@@ -1,0 +1,44 @@
+{
+  "identifier" : "E7B5F1A2-9C3D-4B8E-A1F0-D2E4C6A8B0D3",
+  "nonRenewableSubscriptions" : [
+
+  ],
+  "products" : [
+    {
+      "displayPrice" : "4.99",
+      "familyShareable" : true,
+      "internalID" : "F1A2B3C4-D5E6-7890-ABCD-EF1234567890",
+      "localizations" : [
+        {
+          "description" : "Unlock ad-skip and ad banners for all podcasts, forever.",
+          "displayName" : "Playhead Premium",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "com.playhead.premium",
+      "referenceName" : "Premium Unlock",
+      "type" : "NonConsumable"
+    }
+  ],
+  "settings" : {
+    "_applicationInternalID" : "1234567890",
+    "_developerTeamID" : "XXXXXXXXXX",
+    "_failTransactionsEnabled" : false,
+    "_locale" : "en_US",
+    "_storefront" : "USA",
+    "_storeKitErrors" : [
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "cycleCount"
+      }
+    ]
+  },
+  "subscriptionGroups" : [
+
+  ],
+  "version" : {
+    "major" : 4,
+    "minor" : 0
+  }
+}
