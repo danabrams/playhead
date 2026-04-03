@@ -67,6 +67,11 @@ final class PlaybackService: NSObject, Sendable {
     private var playerItem: AVPlayerItem?
     private var timeObserverToken: Any?
 
+    // MARK: - Progressive Loader
+
+    /// Retains the resource loader delegate for progressive playback.
+    private var progressiveLoader: ProgressiveResourceLoader?
+
     // MARK: - State
 
     private var _state = PlaybackState()
@@ -145,6 +150,9 @@ final class PlaybackService: NSObject, Sendable {
     ///   - url: Remote or local audio URL.
     ///   - startPosition: Resume position in seconds (0 for start).
     func load(url: URL, startPosition: TimeInterval = 0) async {
+        // Tear down any progressive loader from a prior session.
+        progressiveLoader = nil
+
         // Determine if this is a local file.
         isLocalAsset = url.isFileURL
 
@@ -166,6 +174,68 @@ final class PlaybackService: NSObject, Sendable {
         player.replaceCurrentItem(with: item)
 
         // Wait for the item to become ready, then seek to start position.
+        if startPosition > 0 {
+            let target = CMTime(seconds: startPosition, preferredTimescale: 600)
+            await player.currentItem?.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+    }
+
+    /// Load a podcast episode for progressive playback from a file that is
+    /// still being downloaded. Uses AVAssetResourceLoaderDelegate with a
+    /// custom URL scheme so AVPlayer sees the full content length upfront
+    /// and buffers naturally as bytes arrive on disk.
+    ///
+    /// - Parameters:
+    ///   - fileURL: Local file URL being written to by the download manager.
+    ///   - totalBytes: Expected total file size from HTTP Content-Length.
+    ///   - contentType: UTI for the audio format (e.g. "public.mp3").
+    ///   - startPosition: Resume position in seconds (0 for start).
+    func loadProgressive(
+        fileURL: URL,
+        totalBytes: Int64,
+        contentType: String,
+        startPosition: TimeInterval = 0
+    ) async {
+        isLocalAsset = true
+
+        // Create the progressive resource loader that serves bytes from
+        // the growing file.
+        let loader = ProgressiveResourceLoader(
+            fileURL: fileURL,
+            totalBytes: totalBytes,
+            contentType: contentType
+        )
+        progressiveLoader = loader
+
+        // Use a custom scheme so AVPlayer invokes our resource loader delegate
+        // instead of reading the file directly.
+        var components = URLComponents()
+        components.scheme = "playhead-progressive"
+        components.host = "audio"
+        components.path = "/\(fileURL.lastPathComponent)"
+        guard let proxyURL = components.url else {
+            updateState { $0.status = .failed("Failed to create progressive URL") }
+            return
+        }
+
+        let asset = AVURLAsset(url: proxyURL)
+        asset.resourceLoader.setDelegate(loader, queue: loader.queue)
+
+        let item = AVPlayerItem(asset: asset)
+        playerItem = item
+
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = item.observe(\.status, options: [.new]) {
+            [weak self] item, _ in
+            guard let self else { return }
+            Task { @PlaybackServiceActor in
+                self.handleItemStatusChange(item)
+            }
+        }
+
+        updateState { $0.status = .loading }
+        player.replaceCurrentItem(with: item)
+
         if startPosition > 0 {
             let target = CMTime(seconds: startPosition, preferredTimescale: 600)
             await player.currentItem?.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
@@ -592,4 +662,152 @@ final class PlaybackService: NSObject, Sendable {
         applyObservedRate(rate)
     }
 #endif
+}
+
+// MARK: - ProgressiveResourceLoader
+
+/// Serves bytes from a local file that is still being written to.
+/// AVPlayer calls this delegate because the asset uses a custom URL scheme
+/// (`playhead-progressive://`). We declare the full content length upfront
+/// so AVPlayer knows the real duration and buffers naturally.
+final class ProgressiveResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
+
+    let queue = DispatchQueue(label: "com.playhead.progressive-loader")
+
+    private let fileURL: URL
+    private let totalBytes: Int64
+    private let contentType: String
+
+    /// Pending requests waiting for more data to arrive on disk.
+    private var pendingRequests: [AVAssetResourceLoadingRequest] = []
+
+    /// Timer that checks for new data to fulfill pending requests.
+    private var pollTimer: DispatchSourceTimer?
+
+    init(fileURL: URL, totalBytes: Int64, contentType: String) {
+        self.fileURL = fileURL
+        self.totalBytes = totalBytes
+        self.contentType = contentType
+        super.init()
+        startPolling()
+    }
+
+    deinit {
+        pollTimer?.cancel()
+    }
+
+    // MARK: - AVAssetResourceLoaderDelegate
+
+    func resourceLoader(
+        _ resourceLoader: AVAssetResourceLoader,
+        shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest
+    ) -> Bool {
+        // Fill content information on first request.
+        if let contentInfo = loadingRequest.contentInformationRequest {
+            contentInfo.contentType = contentType
+            contentInfo.contentLength = totalBytes
+            contentInfo.isByteRangeAccessSupported = true
+            contentInfo.isEntireLengthAvailableOnDemand = false
+        }
+
+        // Try to fulfill the data request immediately.
+        if fulfillRequest(loadingRequest) {
+            return true
+        }
+
+        // Data not yet available — queue it for later.
+        pendingRequests.append(loadingRequest)
+        return true
+    }
+
+    func resourceLoader(
+        _ resourceLoader: AVAssetResourceLoader,
+        didCancel loadingRequest: AVAssetResourceLoadingRequest
+    ) {
+        pendingRequests.removeAll { $0 === loadingRequest }
+    }
+
+    // MARK: - Request Fulfillment
+
+    /// Attempts to respond to the data request from bytes currently on disk.
+    /// Returns true if the request is fully served, false if more data is needed.
+    @discardableResult
+    private func fulfillRequest(_ loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
+        guard let dataRequest = loadingRequest.dataRequest else {
+            loadingRequest.finishLoading()
+            return true
+        }
+
+        // Use currentOffset — this advances after each respond(with:) call.
+        // requestedOffset is the *initial* offset and doesn't move.
+        let readOffset = dataRequest.currentOffset
+        let endOfRequest = dataRequest.requestedOffset + Int64(dataRequest.requestedLength)
+        let remaining = endOfRequest - readOffset
+
+        guard remaining > 0 else {
+            loadingRequest.finishLoading()
+            return true
+        }
+
+        // How many bytes are on disk right now?
+        let fileSize: Int64
+        do {
+            let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+            fileSize = (attrs[.size] as? Int64) ?? 0
+        } catch {
+            loadingRequest.finishLoading(with: error)
+            return true
+        }
+
+        // If we don't have any bytes at the read position yet, wait.
+        if readOffset >= fileSize {
+            return false
+        }
+
+        // Read available bytes from the current position forward.
+        let availableEnd = min(readOffset + remaining, fileSize)
+        let bytesToRead = Int(availableEnd - readOffset)
+
+        guard bytesToRead > 0 else { return false }
+
+        do {
+            let handle = try FileHandle(forReadingFrom: fileURL)
+            defer { try? handle.close() }
+            try handle.seek(toOffset: UInt64(readOffset))
+            let data = handle.readData(ofLength: bytesToRead)
+            dataRequest.respond(with: data)
+        } catch {
+            loadingRequest.finishLoading(with: error)
+            return true
+        }
+
+        // Check if we've now served everything.
+        if dataRequest.currentOffset >= endOfRequest {
+            loadingRequest.finishLoading()
+            return true
+        }
+
+        // Partial serve — still waiting for more bytes.
+        return false
+    }
+
+    // MARK: - Polling
+
+    /// Periodically checks if pending requests can now be fulfilled.
+    private func startPolling() {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 0.1, repeating: 0.1)
+        timer.setEventHandler { [weak self] in
+            self?.processPendingRequests()
+        }
+        timer.resume()
+        pollTimer = timer
+    }
+
+    private func processPendingRequests() {
+        pendingRequests.removeAll { request in
+            if request.isCancelled { return true }
+            return fulfillRequest(request)
+        }
+    }
 }

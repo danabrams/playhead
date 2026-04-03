@@ -328,6 +328,206 @@ actor DownloadManager {
         return completeURL
     }
 
+    // MARK: - Streaming Download (Play While Downloading)
+
+    /// Minimum bytes before signaling playback can start.
+    /// ~60s at 256 kbps = ~1.9 MB. Round up to 2 MB.
+    static let defaultPlayableThreshold: Int64 = 2 * 1024 * 1024
+
+    /// Result of a streaming download: the local file URL is available for
+    /// playback once the threshold is reached; await `downloadComplete` before
+    /// starting analysis (which needs the full file).
+    struct StreamingDownloadResult: Sendable {
+        /// Local file URL — available for playback immediately.
+        let fileURL: URL
+        /// Total expected file size from HTTP Content-Length, or nil if unknown.
+        let totalBytes: Int64?
+        /// Audio content type UTI (e.g. "public.mp3").
+        let contentType: String
+        /// Resolves when the entire file has been written to disk.
+        let downloadComplete: @Sendable () async throws -> Void
+    }
+
+    /// Downloads episode audio incrementally, returning the local file URL
+    /// as soon as `playableThreshold` bytes have been written.
+    /// The download continues in the background until complete.
+    ///
+    /// If the file is already fully cached, returns immediately with a
+    /// no-op `downloadComplete`.
+    func streamingDownload(
+        episodeId: String,
+        from url: URL,
+        playableThreshold: Int64 = DownloadManager.defaultPlayableThreshold
+    ) async throws -> StreamingDownloadResult {
+        let sourceExt = url.pathExtension.isEmpty ? "mp3" : url.pathExtension
+        extensionCache[episodeId] = sourceExt
+
+        let completeURL = completeFileURL(for: episodeId)
+        if FileManager.default.fileExists(atPath: completeURL.path) {
+            touchAccess(episodeId: episodeId)
+            let uti = Self.utiForExtension(sourceExt)
+            // File size is the total for a complete file.
+            let attrs = try? FileManager.default.attributesOfItem(atPath: completeURL.path)
+            let size = (attrs?[.size] as? Int64)
+            return StreamingDownloadResult(fileURL: completeURL, totalBytes: size, contentType: uti, downloadComplete: {})
+        }
+
+        // Write directly to the final location so AVPlayer can read it.
+        let fm = FileManager.default
+        if fm.fileExists(atPath: completeURL.path) {
+            try fm.removeItem(at: completeURL)
+        }
+        fm.createFile(atPath: completeURL.path, contents: nil)
+        let fileHandle = try FileHandle(forWritingTo: completeURL)
+
+        let request = URLRequest(url: url)
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            try? fileHandle.close()
+            try? fm.removeItem(at: completeURL)
+            throw DownloadManagerError.downloadFailed(episodeId, "HTTP \(code)")
+        }
+
+        // Harvest HTTP metadata for weak fingerprinting.
+        let reportedLength = httpResponse.expectedContentLength
+        let totalContentLength: Int64? = reportedLength > 0 ? reportedLength : nil
+        let metadata = HTTPAssetMetadata(
+            etag: httpResponse.value(forHTTPHeaderField: "ETag"),
+            contentLength: totalContentLength,
+            lastModified: httpResponse.value(forHTTPHeaderField: "Last-Modified")
+        )
+        metadataCache[episodeId] = metadata
+        let weakFP = AudioFingerprint.makeWeak(url: url, metadata: metadata)
+        fingerprintCache[episodeId] = AudioFingerprint(weak: weakFP, strong: nil)
+
+        let signalURL = completeURL
+        let threshold = min(playableThreshold, totalContentLength ?? playableThreshold)
+        let audioUTI = Self.utiForExtension(sourceExt)
+
+        // Completion continuation — signaled when the full file is written.
+        let completionStream = AsyncStream<Result<Void, Error>>.makeStream()
+
+        // Playback-ready continuation — signaled when threshold is reached.
+        let result: StreamingDownloadResult = try await withCheckedThrowingContinuation { continuation in
+            let capturedLogger = self.logger
+            let capturedEpisodeId = episodeId
+            let completionContinuation = completionStream.1
+            Task.detached { [weak self] in
+                var bytesWritten: Int64 = 0
+                var signaled = false
+                var buffer = Data()
+                let flushSize = 64 * 1024
+
+                do {
+                    for try await byte in bytes {
+                        buffer.append(byte)
+
+                        if buffer.count >= flushSize {
+                            fileHandle.write(buffer)
+                            bytesWritten += Int64(buffer.count)
+                            buffer.removeAll(keepingCapacity: true)
+
+                            if !signaled, bytesWritten >= threshold {
+                                signaled = true
+                                capturedLogger.info("Playable threshold reached for \(capturedEpisodeId): \(bytesWritten) bytes")
+                                let waitForComplete: @Sendable () async throws -> Void = {
+                                    for await result in completionStream.0 {
+                                        switch result {
+                                        case .success: return
+                                        case .failure(let error): throw error
+                                        }
+                                    }
+                                }
+                                continuation.resume(returning: StreamingDownloadResult(
+                                    fileURL: signalURL,
+                                    totalBytes: totalContentLength,
+                                    contentType: audioUTI,
+                                    downloadComplete: waitForComplete
+                                ))
+                            }
+
+                            await self?.progressContinuation.yield(DownloadProgress(
+                                episodeId: capturedEpisodeId,
+                                bytesWritten: bytesWritten,
+                                totalBytes: totalContentLength ?? bytesWritten
+                            ))
+                        }
+                    }
+
+                    // Flush remaining bytes.
+                    if !buffer.isEmpty {
+                        fileHandle.write(buffer)
+                        bytesWritten += Int64(buffer.count)
+                    }
+                    try fileHandle.close()
+
+                    // If file was smaller than threshold, signal both at once.
+                    if !signaled {
+                        continuation.resume(returning: StreamingDownloadResult(
+                            fileURL: signalURL,
+                            totalBytes: totalContentLength,
+                            contentType: audioUTI,
+                            downloadComplete: {}
+                        ))
+                    }
+
+                    // Compute strong fingerprint now that file is complete.
+                    if let strongHash = try? FileHasher.sha256(fileURL: signalURL) {
+                        await self?.setFingerprint(
+                            episodeId: capturedEpisodeId, weak: weakFP, strong: strongHash
+                        )
+                        capturedLogger.info("Download complete for \(capturedEpisodeId): \(bytesWritten) bytes, hash=\(strongHash.prefix(16))...")
+                    }
+
+                    await self?.touchAccess(episodeId: capturedEpisodeId)
+                    try await self?.evictIfNeeded()
+
+                    await self?.progressContinuation.yield(DownloadProgress(
+                        episodeId: capturedEpisodeId,
+                        bytesWritten: bytesWritten,
+                        totalBytes: bytesWritten
+                    ))
+
+                    // Signal download complete.
+                    completionContinuation.yield(.success(()))
+                    completionContinuation.finish()
+                } catch {
+                    try? fileHandle.close()
+                    if !signaled {
+                        continuation.resume(throwing: error)
+                    }
+                    completionContinuation.yield(.failure(error))
+                    completionContinuation.finish()
+                    capturedLogger.error("Streaming download failed for \(capturedEpisodeId): \(error)")
+                }
+            }
+        }
+
+        return result
+    }
+
+    /// Helper for detached task to update fingerprint cache.
+    fileprivate func setFingerprint(episodeId: String, weak weakFP: String, strong strongFP: String) {
+        fingerprintCache[episodeId] = AudioFingerprint(weak: weakFP, strong: strongFP)
+    }
+
+    /// Map file extension to UTI for AVAssetResourceLoaderDelegate.
+    static func utiForExtension(_ ext: String) -> String {
+        switch ext.lowercased() {
+        case "mp3":  return "public.mp3"
+        case "m4a":  return "public.mpeg-4-audio"
+        case "aac":  return "public.aac-audio"
+        case "wav":  return "com.microsoft.waveform-audio"
+        case "mp4":  return "public.mpeg-4"
+        case "ogg":  return "org.xiph.ogg"
+        case "opus": return "org.xiph.opus"
+        default:     return "public.audio"
+        }
+    }
+
     // MARK: - Background Pre-Cache
 
     /// Queues a background download for an episode (pre-caching).

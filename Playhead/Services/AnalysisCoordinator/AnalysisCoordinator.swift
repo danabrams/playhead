@@ -130,6 +130,9 @@ actor AnalysisCoordinator {
     private var activeShards: [AnalysisShard]?
     /// Latest playback snapshot for prioritization.
     private var latestSnapshot: PlaybackSnapshot?
+    /// Snapshot captured when the pipeline started — used for initial
+    /// transcription ordering so timeUpdate events don't race with it.
+    private var pipelineStartSnapshot: PlaybackSnapshot?
 
     // MARK: - Work Tasks
 
@@ -272,7 +275,9 @@ actor AnalysisCoordinator {
 
         activeEpisodeId = episodeId
         activePodcastId = podcastId
-        latestSnapshot = PlaybackSnapshot(playheadTime: time, playbackRate: Double(rate), isPlaying: true)
+        let startSnapshot = PlaybackSnapshot(playheadTime: time, playbackRate: Double(rate), isPlaying: true)
+        latestSnapshot = startSnapshot
+        pipelineStartSnapshot = startSnapshot
 
         do {
             let (sessionId, assetId, resumeState) = try await resolveSession(
@@ -468,8 +473,10 @@ actor AnalysisCoordinator {
     private func runFromFeaturesReady(sessionId: String, assetId: String) async throws {
         try Task.checkCancellation()
 
-        // Start transcription with current playback snapshot.
-        if let shards = activeShards, let snapshot = latestSnapshot {
+        // Use the snapshot from when the pipeline started, not the latest
+        // one — timeUpdate events race with pipeline setup and would cause
+        // shard 0 to be deprioritized if the playhead has drifted.
+        if let shards = activeShards, let snapshot = pipelineStartSnapshot ?? latestSnapshot {
             logger.info("FeaturesReady: starting transcription (\(shards.count) shards, playhead at \(String(format: "%.1f", snapshot.playheadTime))s)")
             startObservingTranscriptEvents(sessionId: sessionId, assetId: assetId)
             await transcriptEngine.startTranscription(
