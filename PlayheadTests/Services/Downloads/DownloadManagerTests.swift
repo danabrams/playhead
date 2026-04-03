@@ -285,7 +285,7 @@ struct DownloadManagerIntegrityTests {
         let manager = DownloadManager(cacheDirectory: dir)
         try await manager.bootstrap()
 
-        #expect(throws: DownloadManagerError.self) {
+        await #expect(throws: DownloadManagerError.self) {
             try await manager.verifyIntegrity(
                 episodeId: "nonexistent", expectedHash: "abc"
             )

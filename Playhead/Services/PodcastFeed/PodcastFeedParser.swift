@@ -52,7 +52,7 @@ struct ParsedChapter: Sendable, Equatable {
 
 // MARK: - Feed Parser Errors
 
-enum FeedParserError: Error, LocalizedError {
+enum FeedParserError: Error, LocalizedError, Equatable {
     case emptyData
     case xmlParsingFailed(String)
     case noFeedFound
