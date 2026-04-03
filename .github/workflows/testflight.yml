@@ -50,6 +50,7 @@ jobs:
           p12-password: ${{ secrets.APPSTORE_CERTIFICATES_PASSWORD }}
 
       - name: Download App Store provisioning profile
+        id: provisioning_profiles
         uses: apple-actions/download-provisioning-profiles@v4
         with:
           bundle-id: ${{ env.APP_BUNDLE_ID }}
@@ -60,6 +61,8 @@ jobs:
 
       - name: Create export options plist
         shell: bash
+        env:
+          PROFILE_NAME: ${{ fromJson(steps.provisioning_profiles.outputs.profiles)[0].name }}
         run: |
           set -euo pipefail
           cat > ExportOptions.plist <<PLIST
@@ -73,8 +76,15 @@ jobs:
             <false/>
             <key>method</key>
             <string>app-store</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${APP_BUNDLE_ID}</key>
+              <string>${PROFILE_NAME}</string>
+            </dict>
+            <key>signingCertificate</key>
+            <string>Apple Distribution</string>
             <key>signingStyle</key>
-            <string>automatic</string>
+            <string>manual</string>
             <key>stripSwiftSymbols</key>
             <true/>
             <key>teamID</key>
@@ -87,6 +97,9 @@ jobs:
 
       - name: Archive app
         shell: bash
+        env:
+          PROFILE_NAME: ${{ fromJson(steps.provisioning_profiles.outputs.profiles)[0].name }}
+          PROFILE_UUID: ${{ fromJson(steps.provisioning_profiles.outputs.profiles)[0].udid }}
         run: |
           set -euo pipefail
           xcodebuild archive \
@@ -95,7 +108,11 @@ jobs:
             -configuration Release \
             -destination "generic/platform=iOS" \
             -archivePath "$ARCHIVE_PATH" \
-            -allowProvisioningUpdates
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            PROVISIONING_PROFILE="$PROFILE_UUID"
 
       - name: Export IPA
         shell: bash
