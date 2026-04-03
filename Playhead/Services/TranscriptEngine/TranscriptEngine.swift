@@ -323,7 +323,7 @@ private func makeDefaultSpeechRecognizer() -> any SpeechRecognizer {
         env["XCODE_RUNNING_FOR_PREVIEWS"] == "1" ||
         env["PLAYHEAD_USE_STUB_SPEECH"] == "1"
 
-    if !shouldUseStub && SpeechTranscriber.isAvailable {
+    if !shouldUseStub {
         return AppleSpeechRecognizer()
     }
 #endif
@@ -335,236 +335,118 @@ private func makeDefaultSpeechRecognizer() -> any SpeechRecognizer {
 
 // MARK: - AppleSpeechRecognizer
 
-/// Production recognizer backed by Speech.framework's SpeechAnalyzer.
-/// No microphone permission required — works entirely on pre-decoded buffers.
+/// Production recognizer using SFSpeechRecognizer with on-device recognition.
+/// SpeechAnalyzer crashes with EXC_BREAKPOINT on iOS 26.3 (rdar://FB...).
+/// No microphone access needed — feeds pre-decoded audio buffers directly.
+/// Requires Speech Recognition permission (NSSpeechRecognitionUsageDescription).
 actor AppleSpeechRecognizer: SpeechRecognizer {
     private let logger = Logger(subsystem: "com.playhead", category: "AppleSpeechRecognizer")
-    private var selectedLocale: Locale?
+    private var recognizer: SFSpeechRecognizer?
     private var prepared = false
 
     func loadModel(from directory: URL) async throws {
-        logger.info("Preparing SpeechAnalyzer backend")
-        _ = try await ensureLocaleAssetsPrepared()
+        logger.info("Preparing SFSpeechRecognizer backend")
+        let locale = Locale(identifier: "en-US")
+        guard let sfRecognizer = SFSpeechRecognizer(locale: locale) else {
+            throw TranscriptEngineError.transcriptionFailed(
+                "SFSpeechRecognizer unavailable for locale en-US"
+            )
+        }
+        recognizer = sfRecognizer
+        prepared = true
+        logger.info("SFSpeechRecognizer ready (authorization handled at app startup)")
     }
 
     func unloadModel() async {
+        recognizer = nil
         prepared = false
     }
 
     func isModelLoaded() async -> Bool {
-        prepared || SpeechTranscriber.isAvailable
+        prepared && recognizer?.isAvailable == true
+    }
+
+    /// Request speech recognition authorization. Call during onboarding
+    /// or app startup so the prompt doesn't interrupt playback.
+    static func ensureAuthorized() async -> Bool {
+        let status = SFSpeechRecognizer.authorizationStatus()
+        if status == .authorized { return true }
+        if status == .notDetermined {
+            return await withCheckedContinuation { continuation in
+                SFSpeechRecognizer.requestAuthorization { newStatus in
+                    continuation.resume(returning: newStatus == .authorized)
+                }
+            }
+        }
+        return false
     }
 
     func transcribe(shard: AnalysisShard) async throws -> [TranscriptSegment] {
-        let locale = try await ensureLocaleAssetsPrepared()
+        guard let recognizer else {
+            throw TranscriptEngineError.modelNotLoaded
+        }
 
         let buffer = try Self.makeBuffer(from: shard)
-        let transcriber = SpeechTranscriber(locale: locale, preset: .timeIndexedProgressiveTranscription)
-        let analyzer = SpeechAnalyzer(
-            modules: [transcriber],
-            options: .init(priority: .utility, modelRetention: .lingering)
-        )
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = false
+        request.requiresOnDeviceRecognition = true
+        request.addsPunctuation = true
 
-        logger.debug("Preparing SpeechAnalyzer for shard \(shard.id)")
-        try await analyzer.prepareToAnalyze(in: buffer.format)
+        request.append(buffer)
+        request.endAudio()
 
-        let inputSequence = Self.singleBufferSequence(buffer: buffer)
-        let collector = Task { try await Self.collectSegments(from: transcriber.results) }
+        let timeOffset = shard.startTime
+        let duration = shard.duration
+        let segments: [TranscriptSegment] = try await withCheckedThrowingContinuation { continuation in
+            recognizer.recognitionTask(with: request) { result, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                guard let result, result.isFinal else { return }
 
-        do {
-            _ = try await analyzer.analyzeSequence(inputSequence)
-            withExtendedLifetime(buffer) {}
+                let fullText = result.bestTranscription.formattedString
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !fullText.isEmpty else {
+                    continuation.resume(returning: [])
+                    return
+                }
 
-            let rawSegments = try await collector.value
+                var words: [TranscriptWord] = []
+                for sfWord in result.bestTranscription.segments {
+                    words.append(TranscriptWord(
+                        text: sfWord.substring,
+                        startTime: sfWord.timestamp + timeOffset,
+                        endTime: sfWord.timestamp + sfWord.duration + timeOffset,
+                        confidence: sfWord.confidence
+                    ))
+                }
 
-            // Offset timestamps from buffer-relative (0-based) to episode-relative.
-            let timeOffset = shard.startTime
-            return rawSegments.map { seg in
-                TranscriptSegment(
-                    id: seg.id,
-                    words: seg.words.map { w in
-                        TranscriptWord(
-                            text: w.text,
-                            startTime: w.startTime + timeOffset,
-                            endTime: w.endTime + timeOffset,
-                            confidence: w.confidence
-                        )
-                    },
-                    text: seg.text,
-                    startTime: seg.startTime + timeOffset,
-                    endTime: seg.endTime + timeOffset,
-                    avgConfidence: seg.avgConfidence,
-                    passType: seg.passType
-                )
+                let segStart = words.first?.startTime ?? timeOffset
+                let segEnd = words.last?.endTime ?? (timeOffset + duration)
+                let avgConf = words.isEmpty
+                    ? Float(1.0)
+                    : words.map(\.confidence).reduce(0, +) / Float(words.count)
+
+                continuation.resume(returning: [TranscriptSegment(
+                    id: 0, words: words, text: fullText,
+                    startTime: segStart, endTime: segEnd,
+                    avgConfidence: avgConf, passType: .fast
+                )])
             }
-        } catch {
-            await analyzer.cancelAndFinishNow()
-            collector.cancel()
-            throw error
-        }
-    }
-
-    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
-        _ = try await ensureLocaleAssetsPrepared()
-
-        let buffer = try Self.makeBuffer(from: shard)
-        let detector = SpeechDetector()
-        let analyzer = SpeechAnalyzer(
-            modules: [detector],
-            options: .init(priority: .utility, modelRetention: .lingering)
-        )
-
-        try await analyzer.prepareToAnalyze(in: buffer.format)
-        let inputSequence = Self.singleBufferSequence(buffer: buffer)
-        let collector = Task { try await Self.collectVAD(from: detector.results) }
-
-        do {
-            _ = try await analyzer.analyzeSequence(inputSequence)
-            withExtendedLifetime(buffer) {}
-
-            let timeOffset = shard.startTime
-            return try await collector.value.map { vad in
-                VADResult(
-                    isSpeech: vad.isSpeech,
-                    speechProbability: vad.speechProbability,
-                    startTime: vad.startTime + timeOffset,
-                    endTime: vad.endTime + timeOffset
-                )
-            }
-        } catch {
-            await analyzer.cancelAndFinishNow()
-            collector.cancel()
-            throw error
-        }
-    }
-
-    // MARK: - Locale & Asset Preparation
-
-    private func ensureLocaleAssetsPrepared() async throws -> Locale {
-        let locale = selectedLocale ?? Locale(identifier: "en-US")
-        logger.info("Checking Speech assets for locale \(locale.identifier, privacy: .public)")
-
-        let transcriber = SpeechTranscriber(locale: locale, preset: .timeIndexedProgressiveTranscription)
-        let modules: [any SpeechModule] = [transcriber]
-        let status = await AssetInventory.status(forModules: modules)
-        logger.info("Speech asset status: \(String(describing: status), privacy: .public)")
-
-        switch status {
-        case .unsupported:
-            throw TranscriptEngineError.transcriptionFailed(
-                "Speech assets unsupported for \(locale.identifier)"
-            )
-        case .supported, .downloading:
-            logger.info("Downloading Speech assets…")
-            let start = ContinuousClock.now
-            if let request = try await AssetInventory.assetInstallationRequest(supporting: modules) {
-                try await request.downloadAndInstall()
-            }
-            logger.info("Speech assets downloaded in \(ContinuousClock.now - start)")
-        case .installed:
-            logger.info("Speech assets already installed")
-        @unknown default:
-            break
         }
 
-        selectedLocale = locale
-        prepared = true
-        return locale
-    }
-
-    // MARK: - Buffer & Stream Helpers
-
-    private static func singleBufferSequence(buffer: AVAudioPCMBuffer) -> AsyncStream<AnalyzerInput> {
-        AsyncStream { continuation in
-            continuation.yield(AnalyzerInput(buffer: buffer, bufferStartTime: .zero))
-            continuation.finish()
-        }
-    }
-
-    private static func collectSegments<S>(
-        from results: S
-    ) async throws -> [TranscriptSegment]
-    where S: AsyncSequence, S.Element == SpeechTranscriber.Result, S.Failure == Error {
-        var segments: [TranscriptSegment] = []
-        var nextId = 0
-
-        for try await result in results {
-            guard result.isFinal else { continue }
-            let fullText = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !fullText.isEmpty else { continue }
-
-            let words = Self.extractWords(from: result)
-            let startTime = words.first?.startTime ?? Self.seconds(from: result.range.start)
-            let endTime = words.last?.endTime ?? Self.seconds(from: CMTimeAdd(result.range.start, result.range.duration))
-            let avgConf = words.isEmpty ? Float(1.0) : words.map(\.confidence).reduce(0, +) / Float(words.count)
-
-            segments.append(TranscriptSegment(
-                id: nextId,
-                words: words.isEmpty ? [TranscriptWord(text: fullText, startTime: startTime, endTime: endTime, confidence: avgConf)] : words,
-                text: fullText,
-                startTime: startTime,
-                endTime: endTime,
-                avgConfidence: avgConf,
-                passType: .fast
-            ))
-            nextId += 1
-        }
-        segments.sort { $0.startTime < $1.startTime }
         return segments
     }
 
-    private static func extractWords(from result: SpeechTranscriber.Result) -> [TranscriptWord] {
-        let fallbackStart = seconds(from: result.range.start)
-        let fallbackEnd = seconds(from: CMTimeAdd(result.range.start, result.range.duration))
-
-        var words: [TranscriptWord] = []
-        for run in result.text.runs {
-            let runText = String(result.text[run.range].characters).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !runText.isEmpty else { continue }
-            let pieces = runText.split(whereSeparator: \.isWhitespace).map(String.init)
-            guard !pieces.isEmpty else { continue }
-
-            let timeRange = run.audioTimeRange
-            let runStart = timeRange.map { seconds(from: $0.start) } ?? fallbackStart
-            let runEnd = timeRange.map { seconds(from: CMTimeAdd($0.start, $0.duration)) } ?? fallbackEnd
-            let runDuration = max(runEnd - runStart, 0)
-            let step = pieces.count > 0 ? runDuration / Double(pieces.count) : 0
-            let confidence = Float(run.transcriptionConfidence ?? 1.0)
-
-            for (i, piece) in pieces.enumerated() {
-                let start = runStart + (Double(i) * step)
-                let end = i == pieces.count - 1 ? runEnd : min(runEnd, start + step)
-                words.append(TranscriptWord(text: piece, startTime: start, endTime: end, confidence: confidence))
-            }
-        }
-
-        if words.isEmpty {
-            let text = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return [] }
-            words = [TranscriptWord(text: text, startTime: fallbackStart, endTime: fallbackEnd, confidence: 1.0)]
-        }
-        return words
-    }
-
-    private static func collectVAD<S>(
-        from results: S
-    ) async throws -> [VADResult]
-    where S: AsyncSequence, S.Element == SpeechDetector.Result, S.Failure == Error {
-        var vadResults: [VADResult] = []
-        for try await result in results {
-            guard result.isFinal, result.speechDetected else { continue }
-            let start = seconds(from: result.range.start)
-            let end = seconds(from: CMTimeAdd(result.range.start, result.range.duration))
-            vadResults.append(VADResult(isSpeech: true, speechProbability: 1.0, startTime: start, endTime: end))
-        }
-        vadResults.sort { $0.startTime < $1.startTime }
-        return vadResults
-    }
-
-    private static func seconds(from time: CMTime) -> TimeInterval {
-        let s = CMTimeGetSeconds(time)
-        guard s.isFinite else { return 0 }
-        return max(s, 0)
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
+        // SFSpeechRecognizer has no dedicated VAD. Report all audio as speech;
+        // the transcription step returns empty for silence.
+        return [VADResult(
+            isSpeech: true, speechProbability: 1.0,
+            startTime: shard.startTime,
+            endTime: shard.startTime + shard.duration
+        )]
     }
 
     // MARK: - Buffer Creation

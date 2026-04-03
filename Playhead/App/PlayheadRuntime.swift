@@ -187,6 +187,14 @@ final class PlayheadRuntime {
                 // Settings can still render, but model lifecycle reporting will be empty.
             }
 
+            // Request speech recognition authorization early so the prompt
+            // appears at launch, not mid-playback. No microphone access needed.
+            let speechAuthorized = await AppleSpeechRecognizer.ensureAuthorized()
+            if !speechAuthorized {
+                Logger(subsystem: "com.playhead", category: "Runtime")
+                    .warning("Speech recognition not authorized — transcription unavailable")
+            }
+
             do {
                 try await speechService.loadFastModel(from: modelInventory.activeDirectory)
             } catch {
