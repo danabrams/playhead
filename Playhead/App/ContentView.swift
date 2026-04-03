@@ -12,6 +12,11 @@ struct ContentView: View {
                 .tabItem {
                     Label("Browse", systemImage: "magnifyingglass")
                 }
+
+            SettingsView()
+                .tabItem {
+                    Label("Settings", systemImage: "gearshape")
+                }
         }
         .tint(AppColors.accent)
     }
@@ -20,5 +25,5 @@ struct ContentView: View {
 #Preview {
     ContentView()
         .preferredColorScheme(.dark)
-        .modelContainer(for: [Podcast.self, Episode.self], inMemory: true)
+        .modelContainer(for: [Podcast.self, Episode.self, UserPreferences.self], inMemory: true)
 }
