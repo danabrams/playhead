@@ -42,6 +42,7 @@
 		6C2D39DFFD2FEA91CE781E94 /* MetadataExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05B3F1F41BF2681A24DB0FE2 /* MetadataExtractor.swift */; };
 		6C40EAF7B6620EEAB4589BDF /* SwiftDataStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A890EAEDC77D650C466B01E /* SwiftDataStore.swift */; };
 		6F55BC0BA2319BC0A945499B /* PreviewBudgetStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81B168205092FF5094AE7651 /* PreviewBudgetStore.swift */; };
+		705058919F2354A8AD9CEB2E /* CoreServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98C8FC376788DF3455C4CFF1 /* CoreServiceTests.swift */; };
 		7FDB31900582CA875D2E38E2 /* FoundationModelExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF38243D35CA07BE595A877C /* FoundationModelExtractor.swift */; };
 		837F2D68A2989CED47B9EDDE /* EpisodeListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBA65DE1F0FE58539F95E479 /* EpisodeListView.swift */; };
 		889C30F990CF9C4B7D54F484 /* Podcast.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40DCF7221FE10FF60B443F9E /* Podcast.swift */; };
@@ -125,6 +126,7 @@
 		8D88AFE1E7856E852263579E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		8FF386614C954C71D052A28C /* BackgroundProcessingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundProcessingService.swift; sourceTree = "<group>"; };
 		94F6A9B03C7FA9BD6449F4FD /* PodcastDiscoveryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodcastDiscoveryService.swift; sourceTree = "<group>"; };
+		98C8FC376788DF3455C4CFF1 /* CoreServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreServiceTests.swift; sourceTree = "<group>"; };
 		A10AE76A7837166F6EB25404 /* CorpusLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CorpusLoader.swift; sourceTree = "<group>"; };
 		A66DEB1918E282616C9D45FF /* Playhead.storekit */ = {isa = PBXFileReference; path = Playhead.storekit; sourceTree = "<group>"; };
 		AACB30863437C8FB459C4764 /* CapabilitySnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapabilitySnapshot.swift; sourceTree = "<group>"; };
@@ -187,6 +189,7 @@
 		1B76A42DF2F1F269D7CCD28C /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				98C8FC376788DF3455C4CFF1 /* CoreServiceTests.swift */,
 				1E742C6FF8AD220FC5DD7E8C /* Downloads */,
 				3E8FCE7515C5849FBBE124B4 /* PodcastFeed */,
 				2987C40702B65A17A6E8D618 /* ReplaySimulator */,
@@ -701,6 +704,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				705058919F2354A8AD9CEB2E /* CoreServiceTests.swift in Sources */,
 				B2B9C2EA0D55FA1670620A5D /* CorpusAnnotationTypes.swift in Sources */,
 				08D7241A8987BB4BD1E143E2 /* CorpusLoader.swift in Sources */,
 				D016DD263A2EC780B6E45BC0 /* CorpusLoaderTests.swift in Sources */,
@@ -729,6 +733,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -885,6 +890,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

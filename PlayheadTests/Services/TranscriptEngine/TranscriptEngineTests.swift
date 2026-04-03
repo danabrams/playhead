@@ -269,6 +269,6 @@ struct TranscriptTypeTests {
     @Test("TranscriptPassType raw values")
     func passTypeValues() {
         #expect(TranscriptPassType.fast.rawValue == "fast")
-        #expect(TranscriptPassType.final_.rawValue == "final_")
+        #expect(TranscriptPassType.final_.rawValue == "final")
     }
 }
