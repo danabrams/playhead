@@ -233,7 +233,7 @@ private func makeTranscriptChunk(
             .filter { !$0.isEmpty }
             .joined(separator: " "),
         pass: pass,
-        modelVersion: "whisper-tiny-v1"
+        modelVersion: "apple-speech-v1"
     )
 }
 

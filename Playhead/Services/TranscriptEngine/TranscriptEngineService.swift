@@ -2,7 +2,7 @@
 // Orchestrates on-device transcription for the analysis pipeline.
 //
 // Accepts decoded audio shards from AnalysisAudioService, runs them through
-// WhisperKit via WhisperKitService, and writes TranscriptChunks to SQLite.
+// Apple Speech via SpeechService, and writes TranscriptChunks to SQLite.
 //
 // Processing strategy:
 //   - VAD/pause-anchored chunks (target 8-20 s with small overlap)
@@ -42,7 +42,7 @@ struct TranscriptEngineServiceConfig: Sendable {
         chunkOverlap: 0.5,
         lookaheadWallClockSeconds: 30.0,
         vadSpeechThreshold: 0.5,
-        modelVersion: "whisper-tiny-v1"
+        modelVersion: "apple-speech-v1"
     )
 }
 
@@ -64,14 +64,14 @@ struct PlaybackSnapshot: Sendable {
 
 enum TranscriptEngineServiceError: Error, CustomStringConvertible {
     case noShardsAvailable
-    case whisperKitNotReady
+    case speechServiceNotReady
     case chunkingFailed(String)
 
     var description: String {
         switch self {
         case .noShardsAvailable:
             "No analysis shards available for transcription"
-        case .whisperKitNotReady:
+        case .speechServiceNotReady:
             "Speech engine is not ready"
         case .chunkingFailed(let reason):
             "Chunk boundary computation failed: \(reason)"
@@ -93,7 +93,7 @@ actor TranscriptEngineService {
 
     private let logger = Logger(subsystem: "com.playhead", category: "TranscriptEngineService")
 
-    private let whisperKit: WhisperKitService
+    private let speechService: SpeechService
     private let store: AnalysisStore
     private let config: TranscriptEngineServiceConfig
 
@@ -116,11 +116,11 @@ actor TranscriptEngineService {
     // MARK: - Init
 
     init(
-        whisperKit: WhisperKitService,
+        speechService: SpeechService,
         store: AnalysisStore,
         config: TranscriptEngineServiceConfig = .default
     ) {
-        self.whisperKit = whisperKit
+        self.speechService = speechService
         self.store = store
         self.config = config
     }
@@ -220,12 +220,15 @@ actor TranscriptEngineService {
         shards: [AnalysisShard],
         analysisAssetId: String
     ) async {
+        logger.info("Starting transcription loop: \(shards.count) shards for asset \(analysisAssetId)")
+        let loopStart = ContinuousClock.now
+
         guard !shards.isEmpty else {
             logger.warning("No shards to transcribe")
             return
         }
 
-        guard await whisperKit.isReady() else {
+        guard await speechService.isReady() else {
             logger.error("Speech engine not ready — aborting transcription")
             return
         }
@@ -271,7 +274,8 @@ actor TranscriptEngineService {
             }
         }
 
-        logger.info("Transcription loop complete for asset \(analysisAssetId)")
+        let loopElapsed = ContinuousClock.now - loopStart
+        logger.info("Transcription loop complete for asset \(analysisAssetId) in \(loopElapsed)")
         emitEvent(.completed(analysisAssetId: analysisAssetId))
     }
 
@@ -283,8 +287,8 @@ actor TranscriptEngineService {
     ) async throws {
         try Task.checkCancellation()
 
-        // Run WhisperKit transcription (includes VAD internally).
-        let segments = try await whisperKit.transcribe(shard: shard)
+        // Run Apple Speech transcription.
+        let segments = try await speechService.transcribe(shard: shard)
 
         guard !segments.isEmpty else {
             logger.debug("No segments from shard \(shard.id) — silence or noise")

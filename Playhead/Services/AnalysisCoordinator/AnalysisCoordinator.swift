@@ -81,7 +81,7 @@ enum PlaybackEvent: Sendable {
     case playStarted(
         episodeId: String,
         podcastId: String?,
-        audioURL: URL,
+        audioURL: LocalAudioURL,
         time: TimeInterval,
         rate: Float
     )
@@ -257,7 +257,7 @@ actor AnalysisCoordinator {
     private func handlePlayStarted(
         episodeId: String,
         podcastId: String?,
-        audioURL: URL,
+        audioURL: LocalAudioURL,
         time: TimeInterval,
         rate: Float
     ) async -> String? {
@@ -309,7 +309,7 @@ actor AnalysisCoordinator {
         assetId: String,
         resumeState: SessionState,
         episodeId: String,
-        audioURL: URL
+        audioURL: LocalAudioURL
     ) async {
         do {
             switch resumeState {
@@ -396,7 +396,7 @@ actor AnalysisCoordinator {
 
     // MARK: - Stage: Queued -> Spooling
 
-    private func runFromQueued(sessionId: String, assetId: String, episodeId: String, audioURL: URL) async throws {
+    private func runFromQueued(sessionId: String, assetId: String, episodeId: String, audioURL: LocalAudioURL) async throws {
         try Task.checkCancellation()
         try await transition(sessionId: sessionId, assetId: assetId, to: .spooling)
         try await runFromSpooling(sessionId: sessionId, assetId: assetId, episodeId: episodeId, audioURL: audioURL)
@@ -404,12 +404,14 @@ actor AnalysisCoordinator {
 
     // MARK: - Stage: Spooling -> FeaturesReady
 
-    private func runFromSpooling(sessionId: String, assetId: String, episodeId: String, audioURL: URL) async throws {
+    private func runFromSpooling(sessionId: String, assetId: String, episodeId: String, audioURL: LocalAudioURL) async throws {
         try Task.checkCancellation()
 
         // Decode audio into shards. Truncated files now return partial data
         // instead of throwing, so this catch is only for truly fatal errors
         // (file not found, unreadable asset, decoder failure).
+        logger.info("Spooling: decoding audio for episode \(episodeId)")
+        let decodeStart = ContinuousClock.now
         let shards: [AnalysisShard]
         do {
             shards = try await audioService.decode(fileURL: audioURL, episodeID: episodeId)
@@ -419,9 +421,12 @@ actor AnalysisCoordinator {
             logger.error("Audio decode failed for episode \(episodeId): \(error)")
             throw AnalysisCoordinatorError.noAudioAvailable(episodeId: episodeId)
         }
+        let decodeElapsed = ContinuousClock.now - decodeStart
         guard !shards.isEmpty else {
             throw AnalysisCoordinatorError.noAudioAvailable(episodeId: episodeId)
         }
+        let totalAudio = shards.map(\.duration).reduce(0, +)
+        logger.info("Spooling: decoded \(shards.count) shards (\(String(format: "%.0f", totalAudio))s audio) in \(decodeElapsed)")
         activeShards = shards
 
         // Extract features for the hot zone.
@@ -434,11 +439,14 @@ actor AnalysisCoordinator {
         }
 
         try Task.checkCancellation()
+        logger.info("Spooling: extracting features (existing coverage: \(String(format: "%.1f", existingCoverage))s)")
+        let featureStart = ContinuousClock.now
         try await featureService.extractAndPersist(
             shards: shards,
             analysisAssetId: assetId,
             existingCoverage: existingCoverage
         )
+        logger.info("Spooling: features extracted in \(ContinuousClock.now - featureStart)")
 
         try await transition(sessionId: sessionId, assetId: assetId, to: .featuresReady)
         try await runFromFeaturesReady(sessionId: sessionId, assetId: assetId)
@@ -451,12 +459,15 @@ actor AnalysisCoordinator {
 
         // Start transcription with current playback snapshot.
         if let shards = activeShards, let snapshot = latestSnapshot {
+            logger.info("FeaturesReady: starting transcription (\(shards.count) shards, playhead at \(String(format: "%.1f", snapshot.playheadTime))s)")
             startObservingTranscriptEvents(sessionId: sessionId, assetId: assetId)
             await transcriptEngine.startTranscription(
                 shards: shards,
                 analysisAssetId: assetId,
                 snapshot: snapshot
             )
+        } else {
+            logger.warning("FeaturesReady: no shards or snapshot available — skipping transcription")
         }
 
         try await transition(sessionId: sessionId, assetId: assetId, to: .hotPathReady)
@@ -552,7 +563,7 @@ actor AnalysisCoordinator {
     /// Returns (sessionId, assetId, resumeState).
     private func resolveSession(
         episodeId: String,
-        audioURL: URL
+        audioURL: LocalAudioURL
     ) async throws -> (String, String, SessionState) {
         // Check if an asset already exists for this episode.
         let assetId: String
@@ -602,7 +613,7 @@ actor AnalysisCoordinator {
             episodeId: episodeId,
             assetFingerprint: assetId, // Placeholder until content hashing
             weakFingerprint: nil,
-            sourceURL: audioURL.absoluteString,
+            sourceURL: audioURL.url.absoluteString,
             featureCoverageEndTime: nil,
             fastTranscriptCoverageEndTime: nil,
             confirmedAdCoverageEndTime: nil,

@@ -1,6 +1,6 @@
 // TranscriptEngine.swift
-// On-device speech-to-text via Apple's Speech framework, with a stub
-// fallback for tests and unsupported environments.
+// On-device speech-to-text via Apple's Speech framework (SpeechService),
+// with a stub fallback for tests and unsupported environments.
 //
 // The protocol boundary stays intentionally small so the runtime can swap
 // between the Apple backend and a lightweight stub without touching callers.
@@ -93,17 +93,17 @@ protocol SpeechRecognizer: Sendable {
     ) async throws -> [VADResult]
 }
 
-// MARK: - WhisperKitService
+// MARK: - SpeechService
 
 /// Actor wrapping the runtime ASR backend for thread-safe transcription.
 /// Manages dual-pass model loading and segment-level callbacks.
 ///
-/// Runs transcription on a background thread — never touches the
-/// playback audio session or main thread.
-actor WhisperKitService {
+/// Uses Apple's Speech framework on-device. Runs transcription on a
+/// background thread — never touches the playback audio session or main thread.
+actor SpeechService {
     private let logger = Logger(subsystem: "com.playhead", category: "SpeechEngine")
 
-    /// The underlying recognizer (real WhisperKit or stub).
+    /// The underlying recognizer (Apple Speech or stub).
     private let recognizer: any SpeechRecognizer
 
     /// Which model role is currently loaded.
@@ -136,27 +136,31 @@ actor WhisperKitService {
     // MARK: - Model Management
 
     /// Load the fast-path model for real-time ad lookahead.
-    /// Apple Speech ignores the directory, but the call keeps the runtime
-    /// shape compatible with the earlier model-backed implementation.
+    /// Apple Speech prepares locale assets; the directory is ignored but
+    /// keeps the runtime shape compatible with the model-based interface.
     func loadFastModel(from directory: URL) async throws {
-        logger.info("Loading fast-path ASR model from \(directory.lastPathComponent)")
+        logger.info("Preparing fast-path Speech model…")
+        let start = ContinuousClock.now
         try await recognizer.loadModel(from: directory)
         activeModelRole = .asrFast
-        logger.info("Fast-path ASR model loaded")
+        let elapsed = ContinuousClock.now - start
+        logger.info("Fast-path Speech model ready (\(elapsed))")
     }
 
     /// Load the final-path model for backfill transcription.
-    /// Apple Speech ignores the directory, but the call keeps the runtime
-    /// shape compatible with the earlier model-backed implementation.
+    /// Apple Speech prepares locale assets; the directory is ignored but
+    /// keeps the runtime shape compatible with the model-based interface.
     func loadFinalModel(from directory: URL) async throws {
         if await recognizer.isModelLoaded() {
             logger.info("Unloading current model before loading final-path model")
             await recognizer.unloadModel()
         }
-        logger.info("Loading final-path ASR model from \(directory.lastPathComponent)")
+        logger.info("Preparing final-path Speech model…")
+        let start = ContinuousClock.now
         try await recognizer.loadModel(from: directory)
         activeModelRole = .asrFinal
-        logger.info("Final-path ASR model loaded")
+        let elapsed = ContinuousClock.now - start
+        logger.info("Final-path Speech model ready (\(elapsed))")
     }
 
     /// Unload whatever model is currently active.
@@ -179,7 +183,11 @@ actor WhisperKitService {
             ? .final_
             : .fast
 
+        logger.debug("Transcribing shard \(shard.id) [\(String(format: "%.1f", shard.startTime))-\(String(format: "%.1f", shard.startTime + shard.duration))s]")
+        let start = ContinuousClock.now
         let rawSegments = try await recognizer.transcribe(shard: shard)
+        let elapsed = ContinuousClock.now - start
+        logger.info("Shard \(shard.id) transcribed in \(elapsed) → \(rawSegments.count) segments")
 
         // Re-tag with the correct pass type and yield to stream.
         let segments = rawSegments.map { seg in
@@ -350,7 +358,10 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
             options: .init(priority: .utility, modelRetention: .lingering)
         )
 
+        logger.debug("Preparing SpeechAnalyzer for shard \(shard.id)")
+        let prepStart = ContinuousClock.now
         try await analyzer.prepareToAnalyze(in: buffer.format)
+        logger.debug("SpeechAnalyzer prepared in \(ContinuousClock.now - prepStart)")
 
         let inputSequence = Self.singleBufferSequence(
             buffer: buffer,
@@ -360,8 +371,11 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         let collector = Task { try await Self.collectTranscriptSegments(from: transcriber.results) }
 
         do {
+            let analyzeStart = ContinuousClock.now
             _ = try await analyzer.analyzeSequence(inputSequence)
-            return try await collector.value
+            let segments = try await collector.value
+            logger.debug("SpeechAnalyzer finished shard \(shard.id) in \(ContinuousClock.now - analyzeStart) → \(segments.count) segments")
+            return segments
         } catch {
             await analyzer.cancelAndFinishNow()
             collector.cancel()
@@ -400,6 +414,8 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
 
     private func ensureLocaleAssetsPrepared() async throws -> Locale {
         let locale = await Self.resolveLocale(preferred: selectedLocale)
+        logger.info("Checking Speech assets for locale \(locale.identifier, privacy: .public)")
+
         let transcriber = SpeechTranscriber(
             locale: locale,
             preset: .timeIndexedProgressiveTranscription
@@ -407,6 +423,8 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         let modules: [any SpeechModule] = [transcriber]
 
         let status = await AssetInventory.status(forModules: modules)
+        logger.info("Speech asset status: \(String(describing: status), privacy: .public)")
+
         switch status {
         case .unsupported:
             throw TranscriptEngineError.transcriptionFailed(
@@ -414,14 +432,18 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
             )
 
         case .supported, .downloading:
+            logger.info("Downloading Speech assets for \(locale.identifier, privacy: .public)…")
+            let start = ContinuousClock.now
             if let request = try await AssetInventory.assetInstallationRequest(
                 supporting: modules
             ) {
                 try await request.downloadAndInstall()
             }
+            let elapsed = ContinuousClock.now - start
+            logger.info("Speech assets downloaded in \(elapsed)")
 
         case .installed:
-            break
+            logger.info("Speech assets already installed")
 
         @unknown default:
             break

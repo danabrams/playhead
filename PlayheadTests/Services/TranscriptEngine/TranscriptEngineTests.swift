@@ -1,5 +1,5 @@
 // TranscriptEngineTests.swift
-// Tests for the WhisperKit integration layer and dual-pass transcript engine.
+// Tests for the Speech integration layer and dual-pass transcript engine.
 
 import Foundation
 import Testing
@@ -7,7 +7,7 @@ import Testing
 
 // MARK: - Mock Speech Recognizer
 
-/// Controllable mock for testing WhisperKitService without real WhisperKit.
+/// Controllable mock for testing SpeechService without real Apple Speech.
 final class MockSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
     private var loaded = false
     var transcribeResult: [TranscriptSegment] = []
@@ -69,15 +69,15 @@ private func makeSegment(id: Int = 0, passType: TranscriptPassType = .fast) -> T
     )
 }
 
-// MARK: - WhisperKitService Tests
+// MARK: - SpeechService Tests
 
-@Suite("WhisperKitService – Model Management")
-struct WhisperKitServiceModelTests {
+@Suite("SpeechService – Model Management")
+struct SpeechServiceModelTests {
 
     @Test("Starts with no model loaded")
     func initialState() async {
         let mock = MockSpeechRecognizer()
-        let service = WhisperKitService(recognizer: mock)
+        let service = SpeechService(recognizer: mock)
         let ready = await service.isReady()
         #expect(!ready)
         let role = await service.activeModelRole
@@ -87,7 +87,7 @@ struct WhisperKitServiceModelTests {
     @Test("loadFastModel sets active role to asrFast")
     func loadFast() async throws {
         let mock = MockSpeechRecognizer()
-        let service = WhisperKitService(recognizer: mock)
+        let service = SpeechService(recognizer: mock)
         try await service.loadFastModel(from: URL(fileURLWithPath: "/tmp/model"))
         let role = await service.activeModelRole
         #expect(role == .asrFast)
@@ -98,7 +98,7 @@ struct WhisperKitServiceModelTests {
     @Test("loadFinalModel sets active role to asrFinal")
     func loadFinal() async throws {
         let mock = MockSpeechRecognizer()
-        let service = WhisperKitService(recognizer: mock)
+        let service = SpeechService(recognizer: mock)
         try await service.loadFinalModel(from: URL(fileURLWithPath: "/tmp/model"))
         let role = await service.activeModelRole
         #expect(role == .asrFinal)
@@ -107,7 +107,7 @@ struct WhisperKitServiceModelTests {
     @Test("loadFinalModel unloads existing model first")
     func finalUnloadsCurrent() async throws {
         let mock = MockSpeechRecognizer()
-        let service = WhisperKitService(recognizer: mock)
+        let service = SpeechService(recognizer: mock)
         try await service.loadFastModel(from: URL(fileURLWithPath: "/tmp/fast"))
         try await service.loadFinalModel(from: URL(fileURLWithPath: "/tmp/final"))
         let role = await service.activeModelRole
@@ -117,7 +117,7 @@ struct WhisperKitServiceModelTests {
     @Test("unloadCurrentModel clears state")
     func unload() async throws {
         let mock = MockSpeechRecognizer()
-        let service = WhisperKitService(recognizer: mock)
+        let service = SpeechService(recognizer: mock)
         try await service.loadFastModel(from: URL(fileURLWithPath: "/tmp/model"))
         await service.unloadCurrentModel()
         let ready = await service.isReady()
@@ -127,13 +127,13 @@ struct WhisperKitServiceModelTests {
     }
 }
 
-@Suite("WhisperKitService – Transcription")
-struct WhisperKitServiceTranscriptionTests {
+@Suite("SpeechService – Transcription")
+struct SpeechServiceTranscriptionTests {
 
     @Test("Transcribe fails without loaded model")
     func transcribeNoModel() async {
         let mock = MockSpeechRecognizer()
-        let service = WhisperKitService(recognizer: mock)
+        let service = SpeechService(recognizer: mock)
         let shard = makeShard()
         await #expect(throws: TranscriptEngineError.self) {
             try await service.transcribe(shard: shard)
@@ -144,7 +144,7 @@ struct WhisperKitServiceTranscriptionTests {
     func transcribeFast() async throws {
         let mock = MockSpeechRecognizer()
         mock.transcribeResult = [makeSegment()]
-        let service = WhisperKitService(recognizer: mock)
+        let service = SpeechService(recognizer: mock)
         try await service.loadFastModel(from: URL(fileURLWithPath: "/tmp/model"))
 
         let shard = makeShard()
@@ -157,7 +157,7 @@ struct WhisperKitServiceTranscriptionTests {
     func transcribeFinal() async throws {
         let mock = MockSpeechRecognizer()
         mock.transcribeResult = [makeSegment()]
-        let service = WhisperKitService(recognizer: mock)
+        let service = SpeechService(recognizer: mock)
         try await service.loadFinalModel(from: URL(fileURLWithPath: "/tmp/model"))
 
         let shard = makeShard()
@@ -167,8 +167,8 @@ struct WhisperKitServiceTranscriptionTests {
     }
 }
 
-@Suite("WhisperKitService – VAD Integration")
-struct WhisperKitServiceVADTests {
+@Suite("SpeechService – VAD Integration")
+struct SpeechServiceVADTests {
 
     @Test("transcribeWithVAD skips non-speech shards")
     func vadSkipsSilence() async throws {
@@ -176,7 +176,7 @@ struct WhisperKitServiceVADTests {
         mock.vadResult = [VADResult(isSpeech: false, speechProbability: 0.1,
                                     startTime: 0, endTime: 30)]
         mock.transcribeResult = [makeSegment()]
-        let service = WhisperKitService(recognizer: mock)
+        let service = SpeechService(recognizer: mock)
         try await service.loadFastModel(from: URL(fileURLWithPath: "/tmp/model"))
 
         let shards = [makeShard(id: 0), makeShard(id: 1)]
@@ -191,7 +191,7 @@ struct WhisperKitServiceVADTests {
         mock.vadResult = [VADResult(isSpeech: true, speechProbability: 0.9,
                                     startTime: 0, endTime: 30)]
         mock.transcribeResult = [makeSegment()]
-        let service = WhisperKitService(recognizer: mock)
+        let service = SpeechService(recognizer: mock)
         try await service.loadFastModel(from: URL(fileURLWithPath: "/tmp/model"))
 
         let shards = [makeShard()]

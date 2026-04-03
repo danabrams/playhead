@@ -53,14 +53,22 @@ final class TranscriptPeekViewModel {
         pollTask = Task { [weak self] in
             guard let self else { return }
             // Initial load
+            self.logger.info("Transcript peek: starting initial load for asset \(self.analysisAssetId)")
+            let start = ContinuousClock.now
             await self.refresh()
             self.isLoading = false
+            self.logger.info("Transcript peek: initial load done in \(ContinuousClock.now - start), \(self.chunks.count) chunks")
 
             // Continuous polling for new fast-pass chunks
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Self.pollInterval))
                 guard !Task.isCancelled else { break }
+                let before = self.chunks.count
                 await self.refresh()
+                let after = self.chunks.count
+                if after != before {
+                    self.logger.info("Transcript peek: \(before) → \(after) chunks")
+                }
             }
         }
     }

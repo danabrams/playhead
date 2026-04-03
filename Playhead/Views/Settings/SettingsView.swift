@@ -2,7 +2,7 @@
 // Settings screen with all user-configurable options.
 //
 // Sections:
-// - WhisperKit model selection with download management and size indicators
+// - Speech model selection with download management and size indicators
 // - Ad skip behavior (auto/manual/off)
 // - Playback defaults (speed, skip intervals)
 // - Storage management (transcript cache, model files, cached audio)

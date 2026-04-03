@@ -22,6 +22,7 @@ final class PlayheadRuntime {
     let skipOrchestrator: SkipOrchestrator
     let analysisCoordinator: AnalysisCoordinator
     let backgroundProcessingService: BackgroundProcessingService
+    let downloadManager: DownloadManager
 
     private let isPreviewRuntime: Bool
     private let logger = Logger(subsystem: "com.playhead", category: "Runtime")
@@ -32,6 +33,9 @@ final class PlayheadRuntime {
     private(set) var currentEpisodeTitle: String?
     private(set) var currentPodcastTitle: String?
     private(set) var currentArtworkURL: URL?
+
+    /// Background download task for the current episode's audio cache.
+    private var audioCacheTask: Task<Void, Never>?
 
     /// True when an episode is actively loaded for playback.
     var isPlayingEpisode: Bool {
@@ -81,11 +85,11 @@ final class PlayheadRuntime {
 
         self.audioService = AnalysisAudioService()
 
-        let whisperKitService = WhisperKitService()
+        let speechService = SpeechService()
 
         self.featureService = FeatureExtractionService(store: analysisStore)
         self.transcriptEngine = TranscriptEngineService(
-            whisperKit: whisperKitService,
+            speechService: speechService,
             store: analysisStore
         )
         self.trustService = TrustScoringService(store: analysisStore)
@@ -110,6 +114,7 @@ final class PlayheadRuntime {
             coordinator: analysisCoordinator,
             capabilitiesService: capabilitiesService
         )
+        self.downloadManager = DownloadManager()
 
         // Set error state after all stored properties are initialized.
         if let storeError {
@@ -163,11 +168,17 @@ final class PlayheadRuntime {
 
         backgroundProcessingService.registerBackgroundTasks()
 
-        Task {
+        Task { [downloadManager] in
             do {
                 try await analysisStore.migrate()
             } catch {
                 // The app can still launch, but analysis persistence will be degraded.
+            }
+
+            do {
+                try await downloadManager.bootstrap()
+            } catch {
+                // Non-fatal: downloads will fail but playback still works.
             }
 
             do {
@@ -177,7 +188,7 @@ final class PlayheadRuntime {
             }
 
             do {
-                try await whisperKitService.loadFastModel(from: modelInventory.activeDirectory)
+                try await speechService.loadFastModel(from: modelInventory.activeDirectory)
             } catch {
                 // Speech asset preparation is best-effort at launch; the
                 // transcript engine will surface failures when first used.
@@ -202,7 +213,7 @@ final class PlayheadRuntime {
     func playEpisode(_ episode: Episode) async {
         let episodeId = episode.canonicalEpisodeKey
         let podcastId = episode.podcast?.feedURL.absoluteString
-        let url = episode.cachedAudioURL ?? episode.audioURL
+        let playbackURL = episode.cachedAudioURL ?? episode.audioURL
         let position = episode.playbackPosition
 
         currentEpisodeId = episodeId
@@ -211,36 +222,94 @@ final class PlayheadRuntime {
         currentPodcastTitle = episode.podcast?.title
         currentArtworkURL = episode.podcast?.artworkURL
         currentAnalysisAssetId = nil
-        let resolvedAnalysisAssetId = await analysisCoordinator.handlePlaybackEvent(
-            .playStarted(
-                episodeId: episodeId,
-                podcastId: podcastId,
-                audioURL: url,
-                time: position,
-                rate: 1.0
-            )
-        )
-        currentAnalysisAssetId = resolvedAnalysisAssetId
 
-        if let analysisAssetId = resolvedAnalysisAssetId {
-            await skipOrchestrator.beginEpisode(
-                analysisAssetId: analysisAssetId,
-                podcastId: podcastId
-            )
-        }
-
+        // Start playback immediately (AVPlayer handles remote streams).
         await backgroundProcessingService.playbackDidStart()
-
-        await playbackService.load(url: url, startPosition: position)
+        await playbackService.load(url: playbackURL, startPosition: position)
         await playbackService.play()
         await playbackService.setNowPlayingMetadata(
             title: episode.title,
             artist: episode.podcast?.author,
             albumTitle: episode.podcast?.title
         )
+
+        // Resolve a local audio URL for analysis. The analysis pipeline
+        // requires a LocalAudioURL — remote URLs are rejected at compile time.
+        let localAudioURL: LocalAudioURL?
+        if let cached = episode.cachedAudioURL, let local = LocalAudioURL(cached) {
+            localAudioURL = local
+        } else if let cached = await downloadManager.cachedFileURL(for: episodeId),
+                  let local = LocalAudioURL(cached) {
+            localAudioURL = local
+        } else {
+            localAudioURL = nil
+        }
+
+        if let analysisURL = localAudioURL {
+            // Audio is local — start the analysis pipeline immediately.
+            let resolvedAssetId = await analysisCoordinator.handlePlaybackEvent(
+                .playStarted(
+                    episodeId: episodeId,
+                    podcastId: podcastId,
+                    audioURL: analysisURL,
+                    time: position,
+                    rate: 1.0
+                )
+            )
+            currentAnalysisAssetId = resolvedAssetId
+
+            if let assetId = resolvedAssetId {
+                await skipOrchestrator.beginEpisode(
+                    analysisAssetId: assetId,
+                    podcastId: podcastId
+                )
+            }
+        } else {
+            // Download in background, then kick the analysis pipeline.
+            logger.info("Episode not cached — downloading for analysis: \(episodeId)")
+            audioCacheTask?.cancel()
+            audioCacheTask = Task { [weak self, downloadManager, analysisCoordinator, skipOrchestrator] in
+                guard let self else { return }
+                do {
+                    let localURL = try await downloadManager.progressiveDownload(
+                        episodeId: episodeId,
+                        from: episode.audioURL
+                    )
+                    guard !Task.isCancelled, self.currentEpisodeId == episodeId else { return }
+                    guard let analysisURL = LocalAudioURL(localURL) else {
+                        self.logger.error("Download returned non-local URL: \(localURL)")
+                        return
+                    }
+
+                    self.logger.info("Download complete — starting analysis pipeline")
+                    let resolvedAssetId = await analysisCoordinator.handlePlaybackEvent(
+                        .playStarted(
+                            episodeId: episodeId,
+                            podcastId: podcastId,
+                            audioURL: analysisURL,
+                            time: await self.playbackService.snapshot().currentTime,
+                            rate: 1.0
+                        )
+                    )
+                    self.currentAnalysisAssetId = resolvedAssetId
+
+                    if let assetId = resolvedAssetId {
+                        await skipOrchestrator.beginEpisode(
+                            analysisAssetId: assetId,
+                            podcastId: podcastId
+                        )
+                    }
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    self.logger.error("Background audio download failed: \(error)")
+                }
+            }
+        }
     }
 
     func stopPlayback() async {
+        audioCacheTask?.cancel()
+        audioCacheTask = nil
         await backgroundProcessingService.playbackDidStop()
         await analysisCoordinator.handlePlaybackEvent(.stopped)
         await skipOrchestrator.endEpisode()

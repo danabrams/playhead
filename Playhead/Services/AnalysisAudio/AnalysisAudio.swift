@@ -2,7 +2,7 @@
 // Audio buffer extraction and format conversion for the analysis pipeline.
 //
 // Decodes cached podcast audio into 16 kHz mono Float32 shards suitable for
-// WhisperKit transcription and feature extraction. Completely separate from
+// Apple Speech transcription and feature extraction. Completely separate from
 // the playback path — different queue, no shared audio session.
 
 @preconcurrency import AVFoundation
@@ -12,7 +12,7 @@ import OSLog
 // MARK: - AnalysisShard
 
 /// A short segment of decoded audio ready for ASR or feature extraction.
-/// Stored as 16 kHz mono Float32 — the format WhisperKit expects.
+/// Stored as 16 kHz mono Float32 — the format Apple Speech expects.
 struct AnalysisShard: Sendable {
     /// Unique identifier for this shard within the episode.
     let id: Int
@@ -27,6 +27,25 @@ struct AnalysisShard: Sendable {
 
     /// Number of samples in this shard.
     var sampleCount: Int { samples.count }
+}
+
+// MARK: - LocalAudioURL
+
+/// A URL that is guaranteed to be a local `file://` path.
+/// Use this instead of bare `URL` in the analysis pipeline so the compiler
+/// prevents remote URLs from reaching the audio decoder.
+struct LocalAudioURL: Sendable, Equatable {
+    let url: URL
+
+    /// Returns nil if the URL is not a file URL.
+    init?(_ url: URL) {
+        guard url.isFileURL else { return nil }
+        self.url = url
+    }
+
+    var path: String { url.path }
+    var absoluteString: String { url.absoluteString }
+    var lastPathComponent: String { url.lastPathComponent }
 }
 
 // MARK: - AnalysisAudioError
@@ -169,11 +188,11 @@ actor AnalysisAudioService {
 
     // MARK: - Configuration
 
-    /// Target sample rate for analysis output (WhisperKit standard).
+    /// Target sample rate for analysis output (Apple Speech standard).
     static let targetSampleRate: Double = 16_000
 
-    /// Default shard duration in seconds. 30 s matches WhisperKit's preferred
-    /// input length and keeps memory pressure reasonable.
+    /// Default shard duration in seconds. 30 s keeps memory pressure
+    /// reasonable and aligns with typical ASR input windows.
     static let defaultShardDuration: TimeInterval = 30.0
 
     /// Truncation tolerance — if decoded audio is shorter than the asset
@@ -220,7 +239,7 @@ actor AnalysisAudioService {
     ///   - shardDuration: Duration of each shard in seconds.
     /// - Returns: An array of `AnalysisShard` covering the file.
     func decode(
-        fileURL: URL,
+        fileURL: LocalAudioURL,
         episodeID: String,
         shardDuration: TimeInterval = AnalysisAudioService.defaultShardDuration
     ) async throws -> [AnalysisShard] {
@@ -268,17 +287,17 @@ actor AnalysisAudioService {
     // MARK: - Decoding pipeline
 
     private func performDecode(
-        fileURL: URL,
+        fileURL: LocalAudioURL,
         episodeID: String,
         shardDuration: TimeInterval
     ) async throws -> [AnalysisShard] {
         // 1. Validate the file exists locally.
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            throw AnalysisAudioError.fileNotFound(fileURL)
+            throw AnalysisAudioError.fileNotFound(fileURL.url)
         }
 
         // 2. Load the asset and get its audio track.
-        let asset = AVURLAsset(url: fileURL)
+        let asset = AVURLAsset(url: fileURL.url)
         let assetDuration: TimeInterval
         let audioTrack: AVAssetTrack
 
@@ -288,13 +307,13 @@ actor AnalysisAudioService {
 
             let tracks = try await asset.loadTracks(withMediaType: .audio)
             guard let track = tracks.first else {
-                throw AnalysisAudioError.assetUnreadable(fileURL, underlying: nil)
+                throw AnalysisAudioError.assetUnreadable(fileURL.url, underlying: nil)
             }
             audioTrack = track
         } catch let error as AnalysisAudioError {
             throw error
         } catch {
-            throw AnalysisAudioError.assetUnreadable(fileURL, underlying: error)
+            throw AnalysisAudioError.assetUnreadable(fileURL.url, underlying: error)
         }
 
         // 3. Load the source audio format from the track.
