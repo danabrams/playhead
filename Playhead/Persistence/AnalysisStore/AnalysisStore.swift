@@ -732,6 +732,79 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    func insertAdWindows(_ windows: [AdWindow]) throws {
+        guard !windows.isEmpty else { return }
+        try exec("BEGIN TRANSACTION")
+        do {
+            for ad in windows {
+                try insertAdWindow(ad)
+            }
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    func updateAdWindowMetadata(
+        id: String,
+        advertiser: String?,
+        product: String?,
+        evidenceText: String?,
+        metadataSource: String,
+        metadataConfidence: Double?,
+        metadataPromptVersion: String?
+    ) throws {
+        let sql = """
+            UPDATE ad_windows SET
+                advertiser = ?, product = ?, evidenceText = ?,
+                metadataSource = ?, metadataConfidence = ?, metadataPromptVersion = ?
+            WHERE id = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, advertiser)
+        bind(stmt, 2, product)
+        bind(stmt, 3, evidenceText)
+        bind(stmt, 4, metadataSource)
+        bind(stmt, 5, metadataConfidence)
+        bind(stmt, 6, metadataPromptVersion)
+        bind(stmt, 7, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func updateConfirmedAdCoverage(id: String, endTime: Double) throws {
+        let sql = "UPDATE analysis_assets SET confirmedAdCoverageEndTime = ? WHERE id = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, endTime)
+        bind(stmt, 2, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func fetchAllFeatureWindows(assetId: String) throws -> [FeatureWindow] {
+        let sql = "SELECT * FROM feature_windows WHERE analysisAssetId = ? ORDER BY startTime"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        var results: [FeatureWindow] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(FeatureWindow(
+                analysisAssetId: text(stmt, 0),
+                startTime: sqlite3_column_double(stmt, 1),
+                endTime: sqlite3_column_double(stmt, 2),
+                rms: sqlite3_column_double(stmt, 3),
+                spectralFlux: sqlite3_column_double(stmt, 4),
+                musicProbability: sqlite3_column_double(stmt, 5),
+                pauseProbability: sqlite3_column_double(stmt, 6),
+                speakerClusterId: optionalInt(stmt, 7),
+                jingleHash: optionalText(stmt, 8),
+                featureVersion: Int(sqlite3_column_int(stmt, 9))
+            ))
+        }
+        return results
+    }
+
     // MARK: - CRUD: podcast_profiles
 
     func upsertProfile(_ profile: PodcastProfile) throws {
