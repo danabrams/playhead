@@ -199,13 +199,21 @@ private struct PodcastGridCell: View {
                 }
             }
 
-            // Title
-            Text(podcast.title)
-                .font(AppTypography.caption)
-                .foregroundStyle(AppColors.text)
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: .infinity)
+            // Reserve two caption lines so mixed title lengths don't shift artwork.
+            ZStack(alignment: .top) {
+                Text("A\nA")
+                    .font(AppTypography.caption)
+                    .opacity(0)
+                    .accessibilityHidden(true)
+
+                Text(podcast.title)
+                    .font(AppTypography.caption)
+                    .foregroundStyle(AppColors.text)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity, alignment: .top)
+            }
+            .frame(maxWidth: .infinity)
         }
     }
 

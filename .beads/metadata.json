@@ -3,5 +3,6 @@
   "backend": "dolt",
   "dolt_mode": "embedded",
   "dolt_database": "playhead",
-  "project_id": "31dd6f06-9e7a-4df6-8cfe-bbb1ce68b8aa"
+  "project_id": "31dd6f06-9e7a-4df6-8cfe-bbb1ce68b8aa",
+  "jsonl_export": "issues.jsonl"
 }
