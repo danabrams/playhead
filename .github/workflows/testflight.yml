@@ -18,6 +18,7 @@ permissions:
 env:
   PROJECT_FILE: Playhead.xcodeproj
   PROJECT_SPEC: project.yml
+  INFO_PLIST: Playhead/Support/Info.plist
   SCHEME: Playhead
   APP_BUNDLE_ID: com.playhead.app
   APPLE_TEAM_ID: 36Z6VYTT9X
@@ -42,6 +43,14 @@ jobs:
 
       - name: Generate Xcode project
         run: xcodegen generate --spec "$PROJECT_SPEC"
+
+      - name: Stamp unique build number
+        shell: bash
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$INFO_PLIST"
 
       - name: Import signing certificate
         uses: apple-actions/import-codesign-certs@v3
@@ -98,6 +107,7 @@ jobs:
       - name: Archive app
         shell: bash
         env:
+          BUILD_NUMBER: ${{ github.run_number }}
           PROFILE_NAME: ${{ fromJson(steps.provisioning_profiles.outputs.profiles)[0].name }}
           PROFILE_UUID: ${{ fromJson(steps.provisioning_profiles.outputs.profiles)[0].udid }}
         run: |
@@ -110,6 +120,7 @@ jobs:
             -archivePath "$ARCHIVE_PATH" \
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="Apple Distribution" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
             PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
             PROVISIONING_PROFILE="$PROFILE_UUID"
