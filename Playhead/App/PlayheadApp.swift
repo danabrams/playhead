@@ -29,8 +29,24 @@ struct PlayheadApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
         }
         .modelContainer(modelContainer)
+    }
+}
+
+// MARK: - Root View
+
+/// Switches between onboarding and main content based on first-launch state.
+private struct RootView: View {
+
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
+
+    var body: some View {
+        if hasCompletedOnboarding {
+            ContentView()
+        } else {
+            OnboardingView()
+        }
     }
 }
