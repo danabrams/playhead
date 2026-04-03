@@ -26,3 +26,19 @@ targets:
         INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait"
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         SWIFT_EMIT_LOC_STRINGS: YES
+    scheme:
+      testTargets:
+        - PlayheadTests
+      storeKitConfiguration: Playhead/Resources/Playhead.storekit
+  PlayheadTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: PlayheadTests
+    dependencies:
+      - target: Playhead
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.playhead.tests
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Playhead.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Playhead"
+        BUNDLE_LOADER: "$(TEST_HOST)"
