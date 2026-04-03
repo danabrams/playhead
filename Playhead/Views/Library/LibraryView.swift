@@ -39,6 +39,9 @@ struct LibraryView: View {
             }
             .navigationTitle("Library")
             .navigationBarTitleDisplayMode(.large)
+            .navigationDestination(for: Podcast.self) { podcast in
+                EpisodeListView(podcast: podcast)
+            }
         }
     }
 }
@@ -73,20 +76,23 @@ private extension LibraryView {
         ScrollView {
             LazyVGrid(columns: columns, spacing: Spacing.lg) {
                 ForEach(podcasts) { podcast in
-                    PodcastGridCell(podcast: podcast)
-                        .contextMenu {
-                            Button(role: .destructive) {
-                                unsubscribe(podcast)
-                            } label: {
-                                Label("Unsubscribe", systemImage: "xmark.circle")
-                            }
-
-                            Button {
-                                markAllPlayed(podcast)
-                            } label: {
-                                Label("Mark All Played", systemImage: "checkmark.circle")
-                            }
+                    NavigationLink(value: podcast) {
+                        PodcastGridCell(podcast: podcast)
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            unsubscribe(podcast)
+                        } label: {
+                            Label("Unsubscribe", systemImage: "xmark.circle")
                         }
+
+                        Button {
+                            markAllPlayed(podcast)
+                        } label: {
+                            Label("Mark All Played", systemImage: "checkmark.circle")
+                        }
+                    }
                 }
             }
             .padding(.horizontal, Spacing.md)
