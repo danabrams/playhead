@@ -13,9 +13,9 @@ struct NowPlayingView: View {
     @StateObject private var bannerQueue = AdBannerQueue()
     @State private var showTranscriptPeek = false
 
-    /// Ad segment ranges expressed as fractions of total duration (0...1).
-    /// Fed from SkipOrchestrator in a future bead.
-    var adSegments: [ClosedRange<Double>] = []
+    /// SkipOrchestrator that provides real-time ad segment data.
+    /// When set, the view model observes segment updates automatically.
+    var skipOrchestrator: SkipOrchestrator?
 
     /// Analysis asset ID for the currently playing episode. Nil when no
     /// analysis session exists (transcript peek unavailable).
@@ -75,7 +75,12 @@ struct NowPlayingView: View {
                 }
             )
         }
-        .onAppear { viewModel.startObserving() }
+        .onAppear {
+            viewModel.startObserving()
+            if let orchestrator = skipOrchestrator {
+                viewModel.observeAdSegments(from: orchestrator)
+            }
+        }
         .onDisappear { viewModel.stopObserving() }
         .sheet(isPresented: $showTranscriptPeek) {
             if let assetId = analysisAssetId, let store = analysisStore {
@@ -180,7 +185,7 @@ private extension NowPlayingView {
         VStack(spacing: Spacing.xs) {
             TimelineRailView(
                 progress: viewModel.progress,
-                adSegments: adSegments,
+                adSegments: viewModel.adSegmentRanges,
                 onSeek: { fraction in
                     let target = fraction * viewModel.duration
                     viewModel.seek(to: target)
@@ -291,8 +296,6 @@ private struct TransportButtonStyle: ButtonStyle {
 // MARK: - Preview
 
 #Preview("Now Playing") {
-    NowPlayingView(
-        adSegments: [0.15...0.22, 0.55...0.60]
-    )
-    .preferredColorScheme(.dark)
+    NowPlayingView()
+        .preferredColorScheme(.dark)
 }

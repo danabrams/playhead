@@ -1,6 +1,8 @@
 // TimelineRailView.swift
 // Full-width timeline rail with copper playhead line and recessed ad segments.
 // Supports drag-to-scrub with haptic feedback at segment boundaries.
+// Ad segments render as subtle recessed charcoal blocks with inner shadow.
+// Skip animation: playhead glides forward smoothly (no jump, no bounce).
 
 import SwiftUI
 
@@ -16,8 +18,16 @@ struct TimelineRailView: View {
     @State private var isDragging = false
     @State private var dragProgress: Double = 0
 
+    /// Tracks whether the playhead is gliding through a skip (smooth animation).
+    @State private var isGliding = false
+    /// The previous progress value, used to detect skip-induced jumps.
+    @State private var previousProgress: Double = 0
+
     private let railHeight: CGFloat = 4
     private let touchTargetHeight: CGFloat = 44
+
+    /// Threshold for detecting a skip jump (vs normal playback advance).
+    private let skipJumpThreshold: Double = 0.02
 
     private var effectiveProgress: Double {
         isDragging ? dragProgress : progress
@@ -33,14 +43,12 @@ struct TimelineRailView: View {
                     .fill(AppColors.surface)
                     .frame(height: railHeight)
 
-                // MARK: Ad Segments (recessed blocks)
+                // MARK: Ad Segments (recessed charcoal blocks)
                 ForEach(Array(adSegments.enumerated()), id: \.offset) { _, segment in
                     let x = segment.lowerBound * width
                     let w = (segment.upperBound - segment.lowerBound) * width
 
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(AppColors.secondary.opacity(0.25))
-                        .frame(width: max(w, 2), height: railHeight)
+                    adSegmentBlock(width: max(w, 2))
                         .offset(x: x)
                 }
 
@@ -54,6 +62,7 @@ struct TimelineRailView: View {
                     .fill(AppColors.accent)
                     .frame(width: 2, height: isDragging ? 18 : 12)
                     .offset(x: effectiveProgress * width - 1)
+                    .animation(isDragging ? Motion.quick : glideAnimation, value: effectiveProgress)
                     .animation(Motion.quick, value: isDragging)
             }
             .frame(height: railHeight)
@@ -80,6 +89,51 @@ struct TimelineRailView: View {
             )
         }
         .frame(height: touchTargetHeight)
+        .onChange(of: progress) { oldValue, newValue in
+            let jump = newValue - oldValue
+            if jump > skipJumpThreshold {
+                // A skip just fired — animate the glide.
+                isGliding = true
+                // End the glide state after the animation settles.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    isGliding = false
+                }
+            }
+            previousProgress = newValue
+        }
+    }
+
+    // MARK: - Skip Glide Animation
+
+    /// When a skip fires, the playhead glides forward over 0.45s with easeInOut.
+    /// Normal playback uses no animation (continuous updates).
+    private var glideAnimation: Animation? {
+        isGliding ? .easeInOut(duration: 0.45) : nil
+    }
+
+    // MARK: - Ad Segment Block
+
+    /// Recessed charcoal block with subtle inner shadow.
+    /// Darker than the rail background, muted — not aggressive.
+    @ViewBuilder
+    private func adSegmentBlock(width: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 1)
+            .fill(Palette.charcoal)
+            .frame(width: width, height: railHeight)
+            .overlay(
+                // Inner shadow: darkened top edge to sell the "recessed" illusion.
+                RoundedRectangle(cornerRadius: 1)
+                    .stroke(Color.black.opacity(0.3), lineWidth: 0.5)
+            )
+            .overlay(
+                // Subtle top inset highlight for depth.
+                VStack(spacing: 0) {
+                    Color.black.opacity(0.15)
+                        .frame(height: 1)
+                    Spacer()
+                }
+            )
+            .clipped()
     }
 }
 

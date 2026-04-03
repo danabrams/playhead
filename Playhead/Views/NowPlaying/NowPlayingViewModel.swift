@@ -17,6 +17,10 @@ final class NowPlayingViewModel: ObservableObject {
     @Published var duration: TimeInterval = 0
     @Published var playbackSpeed: Float = 1.0
 
+    /// Ad segments from SkipOrchestrator, expressed as fractional ranges (0...1)
+    /// of the total episode duration. Updated in real-time as detection produces results.
+    @Published var adSegmentRanges: [ClosedRange<Double>] = []
+
     // MARK: - Derived
 
     var progress: Double {
@@ -37,6 +41,10 @@ final class NowPlayingViewModel: ObservableObject {
 
     private var playbackService: PlaybackService?
     private var observationTask: Task<Void, Never>?
+    private var segmentObservationTask: Task<Void, Never>?
+
+    /// Reference to the SkipOrchestrator for ad segment observation.
+    private var skipOrchestrator: SkipOrchestrator?
 
     // MARK: - Lifecycle
 
@@ -57,6 +65,33 @@ final class NowPlayingViewModel: ObservableObject {
     func stopObserving() {
         observationTask?.cancel()
         observationTask = nil
+        segmentObservationTask?.cancel()
+        segmentObservationTask = nil
+    }
+
+    /// Begin observing ad segment updates from a SkipOrchestrator.
+    /// Segments are converted to fractional ranges of the current duration.
+    func observeAdSegments(from orchestrator: SkipOrchestrator) {
+        skipOrchestrator = orchestrator
+        segmentObservationTask?.cancel()
+        segmentObservationTask = Task {
+            let stream = await orchestrator.appliedSegmentsStream()
+            for await segments in stream {
+                guard !Task.isCancelled else { return }
+                let dur = self.duration
+                guard dur > 0 else {
+                    self.adSegmentRanges = []
+                    continue
+                }
+                let ranges: [ClosedRange<Double>] = segments.compactMap { seg in
+                    let lower = seg.start / dur
+                    let upper = seg.end / dur
+                    guard lower < upper, lower >= 0, upper <= 1.0 else { return nil }
+                    return min(max(lower, 0), 1)...min(max(upper, 0), 1)
+                }
+                self.adSegmentRanges = ranges
+            }
+        }
     }
 
     // MARK: - Actions

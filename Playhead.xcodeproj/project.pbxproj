@@ -24,6 +24,7 @@
 		2A2DBC03BB0DAEC911D16F40 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = D233B118794A3B07AB2E70FC /* Theme.swift */; };
 		2B13973F376F6DA284AFC87D /* TranscriptEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18712AF6E8B41C1268D5D290 /* TranscriptEngineTests.swift */; };
 		2B4DE0CAB38F91B1A5419A9B /* AnalysisAudio.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BCE678E596FFBFE53CD62FE /* AnalysisAudio.swift */; };
+		2EC659F048024D2C1E8DFB07 /* ReplayMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85361C153508BAB634696458 /* ReplayMetrics.swift */; };
 		32D65ABF1F2B2CCA3F206D08 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13239A6F6E1EC44E0BF7A83E /* Assets.xcassets */; };
 		3FEA8B2D3DE188957955981F /* DownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 842382A1A5369363A4D358F3 /* DownloadManager.swift */; };
 		41D85ACE045588A287DDF164 /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9002A6E69AE43C9F38CAB4A /* LibraryView.swift */; };
@@ -107,6 +108,7 @@
 		8305E76BBE32491EF296EC19 /* Entitlements.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Entitlements.swift; sourceTree = "<group>"; };
 		8402BA8379CC649522667AB1 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		842382A1A5369363A4D358F3 /* DownloadManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadManager.swift; sourceTree = "<group>"; };
+		85361C153508BAB634696458 /* ReplayMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayMetrics.swift; sourceTree = "<group>"; };
 		858BBD6C21F9850E0297E56C /* ClassifierService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassifierService.swift; sourceTree = "<group>"; };
 		8792CA543BEDF713F5610776 /* NowPlayingBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingBar.swift; sourceTree = "<group>"; };
 		8BCE678E596FFBFE53CD62FE /* AnalysisAudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisAudio.swift; sourceTree = "<group>"; };
@@ -145,6 +147,7 @@
 		06AF8978062742FAAC79CD9B /* PlayheadTests */ = {
 			isa = PBXGroup;
 			children = (
+				9D9F2453820376BB0019DAFB /* Fixtures */,
 				1B76A42DF2F1F269D7CCD28C /* Services */,
 			);
 			path = PlayheadTests;
@@ -172,6 +175,7 @@
 			children = (
 				1E742C6FF8AD220FC5DD7E8C /* Downloads */,
 				3E8FCE7515C5849FBBE124B4 /* PodcastFeed */,
+				2987C40702B65A17A6E8D618 /* ReplaySimulator */,
 				C1A4A606D0BF09E2BB158671 /* TranscriptEngine */,
 			);
 			path = Services;
@@ -202,6 +206,14 @@
 				8FF386614C954C71D052A28C /* BackgroundProcessingService.swift */,
 			);
 			path = AnalysisCoordinator;
+			sourceTree = "<group>";
+		};
+		2987C40702B65A17A6E8D618 /* ReplaySimulator */ = {
+			isa = PBXGroup;
+			children = (
+				85361C153508BAB634696458 /* ReplayMetrics.swift */,
+			);
+			path = ReplaySimulator;
 			sourceTree = "<group>";
 		};
 		2B0E2B910983C8387566A3BB /* Downloads */ = {
@@ -395,6 +407,14 @@
 			path = Entitlements;
 			sourceTree = "<group>";
 		};
+		9D9F2453820376BB0019DAFB /* Fixtures */ = {
+			isa = PBXGroup;
+			children = (
+				AA09B659861A02D611C35A8C /* Corpus */,
+			);
+			path = Fixtures;
+			sourceTree = "<group>";
+		};
 		A7FC4BE8CADD5A18328AF7CF /* App */ = {
 			isa = PBXGroup;
 			children = (
@@ -402,6 +422,13 @@
 				E45D39004A874C90BF04E126 /* PlayheadApp.swift */,
 			);
 			path = App;
+			sourceTree = "<group>";
+		};
+		AA09B659861A02D611C35A8C /* Corpus */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Corpus;
 			sourceTree = "<group>";
 		};
 		C1A4A606D0BF09E2BB158671 /* TranscriptEngine */ = {
@@ -646,6 +673,7 @@
 			files = (
 				FE094685E4D4030EAC60F3DE /* DownloadManagerTests.swift in Sources */,
 				A1517EA2901D1FF0A23045B5 /* FeedParserTests.swift in Sources */,
+				2EC659F048024D2C1E8DFB07 /* ReplayMetrics.swift in Sources */,
 				2B13973F376F6DA284AFC87D /* TranscriptEngineTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
