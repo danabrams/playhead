@@ -95,13 +95,27 @@ private struct RootView: View {
 
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @Environment(PlayheadRuntime.self) private var runtime
+    @State private var showSplash = true
 
     var body: some View {
         Group {
             if let error = runtime.initializationError {
                 errorView(error)
             } else if hasCompletedOnboarding {
-                ContentView()
+                ZStack {
+                    ContentView()
+
+                    if showSplash {
+                        ReturningSplashView()
+                            .transition(.opacity)
+                            .zIndex(1)
+                    }
+                }
+                .onAppear {
+                    withAnimation(.easeOut(duration: 0.4).delay(0.3)) {
+                        showSplash = false
+                    }
+                }
             } else {
                 OnboardingView()
             }
@@ -123,6 +137,42 @@ private struct RootView: View {
                 .foregroundStyle(AppColors.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, Spacing.xl)
+        }
+    }
+}
+
+// MARK: - Returning User Splash
+
+/// Static branded splash shown briefly over ContentView for returning users.
+/// Matches the launch screen background, then fades out to reveal the app.
+private struct ReturningSplashView: View {
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                AppColors.background
+                    .ignoresSafeArea()
+
+                VStack(spacing: Spacing.lg) {
+                    // Static playhead line — same 60% width as onboarding welcome
+                    ZStack(alignment: .leading) {
+                        Rectangle()
+                            .fill(AppColors.accent)
+                            .frame(height: 2)
+                            .frame(width: geometry.size.width * 0.6)
+
+                        Circle()
+                            .fill(AppColors.accent)
+                            .frame(width: 8, height: 8)
+                            .offset(x: geometry.size.width * 0.6 - 4)
+                    }
+                    .frame(height: 8)
+
+                    Text("Playhead")
+                        .font(AppTypography.sans(size: 36, weight: .semibold))
+                        .foregroundStyle(AppColors.text)
+                }
+            }
         }
     }
 }
