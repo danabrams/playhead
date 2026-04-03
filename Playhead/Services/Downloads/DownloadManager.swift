@@ -273,11 +273,21 @@ actor DownloadManager {
         }
 
         // Harvest HTTP metadata for weak fingerprinting.
+        // For resumed downloads (206), expectedContentLength is the remaining
+        // bytes, not the full resource size. Use existing partial size + remaining
+        // to reconstruct total Content-Length so the weak fingerprint is stable.
+        let reportedLength = httpResponse.expectedContentLength
+        let totalContentLength: Int64?
+        if reportedLength > 0 {
+            totalContentLength = httpResponse.statusCode == 206
+                ? existingSize + reportedLength
+                : reportedLength
+        } else {
+            totalContentLength = nil
+        }
         let metadata = HTTPAssetMetadata(
             etag: httpResponse.value(forHTTPHeaderField: "ETag"),
-            contentLength: httpResponse.expectedContentLength > 0
-                ? httpResponse.expectedContentLength
-                : nil,
+            contentLength: totalContentLength,
             lastModified: httpResponse.value(forHTTPHeaderField: "Last-Modified")
         )
         metadataCache[episodeId] = metadata
@@ -639,6 +649,11 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
 
         let fm = FileManager.default
         do {
+            // Ensure the complete directory exists — the delegate may fire
+            // after a cold launch before bootstrap() has been called.
+            if !fm.fileExists(atPath: cacheDir.path) {
+                try fm.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+            }
             if fm.fileExists(atPath: destURL.path) {
                 try fm.removeItem(at: destURL)
             }
