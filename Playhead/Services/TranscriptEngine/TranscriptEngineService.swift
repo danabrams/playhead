@@ -315,7 +315,7 @@ actor TranscriptEngineService {
             endTime: shardEnd
         )
 
-        logger.info("Wrote \(chunks.count) chunks for shard \(shard.id) [\(shard.startTime, format: .fixed(precision: 1))-\(shardEnd, format: .fixed(precision: 1))s]")
+        logger.info("Wrote \(chunks.count) chunks for shard \(shard.id) [\(String(format: "%.1f", shard.startTime))-\(String(format: "%.1f", shardEnd))s]")
     }
 
     // MARK: - Prioritization
