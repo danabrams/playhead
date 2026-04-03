@@ -370,42 +370,47 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         try await analyzer.prepareToAnalyze(in: buffer.format)
         logger.debug("SpeechAnalyzer prepared in \(ContinuousClock.now - prepStart)")
 
-        let collector = Task { try await Self.collectTranscriptSegments(from: transcriber.results) }
+        // Feed audio with bufferStartTime = .zero. The Speech framework may
+        // assert on non-zero start times. We offset results by shard.startTime
+        // after collection.
+        let inputSequence = Self.singleBufferSequence(buffer: buffer)
+
+        let collector = Task {
+            try await Self.collectTranscriptSegments(from: transcriber.results)
+        }
 
         do {
             let analyzeStart = ContinuousClock.now
-            // Timeout: 2x shard duration or 60s minimum — protects against analyzer hangs.
-            let timeoutSeconds = max(60.0, shard.duration * 2)
-
-            let inputSequence = Self.singleBufferSequence(
-                buffer: buffer,
-                startTime: shard.startTime
-            )
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask {
-                    _ = try await analyzer.analyzeSequence(inputSequence)
-                }
-                group.addTask {
-                    try await Task.sleep(for: .seconds(timeoutSeconds))
-                    throw CancellationError()
-                }
-                try await group.next()
-                group.cancelAll()
-            }
-            // Keep the buffer alive until after analyzeSequence completes.
-            // Without this, ARC can deallocate the buffer while the Speech
-            // framework is still reading its float channel data.
+            _ = try await analyzer.analyzeSequence(inputSequence)
+            // Keep buffer alive through analyzeSequence.
             withExtendedLifetime(buffer) {}
 
-            let segments = try await collector.value
-            logger.debug("SpeechAnalyzer finished shard \(shard.id) in \(ContinuousClock.now - analyzeStart) → \(segments.count) segments")
-            return segments
+            let rawSegments = try await collector.value
+            logger.debug("SpeechAnalyzer finished shard \(shard.id) in \(ContinuousClock.now - analyzeStart) → \(rawSegments.count) segments")
+
+            // Offset timestamps from buffer-relative (0-based) to episode-relative.
+            let timeOffset = shard.startTime
+            return rawSegments.map { seg in
+                TranscriptSegment(
+                    id: seg.id,
+                    words: seg.words.map { w in
+                        TranscriptWord(
+                            text: w.text,
+                            startTime: w.startTime + timeOffset,
+                            endTime: w.endTime + timeOffset,
+                            confidence: w.confidence
+                        )
+                    },
+                    text: seg.text,
+                    startTime: seg.startTime + timeOffset,
+                    endTime: seg.endTime + timeOffset,
+                    avgConfidence: seg.avgConfidence,
+                    passType: seg.passType
+                )
+            }
         } catch {
             await analyzer.cancelAndFinishNow()
             collector.cancel()
-            if error is CancellationError {
-                logger.warning("SpeechAnalyzer timed out for shard \(shard.id) (duration=\(String(format: "%.1f", shard.duration))s)")
-            }
             throw error
         }
     }
@@ -422,16 +427,24 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
 
         try await analyzer.prepareToAnalyze(in: buffer.format)
 
-        let inputSequence = Self.singleBufferSequence(
-            buffer: buffer,
-            startTime: shard.startTime
-        )
+        let inputSequence = Self.singleBufferSequence(buffer: buffer)
 
         let collector = Task { try await Self.collectVoiceActivity(from: detector.results) }
 
         do {
             _ = try await analyzer.analyzeSequence(inputSequence)
-            return try await collector.value
+            withExtendedLifetime(buffer) {}
+
+            // Offset VAD results from buffer-relative to episode-relative.
+            let timeOffset = shard.startTime
+            return try await collector.value.map { vad in
+                VADResult(
+                    isSpeech: vad.isSpeech,
+                    speechProbability: vad.speechProbability,
+                    startTime: vad.startTime + timeOffset,
+                    endTime: vad.endTime + timeOffset
+                )
+            }
         } catch {
             await analyzer.cancelAndFinishNow()
             collector.cancel()
@@ -531,12 +544,10 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
     }
 
     private static func singleBufferSequence(
-        buffer: AVAudioPCMBuffer,
-        startTime: TimeInterval
+        buffer: AVAudioPCMBuffer
     ) -> AsyncStream<AnalyzerInput> {
         AsyncStream { continuation in
-            let cmTime = CMTime(seconds: startTime, preferredTimescale: 16_000)
-            continuation.yield(AnalyzerInput(buffer: buffer, bufferStartTime: cmTime))
+            continuation.yield(AnalyzerInput(buffer: buffer, bufferStartTime: .zero))
             continuation.finish()
         }
     }
