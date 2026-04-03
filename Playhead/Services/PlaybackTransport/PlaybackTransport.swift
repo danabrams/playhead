@@ -448,8 +448,10 @@ final class PlaybackService: NSObject, Sendable {
 
         switch type {
         case .began:
+            progressiveLoader?.suspend()
             pause()
         case .ended:
+            progressiveLoader?.resume()
             if let optionsValue = info[AVAudioSessionInterruptionOptionKey] as? UInt {
                 let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
                 if options.contains(.shouldResume) {
@@ -684,6 +686,11 @@ final class ProgressiveResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     /// Timer that checks for new data to fulfill pending requests.
     private var pollTimer: DispatchSourceTimer?
 
+    /// When true, the loader drops all pending requests and ignores new ones.
+    /// Set during audio session interruptions (Siri, phone calls) to prevent
+    /// ObjC exceptions from calling respond/finishLoading on cancelled requests.
+    private var suspended = false
+
     init(fileURL: URL, totalBytes: Int64, contentType: String) {
         self.fileURL = fileURL
         self.totalBytes = totalBytes
@@ -696,12 +703,31 @@ final class ProgressiveResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
         pollTimer?.cancel()
     }
 
+    // MARK: - Suspend / Resume
+
+    /// Stop serving bytes. Called when audio session is interrupted.
+    func suspend() {
+        queue.async { [self] in
+            suspended = true
+            pendingRequests.removeAll()
+        }
+    }
+
+    /// Resume serving bytes. Called when audio session interruption ends.
+    func resume() {
+        queue.async { [self] in
+            suspended = false
+        }
+    }
+
     // MARK: - AVAssetResourceLoaderDelegate
 
     func resourceLoader(
         _ resourceLoader: AVAssetResourceLoader,
         shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest
     ) -> Bool {
+        guard !suspended else { return false }
+
         // Fill content information on first request.
         if let contentInfo = loadingRequest.contentInformationRequest {
             contentInfo.contentType = contentType
@@ -729,50 +755,37 @@ final class ProgressiveResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
 
     // MARK: - Request Fulfillment
 
-    /// Attempts to respond to the data request from bytes currently on disk.
-    /// Returns true if the request is fully served, false if more data is needed.
     @discardableResult
     private func fulfillRequest(_ loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
-        // Guard against cancelled requests — calling respond/finishLoading
-        // on a cancelled request raises an Objective-C exception that crashes
-        // the app. This happens during Siri or other audio session interruptions
-        // when AVPlayer cancels all in-flight resource loading.
-        guard !loadingRequest.isCancelled else { return true }
+        guard !loadingRequest.isCancelled, !suspended else { return true }
 
         guard let dataRequest = loadingRequest.dataRequest else {
-            loadingRequest.finishLoading()
+            if !loadingRequest.isCancelled { loadingRequest.finishLoading() }
             return true
         }
 
-        // Use currentOffset — this advances after each respond(with:) call.
-        // requestedOffset is the *initial* offset and doesn't move.
         let readOffset = dataRequest.currentOffset
         let endOfRequest = dataRequest.requestedOffset + Int64(dataRequest.requestedLength)
         let remaining = endOfRequest - readOffset
 
         guard remaining > 0 else {
-            loadingRequest.finishLoading()
+            if !loadingRequest.isCancelled { loadingRequest.finishLoading() }
             return true
         }
 
-        // How many bytes are on disk right now?
         let fileSize: Int64
         do {
             let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
             fileSize = (attrs[.size] as? Int64) ?? 0
         } catch {
-            if !loadingRequest.isCancelled {
-                loadingRequest.finishLoading(with: error)
-            }
+            if !loadingRequest.isCancelled { loadingRequest.finishLoading(with: error) }
             return true
         }
 
-        // If we don't have any bytes at the read position yet, wait.
         if readOffset >= fileSize {
             return false
         }
 
-        // Read available bytes from the current position forward.
         let availableEnd = min(readOffset + remaining, fileSize)
         let bytesToRead = Int(availableEnd - readOffset)
 
@@ -783,30 +796,23 @@ final class ProgressiveResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
             defer { try? handle.close() }
             try handle.seek(toOffset: UInt64(readOffset))
             let data = handle.readData(ofLength: bytesToRead)
-            guard !loadingRequest.isCancelled else { return true }
+            guard !loadingRequest.isCancelled, !suspended else { return true }
             dataRequest.respond(with: data)
         } catch {
-            if !loadingRequest.isCancelled {
-                loadingRequest.finishLoading(with: error)
-            }
+            if !loadingRequest.isCancelled { loadingRequest.finishLoading(with: error) }
             return true
         }
 
-        // Check if we've now served everything.
         if dataRequest.currentOffset >= endOfRequest {
-            if !loadingRequest.isCancelled {
-                loadingRequest.finishLoading()
-            }
+            if !loadingRequest.isCancelled { loadingRequest.finishLoading() }
             return true
         }
 
-        // Partial serve — still waiting for more bytes.
         return false
     }
 
     // MARK: - Polling
 
-    /// Periodically checks if pending requests can now be fulfilled.
     private func startPolling() {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 0.1, repeating: 0.1)
@@ -818,6 +824,10 @@ final class ProgressiveResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     }
 
     private func processPendingRequests() {
+        guard !suspended else {
+            pendingRequests.removeAll()
+            return
+        }
         pendingRequests.removeAll { request in
             if request.isCancelled { return true }
             return fulfillRequest(request)
