@@ -164,10 +164,19 @@ actor TranscriptEngineService {
     }
 
     /// Notify the service that playback speed changed significantly.
-    /// Adjusts the lookahead window without full restart unless needed.
-    func handleSpeedChange(snapshot: PlaybackSnapshot) {
-        latestSnapshot = snapshot
-        logger.info("Speed changed to \(snapshot.playbackRate, format: .fixed(precision: 1))x")
+    /// Updates the snapshot and reprioritizes — the lookahead window scales
+    /// with playback rate, so in-flight ordering may be stale.
+    func handleSpeedChange(
+        shards: [AnalysisShard],
+        analysisAssetId: String,
+        snapshot: PlaybackSnapshot
+    ) {
+        logger.info("Speed changed to \(snapshot.playbackRate, format: .fixed(precision: 1))x — reprioritizing")
+        startTranscription(
+            shards: shards,
+            analysisAssetId: analysisAssetId,
+            snapshot: snapshot
+        )
     }
 
     /// Stop all transcription work (e.g., episode ended or user switched).

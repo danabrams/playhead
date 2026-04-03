@@ -392,6 +392,15 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    func fetchAssetByEpisodeId(_ episodeId: String) throws -> AnalysisAsset? {
+        let sql = "SELECT * FROM analysis_assets WHERE episodeId = ? ORDER BY rowid DESC LIMIT 1"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, episodeId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return readAsset(stmt)
+    }
+
     func deleteAsset(id: String) throws {
         try exec("DELETE FROM analysis_assets WHERE id = '\(id)'")
     }
@@ -435,6 +444,22 @@ actor AnalysisStore {
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, id)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return AnalysisSession(
+            id: text(stmt, 0),
+            analysisAssetId: text(stmt, 1),
+            state: text(stmt, 2),
+            startedAt: sqlite3_column_double(stmt, 3),
+            updatedAt: sqlite3_column_double(stmt, 4),
+            failureReason: optionalText(stmt, 5)
+        )
+    }
+
+    func fetchLatestSessionForAsset(assetId: String) throws -> AnalysisSession? {
+        let sql = "SELECT * FROM analysis_sessions WHERE analysisAssetId = ? ORDER BY updatedAt DESC LIMIT 1"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         return AnalysisSession(
             id: text(stmt, 0),
