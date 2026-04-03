@@ -49,7 +49,7 @@ struct TranscriptSegment: Sendable, Equatable {
 /// Distinguishes fast-path (real-time) from final-path (backfill) results.
 enum TranscriptPassType: String, Sendable, Codable {
     case fast
-    case final_
+    case final_ = "final"
 }
 
 // MARK: - VAD Types
