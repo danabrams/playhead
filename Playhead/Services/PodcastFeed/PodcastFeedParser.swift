@@ -299,6 +299,8 @@ final class FeedParser: NSObject, XMLParserDelegate, @unchecked Sendable {
             feed.description = text
         case ("subtitle", Self.atomNS):
             if feed.description.isEmpty { feed.description = text }
+        case ("summary", Self.itunesNS):
+            if feed.description.isEmpty { feed.description = text }
         case ("author", Self.itunesNS):
             feed.author = text
         case ("author", ""):
@@ -325,12 +327,16 @@ final class FeedParser: NSObject, XMLParserDelegate, @unchecked Sendable {
             }
         case ("description", ""):
             currentEpisode?.description = text
-        case ("summary", Self.itunesNS):
+        case ("summary", Self.itunesNS), ("summary", Self.atomNS):
             if currentEpisode?.description?.isEmpty ?? true {
                 currentEpisode?.description = text
             }
         case ("encoded", Self.contentNS):
             currentEpisode?.showNotes = text
+        case ("content", Self.atomNS):
+            if currentEpisode?.showNotes == nil {
+                currentEpisode?.showNotes = text
+            }
         case ("duration", Self.itunesNS):
             currentEpisode?.duration = parseDuration(text)
         case ("author", Self.itunesNS):

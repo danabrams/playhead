@@ -189,6 +189,37 @@ struct FeedParserAtomTests {
         #expect(ep.enclosureURL?.absoluteString == "https://example.com/atom.mp3")
         #expect(ep.pubDate != nil)
     }
+
+    @Test("Parses Atom summary and content for description/showNotes")
+    func atomSummaryAndContent() throws {
+        let feed = try parse(Fixtures.atomFeedWithContent)
+        let ep = feed.episodes[0]
+        #expect(ep.description == "Atom episode summary")
+        #expect(ep.showNotes == "<p>Rich Atom content</p>")
+    }
+}
+
+// MARK: - Relative URL and Malformed Date Tests
+
+@Suite("FeedParser – Edge Cases")
+struct FeedParserEdgeCaseTests {
+
+    @Test("Resolves relative enclosure URLs against base URL")
+    func relativeURLResolution() throws {
+        let data = Data(Fixtures.relativeURLFeed.utf8)
+        let base = URL(string: "https://example.com/feeds/")!
+        let feed = try FeedParser().parse(data: data, baseURL: base)
+        let ep = feed.episodes[0]
+        #expect(ep.enclosureURL?.absoluteString == "https://example.com/feeds/audio/ep1.mp3")
+    }
+
+    @Test("Handles malformed dates gracefully without crashing")
+    func malformedDate() throws {
+        let data = Data(Fixtures.malformedDateFeed.utf8)
+        let feed = try FeedParser().parse(data: data)
+        let ep = feed.episodes[0]
+        #expect(ep.pubDate == nil)
+    }
 }
 
 // MARK: - Test Fixtures
@@ -294,5 +325,36 @@ private enum Fixtures {
               type="audio/mpeg" length="9999"/>
       </entry>
     </feed>
+    """
+
+    static let atomFeedWithContent = """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <title>Atom Content Pod</title>
+      <entry>
+        <title>Content Episode</title>
+        <id>atom-content-1</id>
+        <summary>Atom episode summary</summary>
+        <content type="html"><![CDATA[<p>Rich Atom content</p>]]></content>
+        <link rel="enclosure" href="https://example.com/atom.mp3"
+              type="audio/mpeg" length="9999"/>
+      </entry>
+    </feed>
+    """
+
+    static let relativeURLFeed = """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>Rel Pod</title>
+    <item><title>Ep</title><guid>g1</guid>
+    <enclosure url="audio/ep1.mp3" type="audio/mpeg" length="100"/>
+    </item></channel></rss>
+    """
+
+    static let malformedDateFeed = """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>Bad Date Pod</title>
+    <item><title>Ep</title><guid>g1</guid>
+    <pubDate>not-a-real-date-at-all</pubDate>
+    </item></channel></rss>
     """
 }
