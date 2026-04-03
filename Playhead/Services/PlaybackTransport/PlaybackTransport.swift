@@ -733,6 +733,12 @@ final class ProgressiveResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     /// Returns true if the request is fully served, false if more data is needed.
     @discardableResult
     private func fulfillRequest(_ loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
+        // Guard against cancelled requests — calling respond/finishLoading
+        // on a cancelled request raises an Objective-C exception that crashes
+        // the app. This happens during Siri or other audio session interruptions
+        // when AVPlayer cancels all in-flight resource loading.
+        guard !loadingRequest.isCancelled else { return true }
+
         guard let dataRequest = loadingRequest.dataRequest else {
             loadingRequest.finishLoading()
             return true
@@ -755,7 +761,9 @@ final class ProgressiveResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
             let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
             fileSize = (attrs[.size] as? Int64) ?? 0
         } catch {
-            loadingRequest.finishLoading(with: error)
+            if !loadingRequest.isCancelled {
+                loadingRequest.finishLoading(with: error)
+            }
             return true
         }
 
@@ -775,15 +783,20 @@ final class ProgressiveResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
             defer { try? handle.close() }
             try handle.seek(toOffset: UInt64(readOffset))
             let data = handle.readData(ofLength: bytesToRead)
+            guard !loadingRequest.isCancelled else { return true }
             dataRequest.respond(with: data)
         } catch {
-            loadingRequest.finishLoading(with: error)
+            if !loadingRequest.isCancelled {
+                loadingRequest.finishLoading(with: error)
+            }
             return true
         }
 
         // Check if we've now served everything.
         if dataRequest.currentOffset >= endOfRequest {
-            loadingRequest.finishLoading()
+            if !loadingRequest.isCancelled {
+                loadingRequest.finishLoading()
+            }
             return true
         }
 
