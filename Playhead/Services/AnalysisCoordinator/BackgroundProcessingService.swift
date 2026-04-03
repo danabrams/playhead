@@ -283,11 +283,7 @@ actor BackgroundProcessingService {
         // Handle expiration: cancel work gracefully.
         task.expirationHandler = { [weak self] in
             workTask.cancel()
-            guard let self else { return }
-            let coordinator = self.coordinator
-            Task {
-                await coordinator.stop()
-            }
+            Task { await self?.coordinator.stop() }
         }
     }
 
@@ -312,11 +308,7 @@ actor BackgroundProcessingService {
 
         task.expirationHandler = { [weak self] in
             workTask.cancel()
-            guard let self else { return }
-            let coordinator = self.coordinator
-            Task {
-                await coordinator.stop()
-            }
+            Task { await self?.coordinator.stop() }
         }
     }
 
