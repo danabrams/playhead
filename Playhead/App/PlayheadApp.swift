@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import BackgroundTasks
 
 @main
 struct PlayheadApp: App {
@@ -14,6 +15,11 @@ struct PlayheadApp: App {
         }
 
         capabilitiesService.startObserving()
+
+        // Register background task identifiers before first scene render.
+        // Handlers will be attached when BackgroundProcessingService is
+        // fully initialized with its AnalysisCoordinator dependency.
+        BackgroundProcessingService.registerTaskIdentifiers()
 
         let service = capabilitiesService
         Task {

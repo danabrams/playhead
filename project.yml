@@ -8,7 +8,6 @@ options:
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    GENERATE_INFOPLIST_FILE: YES
     MARKETING_VERSION: "1.0.0"
     CURRENT_PROJECT_VERSION: 1
 targets:
@@ -20,12 +19,25 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.playhead.app
-        INFOPLIST_KEY_CFBundleDisplayName: Playhead
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait"
-        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         SWIFT_EMIT_LOC_STRINGS: YES
+    info:
+      path: Playhead/Support/Info.plist
+      properties:
+        CFBundleDisplayName: Playhead
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - processing
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.playhead.app.analysis.backfill
+          - com.playhead.app.analysis.continued
     scheme:
       testTargets:
         - PlayheadTests
