@@ -256,8 +256,7 @@ private extension SettingsView {
             env["XCTestConfigurationFilePath"] != nil ||
             env["XCODE_RUNNING_FOR_PREVIEWS"] == "1" ||
             env["PLAYHEAD_USE_STUB_SPEECH"] == "1"
-        let speechRecognizerAvailable = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) != nil
-        return !usesStubSpeech && speechRecognizerAvailable
+        return !usesStubSpeech
 #else
         return false
 #endif

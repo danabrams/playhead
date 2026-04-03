@@ -323,7 +323,7 @@ private func makeDefaultSpeechRecognizer() -> any SpeechRecognizer {
         env["XCODE_RUNNING_FOR_PREVIEWS"] == "1" ||
         env["PLAYHEAD_USE_STUB_SPEECH"] == "1"
 
-    if !shouldUseStub && SFSpeechRecognizer(locale: Locale(identifier: "en-US")) != nil {
+    if !shouldUseStub {
         return AppleSpeechRecognizer()
     }
 #endif

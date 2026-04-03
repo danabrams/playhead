@@ -19,11 +19,11 @@ env:
   PROJECT_SPEC: project.yml
   SCHEME: Playhead
   DERIVED_DATA_PATH: .deriveddata-ci
-  DESTINATION: platform=iOS Simulator,name=iPhone 16 Pro,OS=latest
+  DESTINATION: platform=iOS Simulator,name=iPhone 17 Pro,OS=latest
 
 jobs:
   build-and-test:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 30
 
     steps:
