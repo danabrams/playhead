@@ -12,7 +12,7 @@ import SwiftUI
 
 struct TranscriptPeekView: View {
 
-    var peekViewModel: TranscriptPeekViewModel
+    @State var peekViewModel: TranscriptPeekViewModel
 
     /// Current playback time, driven by the parent NowPlayingViewModel.
     let currentTime: TimeInterval
