@@ -154,8 +154,8 @@ actor BackgroundProcessingService {
 
     /// Start observing capability changes and battery state.
     /// Call once after registration.
-    func start() {
-        updateBatteryState()
+    func start() async {
+        await updateBatteryState()
 
         capabilityObserverTask?.cancel()
         capabilityObserverTask = Task { [weak self] in
@@ -340,12 +340,12 @@ actor BackgroundProcessingService {
     // MARK: - Thermal & Battery Management
 
     /// React to capability snapshot changes.
-    private func handleCapabilityUpdate(_ snapshot: CapabilitySnapshot) {
+    private func handleCapabilityUpdate(_ snapshot: CapabilitySnapshot) async {
         let previousThermalState = currentThermalState
         currentThermalState = snapshot.thermalState
         isLowPowerMode = snapshot.isLowPowerMode
 
-        updateBatteryState()
+        await updateBatteryState()
 
         let shouldPauseAll = snapshot.thermalState == .critical || isBatteryTooLow()
         let shouldPauseBackfill = snapshot.shouldThrottleAnalysis || isLowPowerMode || isBatteryTooLow()
@@ -389,11 +389,16 @@ actor BackgroundProcessingService {
     }
 
     /// Update cached battery state from UIDevice.
-    private func updateBatteryState() {
-        let device = UIDevice.current
-        device.isBatteryMonitoringEnabled = true
-        currentBatteryLevel = device.batteryLevel
-        isCharging = device.batteryState == .charging || device.batteryState == .full
+    private func updateBatteryState() async {
+        let state = await MainActor.run { () -> (Float, Bool) in
+            let device = UIDevice.current
+            device.isBatteryMonitoringEnabled = true
+            let level = device.batteryLevel
+            let charging = device.batteryState == .charging || device.batteryState == .full
+            return (level, charging)
+        }
+        currentBatteryLevel = state.0
+        isCharging = state.1
     }
 
     /// Whether battery is below threshold and device is not charging.

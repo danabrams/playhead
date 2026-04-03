@@ -188,7 +188,8 @@ final class ModelDownloadViewModel {
             env["XCTestConfigurationFilePath"] != nil ||
             env["XCODE_RUNNING_FOR_PREVIEWS"] == "1" ||
             env["PLAYHEAD_USE_STUB_SPEECH"] == "1"
-        return !usesStubSpeech && SpeechTranscriber.isAvailable
+        let speechRecognizerAvailable = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) != nil
+        return !usesStubSpeech && speechRecognizerAvailable
 #else
         return false
 #endif

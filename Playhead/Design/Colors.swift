@@ -125,6 +125,7 @@ extension Color {
     }
 }
 
+@MainActor
 @ViewBuilder
 private func swatch(_ name: String, _ color: Color) -> some View {
     HStack {
@@ -141,6 +142,7 @@ private func swatch(_ name: String, _ color: Color) -> some View {
     }
 }
 
+@MainActor
 @ViewBuilder
 private func semanticSwatch(_ name: String, _ color: Color) -> some View {
     HStack {

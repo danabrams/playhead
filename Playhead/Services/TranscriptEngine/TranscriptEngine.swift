@@ -323,7 +323,7 @@ private func makeDefaultSpeechRecognizer() -> any SpeechRecognizer {
         env["XCODE_RUNNING_FOR_PREVIEWS"] == "1" ||
         env["PLAYHEAD_USE_STUB_SPEECH"] == "1"
 
-    if !shouldUseStub && SpeechTranscriber.isAvailable {
+    if !shouldUseStub && SFSpeechRecognizer(locale: Locale(identifier: "en-US")) != nil {
         return AppleSpeechRecognizer()
     }
 #endif
@@ -335,9 +335,7 @@ private func makeDefaultSpeechRecognizer() -> any SpeechRecognizer {
 
 // MARK: - AppleSpeechRecognizer
 
-/// Production recognizer using SpeechAnalyzer with on-device recognition.
-/// Uses bestAvailableAudioFormat and AVAudioConverter to feed buffers in
-/// the format SpeechAnalyzer expects (not our native 16kHz).
+/// Production recognizer using SFSpeechRecognizer with on-device recognition.
 /// No microphone or speech recognition permission required.
 actor AppleSpeechRecognizer: SpeechRecognizer {
     private let logger = Logger(subsystem: "com.playhead", category: "AppleSpeechRecognizer")
