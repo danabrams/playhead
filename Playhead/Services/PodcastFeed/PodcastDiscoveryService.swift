@@ -234,14 +234,12 @@ actor PodcastDiscoveryService {
         from feedURL: URL,
         in context: ModelContext
     ) -> Podcast {
-        // Look for existing podcast.
-        let urlString = feedURL.absoluteString
-        var descriptor = FetchDescriptor<Podcast>(
-            predicate: #Predicate { $0.feedURL.absoluteString == urlString }
-        )
-        descriptor.fetchLimit = 1
-
-        let existing = (try? context.fetch(descriptor))?.first
+        // SwiftData predicates cannot descend through stored URL properties
+        // (for example `feedURL.absoluteString`), so match on the URL value
+        // after fetching the current library snapshot.
+        let existing = (try? context.fetch(FetchDescriptor<Podcast>()))?.first {
+            $0.feedURL == feedURL
+        }
 
         let podcast: Podcast
         if let existing {

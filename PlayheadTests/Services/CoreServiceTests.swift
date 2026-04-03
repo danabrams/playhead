@@ -4,6 +4,7 @@
 // CapabilitiesService, and AssetProvider.
 
 import Foundation
+import SwiftData
 import Testing
 @testable import Playhead
 
@@ -32,6 +33,57 @@ private func makeTestStore() async throws -> AnalysisStore {
     let store = try AnalysisStore(directory: dir)
     try await store.migrate()
     return store
+}
+
+@MainActor
+private func makeInMemoryModelContainer() throws -> ModelContainer {
+    let config = ModelConfiguration(
+        "PlayheadTests",
+        schema: SwiftDataStore.schema,
+        isStoredInMemoryOnly: true
+    )
+    return try ModelContainer(
+        for: SwiftDataStore.schema,
+        configurations: [config]
+    )
+}
+
+private func makeParsedFeed(
+    title: String = "Test Podcast",
+    author: String = "Test Host",
+    episodes: [ParsedEpisode]
+) -> ParsedFeed {
+    ParsedFeed(
+        title: title,
+        author: author,
+        description: "Test feed",
+        artworkURL: URL(string: "https://example.com/artwork.jpg"),
+        language: "en",
+        categories: ["Technology"],
+        episodes: episodes
+    )
+}
+
+private func makeParsedEpisode(
+    title: String,
+    guid: String,
+    audioURL: String
+) -> ParsedEpisode {
+    ParsedEpisode(
+        title: title,
+        guid: guid,
+        enclosureURL: URL(string: audioURL),
+        enclosureType: "audio/mpeg",
+        enclosureLength: 1024,
+        pubDate: .now,
+        duration: 1800,
+        description: nil,
+        showNotes: nil,
+        chapters: [],
+        itunesAuthor: nil,
+        itunesImageURL: nil,
+        itunesEpisodeNumber: nil
+    )
 }
 
 private func makeAnalysisAsset(
@@ -1693,5 +1745,62 @@ struct SettingsStorageContractTests {
         #expect(viewModel.modelFilesSize >= 11)
         #expect(viewModel.transcriptCacheSize >= 13)
         #expect(viewModel.cachedAudioSize >= 17)
+    }
+}
+
+@Suite("PodcastDiscoveryService - SwiftData Persistence")
+struct PodcastDiscoveryPersistenceTests {
+
+    @MainActor
+    @Test("Persist upserts podcasts by feed URL without invalid URL descendant predicates")
+    func persistUpsertsPodcastByFeedURL() async throws {
+        let container = try makeInMemoryModelContainer()
+        let context = container.mainContext
+        let discoveryService = PodcastDiscoveryService()
+        let feedURL = URL(string: "https://example.com/feed.xml")!
+
+        let initialFeed = makeParsedFeed(
+            episodes: [
+                makeParsedEpisode(
+                    title: "Episode One",
+                    guid: "ep-1",
+                    audioURL: "https://example.com/ep-1.mp3"
+                )
+            ]
+        )
+
+        let updatedFeed = makeParsedFeed(
+            title: "Updated Podcast",
+            author: "Updated Host",
+            episodes: [
+                makeParsedEpisode(
+                    title: "Episode One Updated",
+                    guid: "ep-1",
+                    audioURL: "https://example.com/ep-1.mp3"
+                ),
+                makeParsedEpisode(
+                    title: "Episode Two",
+                    guid: "ep-2",
+                    audioURL: "https://example.com/ep-2.mp3"
+                ),
+            ]
+        )
+
+        let first = await discoveryService.persist(initialFeed, from: feedURL, in: context)
+        try context.save()
+
+        let second = await discoveryService.persist(updatedFeed, from: feedURL, in: context)
+        try context.save()
+
+        let podcasts = try context.fetch(FetchDescriptor<Podcast>())
+        #expect(podcasts.count == 1)
+        #expect(second.feedURL == feedURL)
+        #expect(second.title == "Updated Podcast")
+        #expect(second.author == "Updated Host")
+        #expect(second.episodes.count == 2)
+        #expect(first.feedURL == second.feedURL)
+
+        let refreshedEpisode = second.episodes.first { $0.feedItemGUID == "ep-1" }
+        #expect(refreshedEpisode?.title == "Episode One Updated")
     }
 }
