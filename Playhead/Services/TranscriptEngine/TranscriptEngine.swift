@@ -464,9 +464,43 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
 
     // MARK: - Buffer Creation
 
+    private static let bufferLogger = Logger(subsystem: "com.playhead", category: "AudioBuffer")
+
     private static func makeBuffer(from shard: AnalysisShard) throws -> AVAudioPCMBuffer {
         guard !shard.samples.isEmpty else {
             throw TranscriptEngineError.transcriptionFailed("empty audio shard")
+        }
+
+        // Validate sample data — NaN/Inf/denormalized floats crash the analyzer.
+        var nanCount = 0
+        var infCount = 0
+        var zeroCount = 0
+        var sumSquares: Double = 0
+        for sample in shard.samples {
+            if sample.isNaN { nanCount += 1 }
+            else if sample.isInfinite { infCount += 1 }
+            else if sample == 0 { zeroCount += 1 }
+            sumSquares += Double(sample * sample)
+        }
+        let rms = sqrt(sumSquares / Double(shard.samples.count))
+
+        bufferLogger.info("""
+            Shard \(shard.id) audio: \(shard.samples.count) samples, \
+            rms=\(String(format: "%.6f", rms)), \
+            zeros=\(zeroCount)/\(shard.samples.count), \
+            nan=\(nanCount), inf=\(infCount)
+            """)
+
+        if nanCount > 0 || infCount > 0 {
+            throw TranscriptEngineError.transcriptionFailed(
+                "shard \(shard.id) contains \(nanCount) NaN and \(infCount) Inf samples"
+            )
+        }
+
+        if zeroCount == shard.samples.count {
+            throw TranscriptEngineError.transcriptionFailed(
+                "shard \(shard.id) is entirely silent (all zeros)"
+            )
         }
 
         guard let format = AVAudioFormat(
@@ -486,9 +520,14 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         }
 
         buffer.frameLength = AVAudioFrameCount(shard.samples.count)
+
+        guard let channelData = buffer.floatChannelData?.pointee else {
+            throw TranscriptEngineError.transcriptionFailed(
+                "failed to access buffer channel data"
+            )
+        }
         shard.samples.withUnsafeBufferPointer { samples in
-            guard let channelData = buffer.floatChannelData?.pointee,
-                  let source = samples.baseAddress else { return }
+            guard let source = samples.baseAddress else { return }
             channelData.assign(from: source, count: shard.samples.count)
         }
 
