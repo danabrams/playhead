@@ -301,9 +301,8 @@ actor BackgroundProcessingService {
         // hops to the actor via Task to check the completion guard.
         task.expirationHandler = { [weak self] in
             workTask.cancel()
-            Task {
-                await self?.coordinator.stop()
-                await self?.markComplete(sendableTask.value, success: false)
+            Task { [weak self, sendableTask] in
+                await self?.handleExpiredProcessingTask(sendableTask.value)
             }
         }
     }
@@ -330,9 +329,8 @@ actor BackgroundProcessingService {
 
         task.expirationHandler = { [weak self] in
             workTask.cancel()
-            Task {
-                await self?.coordinator.stop()
-                await self?.markComplete(sendableTask.value, success: false)
+            Task { [weak self, sendableTask] in
+                await self?.handleExpiredProcessingTask(sendableTask.value)
             }
         }
     }
@@ -404,5 +402,10 @@ actor BackgroundProcessingService {
     /// Whether battery is below threshold and device is not charging.
     private func isBatteryTooLow() -> Bool {
         currentBatteryLevel >= 0 && currentBatteryLevel < Self.lowBatteryThreshold && !isCharging
+    }
+
+    private func handleExpiredProcessingTask(_ task: BGProcessingTask) async {
+        await coordinator.stop()
+        await markComplete(task, success: false)
     }
 }
