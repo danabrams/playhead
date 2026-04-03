@@ -4,6 +4,7 @@
 // transfers for pre-caching, resume after interruption, LRU eviction,
 // and asset fingerprinting for the analysis pipeline.
 
+import CryptoKit
 import Foundation
 import OSLog
 // MARK: - Download State Events
@@ -338,14 +339,21 @@ actor DownloadManager {
 
     // MARK: - File Locations
 
+    /// Derive a filesystem-safe name from an episode ID.
+    /// Episode IDs can contain URL characters (://) so we SHA-256 hash them.
+    private func safeFilename(for episodeId: String) -> String {
+        let digest = SHA256.hash(data: Data(episodeId.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
     /// URL for a partially-downloaded episode file.
     func partialFileURL(for episodeId: String) -> URL {
-        partialsDirectory.appendingPathComponent("\(episodeId).partial")
+        partialsDirectory.appendingPathComponent("\(safeFilename(for: episodeId)).partial")
     }
 
     /// URL for a fully-downloaded, verified episode file.
     func completeFileURL(for episodeId: String) -> URL {
-        completeDirectory.appendingPathComponent("\(episodeId).audio")
+        completeDirectory.appendingPathComponent("\(safeFilename(for: episodeId)).audio")
     }
 
     /// Returns the cached file URL if the episode is fully downloaded.

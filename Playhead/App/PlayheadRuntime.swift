@@ -265,10 +265,22 @@ final class PlayheadRuntime {
                 )
             }
         } else {
+            // Resolve the analysis asset ID now so the transcript button
+            // appears while the download is in progress.
+            let preResolvedAssetId = await analysisCoordinator.resolveAssetId(episodeId: episodeId)
+            currentAnalysisAssetId = preResolvedAssetId
+
+            if let assetId = preResolvedAssetId {
+                await skipOrchestrator.beginEpisode(
+                    analysisAssetId: assetId,
+                    podcastId: podcastId
+                )
+            }
+
             // Download in background, then kick the analysis pipeline.
             logger.info("Episode not cached — downloading for analysis: \(episodeId)")
             audioCacheTask?.cancel()
-            audioCacheTask = Task { [weak self, downloadManager, analysisCoordinator, skipOrchestrator] in
+            audioCacheTask = Task { [weak self, downloadManager, analysisCoordinator] in
                 guard let self else { return }
                 do {
                     let localURL = try await downloadManager.progressiveDownload(
@@ -282,7 +294,7 @@ final class PlayheadRuntime {
                     }
 
                     self.logger.info("Download complete — starting analysis pipeline")
-                    let resolvedAssetId = await analysisCoordinator.handlePlaybackEvent(
+                    let _ = await analysisCoordinator.handlePlaybackEvent(
                         .playStarted(
                             episodeId: episodeId,
                             podcastId: podcastId,
@@ -291,14 +303,6 @@ final class PlayheadRuntime {
                             rate: 1.0
                         )
                     )
-                    self.currentAnalysisAssetId = resolvedAssetId
-
-                    if let assetId = resolvedAssetId {
-                        await skipOrchestrator.beginEpisode(
-                            analysisAssetId: assetId,
-                            podcastId: podcastId
-                        )
-                    }
                 } catch {
                     guard !Task.isCancelled else { return }
                     self.logger.error("Background audio download failed: \(error)")

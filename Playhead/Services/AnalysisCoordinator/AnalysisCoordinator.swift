@@ -557,6 +557,37 @@ actor AnalysisCoordinator {
         logger.info("Session \(sessionId): \(currentState.rawValue) -> \(newState.rawValue)")
     }
 
+    /// Resolve or create an analysis asset ID for an episode without starting
+    /// the pipeline. Use this to wire up the transcript UI while audio is
+    /// still downloading.
+    func resolveAssetId(episodeId: String) async -> String? {
+        do {
+            if let existing = try await store.fetchAssetByEpisodeId(episodeId) {
+                return existing.id
+            }
+            // Create a placeholder asset so the UI has an ID to bind to.
+            let assetId = UUID().uuidString
+            let asset = AnalysisAsset(
+                id: assetId,
+                episodeId: episodeId,
+                assetFingerprint: assetId,
+                weakFingerprint: nil,
+                sourceURL: "",
+                featureCoverageEndTime: nil,
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil,
+                analysisState: SessionState.queued.rawValue,
+                analysisVersion: 1,
+                capabilitySnapshot: nil
+            )
+            try await store.insertAsset(asset)
+            return assetId
+        } catch {
+            logger.error("Failed to resolve asset ID for episode \(episodeId): \(error)")
+            return nil
+        }
+    }
+
     // MARK: - Session Resolution
 
     /// Find an existing session for this episode or create a new one.
