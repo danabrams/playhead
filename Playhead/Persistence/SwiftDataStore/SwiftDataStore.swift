@@ -22,7 +22,7 @@ enum SwiftDataStore {
             schema: schema,
             isStoredInMemoryOnly: false
         )
-        try ModelContainer(
+        return try ModelContainer(
             for: schema,
             migrationPlan: PlayheadMigrationPlan.self,
             configurations: [modelConfiguration]
