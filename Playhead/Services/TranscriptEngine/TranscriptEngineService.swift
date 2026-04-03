@@ -255,9 +255,10 @@ actor TranscriptEngineService {
                 return
             }
 
-            // Skip shards fully covered.
-            let shardEnd = shard.startTime + shard.duration
-            if shardEnd <= existingCoverage { continue }
+            // The coverage watermark is a high-water mark from ahead-of-playhead
+            // processing. Behind-playhead shards may not have been transcribed
+            // even if their time range falls within the watermark. Use per-shard
+            // fingerprint dedup (in transcribeShard) instead of skipping here.
 
             do {
                 try await transcribeShard(
@@ -277,6 +278,24 @@ actor TranscriptEngineService {
                     """)
                 // Continue with next shard — partial coverage is better than none.
                 continue
+            }
+        }
+
+        // Verify the first shard was transcribed. If the first 30s is missing,
+        // transcribe shard 0 explicitly.
+        if let firstShard = shards.first(where: { $0.id == 0 }) {
+            let hasFirst = try? await store.hasTranscriptChunk(
+                analysisAssetId: analysisAssetId,
+                segmentFingerprint: computeFingerprint(
+                    text: "", startTime: 0, endTime: 0 // won't match — check by time range instead
+                )
+            )
+            // Simpler: check if any chunk starts before 30s.
+            let allChunks = (try? await store.fetchTranscriptChunks(assetId: analysisAssetId)) ?? []
+            let hasEarlyChunk = allChunks.contains { $0.startTime < 30 }
+            if !hasEarlyChunk {
+                logger.warning("First 30s missing — transcribing shard 0")
+                try? await transcribeShard(firstShard, analysisAssetId: analysisAssetId)
             }
         }
 
@@ -382,14 +401,15 @@ actor TranscriptEngineService {
         // Partition: ahead-of-playhead first (sorted by proximity),
         // then behind-playhead (sorted by proximity descending for
         // backfill from recent to old).
+        // Coverage filtering removed — the watermark is a high-water mark
+        // that doesn't reflect behind-playhead gaps. Per-shard fingerprint
+        // dedup in transcribeShard handles already-transcribed shards.
         let ahead = shards
             .filter { $0.startTime >= playhead - config.chunkOverlap }
-            .filter { $0.startTime + $0.duration > existingCoverage }
             .sorted { $0.startTime < $1.startTime }
 
         let behind = shards
             .filter { $0.startTime < playhead - config.chunkOverlap }
-            .filter { $0.startTime + $0.duration > existingCoverage }
             .sorted { $0.startTime > $1.startTime }
 
         // Hot path: shards within the lookahead window come first.
