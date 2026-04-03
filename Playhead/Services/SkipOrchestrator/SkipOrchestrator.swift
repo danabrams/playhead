@@ -149,6 +149,10 @@ actor SkipOrchestrator {
     /// Set via `setSkipCueHandler`. Avoids direct PlaybackServiceActor coupling.
     private var skipCueHandler: (([CMTimeRange]) -> Void)?
 
+    /// Continuation-backed stream of applied ad segment time ranges (seconds).
+    /// Consumers receive the full set of applied segments whenever the set changes.
+    private var segmentContinuations: [UUID: AsyncStream<[(start: Double, end: Double)]>.Continuation] = [:]
+
     // MARK: - Init
 
     init(
@@ -164,6 +168,38 @@ actor SkipOrchestrator {
     /// Set the callback that pushes skip cues to PlaybackService.
     func setSkipCueHandler(_ handler: @escaping @Sendable ([CMTimeRange]) -> Void) {
         skipCueHandler = handler
+    }
+
+    // MARK: - Ad Segment Stream
+
+    /// Returns an AsyncStream of applied ad segment ranges (in seconds).
+    /// Each emission is the full current set. The stream ends when the
+    /// continuation is cancelled or the orchestrator is deallocated.
+    func appliedSegmentsStream() -> AsyncStream<[(start: Double, end: Double)]> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            self.segmentContinuations[id] = continuation
+            continuation.onTermination = { @Sendable _ in
+                Task { [weak self] in
+                    await self?.removeSegmentContinuation(id: id)
+                }
+            }
+        }
+    }
+
+    private func removeSegmentContinuation(id: UUID) {
+        segmentContinuations.removeValue(forKey: id)
+    }
+
+    /// Broadcast the current set of applied segments to all listeners.
+    private func broadcastAppliedSegments() {
+        let applied = windows.values
+            .filter { $0.decisionState == .applied || $0.decisionState == .confirmed }
+            .sorted { $0.snappedStart < $1.snappedStart }
+            .map { (start: $0.snappedStart, end: $0.snappedEnd) }
+        for (_, continuation) in segmentContinuations {
+            continuation.yield(applied)
+        }
     }
 
     // MARK: - Episode Lifecycle
@@ -343,6 +379,9 @@ actor SkipOrchestrator {
 
         // 3. Push skip cues to PlaybackService.
         pushMergedCues(merged)
+
+        // 4. Broadcast updated segments to UI listeners.
+        broadcastAppliedSegments()
     }
 
     /// Evaluate a single window against skip policy. Returns the decision.
@@ -395,11 +434,12 @@ actor SkipOrchestrator {
 
         // Boundary stability: only skip if the window boundary is stable
         // (not still being refined by incoming detection events).
-        // For now, confirmed windows are considered stable.
+        // Confirmed windows are considered stable; candidates must wait
+        // for confirmation unless confidence is exceptionally high.
         if managed.decisionState == .candidate {
             // Candidates need confirmation before skipping.
-            // But if confidence is very high, treat as stable.
-            if confidence < config.enterThreshold {
+            // Only override if confidence is very high (strong sponsor evidence).
+            if confidence < config.shortSpanOverrideConfidence {
                 return managed.decisionState
             }
         }
