@@ -57,7 +57,7 @@ struct PlayheadApp: App {
                     let context = modelContainer.mainContext
                     let episodeId = captured.episodeId
                     let descriptor = FetchDescriptor<Episode>(
-                        predicate: #Predicate { $0.canonicalEpisodeKey == episodeId }
+                        predicate: #Predicate { $0.id.uuidString == episodeId }
                     )
                     if let episode = try? context.fetch(descriptor).first {
                         episode.playbackPosition = captured.position

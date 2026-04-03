@@ -179,7 +179,7 @@ actor AnalysisStore {
     /// Tracks which database paths have already been migrated in this process
     /// to avoid redundant DDL work on repeated `open()` calls.
     private static let migratedLock = NSLock()
-    nonisolated(unsafe) private static var migratedPaths: Set<String> = []
+    private static var migratedPaths: Set<String> = []
 
     /// Run pragmas and create all tables / indexes / FTS triggers. Safe to call
     /// more than once (every DDL statement uses IF NOT EXISTS). Skips work if
