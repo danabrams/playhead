@@ -10,6 +10,7 @@ import SwiftUI
 struct NowPlayingView: View {
 
     @StateObject private var viewModel = NowPlayingViewModel()
+    @StateObject private var bannerQueue = AdBannerQueue()
 
     /// Ad segment ranges expressed as fractions of total duration (0...1).
     /// Fed from SkipOrchestrator in a future bead.
@@ -57,6 +58,14 @@ struct NowPlayingView: View {
                     .padding(.horizontal, Spacing.md)
                     .padding(.bottom, Spacing.lg)
             }
+
+            // Ad skip banner — slides in at bottom, single lane, auto-dismiss.
+            AdBannerView(
+                queue: bannerQueue,
+                onListen: { item in
+                    viewModel.seek(to: item.adStartTime)
+                }
+            )
         }
         .onAppear { viewModel.startObserving() }
         .onDisappear { viewModel.stopObserving() }
