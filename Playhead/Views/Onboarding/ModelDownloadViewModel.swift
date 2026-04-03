@@ -7,6 +7,9 @@
 
 import Foundation
 import OSLog
+#if canImport(Speech)
+import Speech
+#endif
 
 @MainActor
 final class ModelDownloadViewModel: ObservableObject {
@@ -42,6 +45,15 @@ final class ModelDownloadViewModel: ObservableObject {
 
     /// Entry point called from .task { } in the view.
     func startDownloads() async {
+        if usesSystemSpeechAssets {
+            displayProgress = 1.0
+            fastPathReady = true
+            allModelsReady = true
+            backgroundModelsRemaining = 0
+            statusMessage = "On-device speech is ready."
+            return
+        }
+
         do {
             let manifest = try ModelInventory.loadBundledManifest()
             let inv = ModelInventory(manifest: manifest)
@@ -60,7 +72,7 @@ final class ModelDownloadViewModel: ObservableObject {
                 logger.info("Fast-path ASR already on disk: \(id)")
                 displayProgress = 1.0
                 fastPathReady = true
-                statusMessage = "Ad detection model ready."
+                statusMessage = "On-device analysis ready."
                 await checkRemainingModels(inv)
                 return
             }
@@ -96,7 +108,7 @@ final class ModelDownloadViewModel: ObservableObject {
                     case .ready:
                         displayProgress = 1.0
                         fastPathReady = true
-                        statusMessage = "Ad detection model ready."
+                        statusMessage = "On-device analysis ready."
                     default:
                         break
                     }
@@ -113,7 +125,7 @@ final class ModelDownloadViewModel: ObservableObject {
                     if case .ready = finalStatus {
                         displayProgress = 1.0
                         fastPathReady = true
-                        statusMessage = "Ad detection model ready."
+                        statusMessage = "On-device analysis ready."
                     }
                 }
             } else {
@@ -139,8 +151,7 @@ final class ModelDownloadViewModel: ObservableObject {
 
     private func checkRemainingModels(_ inventory: ModelInventory) async {
         let missing = await inventory.missingModels()
-        backgroundModelsRemaining = missing.count
-        allModelsReady = missing.isEmpty
+        updateBackgroundModelState(missingCount: missing.count)
     }
 
     private func startBackgroundDownloads(provider: AssetProvider, inventory: ModelInventory) {
@@ -150,18 +161,36 @@ final class ModelDownloadViewModel: ObservableObject {
                 for entry in remaining {
                     try await provider.download(entry: entry)
                     try await provider.promote(modelId: entry.id)
-                    await MainActor.run {
-                        self?.backgroundModelsRemaining -= 1
-                    }
+                    let missingCount = await inventory.missingModels().count
+                    await self?.updateBackgroundModelState(missingCount: missingCount)
                 }
-                await MainActor.run {
-                    self?.allModelsReady = true
-                }
+                let missingCount = await inventory.missingModels().count
+                await self?.updateBackgroundModelState(missingCount: missingCount)
             } catch {
+                let missingCount = await inventory.missingModels().count
+                await self?.updateBackgroundModelState(missingCount: missingCount)
                 // Background failures are non-blocking. The app will
                 // retry on next launch via the normal model-check path.
             }
         }
+    }
+
+    private func updateBackgroundModelState(missingCount: Int) {
+        backgroundModelsRemaining = missingCount
+        allModelsReady = missingCount == 0
+    }
+
+    private var usesSystemSpeechAssets: Bool {
+#if canImport(Speech)
+        let env = ProcessInfo.processInfo.environment
+        let usesStubSpeech =
+            env["XCTestConfigurationFilePath"] != nil ||
+            env["XCODE_RUNNING_FOR_PREVIEWS"] == "1" ||
+            env["PLAYHEAD_USE_STUB_SPEECH"] == "1"
+        return !usesStubSpeech && SpeechTranscriber.isAvailable
+#else
+        return false
+#endif
     }
 }
 

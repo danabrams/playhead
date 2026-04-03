@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct ContentView: View {
+    @EnvironmentObject private var runtime: PlayheadRuntime
+
     var body: some View {
         TabView {
             LibraryView()
@@ -13,7 +15,11 @@ struct ContentView: View {
                     Label("Browse", systemImage: "magnifyingglass")
                 }
 
-            SettingsView()
+            SettingsView(
+                inventory: runtime.modelInventory,
+                assetProvider: runtime.assetProvider,
+                entitlementManager: runtime.entitlementManager
+            )
                 .tabItem {
                     Label("Settings", systemImage: "gearshape")
                 }
@@ -24,6 +30,7 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
+        .environmentObject(PlayheadRuntime(isPreviewRuntime: true))
         .preferredColorScheme(.dark)
         .modelContainer(for: [Podcast.self, Episode.self, UserPreferences.self], inMemory: true)
 }

@@ -38,18 +38,8 @@ final class SettingsViewModel {
 
     func computeStorageSizes() async {
         modelFilesSize = directorySize(at: ModelInventory.defaultModelsRoot())
-
-        let appSupport = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Playhead", isDirectory: true)
-        let transcriptsDir = appSupport.appendingPathComponent("Transcripts", isDirectory: true)
-        transcriptCacheSize = directorySize(at: transcriptsDir)
-
-        let cachesDir = FileManager.default
-            .urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Playhead", isDirectory: true)
-            .appendingPathComponent("Audio", isDirectory: true)
-        cachedAudioSize = directorySize(at: cachesDir)
+        transcriptCacheSize = directorySize(at: analysisShardsDirectory())
+        cachedAudioSize = directorySize(at: audioCacheDirectory())
     }
 
     /// Refreshes model statuses from the inventory.
@@ -106,21 +96,13 @@ final class SettingsViewModel {
 
     /// Clears transcript cache files.
     func clearTranscriptCache() async {
-        let appSupport = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Playhead", isDirectory: true)
-        let transcriptsDir = appSupport.appendingPathComponent("Transcripts", isDirectory: true)
-        removeContents(of: transcriptsDir)
+        removeContents(of: analysisShardsDirectory())
         await computeStorageSizes()
     }
 
     /// Clears cached audio files.
     func clearAudioCache() async {
-        let cachesDir = FileManager.default
-            .urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Playhead", isDirectory: true)
-            .appendingPathComponent("Audio", isDirectory: true)
-        removeContents(of: cachesDir)
+        removeContents(of: audioCacheDirectory())
         await computeStorageSizes()
     }
 
@@ -153,6 +135,17 @@ final class SettingsViewModel {
         for item in contents {
             try? fm.removeItem(at: item)
         }
+    }
+
+    private func analysisShardsDirectory() -> URL {
+        // Must match ShardCache.cacheDirectory in AnalysisAudio.swift.
+        FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("AnalysisShards", isDirectory: true)
+    }
+
+    private func audioCacheDirectory() -> URL {
+        DownloadManager.defaultCacheDirectory()
     }
 }
 

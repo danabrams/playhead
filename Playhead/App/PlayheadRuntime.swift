@@ -1,0 +1,270 @@
+// PlayheadRuntime.swift
+// Shared app-level composition root for long-lived services.
+
+import Foundation
+
+@MainActor
+final class PlayheadRuntime: ObservableObject {
+
+    let playbackService: PlaybackService
+    let capabilitiesService: CapabilitiesService
+    let analysisStore: AnalysisStore
+    let modelInventory: ModelInventory
+    let assetProvider: AssetProvider
+    let entitlementManager: EntitlementManager
+    let audioService: AnalysisAudioService
+    let featureService: FeatureExtractionService
+    let transcriptEngine: TranscriptEngineService
+    let trustService: TrustScoringService
+    let adDetectionService: AdDetectionService
+    let skipOrchestrator: SkipOrchestrator
+    let analysisCoordinator: AnalysisCoordinator
+    let backgroundProcessingService: BackgroundProcessingService
+
+    private let isPreviewRuntime: Bool
+
+    @Published private(set) var currentEpisodeId: String?
+    @Published private(set) var currentPodcastId: String?
+    @Published private(set) var currentAnalysisAssetId: String?
+    @Published private(set) var currentEpisodeTitle: String?
+    @Published private(set) var currentPodcastTitle: String?
+
+    init(isPreviewRuntime: Bool = false) {
+        self.isPreviewRuntime = isPreviewRuntime
+        self.playbackService = PlaybackService()
+        self.capabilitiesService = CapabilitiesService()
+
+        do {
+            self.analysisStore = try AnalysisStore()
+        } catch {
+            fatalError("Failed to initialize AnalysisStore: \(error)")
+        }
+
+        let manifest: ModelManifest
+        do {
+            manifest = try ModelInventory.loadBundledManifest()
+        } catch {
+            manifest = ModelManifest(version: 1, generatedAt: .now, models: [])
+        }
+        self.modelInventory = ModelInventory(manifest: manifest)
+        self.assetProvider = AssetProvider(inventory: modelInventory)
+        self.entitlementManager = EntitlementManager()
+
+        self.audioService = AnalysisAudioService()
+
+        let whisperKitService = WhisperKitService()
+        self.featureService = FeatureExtractionService(store: analysisStore)
+        self.transcriptEngine = TranscriptEngineService(
+            whisperKit: whisperKitService,
+            store: analysisStore
+        )
+        self.trustService = TrustScoringService(store: analysisStore)
+        self.adDetectionService = AdDetectionService(
+            store: analysisStore,
+            metadataExtractor: FallbackExtractor()
+        )
+        self.skipOrchestrator = SkipOrchestrator(
+            store: analysisStore,
+            trustService: trustService
+        )
+        self.analysisCoordinator = AnalysisCoordinator(
+            store: analysisStore,
+            audioService: audioService,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            capabilitiesService: capabilitiesService,
+            adDetectionService: adDetectionService,
+            skipOrchestrator: skipOrchestrator
+        )
+        self.backgroundProcessingService = BackgroundProcessingService(
+            coordinator: analysisCoordinator,
+            capabilitiesService: capabilitiesService
+        )
+
+        capabilitiesService.startObserving()
+
+        Task { [playbackService, analysisCoordinator, skipOrchestrator] in
+            await skipOrchestrator.setSkipCueHandler { cues in
+                Task { @PlaybackServiceActor in
+                    playbackService.setSkipCues(cues)
+                }
+            }
+
+            var lastStatus: PlaybackState.Status = .idle
+            var lastSpeed: Float = 1.0
+
+            for await state in playbackService.stateStream {
+                await skipOrchestrator.updatePlayheadTime(state.currentTime)
+
+                if state.playbackSpeed != lastSpeed {
+                    lastSpeed = state.playbackSpeed
+                    await analysisCoordinator.handlePlaybackEvent(
+                        .speedChanged(rate: state.playbackSpeed, time: state.currentTime)
+                    )
+                }
+
+                switch state.status {
+                case .playing:
+                    let rate = state.rate > 0 ? state.rate : state.playbackSpeed
+                    await analysisCoordinator.handlePlaybackEvent(
+                        .timeUpdate(time: state.currentTime, rate: rate)
+                    )
+
+                case .paused:
+                    if lastStatus != .paused {
+                        await analysisCoordinator.handlePlaybackEvent(.paused(time: state.currentTime))
+                    }
+
+                default:
+                    break
+                }
+
+                lastStatus = state.status
+            }
+        }
+
+        guard !isPreviewRuntime else { return }
+
+        backgroundProcessingService.registerBackgroundTasks()
+
+        Task {
+            do {
+                try await analysisStore.migrate()
+            } catch {
+                // The app can still launch, but analysis persistence will be degraded.
+            }
+
+            do {
+                try await modelInventory.scan()
+            } catch {
+                // Settings can still render, but model lifecycle reporting will be empty.
+            }
+
+            do {
+                try await whisperKitService.loadFastModel(from: modelInventory.activeDirectory)
+            } catch {
+                // Speech asset preparation is best-effort at launch; the
+                // transcript engine will surface failures when first used.
+            }
+
+            await backgroundProcessingService.start()
+            await entitlementManager.start()
+            await capabilitiesService.runSelfTest()
+        }
+    }
+
+    func playEpisode(_ episode: Episode) async {
+        let episodeId = episode.id.uuidString
+        let podcastId = episode.podcast?.feedURL.absoluteString
+        let url = episode.cachedAudioURL ?? episode.audioURL
+        let position = episode.playbackPosition
+
+        currentEpisodeId = episodeId
+        currentPodcastId = podcastId
+        currentEpisodeTitle = episode.title
+        currentPodcastTitle = episode.podcast?.title
+        currentAnalysisAssetId = nil
+        let resolvedAnalysisAssetId = await analysisCoordinator.handlePlaybackEvent(
+            .playStarted(
+                episodeId: episodeId,
+                podcastId: podcastId,
+                audioURL: url,
+                time: position,
+                rate: 1.0
+            )
+        )
+        currentAnalysisAssetId = resolvedAnalysisAssetId
+
+        if let analysisAssetId = resolvedAnalysisAssetId {
+            await skipOrchestrator.beginEpisode(
+                analysisAssetId: analysisAssetId,
+                podcastId: podcastId
+            )
+        }
+
+        await backgroundProcessingService.playbackDidStart()
+
+        await playbackService.load(url: url, startPosition: position)
+        await playbackService.play()
+        await playbackService.setNowPlayingMetadata(
+            title: episode.title,
+            artist: episode.podcast?.author,
+            albumTitle: episode.podcast?.title
+        )
+    }
+
+    func stopPlayback() async {
+        await backgroundProcessingService.playbackDidStop()
+        await analysisCoordinator.handlePlaybackEvent(.stopped)
+        await skipOrchestrator.endEpisode()
+        await playbackService.pause()
+        currentEpisodeId = nil
+        currentPodcastId = nil
+        currentAnalysisAssetId = nil
+        currentEpisodeTitle = nil
+        currentPodcastTitle = nil
+    }
+
+    func recordListenRewind(windowId: String, podcastId: String) async {
+        do {
+            try await adDetectionService.recordListenRewind(
+                windowId: windowId,
+                podcastId: podcastId
+            )
+        } catch {
+            // Rewinds are user-facing; trust scoring remains best-effort.
+        }
+    }
+
+    func togglePlayPause(isPlaying: Bool) async {
+        if isPlaying {
+            let snapshot = await playbackService.snapshot()
+            await playbackService.pause()
+            await analysisCoordinator.handlePlaybackEvent(.paused(time: snapshot.currentTime))
+        } else {
+            let snapshot = await playbackService.snapshot()
+            await playbackService.play()
+            await analysisCoordinator.handlePlaybackEvent(
+                .timeUpdate(
+                    time: snapshot.currentTime,
+                    rate: snapshot.playbackSpeed
+                )
+            )
+        }
+    }
+
+    func skipForward() async {
+        let snapshot = await playbackService.snapshot()
+        let target = min(
+            snapshot.currentTime + PlaybackService.skipForwardSeconds,
+            snapshot.duration
+        )
+        await seek(to: target)
+    }
+
+    func skipBackward() async {
+        let snapshot = await playbackService.snapshot()
+        let target = max(
+            snapshot.currentTime - PlaybackService.skipBackwardSeconds,
+            0
+        )
+        await seek(to: target)
+    }
+
+    func seek(to seconds: TimeInterval) async {
+        let snapshot = await playbackService.snapshot()
+        await skipOrchestrator.recordUserSeek(to: seconds)
+        await playbackService.seek(to: seconds)
+        await analysisCoordinator.handlePlaybackEvent(
+            .scrubbed(to: seconds, rate: snapshot.playbackSpeed)
+        )
+    }
+
+    func setSpeed(_ speed: Float) async {
+        let snapshot = await playbackService.snapshot()
+        await playbackService.setSpeed(speed)
+        await analysisCoordinator.handlePlaybackEvent(
+            .speedChanged(rate: speed, time: snapshot.currentTime)
+        )
+    }
+}

@@ -11,6 +11,9 @@
 
 import SwiftUI
 import SwiftData
+#if canImport(Speech)
+import Speech
+#endif
 
 // MARK: - SettingsView
 
@@ -67,7 +70,18 @@ private extension SettingsView {
 
     var modelSection: some View {
         Section {
-            if viewModel.modelStatuses.isEmpty {
+            if usesSystemSpeechAssets {
+                VStack(alignment: .leading, spacing: Spacing.xxs) {
+                    Text("Apple Speech")
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.text)
+                    Text("Speech assets are managed by iOS and stay on device.")
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppColors.secondary)
+                }
+                .padding(.vertical, Spacing.xxs)
+                .listRowBackground(AppColors.surface)
+            } else if viewModel.modelStatuses.isEmpty {
                 Text("No models in manifest")
                     .font(AppTypography.body)
                     .foregroundStyle(AppColors.secondary)
@@ -79,7 +93,7 @@ private extension SettingsView {
         } header: {
             sectionHeader("Models")
         } footer: {
-            Text("WhisperKit models run entirely on-device. Larger models are more accurate but use more storage.")
+            Text("On-device analysis assets never leave your device.")
                 .font(AppTypography.caption)
                 .foregroundStyle(AppColors.metadata)
         }
@@ -118,12 +132,7 @@ private extension SettingsView {
         case .missing:
             Button {
                 Task {
-                    guard let assetProvider else { return }
-                    try? await assetProvider.download(entry: entry)
-                    if let inventory {
-                        await viewModel.refreshModelStatuses(inventory: inventory)
-                        await viewModel.computeStorageSizes()
-                    }
+                    await downloadAndActivate(entry: entry)
                 }
             } label: {
                 Label("Download", systemImage: "arrow.down.circle")
@@ -143,9 +152,16 @@ private extension SettingsView {
             }
 
         case .staged:
-            Label("Staged", systemImage: "checkmark.circle.badge.clock")
-                .font(AppTypography.caption)
-                .foregroundStyle(AppColors.secondary)
+            Button {
+                Task {
+                    await promoteStaged(entry: entry)
+                }
+            } label: {
+                Label("Activate", systemImage: "checkmark.circle")
+                    .font(AppTypography.caption)
+                    .foregroundStyle(AppColors.accent)
+            }
+            .buttonStyle(.plain)
 
         case .ready(let version):
             HStack(spacing: Spacing.xs) {
@@ -172,15 +188,64 @@ private extension SettingsView {
             }
 
         case .updateAvailable(let current, let new):
-            VStack(alignment: .trailing, spacing: 2) {
+            VStack(alignment: .trailing, spacing: 4) {
                 Text("v\(current)")
                     .font(AppTypography.timestamp)
                     .foregroundStyle(AppColors.metadata)
                 Text("v\(new) available")
                     .font(AppTypography.caption)
                     .foregroundStyle(AppColors.accent)
+                Button {
+                    Task {
+                        await promoteStaged(entry: entry)
+                    }
+                } label: {
+                    Label("Update", systemImage: "arrow.up.circle")
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppColors.accent)
+                }
+                .buttonStyle(.plain)
             }
         }
+    }
+
+    func downloadAndActivate(entry: ModelEntry) async {
+        guard let assetProvider, let inventory else { return }
+        do {
+            try await assetProvider.download(entry: entry)
+            try await assetProvider.promote(modelId: entry.id)
+        } catch {
+            // The inventory refresh below will surface the latest state.
+        }
+
+        await viewModel.refreshModelStatuses(inventory: inventory)
+        await viewModel.computeStorageSizes()
+    }
+
+    func promoteStaged(entry: ModelEntry) async {
+        guard let assetProvider, let inventory else { return }
+        do {
+            try await assetProvider.promote(modelId: entry.id)
+        } catch {
+            // A missing staged file or similar lifecycle issue will be
+            // reflected by the refreshed inventory state below.
+        }
+
+        await viewModel.refreshModelStatuses(inventory: inventory)
+        await viewModel.computeStorageSizes()
+    }
+
+    var usesSystemSpeechAssets: Bool {
+#if canImport(Speech)
+        let env = ProcessInfo.processInfo.environment
+        let usesStubSpeech =
+            env["XCTestConfigurationFilePath"] != nil ||
+            env["XCODE_RUNNING_FOR_PREVIEWS"] == "1" ||
+            env["PLAYHEAD_USE_STUB_SPEECH"] == "1"
+        return !usesStubSpeech && SpeechTranscriber.isAvailable
+#else
+        return false
+#endif
     }
 }
 

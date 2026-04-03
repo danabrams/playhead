@@ -78,7 +78,13 @@ enum AnalysisCoordinatorError: Error, CustomStringConvertible {
 /// Events from PlaybackService that drive analysis decisions.
 enum PlaybackEvent: Sendable {
     /// Playback started or resumed for an episode.
-    case playStarted(episodeId: String, audioURL: URL, time: TimeInterval, rate: Float)
+    case playStarted(
+        episodeId: String,
+        podcastId: String?,
+        audioURL: URL,
+        time: TimeInterval,
+        rate: Float
+    )
     /// Periodic time update during playback.
     case timeUpdate(time: TimeInterval, rate: Float)
     /// User paused playback.
@@ -107,6 +113,8 @@ actor AnalysisCoordinator {
     private let featureService: FeatureExtractionService
     private let transcriptEngine: TranscriptEngineService
     private let capabilitiesService: CapabilitiesService
+    private let adDetectionService: AdDetectionService
+    private let skipOrchestrator: SkipOrchestrator
 
     // MARK: - Active Session State
 
@@ -116,6 +124,8 @@ actor AnalysisCoordinator {
     private var activeAssetId: String?
     /// The episode ID currently being analyzed.
     private var activeEpisodeId: String?
+    /// Podcast identifier for profile-backed backfill decisions.
+    private var activePodcastId: String?
     /// Decoded shards for the current episode (cached in memory for reuse).
     private var activeShards: [AnalysisShard]?
     /// Latest playback snapshot for prioritization.
@@ -125,6 +135,8 @@ actor AnalysisCoordinator {
 
     /// Background task for the current analysis pipeline stage.
     private var pipelineTask: Task<Void, Never>?
+    /// Task bridging persisted transcript chunks into ad detection.
+    private var transcriptEventTask: Task<Void, Never>?
     /// Task listening for capability changes.
     private var capabilityObserverTask: Task<Void, Never>?
 
@@ -144,13 +156,17 @@ actor AnalysisCoordinator {
         audioService: AnalysisAudioService,
         featureService: FeatureExtractionService,
         transcriptEngine: TranscriptEngineService,
-        capabilitiesService: CapabilitiesService
+        capabilitiesService: CapabilitiesService,
+        adDetectionService: AdDetectionService,
+        skipOrchestrator: SkipOrchestrator
     ) {
         self.store = store
         self.audioService = audioService
         self.featureService = featureService
         self.transcriptEngine = transcriptEngine
         self.capabilitiesService = capabilitiesService
+        self.adDetectionService = adDetectionService
+        self.skipOrchestrator = skipOrchestrator
     }
 
     // MARK: - Lifecycle
@@ -177,6 +193,7 @@ actor AnalysisCoordinator {
         activeSessionId = nil
         activeAssetId = nil
         activeEpisodeId = nil
+        activePodcastId = nil
         activeShards = nil
         latestSnapshot = nil
         logger.info("AnalysisCoordinator stopped")
@@ -185,23 +202,33 @@ actor AnalysisCoordinator {
     // MARK: - Playback Event Handling
 
     /// Main entry point: receive a playback event and react.
-    /// Never blocks -- all heavy work is dispatched to background tasks.
-    func handlePlaybackEvent(_ event: PlaybackEvent) {
+    /// Play-start resolves the analysis asset id so the runtime can wire
+    /// the shared analysis session into skip/UI services.
+    func handlePlaybackEvent(_ event: PlaybackEvent) async -> String? {
         switch event {
-        case .playStarted(let episodeId, let audioURL, let time, let rate):
+        case .playStarted(let episodeId, let podcastId, let audioURL, let time, let rate):
             logger.info("Play started: episode=\(episodeId) t=\(time, format: .fixed(precision: 1))s")
-            handlePlayStarted(episodeId: episodeId, audioURL: audioURL, time: time, rate: rate)
+            return await handlePlayStarted(
+                episodeId: episodeId,
+                podcastId: podcastId,
+                audioURL: audioURL,
+                time: time,
+                rate: rate
+            )
 
         case .timeUpdate(let time, let rate):
             handleTimeUpdate(time: time, rate: rate)
+            return nil
 
         case .paused(let time):
             logger.info("Paused at \(time, format: .fixed(precision: 1))s")
             latestSnapshot = PlaybackSnapshot(playheadTime: time, playbackRate: 0, isPlaying: false)
+            return nil
 
         case .scrubbed(let time, let rate):
             logger.info("Scrub to \(time, format: .fixed(precision: 1))s")
             handleScrub(to: time, rate: rate)
+            return nil
 
         case .speedChanged(let rate, let time):
             logger.info("Speed changed to \(rate, format: .fixed(precision: 1))x")
@@ -216,31 +243,105 @@ actor AnalysisCoordinator {
                     )
                 }
             }
+            return nil
 
         case .stopped:
             logger.info("Playback stopped")
             handleStopped()
+            return nil
         }
     }
 
     // MARK: - Play Started
 
-    private func handlePlayStarted(episodeId: String, audioURL: URL, time: TimeInterval, rate: Float) {
+    private func handlePlayStarted(
+        episodeId: String,
+        podcastId: String?,
+        audioURL: URL,
+        time: TimeInterval,
+        rate: Float
+    ) async -> String? {
         // If same episode is already active, just update the snapshot.
         if episodeId == activeEpisodeId, activeSessionId != nil {
             latestSnapshot = PlaybackSnapshot(playheadTime: time, playbackRate: Double(rate), isPlaying: true)
-            return
+            return activeAssetId
         }
 
         // New episode -- stop existing work and start fresh.
         cancelPipeline()
 
         activeEpisodeId = episodeId
+        activePodcastId = podcastId
         latestSnapshot = PlaybackSnapshot(playheadTime: time, playbackRate: Double(rate), isPlaying: true)
 
-        pipelineTask = Task { [weak self] in
-            guard let self else { return }
-            await self.startPipeline(episodeId: episodeId, audioURL: audioURL)
+        do {
+            let (sessionId, assetId, resumeState) = try await resolveSession(
+                episodeId: episodeId,
+                audioURL: audioURL
+            )
+            activeSessionId = sessionId
+            activeAssetId = assetId
+
+            pipelineTask = Task { [weak self] in
+                guard let self else { return }
+                await self.runPipeline(
+                    sessionId: sessionId,
+                    assetId: assetId,
+                    resumeState: resumeState,
+                    episodeId: episodeId,
+                    audioURL: audioURL
+                )
+            }
+
+            if let podcastId {
+                logger.info("Resolved analysis asset \(assetId) for podcast \(podcastId)")
+            }
+
+            return assetId
+        } catch {
+            logger.error("Failed to resolve session for episode \(episodeId): \(error)")
+            return nil
+        }
+    }
+
+    /// Continue the analysis pipeline after the session has been resolved.
+    private func runPipeline(
+        sessionId: String,
+        assetId: String,
+        resumeState: SessionState,
+        episodeId: String,
+        audioURL: URL
+    ) async {
+        do {
+            switch resumeState {
+            case .queued:
+                try await runFromQueued(sessionId: sessionId, assetId: assetId, episodeId: episodeId, audioURL: audioURL)
+            case .spooling:
+                try await runFromSpooling(sessionId: sessionId, assetId: assetId, episodeId: episodeId, audioURL: audioURL)
+            case .featuresReady:
+                try await runFromFeaturesReady(sessionId: sessionId, assetId: assetId)
+            case .hotPathReady:
+                try await runFromHotPathReady(sessionId: sessionId, assetId: assetId)
+            case .backfill:
+                try await runFromBackfill(sessionId: sessionId, assetId: assetId)
+            case .complete:
+                logger.info("Session \(sessionId) already complete")
+            case .failed:
+                try await transition(sessionId: sessionId, assetId: assetId, to: .queued)
+                try await runFromQueued(sessionId: sessionId, assetId: assetId, episodeId: episodeId, audioURL: audioURL)
+            }
+        } catch is CancellationError {
+            logger.info("Pipeline cancelled for episode \(episodeId)")
+        } catch {
+            logger.error("Pipeline failed for episode \(episodeId): \(error)")
+            if let sessionId = activeSessionId, let assetId = activeAssetId {
+                try? await transition(
+                    sessionId: sessionId,
+                    assetId: assetId,
+                    to: .failed,
+                    failureReason: String(describing: error)
+                )
+            }
         }
     }
 
@@ -286,58 +387,11 @@ actor AnalysisCoordinator {
         cancelPipeline()
         Task { await transcriptEngine.stop() }
         activeEpisodeId = nil
+        activePodcastId = nil
+        activeSessionId = nil
+        activeAssetId = nil
         activeShards = nil
         latestSnapshot = nil
-    }
-
-    // MARK: - Pipeline Orchestration
-
-    /// Run the full analysis pipeline for an episode. Each stage transitions
-    /// the session state machine and persists progress.
-    private func startPipeline(episodeId: String, audioURL: URL) async {
-        do {
-            // 1. Create or resume session.
-            let (sessionId, assetId, resumeState) = try await resolveSession(
-                episodeId: episodeId,
-                audioURL: audioURL
-            )
-            activeSessionId = sessionId
-            activeAssetId = assetId
-
-            logger.info("Pipeline started: session=\(sessionId) asset=\(assetId) resume=\(resumeState.rawValue)")
-
-            // 2. Run from the resume point.
-            switch resumeState {
-            case .queued:
-                try await runFromQueued(sessionId: sessionId, assetId: assetId, episodeId: episodeId, audioURL: audioURL)
-            case .spooling:
-                try await runFromSpooling(sessionId: sessionId, assetId: assetId, episodeId: episodeId, audioURL: audioURL)
-            case .featuresReady:
-                try await runFromFeaturesReady(sessionId: sessionId, assetId: assetId)
-            case .hotPathReady:
-                try await runFromHotPathReady(sessionId: sessionId, assetId: assetId)
-            case .backfill:
-                try await runFromBackfill(sessionId: sessionId, assetId: assetId)
-            case .complete:
-                logger.info("Session \(sessionId) already complete")
-            case .failed:
-                // Retry: move back to queued.
-                try await transition(sessionId: sessionId, assetId: assetId, to: .queued)
-                try await runFromQueued(sessionId: sessionId, assetId: assetId, episodeId: episodeId, audioURL: audioURL)
-            }
-        } catch is CancellationError {
-            logger.info("Pipeline cancelled for episode \(episodeId)")
-        } catch {
-            logger.error("Pipeline failed for episode \(episodeId): \(error)")
-            if let sessionId = activeSessionId, let assetId = activeAssetId {
-                try? await transition(
-                    sessionId: sessionId,
-                    assetId: assetId,
-                    to: .failed,
-                    failureReason: String(describing: error)
-                )
-            }
-        }
     }
 
     // MARK: - Stage: Queued -> Spooling
@@ -389,17 +443,13 @@ actor AnalysisCoordinator {
 
         // Start transcription with current playback snapshot.
         if let shards = activeShards, let snapshot = latestSnapshot {
+            startObservingTranscriptEvents(sessionId: sessionId, assetId: assetId)
             await transcriptEngine.startTranscription(
                 shards: shards,
                 analysisAssetId: assetId,
                 snapshot: snapshot
             )
         }
-
-        // Ad detection on extracted features happens here.
-        // AdDetectionService is not yet implemented (stub in AdDetector.swift).
-        // When ready, it will consume FeatureWindows and produce AdWindows.
-        // For now, transition through to hotPathReady.
 
         try await transition(sessionId: sessionId, assetId: assetId, to: .hotPathReady)
         try await runFromHotPathReady(sessionId: sessionId, assetId: assetId)
@@ -426,19 +476,12 @@ actor AnalysisCoordinator {
 
     private func runFromBackfill(sessionId: String, assetId: String) async throws {
         try Task.checkCancellation()
+        guard transcriptEventTask != nil else {
+            try await finalizeBackfill(sessionId: sessionId, assetId: assetId)
+            return
+        }
 
-        // Final-pass transcription and metadata extraction.
-        // The TranscriptEngineService handles backfill passes as part of
-        // its prioritized loop (cold shards after hot shards).
-        // When AdDetectionService is ready, it will also run a final
-        // confirmation pass here.
-
-        // For now, transition to complete once transcription is done.
-        // In production, this will await transcription completion and
-        // final ad-detection results.
-
-        try await transition(sessionId: sessionId, assetId: assetId, to: .complete)
-        logger.info("Analysis complete for asset \(assetId)")
+        logger.info("Backfill waiting for transcript completion on asset \(assetId)")
     }
 
     // MARK: - State Machine Transitions
@@ -591,5 +634,106 @@ actor AnalysisCoordinator {
     private func cancelPipeline() {
         pipelineTask?.cancel()
         pipelineTask = nil
+        transcriptEventTask?.cancel()
+        transcriptEventTask = nil
+    }
+
+    private func startObservingTranscriptEvents(sessionId: String, assetId: String) {
+        transcriptEventTask?.cancel()
+        transcriptEventTask = Task { [weak self] in
+            guard let self else { return }
+            let stream = await self.transcriptEngine.events()
+            for await event in stream {
+                guard !Task.isCancelled else { return }
+
+                switch event {
+                case .chunksPersisted(let analysisAssetId, let chunks):
+                    guard analysisAssetId == assetId else { continue }
+                    await self.handlePersistedTranscriptChunks(chunks, assetId: assetId)
+
+                case .completed(let analysisAssetId):
+                    guard analysisAssetId == assetId else { continue }
+                    do {
+                        try await self.finalizeBackfill(sessionId: sessionId, assetId: assetId)
+                    } catch {
+                        self.logger.error("Backfill finalization failed for asset \(assetId): \(error.localizedDescription)")
+                    }
+                    return
+                }
+            }
+        }
+    }
+
+    private func handlePersistedTranscriptChunks(
+        _ chunks: [TranscriptChunk],
+        assetId: String
+    ) async {
+        let fastChunks = chunks.filter { $0.pass == TranscriptPassType.fast.rawValue }
+        guard !fastChunks.isEmpty else { return }
+
+        do {
+            let windows = try await adDetectionService.runHotPath(
+                chunks: fastChunks,
+                analysisAssetId: assetId,
+                episodeDuration: currentEpisodeDuration()
+            )
+            guard !windows.isEmpty else { return }
+            await skipOrchestrator.receiveAdWindows(windows)
+        } catch {
+            logger.error("Hot-path ad detection failed for asset \(assetId): \(error.localizedDescription)")
+        }
+    }
+
+    private func finalizeBackfill(sessionId: String, assetId: String) async throws {
+        defer {
+            transcriptEventTask?.cancel()
+            transcriptEventTask = nil
+        }
+
+        let allChunks = try await store.fetchTranscriptChunks(assetId: assetId)
+        if let podcastId = activePodcastId, !allChunks.isEmpty {
+            try await adDetectionService.runBackfill(
+                chunks: allChunks,
+                analysisAssetId: assetId,
+                podcastId: podcastId,
+                episodeDuration: currentEpisodeDuration()
+            )
+        }
+
+        let updatedWindows = try await store.fetchAdWindows(assetId: assetId)
+        if !updatedWindows.isEmpty {
+            await skipOrchestrator.receiveAdWindows(updatedWindows)
+        }
+
+        guard let session = try await store.fetchSession(id: sessionId),
+              let sessionState = SessionState(rawValue: session.state)
+        else {
+            return
+        }
+
+        switch sessionState {
+        case .featuresReady:
+            try await transition(sessionId: sessionId, assetId: assetId, to: .hotPathReady)
+            try await transition(sessionId: sessionId, assetId: assetId, to: .backfill)
+
+        case .hotPathReady:
+            try await transition(sessionId: sessionId, assetId: assetId, to: .backfill)
+
+        case .backfill:
+            break
+
+        case .complete, .failed, .queued, .spooling:
+            return
+        }
+
+        try await transition(sessionId: sessionId, assetId: assetId, to: .complete)
+        logger.info("Analysis complete for asset \(assetId)")
+    }
+
+    private func currentEpisodeDuration() -> Double {
+        guard let shards = activeShards else { return 0 }
+        return shards.reduce(0) { partial, shard in
+            max(partial, shard.startTime + shard.duration)
+        }
     }
 }

@@ -94,13 +94,71 @@ actor ModelInventory {
 
     /// Load the bundled manifest from the app bundle.
     static func loadBundledManifest() throws -> ModelManifest {
-        guard let url = Bundle.main.url(forResource: "ModelManifest", withExtension: "json") else {
-            throw ModelInventoryError.bundledManifestMissing
+        let bundle = Bundle.main
+        let candidateURLs = [
+            bundle.url(forResource: "ModelManifest", withExtension: "json"),
+            bundle.url(forResource: "ModelManifest", withExtension: "json", subdirectory: "Resources"),
+        ].compactMap { $0 }
+
+        if let url = candidateURLs.first {
+            let data = try Data(contentsOf: url)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            return try decoder.decode(ModelManifest.self, from: data)
         }
-        let data = try Data(contentsOf: url)
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(ModelManifest.self, from: data)
+
+        Logger(subsystem: "com.playhead", category: "ModelInventory").warning(
+            "Bundled ModelManifest.json missing; falling back to baked-in default manifest"
+        )
+        return defaultBundledManifest()
+    }
+
+    private static func defaultBundledManifest() -> ModelManifest {
+        ModelManifest(
+            version: 1,
+            generatedAt: Date(timeIntervalSince1970: 1_741_382_400),
+            models: [
+                ModelEntry(
+                    id: "whisper-tiny-en",
+                    role: .asrFast,
+                    displayName: "Fast ASR Model",
+                    modelVersion: "1.0.0",
+                    downloadURL: URL(string: "https://example.com/playhead/models/whisper-tiny-en.zip")!,
+                    sha256: String(repeating: "0", count: 64),
+                    compressedSizeBytes: 125_000_000,
+                    uncompressedSizeBytes: 425_000_000,
+                    priority: 300,
+                    minimumOS: "26.0",
+                    requiredCapabilities: ["arm64", "neural-engine"]
+                ),
+                ModelEntry(
+                    id: "whisper-small-en",
+                    role: .asrFinal,
+                    displayName: "Final ASR Model",
+                    modelVersion: "1.0.0",
+                    downloadURL: URL(string: "https://example.com/playhead/models/whisper-small-en.zip")!,
+                    sha256: String(repeating: "0", count: 64),
+                    compressedSizeBytes: 420_000_000,
+                    uncompressedSizeBytes: 1_450_000_000,
+                    priority: 200,
+                    minimumOS: "26.0",
+                    requiredCapabilities: ["arm64", "neural-engine"]
+                ),
+                ModelEntry(
+                    id: "ad-classifier-lite",
+                    role: .classifier,
+                    displayName: "Ad Classifier",
+                    modelVersion: "1.0.0",
+                    downloadURL: URL(string: "https://example.com/playhead/models/ad-classifier-lite.zip")!,
+                    sha256: String(repeating: "0", count: 64),
+                    compressedSizeBytes: 18_000_000,
+                    uncompressedSizeBytes: 54_000_000,
+                    priority: 100,
+                    minimumOS: "26.0",
+                    requiredCapabilities: ["arm64", "neural-engine"]
+                ),
+            ]
+        )
     }
 
     // MARK: - Scanning

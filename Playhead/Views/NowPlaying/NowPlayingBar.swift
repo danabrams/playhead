@@ -10,6 +10,7 @@
 // precise animation, no bounce.
 
 import SwiftUI
+import UIKit
 
 // MARK: - NowPlayingBar
 
@@ -109,13 +110,14 @@ private struct MiniPlayerButtonStyle: ButtonStyle {
 // MARK: - Preview
 
 #Preview("Mini Player Bar") {
+    let runtime = PlayheadRuntime(isPreviewRuntime: true)
     ZStack {
         AppColors.background
             .ignoresSafeArea()
 
         VStack {
             Spacer()
-            NowPlayingBar(viewModel: NowPlayingViewModel())
+            NowPlayingBar(viewModel: NowPlayingViewModel(runtime: runtime))
         }
     }
     .preferredColorScheme(.dark)

@@ -304,6 +304,9 @@ actor DownloadManager {
             fileHandle.seekToEndOfFile()
         } else {
             existingSize = 0
+            if fm.fileExists(atPath: partialURL.path) {
+                try fm.removeItem(at: partialURL)
+            }
             fm.createFile(atPath: partialURL.path, contents: nil)
             fileHandle = try FileHandle(forWritingTo: partialURL)
         }

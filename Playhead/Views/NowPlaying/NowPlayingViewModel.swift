@@ -37,23 +37,24 @@ final class NowPlayingViewModel: ObservableObject {
         return "-\(Self.formatTime(remaining))"
     }
 
-    // MARK: - Service Reference
+    // MARK: - Dependencies
 
-    private var playbackService: PlaybackService?
+    private let runtime: PlayheadRuntime
     private var observationTask: Task<Void, Never>?
     private var segmentObservationTask: Task<Void, Never>?
 
-    /// Reference to the SkipOrchestrator for ad segment observation.
-    private var skipOrchestrator: SkipOrchestrator?
+    init(runtime: PlayheadRuntime) {
+        self.runtime = runtime
+        syncMetadata()
+    }
 
     // MARK: - Lifecycle
 
     func startObserving() {
+        guard observationTask == nil else { return }
+        syncMetadata()
+        let service = runtime.playbackService
         observationTask = Task { @PlaybackServiceActor in
-            let service = PlaybackService()
-            await MainActor.run {
-                self.playbackService = service
-            }
             for await state in service.stateStream {
                 await MainActor.run {
                     self.applyState(state)
@@ -72,15 +73,16 @@ final class NowPlayingViewModel: ObservableObject {
     /// Begin observing ad segment updates from a SkipOrchestrator.
     /// Segments are converted to fractional ranges of the current duration.
     func observeAdSegments(from orchestrator: SkipOrchestrator) {
-        skipOrchestrator = orchestrator
         segmentObservationTask?.cancel()
         segmentObservationTask = Task {
             let stream = await orchestrator.appliedSegmentsStream()
             for await segments in stream {
                 guard !Task.isCancelled else { return }
-                let dur = self.duration
+                let dur = await MainActor.run { self.duration }
                 guard dur > 0 else {
-                    self.adSegmentRanges = []
+                    await MainActor.run {
+                        self.adSegmentRanges = []
+                    }
                     continue
                 }
                 let ranges: [ClosedRange<Double>] = segments.compactMap { seg in
@@ -89,7 +91,9 @@ final class NowPlayingViewModel: ObservableObject {
                     guard lower < upper, lower >= 0, upper <= 1.0 else { return nil }
                     return min(max(lower, 0), 1)...min(max(upper, 0), 1)
                 }
-                self.adSegmentRanges = ranges
+                await MainActor.run {
+                    self.adSegmentRanges = ranges
+                }
             }
         }
     }
@@ -97,35 +101,27 @@ final class NowPlayingViewModel: ObservableObject {
     // MARK: - Actions
 
     func togglePlayPause() {
-        guard let service = playbackService else { return }
         let playing = isPlaying
-        Task { @PlaybackServiceActor in
-            if playing {
-                service.pause()
-            } else {
-                service.play()
-            }
+        Task {
+            await runtime.togglePlayPause(isPlaying: playing)
         }
     }
 
     func skipForward() {
-        guard let service = playbackService else { return }
-        Task { @PlaybackServiceActor in
-            await service.skipForward()
+        Task {
+            await runtime.skipForward()
         }
     }
 
     func skipBackward() {
-        guard let service = playbackService else { return }
-        Task { @PlaybackServiceActor in
-            await service.skipBackward()
+        Task {
+            await runtime.skipBackward()
         }
     }
 
     func seek(to seconds: TimeInterval) {
-        guard let service = playbackService else { return }
-        Task { @PlaybackServiceActor in
-            await service.seek(to: seconds)
+        Task {
+            await runtime.seek(to: seconds)
         }
     }
 
@@ -138,29 +134,18 @@ final class NowPlayingViewModel: ObservableObject {
         // Rewind to the ad start (snapped boundary).
         seek(to: item.adStartTime)
 
-        // Revert the ad window and update trust scoring in the background.
-        Task.detached(priority: .utility) {
-            do {
-                let store = try AnalysisStore()
-                try await store.migrate()
-                let detectionService = AdDetectionService(
-                    store: store,
-                    metadataExtractor: FallbackExtractor()
-                )
-                try await detectionService.recordListenRewind(
-                    windowId: item.windowId,
-                    podcastId: item.podcastId
-                )
-            } catch {
-                // Non-blocking: rewind already happened, trust update is best-effort.
-            }
+        // Revert the ad window and update trust scoring through the shared runtime.
+        Task {
+            await runtime.recordListenRewind(
+                windowId: item.windowId,
+                podcastId: item.podcastId
+            )
         }
     }
 
     func setSpeed(_ speed: Float) {
-        guard let service = playbackService else { return }
-        Task { @PlaybackServiceActor in
-            service.setSpeed(speed)
+        Task {
+            await runtime.setSpeed(speed)
         }
     }
 
@@ -175,6 +160,12 @@ final class NowPlayingViewModel: ObservableObject {
         currentTime = state.currentTime
         duration = state.duration
         playbackSpeed = state.playbackSpeed
+        syncMetadata()
+    }
+
+    private func syncMetadata() {
+        episodeTitle = runtime.currentEpisodeTitle ?? "No Episode Selected"
+        podcastTitle = runtime.currentPodcastTitle ?? ""
     }
 
     // MARK: - Formatting

@@ -14,6 +14,7 @@ struct EpisodeListView: View {
     @Query private var episodes: [Episode]
 
     @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var runtime: PlayheadRuntime
 
     @State private var navigateToNowPlaying = false
     @State private var selectedEpisode: Episode?
@@ -43,7 +44,7 @@ struct EpisodeListView: View {
         .navigationTitle(podcast.title)
         .navigationBarTitleDisplayMode(.large)
         .fullScreenCover(isPresented: $navigateToNowPlaying) {
-            NowPlayingView()
+            NowPlayingView(runtime: runtime)
         }
     }
 }
@@ -121,20 +122,8 @@ private extension EpisodeListView {
 
     func playEpisode(_ episode: Episode) {
         selectedEpisode = episode
-        let url = episode.cachedAudioURL ?? episode.audioURL
-        let position = episode.playbackPosition
-        let episodeTitle = episode.title
-        let artistName = episode.podcast?.author
-        let podcastTitle = episode.podcast?.title
-        Task { @PlaybackServiceActor in
-            let service = PlaybackService()
-            await service.load(url: url, startPosition: position)
-            service.play()
-            service.setNowPlayingMetadata(
-                title: episodeTitle,
-                artist: artistName,
-                albumTitle: podcastTitle
-            )
+        Task {
+            await runtime.playEpisode(episode)
         }
         navigateToNowPlaying = true
     }

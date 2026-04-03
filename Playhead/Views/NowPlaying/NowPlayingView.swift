@@ -4,25 +4,25 @@
 // "Quiet Instrument" aesthetic — precise, minimal chrome, typographic hierarchy.
 
 import SwiftUI
+import UIKit
 
 // MARK: - NowPlayingView
 
 struct NowPlayingView: View {
 
-    @StateObject private var viewModel = NowPlayingViewModel()
+    @ObservedObject private var runtime: PlayheadRuntime
+    @StateObject private var viewModel: NowPlayingViewModel
     @StateObject private var bannerQueue = AdBannerQueue()
     @State private var showTranscriptPeek = false
 
-    /// SkipOrchestrator that provides real-time ad segment data.
-    /// When set, the view model observes segment updates automatically.
-    var skipOrchestrator: SkipOrchestrator?
+    init(runtime: PlayheadRuntime) {
+        self._runtime = ObservedObject(wrappedValue: runtime)
+        self._viewModel = StateObject(wrappedValue: NowPlayingViewModel(runtime: runtime))
+    }
 
-    /// Analysis asset ID for the currently playing episode. Nil when no
-    /// analysis session exists (transcript peek unavailable).
-    var analysisAssetId: String?
-
-    /// Analysis store reference for transcript data. Nil when unavailable.
-    var analysisStore: AnalysisStore?
+    private var analysisAssetId: String? {
+        runtime.currentAnalysisAssetId
+    }
 
     var body: some View {
         ZStack {
@@ -77,17 +77,15 @@ struct NowPlayingView: View {
         }
         .onAppear {
             viewModel.startObserving()
-            if let orchestrator = skipOrchestrator {
-                viewModel.observeAdSegments(from: orchestrator)
-            }
+            viewModel.observeAdSegments(from: runtime.skipOrchestrator)
         }
         .onDisappear { viewModel.stopObserving() }
         .sheet(isPresented: $showTranscriptPeek) {
-            if let assetId = analysisAssetId, let store = analysisStore {
+            if let assetId = analysisAssetId {
                 TranscriptPeekView(
                     peekViewModel: TranscriptPeekViewModel(
                         analysisAssetId: assetId,
-                        store: store
+                        store: runtime.analysisStore
                     ),
                     currentTime: viewModel.currentTime
                 )
@@ -132,7 +130,7 @@ private extension NowPlayingView {
             Spacer()
 
             // Transcript peek — visible when analysis is available
-            if analysisAssetId != nil, analysisStore != nil {
+            if analysisAssetId != nil {
                 Button {
                     showTranscriptPeek = true
                 } label: {
@@ -296,6 +294,6 @@ private struct TransportButtonStyle: ButtonStyle {
 // MARK: - Preview
 
 #Preview("Now Playing") {
-    NowPlayingView()
+    NowPlayingView(runtime: PlayheadRuntime(isPreviewRuntime: true))
         .preferredColorScheme(.dark)
 }

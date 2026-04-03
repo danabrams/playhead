@@ -9,6 +9,18 @@ import Testing
 
 // MARK: - Test Helpers
 
+private func repoRootURL() -> URL {
+    URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+}
+
+private func readRepoSource(_ relativePath: String) throws -> String {
+    let url = repoRootURL().appendingPathComponent(relativePath)
+    return try String(contentsOf: url, encoding: .utf8)
+}
+
 /// Creates an in-memory AnalysisStore for isolated testing.
 private func makeTestStore() async throws -> AnalysisStore {
     let dir = FileManager.default.temporaryDirectory
@@ -1591,5 +1603,91 @@ struct SkipModeTests {
     @Test("Invalid raw value returns nil")
     func invalidRawValue() {
         #expect(SkipMode(rawValue: "bogus") == nil)
+    }
+}
+
+// MARK: - Runtime Composition & Resource Contracts
+
+@Suite("Runtime Contracts - Composition and Resources")
+struct RuntimeContractTests {
+
+    @Test("Shared runtime owns long-lived playback and background services")
+    func runtimeCompositionIsShared() throws {
+        let runtimeSource = try readRepoSource("Playhead/App/PlayheadRuntime.swift")
+        let contentViewSource = try readRepoSource("Playhead/App/ContentView.swift")
+        let episodeListSource = try readRepoSource("Playhead/Views/Library/EpisodeListView.swift")
+        let nowPlayingViewSource = try readRepoSource("Playhead/Views/NowPlaying/NowPlayingView.swift")
+        let nowPlayingVMSource = try readRepoSource("Playhead/Views/NowPlaying/NowPlayingViewModel.swift")
+
+        #expect(runtimeSource.contains("let playbackService: PlaybackService"))
+        #expect(runtimeSource.contains("backgroundProcessingService.registerBackgroundTasks()"))
+        #expect(runtimeSource.contains("let analysisStore: AnalysisStore"))
+        #expect(runtimeSource.contains("let skipOrchestrator: SkipOrchestrator"))
+        #expect(runtimeSource.contains("let modelInventory: ModelInventory"))
+        #expect(runtimeSource.contains("let entitlementManager: EntitlementManager"))
+
+        #expect(episodeListSource.contains("NowPlayingView(runtime: runtime"))
+        #expect(!episodeListSource.contains("NowPlayingView()"))
+
+        #expect(contentViewSource.contains("SettingsView("))
+        #expect(contentViewSource.contains("inventory: runtime.modelInventory"))
+        #expect(contentViewSource.contains("assetProvider: runtime.assetProvider"))
+
+        #expect(nowPlayingVMSource.contains("let service = runtime.playbackService"))
+        #expect(!nowPlayingVMSource.contains("PlaybackService()"))
+
+        #expect(!nowPlayingViewSource.contains("NowPlayingViewModel()"))
+    }
+
+    @Test("Bundled model manifest is present and registered in the app target")
+    func modelManifestIsBundled() throws {
+        let manifestURL = repoRootURL().appendingPathComponent("Playhead/Resources/ModelManifest.json")
+        #expect(FileManager.default.fileExists(atPath: manifestURL.path))
+
+        let projectFile = try readRepoSource("Playhead.xcodeproj/project.pbxproj")
+        #expect(projectFile.contains("ModelManifest.json in Resources"))
+
+        let manifest = try ModelInventory.loadBundledManifest()
+        #expect(!manifest.models.isEmpty)
+        #expect(manifest.models.allSatisfy { !$0.id.isEmpty })
+    }
+}
+
+@Suite("Runtime Contracts - Settings Storage")
+struct SettingsStorageContractTests {
+
+    @MainActor
+    @Test("Storage sizes track the actual on-disk directories")
+    func computeStorageSizesUsesCurrentServicePaths() async throws {
+        let modelRoot = ModelInventory.defaultModelsRoot()
+        let analysisShardsRoot = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("AnalysisShards", isDirectory: true)
+        let audioCacheRoot = DownloadManager.defaultCacheDirectory()
+
+        try FileManager.default.createDirectory(at: modelRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: analysisShardsRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: audioCacheRoot, withIntermediateDirectories: true)
+
+        let modelMarker = modelRoot.appendingPathComponent("model-marker.bin")
+        let analysisMarker = analysisShardsRoot.appendingPathComponent("analysis-marker.bin")
+        let audioMarker = audioCacheRoot.appendingPathComponent("audio-marker.bin")
+
+        defer {
+            try? FileManager.default.removeItem(at: modelMarker)
+            try? FileManager.default.removeItem(at: analysisMarker)
+            try? FileManager.default.removeItem(at: audioMarker)
+        }
+
+        try Data(repeating: 0x61, count: 11).write(to: modelMarker)
+        try Data(repeating: 0x62, count: 13).write(to: analysisMarker)
+        try Data(repeating: 0x63, count: 17).write(to: audioMarker)
+
+        let viewModel = SettingsViewModel()
+        await viewModel.computeStorageSizes()
+
+        #expect(viewModel.modelFilesSize >= 11)
+        #expect(viewModel.transcriptCacheSize >= 13)
+        #expect(viewModel.cachedAudioSize >= 17)
     }
 }

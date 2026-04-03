@@ -1,20 +1,17 @@
 // TranscriptEngine.swift
-// On-device speech-to-text via WhisperKit (Apple-optimized CoreML/ANE).
-// Defines a protocol boundary so the real WhisperKit SPM dependency can
-// be swapped in without changing callers.
+// On-device speech-to-text via Apple's Speech framework, with a stub
+// fallback for tests and unsupported environments.
 //
-// Dual-pass strategy:
-//   Fast path — low-latency model (whisper-tiny/base) for immediate ad
-//               lookahead during playback. Downloaded first via AssetProvider.
-//   Final path — higher-accuracy model (whisper-small) for durable
-//                transcript quality. Backfills once available.
-//
-// SPM dependency to add (not yet wired):
-//   .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "0.9.0")
-//   target dependency: .product(name: "WhisperKit", package: "WhisperKit")
+// The protocol boundary stays intentionally small so the runtime can swap
+// between the Apple backend and a lightweight stub without touching callers.
 
+import AVFoundation
+import CoreMedia
 import Foundation
 import OSLog
+#if canImport(Speech)
+import Speech
+#endif
 
 // MARK: - Transcript Types
 
@@ -68,9 +65,8 @@ struct VADResult: Sendable {
 
 // MARK: - SpeechRecognizer Protocol
 
-/// Protocol boundary for the ASR engine. WhisperKit conforms to this
-/// through ``WhisperKitService``. Enables testing with a stub and
-/// future engine swaps without touching callers.
+/// Protocol boundary for the ASR engine. The default runtime implementation
+/// uses Apple's Speech framework on iOS 26+, while tests can inject the stub.
 protocol SpeechRecognizer: Sendable {
 
     /// Load the model from a local directory path.
@@ -98,13 +94,13 @@ protocol SpeechRecognizer: Sendable {
 
 // MARK: - WhisperKitService
 
-/// Actor wrapping WhisperKit for thread-safe on-device transcription.
+/// Actor wrapping the runtime ASR backend for thread-safe transcription.
 /// Manages dual-pass model loading and segment-level callbacks.
 ///
 /// Runs transcription on a background thread — never touches the
 /// playback audio session or main thread.
 actor WhisperKitService {
-    private let logger = Logger(subsystem: "com.playhead", category: "WhisperKit")
+    private let logger = Logger(subsystem: "com.playhead", category: "SpeechEngine")
 
     /// The underlying recognizer (real WhisperKit or stub).
     private let recognizer: any SpeechRecognizer
@@ -120,6 +116,14 @@ actor WhisperKitService {
 
     // MARK: - Init
 
+    init() {
+        self.recognizer = makeDefaultSpeechRecognizer()
+
+        let (stream, continuation) = AsyncStream<TranscriptSegment>.makeStream()
+        self.segmentStream = stream
+        self.segmentContinuation = continuation
+    }
+
     init(recognizer: any SpeechRecognizer) {
         self.recognizer = recognizer
 
@@ -131,8 +135,8 @@ actor WhisperKitService {
     // MARK: - Model Management
 
     /// Load the fast-path model for real-time ad lookahead.
-    /// The fast-path model (whisper-tiny/base) is downloaded first by
-    /// AssetProvider and should be loaded as soon as it's ready.
+    /// Apple Speech ignores the directory, but the call keeps the runtime
+    /// shape compatible with the earlier model-backed implementation.
     func loadFastModel(from directory: URL) async throws {
         logger.info("Loading fast-path ASR model from \(directory.lastPathComponent)")
         try await recognizer.loadModel(from: directory)
@@ -141,7 +145,8 @@ actor WhisperKitService {
     }
 
     /// Load the final-path model for backfill transcription.
-    /// Unloads the current model first if one is loaded.
+    /// Apple Speech ignores the directory, but the call keeps the runtime
+    /// shape compatible with the earlier model-backed implementation.
     func loadFinalModel(from directory: URL) async throws {
         if await recognizer.isModelLoaded() {
             logger.info("Unloading current model before loading final-path model")
@@ -245,7 +250,7 @@ enum TranscriptEngineError: Error, CustomStringConvertible {
     var description: String {
         switch self {
         case .modelNotLoaded:
-            "No ASR model loaded — call loadFastModel or loadFinalModel first"
+            "No ASR recognizer is ready"
         case .transcriptionFailed(let reason):
             "Transcription failed: \(reason)"
         case .vadFailed(let reason):
@@ -259,16 +264,6 @@ enum TranscriptEngineError: Error, CustomStringConvertible {
 // MARK: - StubSpeechRecognizer
 
 /// Stub implementation for development and testing. Returns empty results.
-/// Replace with real WhisperKit integration once the SPM dependency is added.
-///
-/// To integrate WhisperKit:
-/// 1. Add SPM dependency: https://github.com/argmaxinc/WhisperKit.git (from: "0.9.0")
-/// 2. Create a class conforming to `SpeechRecognizer` that wraps `WhisperKit.WhisperKit`
-/// 3. In `loadModel(from:)`, call `WhisperKit(modelFolder: directory.path)`
-/// 4. In `transcribe(shard:)`, call `whisperKit.transcribe(audioArray: shard.samples)`
-/// 5. Map `TranscriptionResult` segments/words to `TranscriptSegment`/`TranscriptWord`
-/// 6. For VAD, use `WhisperKit.detectVoiceActivity(audioArray:)` or the built-in
-///    energy-based VAD from AudioUtils
 final class StubSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
     private var loaded = false
 
@@ -301,3 +296,318 @@ final class StubSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
         )]
     }
 }
+
+// MARK: - Default Recognizer Factory
+
+private func makeDefaultSpeechRecognizer() -> any SpeechRecognizer {
+#if canImport(Speech)
+    let env = ProcessInfo.processInfo.environment
+    let shouldUseStub =
+        env["XCTestConfigurationFilePath"] != nil ||
+        env["XCODE_RUNNING_FOR_PREVIEWS"] == "1" ||
+        env["PLAYHEAD_USE_STUB_SPEECH"] == "1"
+
+    if !shouldUseStub && SpeechTranscriber.isAvailable {
+        return AppleSpeechRecognizer()
+    }
+#endif
+
+    return StubSpeechRecognizer()
+}
+
+#if canImport(Speech)
+
+// MARK: - AppleSpeechRecognizer
+
+/// Production recognizer backed by Speech.framework's transcriber and detector.
+actor AppleSpeechRecognizer: SpeechRecognizer {
+    private let logger = Logger(subsystem: "com.playhead", category: "AppleSpeechRecognizer")
+    private var selectedLocale: Locale?
+    private var prepared = false
+
+    func loadModel(from directory: URL) async throws {
+        logger.info("Preparing Apple Speech backend; ignoring model directory \(directory.lastPathComponent, privacy: .public)")
+        _ = try await ensureLocaleAssetsPrepared()
+    }
+
+    func unloadModel() async {
+        // Speech.framework manages its own system model lifecycle.
+        prepared = false
+    }
+
+    func isModelLoaded() async -> Bool {
+        prepared || SpeechTranscriber.isAvailable
+    }
+
+    func transcribe(shard: AnalysisShard) async throws -> [TranscriptSegment] {
+        let locale = try await ensureLocaleAssetsPrepared()
+
+        let buffer = try Self.makeBuffer(from: shard)
+        let transcriber = SpeechTranscriber(locale: locale, preset: .timeIndexedProgressiveTranscription)
+        let analyzer = SpeechAnalyzer(
+            modules: [transcriber],
+            options: .init(priority: .utility, modelRetention: .lingering)
+        )
+
+        try await analyzer.prepareToAnalyze(in: buffer.format)
+
+        let inputSequence = Self.singleBufferSequence(
+            buffer: buffer,
+            startTime: shard.startTime
+        )
+
+        let collector = Task { try await Self.collectTranscriptSegments(from: transcriber.results) }
+
+        do {
+            _ = try await analyzer.analyzeSequence(inputSequence)
+            return try await collector.value
+        } catch {
+            await analyzer.cancelAndFinishNow()
+            collector.cancel()
+            throw error
+        }
+    }
+
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
+        _ = try await ensureLocaleAssetsPrepared()
+
+        let buffer = try Self.makeBuffer(from: shard)
+        let detector = SpeechDetector()
+        let analyzer = SpeechAnalyzer(
+            modules: [detector],
+            options: .init(priority: .utility, modelRetention: .lingering)
+        )
+
+        try await analyzer.prepareToAnalyze(in: buffer.format)
+
+        let inputSequence = Self.singleBufferSequence(
+            buffer: buffer,
+            startTime: shard.startTime
+        )
+
+        let collector = Task { try await Self.collectVoiceActivity(from: detector.results) }
+
+        do {
+            _ = try await analyzer.analyzeSequence(inputSequence)
+            return try await collector.value
+        } catch {
+            await analyzer.cancelAndFinishNow()
+            collector.cancel()
+            throw error
+        }
+    }
+
+    private func ensureLocaleAssetsPrepared() async throws -> Locale {
+        let locale = await Self.resolveLocale(preferred: selectedLocale)
+        let transcriber = SpeechTranscriber(
+            locale: locale,
+            preset: .timeIndexedProgressiveTranscription
+        )
+        let modules: [any SpeechModule] = [transcriber]
+
+        let status = await AssetInventory.status(forModules: modules)
+        switch status {
+        case .unsupported:
+            throw TranscriptEngineError.transcriptionFailed(
+                "Speech assets are unsupported for locale \(locale.identifier)"
+            )
+
+        case .supported, .downloading:
+            if let request = try await AssetInventory.assetInstallationRequest(
+                supporting: modules
+            ) {
+                try await request.downloadAndInstall()
+            }
+
+        case .installed:
+            break
+        }
+
+        selectedLocale = locale
+        prepared = true
+        return locale
+    }
+
+    private static func resolveLocale(preferred: Locale?) async -> Locale {
+        if let preferred {
+            return preferred
+        }
+
+        let current = Locale.current
+        if let supported = await SpeechTranscriber.supportedLocale(equivalentTo: current) {
+            return supported
+        }
+
+        let installed = await SpeechTranscriber.installedLocales
+        if let firstInstalled = installed.first {
+            return firstInstalled
+        }
+
+        return current
+    }
+
+    private static func makeBuffer(from shard: AnalysisShard) throws -> AVAudioPCMBuffer {
+        guard !shard.samples.isEmpty else {
+            throw TranscriptEngineError.transcriptionFailed("empty audio shard")
+        }
+
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        ) else {
+            throw TranscriptEngineError.transcriptionFailed("failed to create analysis audio format")
+        }
+
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: AVAudioFrameCount(shard.samples.count)
+        ) else {
+            throw TranscriptEngineError.transcriptionFailed("failed to allocate audio buffer")
+        }
+
+        buffer.frameLength = AVAudioFrameCount(shard.samples.count)
+        shard.samples.withUnsafeBufferPointer { samples in
+            guard let channelData = buffer.floatChannelData?.pointee,
+                  let source = samples.baseAddress else { return }
+            channelData.assign(from: source, count: shard.samples.count)
+        }
+
+        return buffer
+    }
+
+    private static func singleBufferSequence(
+        buffer: AVAudioPCMBuffer,
+        startTime: TimeInterval
+    ) -> AsyncStream<AnalyzerInput> {
+        AsyncStream { continuation in
+            let cmTime = CMTime(seconds: startTime, preferredTimescale: 600)
+            continuation.yield(AnalyzerInput(buffer: buffer, bufferStartTime: cmTime))
+            continuation.finish()
+        }
+    }
+
+    private static func collectTranscriptSegments<Results>(
+        from results: Results
+    ) async throws -> [TranscriptSegment]
+    where Results: AsyncSequence, Results.Element == SpeechTranscriber.Result, Results.Failure == Error {
+        var segments: [TranscriptSegment] = []
+        var nextId = 0
+
+        for try await result in results {
+            guard result.isFinal else { continue }
+
+            let words = words(from: result)
+            let fullText = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !fullText.isEmpty else { continue }
+
+            let startTime = words.first?.startTime ?? seconds(from: result.range.start)
+            let endTime = words.last?.endTime ?? seconds(from: CMTimeAdd(result.range.start, result.range.duration))
+            let avgConfidence = words.isEmpty
+                ? 1.0
+                : words.map(\.confidence).reduce(0, +) / Float(words.count)
+
+            segments.append(TranscriptSegment(
+                id: nextId,
+                words: words.isEmpty ? [TranscriptWord(
+                    text: fullText,
+                    startTime: startTime,
+                    endTime: endTime,
+                    confidence: avgConfidence
+                )] : words,
+                text: fullText,
+                startTime: startTime,
+                endTime: endTime,
+                avgConfidence: avgConfidence,
+                passType: .fast
+            ))
+            nextId += 1
+        }
+
+        segments.sort { $0.startTime < $1.startTime }
+        return segments
+    }
+
+    private static func words(from result: SpeechTranscriber.Result) -> [TranscriptWord] {
+        let fallbackStart = seconds(from: result.range.start)
+        let fallbackEnd = seconds(from: CMTimeAdd(result.range.start, result.range.duration))
+        let fallbackRange = max(fallbackEnd - fallbackStart, 0)
+
+        var words: [TranscriptWord] = []
+
+        for run in result.text.runs {
+            let runText = String(result.text[run.range].characters)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !runText.isEmpty else { continue }
+
+            let pieces = runText.split(whereSeparator: \.isWhitespace).map(String.init)
+            guard !pieces.isEmpty else { continue }
+
+            let timeRange = run.audioTimeRange
+            let runStart = timeRange.map { seconds(from: $0.start) } ?? fallbackStart
+            let runEnd = timeRange.map { seconds(from: CMTimeAdd($0.start, $0.duration)) } ?? fallbackEnd
+            let runDuration = max(runEnd - runStart, 0)
+            let step = pieces.count > 0 ? runDuration / Double(pieces.count) : 0
+            let confidence = Float(run.transcriptionConfidence ?? 1.0)
+
+            for (index, piece) in pieces.enumerated() {
+                let start = runStart + (Double(index) * step)
+                let end = index == pieces.count - 1 ? runEnd : min(runEnd, start + step)
+                words.append(TranscriptWord(
+                    text: piece,
+                    startTime: start,
+                    endTime: end,
+                    confidence: confidence
+                ))
+            }
+        }
+
+        if words.isEmpty {
+            let text = String(result.text.characters)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return [] }
+
+            words = [TranscriptWord(
+                text: text,
+                startTime: fallbackStart,
+                endTime: fallbackStart + fallbackRange,
+                confidence: 1.0
+            )]
+        }
+
+        return words
+    }
+
+    private static func collectVoiceActivity<Results>(
+        from results: Results
+    ) async throws -> [VADResult]
+    where Results: AsyncSequence, Results.Element == SpeechDetector.Result, Results.Failure == Error {
+        var vadResults: [VADResult] = []
+
+        for try await result in results {
+            guard result.isFinal, result.speechDetected else { continue }
+
+            let start = seconds(from: result.range.start)
+            let end = seconds(from: CMTimeAdd(result.range.start, result.range.duration))
+
+            vadResults.append(VADResult(
+                isSpeech: true,
+                speechProbability: 1.0,
+                startTime: start,
+                endTime: end
+            ))
+        }
+
+        vadResults.sort { $0.startTime < $1.startTime }
+        return vadResults
+    }
+
+    private static func seconds(from time: CMTime) -> TimeInterval {
+        let seconds = CMTimeGetSeconds(time)
+        guard seconds.isFinite else { return 0 }
+        return max(seconds, 0)
+    }
+}
+
+#endif

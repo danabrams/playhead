@@ -94,10 +94,9 @@ actor BackgroundProcessingService {
 
     // MARK: - Registration
 
-    /// Register background task identifiers with placeholder handlers.
-    /// Must be called before app finishes launching (App.init). When the
-    /// BackgroundProcessingService instance is created, call
-    /// ``registerBackgroundTasks()`` to replace with real handlers.
+    /// Register background task identifiers with fallback handlers.
+    /// This remains for compatibility, but the app should prefer
+    /// ``registerBackgroundTasks()`` once the runtime has been built.
     static func registerTaskIdentifiers() {
         let logger = Logger(subsystem: "com.playhead", category: "BackgroundProcessing")
 

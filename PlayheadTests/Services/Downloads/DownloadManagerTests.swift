@@ -2,6 +2,9 @@
 // Unit tests for the audio asset cache and download manager.
 
 import Foundation
+import Dispatch
+import CryptoKit
+import Network
 import Testing
 @testable import Playhead
 
@@ -290,5 +293,170 @@ struct DownloadManagerIntegrityTests {
                 episodeId: "nonexistent", expectedHash: "abc"
             )
         }
+    }
+}
+
+// MARK: - Resume Contracts
+
+private enum IgnoringRangeServerError: Error {
+    case failedToStart
+    case missingPort
+}
+
+private final class IgnoringRangeHTTPServer {
+    private let body: Data
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "PlayheadTests.IgnoringRangeHTTPServer")
+    private let started = DispatchSemaphore(value: 0)
+    private var boundPort: NWEndpoint.Port?
+
+    private(set) var rawRequests: [String] = []
+
+    init(body: Data) throws {
+        self.body = body
+        self.listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: 0)!)
+    }
+
+    func start() throws -> URL {
+        listener.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            if case .ready = state {
+                self.boundPort = self.listener.port
+                self.started.signal()
+            }
+        }
+
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.handle(connection: connection)
+        }
+
+        listener.start(queue: queue)
+
+        guard started.wait(timeout: .now() + 5) == .success else {
+            throw IgnoringRangeServerError.failedToStart
+        }
+
+        guard let port = boundPort else {
+            throw IgnoringRangeServerError.missingPort
+        }
+
+        return URL(string: "http://127.0.0.1:\(port.rawValue)/audio")!
+    }
+
+    func stop() {
+        listener.cancel()
+    }
+
+    private func handle(connection: NWConnection) {
+        connection.start(queue: queue)
+        receiveRequest(connection: connection, accumulated: Data())
+    }
+
+    private func receiveRequest(connection: NWConnection, accumulated: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+
+            var buffer = accumulated
+            if let data {
+                buffer.append(data)
+            }
+
+            let requestText = String(decoding: buffer, as: UTF8.self)
+            if requestText.contains("\r\n\r\n") || isComplete || error != nil {
+                self.rawRequests.append(requestText)
+                self.sendResponse(connection: connection)
+                return
+            }
+
+            self.receiveRequest(connection: connection, accumulated: buffer)
+        }
+    }
+
+    private func sendResponse(connection: NWConnection) {
+        var response = Data("HTTP/1.1 200 OK\r\n".utf8)
+        response.append(Data("Content-Length: \(body.count)\r\n".utf8))
+        response.append(Data("Content-Type: application/octet-stream\r\n".utf8))
+        response.append(Data("Connection: close\r\n\r\n".utf8))
+        response.append(body)
+
+        connection.send(content: response, completion: .contentProcessed { _ in
+            connection.cancel()
+        })
+    }
+}
+
+@Suite("DownloadManager – Resume")
+struct DownloadManagerResumeContractTests {
+
+    private func makeTempDir() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PlayheadTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    @Test("Resume download restarts cleanly when the server ignores Range")
+    func ignoredRangeResponseDoesNotCorruptPartialFile() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let inventory = ModelInventory(
+            manifest: ModelManifest(
+                version: 1,
+                generatedAt: .now,
+                models: [
+                    ModelEntry(
+                        id: "resume-model",
+                        role: .asrFast,
+                        displayName: "Resume Model",
+                        modelVersion: "1.0.0",
+                        downloadURL: URL(string: "http://127.0.0.1/placeholder")!,
+                        sha256: Self.sha256Hex(Data("NEW".utf8)),
+                        compressedSizeBytes: 3,
+                        uncompressedSizeBytes: 3,
+                        priority: 100,
+                        minimumOS: "26.0",
+                        requiredCapabilities: []
+                    )
+                ]
+            ),
+            rootOverride: dir
+        )
+        try await inventory.ensureDirectories()
+
+        let provider = AssetProvider(inventory: inventory)
+        let partialURL = inventory.downloadsDirectory.appendingPathComponent("resume-model.partial")
+        try Data("STALE-STALE".utf8).write(to: partialURL)
+
+        let server = try IgnoringRangeHTTPServer(body: Data("NEW".utf8))
+        let url = try server.start()
+        defer { server.stop() }
+
+        var entry = await inventory.manifest.models[0]
+        entry = ModelEntry(
+            id: entry.id,
+            role: entry.role,
+            displayName: entry.displayName,
+            modelVersion: entry.modelVersion,
+            downloadURL: url,
+            sha256: entry.sha256,
+            compressedSizeBytes: entry.compressedSizeBytes,
+            uncompressedSizeBytes: entry.uncompressedSizeBytes,
+            priority: entry.priority,
+            minimumOS: entry.minimumOS,
+            requiredCapabilities: entry.requiredCapabilities
+        )
+
+        try await provider.download(entry: entry)
+
+        let stagedURL = inventory.stagingDirectory.appendingPathComponent("resume-model")
+        let stagedData = try Data(contentsOf: stagedURL)
+        #expect(String(data: stagedData, encoding: .utf8) == "NEW")
+        #expect(!FileManager.default.fileExists(atPath: partialURL.path))
+        #expect(server.rawRequests.contains { $0.contains("Range: bytes=") })
+    }
+
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }

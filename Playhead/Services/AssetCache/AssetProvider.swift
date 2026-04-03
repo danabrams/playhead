@@ -88,15 +88,17 @@ actor AssetProvider {
 
         // Resume support: if a partial file exists, request remaining bytes.
         let fm = FileManager.default
+        var existingSize: Int64 = 0
         if fm.fileExists(atPath: partialURL.path),
            let attrs = try? fm.attributesOfItem(atPath: partialURL.path),
-           let existingSize = attrs[.size] as? Int64, existingSize > 0 {
+           let size = attrs[.size] as? Int64, size > 0 {
+            existingSize = size
             request.setValue("bytes=\(existingSize)-", forHTTPHeaderField: "Range")
             logger.info("Resuming download for \(entry.id) from byte \(existingSize)")
         }
 
         // Use async bytes for streaming download with progress tracking.
-        let (asyncBytes, response) = try await URLSession.shared.bytes(for: request)
+        let (asyncBytes, response) = try await urlSession().bytes(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) || httpResponse.statusCode == 206 else {
@@ -108,24 +110,28 @@ actor AssetProvider {
 
         let totalSize = entry.compressedSizeBytes
         let fileHandle: FileHandle
+        let isResume = httpResponse.statusCode == 206 && existingSize > 0
+        if httpResponse.statusCode == 200, existingSize > 0 {
+            logger.warning("Server ignored Range for \(entry.id); restarting partial download")
+        }
 
-        if httpResponse.statusCode == 206 {
+        if isResume {
             // Appending to existing partial file.
             fileHandle = try FileHandle(forWritingTo: partialURL)
             fileHandle.seekToEndOfFile()
         } else {
-            // Fresh download — create or overwrite.
+            // Fresh download — replace any stale partial bytes.
+            if fm.fileExists(atPath: partialURL.path) {
+                try fm.removeItem(at: partialURL)
+            }
             fm.createFile(atPath: partialURL.path, contents: nil)
             fileHandle = try FileHandle(forWritingTo: partialURL)
+            existingSize = 0
         }
 
         defer { try? fileHandle.close() }
 
-        var downloaded: Int64 = 0
-        let existingBytes: Int64 = httpResponse.statusCode == 206
-            ? (try? fm.attributesOfItem(atPath: partialURL.path))?[.size] as? Int64 ?? 0
-            : 0
-        downloaded = existingBytes
+        var downloaded: Int64 = existingSize
 
         var buffer = Data()
         let flushThreshold = 256 * 1024 // Flush every 256 KB
@@ -147,8 +153,6 @@ actor AssetProvider {
             fileHandle.write(buffer)
             downloaded += Int64(buffer.count)
         }
-
-        try fileHandle.close()
 
         logger.info("Download complete for \(entry.id): \(downloaded) bytes")
 

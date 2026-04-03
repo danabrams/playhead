@@ -201,6 +201,11 @@ final class PlaybackService: NSObject, Sendable {
         updateNowPlayingInfo()
     }
 
+    /// Returns the latest transport snapshot for higher-level coordinators.
+    func snapshot() -> PlaybackState {
+        _state
+    }
+
     /// Seek to an absolute position in seconds.
     func seek(to seconds: TimeInterval) async {
         let target = CMTime(seconds: seconds, preferredTimescale: 600)

@@ -72,11 +72,16 @@ enum TranscriptEngineServiceError: Error, CustomStringConvertible {
         case .noShardsAvailable:
             "No analysis shards available for transcription"
         case .whisperKitNotReady:
-            "WhisperKitService is not ready — no model loaded"
+            "Speech engine is not ready"
         case .chunkingFailed(let reason):
             "Chunk boundary computation failed: \(reason)"
         }
     }
+}
+
+enum TranscriptEngineEvent: Sendable {
+    case chunksPersisted(analysisAssetId: String, chunks: [TranscriptChunk])
+    case completed(analysisAssetId: String)
 }
 
 // MARK: - TranscriptEngineService
@@ -103,6 +108,10 @@ actor TranscriptEngineService {
 
     /// Running chunk index counter per asset, for ordering.
     private var chunkCounter: Int = 0
+
+    /// Broadcasts persisted chunk batches and completion signals to the
+    /// analysis coordinator without forcing it to poll SQLite.
+    private var eventContinuations: [UUID: AsyncStream<TranscriptEngineEvent>.Continuation] = [:]
 
     // MARK: - Init
 
@@ -193,6 +202,18 @@ actor TranscriptEngineService {
         activeTask != nil && activeTask?.isCancelled == false
     }
 
+    func events() -> AsyncStream<TranscriptEngineEvent> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            self.eventContinuations[id] = continuation
+            continuation.onTermination = { @Sendable _ in
+                Task { [weak self] in
+                    await self?.removeEventContinuation(id: id)
+                }
+            }
+        }
+    }
+
     // MARK: - Transcription loop
 
     private func runTranscriptionLoop(
@@ -205,7 +226,7 @@ actor TranscriptEngineService {
         }
 
         guard await whisperKit.isReady() else {
-            logger.error("WhisperKit not ready — aborting transcription")
+            logger.error("Speech engine not ready — aborting transcription")
             return
         }
 
@@ -251,6 +272,7 @@ actor TranscriptEngineService {
         }
 
         logger.info("Transcription loop complete for asset \(analysisAssetId)")
+        emitEvent(.completed(analysisAssetId: analysisAssetId))
     }
 
     // MARK: - Single shard transcription
@@ -315,6 +337,7 @@ actor TranscriptEngineService {
         // Batch-insert to SQLite.
         if !chunks.isEmpty {
             try await store.insertTranscriptChunks(chunks)
+            emitEvent(.chunksPersisted(analysisAssetId: analysisAssetId, chunks: chunks))
         }
 
         // Update coverage watermark.
@@ -402,5 +425,15 @@ actor TranscriptEngineService {
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { !$0.isEmpty }
             .joined(separator: " ")
+    }
+
+    private func removeEventContinuation(id: UUID) {
+        eventContinuations.removeValue(forKey: id)
+    }
+
+    private func emitEvent(_ event: TranscriptEngineEvent) {
+        for continuation in eventContinuations.values {
+            continuation.yield(event)
+        }
     }
 }

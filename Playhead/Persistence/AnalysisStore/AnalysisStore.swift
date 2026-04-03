@@ -402,7 +402,11 @@ actor AnalysisStore {
     }
 
     func deleteAsset(id: String) throws {
-        try exec("DELETE FROM analysis_assets WHERE id = '\(id)'")
+        let sql = "DELETE FROM analysis_assets WHERE id = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, id)
+        try step(stmt, expecting: SQLITE_DONE)
     }
 
     private func readAsset(_ stmt: OpaquePointer?) -> AnalysisAsset {
