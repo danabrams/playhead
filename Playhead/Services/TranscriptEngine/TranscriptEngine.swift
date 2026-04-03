@@ -183,7 +183,14 @@ actor SpeechService {
             ? .final_
             : .fast
 
-        logger.debug("Transcribing shard \(shard.id) [\(String(format: "%.1f", shard.startTime))-\(String(format: "%.1f", shard.startTime + shard.duration))s]")
+        logger.info("""
+            Transcribing shard \(shard.id) \
+            [start=\(String(format: "%.2f", shard.startTime))s, \
+            end=\(String(format: "%.2f", shard.startTime + shard.duration))s, \
+            duration=\(String(format: "%.2f", shard.duration))s, \
+            samples=\(shard.sampleCount), \
+            episode=\(shard.episodeID)]
+            """)
         let start = ContinuousClock.now
         let rawSegments = try await recognizer.transcribe(shard: shard)
         let elapsed = ContinuousClock.now - start
@@ -363,22 +370,42 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         try await analyzer.prepareToAnalyze(in: buffer.format)
         logger.debug("SpeechAnalyzer prepared in \(ContinuousClock.now - prepStart)")
 
-        let inputSequence = Self.singleBufferSequence(
-            buffer: buffer,
-            startTime: shard.startTime
-        )
-
         let collector = Task { try await Self.collectTranscriptSegments(from: transcriber.results) }
 
         do {
             let analyzeStart = ContinuousClock.now
-            _ = try await analyzer.analyzeSequence(inputSequence)
+            // Timeout: 2x shard duration or 60s minimum — protects against analyzer hangs.
+            let timeoutSeconds = max(60.0, shard.duration * 2)
+
+            let inputSequence = Self.singleBufferSequence(
+                buffer: buffer,
+                startTime: shard.startTime
+            )
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    _ = try await analyzer.analyzeSequence(inputSequence)
+                }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(timeoutSeconds))
+                    throw CancellationError()
+                }
+                try await group.next()
+                group.cancelAll()
+            }
+            // Keep the buffer alive until after analyzeSequence completes.
+            // Without this, ARC can deallocate the buffer while the Speech
+            // framework is still reading its float channel data.
+            withExtendedLifetime(buffer) {}
+
             let segments = try await collector.value
             logger.debug("SpeechAnalyzer finished shard \(shard.id) in \(ContinuousClock.now - analyzeStart) → \(segments.count) segments")
             return segments
         } catch {
             await analyzer.cancelAndFinishNow()
             collector.cancel()
+            if error is CancellationError {
+                logger.warning("SpeechAnalyzer timed out for shard \(shard.id) (duration=\(String(format: "%.1f", shard.duration))s)")
+            }
             throw error
         }
     }
@@ -508,7 +535,7 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         startTime: TimeInterval
     ) -> AsyncStream<AnalyzerInput> {
         AsyncStream { continuation in
-            let cmTime = CMTime(seconds: startTime, preferredTimescale: 600)
+            let cmTime = CMTime(seconds: startTime, preferredTimescale: 16_000)
             continuation.yield(AnalyzerInput(buffer: buffer, bufferStartTime: cmTime))
             continuation.finish()
         }

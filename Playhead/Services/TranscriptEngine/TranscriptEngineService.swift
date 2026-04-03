@@ -268,7 +268,13 @@ actor TranscriptEngineService {
                 logger.info("Transcription cancelled during shard \(shard.id)")
                 return
             } catch {
-                logger.error("Transcription failed for shard \(shard.id): \(error)")
+                logger.error("""
+                    Transcription failed for shard \(shard.id) \
+                    [start=\(String(format: "%.2f", shard.startTime))s, \
+                    duration=\(String(format: "%.2f", shard.duration))s, \
+                    samples=\(shard.sampleCount), \
+                    episode=\(shard.episodeID)]: \(error)
+                    """)
                 // Continue with next shard — partial coverage is better than none.
                 continue
             }
