@@ -1096,6 +1096,51 @@ struct PreviewBudgetTests {
         #expect(hasBudget == false)
     }
 
+    @Test("Exact boundary: consumed == baseBudgetSeconds yields zero remaining and no grace")
+    func exactBoundaryBudgetExhausted() async throws {
+        let store = try await makeTestStore()
+        let budgetStore = PreviewBudgetStore(analysisStore: store)
+
+        // Consume exactly the base budget (720s).
+        _ = await budgetStore.consumeBudget(for: "ep-boundary", seconds: 720)
+
+        // remaining should be exactly 0.
+        let remaining = await budgetStore.remainingBudget(for: "ep-boundary")
+        #expect(remaining == 0,
+                "consumed == baseBudgetSeconds must yield 0 remaining")
+        #expect(await budgetStore.hasBudget(for: "ep-boundary") == false,
+                "hasBudget must be false at exact boundary")
+
+        // Grace must also be denied at the exact boundary.
+        let grace = await budgetStore.graceAllowance(
+            for: "ep-boundary", adBreakDuration: 60
+        )
+        #expect(grace == 0,
+                "No grace when consumed == baseBudgetSeconds (budget exhausted)")
+    }
+
+    @Test("One second below base budget still has remaining and qualifies for grace")
+    func oneBelowBoundary() async throws {
+        let store = try await makeTestStore()
+        let budgetStore = PreviewBudgetStore(analysisStore: store)
+
+        // Consume one second less than the base budget.
+        _ = await budgetStore.consumeBudget(for: "ep-almost", seconds: 719)
+
+        let remaining = await budgetStore.remainingBudget(for: "ep-almost")
+        #expect(remaining == 1.0,
+                "One second below budget should have 1s remaining")
+        #expect(await budgetStore.hasBudget(for: "ep-almost") == true,
+                "hasBudget must be true when 1s remains")
+
+        // Grace should still be granted since consumed < baseBudgetSeconds.
+        let grace = await budgetStore.graceAllowance(
+            for: "ep-almost", adBreakDuration: 60
+        )
+        #expect(grace == 60.0,
+                "Grace should be granted when consumed is below base budget")
+    }
+
     @Test("Grace window allows up to absolute cap (1200s)")
     func graceWindow() async throws {
         let store = try await makeTestStore()

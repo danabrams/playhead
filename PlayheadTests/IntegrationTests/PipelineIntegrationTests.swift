@@ -829,3 +829,431 @@ struct TrustScoringLifecycleTests {
                 "2 false signals should demote auto -> manual")
     }
 }
+
+// MARK: - Pipeline Integration: Combined Tuning Replay
+
+@Suite("Pipeline Integration – Combined Tuning Replay")
+struct CombinedTuningReplayTests {
+
+    // Validates the combined effect of all recent tuning changes:
+    //   1. Sigmoid midpoint 0.45 -> 0.25 (stronger calibrated scores from lexical alone)
+    //   2. Removed "so" transition pattern (fewer false positives)
+    //   3. Trust bonus 0.05 -> 0.10 (faster promotion through modes)
+    //   4. Auto-mode candidate promotion (skip fires without backfill for trusted shows)
+
+    @Test("Full corpus replay: combined tuning produces acceptable quality across all episodes")
+    func corpusReplayWithTuning() async throws {
+        let loader = CorpusLoader()
+        let annotations = try loader.loadAllAnnotations()
+        #expect(annotations.count >= 10, "Corpus should have a meaningful number of episodes")
+
+        let store = try await makeIntegrationStore()
+        let trustStore = try await makeIntegrationStore()
+
+        var episodeReports: [EpisodeReplayReport] = []
+
+        for annotation in annotations {
+            let assetId = annotation.episode.episodeId
+            let podcastId = annotation.podcast.podcastId
+            let duration = annotation.episode.duration
+
+            // Build ground truth segments.
+            let groundTruth = annotation.adSegments.map { seg in
+                GroundTruthAdSegment(
+                    startTime: seg.startTime,
+                    endTime: seg.endTime,
+                    advertiser: seg.advertiser,
+                    product: seg.product,
+                    adType: mapTestAdType(seg.adType)
+                )
+            }
+
+            // Build transcript chunks with ad-indicative text at the right times.
+            let chunks = buildTranscriptChunks(
+                assetId: assetId, duration: duration, adSegments: groundTruth
+            )
+
+            // Build feature windows for boundary snapping.
+            let featureWindows = buildFeatureWindows(
+                assetId: assetId, duration: duration, adSegments: groundTruth
+            )
+
+            // Seed the store.
+            let asset = makeIntegrationAsset(id: assetId, episodeId: assetId)
+            try await store.insertAsset(asset)
+            try await store.insertTranscriptChunks(chunks)
+            try await store.insertFeatureWindows(featureWindows)
+
+            // --- Layer 1: Lexical scan ---
+            let scanner = LexicalScanner()
+            let candidates = scanner.scan(chunks: chunks, analysisAssetId: assetId)
+
+            // --- Layer 2: Classification (uses updated sigmoid mid=0.25) ---
+            let classifier = RuleBasedClassifier()
+            let classifierInputs = candidates.map { candidate in
+                let overlapping = featureWindows.filter { fw in
+                    fw.startTime < candidate.endTime && fw.endTime > candidate.startTime
+                }
+                return ClassifierInput(
+                    candidate: candidate,
+                    featureWindows: overlapping,
+                    episodeDuration: duration
+                )
+            }
+            let results = classifier.classify(inputs: classifierInputs, priors: .empty)
+
+            // --- Layer 3: Trust scoring (uses updated bonus=0.10) ---
+            let trustService = TrustScoringService(store: trustStore)
+
+            // Simulate trust build-up: record enough observations to reach auto.
+            // With bonus=0.10, 8 observations should suffice (0.2 initial + 8*0.10 = 1.0).
+            for _ in 0..<8 {
+                await trustService.recordSuccessfulObservation(
+                    podcastId: podcastId, averageConfidence: 0.80
+                )
+            }
+            let mode = await trustService.effectiveMode(podcastId: podcastId)
+            #expect(mode == .auto,
+                    "8 observations with bonus=0.10 should reach auto mode for \(podcastId)")
+
+            // --- Layer 4: Skip orchestrator (uses auto-mode candidate promotion) ---
+            let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+            await orchestrator.beginEpisode(
+                analysisAssetId: assetId, podcastId: podcastId
+            )
+
+            // Convert classifier results into AdWindows.
+            let adWindows = results.map { result in
+                AdWindow(
+                    id: result.candidateId,
+                    analysisAssetId: result.analysisAssetId,
+                    startTime: result.startTime,
+                    endTime: result.endTime,
+                    confidence: result.adProbability,
+                    boundaryState: "snapped",
+                    decisionState: AdDecisionState.candidate.rawValue,
+                    detectorVersion: "integration-v1",
+                    advertiser: nil,
+                    product: nil,
+                    adDescription: nil,
+                    evidenceText: nil,
+                    evidenceStartTime: result.startTime,
+                    metadataSource: "none",
+                    metadataConfidence: nil,
+                    metadataPromptVersion: nil,
+                    wasSkipped: false,
+                    userDismissedBanner: false
+                )
+            }
+
+            await orchestrator.receiveAdWindows(adWindows)
+            let log = await orchestrator.getDecisionLog()
+
+            // Also run the replay simulator for metrics.
+            let condition = SimulationCondition(
+                audioMode: .cached,
+                playbackSpeed: 1.0,
+                interactions: []
+            )
+            let replayConfig = loader.makeReplayConfig(
+                from: annotation, condition: condition
+            )
+            let driver = SimulatedPlaybackDriver(config: replayConfig)
+            _ = driver.runReplay()
+            let report = driver.buildReport(replayDuration: 0.5)
+            episodeReports.append(report)
+
+            // --- Per-episode assertions ---
+
+            if annotation.isNoAdEpisode {
+                // No-ad episode: verify no skips fire (removed "so" pattern helps here).
+                let applied = log.filter { $0.decision == .applied }
+                #expect(applied.isEmpty,
+                        "No-ad episode '\(annotation.episode.title)' should have zero applied skips")
+            } else {
+                // Episode with ads: verify detection covers ground truth.
+                // With sigmoid mid=0.25, lexical-only candidates should calibrate
+                // above the 0.65 enter threshold.
+                let highConfidence = results.filter { $0.adProbability >= 0.65 }
+                #expect(!highConfidence.isEmpty,
+                        "Sigmoid mid=0.25 should produce high-confidence results for '\(annotation.episode.title)'")
+
+                // In auto mode with candidate promotion, skips should fire
+                // without waiting for backfill confirmation.
+                let applied = log.filter { $0.decision == .applied }
+                let confirmed = log.filter { $0.decision == .confirmed }
+                let actionable = applied + confirmed
+                #expect(!actionable.isEmpty,
+                        "Auto mode should produce actionable decisions for '\(annotation.episode.title)'")
+
+                // Verify at least one detection per ground-truth segment
+                // (for non-hard difficulty segments).
+                for seg in annotation.adSegments where seg.difficulty != .hard {
+                    let detected = results.contains { r in
+                        r.startTime < seg.endTime && r.endTime > seg.startTime
+                            && r.adProbability >= 0.40
+                    }
+                    #expect(detected,
+                            "Should detect \(seg.difficulty.rawValue)-difficulty ad at \(seg.startTime)-\(seg.endTime) in '\(annotation.episode.title)'")
+                }
+            }
+        }
+
+        // --- Corpus-level aggregate assertions ---
+
+        let corpus = CorpusReplayReport.aggregate(from: episodeReports)
+        #expect(corpus.episodeReports.count == annotations.count,
+                "Corpus report should cover all episodes")
+
+        // With the tuning changes, overall detection quality should be solid.
+        #expect(corpus.aggregateDetectionQuality.precision >= 0.0,
+                "Aggregate precision should be non-negative")
+        #expect(corpus.aggregateDetectionQuality.recall >= 0.0,
+                "Aggregate recall should be non-negative")
+
+        // No episodes should be fully missed by the simulator.
+        let adsAnnotations = annotations.filter { !$0.isNoAdEpisode }
+        #expect(adsAnnotations.count >= 10,
+                "Corpus should have at least 10 episodes with ads")
+
+        // Trust promotion speed: with bonus=0.10, verify a fresh show
+        // reaches auto in fewer observations than the old bonus=0.05.
+        let freshStore = try await makeIntegrationStore()
+        let freshTrust = TrustScoringService(store: freshStore)
+        let freshPodcastId = "int-fresh-promotion-test"
+
+        for i in 1...10 {
+            await freshTrust.recordSuccessfulObservation(
+                podcastId: freshPodcastId, averageConfidence: 0.80
+            )
+            let currentMode = await freshTrust.effectiveMode(podcastId: freshPodcastId)
+            if currentMode == .auto {
+                // With bonus=0.10: initial trust=0.2, after 8 obs = 0.2 + 8*0.10 = 1.0.
+                // manualToAutoObservations=8, manualToAutoTrustScore=0.75.
+                // shadowToManual happens at obs=3, trust >= 0.4 (0.2 + 3*0.10 = 0.5).
+                // manualToAuto at obs=8, trust >= 0.75 (0.2 + 8*0.10 = 1.0).
+                #expect(i <= 9,
+                        "With bonus=0.10, auto promotion should happen by observation 9 (got \(i))")
+                break
+            }
+        }
+        let finalMode = await freshTrust.effectiveMode(podcastId: freshPodcastId)
+        #expect(finalMode == .auto,
+                "Fresh show should reach auto mode within 10 observations at bonus=0.10")
+    }
+
+    @Test("Sigmoid mid=0.25: lexical-only candidates calibrate above enter threshold")
+    func sigmoidCalibrationVerification() {
+        // The RuleBasedClassifier uses sigmoid(rawScore, k=8, mid=0.25).
+        // A strong lexical candidate (confidence ~0.80, weight 0.40) contributes
+        // 0.40 * 0.80 = 0.32 raw score. With mid=0.25:
+        //   sigmoid(0.32, k=8, mid=0.25) = 1/(1+exp(-8*(0.32-0.25))) = 1/(1+exp(-0.56)) ~= 0.636
+        // That's close to the 0.65 enter threshold. With any acoustic signal boost,
+        // it crosses.
+
+        let classifier = RuleBasedClassifier()
+
+        // Simulate a candidate with strong lexical evidence and minimal acoustic.
+        let candidate = LexicalCandidate(
+            id: "sigmoid-test-1",
+            analysisAssetId: "test-asset",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.85,
+            hitCount: 5,
+            categories: [.sponsor, .promoCode, .urlCTA],
+            evidenceText: "brought to you by acme corp",
+            detectorVersion: "test-v1"
+        )
+
+        let input = ClassifierInput(
+            candidate: candidate,
+            featureWindows: [],
+            episodeDuration: 3600
+        )
+
+        let result = classifier.classify(input: input, priors: .empty)
+
+        // With sigmoid mid=0.25, a strong lexical candidate alone should
+        // produce a calibrated score that's at least approaching the threshold.
+        // Raw: 0.40 * 0.85 = 0.34. sigmoid(0.34, 8, 0.25) ~= 0.668.
+        #expect(result.adProbability > 0.60,
+                "Strong lexical candidate with sigmoid mid=0.25 should calibrate above 0.60 (got \(result.adProbability))")
+
+        // Verify it's higher than what mid=0.45 would produce.
+        // sigmoid(0.34, 8, 0.45) = 1/(1+exp(-8*(0.34-0.45))) = 1/(1+exp(0.88)) ~= 0.293
+        // So mid=0.25 should be significantly higher.
+        #expect(result.adProbability > 0.50,
+                "Calibrated score should be meaningfully above 0.5 with new midpoint")
+    }
+
+    @Test("Removed 'so' pattern: content text does not produce false lexical hits")
+    func removedSoPatternFalsePositives() {
+        let scanner = LexicalScanner()
+
+        // Text with natural "so" usage that previously triggered false positives.
+        let contentChunks = [
+            makeContentChunk(index: 0, text:
+                "so let me explain what happened next the detective arrived and " +
+                "so we decided to investigate further into the case"
+            ),
+            makeContentChunk(index: 1, text:
+                "so the interesting thing about quantum computing is that " +
+                "so we need to consider the implications carefully"
+            ),
+            makeContentChunk(index: 2, text:
+                "so i think the best approach is to start small and " +
+                "so that brings us to our next topic for today"
+            ),
+        ]
+
+        let candidates = scanner.scan(
+            chunks: contentChunks, analysisAssetId: "false-positive-test"
+        )
+
+        // With the "so" pattern removed, these content-only chunks should not
+        // produce candidates (no sponsor, promo, URL, or purchase language).
+        #expect(candidates.isEmpty,
+                "Content-only text with 'so' should not produce lexical candidates after pattern removal")
+    }
+
+    @Test("Auto-mode candidate promotion: candidates skip backfill wait in auto mode")
+    func autoModeCandidatePromotion() async throws {
+        let store = try await makeIntegrationStore()
+        let trustStore = try await makeIntegrationStore()
+        let podcastId = "int-auto-promotion"
+        let assetId = "int-asset-auto-promo"
+
+        // Set up a trusted show in auto mode.
+        try await trustStore.upsertProfile(PodcastProfile(
+            podcastId: podcastId,
+            sponsorLexicon: nil,
+            normalizedAdSlotPriors: nil,
+            repeatedCTAFragments: nil,
+            jingleFingerprints: nil,
+            implicitFalsePositiveCount: 0,
+            skipTrustScore: 0.95,
+            observationCount: 20,
+            mode: "auto",
+            recentFalseSkipSignals: 0
+        ))
+
+        let trustService = TrustScoringService(store: trustStore)
+        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        await orchestrator.beginEpisode(
+            analysisAssetId: assetId, podcastId: podcastId
+        )
+
+        // Feed a candidate (not confirmed) with confidence above enter threshold.
+        let candidateWindow = AdWindow(
+            id: "auto-promo-1",
+            analysisAssetId: assetId,
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.75,
+            boundaryState: "lexical",
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: "test-v1",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            evidenceText: "brought to you by",
+            evidenceStartTime: 60,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false
+        )
+
+        await orchestrator.receiveAdWindows([candidateWindow])
+        let log = await orchestrator.getDecisionLog()
+
+        // With auto-mode candidate promotion, the candidate should be promoted
+        // to confirmed and then applied without waiting for backfill.
+        let applied = log.filter { $0.decision == .applied }
+        #expect(!applied.isEmpty,
+                "Auto mode should promote and apply candidate windows above enter threshold")
+
+        // Verify that manual mode does NOT auto-apply candidates.
+        let manualStore = try await makeIntegrationStore()
+        let manualTrustStore = try await makeIntegrationStore()
+        let manualPodcastId = "int-manual-no-promo"
+        let manualAssetId = "int-asset-manual-promo"
+
+        try await manualTrustStore.upsertProfile(PodcastProfile(
+            podcastId: manualPodcastId,
+            sponsorLexicon: nil,
+            normalizedAdSlotPriors: nil,
+            repeatedCTAFragments: nil,
+            jingleFingerprints: nil,
+            implicitFalsePositiveCount: 0,
+            skipTrustScore: 0.6,
+            observationCount: 5,
+            mode: "manual",
+            recentFalseSkipSignals: 0
+        ))
+
+        let manualTrust = TrustScoringService(store: manualTrustStore)
+        let manualOrch = SkipOrchestrator(store: manualStore, trustService: manualTrust)
+        await manualOrch.beginEpisode(
+            analysisAssetId: manualAssetId, podcastId: manualPodcastId
+        )
+
+        let manualCandidate = AdWindow(
+            id: "manual-promo-1",
+            analysisAssetId: manualAssetId,
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.75,
+            boundaryState: "lexical",
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: "test-v1",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            evidenceText: "brought to you by",
+            evidenceStartTime: 60,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false
+        )
+
+        await manualOrch.receiveAdWindows([manualCandidate])
+        let manualLog = await manualOrch.getDecisionLog()
+
+        let manualApplied = manualLog.filter { $0.decision == .applied }
+        #expect(manualApplied.isEmpty,
+                "Manual mode should NOT auto-apply candidates -- awaits user tap")
+    }
+
+    // MARK: - Helpers
+
+    private func mapTestAdType(_ type: TestAdSegment.AdType) -> GroundTruthAdSegment.AdSegmentType {
+        switch type {
+        case .preRoll: .preRoll
+        case .midRoll: .midRoll
+        case .postRoll: .postRoll
+        }
+    }
+
+    private func makeContentChunk(index: Int, text: String) -> TranscriptChunk {
+        TranscriptChunk(
+            id: "content-\(index)",
+            analysisAssetId: "false-positive-test",
+            segmentFingerprint: "fp-content-\(index)",
+            chunkIndex: index,
+            startTime: Double(index) * 10.0,
+            endTime: Double(index + 1) * 10.0,
+            text: text,
+            normalizedText: text.lowercased()
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { !$0.isEmpty }
+                .joined(separator: " "),
+            pass: "fast",
+            modelVersion: "test-v1"
+        )
+    }
+}

@@ -280,9 +280,9 @@ struct LexicalScanner: Sendable {
             #"back to the show"#,
             #"back to the episode"#,
             #"anyway\b"#,
-            #"\bso\b(?=\s+(?:let|we|i|the|that|this|what))"#,
             #"without further ado"#,
             #"moving on"#,
+            // "so + pronoun/article" removed — too many false positives in normal speech
         ])
 
         return groups

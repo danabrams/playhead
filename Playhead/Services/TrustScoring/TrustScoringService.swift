@@ -55,7 +55,7 @@ struct TrustScoringConfig: Sendable {
         autoToManualFalseSignals: 2,
         manualToShadowFalseSignals: 4,
         falseSignalPenalty: 0.10,
-        correctObservationBonus: 0.05,
+        correctObservationBonus: 0.10,
         exceptionalFirstEpisodeConfidence: 0.92
     )
 }

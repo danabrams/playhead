@@ -187,7 +187,12 @@ struct RuleBasedClassifier: ClassifierService {
     /// Sigmoid steepness for calibration.
     private static let sigmoidK: Double = 8.0
     /// Sigmoid midpoint (raw score at which output = 0.5).
-    private static let sigmoidMid: Double = 0.45
+    /// Set to 0.25 so strong lexical signals alone (weight 0.40, max
+    /// contribution ~0.38) produce calibrated scores above the
+    /// orchestrator's enter threshold (0.65). This aligns with
+    /// LexicalScanner's design: "catches 60-70% of ads via lexical
+    /// signals alone."
+    private static let sigmoidMid: Double = 0.25
 
     /// Maximum boundary adjustment (seconds).
     private static let maxBoundaryAdjust: Double = 3.0

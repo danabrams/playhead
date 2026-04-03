@@ -78,8 +78,8 @@ actor PreviewBudgetStore {
         let consumed = await fetchConsumed(for: episodeKey)
 
         // Only grant grace if we're within the base budget (ad break started
-        // while the user still had budget).
-        guard consumed <= Self.baseBudgetSeconds else { return 0 }
+        // while the user still had budget). Exactly at the limit = exhausted.
+        guard consumed < Self.baseBudgetSeconds else { return 0 }
 
         // How much more can we allow under the absolute cap?
         let headroom = Self.maxBudgetWithGraceSeconds - consumed

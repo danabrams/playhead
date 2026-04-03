@@ -503,8 +503,13 @@ actor SkipOrchestrator {
         // for confirmation unless confidence is exceptionally high.
         if managed.decisionState == .candidate {
             // Candidates need confirmation before skipping.
-            // Only override if confidence is very high (strong sponsor evidence).
-            if confidence < config.shortSpanOverrideConfidence {
+            // In auto mode (trusted show), promote candidates above the
+            // enter threshold without waiting for backfill confirmation.
+            // Otherwise, only override if confidence is very high.
+            if activeSkipMode == .auto && confidence >= config.enterThreshold {
+                // Promote to confirmed — fall through to trust mode gate.
+                managed.decisionState = .confirmed
+            } else if confidence < config.shortSpanOverrideConfidence {
                 return managed.decisionState
             }
         }
