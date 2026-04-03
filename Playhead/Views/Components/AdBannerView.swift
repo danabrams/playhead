@@ -18,14 +18,22 @@ import SwiftUI
 /// Data for a single ad skip banner notification.
 struct AdSkipBannerItem: Identifiable, Equatable {
     let id: String
-    /// Advertiser name, if known.
+    /// The ad window ID from AnalysisStore (for revert feedback).
+    let windowId: String
+    /// Advertiser name, if known and above confidence threshold.
     let advertiser: String?
-    /// Short product/tagline, if known.
+    /// Short product/tagline, if known and above confidence threshold.
     let product: String?
-    /// Timestamp in episode seconds where the skipped ad started.
+    /// Timestamp in episode seconds where the skipped ad started (snapped boundary).
     let adStartTime: Double
     /// Timestamp in episode seconds where the skipped ad ended.
     let adEndTime: Double
+    /// Confidence of the metadata extraction (nil = no metadata).
+    let metadataConfidence: Double?
+    /// Where the metadata came from (e.g. "foundationModels", "regex", "none").
+    let metadataSource: String
+    /// The podcast ID, needed for trust scoring on revert.
+    let podcastId: String
 }
 
 // MARK: - Banner Queue (ViewModel)
@@ -140,19 +148,65 @@ struct AdBannerView: View {
         .animation(Motion.standard, value: queue.currentBanner?.id)
     }
 
+    // MARK: - Copy Logic
+
+    /// Minimum metadata confidence required to surface advertiser/product.
+    /// Below this, the banner falls back to generic "Skipped sponsor segment".
+    private static let metadataConfidenceThreshold: Double = 0.60
+
+    /// Resolve the banner copy line from metadata, applying strict
+    /// evidence-bound rules. Never surfaces a brand solely from a model guess.
+    private static func bannerCopy(for item: AdSkipBannerItem) -> BannerCopyLine {
+        // Only surface specific copy when:
+        // 1. metadataSource is not "none" (metadata was actually extracted)
+        // 2. metadataConfidence exceeds the threshold
+        // 3. evidenceText was present (advertiser came from transcript, not a guess)
+        let hasStrongEvidence: Bool = {
+            guard item.metadataSource != "none",
+                  let confidence = item.metadataConfidence,
+                  confidence >= metadataConfidenceThreshold
+            else { return false }
+            return true
+        }()
+
+        if hasStrongEvidence, let advertiser = item.advertiser {
+            return BannerCopyLine(
+                prefix: "Skipped",
+                advertiser: advertiser,
+                detail: item.product
+            )
+        }
+
+        // Weak or missing evidence: generic copy, never hallucinated names.
+        return BannerCopyLine(
+            prefix: "Skipped sponsor segment",
+            advertiser: nil,
+            detail: nil
+        )
+    }
+
+    /// Template-driven banner copy. Never free-form.
+    private struct BannerCopyLine: Equatable {
+        let prefix: String
+        let advertiser: String?
+        let detail: String?
+    }
+
     // MARK: - Banner Card
 
     @ViewBuilder
     private func bannerCard(_ item: AdSkipBannerItem) -> some View {
+        let copy = Self.bannerCopy(for: item)
+
         VStack(alignment: .leading, spacing: Spacing.xs) {
-            // Top line: "Skipped · Advertiser · Product"
+            // Top line: template-driven copy
             HStack(spacing: 0) {
-                Text("Skipped")
+                Text(copy.prefix)
                     .font(AppTypography.sans(size: 13, weight: .semibold))
                     .foregroundStyle(AppColors.accent)
 
-                if let advertiser = item.advertiser {
-                    Text(" · ")
+                if let advertiser = copy.advertiser {
+                    Text(" \u{00B7} ")
                         .font(AppTypography.sans(size: 13, weight: .regular))
                         .foregroundStyle(boneText)
                     Text(advertiser)
@@ -160,11 +214,11 @@ struct AdBannerView: View {
                         .foregroundStyle(boneText)
                 }
 
-                if let product = item.product {
-                    Text(" · ")
+                if let detail = copy.detail {
+                    Text(" \u{00B7} ")
                         .font(AppTypography.sans(size: 13, weight: .regular))
                         .foregroundStyle(boneText.opacity(0.6))
-                    Text("\"\(product)\"")
+                    Text("\"\(detail)\"")
                         .font(AppTypography.mono(size: 12, weight: .regular))
                         .foregroundStyle(boneText.opacity(0.7))
                         .lineLimit(1)
@@ -239,7 +293,7 @@ private struct BannerButtonStyle: ButtonStyle {
 
 // MARK: - Preview
 
-#Preview("Ad Banner") {
+#Preview("Ad Banner — High Confidence") {
     ZStack {
         AppColors.background
             .ignoresSafeArea()
@@ -249,10 +303,40 @@ private struct BannerButtonStyle: ButtonStyle {
                 let q = AdBannerQueue()
                 q.enqueue(AdSkipBannerItem(
                     id: "preview-1",
+                    windowId: "w-1",
                     advertiser: "Squarespace",
                     product: "Build your website",
                     adStartTime: 120.0,
-                    adEndTime: 180.0
+                    adEndTime: 180.0,
+                    metadataConfidence: 0.85,
+                    metadataSource: "foundationModels",
+                    podcastId: "podcast-1"
+                ))
+                return q
+            }()
+        )
+    }
+    .preferredColorScheme(.dark)
+}
+
+#Preview("Ad Banner — Low Confidence") {
+    ZStack {
+        AppColors.background
+            .ignoresSafeArea()
+
+        AdBannerView(
+            queue: {
+                let q = AdBannerQueue()
+                q.enqueue(AdSkipBannerItem(
+                    id: "preview-2",
+                    windowId: "w-2",
+                    advertiser: "Maybe Corp",
+                    product: nil,
+                    adStartTime: 300.0,
+                    adEndTime: 345.0,
+                    metadataConfidence: 0.3,
+                    metadataSource: "foundationModels",
+                    podcastId: "podcast-1"
                 ))
                 return q
             }()
@@ -270,11 +354,15 @@ private struct BannerButtonStyle: ButtonStyle {
             queue: {
                 let q = AdBannerQueue()
                 q.enqueue(AdSkipBannerItem(
-                    id: "preview-2",
+                    id: "preview-3",
+                    windowId: "w-3",
                     advertiser: nil,
                     product: nil,
-                    adStartTime: 300.0,
-                    adEndTime: 345.0
+                    adStartTime: 400.0,
+                    adEndTime: 450.0,
+                    metadataConfidence: nil,
+                    metadataSource: "none",
+                    podcastId: "podcast-1"
                 ))
                 return q
             }()

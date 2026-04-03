@@ -63,7 +63,7 @@ struct NowPlayingView: View {
             AdBannerView(
                 queue: bannerQueue,
                 onListen: { item in
-                    viewModel.seek(to: item.adStartTime)
+                    viewModel.handleListenRewind(item: item)
                 }
             )
         }

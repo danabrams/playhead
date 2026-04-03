@@ -94,6 +94,34 @@ final class NowPlayingViewModel: ObservableObject {
         }
     }
 
+    /// Handle the "Listen" tap on an ad skip banner.
+    ///
+    /// 1. Rewind to the snapped start boundary of the skipped ad window.
+    /// 2. Set decisionState to .reverted so auto-skip ignores this span.
+    /// 3. Feed a false-positive signal to the PodcastProfile trust scoring.
+    func handleListenRewind(item: AdSkipBannerItem) {
+        // Rewind to the ad start (snapped boundary).
+        seek(to: item.adStartTime)
+
+        // Revert the ad window and update trust scoring in the background.
+        Task.detached(priority: .utility) {
+            do {
+                let store = try AnalysisStore()
+                try await store.migrate()
+                let detectionService = AdDetectionService(
+                    store: store,
+                    metadataExtractor: FallbackExtractor()
+                )
+                try await detectionService.recordListenRewind(
+                    windowId: item.windowId,
+                    podcastId: item.podcastId
+                )
+            } catch {
+                // Non-blocking: rewind already happened, trust update is best-effort.
+            }
+        }
+    }
+
     func setSpeed(_ speed: Float) {
         guard let service = playbackService else { return }
         Task { @PlaybackServiceActor in

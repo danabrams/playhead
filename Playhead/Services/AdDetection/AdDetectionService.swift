@@ -47,6 +47,10 @@ enum AdDecisionState: String, Sendable {
     case confirmed
     /// Suppressed: below threshold after backfill re-classification.
     case suppressed
+    /// Skip was applied to the listener (audio was skipped).
+    case applied
+    /// User tapped "Listen" — skip reverted, plays through the ad.
+    case reverted
 }
 
 // MARK: - Boundary State
@@ -305,10 +309,10 @@ actor AdDetectionService {
         windowId: String,
         podcastId: String
     ) async throws {
-        // Suppress the window (user doesn't want this skip).
+        // Revert the window (user tapped "Listen" to play through).
         try await store.updateAdWindowDecision(
             id: windowId,
-            decisionState: AdDecisionState.suppressed.rawValue
+            decisionState: AdDecisionState.reverted.rawValue
         )
 
         // Increment false-positive signal on the profile.

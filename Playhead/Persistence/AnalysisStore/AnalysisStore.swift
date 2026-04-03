@@ -773,6 +773,15 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    func updateAdWindowWasSkipped(id: String, wasSkipped: Bool) throws {
+        let sql = "UPDATE ad_windows SET wasSkipped = ? WHERE id = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, wasSkipped ? 1 : 0)
+        bind(stmt, 2, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
     func updateConfirmedAdCoverage(id: String, endTime: Double) throws {
         let sql = "UPDATE analysis_assets SET confirmedAdCoverageEndTime = ? WHERE id = ?"
         let stmt = try prepare(sql)
