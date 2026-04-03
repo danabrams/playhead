@@ -41,7 +41,7 @@ enum SessionState: String, Sendable, CaseIterable {
         case .featuresReady:  [.hotPathReady, .failed]
         case .hotPathReady:   [.backfill, .complete, .failed]
         case .backfill:       [.complete, .failed]
-        case .complete:       [.featuresReady] // recovery: re-run if no data
+        case .complete:       [.queued] // recovery: re-run if no data
         case .failed:         [.queued] // retry
         }
     }
@@ -326,12 +326,13 @@ actor AnalysisCoordinator {
             case .complete:
                 // Verify the session actually has transcript data. A crash
                 // during backfill can leave the session as "complete" with
-                // no chunks.
+                // no chunks. Restart from queued to re-decode audio (shards
+                // aren't in memory across app launches).
                 let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
                 if chunks.isEmpty {
-                    logger.info("Session \(sessionId) marked complete but has 0 chunks — restarting from featuresReady")
-                    try await transition(sessionId: sessionId, assetId: assetId, to: .featuresReady)
-                    try await runFromFeaturesReady(sessionId: sessionId, assetId: assetId)
+                    logger.info("Session \(sessionId) marked complete but has 0 chunks — restarting from queued")
+                    try await transition(sessionId: sessionId, assetId: assetId, to: .queued)
+                    try await runFromQueued(sessionId: sessionId, assetId: assetId, episodeId: episodeId, audioURL: audioURL)
                 } else {
                     logger.info("Session \(sessionId) already complete (\(chunks.count) chunks)")
                 }
@@ -508,18 +509,13 @@ actor AnalysisCoordinator {
 
         // If resuming from a persisted backfill state (e.g. after a crash),
         // there's no active transcript task. Check if transcription actually
-        // produced data. If not, restart transcription.
+        // produced data. If not, throw so runPipeline marks as failed →
+        // queued, which will re-decode audio and restart fully.
         if transcriptEventTask == nil {
             let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
-            if chunks.isEmpty, let shards = activeShards, let snapshot = latestSnapshot {
-                logger.info("Backfill resumed with 0 chunks — restarting transcription")
-                startObservingTranscriptEvents(sessionId: sessionId, assetId: assetId)
-                await transcriptEngine.startTranscription(
-                    shards: shards,
-                    analysisAssetId: assetId,
-                    snapshot: snapshot
-                )
-                return
+            if chunks.isEmpty {
+                logger.info("Backfill resumed with 0 chunks — requesting full restart")
+                throw AnalysisCoordinatorError.noAudioAvailable(episodeId: activeEpisodeId ?? "unknown")
             }
             try await finalizeBackfill(sessionId: sessionId, assetId: assetId)
             return
