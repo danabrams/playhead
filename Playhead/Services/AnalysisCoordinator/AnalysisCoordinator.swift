@@ -458,10 +458,15 @@ actor AnalysisCoordinator {
                 throw AnalysisCoordinatorError.sessionNotFound(id: sessionId)
             }
             guard let state = SessionState(rawValue: session.state) else {
-                // Unknown state in DB -- force to failed.
-                currentState = .failed
-                logger.error("Unknown session state '\(session.state)' for session \(sessionId), treating as failed")
-                return
+                // Unknown state in DB -- persist failed state and reject transition.
+                logger.error("Unknown session state '\(session.state)' for session \(sessionId), persisting as failed")
+                try await store.updateSessionState(
+                    id: sessionId,
+                    state: SessionState.failed.rawValue,
+                    failureReason: "Unknown state in DB: \(session.state)"
+                )
+                try await store.updateAssetState(id: assetId, state: SessionState.failed.rawValue)
+                throw AnalysisCoordinatorError.invalidTransition(from: .failed, to: newState)
             }
             currentState = state
         } catch let error as AnalysisCoordinatorError {
