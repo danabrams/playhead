@@ -115,6 +115,19 @@ private func condensedSourceSnippet(_ source: String) -> String {
     .trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
+private func eventually(
+    iterations: Int = 100,
+    condition: @escaping @MainActor () -> Bool
+) async -> Bool {
+    for _ in 0..<iterations {
+        if await MainActor.run(body: condition) {
+            return true
+        }
+        await Task.yield()
+    }
+    return await MainActor.run(body: condition)
+}
+
 /// Tracks temporary directories created by `makeTestStore()` for cleanup.
 private let _testStoreDirs = TestTempDirTracker()
 
@@ -1799,6 +1812,86 @@ struct RuntimeContractTests {
         let manifest = try ModelInventory.loadBundledManifest()
         #expect(!manifest.models.isEmpty)
         #expect(manifest.models.allSatisfy { !$0.id.isEmpty })
+    }
+}
+
+@Suite("Playback Transport - Observer Hydration")
+struct PlaybackObserverHydrationTests {
+
+    @Test("Late subscribers receive the current playback snapshot immediately")
+    func lateSubscribersReceiveCurrentState() async {
+        let service = PlaybackService()
+        let expected = PlaybackState(
+            status: .playing,
+            currentTime: 42,
+            duration: 180,
+            rate: 1,
+            playbackSpeed: 1.25
+        )
+
+        await service._testingInjectState(expected)
+
+        let stream = await service.observeStates()
+        var iterator = stream.makeAsyncIterator()
+        let firstState = await iterator.next()
+
+        #expect(firstState == expected)
+
+        await service.tearDown()
+    }
+}
+
+@Suite("NowPlayingViewModel - Reattachment")
+struct NowPlayingViewModelReattachmentTests {
+
+    @MainActor
+    @Test("Reattaching restores the latest playback state without waiting for a new event")
+    func reattachingRestoresLatestPlaybackState() async {
+        let runtime = PlayheadRuntime(isPreviewRuntime: true)
+        let viewModel = NowPlayingViewModel(runtime: runtime)
+
+        await runtime.playbackService._testingInjectState(
+            PlaybackState(
+                status: .playing,
+                currentTime: 32,
+                duration: 600,
+                rate: 1,
+                playbackSpeed: 1.0
+            )
+        )
+
+        viewModel.startObserving()
+
+        #expect(await eventually {
+            viewModel.isPlaying
+                && viewModel.currentTime == 32
+                && viewModel.duration == 600
+                && viewModel.playbackSpeed == 1.0
+        })
+
+        viewModel.stopObserving()
+
+        await runtime.playbackService._testingInjectState(
+            PlaybackState(
+                status: .paused,
+                currentTime: 275,
+                duration: 600,
+                rate: 0,
+                playbackSpeed: 1.5
+            )
+        )
+
+        viewModel.startObserving()
+
+        #expect(await eventually {
+            !viewModel.isPlaying
+                && viewModel.currentTime == 275
+                && viewModel.duration == 600
+                && viewModel.playbackSpeed == 1.5
+        })
+
+        viewModel.stopObserving()
+        await runtime.playbackService.tearDown()
     }
 }
 

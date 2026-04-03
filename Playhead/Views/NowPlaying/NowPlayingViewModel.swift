@@ -55,8 +55,10 @@ final class NowPlayingViewModel {
         guard observationTask == nil else { return }
         syncMetadata()
         let service = runtime.playbackService
-        observationTask = Task { @PlaybackServiceActor in
-            for await state in service.stateStream {
+        observationTask = Task {
+            let stream = await service.observeStates()
+            for await state in stream {
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     self.applyState(state)
                 }
@@ -67,6 +69,10 @@ final class NowPlayingViewModel {
     func stopObserving() {
         observationTask?.cancel()
         observationTask = nil
+        stopObservingAdSegments()
+    }
+
+    func stopObservingAdSegments() {
         segmentObservationTask?.cancel()
         segmentObservationTask = nil
     }

@@ -127,7 +127,8 @@ final class PlayheadRuntime {
             var lastStatus: PlaybackState.Status = .idle
             var lastSpeed: Float = 1.0
 
-            for await state in playbackService.stateStream {
+            let stateStream = await playbackService.observeStates()
+            for await state in stateStream {
                 await skipOrchestrator.updatePlayheadTime(state.currentTime)
 
                 if state.playbackSpeed != lastSpeed {

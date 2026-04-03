@@ -10,6 +10,7 @@ import SwiftUI
 struct NowPlayingView: View {
 
     private var runtime: PlayheadRuntime
+    private let ownsViewModel: Bool
     @State private var viewModel: NowPlayingViewModel
     @State private var bannerQueue = AdBannerQueue()
     @State private var showTranscriptPeek = false
@@ -19,7 +20,9 @@ struct NowPlayingView: View {
     /// Falls back to creating its own if none provided.
     init(runtime: PlayheadRuntime, viewModel: NowPlayingViewModel? = nil) {
         self.runtime = runtime
-        self._viewModel = State(wrappedValue: viewModel ?? NowPlayingViewModel(runtime: runtime))
+        let resolvedViewModel = viewModel ?? NowPlayingViewModel(runtime: runtime)
+        self.ownsViewModel = viewModel == nil
+        self._viewModel = State(wrappedValue: resolvedViewModel)
     }
 
     private var analysisAssetId: String? {
@@ -81,7 +84,13 @@ struct NowPlayingView: View {
             viewModel.startObserving()
             viewModel.observeAdSegments(from: runtime.skipOrchestrator)
         }
-        .onDisappear { viewModel.stopObserving() }
+        .onDisappear {
+            if ownsViewModel {
+                viewModel.stopObserving()
+            } else {
+                viewModel.stopObservingAdSegments()
+            }
+        }
         .sheet(isPresented: $showTranscriptPeek) {
             if let assetId = analysisAssetId {
                 TranscriptPeekView(

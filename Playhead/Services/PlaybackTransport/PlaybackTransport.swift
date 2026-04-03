@@ -76,9 +76,9 @@ final class PlaybackService: NSObject, Sendable {
 
     // MARK: - Streams
 
-    private let stateContinuation: AsyncStream<PlaybackState>.Continuation
-    /// Subscribe to receive playback state updates.
-    nonisolated let stateStream: AsyncStream<PlaybackState>
+    /// Active state observers. Each observer receives the current snapshot
+    /// immediately on subscription, then all subsequent updates.
+    private var stateObservers: [UUID: AsyncStream<PlaybackState>.Continuation] = [:]
 
     // MARK: - Observation
 
@@ -96,10 +96,6 @@ final class PlaybackService: NSObject, Sendable {
         let player = AVPlayer()
         player.automaticallyWaitsToMinimizeStalling = true
         self.player = player
-
-        let (stream, continuation) = AsyncStream<PlaybackState>.makeStream()
-        self.stateStream = stream
-        self.stateContinuation = continuation
 
         super.init()
 
@@ -123,7 +119,10 @@ final class PlaybackService: NSObject, Sendable {
         rateObservation?.invalidate()
         itemStatusObservation?.invalidate()
         removeRemoteCommandTargets()
-        stateContinuation.finish()
+        for continuation in stateObservers.values {
+            continuation.finish()
+        }
+        stateObservers.removeAll()
     }
 
     // MARK: - Audio Session
@@ -210,6 +209,22 @@ final class PlaybackService: NSObject, Sendable {
     /// Returns the latest transport snapshot for higher-level coordinators.
     func snapshot() -> PlaybackState {
         _state
+    }
+
+    /// Subscribe to playback state with immediate hydration.
+    /// This avoids remount bugs where a late subscriber sees defaults until the
+    /// next transport event arrives.
+    func observeStates() -> AsyncStream<PlaybackState> {
+        AsyncStream { continuation in
+            let id = UUID()
+            stateObservers[id] = continuation
+            continuation.yield(_state)
+            continuation.onTermination = { [weak self] _ in
+                Task { @PlaybackServiceActor in
+                    self?.stateObservers.removeValue(forKey: id)
+                }
+            }
+        }
     }
 
     /// Seek to an absolute position in seconds.
@@ -531,6 +546,18 @@ final class PlaybackService: NSObject, Sendable {
 
     private func updateState(_ mutate: (inout PlaybackState) -> Void) {
         mutate(&_state)
-        stateContinuation.yield(_state)
+        for continuation in stateObservers.values {
+            continuation.yield(_state)
+        }
     }
+
+#if DEBUG
+    /// Test-only hook for setting transport state without loading media.
+    func _testingInjectState(_ state: PlaybackState) {
+        _state = state
+        for continuation in stateObservers.values {
+            continuation.yield(_state)
+        }
+    }
+#endif
 }

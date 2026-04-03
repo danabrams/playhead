@@ -45,17 +45,32 @@ struct ContentView: View {
             }
         }
         .animation(Motion.standard, value: runtime.isPlayingEpisode)
+        .task {
+            syncNowPlayingViewModel(isPlaying: runtime.isPlayingEpisode)
+        }
         .onChange(of: runtime.isPlayingEpisode) { _, isPlaying in
-            if isPlaying, nowPlayingViewModel == nil {
-                nowPlayingViewModel = NowPlayingViewModel(runtime: runtime)
-            } else if !isPlaying {
-                nowPlayingViewModel = nil
-            }
+            syncNowPlayingViewModel(isPlaying: isPlaying)
         }
         .fullScreenCover(isPresented: $showNowPlaying) {
             if let vm = nowPlayingViewModel {
                 NowPlayingView(runtime: runtime, viewModel: vm)
             }
+        }
+    }
+
+    private func syncNowPlayingViewModel(isPlaying: Bool) {
+        if isPlaying {
+            if let vm = nowPlayingViewModel {
+                vm.startObserving()
+            } else {
+                let vm = NowPlayingViewModel(runtime: runtime)
+                vm.startObserving()
+                nowPlayingViewModel = vm
+            }
+        } else {
+            nowPlayingViewModel?.stopObserving()
+            nowPlayingViewModel = nil
+            showNowPlaying = false
         }
     }
 }
