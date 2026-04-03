@@ -53,8 +53,8 @@ final class PlaybackService: NSObject, Sendable {
     static let maxSpeed: Float = 3.0
 
     /// Default skip intervals.
-    static let skipForwardSeconds: TimeInterval = 30
-    static let skipBackwardSeconds: TimeInterval = 15
+    nonisolated static let skipForwardSeconds: TimeInterval = 30
+    nonisolated static let skipBackwardSeconds: TimeInterval = 15
 
     /// Duck volume during skip transitions on streamed audio.
     private static let duckVolume: Float = 0.15
@@ -92,7 +92,7 @@ final class PlaybackService: NSObject, Sendable {
 
     // MARK: - Init
 
-    override init() {
+    nonisolated override init() {
         let player = AVPlayer()
         player.automaticallyWaitsToMinimizeStalling = true
         self.player = player
@@ -103,12 +103,14 @@ final class PlaybackService: NSObject, Sendable {
 
         super.init()
 
-        configureAudioSession()
-        configureRemoteCommands()
-        startPeriodicTimeObserver()
-        observePlayerRate()
-        observeInterruptions()
-        observeRouteChanges()
+        Task { @PlaybackServiceActor [self] in
+            self.configureAudioSession()
+            self.configureRemoteCommands()
+            self.startPeriodicTimeObserver()
+            self.observePlayerRate()
+            self.observeInterruptions()
+            self.observeRouteChanges()
+        }
     }
 
     /// Tear down observers and streams. Call before releasing the service.
