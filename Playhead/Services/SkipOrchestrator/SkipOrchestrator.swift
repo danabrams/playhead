@@ -118,6 +118,7 @@ actor SkipOrchestrator {
 
     private let store: AnalysisStore
     private let config: SkipPolicyConfig
+    private let trustService: TrustScoringService?
 
     // MARK: - State
 
@@ -149,6 +150,10 @@ actor SkipOrchestrator {
     /// Set via `setSkipCueHandler`. Avoids direct PlaybackServiceActor coupling.
     private var skipCueHandler: (([CMTimeRange]) -> Void)?
 
+    /// Per-show skip mode for the current episode. Loaded from TrustScoringService
+    /// at episode start. Defaults to `.shadow` if no trust service is wired.
+    private var activeSkipMode: SkipMode = .shadow
+
     /// Continuation-backed stream of applied ad segment time ranges (seconds).
     /// Consumers receive the full set of applied segments whenever the set changes.
     private var segmentContinuations: [UUID: AsyncStream<[(start: Double, end: Double)]>.Continuation] = [:]
@@ -157,10 +162,12 @@ actor SkipOrchestrator {
 
     init(
         store: AnalysisStore,
-        config: SkipPolicyConfig = .default
+        config: SkipPolicyConfig = .default,
+        trustService: TrustScoringService? = nil
     ) {
         self.store = store
         self.config = config
+        self.trustService = trustService
     }
 
     // MARK: - Configuration
@@ -205,7 +212,10 @@ actor SkipOrchestrator {
     // MARK: - Episode Lifecycle
 
     /// Begin orchestration for a new episode. Clears all prior state.
-    func beginEpisode(analysisAssetId: String) async {
+    /// - Parameters:
+    ///   - analysisAssetId: The analysis asset being played.
+    ///   - podcastId: The podcast's ID, used to load the per-show trust mode.
+    func beginEpisode(analysisAssetId: String, podcastId: String? = nil) async {
         windows.removeAll()
         activeAssetId = analysisAssetId
         inAdState = false
@@ -213,6 +223,13 @@ actor SkipOrchestrator {
         skipSuppressedAfterSeek = false
         currentPlayheadTime = 0
         decisionLog.removeAll()
+
+        // Load per-show trust mode.
+        if let podcastId, let trustService {
+            activeSkipMode = await trustService.effectiveMode(podcastId: podcastId)
+        } else {
+            activeSkipMode = .shadow
+        }
 
         // Pre-load feature windows for boundary snapping.
         do {
@@ -308,7 +325,8 @@ actor SkipOrchestrator {
     }
 
     /// Record that the user tapped "Listen" to revert a skip.
-    func recordListenRevert(windowId: String) async {
+    /// Also signals the trust engine (if wired) as a false-skip.
+    func recordListenRevert(windowId: String, podcastId: String? = nil) async {
         guard var managed = windows[windowId] else { return }
 
         managed.decisionState = .reverted
@@ -331,8 +349,55 @@ actor SkipOrchestrator {
             logger.warning("Failed to persist revert for \(windowId): \(error.localizedDescription)")
         }
 
+        // Signal the trust engine about the false skip.
+        if let podcastId, let trustService {
+            await trustService.recordFalseSkipSignal(podcastId: podcastId)
+        }
+
         // Remove the cue and re-push.
         evaluateAndPush()
+    }
+
+    /// User tapped "Skip Ad" in manual mode. Promotes a confirmed window
+    /// to applied and fires the skip cue.
+    func applyManualSkip(windowId: String) async {
+        guard var managed = windows[windowId] else { return }
+        guard managed.decisionState == .confirmed else { return }
+
+        managed.decisionState = .applied
+        managed.cueActive = true
+        windows[windowId] = managed
+
+        logDecision(
+            managed: managed,
+            decision: .applied,
+            reason: "Manual skip by user"
+        )
+
+        // Persist.
+        let id = managed.adWindow.id
+        Task { [store] in
+            try? await store.updateAdWindowDecision(
+                id: id,
+                decisionState: SkipDecisionState.applied.rawValue
+            )
+            try? await store.updateAdWindowWasSkipped(id: id, wasSkipped: true)
+        }
+
+        evaluateAndPush()
+    }
+
+    /// The active skip mode for the current episode.
+    func currentSkipMode() -> SkipMode {
+        activeSkipMode
+    }
+
+    /// Windows in the confirmed state (available for manual skip UI).
+    func confirmedWindows() -> [AdWindow] {
+        windows.values
+            .filter { $0.decisionState == .confirmed }
+            .sorted { $0.snappedStart < $1.snappedStart }
+            .map(\.adWindow)
     }
 
     // MARK: - Decision Log Access
@@ -444,10 +509,25 @@ actor SkipOrchestrator {
             }
         }
 
+        // Trust mode gate: shadow mode logs only; manual mode marks confirmed
+        // but does not auto-skip (UI shows a manual "Skip Ad" button instead).
+        switch activeSkipMode {
+        case .shadow:
+            let decision = SkipDecisionState.confirmed
+            logDecision(managed: managed, decision: decision, reason: "Shadow mode -- detection logged, no skip fired")
+            return decision
+        case .manual:
+            let decision = SkipDecisionState.confirmed
+            logDecision(managed: managed, decision: decision, reason: "Manual mode -- confirmed, awaiting user tap")
+            return decision
+        case .auto:
+            break // Proceed to auto-skip below.
+        }
+
         // All checks passed -- apply the skip.
         inAdState = true
         let decision = SkipDecisionState.applied
-        logDecision(managed: managed, decision: decision, reason: "Skip policy accepted")
+        logDecision(managed: managed, decision: decision, reason: "Skip policy accepted (auto mode)")
 
         // Persist to SQLite (fire-and-forget from the actor).
         let windowId = managed.adWindow.id
