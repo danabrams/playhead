@@ -176,9 +176,10 @@ struct CorpusLoader {
 
         // Check for overlapping segments.
         let sorted = annotation.adSegments.sorted { $0.startTime < $1.startTime }
-        for i in 1..<sorted.count {
-            if sorted[i].startTime < sorted[i - 1].endTime {
-                errors.append("Segments \(i - 1) and \(i) overlap")
+        for (index, pair) in zip(sorted.indices, zip(sorted, sorted.dropFirst())) {
+            let (previous, current) = pair
+            if current.startTime < previous.endTime {
+                errors.append("Segments \(index) and \(index + 1) overlap")
             }
         }
 

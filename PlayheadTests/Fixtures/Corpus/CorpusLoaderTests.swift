@@ -212,6 +212,33 @@ struct CorpusValidationEdgeCaseTests {
         #expect(errors.contains { $0.contains("isNoAdEpisode") }, "Should detect no-ad flag inconsistency")
     }
 
+    @Test("Validation accepts empty segment lists")
+    func emptySegmentsDoNotTrap() {
+        let annotation = TestEpisodeAnnotation(
+            annotationId: "test-empty",
+            audioFileReference: "test.m4a",
+            podcast: TestPodcastMetadata(
+                podcastId: "test", title: "Test", author: "Test",
+                genre: "Test", usesDynamicAdInsertion: false
+            ),
+            episode: TestEpisodeMetadata(
+                episodeId: "test-ep", title: "Test Episode",
+                duration: 600, publishedAt: "2026-01-01",
+                feedURL: "https://example.com/feed",
+                audioURL: "https://example.com/audio.m4a"
+            ),
+            adSegments: [],
+            isNoAdEpisode: true,
+            tags: [],
+            schemaVersion: 1,
+            annotatedBy: "test",
+            lastUpdated: "2026-01-01"
+        )
+
+        let errors = loader.validate(annotation)
+        #expect(errors.isEmpty, "Empty no-ad annotations should validate cleanly")
+    }
+
     @Test("Converts annotation to ReplayConfiguration")
     func annotationToReplayConfig() throws {
         let annotations = try loader.loadAllAnnotations()

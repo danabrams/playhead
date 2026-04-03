@@ -80,10 +80,16 @@ actor AssetProvider {
     func download(entry: ModelEntry) async throws {
         let downloadsDir = inventory.downloadsDirectory
         let downloadedURL = downloadsDir.appendingPathComponent("\(entry.id).download")
+        let partialURL = downloadsDir.appendingPathComponent("\(entry.id).partial")
+        let fm = FileManager.default
 
         await inventory.updateDownloadProgress(modelId: entry.id, progress: 0)
 
-        let request = URLRequest(url: entry.downloadURL)
+        let partialSize = ((try? fm.attributesOfItem(atPath: partialURL.path)[.size]) as? NSNumber)?.int64Value
+        var request = URLRequest(url: entry.downloadURL)
+        if let partialSize, partialSize > 0 {
+            request.setValue("bytes=\(partialSize)-", forHTTPHeaderField: "Range")
+        }
 
         // Download to a temporary file. Use URLSession.shared (not the background
         // session) because async download(for:) is not supported on background sessions.
@@ -97,13 +103,17 @@ actor AssetProvider {
             )
         }
 
-        let fm = FileManager.default
-
         // Move the temp file to the downloads directory so it persists.
         if fm.fileExists(atPath: downloadedURL.path) {
             try fm.removeItem(at: downloadedURL)
         }
-        try fm.moveItem(at: tempURL, to: downloadedURL)
+        if let partialSize, partialSize > 0, httpResponse.statusCode == 206 {
+            try fm.copyItem(at: partialURL, to: downloadedURL)
+            try append(fileAt: tempURL, to: downloadedURL)
+            try fm.removeItem(at: tempURL)
+        } else {
+            try fm.moveItem(at: tempURL, to: downloadedURL)
+        }
 
         let attrs = try fm.attributesOfItem(atPath: downloadedURL.path)
         let downloaded = (attrs[.size] as? Int64) ?? 0
@@ -113,6 +123,25 @@ actor AssetProvider {
 
         // Verify and stage.
         try await verifyAndStage(entry: entry, downloadedFile: downloadedURL)
+
+        // Successful staging supersedes any stale resume artifact.
+        if fm.fileExists(atPath: partialURL.path) {
+            try fm.removeItem(at: partialURL)
+        }
+    }
+
+    private func append(fileAt sourceURL: URL, to destinationURL: URL) throws {
+        let sourceHandle = try FileHandle(forReadingFrom: sourceURL)
+        let destinationHandle = try FileHandle(forWritingTo: destinationURL)
+        defer {
+            try? sourceHandle.close()
+            try? destinationHandle.close()
+        }
+
+        try destinationHandle.seekToEnd()
+        while let chunk = try sourceHandle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            try destinationHandle.write(contentsOf: chunk)
+        }
     }
 
     // MARK: - Verification

@@ -413,7 +413,13 @@ actor AnalysisStore {
     }
 
     func fetchAssetByEpisodeId(_ episodeId: String) throws -> AnalysisAsset? {
-        let sql = "SELECT * FROM analysis_assets WHERE episodeId = ? ORDER BY createdAt DESC LIMIT 1"
+        let sql = """
+            SELECT *
+            FROM analysis_assets
+            WHERE episodeId = ?
+            ORDER BY createdAt DESC, rowid DESC
+            LIMIT 1
+            """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, episodeId)
