@@ -13,6 +13,7 @@ final class NowPlayingViewModel {
 
     var episodeTitle: String = "No Episode Selected"
     var podcastTitle: String = ""
+    var artworkURL: URL?
     var isPlaying: Bool = false
     var currentTime: TimeInterval = 0
     var duration: TimeInterval = 0
@@ -159,11 +160,10 @@ final class NowPlayingViewModel {
     // MARK: - Private
 
     private func applyState(_ state: PlaybackState) {
-        if case .playing = state.status {
-            isPlaying = true
-        } else {
-            isPlaying = false
-        }
+        isPlaying = state.rate > 0 || {
+            if case .playing = state.status { return true }
+            return false
+        }()
         currentTime = state.currentTime
         duration = state.duration
         playbackSpeed = state.playbackSpeed
@@ -173,5 +173,6 @@ final class NowPlayingViewModel {
     private func syncMetadata() {
         episodeTitle = runtime.currentEpisodeTitle ?? "No Episode Selected"
         podcastTitle = runtime.currentPodcastTitle ?? ""
+        artworkURL = runtime.currentArtworkURL
     }
 }

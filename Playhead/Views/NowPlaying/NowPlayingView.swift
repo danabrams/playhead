@@ -170,11 +170,41 @@ private extension NowPlayingView {
             .aspectRatio(1, contentMode: .fit)
             .frame(maxWidth: 140, maxHeight: 140)
             .overlay(
+                Group {
+                    if let artworkURL = viewModel.artworkURL {
+                        AsyncImage(url: artworkURL) { phase in
+                            switch phase {
+                            case .success(let image):
+                                image
+                                    .resizable()
+                                    .scaledToFill()
+                            case .failure:
+                                artworkPlaceholder
+                            case .empty:
+                                ProgressView()
+                                    .tint(AppColors.secondary)
+                            @unknown default:
+                                artworkPlaceholder
+                            }
+                        }
+                    } else {
+                        artworkPlaceholder
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md))
+            )
+            .overlay(
                 RoundedRectangle(cornerRadius: CornerRadius.md)
                     .stroke(AppColors.secondary.opacity(0.2), lineWidth: 1)
             )
             .themeShadow(AppShadow.card)
             .accessibilityLabel("Episode artwork")
+    }
+
+    private var artworkPlaceholder: some View {
+        Image(systemName: "mic.fill")
+            .font(.title2)
+            .foregroundStyle(AppColors.secondary.opacity(0.4))
     }
 
     // MARK: Titles

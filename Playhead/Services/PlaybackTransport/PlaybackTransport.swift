@@ -176,11 +176,7 @@ final class PlaybackService: NSObject, Sendable {
         switch item.status {
         case .readyToPlay:
             let duration = CMTimeGetSeconds(item.duration)
-            updateState {
-                $0.status = .paused
-                $0.duration = duration.isFinite ? duration : 0
-            }
-            updateNowPlayingInfo()
+            applyReadyToPlayState(duration: duration)
         case .failed:
             let msg = item.error?.localizedDescription ?? "unknown"
             updateState { $0.status = .failed(msg) }
@@ -354,7 +350,7 @@ final class PlaybackService: NSObject, Sendable {
             [weak self] player, _ in
             guard let self else { return }
             Task { @PlaybackServiceActor in
-                self.updateState { $0.rate = player.rate }
+                self.applyObservedRate(player.rate)
             }
         }
     }
@@ -544,6 +540,34 @@ final class PlaybackService: NSObject, Sendable {
 
     // MARK: - State Update
 
+    private func applyReadyToPlayState(duration: TimeInterval) {
+        let currentRate = player.rate
+        let wasPlaying = if case .playing = _state.status { true } else { false }
+        updateState {
+            $0.duration = duration.isFinite ? duration : 0
+            $0.rate = currentRate
+            $0.status = (currentRate > 0 || wasPlaying) ? .playing : .paused
+        }
+        updateNowPlayingInfo()
+    }
+
+    private func applyObservedRate(_ rate: Float) {
+        updateState {
+            $0.rate = rate
+            switch $0.status {
+            case .loading where rate > 0:
+                $0.status = .playing
+            case .paused where rate > 0:
+                $0.status = .playing
+            case .playing where rate == 0:
+                $0.status = .paused
+            default:
+                break
+            }
+        }
+        updateNowPlayingInfo()
+    }
+
     private func updateState(_ mutate: (inout PlaybackState) -> Void) {
         mutate(&_state)
         for continuation in stateObservers.values {
@@ -558,6 +582,14 @@ final class PlaybackService: NSObject, Sendable {
         for continuation in stateObservers.values {
             continuation.yield(_state)
         }
+    }
+
+    func _testingApplyReadyToPlayState(duration: TimeInterval) {
+        applyReadyToPlayState(duration: duration)
+    }
+
+    func _testingApplyObservedRate(_ rate: Float) {
+        applyObservedRate(rate)
     }
 #endif
 }

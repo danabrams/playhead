@@ -31,6 +31,7 @@ final class PlayheadRuntime {
     private(set) var currentAnalysisAssetId: String?
     private(set) var currentEpisodeTitle: String?
     private(set) var currentPodcastTitle: String?
+    private(set) var currentArtworkURL: URL?
 
     /// True when an episode is actively loaded for playback.
     var isPlayingEpisode: Bool {
@@ -208,6 +209,7 @@ final class PlayheadRuntime {
         currentPodcastId = podcastId
         currentEpisodeTitle = episode.title
         currentPodcastTitle = episode.podcast?.title
+        currentArtworkURL = episode.podcast?.artworkURL
         currentAnalysisAssetId = nil
         let resolvedAnalysisAssetId = await analysisCoordinator.handlePlaybackEvent(
             .playStarted(
@@ -248,6 +250,7 @@ final class PlayheadRuntime {
         currentAnalysisAssetId = nil
         currentEpisodeTitle = nil
         currentPodcastTitle = nil
+        currentArtworkURL = nil
     }
 
     func recordListenRewind(windowId: String, podcastId: String) async {

@@ -42,10 +42,40 @@ struct NowPlayingBar: View {
 
             // Bar content
             HStack(spacing: Spacing.sm) {
-                // Artwork placeholder
+                // Artwork
                 RoundedRectangle(cornerRadius: CornerRadius.sm)
                     .fill(AppColors.surface)
                     .frame(width: 40, height: 40)
+                    .overlay(
+                        Group {
+                            if let artworkURL = viewModel.artworkURL {
+                                AsyncImage(url: artworkURL) { phase in
+                                    switch phase {
+                                    case .success(let image):
+                                        image
+                                            .resizable()
+                                            .scaledToFill()
+                                    case .failure:
+                                        Image(systemName: "mic.fill")
+                                            .font(.caption)
+                                            .foregroundStyle(AppColors.secondary.opacity(0.4))
+                                    case .empty:
+                                        ProgressView()
+                                            .tint(AppColors.secondary)
+                                    @unknown default:
+                                        Image(systemName: "mic.fill")
+                                            .font(.caption)
+                                            .foregroundStyle(AppColors.secondary.opacity(0.4))
+                                    }
+                                }
+                            } else {
+                                Image(systemName: "mic.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(AppColors.secondary.opacity(0.4))
+                            }
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.sm))
+                    )
                     .overlay(
                         RoundedRectangle(cornerRadius: CornerRadius.sm)
                             .stroke(AppColors.secondary.opacity(0.2), lineWidth: 0.5)

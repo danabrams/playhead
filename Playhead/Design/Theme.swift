@@ -111,6 +111,34 @@ enum CardProportion {
     static let strip: CGFloat = 3.0 / 1.0
 }
 
+// MARK: - Debug Placeholder Overlay
+
+/// In DEBUG builds, overlays a conspicuous label on views that lack real content.
+/// Use on any view that is a temporary stand-in for dynamic data (images, text, etc.)
+/// so unwired placeholders are impossible to miss during development.
+///
+/// Usage:
+///     RoundedRectangle(cornerRadius: CornerRadius.md)
+///         .fill(AppColors.surface)
+///         .debugPlaceholder("Artwork")
+extension View {
+    func debugPlaceholder(_ label: String) -> some View {
+        #if DEBUG
+        self.overlay(
+            Text("⚠ \(label)")
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+                .background(Color.red.opacity(0.85))
+                .cornerRadius(3)
+        )
+        #else
+        self
+        #endif
+    }
+}
+
 // MARK: - Preview
 
 #Preview("Theme Tokens") {
