@@ -101,7 +101,7 @@ struct NowPlayingView: View {
                     currentTime: viewModel.currentTime
                 )
                 .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.hidden)
+                .presentationDragIndicator(.visible)
                 .presentationBackground(AppColors.surface)
             }
         }

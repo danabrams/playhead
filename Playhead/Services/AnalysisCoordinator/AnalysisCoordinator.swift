@@ -643,6 +643,8 @@ actor AnalysisCoordinator {
                             failureReason: nil
                         )
                         try await store.updateAssetState(id: assetId, state: SessionState.queued.rawValue)
+                        // Reset coverage watermarks so no shards are skipped.
+                        try await store.updateFastTranscriptCoverage(id: assetId, endTime: 0)
                         return (session.id, assetId, .queued)
                     }
                 }
