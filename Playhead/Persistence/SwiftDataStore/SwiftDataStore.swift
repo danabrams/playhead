@@ -6,20 +6,22 @@ import Foundation
 import SwiftData
 
 enum SwiftDataStore {
-    static let schema = Schema([
-        Podcast.self,
-        Episode.self,
-        UserPreferences.self,
-    ])
-
-    static let modelConfiguration = ModelConfiguration(
-        "Playhead",
-        schema: schema,
-        isStoredInMemoryOnly: false
-    )
+    static var schema: Schema {
+        Schema([
+            Podcast.self,
+            Episode.self,
+            UserPreferences.self,
+        ])
+    }
 
     @MainActor
     static func makeContainer() throws -> ModelContainer {
+        let schema = Self.schema
+        let modelConfiguration = ModelConfiguration(
+            "Playhead",
+            schema: schema,
+            isStoredInMemoryOnly: false
+        )
         try ModelContainer(
             for: schema,
             migrationPlan: PlayheadMigrationPlan.self,
