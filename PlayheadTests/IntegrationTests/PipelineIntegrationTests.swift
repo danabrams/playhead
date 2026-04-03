@@ -393,7 +393,7 @@ struct CheckpointResumeIntegrationTests {
     @Test("Kill and relaunch: analysis resumes from checkpoint")
     func resumeFromCheckpoint() async throws {
         // Phase 1: Analyze first half.
-        let dir = makeTempDir(prefix: "PlayheadResume")
+        let dir = try makeTempDir(prefix: "PlayheadResume")
         defer { try? FileManager.default.removeItem(at: dir) }
         let store1 = try AnalysisStore(directory: dir)
         try await store1.migrate()

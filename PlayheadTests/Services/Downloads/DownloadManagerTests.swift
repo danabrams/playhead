@@ -283,7 +283,8 @@ private enum IgnoringRangeServerError: Error {
     case missingPort
 }
 
-private final class IgnoringRangeHTTPServer {
+/// Test-only helper shared across Network callbacks on a private serial queue.
+private final class IgnoringRangeHTTPServer: @unchecked Sendable {
     private let body: Data
     private let listener: NWListener
     private let queue = DispatchQueue(label: "PlayheadTests.IgnoringRangeHTTPServer")
