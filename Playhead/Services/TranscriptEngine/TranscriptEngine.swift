@@ -404,6 +404,12 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         let sourceBuffer = try Self.makeBuffer(from: shard)
         let analyzerBuffer = try Self.convert(sourceBuffer, to: targetFormat)
 
+        guard analyzerBuffer.format == targetFormat else {
+            throw TranscriptEngineError.transcriptionFailed(
+                "Buffer format \(analyzerBuffer.format) does not match analyzer format \(targetFormat)"
+            )
+        }
+
         let transcriber = SpeechTranscriber(locale: locale, preset: .timeIndexedProgressiveTranscription)
         let analyzer = SpeechAnalyzer(
             modules: [transcriber],
