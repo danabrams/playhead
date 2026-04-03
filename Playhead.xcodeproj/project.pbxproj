@@ -31,7 +31,9 @@
 		C3F1955383BB6EA2A22C711D /* AnalysisCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38E0CFFDA6C482D8221FC32E /* AnalysisCoordinator.swift */; };
 		CAF5FCE8B77A791B172F1C14 /* PlaybackTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC91A4E5E30798EB9DBF0857 /* PlaybackTransport.swift */; };
 		CD12E8D93253CDBAF6CD2E5A /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15DC2AB051D643D9AC7BCB32 /* PlayerView.swift */; };
+		DC0F2AB351019294781DEA6F /* CapabilitiesService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47EE64C2FAFD63DB3959EBAD /* CapabilitiesService.swift */; };
 		E25A0C8B37F9E45D65C1F986 /* PodcastFeedParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66177AFCE7CAB1E3D8BE4A72 /* PodcastFeedParser.swift */; };
+		F16058900DDD4F713351D2CA /* CapabilitySnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = AACB30863437C8FB459C4764 /* CapabilitySnapshot.swift */; };
 		F8FB803EB06FBF3DCE942D15 /* TranscriptEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = D05C8732C0F500FA416363F3 /* TranscriptEngine.swift */; };
 /* End PBXBuildFile section */
 
@@ -45,6 +47,7 @@
 		342EA74C989F8824D9A9BDDF /* FeatureExtraction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeatureExtraction.swift; sourceTree = "<group>"; };
 		38E0CFFDA6C482D8221FC32E /* AnalysisCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisCoordinator.swift; sourceTree = "<group>"; };
 		40DCF7221FE10FF60B443F9E /* Podcast.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Podcast.swift; sourceTree = "<group>"; };
+		47EE64C2FAFD63DB3959EBAD /* CapabilitiesService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapabilitiesService.swift; sourceTree = "<group>"; };
 		5753B081F06174EAC07D0CA3 /* Playhead.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Playhead.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		66177AFCE7CAB1E3D8BE4A72 /* PodcastFeedParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodcastFeedParser.swift; sourceTree = "<group>"; };
 		6A890EAEDC77D650C466B01E /* SwiftDataStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftDataStore.swift; sourceTree = "<group>"; };
@@ -53,6 +56,7 @@
 		842382A1A5369363A4D358F3 /* DownloadManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadManager.swift; sourceTree = "<group>"; };
 		8792CA543BEDF713F5610776 /* NowPlayingBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingBar.swift; sourceTree = "<group>"; };
 		8BCE678E596FFBFE53CD62FE /* AnalysisAudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisAudio.swift; sourceTree = "<group>"; };
+		AACB30863437C8FB459C4764 /* CapabilitySnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapabilitySnapshot.swift; sourceTree = "<group>"; };
 		AC5B77F81546B6507DE443D7 /* Typography.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Typography.swift; sourceTree = "<group>"; };
 		B742D1D0018FC68E6BC19870 /* AdDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdDetector.swift; sourceTree = "<group>"; };
 		C3A5A5825F04C62A4FEC258F /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -120,6 +124,8 @@
 			isa = PBXGroup;
 			children = (
 				0C8BBF44C045B759B9843C2B /* Capabilities.swift */,
+				47EE64C2FAFD63DB3959EBAD /* CapabilitiesService.swift */,
+				AACB30863437C8FB459C4764 /* CapabilitySnapshot.swift */,
 			);
 			path = Capabilities;
 			sourceTree = "<group>";
@@ -389,6 +395,8 @@
 				12FFACF51EEE1ADF93707FEC /* AnalysisStore.swift in Sources */,
 				61E29A6594FA0F8AD78528B0 /* AssetCache.swift in Sources */,
 				139B5422E4655DF7DDE5F53B /* Capabilities.swift in Sources */,
+				DC0F2AB351019294781DEA6F /* CapabilitiesService.swift in Sources */,
+				F16058900DDD4F713351D2CA /* CapabilitySnapshot.swift in Sources */,
 				A9132ADE01AB63F77943933B /* Colors.swift in Sources */,
 				9F008731AAFEC30DCA80FB18 /* ContentView.swift in Sources */,
 				3FEA8B2D3DE188957955981F /* DownloadManager.swift in Sources */,
