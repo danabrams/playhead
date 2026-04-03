@@ -342,7 +342,7 @@ actor AssetProvider {
 
     /// Removes all rollback archives, freeing disk space.
     func cleanRollbacks() async throws {
-        let rollbackDir = await inventory.rollbackDirectory
+        let rollbackDir = inventory.rollbackDirectory
         let fm = FileManager.default
         guard let contents = try? fm.contentsOfDirectory(
             at: rollbackDir,
