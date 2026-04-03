@@ -13,12 +13,7 @@ import Testing
 @Suite("DownloadManager – Setup")
 struct DownloadManagerSetupTests {
 
-    private func makeTempDir() throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("PlayheadTests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
-    }
+    // Uses shared makeTempDir() from TestHelpers.swift
 
     @Test("Bootstrap creates required directories")
     func bootstrap() async throws {
@@ -41,12 +36,7 @@ struct DownloadManagerSetupTests {
 @Suite("DownloadManager – Cache")
 struct DownloadManagerCacheTests {
 
-    private func makeTempDir() throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("PlayheadTests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
-    }
+    // Uses shared makeTempDir() from TestHelpers.swift
 
     @Test("isCached returns false for uncached episode")
     func notCached() async throws {
@@ -149,12 +139,7 @@ struct DownloadManagerCacheTests {
 @Suite("DownloadManager – Eviction")
 struct DownloadManagerEvictionTests {
 
-    private func makeTempDir() throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("PlayheadTests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
-    }
+    // Uses shared makeTempDir() from TestHelpers.swift
 
     @Test("Eviction skips analysis-protected episodes")
     func evictionProtectsAnalysis() async throws {
@@ -228,12 +213,7 @@ struct DownloadManagerFingerprintTests {
 @Suite("DownloadManager – Integrity")
 struct DownloadManagerIntegrityTests {
 
-    private func makeTempDir() throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("PlayheadTests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
-    }
+    // Uses shared makeTempDir() from TestHelpers.swift
 
     @Test("verifyIntegrity returns true for matching hash")
     func integrityMatch() async throws {
@@ -388,12 +368,7 @@ private final class IgnoringRangeHTTPServer {
 @Suite("DownloadManager – Resume")
 struct DownloadManagerResumeContractTests {
 
-    private func makeTempDir() throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("PlayheadTests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
-    }
+    // Uses shared makeTempDir() from TestHelpers.swift
 
     @Test("Resume download restarts cleanly when the server ignores Range")
     func ignoredRangeResponseDoesNotCorruptPartialFile() async throws {

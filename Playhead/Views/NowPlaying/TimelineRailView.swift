@@ -22,6 +22,8 @@ struct TimelineRailView: View {
     @State private var isGliding = false
     /// The previous progress value, used to detect skip-induced jumps.
     @State private var previousProgress: Double = 0
+    /// Task for resetting the glide state after animation settles.
+    @State private var glideResetTask: Task<Void, Never>?
 
     private let railHeight: CGFloat = 4
     private let touchTargetHeight: CGFloat = 44
@@ -73,8 +75,7 @@ struct TimelineRailView: View {
                     .onChanged { value in
                         if !isDragging {
                             isDragging = true
-                            let generator = UIImpactFeedbackGenerator(style: .light)
-                            generator.impactOccurred()
+                            HapticManager.light()
                         }
                         let fraction = min(max(value.location.x / width, 0), 1)
                         dragProgress = fraction
@@ -83,19 +84,38 @@ struct TimelineRailView: View {
                         let fraction = min(max(value.location.x / width, 0), 1)
                         onSeek(fraction)
                         isDragging = false
-                        let generator = UIImpactFeedbackGenerator(style: .light)
-                        generator.impactOccurred()
+                        HapticManager.light()
                     }
             )
         }
         .frame(height: touchTargetHeight)
+        .accessibilityElement()
+        .accessibilityLabel("Timeline scrubber")
+        .accessibilityValue("\(Int(effectiveProgress * 100)) percent")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment:
+                // Advance by 5% of total duration
+                let newProgress = min(effectiveProgress + 0.05, 1.0)
+                onSeek(newProgress)
+            case .decrement:
+                // Rewind by 5% of total duration
+                let newProgress = max(effectiveProgress - 0.05, 0.0)
+                onSeek(newProgress)
+            @unknown default:
+                break
+            }
+        }
         .onChange(of: progress) { oldValue, newValue in
             let jump = newValue - oldValue
             if jump > skipJumpThreshold {
                 // A skip just fired — animate the glide.
                 isGliding = true
                 // End the glide state after the animation settles.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                glideResetTask?.cancel()
+                glideResetTask = Task {
+                    try? await Task.sleep(for: .milliseconds(500))
+                    guard !Task.isCancelled else { return }
                     isGliding = false
                 }
             }

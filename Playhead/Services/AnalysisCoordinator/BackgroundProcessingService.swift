@@ -68,6 +68,11 @@ actor BackgroundProcessingService {
     /// Task for the active background processing expiration handler.
     private var activeBackgroundTask: Task<Void, Never>?
 
+    /// Guards against double-completion of BGProcessingTask. Both the work
+    /// completion path and the expiration handler check this before calling
+    /// setTaskCompleted.
+    private var bgTaskCompleted = false
+
     /// Current thermal state, cached for decision-making.
     private var currentThermalState: ThermalState = .nominal
 
@@ -244,6 +249,19 @@ actor BackgroundProcessingService {
         }
     }
 
+    // MARK: - Background Task Completion Guard
+
+    /// Safely complete a BGProcessingTask, guarding against double-completion.
+    /// Both the work path and expiration handler call this; only the first wins.
+    private func markComplete(_ task: BGProcessingTask, success: Bool) {
+        guard !bgTaskCompleted else {
+            logger.debug("BGTask completion already called, ignoring duplicate")
+            return
+        }
+        bgTaskCompleted = true
+        task.setTaskCompleted(success: success)
+    }
+
     // MARK: - Background Task Handlers
 
     /// Handle the backfill BGProcessingTask. Runs analysis on episodes that
@@ -251,38 +269,42 @@ actor BackgroundProcessingService {
     private func handleBackfillTask(_ task: BGProcessingTask) {
         logger.info("Backfill task started")
 
+        // Reset completion guard for this task invocation.
+        bgTaskCompleted = false
+
         // Schedule the next occurrence.
         scheduleBackfillIfNeeded()
 
         let sendableTask = UncheckedSendableBox(task)
-        let workTask = Task { [weak self] in
-            guard let self else { return }
-
+        let workTask = Task {
             // Check constraints before starting.
-            let snapshot = await capabilitiesService.currentSnapshot
+            let snapshot = await self.capabilitiesService.currentSnapshot
             guard !snapshot.shouldThrottleAnalysis else {
-                logger.info("Backfill skipped: thermal throttle active")
-                sendableTask.value.setTaskCompleted(success: true)
+                self.logger.info("Backfill skipped: thermal throttle active")
+                await self.markComplete(sendableTask.value, success: true)
                 return
             }
 
             // Delegate backfill work to the coordinator.
             // The coordinator will checkpoint after every feature block and
             // transcript chunk, so expiration is safe at any point.
-            await coordinator.start()
+            await self.coordinator.start()
 
             // Let the coordinator run until the task expires or completes.
-            // The expiration handler below will cancel this task.
-            sendableTask.value.setTaskCompleted(success: true)
-            logger.info("Backfill task completed")
+            await self.markComplete(sendableTask.value, success: true)
+            self.logger.info("Backfill task completed")
         }
 
         activeBackgroundTask = workTask
 
-        // Handle expiration: cancel work gracefully.
+        // Handle expiration: cancel work gracefully. The nonisolated callback
+        // hops to the actor via Task to check the completion guard.
         task.expirationHandler = { [weak self] in
             workTask.cancel()
-            Task { await self?.coordinator.stop() }
+            Task {
+                await self?.coordinator.stop()
+                await self?.markComplete(sendableTask.value, success: false)
+            }
         }
     }
 
@@ -291,23 +313,27 @@ actor BackgroundProcessingService {
     private func handleContinuedProcessingTask(_ task: BGProcessingTask) {
         logger.info("Continued processing task started")
 
-        let sendableTask = UncheckedSendableBox(task)
-        let workTask = Task { [weak self] in
-            guard let self else { return }
+        // Reset completion guard for this task invocation.
+        bgTaskCompleted = false
 
+        let sendableTask = UncheckedSendableBox(task)
+        let workTask = Task {
             // Continued processing is for user-initiated work like model
             // downloads. The coordinator handles checkpoint/resume.
-            await coordinator.start()
+            await self.coordinator.start()
 
-            sendableTask.value.setTaskCompleted(success: true)
-            logger.info("Continued processing task completed")
+            await self.markComplete(sendableTask.value, success: true)
+            self.logger.info("Continued processing task completed")
         }
 
         activeBackgroundTask = workTask
 
         task.expirationHandler = { [weak self] in
             workTask.cancel()
-            Task { await self?.coordinator.stop() }
+            Task {
+                await self?.coordinator.stop()
+                await self?.markComplete(sendableTask.value, success: false)
+            }
         }
     }
 

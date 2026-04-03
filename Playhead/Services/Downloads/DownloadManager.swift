@@ -6,8 +6,6 @@
 
 import Foundation
 import OSLog
-import CryptoKit
-
 // MARK: - Download State Events
 
 /// Progress and completion events for a single episode download.
@@ -246,45 +244,28 @@ actor DownloadManager {
         }
     }
 
-    /// Core download logic: streams bytes to disk with progress reporting.
+    /// Core download logic: downloads to a temp file, then moves to cache.
+    /// Uses URLSession.shared.download(for:) to avoid byte-at-a-time iteration.
     private func performDownload(episodeId: String, url: URL) async throws -> URL {
-        let partialURL = partialFileURL(for: episodeId)
         let completeURL = completeFileURL(for: episodeId)
 
-        var request = URLRequest(url: url)
+        let request = URLRequest(url: url)
         let fm = FileManager.default
 
-        // Resume support.
-        var existingSize: Int64 = 0
-        if fm.fileExists(atPath: partialURL.path),
-           let attrs = try? fm.attributesOfItem(atPath: partialURL.path),
-           let size = attrs[.size] as? Int64, size > 0 {
-            existingSize = size
-            request.setValue("bytes=\(size)-", forHTTPHeaderField: "Range")
-            logger.info("Resuming download for \(episodeId) from byte \(size)")
-        }
-
-        let (asyncBytes, response) = try await URLSession.shared.bytes(for: request)
+        // Download to a temporary file (handled efficiently by URLSession).
+        let (tempURL, response) = try await URLSession.shared.download(for: request)
+        // Clean up temp file on any error path.
+        defer { try? fm.removeItem(at: tempURL) }
 
         guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) || httpResponse.statusCode == 206 else {
+              (200...299).contains(httpResponse.statusCode) else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             throw DownloadManagerError.downloadFailed(episodeId, "HTTP \(code)")
         }
 
         // Harvest HTTP metadata for weak fingerprinting.
-        // For resumed downloads (206), expectedContentLength is the remaining
-        // bytes, not the full resource size. Use existing partial size + remaining
-        // to reconstruct total Content-Length so the weak fingerprint is stable.
         let reportedLength = httpResponse.expectedContentLength
-        let totalContentLength: Int64?
-        if reportedLength > 0 {
-            totalContentLength = httpResponse.statusCode == 206
-                ? existingSize + reportedLength
-                : reportedLength
-        } else {
-            totalContentLength = nil
-        }
+        let totalContentLength: Int64? = reportedLength > 0 ? reportedLength : nil
         let metadata = HTTPAssetMetadata(
             etag: httpResponse.value(forHTTPHeaderField: "ETag"),
             contentLength: totalContentLength,
@@ -296,75 +277,19 @@ actor DownloadManager {
         let weakFP = AudioFingerprint.makeWeak(url: url, metadata: metadata)
         fingerprintCache[episodeId] = AudioFingerprint(weak: weakFP, strong: nil)
 
-        // Set up file writing.
-        let fileHandle: FileHandle
-
-        if httpResponse.statusCode == 206 && existingSize > 0 {
-            fileHandle = try FileHandle(forWritingTo: partialURL)
-            fileHandle.seekToEndOfFile()
-        } else {
-            existingSize = 0
-            if fm.fileExists(atPath: partialURL.path) {
-                try fm.removeItem(at: partialURL)
-            }
-            fm.createFile(atPath: partialURL.path, contents: nil)
-            fileHandle = try FileHandle(forWritingTo: partialURL)
-        }
-        defer { try? fileHandle.close() }
-
-        let totalBytes = metadata.contentLength ?? httpResponse.expectedContentLength
-        var downloaded = existingSize
-        var buffer = Data()
-        let flushThreshold = 256 * 1024
-        var hasher = SHA256()
-
-        // If resuming, we need to hash existing bytes first for the strong fingerprint.
-        if existingSize > 0 {
-            let readHandle = try FileHandle(forReadingFrom: partialURL)
-            defer { try? readHandle.close() }
-            while autoreleasepool(invoking: {
-                let chunk = readHandle.readData(ofLength: 1024 * 1024)
-                guard !chunk.isEmpty else { return false }
-                hasher.update(data: chunk)
-                return true
-            }) { }
-        }
-
-        for try await byte in asyncBytes {
-            buffer.append(byte)
-            if buffer.count >= flushThreshold {
-                fileHandle.write(buffer)
-                hasher.update(data: buffer)
-                downloaded += Int64(buffer.count)
-                buffer.removeAll(keepingCapacity: true)
-
-                progressContinuation.yield(DownloadProgress(
-                    episodeId: episodeId,
-                    bytesWritten: downloaded,
-                    totalBytes: totalBytes
-                ))
-            }
-        }
-
-        // Flush remaining.
-        if !buffer.isEmpty {
-            fileHandle.write(buffer)
-            hasher.update(data: buffer)
-            downloaded += Int64(buffer.count)
-        }
-
-        try fileHandle.close()
-
-        // Compute strong fingerprint.
-        let digest = hasher.finalize()
-        let strongHash = digest.map { String(format: "%02x", $0) }.joined()
-        fingerprintCache[episodeId] = AudioFingerprint(weak: weakFP, strong: strongHash)
-
-        // Move partial -> complete.
+        // Move temp -> complete first, then hash from final location.
         if fm.fileExists(atPath: completeURL.path) {
             try fm.removeItem(at: completeURL)
         }
-        try fm.moveItem(at: partialURL, to: completeURL)
+        try fm.copyItem(at: tempURL, to: completeURL)
+
+        // Get the file size.
+        let attrs = try fm.attributesOfItem(atPath: completeURL.path)
+        let downloaded = (attrs[.size] as? Int64) ?? 0
+
+        // Compute strong fingerprint from the final file.
+        let strongHash = try FileHasher.sha256(fileURL: completeURL)
+        fingerprintCache[episodeId] = AudioFingerprint(weak: weakFP, strong: strongHash)
 
         touchAccess(episodeId: episodeId)
 
@@ -454,7 +379,7 @@ actor DownloadManager {
             return existing
         }
 
-        let hash = try sha256(fileURL: fileURL)
+        let hash = try FileHasher.sha256(fileURL: fileURL)
         let metadata = metadataCache[episodeId] ?? HTTPAssetMetadata(
             etag: nil, contentLength: nil, lastModified: nil
         )
@@ -472,7 +397,7 @@ actor DownloadManager {
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             throw DownloadManagerError.fileNotFound(fileURL.path)
         }
-        let actualHash = try sha256(fileURL: fileURL)
+        let actualHash = try FileHasher.sha256(fileURL: fileURL)
         return actualHash.lowercased() == expectedHash.lowercased()
     }
 
@@ -609,24 +534,6 @@ actor DownloadManager {
         }
     }
 
-    /// Computes SHA-256 hash of a file in 1 MB chunks.
-    private func sha256(fileURL: URL) throws -> String {
-        let handle = try FileHandle(forReadingFrom: fileURL)
-        defer { try? handle.close() }
-
-        var hasher = SHA256()
-        let chunkSize = 1024 * 1024
-
-        while autoreleasepool(invoking: {
-            let chunk = handle.readData(ofLength: chunkSize)
-            guard !chunk.isEmpty else { return false }
-            hasher.update(data: chunk)
-            return true
-        }) { }
-
-        let digest = hasher.finalize()
-        return digest.map { String(format: "%02x", $0) }.joined()
-    }
 }
 
 // MARK: - EpisodeDownloadDelegate

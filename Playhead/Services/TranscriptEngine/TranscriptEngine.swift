@@ -8,6 +8,7 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import os
 import OSLog
 #if canImport(Speech)
 import Speech
@@ -264,29 +265,29 @@ enum TranscriptEngineError: Error, CustomStringConvertible {
 // MARK: - StubSpeechRecognizer
 
 /// Stub implementation for development and testing. Returns empty results.
-final class StubSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
-    private var loaded = false
+final class StubSpeechRecognizer: SpeechRecognizer, Sendable {
+    private let _loaded = OSAllocatedUnfairLock(initialState: false)
 
     func loadModel(from directory: URL) async throws {
-        loaded = true
+        _loaded.withLock { $0 = true }
     }
 
     func unloadModel() async {
-        loaded = false
+        _loaded.withLock { $0 = false }
     }
 
     func isModelLoaded() async -> Bool {
-        loaded
+        _loaded.withLock { $0 }
     }
 
     func transcribe(shard: AnalysisShard) async throws -> [TranscriptSegment] {
-        guard loaded else { throw TranscriptEngineError.modelNotLoaded }
+        guard _loaded.withLock({ $0 }) else { throw TranscriptEngineError.modelNotLoaded }
         // Stub: return empty transcript.
         return []
     }
 
     func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
-        guard loaded else { throw TranscriptEngineError.modelNotLoaded }
+        guard _loaded.withLock({ $0 }) else { throw TranscriptEngineError.modelNotLoaded }
         // Stub: report speech detected for entire shard.
         return [VADResult(
             isSpeech: true,

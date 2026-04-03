@@ -49,11 +49,21 @@ struct CapabilitySnapshot: Codable, Sendable, Equatable {
 // MARK: - ThermalState
 
 /// Mirrors ProcessInfo.ThermalState as a Codable enum.
-enum ThermalState: Int, Codable, Sendable, Equatable {
+enum ThermalState: Int, Codable, Sendable, Equatable, CustomStringConvertible {
     case nominal
     case fair
     case serious
     case critical
+
+    /// Human-readable name for logging (e.g. "nominal", "critical").
+    var description: String {
+        switch self {
+        case .nominal: "nominal"
+        case .fair: "fair"
+        case .serious: "serious"
+        case .critical: "critical"
+        }
+    }
 
     init(from processThermalState: ProcessInfo.ThermalState) {
         switch processThermalState {

@@ -12,10 +12,13 @@ import Testing
 
 // MARK: - Integration Test Helpers
 
+/// Tracks integration test temp directories for cleanup.
+private let _integrationStoreDirs = TestTempDirTracker()
+
 /// Creates a temp-directory-backed AnalysisStore for integration tests.
 private func makeIntegrationStore() async throws -> AnalysisStore {
-    let dir = FileManager.default.temporaryDirectory
-        .appendingPathComponent("PlayheadIntegration-\(UUID().uuidString)")
+    let dir = try makeTempDir(prefix: "PlayheadIntegration")
+    _integrationStoreDirs.track(dir)
     let store = try AnalysisStore(directory: dir)
     try await store.migrate()
     return store
@@ -390,8 +393,8 @@ struct CheckpointResumeIntegrationTests {
     @Test("Kill and relaunch: analysis resumes from checkpoint")
     func resumeFromCheckpoint() async throws {
         // Phase 1: Analyze first half.
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("PlayheadResume-\(UUID().uuidString)")
+        let dir = makeTempDir(prefix: "PlayheadResume")
+        defer { try? FileManager.default.removeItem(at: dir) }
         let store1 = try AnalysisStore(directory: dir)
         try await store1.migrate()
 
@@ -841,8 +844,20 @@ struct CombinedTuningReplayTests {
     //   3. Trust bonus 0.05 -> 0.10 (faster promotion through modes)
     //   4. Auto-mode candidate promotion (skip fires without backfill for trusted shows)
 
-    @Test("Full corpus replay: combined tuning produces acceptable quality across all episodes")
-    func corpusReplayWithTuning() async throws {
+    // MARK: - Shared Corpus Replay Helper
+
+    /// Runs the full corpus replay pipeline and returns per-episode results.
+    /// Shared by the focused test methods below.
+    private struct CorpusReplayResult {
+        let annotations: [TestEpisodeAnnotation]
+        let episodeReports: [EpisodeReplayReport]
+        /// Per-episode classifier results keyed by episode ID.
+        let classifierResults: [String: [ClassifierResult]]
+        /// Per-episode decision logs keyed by episode ID.
+        let decisionLogs: [String: [SkipDecisionRecord]]
+    }
+
+    private func runCorpusReplay() async throws -> CorpusReplayResult {
         let loader = CorpusLoader()
         let annotations = try loader.loadAllAnnotations()
         #expect(annotations.count >= 10, "Corpus should have a meaningful number of episodes")
@@ -851,6 +866,8 @@ struct CombinedTuningReplayTests {
         let trustStore = try await makeIntegrationStore()
 
         var episodeReports: [EpisodeReplayReport] = []
+        var allClassifierResults: [String: [ClassifierResult]] = [:]
+        var allDecisionLogs: [String: [SkipDecisionRecord]] = [:]
 
         for annotation in annotations {
             let assetId = annotation.episode.episodeId
@@ -901,6 +918,7 @@ struct CombinedTuningReplayTests {
                 )
             }
             let results = classifier.classify(inputs: classifierInputs, priors: .empty)
+            allClassifierResults[assetId] = results
 
             // --- Layer 3: Trust scoring (uses updated bonus=0.10) ---
             let trustService = TrustScoringService(store: trustStore)
@@ -948,6 +966,7 @@ struct CombinedTuningReplayTests {
 
             await orchestrator.receiveAdWindows(adWindows)
             let log = await orchestrator.getDecisionLog()
+            allDecisionLogs[assetId] = log
 
             // Also run the replay simulator for metrics.
             let condition = SimulationCondition(
@@ -962,62 +981,56 @@ struct CombinedTuningReplayTests {
             _ = driver.runReplay()
             let report = driver.buildReport(replayDuration: 0.5)
             episodeReports.append(report)
+        }
 
-            // --- Per-episode assertions ---
+        return CorpusReplayResult(
+            annotations: annotations,
+            episodeReports: episodeReports,
+            classifierResults: allClassifierResults,
+            decisionLogs: allDecisionLogs
+        )
+    }
 
-            if annotation.isNoAdEpisode {
-                // No-ad episode: verify no skips fire (removed "so" pattern helps here).
-                let applied = log.filter { $0.decision == .applied }
-                #expect(applied.isEmpty,
-                        "No-ad episode '\(annotation.episode.title)' should have zero applied skips")
-            } else {
-                // Episode with ads: verify detection covers ground truth.
-                // With sigmoid mid=0.25, lexical-only candidates should calibrate
-                // above the 0.65 enter threshold.
-                let highConfidence = results.filter { $0.adProbability >= 0.65 }
-                #expect(!highConfidence.isEmpty,
-                        "Sigmoid mid=0.25 should produce high-confidence results for '\(annotation.episode.title)'")
+    // MARK: - Focused Corpus Tests
 
-                // In auto mode with candidate promotion, skips should fire
-                // without waiting for backfill confirmation.
-                let applied = log.filter { $0.decision == .applied }
-                let confirmed = log.filter { $0.decision == .confirmed }
-                let actionable = applied + confirmed
-                #expect(!actionable.isEmpty,
-                        "Auto mode should produce actionable decisions for '\(annotation.episode.title)'")
+    @Test("Sigmoid calibration: per-episode detection with mid=0.25 produces high-confidence results")
+    func corpusSigmoidCalibration() async throws {
+        let result = try await runCorpusReplay()
 
-                // Verify at least one detection per ground-truth segment
-                // (for non-hard difficulty segments).
-                for seg in annotation.adSegments where seg.difficulty != .hard {
-                    let detected = results.contains { r in
-                        r.startTime < seg.endTime && r.endTime > seg.startTime
-                            && r.adProbability >= 0.40
-                    }
-                    #expect(detected,
-                            "Should detect \(seg.difficulty.rawValue)-difficulty ad at \(seg.startTime)-\(seg.endTime) in '\(annotation.episode.title)'")
+        for annotation in result.annotations where !annotation.isNoAdEpisode {
+            let assetId = annotation.episode.episodeId
+            let results = result.classifierResults[assetId] ?? []
+
+            // With sigmoid mid=0.25, lexical-only candidates should calibrate
+            // above the 0.65 enter threshold.
+            let highConfidence = results.filter { $0.adProbability >= 0.65 }
+            #expect(!highConfidence.isEmpty,
+                    "Sigmoid mid=0.25 should produce high-confidence results for '\(annotation.episode.title)'")
+
+            // Verify at least one detection per ground-truth segment
+            // (for non-hard difficulty segments).
+            for seg in annotation.adSegments where seg.difficulty != .hard {
+                let detected = results.contains { r in
+                    r.startTime < seg.endTime && r.endTime > seg.startTime
+                        && r.adProbability >= 0.40
                 }
+                #expect(detected,
+                        "Should detect \(seg.difficulty.rawValue)-difficulty ad at \(seg.startTime)-\(seg.endTime) in '\(annotation.episode.title)'")
             }
         }
 
-        // --- Corpus-level aggregate assertions ---
+        // No-ad episodes should have no applied skips.
+        for annotation in result.annotations where annotation.isNoAdEpisode {
+            let log = result.decisionLogs[annotation.episode.episodeId] ?? []
+            let applied = log.filter { $0.decision == .applied }
+            #expect(applied.isEmpty,
+                    "No-ad episode '\(annotation.episode.title)' should have zero applied skips")
+        }
+    }
 
-        let corpus = CorpusReplayReport.aggregate(from: episodeReports)
-        #expect(corpus.episodeReports.count == annotations.count,
-                "Corpus report should cover all episodes")
-
-        // With the tuning changes, overall detection quality should be solid.
-        #expect(corpus.aggregateDetectionQuality.precision >= 0.0,
-                "Aggregate precision should be non-negative")
-        #expect(corpus.aggregateDetectionQuality.recall >= 0.0,
-                "Aggregate recall should be non-negative")
-
-        // No episodes should be fully missed by the simulator.
-        let adsAnnotations = annotations.filter { !$0.isNoAdEpisode }
-        #expect(adsAnnotations.count >= 10,
-                "Corpus should have at least 10 episodes with ads")
-
-        // Trust promotion speed: with bonus=0.10, verify a fresh show
-        // reaches auto in fewer observations than the old bonus=0.05.
+    @Test("Trust promotion speed: bonus=0.10 reaches auto mode within expected observations")
+    func corpusTrustPromotionSpeed() async throws {
+        // Verify a fresh show reaches auto in fewer observations with bonus=0.10.
         let freshStore = try await makeIntegrationStore()
         let freshTrust = TrustScoringService(store: freshStore)
         let freshPodcastId = "int-fresh-promotion-test"
@@ -1040,6 +1053,37 @@ struct CombinedTuningReplayTests {
         let finalMode = await freshTrust.effectiveMode(podcastId: freshPodcastId)
         #expect(finalMode == .auto,
                 "Fresh show should reach auto mode within 10 observations at bonus=0.10")
+
+        // Also verify per-episode trust in the full corpus replay.
+        let result = try await runCorpusReplay()
+        for annotation in result.annotations where !annotation.isNoAdEpisode {
+            let log = result.decisionLogs[annotation.episode.episodeId] ?? []
+            let applied = log.filter { $0.decision == .applied }
+            let confirmed = log.filter { $0.decision == .confirmed }
+            let actionable = applied + confirmed
+            #expect(!actionable.isEmpty,
+                    "Auto mode should produce actionable decisions for '\(annotation.episode.title)'")
+        }
+    }
+
+    @Test("Corpus aggregate quality: replay report covers all episodes with valid metrics")
+    func corpusAggregateQuality() async throws {
+        let result = try await runCorpusReplay()
+
+        let corpus = CorpusReplayReport.aggregate(from: result.episodeReports)
+        #expect(corpus.episodeReports.count == result.annotations.count,
+                "Corpus report should cover all episodes")
+
+        // With the tuning changes, overall detection quality should be solid.
+        #expect(corpus.aggregateDetectionQuality.precision >= 0.0,
+                "Aggregate precision should be non-negative")
+        #expect(corpus.aggregateDetectionQuality.recall >= 0.0,
+                "Aggregate recall should be non-negative")
+
+        // No episodes should be fully missed by the simulator.
+        let adsAnnotations = result.annotations.filter { !$0.isNoAdEpisode }
+        #expect(adsAnnotations.count >= 10,
+                "Corpus should have at least 10 episodes with ads")
     }
 
     @Test("Sigmoid mid=0.25: lexical-only candidates calibrate above enter threshold")

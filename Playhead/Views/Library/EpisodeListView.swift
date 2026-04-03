@@ -14,7 +14,7 @@ struct EpisodeListView: View {
     @Query private var episodes: [Episode]
 
     @Environment(\.modelContext) private var modelContext
-    @EnvironmentObject private var runtime: PlayheadRuntime
+    @Environment(PlayheadRuntime.self) private var runtime
 
     @State private var navigateToNowPlaying = false
     @State private var selectedEpisode: Episode?
@@ -60,6 +60,7 @@ private extension EpisodeListView {
             Image(systemName: "waveform")
                 .font(.system(size: 48, weight: .thin))
                 .foregroundStyle(AppColors.secondary)
+                .accessibilityHidden(true)
 
             Text("No Episodes")
                 .font(AppTypography.sans(size: 20, weight: .semibold))
@@ -112,6 +113,9 @@ private extension EpisodeListView {
                         }
                         .tint(Palette.mutedSage)
                     }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("\(episode.title)\(episode.isPlayed ? ", played" : "")")
+                    .accessibilityHint("Tap to play this episode")
             }
         }
         .listStyle(.plain)
@@ -135,8 +139,7 @@ private extension EpisodeListView {
     func queueEpisode(_ episode: Episode) {
         // Queue functionality will be wired in a future bead.
         // For now, mark as a no-op placeholder with haptic feedback.
-        let generator = UINotificationFeedbackGenerator()
-        generator.notificationOccurred(.success)
+        HapticManager.notification(.success)
     }
 }
 
@@ -157,13 +160,13 @@ private struct EpisodeRow: View {
             // Date and duration (mono)
             HStack(spacing: Spacing.sm) {
                 if let date = episode.publishedAt {
-                    Text(date.formatted(.episodeDate))
+                    Text(Self.formatEpisodeDate(date))
                         .font(AppTypography.timestamp)
                         .foregroundStyle(AppColors.metadata)
                 }
 
                 if let duration = episode.duration {
-                    Text(Self.formatDuration(duration))
+                    Text(TimeFormatter.formatDuration(duration))
                         .font(AppTypography.timestamp)
                         .foregroundStyle(AppColors.metadata)
                 }
@@ -175,6 +178,7 @@ private struct EpisodeRow: View {
                     Image(systemName: "checkmark.circle")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(Palette.mutedSage)
+                        .accessibilityLabel("Analysis complete")
                 }
 
                 // Ad count — small copper numeral (not a badge)
@@ -182,6 +186,7 @@ private struct EpisodeRow: View {
                     Text("\(summary.adSegmentCount)")
                         .font(AppTypography.mono(size: 12, weight: .semibold))
                         .foregroundStyle(AppColors.accent)
+                        .accessibilityLabel("\(summary.adSegmentCount) ad segments detected")
                 }
             }
 
@@ -201,6 +206,7 @@ private struct EpisodeRow: View {
                     }
                 }
                 .frame(height: 2)
+                .accessibilityValue("Progress: \(Int(min(episode.playbackPosition / (episode.duration ?? 1), 1.0) * 100)) percent")
             }
         }
         .padding(.vertical, Spacing.xs)
@@ -208,31 +214,16 @@ private struct EpisodeRow: View {
 
     // MARK: - Formatting
 
-    private static func formatDuration(_ seconds: TimeInterval) -> String {
-        guard seconds.isFinite, seconds >= 0 else { return "" }
-        let totalSeconds = Int(seconds)
-        let hours = totalSeconds / 3600
-        let minutes = (totalSeconds % 3600) / 60
-        if hours > 0 {
-            return "\(hours)h \(minutes)m"
-        }
-        return "\(minutes) min"
-    }
-}
-
-// MARK: - Date Formatting
-
-private extension FormatStyle where Self == Date.FormatStyle {
-    /// Compact episode date: "Mar 15" or "Mar 15, 2024" for older episodes.
-    static var episodeDate: Date.FormatStyle {
+    /// Compact episode date: "Mar 15" for current year, "Mar 15, 2024" for older.
+    private static func formatEpisodeDate(_ date: Date) -> String {
         let calendar = Calendar.current
-        let now = Date.now
-        if let yearAgo = calendar.date(byAdding: .year, value: -1, to: now) {
-            // We can't conditionally return different styles in a static,
-            // so use a generous format that works for both cases.
-            _ = yearAgo // suppress warning
+        let episodeYear = calendar.component(.year, from: date)
+        let currentYear = calendar.component(.year, from: .now)
+
+        if episodeYear < currentYear {
+            return date.formatted(.dateTime.month(.abbreviated).day().year())
         }
-        return .dateTime.month(.abbreviated).day()
+        return date.formatted(.dateTime.month(.abbreviated).day())
     }
 }
 
@@ -248,6 +239,7 @@ private extension FormatStyle where Self == Date.FormatStyle {
             )
         )
     }
+    .environment(PlayheadRuntime(isPreviewRuntime: true))
     .preferredColorScheme(.dark)
     .modelContainer(for: [Podcast.self, Episode.self], inMemory: true)
 }

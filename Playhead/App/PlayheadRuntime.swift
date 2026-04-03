@@ -2,9 +2,11 @@
 // Shared app-level composition root for long-lived services.
 
 import Foundation
+import OSLog
 
 @MainActor
-final class PlayheadRuntime: ObservableObject {
+@Observable
+final class PlayheadRuntime {
 
     let playbackService: PlaybackService
     let capabilitiesService: CapabilitiesService
@@ -22,23 +24,49 @@ final class PlayheadRuntime: ObservableObject {
     let backgroundProcessingService: BackgroundProcessingService
 
     private let isPreviewRuntime: Bool
+    private let logger = Logger(subsystem: "com.playhead", category: "Runtime")
 
-    @Published private(set) var currentEpisodeId: String?
-    @Published private(set) var currentPodcastId: String?
-    @Published private(set) var currentAnalysisAssetId: String?
-    @Published private(set) var currentEpisodeTitle: String?
-    @Published private(set) var currentPodcastTitle: String?
+    private(set) var currentEpisodeId: String?
+    private(set) var currentPodcastId: String?
+    private(set) var currentAnalysisAssetId: String?
+    private(set) var currentEpisodeTitle: String?
+    private(set) var currentPodcastTitle: String?
+
+    /// True when an episode is actively loaded for playback.
+    var isPlayingEpisode: Bool {
+        currentEpisodeId != nil
+    }
+
+    /// Error state flag for catastrophic initialization failures.
+    var initializationError: String?
 
     init(isPreviewRuntime: Bool = false) {
         self.isPreviewRuntime = isPreviewRuntime
         self.playbackService = PlaybackService()
         self.capabilitiesService = CapabilitiesService()
 
-        do {
-            self.analysisStore = try AnalysisStore()
-        } catch {
-            fatalError("Failed to initialize AnalysisStore: \(error)")
+        // AnalysisStore: attempt creation with graceful recovery.
+        // 1. Normal open  2. Delete + retry  3. Temp directory (ephemeral)
+        var resolvedStore: AnalysisStore
+        var storeError: String?
+        if let store = try? AnalysisStore() {
+            resolvedStore = store
+        } else {
+            // Delete corrupted store and retry
+            try? FileManager.default.removeItem(at: AnalysisStore.defaultDirectory())
+            if let store = try? AnalysisStore() {
+                resolvedStore = store
+            } else {
+                // Fallback to temp directory — analysis won't persist across launches
+                let tmpDir = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("PlayheadAnalysis-\(ProcessInfo.processInfo.globallyUniqueString)", isDirectory: true)
+                // If even temp directory fails, the device is in severe trouble.
+                // Use force-try as last resort — the app cannot function without any store.
+                resolvedStore = try! AnalysisStore(directory: tmpDir)
+                storeError = "Analysis database could not be opened. Ad detection may not persist across launches."
+            }
         }
+        self.analysisStore = resolvedStore
 
         let manifest: ModelManifest
         do {
@@ -53,6 +81,7 @@ final class PlayheadRuntime: ObservableObject {
         self.audioService = AnalysisAudioService()
 
         let whisperKitService = WhisperKitService()
+
         self.featureService = FeatureExtractionService(store: analysisStore)
         self.transcriptEngine = TranscriptEngineService(
             whisperKit: whisperKitService,
@@ -80,6 +109,11 @@ final class PlayheadRuntime: ObservableObject {
             coordinator: analysisCoordinator,
             capabilitiesService: capabilitiesService
         )
+
+        // Set error state after all stored properties are initialized.
+        if let storeError {
+            self.initializationError = storeError
+        }
 
         capabilitiesService.startObserving()
 
@@ -151,6 +185,16 @@ final class PlayheadRuntime: ObservableObject {
             await entitlementManager.start()
             await capabilitiesService.runSelfTest()
         }
+    }
+
+    /// Capture and expose the current playback position for persistence.
+    /// Called from scene phase handling to save state on backgrounding.
+    /// Returns the position in seconds, or nil if nothing is playing.
+    func capturePlaybackPosition() async -> (episodeId: String, position: TimeInterval)? {
+        guard let episodeId = currentEpisodeId else { return nil }
+        let snapshot = await playbackService.snapshot()
+        logger.info("Captured playback position for backgrounding: \(snapshot.currentTime)s")
+        return (episodeId, snapshot.currentTime)
     }
 
     func playEpisode(_ episode: Episode) async {
@@ -267,4 +311,5 @@ final class PlayheadRuntime: ObservableObject {
             .speedChanged(rate: speed, time: snapshot.currentTime)
         )
     }
+
 }

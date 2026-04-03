@@ -10,13 +10,12 @@
 // precise animation, no bounce.
 
 import SwiftUI
-import UIKit
 
 // MARK: - NowPlayingBar
 
 struct NowPlayingBar: View {
 
-    @ObservedObject var viewModel: NowPlayingViewModel
+    var viewModel: NowPlayingViewModel
 
     /// Called when the user taps the bar to expand to full Now Playing.
     var onTap: () -> Void = {}
@@ -39,6 +38,7 @@ struct NowPlayingBar: View {
                     )
             }
             .frame(height: Self.progressLineHeight)
+            .accessibilityValue("Playback progress: \(Int(viewModel.progress * 100)) percent")
 
             // Bar content
             HStack(spacing: Spacing.sm) {
@@ -50,6 +50,7 @@ struct NowPlayingBar: View {
                         RoundedRectangle(cornerRadius: CornerRadius.sm)
                             .stroke(AppColors.secondary.opacity(0.2), lineWidth: 0.5)
                     )
+                    .accessibilityHidden(true)
 
                 // Title + subtitle
                 VStack(alignment: .leading, spacing: 2) {
@@ -70,8 +71,7 @@ struct NowPlayingBar: View {
 
                 // Play / Pause button
                 Button {
-                    let generator = UIImpactFeedbackGenerator(style: .light)
-                    generator.impactOccurred()
+                    HapticManager.light()
                     viewModel.togglePlayPause()
                 } label: {
                     Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
@@ -81,6 +81,7 @@ struct NowPlayingBar: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(MiniPlayerButtonStyle())
+                .accessibilityLabel(viewModel.isPlaying ? "Pause" : "Play")
             }
             .padding(.horizontal, Spacing.md)
             .frame(height: Self.barHeight)

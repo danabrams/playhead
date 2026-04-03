@@ -219,12 +219,21 @@ struct CorpusReplayReport: Sendable, Codable {
 
         let totalListens = reports.map(\.userOverrides.listenTapCount).reduce(0, +)
         let totalRewinds = reports.map(\.userOverrides.rewindAfterSkipCount).reduce(0, +)
-        let totalSkips = reports.map { r in
+        // Compute total skips directly from per-episode data rather than
+        // back-calculating from overrideRate, which produces division-by-zero
+        // for episodes with zero overrides and skews the denominator.
+        let totalOverrides = totalListens + totalRewinds
+        let totalSkips: Int = reports.map { r in
+            let overrides = r.userOverrides.listenTapCount + r.userOverrides.rewindAfterSkipCount
             let rate = r.userOverrides.overrideRate
-            guard rate > 0 else { return 0 }
-            return Int(Double(r.userOverrides.listenTapCount + r.userOverrides.rewindAfterSkipCount) / rate)
+            // Only back-calculate when the episode had overrides (rate > 0).
+            // Episodes with zero overrides contribute zero to the denominator
+            // since we cannot infer how many skips they had from rate alone.
+            guard rate > 0, overrides > 0 else { return 0 }
+            return Int((Double(overrides) / rate).rounded())
         }.reduce(0, +)
-        let aggOverrideRate = totalSkips > 0 ? Double(totalListens + totalRewinds) / Double(totalSkips) : 0
+        // Fallback: if no episode had overrides, rate is 0.
+        let aggOverrideRate = totalSkips > 0 ? Double(totalOverrides) / Double(totalSkips) : 0
 
         let aggOverrides = UserOverrideMetrics(
             listenTapCount: totalListens,
@@ -247,13 +256,21 @@ struct CorpusReplayReport: Sendable, Codable {
 
 // MARK: - Helpers
 
-/// Compute the p-th percentile of a sorted array.
+/// Namespace for metric math utilities.
+enum MetricMath {
+    /// Compute the p-th percentile of an array using linear interpolation.
+    static func percentile(_ values: [Double], _ p: Double) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let index = p * Double(sorted.count - 1)
+        let lower = Int(index.rounded(.down))
+        let upper = min(lower + 1, sorted.count - 1)
+        let fraction = index - Double(lower)
+        return sorted[lower] * (1 - fraction) + sorted[upper] * fraction
+    }
+}
+
+/// Convenience free-function wrapper for backward compatibility with existing call sites.
 func percentile(_ values: [Double], _ p: Double) -> Double {
-    guard !values.isEmpty else { return 0 }
-    let sorted = values.sorted()
-    let index = p * Double(sorted.count - 1)
-    let lower = Int(index.rounded(.down))
-    let upper = min(lower + 1, sorted.count - 1)
-    let fraction = index - Double(lower)
-    return sorted[lower] * (1 - fraction) + sorted[upper] * fraction
+    MetricMath.percentile(values, p)
 }

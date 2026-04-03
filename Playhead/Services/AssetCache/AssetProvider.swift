@@ -5,8 +5,6 @@
 
 import Foundation
 import OSLog
-import CryptoKit
-
 // MARK: - AssetProvider
 
 /// Actor responsible for the full lifecycle of model assets:
@@ -77,112 +75,55 @@ actor AssetProvider {
         }
     }
 
-    /// Downloads a single model entry. Resumes if a partial file exists.
+    /// Downloads a single model entry using URLSession.download(for:)
+    /// to avoid byte-at-a-time iteration overhead.
     func download(entry: ModelEntry) async throws {
         let downloadsDir = inventory.downloadsDirectory
-        let partialURL = downloadsDir.appendingPathComponent("\(entry.id).partial")
+        let downloadedURL = downloadsDir.appendingPathComponent("\(entry.id).download")
 
         await inventory.updateDownloadProgress(modelId: entry.id, progress: 0)
 
-        var request = URLRequest(url: entry.downloadURL)
+        let request = URLRequest(url: entry.downloadURL)
 
-        // Resume support: if a partial file exists, request remaining bytes.
-        let fm = FileManager.default
-        var existingSize: Int64 = 0
-        if fm.fileExists(atPath: partialURL.path),
-           let attrs = try? fm.attributesOfItem(atPath: partialURL.path),
-           let size = attrs[.size] as? Int64, size > 0 {
-            existingSize = size
-            request.setValue("bytes=\(existingSize)-", forHTTPHeaderField: "Range")
-            logger.info("Resuming download for \(entry.id) from byte \(existingSize)")
-        }
-
-        // Use async bytes for streaming download with progress tracking.
-        let (asyncBytes, response) = try await urlSession().bytes(for: request)
+        // Download to a temporary file. Use URLSession.shared (not the background
+        // session) because async download(for:) is not supported on background sessions.
+        let (tempURL, response) = try await URLSession.shared.download(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) || httpResponse.statusCode == 206 else {
+              (200...299).contains(httpResponse.statusCode) else {
             throw AssetProviderError.downloadFailed(
                 entry.id,
                 "HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)"
             )
         }
 
-        let totalSize = entry.compressedSizeBytes
-        let fileHandle: FileHandle
-        let isResume = httpResponse.statusCode == 206 && existingSize > 0
-        if httpResponse.statusCode == 200, existingSize > 0 {
-            logger.warning("Server ignored Range for \(entry.id); restarting partial download")
+        let fm = FileManager.default
+
+        // Move the temp file to the downloads directory so it persists.
+        if fm.fileExists(atPath: downloadedURL.path) {
+            try fm.removeItem(at: downloadedURL)
         }
+        try fm.moveItem(at: tempURL, to: downloadedURL)
 
-        if isResume {
-            // Appending to existing partial file.
-            fileHandle = try FileHandle(forWritingTo: partialURL)
-            fileHandle.seekToEndOfFile()
-        } else {
-            // Fresh download — replace any stale partial bytes.
-            if fm.fileExists(atPath: partialURL.path) {
-                try fm.removeItem(at: partialURL)
-            }
-            fm.createFile(atPath: partialURL.path, contents: nil)
-            fileHandle = try FileHandle(forWritingTo: partialURL)
-            existingSize = 0
-        }
+        let attrs = try fm.attributesOfItem(atPath: downloadedURL.path)
+        let downloaded = (attrs[.size] as? Int64) ?? 0
 
-        defer { try? fileHandle.close() }
-
-        var downloaded: Int64 = existingSize
-
-        var buffer = Data()
-        let flushThreshold = 256 * 1024 // Flush every 256 KB
-
-        for try await byte in asyncBytes {
-            buffer.append(byte)
-            if buffer.count >= flushThreshold {
-                fileHandle.write(buffer)
-                downloaded += Int64(buffer.count)
-                buffer.removeAll(keepingCapacity: true)
-
-                let progress = totalSize > 0 ? Double(downloaded) / Double(totalSize) : 0
-                await inventory.updateDownloadProgress(modelId: entry.id, progress: min(progress, 1.0))
-            }
-        }
-
-        // Flush remaining bytes.
-        if !buffer.isEmpty {
-            fileHandle.write(buffer)
-            downloaded += Int64(buffer.count)
-        }
-
+        await inventory.updateDownloadProgress(modelId: entry.id, progress: 1.0)
         logger.info("Download complete for \(entry.id): \(downloaded) bytes")
 
         // Verify and stage.
-        try await verifyAndStage(entry: entry, downloadedFile: partialURL)
+        try await verifyAndStage(entry: entry, downloadedFile: downloadedURL)
     }
 
     // MARK: - Verification
 
     /// Verifies the SHA-256 checksum of a downloaded file.
+    /// Delegates to the shared FileHasher utility.
     func verifyChecksum(fileURL: URL, expected: String) throws -> Bool {
-        let fileHandle = try FileHandle(forReadingFrom: fileURL)
-        defer { try? fileHandle.close() }
-
-        var hasher = SHA256()
-        let chunkSize = 1024 * 1024 // 1 MB chunks
-
-        while autoreleasepool(invoking: {
-            let chunk = fileHandle.readData(ofLength: chunkSize)
-            guard !chunk.isEmpty else { return false }
-            hasher.update(data: chunk)
-            return true
-        }) { }
-
-        let digest = hasher.finalize()
-        let hex = digest.map { String(format: "%02x", $0) }.joined()
-
-        let matches = hex.lowercased() == expected.lowercased()
+        let actual = try FileHasher.sha256(fileURL: fileURL)
+        let matches = actual.lowercased() == expected.lowercased()
         if !matches {
-            logger.error("Checksum mismatch for file: expected \(expected), got \(hex)")
+            logger.error("Checksum mismatch for file: expected \(expected), got \(actual)")
         }
         return matches
     }

@@ -78,7 +78,25 @@ struct ReplayConfiguration: Sendable {
 /// Does not use a real AVPlayer. Instead, it advances a virtual playhead and
 /// feeds transcript chunks and feature windows to the pipeline at the
 /// appropriate simulated times.
-final class SimulatedPlaybackDriver: @unchecked Sendable {
+/// A seedable random number generator for deterministic replay tests.
+/// Uses a linear congruential generator for simplicity and reproducibility.
+struct SeededRandomNumberGenerator: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        self.state = seed
+    }
+
+    mutating func next() -> UInt64 {
+        // LCG parameters from Numerical Recipes.
+        state = state &* 6364136223846793005 &+ 1442695040888963407
+        return state
+    }
+}
+
+/// Single-threaded simulation driver. Not safe for concurrent access.
+/// All mutable state is accessed only from the synchronous `runReplay()` call chain.
+final class SimulatedPlaybackDriver {
 
     private let config: ReplayConfiguration
     private var currentTime: TimeInterval = 0
@@ -90,6 +108,9 @@ final class SimulatedPlaybackDriver: @unchecked Sendable {
     private var revertedSkips: [String] = []
     private var detectedWindows: [AdWindow] = []
 
+    /// Random number generator (injectable for deterministic tests).
+    private var rng: any RandomNumberGenerator
+
     /// Sorted interactions by time for efficient processing.
     private let sortedInteractions: [SimulatedInteraction]
     private var nextInteractionIndex: Int = 0
@@ -97,10 +118,11 @@ final class SimulatedPlaybackDriver: @unchecked Sendable {
     /// Signpost for pipeline timing.
     private let signposter = OSSignposter(subsystem: "com.playhead.test", category: "ReplaySimulator")
 
-    init(config: ReplayConfiguration) {
+    init(config: ReplayConfiguration, rng: any RandomNumberGenerator = SystemRandomNumberGenerator()) {
         self.config = config
         self.currentSpeed = config.condition.playbackSpeed
         self.sortedInteractions = config.condition.interactions.sorted { $0.atTime < $1.atTime }
+        self.rng = rng
     }
 
     // MARK: - Replay Execution
@@ -138,7 +160,7 @@ final class SimulatedPlaybackDriver: @unchecked Sendable {
                     events.append(.adWindowDetected(window))
 
                     // Simulate banner latency.
-                    let bannerDelay = Double.random(in: 50...300)
+                    let bannerDelay = Double.random(in: 50...300, using: &rng)
                     bannerLatencies.append(bannerDelay)
                     events.append(.bannerShown(windowId: window.id, latencyMs: bannerDelay))
                 }
@@ -154,7 +176,7 @@ final class SimulatedPlaybackDriver: @unchecked Sendable {
             events.append(.playheadAdvanced(time: currentTime))
 
             // Advance playhead by time step scaled by speed.
-            currentTime += timeStep
+            currentTime += timeStep * Double(currentSpeed)
         }
 
         return events
@@ -349,9 +371,9 @@ final class SimulatedPlaybackDriver: @unchecked Sendable {
             guard !existingOverlap else { continue }
 
             // Simulate detection with boundary noise (+-0.5s).
-            let startNoise = Double.random(in: -0.5...0.5)
-            let endNoise = Double.random(in: -0.5...0.5)
-            let confidence = Double.random(in: 0.55...0.95)
+            let startNoise = Double.random(in: -0.5...0.5, using: &rng)
+            let endNoise = Double.random(in: -0.5...0.5, using: &rng)
+            let confidence = Double.random(in: 0.55...0.95, using: &rng)
 
             let window = AdWindow(
                 id: UUID().uuidString,

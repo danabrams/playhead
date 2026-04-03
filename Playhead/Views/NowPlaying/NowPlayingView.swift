@@ -4,20 +4,22 @@
 // "Quiet Instrument" aesthetic — precise, minimal chrome, typographic hierarchy.
 
 import SwiftUI
-import UIKit
 
 // MARK: - NowPlayingView
 
 struct NowPlayingView: View {
 
-    @ObservedObject private var runtime: PlayheadRuntime
-    @StateObject private var viewModel: NowPlayingViewModel
-    @StateObject private var bannerQueue = AdBannerQueue()
+    private var runtime: PlayheadRuntime
+    @State private var viewModel: NowPlayingViewModel
+    @State private var bannerQueue = AdBannerQueue()
     @State private var showTranscriptPeek = false
+    @Environment(\.dismiss) private var dismiss
 
-    init(runtime: PlayheadRuntime) {
-        self._runtime = ObservedObject(wrappedValue: runtime)
-        self._viewModel = StateObject(wrappedValue: NowPlayingViewModel(runtime: runtime))
+    /// Accepts an optional external ViewModel for shared state with NowPlayingBar.
+    /// Falls back to creating its own if none provided.
+    init(runtime: PlayheadRuntime, viewModel: NowPlayingViewModel? = nil) {
+        self.runtime = runtime
+        self._viewModel = State(wrappedValue: viewModel ?? NowPlayingViewModel(runtime: runtime))
     }
 
     private var analysisAssetId: String? {
@@ -106,12 +108,14 @@ private extension NowPlayingView {
     var topBar: some View {
         HStack {
             Button {
-                // Dismiss — wired by parent
+                dismiss()
             } label: {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 18, weight: .medium))
                     .foregroundStyle(AppColors.secondary)
             }
+            .accessibilityLabel("Dismiss")
+            .accessibilityHint("Closes the now playing screen")
 
             Spacer()
 
@@ -126,6 +130,7 @@ private extension NowPlayingView {
                     .foregroundStyle(AppColors.secondary)
                     .lineLimit(1)
             }
+            .accessibilityElement(children: .combine)
 
             Spacer()
 
@@ -138,6 +143,8 @@ private extension NowPlayingView {
                         .font(.system(size: 18, weight: .medium))
                         .foregroundStyle(AppColors.secondary)
                 }
+                .accessibilityLabel("Transcript")
+                .accessibilityHint("Opens the transcript peek sheet")
             } else {
                 // Balance the chevron when transcript unavailable
                 Color.clear
@@ -158,6 +165,7 @@ private extension NowPlayingView {
                     .stroke(AppColors.secondary.opacity(0.2), lineWidth: 1)
             )
             .themeShadow(AppShadow.card)
+            .accessibilityLabel("Episode artwork")
     }
 
     // MARK: Titles
@@ -175,6 +183,7 @@ private extension NowPlayingView {
                 .foregroundStyle(AppColors.secondary)
                 .lineLimit(1)
         }
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: Timeline
@@ -194,12 +203,14 @@ private extension NowPlayingView {
                 Text(viewModel.elapsedFormatted)
                     .font(AppTypography.timestamp)
                     .foregroundStyle(AppColors.metadata)
+                    .accessibilityLabel("Elapsed: \(viewModel.elapsedFormatted)")
 
                 Spacer()
 
                 Text(viewModel.remainingFormatted)
                     .font(AppTypography.timestamp)
                     .foregroundStyle(AppColors.metadata)
+                    .accessibilityLabel("Remaining: \(viewModel.remainingFormatted)")
             }
         }
     }
@@ -213,7 +224,8 @@ private extension NowPlayingView {
             // Skip backward 15s
             TransportButton(
                 systemName: "gobackward.15",
-                size: 28
+                size: 28,
+                accessibilityText: "Skip back 15 seconds"
             ) {
                 viewModel.skipBackward()
             }
@@ -223,7 +235,8 @@ private extension NowPlayingView {
                 systemName: viewModel.isPlaying
                     ? "pause.fill"
                     : "play.fill",
-                size: 42
+                size: 42,
+                accessibilityText: viewModel.isPlaying ? "Pause" : "Play"
             ) {
                 viewModel.togglePlayPause()
             }
@@ -231,7 +244,8 @@ private extension NowPlayingView {
             // Skip forward 30s
             TransportButton(
                 systemName: "goforward.30",
-                size: 28
+                size: 28,
+                accessibilityText: "Skip forward 30 seconds"
             ) {
                 viewModel.skipForward()
             }
@@ -264,12 +278,12 @@ private extension NowPlayingView {
 private struct TransportButton: View {
     let systemName: String
     let size: CGFloat
+    var accessibilityText: String = ""
     let action: () -> Void
 
     var body: some View {
         Button {
-            let generator = UIImpactFeedbackGenerator(style: .light)
-            generator.impactOccurred()
+            HapticManager.light()
             action()
         } label: {
             Image(systemName: systemName)
@@ -279,6 +293,7 @@ private struct TransportButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(TransportButtonStyle())
+        .accessibilityLabel(accessibilityText)
     }
 }
 

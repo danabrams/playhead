@@ -13,9 +13,10 @@ struct BrowseView: View {
 
     @Environment(\.modelContext) private var modelContext
 
-    @StateObject private var viewModel = BrowseViewModel()
+    @State private var viewModel = BrowseViewModel()
 
     var body: some View {
+        @Bindable var viewModel = viewModel
         NavigationStack {
             ZStack {
                 AppColors.background
@@ -57,6 +58,7 @@ private extension BrowseView {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 48, weight: .thin))
                 .foregroundStyle(AppColors.secondary)
+                .accessibilityHidden(true)
 
             Text("Discover Podcasts")
                 .font(AppTypography.sans(size: 20, weight: .semibold))
@@ -75,6 +77,7 @@ private extension BrowseView {
             Image(systemName: "tray")
                 .font(.system(size: 48, weight: .thin))
                 .foregroundStyle(AppColors.secondary)
+                .accessibilityHidden(true)
 
             Text("No Results")
                 .font(AppTypography.sans(size: 20, weight: .semibold))
@@ -113,6 +116,7 @@ private extension BrowseView {
                 ProgressView()
                     .tint(AppColors.accent)
                     .padding(.top, Spacing.lg)
+                    .accessibilityLabel("Searching")
             }
         }
     }
@@ -129,6 +133,7 @@ private struct SearchResultRow: View {
             // Stamp-sized artwork
             artworkView
                 .frame(width: 56, height: 56)
+                .accessibilityHidden(true)
 
             // Title + author
             VStack(alignment: .leading, spacing: Spacing.xxs) {
@@ -156,10 +161,13 @@ private struct SearchResultRow: View {
             Image(systemName: "chevron.right")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(AppColors.secondary.opacity(0.5))
+                .accessibilityHidden(true)
         }
         .padding(.horizontal, Spacing.md)
         .padding(.vertical, Spacing.sm)
         .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(result.title) by \(result.author)")
     }
 
     private var artworkView: some View {
@@ -227,6 +235,7 @@ struct PodcastDetailView: View {
                 VStack(spacing: Spacing.lg) {
                     // Hero artwork
                     heroArtwork
+                        .accessibilityLabel("Podcast artwork for \(result.title)")
 
                     // Metadata
                     VStack(spacing: Spacing.xs) {
@@ -319,6 +328,7 @@ struct PodcastDetailView: View {
             .foregroundStyle(AppColors.secondary.opacity(0.5))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(AppColors.surface)
+            .accessibilityHidden(true)
     }
 
     private var subscribeButton: some View {
@@ -354,6 +364,7 @@ struct PodcastDetailView: View {
             )
         }
         .disabled(isSubscribing || subscribed)
+        .accessibilityLabel(subscribed ? "Subscribed to \(result.title)" : "Subscribe to \(result.title)")
     }
 
     @MainActor

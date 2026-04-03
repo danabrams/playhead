@@ -69,61 +69,66 @@ private struct WelcomeStepView: View {
     @State private var textVisible = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            Spacer()
+        GeometryReader { geometry in
+            let availableWidth = geometry.size.width
 
-            // Playhead line motif: a horizontal copper line
-            // that extends from left, with the app name appearing after.
-            VStack(spacing: Spacing.lg) {
-                // The playhead line
-                ZStack(alignment: .leading) {
-                    Rectangle()
-                        .fill(AppColors.accent)
-                        .frame(height: 2)
-                        .frame(
-                            width: lineExtended ? UIScreen.main.bounds.width * 0.6 : 0
-                        )
+            VStack(spacing: 0) {
+                Spacer()
 
-                    // Playhead dot at the leading edge of the line
-                    Circle()
-                        .fill(AppColors.accent)
-                        .frame(width: 8, height: 8)
-                        .offset(
-                            x: lineExtended ? UIScreen.main.bounds.width * 0.6 - 4 : -4
-                        )
-                        .opacity(lineExtended ? 1 : 0)
+                // Playhead line motif: a horizontal copper line
+                // that extends from left, with the app name appearing after.
+                VStack(spacing: Spacing.lg) {
+                    // The playhead line
+                    ZStack(alignment: .leading) {
+                        Rectangle()
+                            .fill(AppColors.accent)
+                            .frame(height: 2)
+                            .frame(
+                                width: lineExtended ? availableWidth * 0.6 : 0
+                            )
+
+                        // Playhead dot at the leading edge of the line
+                        Circle()
+                            .fill(AppColors.accent)
+                            .frame(width: 8, height: 8)
+                            .offset(
+                                x: lineExtended ? availableWidth * 0.6 - 4 : -4
+                            )
+                            .opacity(lineExtended ? 1 : 0)
+                    }
+                    .frame(height: 8)
+                    .accessibilityHidden(true)
+
+                    VStack(spacing: Spacing.xs) {
+                        Text("Playhead")
+                            .font(AppTypography.sans(size: 36, weight: .semibold))
+                            .foregroundStyle(AppColors.text)
+
+                        Text("Podcast listening, minus the ads.")
+                            .font(AppTypography.body)
+                            .foregroundStyle(AppColors.secondary)
+                    }
+                    .opacity(textVisible ? 1 : 0)
+                    .offset(y: textVisible ? 0 : 12)
                 }
-                .frame(height: 8)
 
-                VStack(spacing: Spacing.xs) {
-                    Text("Playhead")
-                        .font(AppTypography.sans(size: 36, weight: .semibold))
-                        .foregroundStyle(AppColors.text)
+                Spacer()
 
-                    Text("Podcast listening, minus the ads.")
-                        .font(AppTypography.body)
-                        .foregroundStyle(AppColors.secondary)
+                OnboardingButton(label: "Get Started") {
+                    onContinue()
                 }
                 .opacity(textVisible ? 1 : 0)
-                .offset(y: textVisible ? 0 : 12)
+                .padding(.horizontal, Spacing.xl)
+                .padding(.bottom, Spacing.xxl)
             }
-
-            Spacer()
-
-            OnboardingButton(label: "Get Started") {
-                onContinue()
-            }
-            .opacity(textVisible ? 1 : 0)
-            .padding(.horizontal, Spacing.xl)
-            .padding(.bottom, Spacing.xxl)
-        }
-        .onAppear {
-            // Stagger the entrance: line first, then text.
-            withAnimation(.easeOut(duration: 0.8)) {
-                lineExtended = true
-            }
-            withAnimation(.easeOut(duration: 0.5).delay(0.5)) {
-                textVisible = true
+            .onAppear {
+                // Stagger the entrance: line first, then text.
+                withAnimation(.easeOut(duration: 0.8)) {
+                    lineExtended = true
+                }
+                withAnimation(.easeOut(duration: 0.5).delay(0.5)) {
+                    textVisible = true
+                }
             }
         }
     }
@@ -190,6 +195,7 @@ private struct ValuePropStepView: View {
                 .foregroundStyle(AppColors.accent)
                 .frame(width: 32, alignment: .center)
                 .padding(.top, 2)
+                .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: Spacing.xxs) {
                 Text(title)
@@ -202,6 +208,7 @@ private struct ValuePropStepView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -211,7 +218,7 @@ private struct ModelDownloadStepView: View {
 
     let onContinue: () -> Void
 
-    @StateObject private var viewModel = ModelDownloadViewModel()
+    @State private var viewModel = ModelDownloadViewModel()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -238,6 +245,7 @@ private struct ModelDownloadStepView: View {
                             .animation(Motion.quick, value: viewModel.displayProgress)
                     }
                 }
+                .accessibilityLabel(viewModel.fastPathReady ? "Download complete" : "Downloading: \(Int(viewModel.displayProgress * 100)) percent")
 
                 VStack(spacing: Spacing.xs) {
                     Text(viewModel.fastPathReady ? "Ready to go" : "Preparing ad detection")
@@ -286,12 +294,13 @@ private struct FirstPodcastStepView: View {
     let onComplete: () -> Void
 
     @Environment(\.modelContext) private var modelContext
-    @StateObject private var viewModel = BrowseViewModel()
+    @State private var viewModel = BrowseViewModel()
     @State private var subscribedPodcast: Podcast?
     @State private var isSubscribing = false
     @State private var errorMessage: String?
 
     var body: some View {
+        @Bindable var viewModel = viewModel
         VStack(spacing: 0) {
             // Header
             VStack(spacing: Spacing.xs) {
@@ -312,6 +321,7 @@ private struct FirstPodcastStepView: View {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(AppColors.secondary)
+                    .accessibilityHidden(true)
 
                 TextField("Search podcasts", text: $viewModel.searchText)
                     .font(AppTypography.body)
@@ -329,6 +339,7 @@ private struct FirstPodcastStepView: View {
                             .font(.system(size: 16))
                             .foregroundStyle(AppColors.secondary)
                     }
+                    .accessibilityLabel("Clear search")
                 }
             }
             .padding(.horizontal, Spacing.md)
@@ -349,6 +360,7 @@ private struct FirstPodcastStepView: View {
                 Spacer()
                 ProgressView()
                     .tint(AppColors.accent)
+                    .accessibilityLabel("Searching")
                 Spacer()
             } else if viewModel.results.isEmpty && !viewModel.searchText.isEmpty {
                 Spacer()
@@ -362,6 +374,7 @@ private struct FirstPodcastStepView: View {
                     .font(.system(size: 40, weight: .thin))
                     .foregroundStyle(AppColors.secondary.opacity(0.5))
                     .padding(.bottom, Spacing.sm)
+                    .accessibilityHidden(true)
                 Text("Type a name or topic above.")
                     .font(AppTypography.caption)
                     .foregroundStyle(AppColors.metadata)
@@ -455,6 +468,7 @@ private struct OnboardingSearchRow: View {
             // Artwork
             artworkView
                 .frame(width: 52, height: 52)
+                .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: Spacing.xxs) {
                 Text(result.title)
@@ -476,6 +490,7 @@ private struct OnboardingSearchRow: View {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 22))
                     .foregroundStyle(AppColors.accent)
+                    .accessibilityLabel("Subscribed")
             } else {
                 Button {
                     onSubscribe()
@@ -485,6 +500,7 @@ private struct OnboardingSearchRow: View {
                         .foregroundStyle(AppColors.accent)
                 }
                 .disabled(isSubscribing)
+                .accessibilityLabel("Subscribe to \(result.title)")
             }
         }
         .padding(.horizontal, Spacing.md)
@@ -533,7 +549,7 @@ private struct OnboardingSearchRow: View {
 
 // MARK: - Shared Button
 
-struct OnboardingButton: View {
+private struct OnboardingButton: View {
 
     let label: String
     let action: () -> Void
@@ -550,6 +566,7 @@ struct OnboardingButton: View {
                         .fill(AppColors.accent)
                 )
         }
+        .accessibilityLabel(label)
     }
 }
 

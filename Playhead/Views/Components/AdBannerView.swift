@@ -41,9 +41,10 @@ struct AdSkipBannerItem: Identifiable, Equatable {
 /// Manages banner display queue. Coalesces adjacent skips into a single
 /// banner. Ensures only one banner is visible at a time.
 @MainActor
-final class AdBannerQueue: ObservableObject {
+@Observable
+final class AdBannerQueue {
 
-    @Published private(set) var currentBanner: AdSkipBannerItem?
+    private(set) var currentBanner: AdSkipBannerItem?
 
     /// Pending banners waiting to display.
     private var queue: [AdSkipBannerItem] = []
@@ -126,7 +127,7 @@ final class AdBannerQueue: ObservableObject {
 /// Slides in from below, slides out on dismiss.
 struct AdBannerView: View {
 
-    @ObservedObject var queue: AdBannerQueue
+    var queue: AdBannerQueue
 
     /// Called when the user taps "Listen" to jump back to the skipped ad.
     var onListen: ((AdSkipBannerItem) -> Void)?
@@ -246,6 +247,8 @@ struct AdBannerView: View {
                         )
                 }
                 .buttonStyle(BannerButtonStyle())
+                .accessibilityLabel("Listen to skipped ad")
+                .accessibilityHint("Rewinds to the start of the skipped ad segment")
 
                 // Dismiss button
                 Button {
@@ -258,6 +261,7 @@ struct AdBannerView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(BannerButtonStyle())
+                .accessibilityLabel("Dismiss banner")
             }
         }
         .padding(.horizontal, Spacing.md)
@@ -267,10 +271,10 @@ struct AdBannerView: View {
                 .fill(Palette.ink)
                 .themeShadow(AppShadow.elevated)
         )
+        .accessibilityElement(children: .contain)
         .onAppear {
             // Subtle haptic on banner appear.
-            let generator = UIImpactFeedbackGenerator(style: .soft)
-            generator.impactOccurred()
+            HapticManager.soft()
         }
     }
 

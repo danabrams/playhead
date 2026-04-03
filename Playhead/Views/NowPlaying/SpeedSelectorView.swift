@@ -15,8 +15,7 @@ struct SpeedSelectorView: View {
 
     var body: some View {
         Button {
-            let generator = UIImpactFeedbackGenerator(style: .light)
-            generator.impactOccurred()
+            HapticManager.light()
             cycleSpeed()
         } label: {
             Text(Self.formatSpeed(currentSpeed))
@@ -34,9 +33,11 @@ struct SpeedSelectorView: View {
                 )
         }
         .buttonStyle(TransportScaleStyle())
+        .accessibilityLabel("Playback speed: \(Self.formatSpeed(currentSpeed))")
+        .accessibilityHint("Tap to cycle speed, long press for all options")
+        .accessibilityValue(Self.formatSpeed(currentSpeed))
         .onLongPressGesture {
-            let generator = UIImpactFeedbackGenerator(style: .medium)
-            generator.impactOccurred()
+            HapticManager.medium()
             showingPicker = true
         }
         .confirmationDialog("Playback Speed", isPresented: $showingPicker) {

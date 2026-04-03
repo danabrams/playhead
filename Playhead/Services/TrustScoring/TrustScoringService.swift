@@ -84,9 +84,14 @@ actor TrustScoringService {
     /// Return the effective skip mode for a podcast. Respects user override.
     /// If no profile exists yet, returns `.shadow`.
     func effectiveMode(podcastId: String) async -> SkipMode {
-        guard let profile = try? await store.fetchProfile(podcastId: podcastId) else {
+        let profile: PodcastProfile?
+        do {
+            profile = try await store.fetchProfile(podcastId: podcastId)
+        } catch {
+            logger.warning("Failed to fetch profile for \(podcastId): \(error.localizedDescription)")
             return .shadow
         }
+        guard let profile else { return .shadow }
         return SkipMode(rawValue: profile.mode) ?? .shadow
     }
 
@@ -98,7 +103,15 @@ actor TrustScoringService {
         podcastId: String,
         averageConfidence: Double
     ) async {
-        guard let profile = try? await store.fetchProfile(podcastId: podcastId) else {
+        let profile: PodcastProfile?
+        do {
+            profile = try await store.fetchProfile(podcastId: podcastId)
+        } catch {
+            logger.warning("Failed to fetch profile for \(podcastId): \(error.localizedDescription)")
+            return
+        }
+
+        guard let profile else {
             // First observation for a brand-new show.
             let initialMode: SkipMode =
                 averageConfidence >= config.exceptionalFirstEpisodeConfidence
@@ -116,7 +129,11 @@ actor TrustScoringService {
                 mode: initialMode.rawValue,
                 recentFalseSkipSignals: 0
             )
-            try? await store.upsertProfile(newProfile)
+            do {
+                try await store.upsertProfile(newProfile)
+            } catch {
+                logger.warning("Failed to upsert new profile for \(podcastId): \(error.localizedDescription)")
+            }
             logger.info("New show \(podcastId): mode=\(initialMode.rawValue) confidence=\(averageConfidence, format: .fixed(precision: 2))")
             return
         }
@@ -144,7 +161,11 @@ actor TrustScoringService {
             mode: newMode.rawValue,
             recentFalseSkipSignals: profile.recentFalseSkipSignals
         )
-        try? await store.upsertProfile(updated)
+        do {
+            try await store.upsertProfile(updated)
+        } catch {
+            logger.warning("Failed to upsert profile for \(podcastId) after observation: \(error.localizedDescription)")
+        }
 
         if newMode != currentMode {
             logger.info("Promoted \(podcastId): \(currentMode.rawValue) -> \(newMode.rawValue) trust=\(newTrust, format: .fixed(precision: 2)) obs=\(newObservations)")
@@ -156,7 +177,14 @@ actor TrustScoringService {
     /// Record a false-skip signal (user tapped "Listen" or rewound after skip).
     /// Decrements trust and may trigger demotion.
     func recordFalseSkipSignal(podcastId: String) async {
-        guard let profile = try? await store.fetchProfile(podcastId: podcastId) else { return }
+        let profile: PodcastProfile?
+        do {
+            profile = try await store.fetchProfile(podcastId: podcastId)
+        } catch {
+            logger.warning("Failed to fetch profile for false-skip signal on \(podcastId): \(error.localizedDescription)")
+            return
+        }
+        guard let profile else { return }
 
         let newFalseSignals = profile.recentFalseSkipSignals + 1
         let newTrust = max(0, profile.skipTrustScore - config.falseSignalPenalty)
@@ -179,7 +207,11 @@ actor TrustScoringService {
             mode: newMode.rawValue,
             recentFalseSkipSignals: newFalseSignals
         )
-        try? await store.upsertProfile(updated)
+        do {
+            try await store.upsertProfile(updated)
+        } catch {
+            logger.warning("Failed to upsert profile for \(podcastId) after false-skip signal: \(error.localizedDescription)")
+        }
 
         if newMode != currentMode {
             logger.info("Demoted \(podcastId): \(currentMode.rawValue) -> \(newMode.rawValue) trust=\(newTrust, format: .fixed(precision: 2)) falseSignals=\(newFalseSignals)")
@@ -193,7 +225,15 @@ actor TrustScoringService {
     /// Set a user-chosen mode for a podcast, overriding the trust engine.
     /// Stores the mode directly; trust score is not changed.
     func setUserOverride(podcastId: String, mode: SkipMode) async {
-        guard let profile = try? await store.fetchProfile(podcastId: podcastId) else {
+        let profile: PodcastProfile?
+        do {
+            profile = try await store.fetchProfile(podcastId: podcastId)
+        } catch {
+            logger.warning("Failed to fetch profile for user override on \(podcastId): \(error.localizedDescription)")
+            return
+        }
+
+        guard let profile else {
             // Create a profile with the override mode.
             let newProfile = PodcastProfile(
                 podcastId: podcastId,
@@ -207,7 +247,11 @@ actor TrustScoringService {
                 mode: mode.rawValue,
                 recentFalseSkipSignals: 0
             )
-            try? await store.upsertProfile(newProfile)
+            do {
+                try await store.upsertProfile(newProfile)
+            } catch {
+                logger.warning("Failed to upsert new profile for user override on \(podcastId): \(error.localizedDescription)")
+            }
             logger.info("User override (new profile) \(podcastId): mode=\(mode.rawValue)")
             return
         }
@@ -224,7 +268,11 @@ actor TrustScoringService {
             mode: mode.rawValue,
             recentFalseSkipSignals: profile.recentFalseSkipSignals
         )
-        try? await store.upsertProfile(updated)
+        do {
+            try await store.upsertProfile(updated)
+        } catch {
+            logger.warning("Failed to upsert profile for user override on \(podcastId): \(error.localizedDescription)")
+        }
         logger.info("User override \(podcastId): mode=\(mode.rawValue)")
     }
 
@@ -233,7 +281,14 @@ actor TrustScoringService {
     /// Reset recent false-skip signals for a podcast (called after a
     /// successful episode with no false signals, to decay old signals).
     func decayFalseSignals(podcastId: String) async {
-        guard let profile = try? await store.fetchProfile(podcastId: podcastId) else { return }
+        let profile: PodcastProfile?
+        do {
+            profile = try await store.fetchProfile(podcastId: podcastId)
+        } catch {
+            logger.warning("Failed to fetch profile for false-signal decay on \(podcastId): \(error.localizedDescription)")
+            return
+        }
+        guard let profile else { return }
         guard profile.recentFalseSkipSignals > 0 else { return }
 
         // Halve the false signal count after each clean episode.
@@ -251,7 +306,11 @@ actor TrustScoringService {
             mode: profile.mode,
             recentFalseSkipSignals: decayed
         )
-        try? await store.upsertProfile(updated)
+        do {
+            try await store.upsertProfile(updated)
+        } catch {
+            logger.warning("Failed to upsert profile for false-signal decay on \(podcastId): \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Promotion / Demotion Logic

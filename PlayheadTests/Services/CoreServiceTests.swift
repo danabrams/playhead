@@ -21,10 +21,14 @@ private func readRepoSource(_ relativePath: String) throws -> String {
     return try String(contentsOf: url, encoding: .utf8)
 }
 
-/// Creates an in-memory AnalysisStore for isolated testing.
+/// Tracks temporary directories created by `makeTestStore()` for cleanup.
+private let _testStoreDirs = TestTempDirTracker()
+
+/// Creates an AnalysisStore backed by a temporary directory for isolated testing.
+/// The directory is automatically cleaned up when the test process ends.
 private func makeTestStore() async throws -> AnalysisStore {
-    let dir = FileManager.default.temporaryDirectory
-        .appendingPathComponent("PlayheadTests-\(UUID().uuidString)")
+    let dir = try makeTempDir(prefix: "PlayheadTests")
+    _testStoreDirs.track(dir)
     let store = try AnalysisStore(directory: dir)
     try await store.migrate()
     return store

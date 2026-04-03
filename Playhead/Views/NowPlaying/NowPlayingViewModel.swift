@@ -6,20 +6,21 @@ import Foundation
 import SwiftUI
 
 @MainActor
-final class NowPlayingViewModel: ObservableObject {
+@Observable
+final class NowPlayingViewModel {
 
-    // MARK: - Published State
+    // MARK: - State
 
-    @Published var episodeTitle: String = "No Episode Selected"
-    @Published var podcastTitle: String = ""
-    @Published var isPlaying: Bool = false
-    @Published var currentTime: TimeInterval = 0
-    @Published var duration: TimeInterval = 0
-    @Published var playbackSpeed: Float = 1.0
+    var episodeTitle: String = "No Episode Selected"
+    var podcastTitle: String = ""
+    var isPlaying: Bool = false
+    var currentTime: TimeInterval = 0
+    var duration: TimeInterval = 0
+    var playbackSpeed: Float = 1.0
 
     /// Ad segments from SkipOrchestrator, expressed as fractional ranges (0...1)
     /// of the total episode duration. Updated in real-time as detection produces results.
-    @Published var adSegmentRanges: [ClosedRange<Double>] = []
+    var adSegmentRanges: [ClosedRange<Double>] = []
 
     // MARK: - Derived
 
@@ -29,12 +30,12 @@ final class NowPlayingViewModel: ObservableObject {
     }
 
     var elapsedFormatted: String {
-        Self.formatTime(currentTime)
+        TimeFormatter.formatTime(currentTime)
     }
 
     var remainingFormatted: String {
         let remaining = max(duration - currentTime, 0)
-        return "-\(Self.formatTime(remaining))"
+        return "-\(TimeFormatter.formatTime(remaining))"
     }
 
     // MARK: - Dependencies
@@ -166,19 +167,5 @@ final class NowPlayingViewModel: ObservableObject {
     private func syncMetadata() {
         episodeTitle = runtime.currentEpisodeTitle ?? "No Episode Selected"
         podcastTitle = runtime.currentPodcastTitle ?? ""
-    }
-
-    // MARK: - Formatting
-
-    private static func formatTime(_ seconds: TimeInterval) -> String {
-        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
-        let totalSeconds = Int(seconds)
-        let hours = totalSeconds / 3600
-        let minutes = (totalSeconds % 3600) / 60
-        let secs = totalSeconds % 60
-        if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, secs)
-        }
-        return String(format: "%d:%02d", minutes, secs)
     }
 }

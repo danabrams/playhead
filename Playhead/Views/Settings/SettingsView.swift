@@ -24,36 +24,43 @@ struct SettingsView: View {
 
     @State private var viewModel = SettingsViewModel()
 
+    /// Resolved preferences, loaded in .onAppear to avoid SwiftData
+    /// inserts during body evaluation.
+    @State private var preferences: UserPreferences?
+
     /// Injected dependencies — set via environment or passed directly.
     var inventory: ModelInventory?
     var assetProvider: AssetProvider?
     var entitlementManager: EntitlementManager?
 
-    /// Resolved preferences: fetches the first row or creates a default.
-    private var preferences: UserPreferences {
-        if let existing = allPreferences.first {
-            return existing
-        }
-        let fresh = UserPreferences()
-        modelContext.insert(fresh)
-        return fresh
-    }
-
     var body: some View {
         NavigationStack {
             List {
-                modelSection
-                adSkipSection
-                playbackSection
-                backgroundSection
-                storageSection
-                purchasesSection
+                if let prefs = preferences {
+                    modelSection
+                    adSkipSection(prefs)
+                    playbackSection(prefs)
+                    backgroundSection(prefs)
+                    storageSection
+                    purchasesSection
+                }
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
             .background(AppColors.background)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.large)
+            .onAppear {
+                if preferences == nil {
+                    if let existing = allPreferences.first {
+                        preferences = existing
+                    } else {
+                        let fresh = UserPreferences()
+                        modelContext.insert(fresh)
+                        preferences = fresh
+                    }
+                }
+            }
             .task {
                 await viewModel.computeStorageSizes()
                 if let inventory {
@@ -62,6 +69,7 @@ struct SettingsView: View {
             }
         }
     }
+
 }
 
 // MARK: - Model Selection Section
@@ -124,6 +132,7 @@ private extension SettingsView {
         }
         .padding(.vertical, Spacing.xxs)
         .listRowBackground(AppColors.surface)
+        .accessibilityElement(children: .combine)
     }
 
     @ViewBuilder
@@ -140,6 +149,7 @@ private extension SettingsView {
                     .foregroundStyle(AppColors.accent)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Download \(entry.displayName)")
 
         case .downloading(let progress):
             HStack(spacing: Spacing.xs) {
@@ -150,6 +160,7 @@ private extension SettingsView {
                     .font(AppTypography.timestamp)
                     .foregroundStyle(AppColors.metadata)
             }
+            .accessibilityValue("Downloading: \(Int(progress * 100)) percent")
 
         case .staged:
             Button {
@@ -162,6 +173,7 @@ private extension SettingsView {
                     .foregroundStyle(AppColors.accent)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Activate \(entry.displayName)")
 
         case .ready(let version):
             HStack(spacing: Spacing.xs) {
@@ -184,6 +196,7 @@ private extension SettingsView {
                             .foregroundStyle(.red.opacity(0.8))
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Delete \(entry.displayName)")
                 }
             }
 
@@ -205,6 +218,7 @@ private extension SettingsView {
                         .foregroundStyle(AppColors.accent)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Update \(entry.displayName) to version \(new)")
             }
         }
     }
@@ -253,11 +267,11 @@ private extension SettingsView {
 
 private extension SettingsView {
 
-    var adSkipSection: some View {
+    func adSkipSection(_ prefs: UserPreferences) -> some View {
         Section {
             Picker(selection: Binding(
-                get: { preferences.skipBehavior },
-                set: { preferences.skipBehavior = $0 }
+                get: { prefs.skipBehavior },
+                set: { prefs.skipBehavior = $0 }
             )) {
                 ForEach(SkipBehavior.allCases, id: \.self) { behavior in
                     Text(behavior.displayName)
@@ -269,17 +283,19 @@ private extension SettingsView {
                     .foregroundStyle(AppColors.text)
             }
             .listRowBackground(AppColors.surface)
+            .accessibilityLabel("Ad skip mode")
+            .accessibilityValue(prefs.skipBehavior.displayName)
         } header: {
             sectionHeader("Ad Detection")
         } footer: {
-            Text(skipBehaviorFooter)
+            Text(skipBehaviorFooter(prefs))
                 .font(AppTypography.caption)
                 .foregroundStyle(AppColors.metadata)
         }
     }
 
-    var skipBehaviorFooter: String {
-        switch preferences.skipBehavior {
+    func skipBehaviorFooter(_ prefs: UserPreferences) -> String {
+        switch prefs.skipBehavior {
         case .auto:
             "Detected ads are skipped automatically during playback."
         case .manual:
@@ -294,7 +310,7 @@ private extension SettingsView {
 
 private extension SettingsView {
 
-    var playbackSection: some View {
+    func playbackSection(_ prefs: UserPreferences) -> some View {
         Section {
             // Playback speed
             VStack(alignment: .leading, spacing: Spacing.xs) {
@@ -303,20 +319,21 @@ private extension SettingsView {
                         .font(AppTypography.body)
                         .foregroundStyle(AppColors.text)
                     Spacer()
-                    Text(String(format: "%.1fx", preferences.playbackSpeed))
+                    Text(String(format: "%.1fx", prefs.playbackSpeed))
                         .font(AppTypography.timestamp)
                         .foregroundStyle(AppColors.accent)
                 }
 
                 Slider(
                     value: Binding(
-                        get: { preferences.playbackSpeed },
-                        set: { preferences.playbackSpeed = $0 }
+                        get: { prefs.playbackSpeed },
+                        set: { prefs.playbackSpeed = $0 }
                     ),
                     in: 0.5...3.0,
                     step: 0.1
                 )
                 .tint(AppColors.accent)
+                .accessibilityValue(String(format: "%.1f times", prefs.playbackSpeed))
             }
             .listRowBackground(AppColors.surface)
 
@@ -327,8 +344,8 @@ private extension SettingsView {
                     .foregroundStyle(AppColors.text)
                 Spacer()
                 Picker("", selection: Binding(
-                    get: { preferences.skipIntervals.forwardSeconds },
-                    set: { preferences.skipIntervals.forwardSeconds = $0 }
+                    get: { prefs.skipIntervals.forwardSeconds },
+                    set: { prefs.skipIntervals.forwardSeconds = $0 }
                 )) {
                     ForEach(skipIntervalOptions, id: \.self) { seconds in
                         Text("\(Int(seconds))s").tag(seconds)
@@ -338,6 +355,8 @@ private extension SettingsView {
                 .tint(AppColors.accent)
             }
             .listRowBackground(AppColors.surface)
+            .accessibilityLabel("Skip forward interval")
+            .accessibilityValue("\(Int(prefs.skipIntervals.forwardSeconds)) seconds")
 
             // Backward skip interval
             HStack {
@@ -346,8 +365,8 @@ private extension SettingsView {
                     .foregroundStyle(AppColors.text)
                 Spacer()
                 Picker("", selection: Binding(
-                    get: { preferences.skipIntervals.backwardSeconds },
-                    set: { preferences.skipIntervals.backwardSeconds = $0 }
+                    get: { prefs.skipIntervals.backwardSeconds },
+                    set: { prefs.skipIntervals.backwardSeconds = $0 }
                 )) {
                     ForEach(skipIntervalOptions, id: \.self) { seconds in
                         Text("\(Int(seconds))s").tag(seconds)
@@ -357,6 +376,8 @@ private extension SettingsView {
                 .tint(AppColors.accent)
             }
             .listRowBackground(AppColors.surface)
+            .accessibilityLabel("Skip back interval")
+            .accessibilityValue("\(Int(prefs.skipIntervals.backwardSeconds)) seconds")
         } header: {
             sectionHeader("Playback")
         }
@@ -371,11 +392,11 @@ private extension SettingsView {
 
 private extension SettingsView {
 
-    var backgroundSection: some View {
+    func backgroundSection(_ prefs: UserPreferences) -> some View {
         Section {
             Toggle(isOn: Binding(
-                get: { preferences.backgroundProcessingEnabled },
-                set: { preferences.backgroundProcessingEnabled = $0 }
+                get: { prefs.backgroundProcessingEnabled },
+                set: { prefs.backgroundProcessingEnabled = $0 }
             )) {
                 Label("Background Processing", systemImage: "arrow.triangle.2.circlepath")
                     .font(AppTypography.body)
@@ -449,9 +470,11 @@ private extension SettingsView {
                     .font(AppTypography.caption)
                     .foregroundStyle(.red.opacity(0.8))
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Clear \(label)")
             }
         }
         .listRowBackground(AppColors.surface)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -480,12 +503,14 @@ private extension SettingsView {
                     } else if viewModel.restoreSucceeded {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(.green)
+                            .accessibilityLabel("Restore successful")
                     }
                 }
             }
             .buttonStyle(.plain)
             .disabled(viewModel.isRestoring)
             .listRowBackground(AppColors.surface)
+            .accessibilityLabel("Restore purchases")
 
             if let error = viewModel.restoreError {
                 Text(error)

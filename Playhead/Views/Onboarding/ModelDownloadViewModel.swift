@@ -12,26 +12,27 @@ import Speech
 #endif
 
 @MainActor
-final class ModelDownloadViewModel: ObservableObject {
+@Observable
+final class ModelDownloadViewModel {
 
     private let logger = Logger(subsystem: "com.playhead", category: "OnboardingDownload")
 
-    // MARK: - Published State
+    // MARK: - State
 
     /// Progress of the fast-path model download (0.0 ... 1.0).
-    @Published var displayProgress: Double = 0
+    var displayProgress: Double = 0
 
     /// True once the fast-path ASR model is ready for inference.
-    @Published var fastPathReady = false
+    var fastPathReady = false
 
     /// True once every model in the manifest is ready.
-    @Published var allModelsReady = false
+    var allModelsReady = false
 
     /// Number of background models still downloading after the fast path.
-    @Published var backgroundModelsRemaining: Int = 0
+    var backgroundModelsRemaining: Int = 0
 
     /// Human-readable status line shown below the progress indicator.
-    @Published var statusMessage: String = "Checking models..."
+    var statusMessage: String = "Checking models..."
 
     /// True once the fast-path model is ready (user can tap Continue).
     var canProceed: Bool { fastPathReady }

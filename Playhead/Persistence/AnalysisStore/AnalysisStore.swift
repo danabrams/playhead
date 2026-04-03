@@ -7,6 +7,11 @@
 import Foundation
 import SQLite3
 
+/// SQLite SQLITE_TRANSIENT destructor constant — tells sqlite3_bind_text to
+/// immediately copy the provided string. Defined once to avoid repeated
+/// unsafeBitCast calls at every bind site.
+private let SQLITE_TRANSIENT_PTR = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
 // MARK: - Row types
 
 struct AnalysisAsset: Sendable {
@@ -152,7 +157,9 @@ actor AnalysisStore {
         self.databaseURL = dir.appendingPathComponent("analysis.sqlite")
 
         var handle: OpaquePointer?
-        let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+        // NOMUTEX: the enclosing actor already serializes all access, so the
+        // full-mutex threading mode is redundant overhead.
+        let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX
         let rc = sqlite3_open_v2(databaseURL.path, &handle, flags, nil)
         guard rc == SQLITE_OK, let handle else {
             let msg = handle.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
@@ -169,9 +176,21 @@ actor AnalysisStore {
         return store
     }
 
+    /// Tracks which database paths have already been migrated in this process
+    /// to avoid redundant DDL work on repeated `open()` calls.
+    private static let migratedLock = NSLock()
+    private static var migratedPaths: Set<String> = []
+
     /// Run pragmas and create all tables / indexes / FTS triggers. Safe to call
-    /// more than once (every DDL statement uses IF NOT EXISTS).
+    /// more than once (every DDL statement uses IF NOT EXISTS). Skips work if
+    /// this database path has already been migrated in the current process.
     func migrate() throws {
+        let path = databaseURL.path
+        let alreadyDone = Self.migratedLock.withLock {
+            !Self.migratedPaths.insert(path).inserted
+        }
+        guard !alreadyDone else { return }
+
         try configurePragmas()
         try createTables()
     }
@@ -211,7 +230,8 @@ actor AnalysisStore {
                 confirmedAdCoverageEndTime  REAL,
                 analysisState               TEXT NOT NULL DEFAULT 'new',
                 analysisVersion             INTEGER NOT NULL DEFAULT 1,
-                capabilitySnapshot          TEXT
+                capabilitySnapshot          TEXT,
+                createdAt                   REAL NOT NULL DEFAULT (strftime('%s', 'now'))
             )
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_assets_episode ON analysis_assets(episodeId)")
@@ -220,7 +240,7 @@ actor AnalysisStore {
         try exec("""
             CREATE TABLE IF NOT EXISTS analysis_sessions (
                 id               TEXT PRIMARY KEY,
-                analysisAssetId  TEXT NOT NULL REFERENCES analysis_assets(id),
+                analysisAssetId  TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
                 state            TEXT NOT NULL DEFAULT 'queued',
                 startedAt        REAL NOT NULL,
                 updatedAt        REAL NOT NULL,
@@ -232,7 +252,7 @@ actor AnalysisStore {
         // feature_windows
         try exec("""
             CREATE TABLE IF NOT EXISTS feature_windows (
-                analysisAssetId   TEXT NOT NULL REFERENCES analysis_assets(id),
+                analysisAssetId   TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
                 startTime         REAL NOT NULL,
                 endTime           REAL NOT NULL,
                 rms               REAL NOT NULL,
@@ -250,7 +270,7 @@ actor AnalysisStore {
         try exec("""
             CREATE TABLE IF NOT EXISTS transcript_chunks (
                 id                  TEXT PRIMARY KEY,
-                analysisAssetId     TEXT NOT NULL REFERENCES analysis_assets(id),
+                analysisAssetId     TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
                 segmentFingerprint  TEXT NOT NULL,
                 chunkIndex          INTEGER NOT NULL,
                 startTime           REAL NOT NULL,
@@ -268,7 +288,7 @@ actor AnalysisStore {
         try exec("""
             CREATE TABLE IF NOT EXISTS ad_windows (
                 id                  TEXT PRIMARY KEY,
-                analysisAssetId     TEXT NOT NULL REFERENCES analysis_assets(id),
+                analysisAssetId     TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
                 startTime           REAL NOT NULL,
                 endTime             REAL NOT NULL,
                 confidence          REAL NOT NULL,
@@ -393,7 +413,7 @@ actor AnalysisStore {
     }
 
     func fetchAssetByEpisodeId(_ episodeId: String) throws -> AnalysisAsset? {
-        let sql = "SELECT * FROM analysis_assets WHERE episodeId = ? ORDER BY rowid DESC LIMIT 1"
+        let sql = "SELECT * FROM analysis_assets WHERE episodeId = ? ORDER BY createdAt DESC LIMIT 1"
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, episodeId)
@@ -631,6 +651,16 @@ actor AnalysisStore {
     }
 
     func searchTranscripts(query: String) throws -> [TranscriptChunk] {
+        // Sanitize the query for FTS5: strip double quotes, then wrap each
+        // whitespace-separated token in double quotes so special characters
+        // (*, AND, OR, NEAR, etc.) are treated as literal search terms.
+        let sanitized = query
+            .replacingOccurrences(of: "\"", with: "")
+            .split(whereSeparator: \.isWhitespace)
+            .map { "\"\($0)\"" }
+            .joined(separator: " ")
+        guard !sanitized.isEmpty else { return [] }
+
         let sql = """
             SELECT tc.* FROM transcript_chunks tc
             JOIN transcript_chunks_fts fts ON tc.rowid = fts.rowid
@@ -639,7 +669,7 @@ actor AnalysisStore {
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, query)
+        bind(stmt, 1, sanitized)
         var results: [TranscriptChunk] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             results.append(readTranscriptChunk(stmt))
@@ -942,7 +972,7 @@ actor AnalysisStore {
 
     private func bind(_ stmt: OpaquePointer?, _ idx: Int32, _ value: String?) {
         if let value {
-            sqlite3_bind_text(stmt, idx, (value as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            sqlite3_bind_text(stmt, idx, (value as NSString).utf8String, -1, SQLITE_TRANSIENT_PTR)
         } else {
             sqlite3_bind_null(stmt, idx)
         }
@@ -973,11 +1003,13 @@ actor AnalysisStore {
     }
 
     private func bind(_ stmt: OpaquePointer?, _ idx: Int32, _ value: String) {
-        sqlite3_bind_text(stmt, idx, (value as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        sqlite3_bind_text(stmt, idx, (value as NSString).utf8String, -1, SQLITE_TRANSIENT_PTR)
     }
 
     // Read helpers
 
+    /// Read a NOT NULL text column. If the column is unexpectedly NULL, returns
+    /// an empty string. Use ``optionalText(_:_:)`` for nullable columns.
     private func text(_ stmt: OpaquePointer?, _ idx: Int32) -> String {
         sqlite3_column_text(stmt, idx).map { String(cString: $0) } ?? ""
     }

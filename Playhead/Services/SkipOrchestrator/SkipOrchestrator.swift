@@ -140,8 +140,9 @@ actor SkipOrchestrator {
     /// Latest known playhead position.
     private var currentPlayheadTime: TimeInterval = 0
 
-    /// Decision log for evaluation harness.
+    /// Decision log for evaluation harness. Capped to prevent unbounded growth.
     private var decisionLog: [SkipDecisionRecord] = []
+    private let decisionLogCapacity = 500
 
     /// Feature windows cache for boundary snapping (loaded per-asset).
     private var cachedFeatureWindows: [FeatureWindow] = []
@@ -376,12 +377,16 @@ actor SkipOrchestrator {
 
         // Persist.
         let id = managed.adWindow.id
-        Task { [store] in
-            try? await store.updateAdWindowDecision(
-                id: id,
-                decisionState: SkipDecisionState.applied.rawValue
-            )
-            try? await store.updateAdWindowWasSkipped(id: id, wasSkipped: true)
+        Task { [store, logger] in
+            do {
+                try await store.updateAdWindowDecision(
+                    id: id,
+                    decisionState: SkipDecisionState.applied.rawValue
+                )
+                try await store.updateAdWindowWasSkipped(id: id, wasSkipped: true)
+            } catch {
+                logger.warning("Failed to persist manual skip for \(id): \(error.localizedDescription)")
+            }
         }
 
         evaluateAndPush()
@@ -415,8 +420,10 @@ actor SkipOrchestrator {
         guard activeAssetId != nil else { return }
 
         // 1. Collect eligible windows (confirmed or candidate with sufficient confidence).
+        //    Sort by snappedStart so hysteresis (inAdState) is evaluated in temporal order.
         var eligible: [ManagedWindow] = []
-        for (id, var managed) in windows {
+        let sortedWindows = windows.sorted { $0.value.snappedStart < $1.value.snappedStart }
+        for (id, var managed) in sortedWindows {
             // Skip already-terminal states.
             if managed.decisionState == .applied
                 || managed.decisionState == .suppressed
@@ -536,12 +543,16 @@ actor SkipOrchestrator {
 
         // Persist to SQLite (fire-and-forget from the actor).
         let windowId = managed.adWindow.id
-        Task { [store] in
-            try? await store.updateAdWindowDecision(
-                id: windowId,
-                decisionState: SkipDecisionState.applied.rawValue
-            )
-            try? await store.updateAdWindowWasSkipped(id: windowId, wasSkipped: true)
+        Task { [store, logger] in
+            do {
+                try await store.updateAdWindowDecision(
+                    id: windowId,
+                    decisionState: SkipDecisionState.applied.rawValue
+                )
+                try await store.updateAdWindowWasSkipped(id: windowId, wasSkipped: true)
+            } catch {
+                logger.warning("Failed to persist skip state for \(windowId): \(error.localizedDescription)")
+            }
         }
 
         return decision
@@ -668,6 +679,9 @@ actor SkipOrchestrator {
             timestamp: Date().timeIntervalSince1970
         )
         decisionLog.append(record)
+        if decisionLog.count > decisionLogCapacity {
+            decisionLog.removeFirst(decisionLog.count - decisionLogCapacity)
+        }
 
         logger.info("Decision: \(decision.rawValue) window=\(managed.adWindow.id) [\(managed.snappedStart, format: .fixed(precision: 1))s-\(managed.snappedEnd, format: .fixed(precision: 1))s] reason=\(reason)")
     }

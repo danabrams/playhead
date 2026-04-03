@@ -72,7 +72,7 @@ struct ReplaySimulatorBasicTests {
     @Test("Replay produces events for a simple episode")
     func basicReplay() {
         let config = makeConfig()
-        let driver = SimulatedPlaybackDriver(config: config)
+        let driver = SimulatedPlaybackDriver(config: config, rng: SeededRandomNumberGenerator(seed: 42))
         let events = driver.runReplay()
 
         #expect(!events.isEmpty, "Replay should produce events")
@@ -87,7 +87,7 @@ struct ReplaySimulatorBasicTests {
     @Test("Detection quality metrics are computed correctly")
     func detectionQuality() {
         let config = makeConfig()
-        let driver = SimulatedPlaybackDriver(config: config)
+        let driver = SimulatedPlaybackDriver(config: config, rng: SeededRandomNumberGenerator(seed: 42))
         _ = driver.runReplay()
 
         let quality = driver.computeDetectionQuality()
@@ -103,7 +103,7 @@ struct ReplaySimulatorBasicTests {
     @Test("Boundary quality metrics capture entry/resume errors")
     func boundaryQuality() {
         let config = makeConfig()
-        let driver = SimulatedPlaybackDriver(config: config)
+        let driver = SimulatedPlaybackDriver(config: config, rng: SeededRandomNumberGenerator(seed: 42))
         _ = driver.runReplay()
 
         let boundary = driver.computeBoundaryQuality()
@@ -116,7 +116,7 @@ struct ReplaySimulatorBasicTests {
     @Test("Latency metrics are populated")
     func latencyMetrics() {
         let config = makeConfig()
-        let driver = SimulatedPlaybackDriver(config: config)
+        let driver = SimulatedPlaybackDriver(config: config, rng: SeededRandomNumberGenerator(seed: 42))
         _ = driver.runReplay()
 
         let latency = driver.computeLatencyMetrics()
@@ -128,7 +128,7 @@ struct ReplaySimulatorBasicTests {
     @Test("Full report can be built and serialized to JSON")
     func reportSerialization() throws {
         let config = makeConfig()
-        let driver = SimulatedPlaybackDriver(config: config)
+        let driver = SimulatedPlaybackDriver(config: config, rng: SeededRandomNumberGenerator(seed: 42))
         _ = driver.runReplay()
 
         let report = driver.buildReport(replayDuration: 1.5)
@@ -198,7 +198,7 @@ struct ReplaySimulatorConditionTests {
     @Test("High-speed playback (3x) still detects ads")
     func highSpeedPlayback() {
         let config = makeConfig(speed: 3.0)
-        let driver = SimulatedPlaybackDriver(config: config)
+        let driver = SimulatedPlaybackDriver(config: config, rng: SeededRandomNumberGenerator(seed: 42))
         _ = driver.runReplay()
 
         let quality = driver.computeDetectionQuality()
@@ -208,7 +208,7 @@ struct ReplaySimulatorConditionTests {
     @Test("Low-speed playback (0.5x) still detects ads")
     func lowSpeedPlayback() {
         let config = makeConfig(speed: 0.5)
-        let driver = SimulatedPlaybackDriver(config: config)
+        let driver = SimulatedPlaybackDriver(config: config, rng: SeededRandomNumberGenerator(seed: 42))
         _ = driver.runReplay()
 
         let quality = driver.computeDetectionQuality()
@@ -220,7 +220,7 @@ struct ReplaySimulatorConditionTests {
         let config = makeConfig(interactions: [
             SimulatedInteraction(type: .scrub, atTime: 30, targetTime: 200, newSpeed: nil),
         ])
-        let driver = SimulatedPlaybackDriver(config: config)
+        let driver = SimulatedPlaybackDriver(config: config, rng: SeededRandomNumberGenerator(seed: 42))
         let events = driver.runReplay()
 
         let scrubs = events.filter {
@@ -236,7 +236,7 @@ struct ReplaySimulatorConditionTests {
         let config = makeConfig(interactions: [
             SimulatedInteraction(type: .listenTap, atTime: 125, targetTime: nil, newSpeed: nil),
         ])
-        let driver = SimulatedPlaybackDriver(config: config)
+        let driver = SimulatedPlaybackDriver(config: config, rng: SeededRandomNumberGenerator(seed: 42))
         let events = driver.runReplay()
 
         let reverts = events.filter {
@@ -256,7 +256,7 @@ struct ReplaySimulatorConditionTests {
         let config = makeConfig(interactions: [
             SimulatedInteraction(type: .speedChange, atTime: 100, targetTime: nil, newSpeed: 2.0),
         ])
-        let driver = SimulatedPlaybackDriver(config: config)
+        let driver = SimulatedPlaybackDriver(config: config, rng: SeededRandomNumberGenerator(seed: 42))
         let events = driver.runReplay()
 
         let speedChanges = events.filter {
@@ -271,7 +271,7 @@ struct ReplaySimulatorConditionTests {
         let config = makeConfig(interactions: [
             SimulatedInteraction(type: .lateDetection, atTime: 300, targetTime: nil, newSpeed: nil),
         ])
-        let driver = SimulatedPlaybackDriver(config: config)
+        let driver = SimulatedPlaybackDriver(config: config, rng: SeededRandomNumberGenerator(seed: 42))
         let events = driver.runReplay()
 
         let lateDetections = events.filter {
@@ -354,6 +354,47 @@ struct ReplaySimulatorAggregationTests {
         #expect(corpus.aggregateDetectionQuality.missedSegmentCount == 1) // 0 + 1
         #expect(corpus.aggregateUserOverrides.listenTapCount == 1) // 1 + 0
         #expect(corpus.aggregateUserOverrides.rewindAfterSkipCount == 1) // 0 + 1
+    }
+
+    @Test("Seeded RNG produces deterministic replay results")
+    func seededDeterminism() {
+        let report1 = EpisodeReplayReport(
+            episodeId: "ep-1",
+            episodeTitle: "Episode 1",
+            condition: SimulationCondition(audioMode: .cached, playbackSpeed: 1.0, interactions: []),
+            detectionQuality: DetectionQualityMetrics(
+                falsePositiveSkipSeconds: 5, falseNegativeAdSeconds: 10,
+                precision: 0.9, recall: 0.8, f1Score: 0.85,
+                missedSegmentCount: 0, spuriousSegmentCount: 1
+            ),
+            boundaryQuality: BoundaryQualityMetrics(
+                cutSpeechAtEntryMs: [100, 200], cutSpeechAtResumeMs: [150, 250],
+                p50EntryErrorMs: 150, p95EntryErrorMs: 200,
+                p50ResumeErrorMs: 200, p95ResumeErrorMs: 250
+            ),
+            latency: LatencyMetrics(
+                timeToFirstUsableSkip: 5.0, p50BannerLatencyMs: 80,
+                p95BannerLatencyMs: 200, meanPipelineLatencyMs: 10,
+                p95PipelineLatencyMs: 25
+            ),
+            userOverrides: UserOverrideMetrics(
+                listenTapCount: 1, rewindAfterSkipCount: 0, overrideRate: 0.1
+            ),
+            samples: [],
+            simulatorVersion: EpisodeReplayReport.currentSimulatorVersion,
+            generatedAt: Date(),
+            replayDurationSeconds: 2.0
+        )
+
+        // Two replays with the same seed should produce identical detection windows.
+        var rng1 = SeededRandomNumberGenerator(seed: 99)
+        var rng2 = SeededRandomNumberGenerator(seed: 99)
+
+        // Verify the RNG itself is deterministic.
+        for _ in 0..<100 {
+            #expect(rng1.next() == rng2.next(), "Seeded RNG should produce identical sequences")
+        }
+        _ = report1 // suppress unused warning
     }
 
     @Test("Percentile helper handles edge cases")

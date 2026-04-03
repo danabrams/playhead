@@ -45,7 +45,7 @@ actor CapabilitiesService {
         foundationModels=\(snapshot.foundationModelsAvailable), \
         appleIntelligence=\(snapshot.appleIntelligenceEnabled), \
         localeSupported=\(snapshot.foundationModelsLocaleSupported), \
-        thermal=\(snapshot.thermalState.rawValue), \
+        thermal=\(snapshot.thermalState.description), \
         lowPower=\(snapshot.isLowPowerMode), \
         bgProcessing=\(snapshot.backgroundProcessingSupported), \
         diskSpace=\(snapshot.availableDiskSpaceBytes / (1024 * 1024))MB
@@ -74,8 +74,11 @@ actor CapabilitiesService {
     }
 
     /// Starts observing system notifications for capability-relevant changes.
-    /// Call once at app launch from a non-isolated context.
-    nonisolated func startObserving() {
+    /// Safe to call multiple times — removes old observers before adding new ones.
+    func startObserving() {
+        // Remove any previously registered observers to prevent leaks on double-call.
+        removeObservers()
+
         let center = NotificationCenter.default
 
         let thermalToken = center.addObserver(
@@ -96,9 +99,7 @@ actor CapabilitiesService {
             Task { await self.refreshSnapshot() }
         }
 
-        Task {
-            await self.storeObserverTokens([thermalToken, powerToken])
-        }
+        observerTokens = [thermalToken, powerToken]
     }
 
     // MARK: - Snapshot Capture
@@ -189,7 +190,13 @@ actor CapabilitiesService {
         continuations.removeValue(forKey: id)
     }
 
-    private func storeObserverTokens(_ tokens: [any NSObjectProtocol]) {
-        observerTokens.append(contentsOf: tokens)
+
+    /// Remove all registered notification observers and clear the token list.
+    private func removeObservers() {
+        let center = NotificationCenter.default
+        for token in observerTokens {
+            center.removeObserver(token)
+        }
+        observerTokens.removeAll()
     }
 }

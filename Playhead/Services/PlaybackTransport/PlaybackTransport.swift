@@ -87,6 +87,9 @@ final class PlaybackService: NSObject, Sendable {
     private var rateObservation: NSKeyValueObservation?
     private var itemStatusObservation: NSKeyValueObservation?
 
+    /// Opaque targets returned by MPRemoteCommandCenter.addTarget so we can remove them.
+    private var remoteCommandTargets: [(MPRemoteCommand, Any)] = []
+
     // MARK: - Init
 
     override init() {
@@ -117,6 +120,7 @@ final class PlaybackService: NSObject, Sendable {
         statusObservation?.invalidate()
         rateObservation?.invalidate()
         itemStatusObservation?.invalidate()
+        removeRemoteCommandTargets()
         stateContinuation.finish()
     }
 
@@ -440,19 +444,21 @@ final class PlaybackService: NSObject, Sendable {
     private func configureRemoteCommands() {
         let center = MPRemoteCommandCenter.shared()
 
-        center.playCommand.addTarget { [weak self] _ in
+        let playTarget = center.playCommand.addTarget { [weak self] _ in
             guard let self else { return .commandFailed }
             Task { @PlaybackServiceActor in self.play() }
             return .success
         }
+        remoteCommandTargets.append((center.playCommand, playTarget))
 
-        center.pauseCommand.addTarget { [weak self] _ in
+        let pauseTarget = center.pauseCommand.addTarget { [weak self] _ in
             guard let self else { return .commandFailed }
             Task { @PlaybackServiceActor in self.pause() }
             return .success
         }
+        remoteCommandTargets.append((center.pauseCommand, pauseTarget))
 
-        center.togglePlayPauseCommand.addTarget { [weak self] _ in
+        let toggleTarget = center.togglePlayPauseCommand.addTarget { [weak self] _ in
             guard let self else { return .commandFailed }
             Task { @PlaybackServiceActor in
                 if case .playing = self._state.status {
@@ -463,26 +469,29 @@ final class PlaybackService: NSObject, Sendable {
             }
             return .success
         }
+        remoteCommandTargets.append((center.togglePlayPauseCommand, toggleTarget))
 
         center.skipForwardCommand.preferredIntervals = [
             NSNumber(value: Self.skipForwardSeconds)
         ]
-        center.skipForwardCommand.addTarget { [weak self] _ in
+        let skipFwdTarget = center.skipForwardCommand.addTarget { [weak self] _ in
             guard let self else { return .commandFailed }
             Task { @PlaybackServiceActor in await self.skipForward() }
             return .success
         }
+        remoteCommandTargets.append((center.skipForwardCommand, skipFwdTarget))
 
         center.skipBackwardCommand.preferredIntervals = [
             NSNumber(value: Self.skipBackwardSeconds)
         ]
-        center.skipBackwardCommand.addTarget { [weak self] _ in
+        let skipBwdTarget = center.skipBackwardCommand.addTarget { [weak self] _ in
             guard let self else { return .commandFailed }
             Task { @PlaybackServiceActor in await self.skipBackward() }
             return .success
         }
+        remoteCommandTargets.append((center.skipBackwardCommand, skipBwdTarget))
 
-        center.changePlaybackPositionCommand.addTarget { [weak self] event in
+        let positionTarget = center.changePlaybackPositionCommand.addTarget { [weak self] event in
             guard let self,
                   let positionEvent = event as? MPChangePlaybackPositionCommandEvent
             else { return .commandFailed }
@@ -491,11 +500,12 @@ final class PlaybackService: NSObject, Sendable {
             }
             return .success
         }
+        remoteCommandTargets.append((center.changePlaybackPositionCommand, positionTarget))
 
         center.changePlaybackRateCommand.supportedPlaybackRates = [
             0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
         ]
-        center.changePlaybackRateCommand.addTarget { [weak self] event in
+        let rateTarget = center.changePlaybackRateCommand.addTarget { [weak self] event in
             guard let self,
                   let rateEvent = event as? MPChangePlaybackRateCommandEvent
             else { return .commandFailed }
@@ -504,6 +514,15 @@ final class PlaybackService: NSObject, Sendable {
             }
             return .success
         }
+        remoteCommandTargets.append((center.changePlaybackRateCommand, rateTarget))
+    }
+
+    /// Remove all registered remote command targets to prevent leaks.
+    private func removeRemoteCommandTargets() {
+        for (command, target) in remoteCommandTargets {
+            command.removeTarget(target)
+        }
+        remoteCommandTargets.removeAll()
     }
 
     // MARK: - State Update

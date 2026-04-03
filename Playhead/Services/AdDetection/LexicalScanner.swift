@@ -157,8 +157,15 @@ struct LexicalScanner: Sendable {
     /// Scan a single chunk. Useful for streaming hot-path processing
     /// where chunks arrive one at a time.
     func scanChunk(_ chunk: TranscriptChunk) -> [LexicalHit] {
-        let text = chunk.normalizedText
-        guard !text.isEmpty else { return [] }
+        var text = chunk.normalizedText
+        if text.isEmpty {
+            // Fall back to raw text if normalizedText is not yet populated.
+            text = chunk.text
+            if text.isEmpty {
+                return []
+            }
+            logger.warning("normalizedText empty for chunk at \(chunk.startTime, format: .fixed(precision: 1))s, falling back to raw text")
+        }
 
         let nsText = text as NSString
         let fullRange = NSRange(location: 0, length: nsText.length)

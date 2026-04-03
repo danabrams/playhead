@@ -30,6 +30,15 @@ enum SwiftDataStore {
 
 // MARK: - Migration
 
+// MIGRATION WARNING: PlayheadSchemaV1.models currently references LIVE types
+// (Podcast.self, Episode.self, UserPreferences.self). Before creating a V2
+// schema, these MUST be replaced with frozen type snapshots so that V1's
+// definition never changes when the live models evolve. For example:
+//
+//     typealias PodcastV1 = Podcast   // snapshot of Podcast at V1
+//     static var models: [any PersistentModel.Type] { [PodcastV1.self, ...] }
+//
+// Failing to freeze will silently corrupt lightweight migration diffs.
 enum PlayheadSchemaV1: VersionedSchema {
     static var versionIdentifier: Schema.Version { Schema.Version(1, 0, 0) }
 

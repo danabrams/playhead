@@ -7,21 +7,22 @@ import Foundation
 import OSLog
 
 @MainActor
-final class TranscriptPeekViewModel: ObservableObject {
+@Observable
+final class TranscriptPeekViewModel {
 
-    // MARK: - Published State
+    // MARK: - State
 
     /// Transcript chunks sorted by startTime, fast-pass included.
-    @Published private(set) var chunks: [TranscriptChunk] = []
+    private(set) var chunks: [TranscriptChunk] = []
 
     /// Ad windows for visual muting of ad segments.
-    @Published private(set) var adWindows: [AdWindow] = []
+    private(set) var adWindows: [AdWindow] = []
 
     /// Index of the chunk containing the current playback position, or nil.
-    @Published private(set) var activeChunkIndex: Int?
+    private(set) var activeChunkIndex: Int?
 
     /// True while the initial load is in progress.
-    @Published private(set) var isLoading: Bool = true
+    private(set) var isLoading: Bool = true
 
     // MARK: - Configuration
 
@@ -30,6 +31,10 @@ final class TranscriptPeekViewModel: ObservableObject {
     private let logger = Logger(subsystem: "com.playhead", category: "TranscriptPeek")
 
     /// How often to poll for new chunks (seconds).
+    /// Polling is intentional here: AnalysisStore does not emit granular
+    /// notifications for individual chunk inserts. The 2-second interval
+    /// balances responsiveness with efficiency. When AnalysisStore gains
+    /// change notifications, this should be replaced with event-driven updates.
     private static let pollInterval: TimeInterval = 2.0
 
     private var pollTask: Task<Void, Never>?

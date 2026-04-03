@@ -257,6 +257,7 @@ actor FeatureExtractionService {
         // Convert to split complex form.
         var realPart = [Float](repeating: 0, count: halfN)
         var imagPart = [Float](repeating: 0, count: halfN)
+        var magnitudes = [Float](repeating: 0, count: halfN)
 
         realPart.withUnsafeMutableBufferPointer { realBuf in
             imagPart.withUnsafeMutableBufferPointer { imagBuf in
@@ -275,16 +276,12 @@ actor FeatureExtractionService {
                 // Forward FFT.
                 fftSetup.forward(input: splitComplex, output: &splitComplex)
 
-                // Compute magnitudes.
-                var magnitudes = [Float](repeating: 0, count: halfN)
+                // Compute magnitudes into a local array — don't write back through the split complex buffers.
                 vDSP_zvabs(&splitComplex, 1, &magnitudes, 1, vDSP_Length(halfN))
-
-                // Copy result out (we'll return it below via capture).
-                realBuf.baseAddress!.update(from: magnitudes, count: halfN)
             }
         }
 
-        return realPart
+        return magnitudes
     }
 
     // MARK: - DSP: Spectral Flux

@@ -7,6 +7,7 @@
 
 @preconcurrency import AVFoundation
 import Foundation
+import OSLog
 
 // MARK: - AnalysisShard
 
@@ -189,6 +190,7 @@ actor AnalysisAudioService {
 
     // MARK: - State
 
+    private let logger = Logger(subsystem: "com.playhead", category: "AnalysisAudio")
     private var activeTasks: [String: Task<[AnalysisShard], Error>] = [:]
 
     // MARK: - Init
@@ -461,13 +463,13 @@ actor AnalysisAudioService {
         //     is better than re-decoding every time.
         ShardCache.saveShards(shards, episodeID: episodeID)
 
-        // 11. Surface truncation after caching, so callers can handle it.
+        // 11. Log truncation warning but return partial shards — throwing here
+        //     causes the coordinator to treat it as noAudioAvailable and retry-loop.
         if isTruncated {
-            throw AnalysisAudioError.truncatedFile(
-                fileURL,
-                expectedDuration: assetDuration,
-                decodedDuration: decodedDuration
-            )
+            let pct = assetDuration > 0
+                ? Int(decodedDuration / assetDuration * 100)
+                : 0
+            logger.warning("Truncated file \(fileURL.lastPathComponent): decoded \(decodedDuration, format: .fixed(precision: 1))s of \(assetDuration, format: .fixed(precision: 1))s (\(pct)%)")
         }
 
         return shards

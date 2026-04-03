@@ -70,7 +70,9 @@ enum FeedParserError: Error, LocalizedError, Equatable {
 
 /// Parses RSS 2.0 and Atom podcast feeds using Foundation XMLParser.
 /// Handles iTunes namespace extensions and Podcasting 2.0 chapter tags.
-final class FeedParser: NSObject, XMLParserDelegate, @unchecked Sendable {
+/// - Important: Instances must not be shared across threads. Callers should
+///   create a fresh `FeedParser` for each parse operation.
+final class FeedParser: NSObject, XMLParserDelegate {
 
     // MARK: - Namespace URIs
 

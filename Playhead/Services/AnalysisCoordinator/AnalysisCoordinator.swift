@@ -282,8 +282,7 @@ actor AnalysisCoordinator {
             activeSessionId = sessionId
             activeAssetId = assetId
 
-            pipelineTask = Task { [weak self] in
-                guard let self else { return }
+            pipelineTask = Task {
                 await self.runPipeline(
                     sessionId: sessionId,
                     assetId: assetId,
@@ -334,14 +333,14 @@ actor AnalysisCoordinator {
             logger.info("Pipeline cancelled for episode \(episodeId)")
         } catch {
             logger.error("Pipeline failed for episode \(episodeId): \(error)")
-            if let sessionId = activeSessionId, let assetId = activeAssetId {
-                try? await transition(
-                    sessionId: sessionId,
-                    assetId: assetId,
-                    to: .failed,
-                    failureReason: String(describing: error)
-                )
-            }
+            // Use the captured sessionId/assetId parameters, not mutable actor
+            // state which may have changed if a new episode started.
+            try? await transition(
+                sessionId: sessionId,
+                assetId: assetId,
+                to: .failed,
+                failureReason: String(describing: error)
+            )
         }
     }
 
@@ -370,8 +369,9 @@ actor AnalysisCoordinator {
         else { return }
 
         // Reprioritize transcript engine without losing existing work.
-        Task {
-            await transcriptEngine.handleScrub(
+        // Strong self capture: actor should stay alive to complete reprioritization.
+        Task { [shards, assetId, snapshot] in
+            await self.transcriptEngine.handleScrub(
                 shards: shards,
                 analysisAssetId: assetId,
                 snapshot: snapshot
@@ -385,7 +385,7 @@ actor AnalysisCoordinator {
 
     private func handleStopped() {
         cancelPipeline()
-        Task { await transcriptEngine.stop() }
+        Task { await self.transcriptEngine.stop() }
         activeEpisodeId = nil
         activePodcastId = nil
         activeSessionId = nil
@@ -407,11 +407,19 @@ actor AnalysisCoordinator {
     private func runFromSpooling(sessionId: String, assetId: String, episodeId: String, audioURL: URL) async throws {
         try Task.checkCancellation()
 
-        // Decode audio into shards.
+        // Decode audio into shards. Truncated files now return partial data
+        // instead of throwing, so this catch is only for truly fatal errors
+        // (file not found, unreadable asset, decoder failure).
         let shards: [AnalysisShard]
         do {
             shards = try await audioService.decode(fileURL: audioURL, episodeID: episodeId)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
+            logger.error("Audio decode failed for episode \(episodeId): \(error)")
+            throw AnalysisCoordinatorError.noAudioAvailable(episodeId: episodeId)
+        }
+        guard !shards.isEmpty else {
             throw AnalysisCoordinatorError.noAudioAvailable(episodeId: episodeId)
         }
         activeShards = shards
@@ -640,8 +648,7 @@ actor AnalysisCoordinator {
 
     private func startObservingTranscriptEvents(sessionId: String, assetId: String) {
         transcriptEventTask?.cancel()
-        transcriptEventTask = Task { [weak self] in
-            guard let self else { return }
+        transcriptEventTask = Task {
             let stream = await self.transcriptEngine.events()
             for await event in stream {
                 guard !Task.isCancelled else { return }

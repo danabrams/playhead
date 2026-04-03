@@ -12,7 +12,7 @@ import SwiftUI
 
 struct TranscriptPeekView: View {
 
-    @ObservedObject var peekViewModel: TranscriptPeekViewModel
+    var peekViewModel: TranscriptPeekViewModel
 
     /// Current playback time, driven by the parent NowPlayingViewModel.
     let currentTime: TimeInterval
@@ -62,6 +62,7 @@ private extension TranscriptPeekView {
         Capsule()
             .fill(AppColors.secondary.opacity(0.3))
             .frame(width: 36, height: 5)
+            .accessibilityHidden(true)
     }
 
     // MARK: Header
@@ -80,6 +81,7 @@ private extension TranscriptPeekView {
                 liveIndicator
             }
         }
+        .accessibilityElement(children: .combine)
     }
 
     var liveIndicator: some View {
@@ -93,6 +95,7 @@ private extension TranscriptPeekView {
                 .foregroundStyle(AppColors.accent)
                 .tracking(0.8)
         }
+        .accessibilityLabel("Live transcript updating")
     }
 
     // MARK: Loading
@@ -102,6 +105,7 @@ private extension TranscriptPeekView {
             Spacer()
             ProgressView()
                 .tint(AppColors.secondary)
+                .accessibilityLabel("Loading transcript")
             Text("Loading transcript...")
                 .font(AppTypography.caption)
                 .foregroundStyle(AppColors.metadata)
@@ -178,7 +182,7 @@ private extension TranscriptPeekView {
 
             VStack(alignment: .leading, spacing: Spacing.xxs) {
                 // Timestamp
-                Text(formatTimestamp(chunk.startTime))
+                Text(TimeFormatter.formatTime(chunk.startTime))
                     .font(AppTypography.mono(size: 10, weight: .medium))
                     .foregroundStyle(
                         isActive ? AppColors.accent : AppColors.metadata
@@ -195,6 +199,8 @@ private extension TranscriptPeekView {
         .padding(.vertical, Spacing.xxs)
         .padding(.leading, isActive ? 0 : 3 + Spacing.xs) // Align text regardless of bar
         .animation(Motion.quick, value: isActive)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(isAd ? "Ad segment at \(TimeFormatter.formatTime(chunk.startTime)): \(chunk.text)" : "\(TimeFormatter.formatTime(chunk.startTime)): \(chunk.text)")
     }
 
     // MARK: Helpers
@@ -204,18 +210,6 @@ private extension TranscriptPeekView {
             return AppColors.metadata
         }
         return isActive ? AppColors.text : AppColors.secondary
-    }
-
-    func formatTimestamp(_ seconds: Double) -> String {
-        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
-        let total = Int(seconds)
-        let hours = total / 3600
-        let minutes = (total % 3600) / 60
-        let secs = total % 60
-        if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, secs)
-        }
-        return String(format: "%d:%02d", minutes, secs)
     }
 }
 

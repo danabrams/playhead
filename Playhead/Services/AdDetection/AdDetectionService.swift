@@ -316,7 +316,10 @@ actor AdDetectionService {
         )
 
         // Increment false-positive signal on the profile.
-        guard let profile = try await store.fetchProfile(podcastId: podcastId) else { return }
+        guard let profile = try await store.fetchProfile(podcastId: podcastId) else {
+            logger.warning("No profile found for podcast \(podcastId) during listen-rewind recording")
+            return
+        }
         let updatedProfile = PodcastProfile(
             podcastId: profile.podcastId,
             sponsorLexicon: profile.sponsorLexicon,

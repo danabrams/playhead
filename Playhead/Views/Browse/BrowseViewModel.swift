@@ -5,19 +5,26 @@ import Foundation
 import SwiftUI
 
 @MainActor
-final class BrowseViewModel: ObservableObject {
+@Observable
+final class BrowseViewModel {
 
-    // MARK: - Published State
+    // MARK: - State
 
-    @Published var searchText = ""
-    @Published var results: [DiscoveryResult] = []
-    @Published var isSearching = false
-    @Published var showError = false
-    @Published var errorMessage = ""
+    var searchText = ""
+    var results: [DiscoveryResult] = []
+    var isSearching = false
+    var showError = false
+    var errorMessage = ""
 
     // MARK: - Services
 
-    let discoveryService = PodcastDiscoveryService()
+    let discoveryService: PodcastDiscoveryService
+
+    // MARK: - Init
+
+    init(discoveryService: PodcastDiscoveryService = PodcastDiscoveryService()) {
+        self.discoveryService = discoveryService
+    }
 
     // MARK: - Debounce
 

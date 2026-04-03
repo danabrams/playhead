@@ -16,14 +16,16 @@ struct LibraryView: View {
     private var podcasts: [Podcast]
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(PlayheadRuntime.self) private var runtime
 
     @State private var isRefreshing = false
-
-    private let discoveryService = PodcastDiscoveryService()
 
     private let columns = [
         GridItem(.adaptive(minimum: 100, maximum: 140), spacing: Spacing.md)
     ]
+
+    /// Shared discovery service instance — persists across view re-evaluations.
+    @State private var discoveryService = PodcastDiscoveryService()
 
     var body: some View {
         NavigationStack {
@@ -57,6 +59,7 @@ private extension LibraryView {
             Image(systemName: "square.stack")
                 .font(.system(size: 48, weight: .thin))
                 .foregroundStyle(AppColors.secondary)
+                .accessibilityHidden(true)
 
             Text("No Podcasts Yet")
                 .font(AppTypography.sans(size: 20, weight: .semibold))
@@ -93,6 +96,7 @@ private extension LibraryView {
                             Label("Mark All Played", systemImage: "checkmark.circle")
                         }
                     }
+                    .accessibilityLabel("\(podcast.title), \(podcast.episodes.filter { !$0.isPlayed }.count) unplayed")
                 }
             }
             .padding(.horizontal, Spacing.md)
@@ -120,9 +124,10 @@ private extension LibraryView {
         isRefreshing = true
         defer { isRefreshing = false }
 
+        let service = discoveryService
         for podcast in podcasts {
             do {
-                let _ = try await discoveryService.refreshEpisodes(
+                let _ = try await service.refreshEpisodes(
                     for: podcast, in: modelContext
                 )
             } catch {
@@ -190,6 +195,7 @@ private struct PodcastGridCell: View {
                             Capsule().fill(AppColors.accent)
                         )
                         .offset(x: -4, y: 4)
+                        .accessibilityLabel("\(unplayedCount) unplayed")
                 }
             }
 
@@ -209,6 +215,7 @@ private struct PodcastGridCell: View {
             .foregroundStyle(AppColors.secondary.opacity(0.5))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(AppColors.surface)
+            .accessibilityHidden(true)
     }
 }
 
@@ -216,12 +223,14 @@ private struct PodcastGridCell: View {
 
 #Preview("Library — Populated") {
     LibraryView()
+        .environment(PlayheadRuntime(isPreviewRuntime: true))
         .preferredColorScheme(.dark)
         .modelContainer(for: [Podcast.self, Episode.self], inMemory: true)
 }
 
 #Preview("Library — Empty") {
     LibraryView()
+        .environment(PlayheadRuntime(isPreviewRuntime: true))
         .preferredColorScheme(.dark)
         .modelContainer(for: [Podcast.self, Episode.self], inMemory: true)
 }
