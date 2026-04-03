@@ -184,6 +184,19 @@ actor DownloadManager {
                 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
             }
         }
+        // Remove stale files with unrecognized extensions (e.g. ".audio"
+        // from earlier builds) that AVURLAsset can't open.
+        if let files = try? fm.contentsOfDirectory(atPath: completeDirectory.path) {
+            for file in files {
+                let ext = (file as NSString).pathExtension
+                if !ext.isEmpty, !Self.knownAudioExtensions.contains(ext), ext != "partial" {
+                    let staleURL = completeDirectory.appendingPathComponent(file)
+                    try? fm.removeItem(at: staleURL)
+                    logger.info("Removed stale cache file: \(file)")
+                }
+            }
+        }
+
         // Rebuild access log from file system.
         try rebuildAccessLog()
         logger.info("DownloadManager bootstrapped at \(self.cacheDirectory.path)")
@@ -367,6 +380,11 @@ actor DownloadManager {
         return completeDirectory.appendingPathComponent("\(safeFilename(for: episodeId)).\(ext)")
     }
 
+    /// Audio extensions AVURLAsset can identify.
+    private static let knownAudioExtensions: Set<String> = [
+        "mp3", "m4a", "aac", "wav", "caf", "aiff", "mp4", "ogg", "opus"
+    ]
+
     /// Resolve the file extension for an episode. Checks the in-memory cache
     /// first, then scans the complete directory for a matching file.
     private func resolveExtension(for episodeId: String) -> String {
@@ -379,7 +397,7 @@ actor DownloadManager {
         if let files = try? fm.contentsOfDirectory(atPath: completeDirectory.path) {
             for file in files where file.hasPrefix(prefix) {
                 let ext = (file as NSString).pathExtension
-                if !ext.isEmpty {
+                if Self.knownAudioExtensions.contains(ext) {
                     extensionCache[episodeId] = ext
                     return ext
                 }
