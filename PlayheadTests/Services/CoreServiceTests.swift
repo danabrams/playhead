@@ -22,6 +22,99 @@ private func readRepoSource(_ relativePath: String) throws -> String {
     return try String(contentsOf: url, encoding: .utf8)
 }
 
+private func repoRelativePath(_ url: URL) -> String {
+    let rootPath = repoRootURL().standardizedFileURL.path
+    let filePath = url.standardizedFileURL.path
+    guard filePath.hasPrefix(rootPath) else { return filePath }
+    return String(filePath.dropFirst(rootPath.count + 1))
+}
+
+private func swiftFiles(in relativePath: String) throws -> [URL] {
+    let root = repoRootURL().appendingPathComponent(relativePath, isDirectory: true)
+    guard let enumerator = FileManager.default.enumerator(
+        at: root,
+        includingPropertiesForKeys: nil
+    ) else {
+        return []
+    }
+
+    var files: [URL] = []
+    while let next = enumerator.nextObject() as? URL {
+        guard next.pathExtension == "swift" else { continue }
+        files.append(next)
+    }
+    return files.sorted { $0.path < $1.path }
+}
+
+private func predicateBlocks(in source: String) -> [String] {
+    var blocks: [String] = []
+    var searchStart = source.startIndex
+
+    while let macroRange = source[searchStart...].range(of: "#Predicate") {
+        guard let braceStart = source[macroRange.upperBound...].firstIndex(of: "{") else {
+            break
+        }
+
+        var index = source.index(after: braceStart)
+        var braceDepth = 1
+
+        while index < source.endIndex, braceDepth > 0 {
+            switch source[index] {
+            case "{":
+                braceDepth += 1
+            case "}":
+                braceDepth -= 1
+            default:
+                break
+            }
+            index = source.index(after: index)
+        }
+
+        guard braceDepth == 0 else { break }
+        blocks.append(String(source[macroRange.lowerBound..<index]))
+        searchStart = index
+    }
+
+    return blocks
+}
+
+private func modelURLPropertyNames() throws -> [String] {
+    let regex = try NSRegularExpression(
+        pattern: #"var\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*URL\??\b"#
+    )
+
+    var propertyNames: Set<String> = []
+    for fileURL in try swiftFiles(in: "Playhead/Models") {
+        let source = try String(contentsOf: fileURL, encoding: .utf8)
+        let range = NSRange(source.startIndex..<source.endIndex, in: source)
+        for match in regex.matches(in: source, range: range) {
+            guard let nameRange = Range(match.range(at: 1), in: source) else { continue }
+            propertyNames.insert(String(source[nameRange]))
+        }
+    }
+
+    return propertyNames.sorted()
+}
+
+private func containsURLDescendantAccess(
+    predicateBlock: String,
+    propertyName: String
+) throws -> Bool {
+    let pattern = #"\.\s*\#(NSRegularExpression.escapedPattern(for: propertyName))\s*(?:\?\.|\.)"#
+    let regex = try NSRegularExpression(pattern: pattern)
+    let range = NSRange(predicateBlock.startIndex..<predicateBlock.endIndex, in: predicateBlock)
+    return regex.firstMatch(in: predicateBlock, range: range) != nil
+}
+
+private func condensedSourceSnippet(_ source: String) -> String {
+    source.replacingOccurrences(
+        of: #"\s+"#,
+        with: " ",
+        options: .regularExpression
+    )
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
 /// Tracks temporary directories created by `makeTestStore()` for cleanup.
 private let _testStoreDirs = TestTempDirTracker()
 
@@ -1802,5 +1895,45 @@ struct PodcastDiscoveryPersistenceTests {
 
         let refreshedEpisode = second.episodes.first { $0.feedItemGUID == "ep-1" }
         #expect(refreshedEpisode?.title == "Episode One Updated")
+    }
+}
+
+@Suite("SwiftData Predicate Guardrails")
+struct SwiftDataPredicateGuardrailTests {
+
+    @Test("Predicate blocks do not descend through SwiftData model URL properties")
+    func predicatesAvoidURLDescendants() throws {
+        let urlPropertyNames = try modelURLPropertyNames()
+        #expect(
+            !urlPropertyNames.isEmpty,
+            "Expected at least one SwiftData model URL property so this guard stays meaningful."
+        )
+
+        var violations: [String] = []
+
+        for fileURL in try swiftFiles(in: "Playhead") {
+            let source = try String(contentsOf: fileURL, encoding: .utf8)
+            for predicateBlock in predicateBlocks(in: source) {
+                for propertyName in urlPropertyNames {
+                    if try containsURLDescendantAccess(
+                        predicateBlock: predicateBlock,
+                        propertyName: propertyName
+                    ) {
+                        violations.append(
+                            "\(repoRelativePath(fileURL)): \(propertyName) -> \(condensedSourceSnippet(predicateBlock))"
+                        )
+                    }
+                }
+            }
+        }
+
+        #expect(
+            violations.isEmpty,
+            """
+            SwiftData predicates must compare stored URL properties directly. Descendant access such as `.feedURL.absoluteString` crashes at runtime.
+            Violations:
+            \(violations.joined(separator: "\n"))
+            """
+        )
     }
 }
