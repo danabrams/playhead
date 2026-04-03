@@ -63,8 +63,9 @@ final class NowPlayingViewModel: ObservableObject {
 
     func togglePlayPause() {
         guard let service = playbackService else { return }
+        let playing = isPlaying
         Task { @PlaybackServiceActor in
-            if case .playing = await MainActor.run(body: { self.isPlaying }) ? PlaybackState.Status.playing : PlaybackState.Status.paused {
+            if playing {
                 service.pause()
             } else {
                 service.play()

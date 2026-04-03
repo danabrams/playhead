@@ -140,7 +140,6 @@ actor PodcastDiscoveryService {
     private let logger = Logger(subsystem: "com.playhead", category: "Discovery")
 
     private let provider: DiscoveryProvider
-    private let feedParser: FeedParser
     private let session: URLSession
 
     /// In-memory cache of recent search results, keyed by lowercased query.
@@ -165,7 +164,6 @@ actor PodcastDiscoveryService {
         session: URLSession = .shared
     ) {
         self.provider = provider ?? ITunesSearchProvider(session: session)
-        self.feedParser = FeedParser()
         self.session = session
     }
 
