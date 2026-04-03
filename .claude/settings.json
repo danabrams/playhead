@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/xcodegen-on-swift-write.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

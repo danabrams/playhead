@@ -20,6 +20,7 @@ targets:
       - path: Playhead/Resources
     settings:
       base:
+        DEVELOPMENT_TEAM: 36Z6VYTT9X
         PRODUCT_BUNDLE_IDENTIFIER: com.playhead.app
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_EMIT_LOC_STRINGS: YES
@@ -35,6 +36,7 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+        NSSpeechRecognitionUsageDescription: Playhead uses on-device speech transcription to generate episode transcripts and ad-skip markers.
         UIBackgroundModes:
           - processing
         BGTaskSchedulerPermittedIdentifiers:
