@@ -68,7 +68,7 @@ struct ShardOrderingTests {
     private let chunkOverlap: TimeInterval = 0.5
     private let lookaheadWallClockSeconds: TimeInterval = 120.0
 
-    /// Reproduce the full prioritization: hot path → cold ahead → behind.
+    /// Reproduce the full prioritization: shard 0 → hot path → cold ahead → behind.
     private func prioritize(
         shardStarts: [TimeInterval],
         playhead: TimeInterval,
@@ -84,10 +84,14 @@ struct ShardOrderingTests {
             .filter { $0 < playhead - chunkOverlap }
             .sorted(by: >)
 
+        // Shard 0 always goes first for pre-roll ad detection.
+        let shard0 = behind.filter { $0 == 0 }
+        let behindWithoutShard0 = behind.filter { $0 > 0 }
+
         let hotPath = ahead.filter { $0 < playhead + lookaheadAudioSeconds }
         let coldAhead = ahead.filter { $0 >= playhead + lookaheadAudioSeconds }
 
-        return hotPath + coldAhead + behind
+        return shard0 + hotPath + coldAhead + behindWithoutShard0
     }
 
     @Test("Shard 0 is first when playhead is at 0")
@@ -97,11 +101,20 @@ struct ShardOrderingTests {
         #expect(ordered.first == 0, "Shard 0 must be transcribed first")
     }
 
-    @Test("Shard 0 is last when playhead is at 15 (the race bug)")
-    func shard0LastWhenDrifted() {
+    @Test("Shard 0 is first even when playhead drifts to 15s")
+    func shard0FirstWhenDrifted() {
         let shards: [TimeInterval] = [0, 30, 60, 90, 120]
         let ordered = prioritize(shardStarts: shards, playhead: 15)
-        #expect(ordered.last == 0, "Without the fix, shard 0 ends up last")
+        #expect(ordered.first == 0, "Shard 0 must always be first for pre-roll ad detection")
+    }
+
+    @Test("Shard 0 is first even when playback starts mid-episode")
+    func shard0FirstMidEpisode() {
+        let shards: [TimeInterval] = [0, 30, 60, 90, 120, 150, 180]
+        let ordered = prioritize(shardStarts: shards, playhead: 90)
+        #expect(ordered.first == 0, "Shard 0 must always be first")
+        // Shards near playhead (90, 120) should follow shard 0.
+        #expect(ordered[1] == 90)
     }
 
     @Test("At 2x speed, hot path window doubles")

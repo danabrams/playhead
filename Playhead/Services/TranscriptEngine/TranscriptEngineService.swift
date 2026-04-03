@@ -412,11 +412,18 @@ actor TranscriptEngineService {
             .filter { $0.startTime < playhead - config.chunkOverlap }
             .sorted { $0.startTime > $1.startTime }
 
+        // Always include shard 0 in hot path — pre-roll ad detection
+        // needs the episode start regardless of where playback begins.
+        // Without this, shard 0 ends up last in `behind` and may be
+        // skipped if the task is cancelled before reaching it.
+        let shard0 = behind.filter { $0.startTime == 0 }
+        let behindWithoutShard0 = behind.filter { $0.startTime > 0 }
+
         // Hot path: shards within the lookahead window come first.
         let hotPath = ahead.filter { $0.startTime < playhead + lookaheadAudioSeconds }
         let coldAhead = ahead.filter { $0.startTime >= playhead + lookaheadAudioSeconds }
 
-        return hotPath + coldAhead + behind
+        return shard0 + hotPath + coldAhead + behindWithoutShard0
     }
 
     // MARK: - Coverage updates
