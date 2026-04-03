@@ -557,6 +557,38 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    func insertTranscriptChunks(_ chunks: [TranscriptChunk]) throws {
+        guard !chunks.isEmpty else { return }
+        try exec("BEGIN TRANSACTION")
+        do {
+            for chunk in chunks {
+                try insertTranscriptChunk(chunk)
+            }
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    func updateFastTranscriptCoverage(id: String, endTime: Double) throws {
+        let sql = "UPDATE analysis_assets SET fastTranscriptCoverageEndTime = ? WHERE id = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, endTime)
+        bind(stmt, 2, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func hasTranscriptChunk(analysisAssetId: String, segmentFingerprint: String) throws -> Bool {
+        let sql = "SELECT 1 FROM transcript_chunks WHERE analysisAssetId = ? AND segmentFingerprint = ? LIMIT 1"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        bind(stmt, 2, segmentFingerprint)
+        return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
     func fetchTranscriptChunks(assetId: String) throws -> [TranscriptChunk] {
         let sql = "SELECT * FROM transcript_chunks WHERE analysisAssetId = ? ORDER BY chunkIndex"
         let stmt = try prepare(sql)
