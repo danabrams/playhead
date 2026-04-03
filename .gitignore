@@ -3,6 +3,9 @@
 .dolt/
 *.db
 .beads-credential-key
+.beads/.br_history/
+.beads/dolt
+.beads/dolt-wal
 
 # bv (beads viewer) local config and caches
 .bv/
@@ -13,7 +16,10 @@ xcuserdata/
 *.xcscmblueprint
 *.xccheckout
 DerivedData/
+.deriveddata/
+.deriveddata-*/
 build/
+*.xcresult
 *.moved-aside
 *.pbxuser
 !default.pbxuser

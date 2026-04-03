@@ -1,0 +1,73 @@
+name: iOS CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ios-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PROJECT_FILE: Playhead.xcodeproj
+  PROJECT_SPEC: project.yml
+  SCHEME: Playhead
+  DERIVED_DATA_PATH: .deriveddata-ci
+  DESTINATION: platform=iOS Simulator,name=iPhone 16 Pro,OS=latest
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec "$PROJECT_SPEC"
+
+      - name: Show available simulators
+        run: xcrun simctl list devices available
+
+      - name: Build for testing
+        run: |
+          set -euo pipefail
+          xcodebuild build-for-testing \
+            -project "$PROJECT_FILE" \
+            -scheme "$SCHEME" \
+            -destination "$DESTINATION" \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Run tests
+        run: |
+          set -euo pipefail
+          xcodebuild test-without-building \
+            -project "$PROJECT_FILE" \
+            -scheme "$SCHEME" \
+            -destination "$DESTINATION" \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Upload Xcode results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcode-results
+          path: |
+            .deriveddata-ci/Logs/Test/*.xcresult
+            .deriveddata-ci/Logs/Build/*.xcactivitylog
+          if-no-files-found: ignore
