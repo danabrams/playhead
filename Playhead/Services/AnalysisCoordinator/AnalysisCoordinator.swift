@@ -41,7 +41,7 @@ enum SessionState: String, Sendable, CaseIterable {
         case .featuresReady:  [.hotPathReady, .failed]
         case .hotPathReady:   [.backfill, .complete, .failed]
         case .backfill:       [.complete, .failed]
-        case .complete:       []
+        case .complete:       [.featuresReady] // recovery: re-run if no data
         case .failed:         [.queued] // retry
         }
     }
@@ -324,7 +324,17 @@ actor AnalysisCoordinator {
             case .backfill:
                 try await runFromBackfill(sessionId: sessionId, assetId: assetId)
             case .complete:
-                logger.info("Session \(sessionId) already complete")
+                // Verify the session actually has transcript data. A crash
+                // during backfill can leave the session as "complete" with
+                // no chunks.
+                let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
+                if chunks.isEmpty {
+                    logger.info("Session \(sessionId) marked complete but has 0 chunks — restarting from featuresReady")
+                    try await transition(sessionId: sessionId, assetId: assetId, to: .featuresReady)
+                    try await runFromFeaturesReady(sessionId: sessionId, assetId: assetId)
+                } else {
+                    logger.info("Session \(sessionId) already complete (\(chunks.count) chunks)")
+                }
             case .failed:
                 try await transition(sessionId: sessionId, assetId: assetId, to: .queued)
                 try await runFromQueued(sessionId: sessionId, assetId: assetId, episodeId: episodeId, audioURL: audioURL)
@@ -495,7 +505,22 @@ actor AnalysisCoordinator {
 
     private func runFromBackfill(sessionId: String, assetId: String) async throws {
         try Task.checkCancellation()
-        guard transcriptEventTask != nil else {
+
+        // If resuming from a persisted backfill state (e.g. after a crash),
+        // there's no active transcript task. Check if transcription actually
+        // produced data. If not, restart transcription.
+        if transcriptEventTask == nil {
+            let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
+            if chunks.isEmpty, let shards = activeShards, let snapshot = latestSnapshot {
+                logger.info("Backfill resumed with 0 chunks — restarting transcription")
+                startObservingTranscriptEvents(sessionId: sessionId, assetId: assetId)
+                await transcriptEngine.startTranscription(
+                    shards: shards,
+                    analysisAssetId: assetId,
+                    snapshot: snapshot
+                )
+                return
+            }
             try await finalizeBackfill(sessionId: sessionId, assetId: assetId)
             return
         }
