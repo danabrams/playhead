@@ -630,6 +630,22 @@ actor AnalysisCoordinator {
                let state = SessionState(rawValue: session.state),
                state != .failed
             {
+                // For late-stage states (backfill, complete), verify that
+                // transcript data actually exists. A prior crash can leave
+                // the state machine advanced but the data empty.
+                if state == .backfill || state == .complete {
+                    let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
+                    if chunks.isEmpty {
+                        logger.info("Session \(session.id) in \(state.rawValue) but 0 chunks — resetting to queued")
+                        try await store.updateSessionState(
+                            id: session.id,
+                            state: SessionState.queued.rawValue,
+                            failureReason: nil
+                        )
+                        try await store.updateAssetState(id: assetId, state: SessionState.queued.rawValue)
+                        return (session.id, assetId, .queued)
+                    }
+                }
                 // Resume from persisted state.
                 return (session.id, assetId, state)
             }
