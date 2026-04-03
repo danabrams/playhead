@@ -115,7 +115,7 @@ final class PlayheadRuntime {
             self.initializationError = storeError
         }
 
-        capabilitiesService.startObserving()
+        Task { await capabilitiesService.startObserving() }
 
         Task { [playbackService, analysisCoordinator, skipOrchestrator] in
             await skipOrchestrator.setSkipCueHandler { cues in
@@ -198,7 +198,7 @@ final class PlayheadRuntime {
     }
 
     func playEpisode(_ episode: Episode) async {
-        let episodeId = episode.id.uuidString
+        let episodeId = episode.canonicalEpisodeKey
         let podcastId = episode.podcast?.feedURL.absoluteString
         let url = episode.cachedAudioURL ?? episode.audioURL
         let position = episode.playbackPosition

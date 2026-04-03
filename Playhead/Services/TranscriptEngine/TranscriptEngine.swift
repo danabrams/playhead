@@ -422,6 +422,9 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
 
         case .installed:
             break
+
+        @unknown default:
+            break
         }
 
         selectedLocale = locale

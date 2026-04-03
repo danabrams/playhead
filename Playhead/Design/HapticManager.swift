@@ -7,6 +7,7 @@ import UIKit
 
 // MARK: - HapticManager
 
+@MainActor
 enum HapticManager {
 
     private static let lightGenerator = UIImpactFeedbackGenerator(style: .light)
