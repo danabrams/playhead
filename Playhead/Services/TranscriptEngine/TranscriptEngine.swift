@@ -417,7 +417,12 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         let collector = Task { try await Self.collectSegments(from: transcriber.results) }
 
         do {
-            _ = try await analyzer.analyzeSequence(inputSequence)
+            // analyzeSequence consumes the stream and returns the last sample.
+            // finalizeAndFinish closes the session and terminates transcriber.results,
+            // which unblocks the collector. Without this call, results hangs forever.
+            if let lastSample = try await analyzer.analyzeSequence(inputSequence) {
+                try await analyzer.finalizeAndFinish(through: lastSample)
+            }
             withExtendedLifetime(analyzerBuffer) {}
 
             let rawSegments = try await collector.value
@@ -468,7 +473,9 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         let collector = Task { try await Self.collectVAD(from: detector.results) }
 
         do {
-            _ = try await analyzer.analyzeSequence(inputSequence)
+            if let lastSample = try await analyzer.analyzeSequence(inputSequence) {
+                try await analyzer.finalizeAndFinish(through: lastSample)
+            }
             withExtendedLifetime(analyzerBuffer) {}
 
             let timeOffset = shard.startTime
