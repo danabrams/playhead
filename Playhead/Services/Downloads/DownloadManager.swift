@@ -136,6 +136,9 @@ actor DownloadManager {
     /// Fingerprint cache: episode ID -> computed fingerprint.
     private var fingerprintCache: [String: AudioFingerprint] = [:]
 
+    /// Cached file extension per episode ID (e.g. "mp3", "m4a").
+    private var extensionCache: [String: String] = [:]
+
     /// Background URL session for pre-caching.
     private var _backgroundSession: URLSession?
 
@@ -216,6 +219,10 @@ actor DownloadManager {
         episodeId: String,
         from url: URL
     ) async throws -> URL {
+        // Cache the source extension for this episode.
+        let sourceExt = url.pathExtension.isEmpty ? "mp3" : url.pathExtension
+        extensionCache[episodeId] = sourceExt
+
         // Already fully cached?
         let completeURL = completeFileURL(for: episodeId)
         if FileManager.default.fileExists(atPath: completeURL.path) {
@@ -313,6 +320,8 @@ actor DownloadManager {
     /// Queues a background download for an episode (pre-caching).
     /// Completes even if the app is suspended.
     func backgroundDownload(episodeId: String, from url: URL) {
+        let sourceExt = url.pathExtension.isEmpty ? "mp3" : url.pathExtension
+        extensionCache[episodeId] = sourceExt
         let completeURL = completeFileURL(for: episodeId)
         guard !FileManager.default.fileExists(atPath: completeURL.path) else {
             logger.debug("Skipping background download for \(episodeId): already cached")
@@ -352,8 +361,31 @@ actor DownloadManager {
     }
 
     /// URL for a fully-downloaded, verified episode file.
+    /// Uses the cached source extension so AVURLAsset can identify the codec.
     func completeFileURL(for episodeId: String) -> URL {
-        completeDirectory.appendingPathComponent("\(safeFilename(for: episodeId)).audio")
+        let ext = resolveExtension(for: episodeId)
+        return completeDirectory.appendingPathComponent("\(safeFilename(for: episodeId)).\(ext)")
+    }
+
+    /// Resolve the file extension for an episode. Checks the in-memory cache
+    /// first, then scans the complete directory for a matching file.
+    private func resolveExtension(for episodeId: String) -> String {
+        if let cached = extensionCache[episodeId] {
+            return cached
+        }
+        // Scan the directory for any file matching this hash prefix.
+        let prefix = safeFilename(for: episodeId)
+        let fm = FileManager.default
+        if let files = try? fm.contentsOfDirectory(atPath: completeDirectory.path) {
+            for file in files where file.hasPrefix(prefix) {
+                let ext = (file as NSString).pathExtension
+                if !ext.isEmpty {
+                    extensionCache[episodeId] = ext
+                    return ext
+                }
+            }
+        }
+        return "mp3"
     }
 
     /// Returns the cached file URL if the episode is fully downloaded.
