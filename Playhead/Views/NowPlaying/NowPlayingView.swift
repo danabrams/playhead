@@ -11,10 +11,18 @@ struct NowPlayingView: View {
 
     @StateObject private var viewModel = NowPlayingViewModel()
     @StateObject private var bannerQueue = AdBannerQueue()
+    @State private var showTranscriptPeek = false
 
     /// Ad segment ranges expressed as fractions of total duration (0...1).
     /// Fed from SkipOrchestrator in a future bead.
     var adSegments: [ClosedRange<Double>] = []
+
+    /// Analysis asset ID for the currently playing episode. Nil when no
+    /// analysis session exists (transcript peek unavailable).
+    var analysisAssetId: String?
+
+    /// Analysis store reference for transcript data. Nil when unavailable.
+    var analysisStore: AnalysisStore?
 
     var body: some View {
         ZStack {
@@ -69,6 +77,20 @@ struct NowPlayingView: View {
         }
         .onAppear { viewModel.startObserving() }
         .onDisappear { viewModel.stopObserving() }
+        .sheet(isPresented: $showTranscriptPeek) {
+            if let assetId = analysisAssetId, let store = analysisStore {
+                TranscriptPeekView(
+                    peekViewModel: TranscriptPeekViewModel(
+                        analysisAssetId: assetId,
+                        store: store
+                    ),
+                    currentTime: viewModel.currentTime
+                )
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.hidden)
+                .presentationBackground(AppColors.surface)
+            }
+        }
     }
 }
 
@@ -104,9 +126,20 @@ private extension NowPlayingView {
 
             Spacer()
 
-            // Balance the chevron
-            Color.clear
-                .frame(width: 18, height: 18)
+            // Transcript peek — visible when analysis is available
+            if analysisAssetId != nil, analysisStore != nil {
+                Button {
+                    showTranscriptPeek = true
+                } label: {
+                    Image(systemName: "text.quote")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(AppColors.secondary)
+                }
+            } else {
+                // Balance the chevron when transcript unavailable
+                Color.clear
+                    .frame(width: 18, height: 18)
+            }
         }
     }
 
