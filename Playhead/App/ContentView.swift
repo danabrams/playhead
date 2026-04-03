@@ -6,44 +6,33 @@ struct ContentView: View {
     @State private var nowPlayingViewModel: NowPlayingViewModel?
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            TabView {
+        TabView {
+            tabRoot {
                 LibraryView()
-                    .tabItem {
-                        Label("Library", systemImage: "square.stack")
-                    }
+            }
+                .tabItem {
+                    Label("Library", systemImage: "square.stack")
+                }
 
+            tabRoot {
                 BrowseView()
-                    .tabItem {
-                        Label("Browse", systemImage: "magnifyingglass")
-                    }
+            }
+                .tabItem {
+                    Label("Browse", systemImage: "magnifyingglass")
+                }
 
+            tabRoot {
                 SettingsView(
                     inventory: runtime.modelInventory,
                     assetProvider: runtime.assetProvider,
                     entitlementManager: runtime.entitlementManager
                 )
-                    .tabItem {
-                        Label("Settings", systemImage: "gearshape")
-                    }
             }
-            .tint(AppColors.accent)
-
-            // NowPlayingBar overlay — shown when an episode is loaded
-            if runtime.isPlayingEpisode, let vm = nowPlayingViewModel {
-                NowPlayingBar(
-                    viewModel: vm,
-                    onTap: {
-                        showNowPlaying = true
-                    }
-                )
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-                .safeAreaInset(edge: .bottom) { Color.clear.frame(height: 0) }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("Now playing: \(runtime.currentEpisodeTitle ?? "Episode")")
-                .accessibilityHint("Tap to open full player")
-            }
+                .tabItem {
+                    Label("Settings", systemImage: "gearshape")
+                }
         }
+        .tint(AppColors.accent)
         .animation(Motion.standard, value: runtime.isPlayingEpisode)
         .task {
             syncNowPlayingViewModel(isPlaying: runtime.isPlayingEpisode)
@@ -71,6 +60,32 @@ struct ContentView: View {
             nowPlayingViewModel?.stopObserving()
             nowPlayingViewModel = nil
             showNowPlaying = false
+        }
+    }
+
+    private func tabRoot<Content: View>(
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        content()
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                miniPlayerInset
+            }
+    }
+
+    @ViewBuilder
+    private var miniPlayerInset: some View {
+        if runtime.isPlayingEpisode, let vm = nowPlayingViewModel {
+            NowPlayingBar(
+                viewModel: vm,
+                onTap: {
+                    showNowPlaying = true
+                }
+            )
+            .padding(.bottom, Spacing.xs)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Now playing: \(runtime.currentEpisodeTitle ?? "Episode")")
+            .accessibilityHint("Tap to open full player")
         }
     }
 }
