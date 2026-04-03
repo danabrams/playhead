@@ -40,7 +40,7 @@ final class Podcast {
 
 @Model
 final class Episode {
-    #Unique<Episode>([\.feedItemGUID])
+    #Unique<Episode>([\.canonicalEpisodeKey])
 
     var feedItemGUID: String
     var canonicalEpisodeKey: String
