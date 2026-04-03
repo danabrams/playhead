@@ -457,7 +457,30 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    func updateFeatureCoverage(id: String, endTime: Double) throws {
+        let sql = "UPDATE analysis_assets SET featureCoverageEndTime = ? WHERE id = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, endTime)
+        bind(stmt, 2, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
     // MARK: - CRUD: feature_windows
+
+    func insertFeatureWindows(_ windows: [FeatureWindow]) throws {
+        guard !windows.isEmpty else { return }
+        try exec("BEGIN TRANSACTION")
+        do {
+            for fw in windows {
+                try insertFeatureWindow(fw)
+            }
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
 
     func insertFeatureWindow(_ fw: FeatureWindow) throws {
         let sql = """
