@@ -5,6 +5,7 @@
 
 import Foundation
 import OSLog
+import UIKit
 
 #if canImport(FoundationModels)
 import FoundationModels
@@ -47,6 +48,7 @@ actor CapabilitiesService {
         localeSupported=\(snapshot.foundationModelsLocaleSupported), \
         thermal=\(snapshot.thermalState.description), \
         lowPower=\(snapshot.isLowPowerMode), \
+        charging=\(snapshot.isCharging), \
         bgProcessing=\(snapshot.backgroundProcessingSupported), \
         diskSpace=\(snapshot.availableDiskSpaceBytes / (1024 * 1024))MB
         """)
@@ -76,6 +78,8 @@ actor CapabilitiesService {
     /// Starts observing system notifications for capability-relevant changes.
     /// Safe to call multiple times — removes old observers before adding new ones.
     func startObserving() {
+        UIDevice.current.isBatteryMonitoringEnabled = true
+
         // Remove any previously registered observers to prevent leaks on double-call.
         removeObservers()
 
@@ -99,7 +103,16 @@ actor CapabilitiesService {
             Task { await self.refreshSnapshot() }
         }
 
-        observerTokens = [thermalToken, powerToken]
+        let batteryToken = center.addObserver(
+            forName: UIDevice.batteryStateDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { await self.refreshSnapshot() }
+        }
+
+        observerTokens = [thermalToken, powerToken, batteryToken]
     }
 
     // MARK: - Snapshot Capture
@@ -116,12 +129,16 @@ actor CapabilitiesService {
         let backgroundProcessingSupported = checkBackgroundProcessingSupported()
         let availableDiskSpace = queryAvailableDiskSpace()
 
+        let batteryState = UIDevice.current.batteryState
+        let isCharging = batteryState == .charging || batteryState == .full
+
         return CapabilitySnapshot(
             foundationModelsAvailable: foundationModelsAvailable,
             appleIntelligenceEnabled: appleIntelligenceEnabled,
             foundationModelsLocaleSupported: localeSupported,
             thermalState: thermalState,
             isLowPowerMode: isLowPowerMode,
+            isCharging: isCharging,
             backgroundProcessingSupported: backgroundProcessingSupported,
             availableDiskSpaceBytes: availableDiskSpace,
             capturedAt: .now

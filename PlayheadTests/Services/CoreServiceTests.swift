@@ -1404,6 +1404,7 @@ struct CapabilitiesServiceTests {
             foundationModelsLocaleSupported: true,
             thermalState: .fair,
             isLowPowerMode: true,
+            isCharging: false,
             backgroundProcessingSupported: true,
             availableDiskSpaceBytes: 500_000_000,
             capturedAt: Date(timeIntervalSince1970: 1700000000)
@@ -1428,6 +1429,7 @@ struct CapabilitiesServiceTests {
             foundationModelsLocaleSupported: false,
             thermalState: .nominal,
             isLowPowerMode: false,
+            isCharging: false,
             backgroundProcessingSupported: true,
             availableDiskSpaceBytes: 1_000_000,
             capturedAt: .now
@@ -1440,6 +1442,7 @@ struct CapabilitiesServiceTests {
             foundationModelsLocaleSupported: false,
             thermalState: .serious,
             isLowPowerMode: false,
+            isCharging: false,
             backgroundProcessingSupported: true,
             availableDiskSpaceBytes: 1_000_000,
             capturedAt: .now
@@ -1455,6 +1458,7 @@ struct CapabilitiesServiceTests {
             foundationModelsLocaleSupported: false,
             thermalState: .nominal,
             isLowPowerMode: false,
+            isCharging: false,
             backgroundProcessingSupported: true,
             availableDiskSpaceBytes: 1_000_000,
             capturedAt: .now
@@ -1467,6 +1471,7 @@ struct CapabilitiesServiceTests {
             foundationModelsLocaleSupported: false,
             thermalState: .nominal,
             isLowPowerMode: true,
+            isCharging: false,
             backgroundProcessingSupported: true,
             availableDiskSpaceBytes: 1_000_000,
             capturedAt: .now
@@ -1482,6 +1487,7 @@ struct CapabilitiesServiceTests {
             foundationModelsLocaleSupported: true,
             thermalState: .nominal,
             isLowPowerMode: false,
+            isCharging: false,
             backgroundProcessingSupported: true,
             availableDiskSpaceBytes: 1_000_000,
             capturedAt: .now
@@ -1495,6 +1501,7 @@ struct CapabilitiesServiceTests {
             foundationModelsLocaleSupported: true,
             thermalState: .nominal,
             isLowPowerMode: false,
+            isCharging: false,
             backgroundProcessingSupported: true,
             availableDiskSpaceBytes: 1_000_000,
             capturedAt: .now

@@ -21,6 +21,9 @@ struct CapabilitySnapshot: Codable, Sendable, Equatable {
     /// Whether Low Power Mode is active.
     let isLowPowerMode: Bool
 
+    /// Whether the device is currently charging (or full).
+    let isCharging: Bool
+
     /// Whether background processing tasks are supported.
     let backgroundProcessingSupported: Bool
 
@@ -43,6 +46,50 @@ struct CapabilitySnapshot: Codable, Sendable, Equatable {
     /// Whether Foundation Models features (banner enrichment) are usable.
     var canUseFoundationModels: Bool {
         foundationModelsAvailable && appleIntelligenceEnabled && foundationModelsLocaleSupported
+    }
+
+    /// Whether deferred (T1+) analysis work can run: charging and not thermally throttled.
+    var canRunDeferredWork: Bool {
+        isCharging && !shouldThrottleAnalysis
+    }
+
+    // MARK: - Initializers
+
+    init(
+        foundationModelsAvailable: Bool,
+        appleIntelligenceEnabled: Bool,
+        foundationModelsLocaleSupported: Bool,
+        thermalState: ThermalState,
+        isLowPowerMode: Bool,
+        isCharging: Bool,
+        backgroundProcessingSupported: Bool,
+        availableDiskSpaceBytes: Int64,
+        capturedAt: Date
+    ) {
+        self.foundationModelsAvailable = foundationModelsAvailable
+        self.appleIntelligenceEnabled = appleIntelligenceEnabled
+        self.foundationModelsLocaleSupported = foundationModelsLocaleSupported
+        self.thermalState = thermalState
+        self.isLowPowerMode = isLowPowerMode
+        self.isCharging = isCharging
+        self.backgroundProcessingSupported = backgroundProcessingSupported
+        self.availableDiskSpaceBytes = availableDiskSpaceBytes
+        self.capturedAt = capturedAt
+    }
+
+    // MARK: - Backward-Compatible Decoding
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        foundationModelsAvailable = try container.decode(Bool.self, forKey: .foundationModelsAvailable)
+        appleIntelligenceEnabled = try container.decode(Bool.self, forKey: .appleIntelligenceEnabled)
+        foundationModelsLocaleSupported = try container.decode(Bool.self, forKey: .foundationModelsLocaleSupported)
+        thermalState = try container.decode(ThermalState.self, forKey: .thermalState)
+        isLowPowerMode = try container.decode(Bool.self, forKey: .isLowPowerMode)
+        isCharging = try container.decodeIfPresent(Bool.self, forKey: .isCharging) ?? false
+        backgroundProcessingSupported = try container.decode(Bool.self, forKey: .backgroundProcessingSupported)
+        availableDiskSpaceBytes = try container.decode(Int64.self, forKey: .availableDiskSpaceBytes)
+        capturedAt = try container.decode(Date.self, forKey: .capturedAt)
     }
 }
 
