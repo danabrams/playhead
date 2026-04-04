@@ -35,6 +35,7 @@ private struct UncheckedSendableBox<T>: @unchecked Sendable {
 enum BackgroundTaskID {
     static let backfillProcessing = "com.playhead.app.analysis.backfill"
     static let continuedProcessing = "com.playhead.app.analysis.continued"
+    static let preAnalysisRecovery = "com.playhead.app.preanalysis.recovery"
 }
 
 // MARK: - BackgroundProcessingService
@@ -50,6 +51,11 @@ actor BackgroundProcessingService {
 
     private let coordinator: AnalysisCoordinator
     private let capabilitiesService: CapabilitiesService
+
+    /// Pre-analysis services, injected after construction via
+    /// ``setPreAnalysisServices(scheduler:reconciler:)``.
+    private var analysisWorkScheduler: AnalysisWorkScheduler?
+    private var analysisJobReconciler: AnalysisJobReconciler?
 
     // MARK: - State
 
@@ -97,6 +103,17 @@ actor BackgroundProcessingService {
         self.capabilitiesService = capabilitiesService
     }
 
+    /// Inject pre-analysis services after construction. Called once the
+    /// scheduler and reconciler are built during app setup.
+    func setPreAnalysisServices(
+        scheduler: AnalysisWorkScheduler,
+        reconciler: AnalysisJobReconciler
+    ) {
+        self.analysisWorkScheduler = scheduler
+        self.analysisJobReconciler = reconciler
+        logger.info("Pre-analysis services injected")
+    }
+
     // MARK: - Registration
 
     /// Register background task identifiers with fallback handlers.
@@ -118,6 +135,14 @@ actor BackgroundProcessingService {
             using: nil
         ) { task in
             logger.warning("Continued processing task fired before service initialized")
+            task.setTaskCompleted(success: false)
+        }
+
+        BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: BackgroundTaskID.preAnalysisRecovery,
+            using: nil
+        ) { task in
+            logger.warning("Pre-analysis recovery task fired before service initialized")
             task.setTaskCompleted(success: false)
         }
     }
@@ -147,6 +172,18 @@ actor BackgroundProcessingService {
             }
             let sendableTask = UncheckedSendableBox(processingTask)
             Task { await self.handleContinuedProcessingTask(sendableTask.value) }
+        }
+
+        BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: BackgroundTaskID.preAnalysisRecovery,
+            using: nil
+        ) { [weak self] task in
+            guard let self, let processingTask = task as? BGProcessingTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            let sendableTask = UncheckedSendableBox(processingTask)
+            Task { await self.handlePreAnalysisRecovery(sendableTask.value) }
         }
     }
 
@@ -407,5 +444,55 @@ actor BackgroundProcessingService {
     private func handleExpiredProcessingTask(_ task: BGProcessingTask) async {
         await coordinator.stop()
         await markComplete(task, success: false)
+    }
+
+    // MARK: - Pre-Analysis Recovery
+
+    /// Handle the pre-analysis recovery BGProcessingTask. Runs reconciliation
+    /// to find interrupted T0/T1+ jobs and resumes them.
+    private func handlePreAnalysisRecovery(_ task: BGProcessingTask) async {
+        logger.info("Pre-analysis recovery task started")
+
+        bgTaskCompleted = false
+
+        // Schedule the next occurrence.
+        schedulePreAnalysisRecovery()
+
+        guard let reconciler = analysisJobReconciler else {
+            logger.warning("Pre-analysis recovery: no reconciler available")
+            markComplete(task, success: false)
+            return
+        }
+
+        let sendableTask = UncheckedSendableBox(task)
+        let workTask = Task {
+            _ = try? await reconciler.reconcile()
+            await self.markComplete(sendableTask.value, success: true)
+            self.logger.info("Pre-analysis recovery task completed")
+        }
+
+        activeBackgroundTask = workTask
+
+        task.expirationHandler = { [weak self] in
+            workTask.cancel()
+            Task { [weak self, sendableTask] in
+                await self?.analysisWorkScheduler?.cancelCurrentJob()
+                await self?.markComplete(sendableTask.value, success: false)
+            }
+        }
+    }
+
+    /// Schedule a BGProcessingTask for pre-analysis recovery.
+    /// Requires external power; earliest begin 60s from now.
+    func schedulePreAnalysisRecovery() {
+        let request = BGProcessingTaskRequest(identifier: BackgroundTaskID.preAnalysisRecovery)
+        request.requiresExternalPower = true
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 60)
+        do {
+            try BGTaskScheduler.shared.submit(request)
+            logger.info("Scheduled pre-analysis recovery task")
+        } catch {
+            logger.error("Failed to schedule pre-analysis recovery: \(error)")
+        }
     }
 }

@@ -43,6 +43,7 @@ targets:
         BGTaskSchedulerPermittedIdentifiers:
           - com.playhead.app.analysis.backfill
           - com.playhead.app.analysis.continued
+          - com.playhead.app.preanalysis.recovery
     scheme:
       testTargets:
         - PlayheadTests
