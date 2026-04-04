@@ -5,7 +5,6 @@
 // Separate from AnalysisAudioService — different queue, different purpose.
 
 @preconcurrency import AVFoundation
-import Combine
 import Foundation
 import MediaPlayer
 
@@ -82,7 +81,6 @@ final class PlaybackService: NSObject, Sendable {
 
     // MARK: - Observation
 
-    private var cancellables = Set<AnyCancellable>()
     private var statusObservation: NSKeyValueObservation?
     private var rateObservation: NSKeyValueObservation?
     private var itemStatusObservation: NSKeyValueObservation?
@@ -104,8 +102,13 @@ final class PlaybackService: NSObject, Sendable {
             self.configureRemoteCommands()
             self.startPeriodicTimeObserver()
             self.observePlayerRate()
-            self.observeInterruptions()
-            self.observeRouteChanges()
+            // Interruptions and route changes use async notification
+            // sequences so they run entirely on PlaybackServiceActor.
+            // Combine's .sink runs on the notification's posting thread
+            // (main queue), which triggers Swift 6 actor isolation
+            // assertions when accessing actor-isolated self.
+            self.observeInterruptionsAsync()
+            self.observeRouteChangesAsync()
         }
     }
 
@@ -371,68 +374,62 @@ final class PlaybackService: NSObject, Sendable {
         }
     }
 
-    // MARK: - Interruptions
+    // MARK: - Interruptions (Async)
 
-    private func observeInterruptions() {
-        NotificationCenter.default.publisher(
-            for: AVAudioSession.interruptionNotification
-        )
-        .sink { [weak self] notification in
-            guard let self else { return }
-            Task { @PlaybackServiceActor in
-                self.handleInterruption(notification)
-            }
-        }
-        .store(in: &cancellables)
-    }
+    /// Observe audio session interruptions using an async notification
+    /// sequence that runs entirely on PlaybackServiceActor. This avoids
+    /// the Swift 6 actor isolation crash that occurs when Combine's .sink
+    /// closure accesses actor-isolated self from the main queue.
+    private func observeInterruptionsAsync() {
+        Task { @PlaybackServiceActor [weak self] in
+            let notifications = NotificationCenter.default.notifications(
+                named: AVAudioSession.interruptionNotification
+            )
+            for await notification in notifications {
+                guard let self else { break }
+                guard let info = notification.userInfo,
+                      let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+                      let type = AVAudioSession.InterruptionType(rawValue: typeValue)
+                else { continue }
 
-    private func handleInterruption(_ notification: Notification) {
-        guard let info = notification.userInfo,
-              let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt,
-              let type = AVAudioSession.InterruptionType(rawValue: typeValue)
-        else { return }
-
-        switch type {
-        case .began:
-            pause()
-        case .ended:
-            if let optionsValue = info[AVAudioSessionInterruptionOptionKey] as? UInt {
-                let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
-                if options.contains(.shouldResume) {
-                    play()
+                switch type {
+                case .began:
+                    self.pause()
+                case .ended:
+                    if let optionsValue = info[AVAudioSessionInterruptionOptionKey] as? UInt {
+                        let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+                        if options.contains(.shouldResume) {
+                            self.play()
+                        }
+                    }
+                @unknown default:
+                    break
                 }
             }
-        @unknown default:
-            break
         }
     }
 
-    // MARK: - Route Changes
+    // MARK: - Route Changes (Async)
 
-    private func observeRouteChanges() {
-        NotificationCenter.default.publisher(
-            for: AVAudioSession.routeChangeNotification
-        )
-        .sink { [weak self] notification in
-            guard let self else { return }
-            Task { @PlaybackServiceActor in
-                self.handleRouteChange(notification)
+    private func observeRouteChangesAsync() {
+        Task { @PlaybackServiceActor [weak self] in
+            let notifications = NotificationCenter.default.notifications(
+                named: AVAudioSession.routeChangeNotification
+            )
+            for await notification in notifications {
+                guard let self else { break }
+                guard let info = notification.userInfo,
+                      let reasonValue = info[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                      let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue)
+                else { continue }
+
+                switch reason {
+                case .oldDeviceUnavailable:
+                    self.pause()
+                default:
+                    break
+                }
             }
-        }
-        .store(in: &cancellables)
-    }
-
-    private func handleRouteChange(_ notification: Notification) {
-        guard let info = notification.userInfo,
-              let reasonValue = info[AVAudioSessionRouteChangeReasonKey] as? UInt,
-              let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue)
-        else { return }
-
-        switch reason {
-        case .oldDeviceUnavailable:
-            pause()
-        default:
-            break
         }
     }
 
