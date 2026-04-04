@@ -28,6 +28,7 @@ targets:
       path: Playhead/Support/Info.plist
       properties:
         CFBundleDisplayName: Playhead
+        ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
