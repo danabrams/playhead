@@ -6,6 +6,7 @@
 	<array>
 		<string>com.playhead.app.analysis.backfill</string>
 		<string>com.playhead.app.analysis.continued</string>
+		<string>com.playhead.app.preanalysis.recovery</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>

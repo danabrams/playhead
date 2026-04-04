@@ -24,6 +24,9 @@ final class PlayheadRuntime {
     let analysisCoordinator: AnalysisCoordinator
     let backgroundProcessingService: BackgroundProcessingService
     let downloadManager: DownloadManager
+    let analysisJobRunner: AnalysisJobRunner
+    let analysisWorkScheduler: AnalysisWorkScheduler
+    let analysisJobReconciler: AnalysisJobReconciler
 
     private let isPreviewRuntime: Bool
     private let logger = Logger(subsystem: "com.playhead", category: "Runtime")
@@ -119,12 +122,43 @@ final class PlayheadRuntime {
         )
         self.downloadManager = DownloadManager()
 
+        let cueMaterializer = SkipCueMaterializer(store: analysisStore)
+        self.analysisJobRunner = AnalysisJobRunner(
+            store: analysisStore,
+            audioProvider: audioService,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adDetectionService,
+            cueMaterializer: cueMaterializer
+        )
+        self.analysisWorkScheduler = AnalysisWorkScheduler(
+            store: analysisStore,
+            jobRunner: analysisJobRunner,
+            capabilitiesService: capabilitiesService,
+            downloadManager: downloadManager
+        )
+        self.analysisJobReconciler = AnalysisJobReconciler(
+            store: analysisStore,
+            downloadManager: downloadManager,
+            capabilitiesService: capabilitiesService
+        )
+
         // Set error state after all stored properties are initialized.
         if let storeError {
             self.initializationError = storeError
         }
 
         Task { await capabilitiesService.startObserving() }
+
+        Task { [downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService] in
+            await downloadManager.setAnalysisWorkScheduler(analysisWorkScheduler)
+            await backgroundProcessingService.setPreAnalysisServices(
+                scheduler: analysisWorkScheduler,
+                reconciler: analysisJobReconciler
+            )
+            try? await analysisJobReconciler.reconcile()
+            await analysisWorkScheduler.startSchedulerLoop()
+        }
 
         Task { [playbackService, analysisCoordinator, skipOrchestrator] in
             await skipOrchestrator.setSkipCueHandler { cues in
@@ -244,7 +278,7 @@ final class PlayheadRuntime {
             // Not cached — stream-download and play once enough is buffered.
             logger.info("Episode not cached — streaming download: \(episodeId)")
             audioCacheTask?.cancel()
-            audioCacheTask = Task { [weak self, downloadManager, analysisCoordinator] in
+            audioCacheTask = Task { [weak self, downloadManager, analysisCoordinator, analysisWorkScheduler] in
                 guard let self else { return }
                 do {
                     let result = try await downloadManager.streamingDownload(
@@ -312,6 +346,7 @@ final class PlayheadRuntime {
                     )
                     self.currentAnalysisAssetId = resolvedAssetId
                     if let assetId = resolvedAssetId {
+                        await analysisWorkScheduler.playbackStarted(episodeId: episodeId)
                         await self.skipOrchestrator.beginEpisode(
                             analysisAssetId: assetId,
                             podcastId: podcastId
@@ -342,6 +377,7 @@ final class PlayheadRuntime {
         currentAnalysisAssetId = resolvedAssetId
 
         if let assetId = resolvedAssetId {
+            await analysisWorkScheduler.playbackStarted(episodeId: episodeId)
             await skipOrchestrator.beginEpisode(
                 analysisAssetId: assetId,
                 podcastId: podcastId
