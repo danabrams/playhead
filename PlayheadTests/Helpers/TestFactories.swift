@@ -7,15 +7,18 @@ import Foundation
 // MARK: - CapabilitySnapshot
 
 func makeCapabilitySnapshot(
+    foundationModelsAvailable: Bool = false,
     thermalState: ThermalState = .nominal,
-    isLowPowerMode: Bool = false
+    isLowPowerMode: Bool = false,
+    isCharging: Bool = false
 ) -> CapabilitySnapshot {
     CapabilitySnapshot(
-        foundationModelsAvailable: false,
+        foundationModelsAvailable: foundationModelsAvailable,
         appleIntelligenceEnabled: false,
         foundationModelsLocaleSupported: false,
         thermalState: thermalState,
         isLowPowerMode: isLowPowerMode,
+        isCharging: isCharging,
         backgroundProcessingSupported: true,
         availableDiskSpaceBytes: 10 * 1024 * 1024 * 1024,
         capturedAt: .now

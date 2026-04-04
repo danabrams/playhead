@@ -92,6 +92,7 @@ enum DownloadManagerError: Error, CustomStringConvertible {
 protocol DownloadProviding: Sendable {
     func cachedFileURL(for episodeId: String) async -> URL?
     func fingerprint(for episodeId: String) async -> AudioFingerprint?
+    func allCachedEpisodeIds() async -> Set<String>
 }
 
 // MARK: - DownloadManager
@@ -625,6 +626,13 @@ actor DownloadManager {
     /// Returns true if the episode audio is fully cached on disk.
     func isCached(episodeId: String) -> Bool {
         FileManager.default.fileExists(atPath: completeFileURL(for: episodeId).path)
+    }
+
+    /// Returns the set of episode IDs that have fully-downloaded cached audio.
+    /// Scans the complete directory and reverse-maps filenames back to episode IDs
+    /// using the access log (which tracks all episodes that have been downloaded).
+    func allCachedEpisodeIds() -> Set<String> {
+        Set(accessLog.keys.filter { isCached(episodeId: $0) })
     }
 
     // MARK: - Fingerprinting

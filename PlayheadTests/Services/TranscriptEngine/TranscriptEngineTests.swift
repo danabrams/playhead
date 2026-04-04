@@ -45,17 +45,6 @@ final class MockSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
 
 // MARK: - Helpers
 
-private func makeShard(id: Int = 0, episodeID: String = "test-ep",
-                       startTime: TimeInterval = 0, duration: TimeInterval = 30) -> AnalysisShard {
-    AnalysisShard(
-        id: id,
-        episodeID: episodeID,
-        startTime: startTime,
-        duration: duration,
-        samples: [Float](repeating: 0, count: 16000 * Int(duration))
-    )
-}
-
 private func makeSegment(id: Int = 0, passType: TranscriptPassType = .fast) -> TranscriptSegment {
     let word = TranscriptWord(text: "hello", startTime: 0, endTime: 0.5, confidence: 0.95)
     return TranscriptSegment(

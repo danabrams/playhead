@@ -1328,6 +1328,54 @@ actor AnalysisStore {
         return ids
     }
 
+    /// Fetches episode IDs that have at least one active (non-terminal) job.
+    func fetchActiveJobEpisodeIds() throws -> Set<String> {
+        let sql = "SELECT DISTINCT episodeId FROM analysis_jobs WHERE state NOT IN ('complete', 'superseded', 'failed')"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        var ids = Set<String>()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            ids.insert(text(stmt, 0))
+        }
+        return ids
+    }
+
+    /// Recovers an expired lease: sets state to queued, clears lease fields,
+    /// and increments attemptCount.
+    func recoverExpiredLease(jobId: String) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET state = 'queued', leaseOwner = NULL, leaseExpiresAt = NULL,
+                attemptCount = attemptCount + 1, updatedAt = ?
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, Date().timeIntervalSince1970)
+        bind(stmt, 2, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Batch-updates the state (and optionally nextEligibleAt) for multiple jobs.
+    func batchUpdateJobState(jobIds: [String], state: String, nextEligibleAt: Double? = nil) throws {
+        guard !jobIds.isEmpty else { return }
+        let now = Date().timeIntervalSince1970
+        for jobId in jobIds {
+            let sql = """
+                UPDATE analysis_jobs
+                SET state = ?, nextEligibleAt = ?, updatedAt = ?
+                WHERE jobId = ?
+                """
+            let stmt = try prepare(sql)
+            defer { sqlite3_finalize(stmt) }
+            bind(stmt, 1, state)
+            bind(stmt, 2, nextEligibleAt)
+            bind(stmt, 3, now)
+            bind(stmt, 4, jobId)
+            try step(stmt, expecting: SQLITE_DONE)
+        }
+    }
+
     private func readJob(_ stmt: OpaquePointer?) -> AnalysisJob {
         AnalysisJob(
             jobId: text(stmt, 0),

@@ -66,7 +66,7 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
         try await store.insertSkipCues(cues)
 
         // Track skip cues pushed via the handler.
-        var pushedCues: [CMTimeRange] = []
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
         await orchestrator.setSkipCueHandler { ranges in
             pushedCues = ranges
         }

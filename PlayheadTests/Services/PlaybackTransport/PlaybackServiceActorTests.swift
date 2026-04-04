@@ -146,10 +146,11 @@ struct ProgressiveLoaderDecouplingTests {
             }
 
             // Loader-side: suspend/resume (simulating interruption).
+            nonisolated(unsafe) let unsafeLoader = loader
             group.addTask {
                 for _ in 0..<50 {
-                    loader.suspend()
-                    loader.resume()
+                    unsafeLoader.suspend()
+                    unsafeLoader.resume()
                 }
             }
         }

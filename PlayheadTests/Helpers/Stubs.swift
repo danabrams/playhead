@@ -49,6 +49,7 @@ final class StubCapabilitiesProvider: CapabilitiesProviding, @unchecked Sendable
             foundationModelsLocaleSupported: false,
             thermalState: .nominal,
             isLowPowerMode: false,
+            isCharging: false,
             backgroundProcessingSupported: true,
             availableDiskSpaceBytes: 10 * 1024 * 1024 * 1024,
             capturedAt: .now
@@ -75,6 +76,10 @@ final class StubDownloadProvider: DownloadProviding, @unchecked Sendable {
 
     func fingerprint(for episodeId: String) -> AudioFingerprint? {
         fingerprints[episodeId]
+    }
+
+    func allCachedEpisodeIds() -> Set<String> {
+        Set(cachedURLs.keys)
     }
 }
 

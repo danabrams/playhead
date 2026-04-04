@@ -5,18 +5,6 @@ import Foundation
 import Testing
 @testable import Playhead
 
-// MARK: - Test Helpers
-
-private let _testStoreDirs = TestTempDirTracker()
-
-private func makeTestStore() async throws -> AnalysisStore {
-    let dir = try makeTempDir(prefix: "AnalysisJobTests")
-    _testStoreDirs.track(dir)
-    let store = try AnalysisStore(directory: dir)
-    try await store.migrate()
-    return store
-}
-
 // MARK: - Tests
 
 @Suite("AnalysisJob CRUD")
