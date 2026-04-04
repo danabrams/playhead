@@ -20,6 +20,9 @@ actor AnalysisWorkScheduler {
     private var currentEpisodeId: String?
     private var shouldCancelCurrentJob = false
 
+    /// Tracks OSSignposter queue-wait intervals keyed by jobId.
+    private var queueWaitStates: [String: OSSignpostIntervalState] = [:]
+
     init(
         store: AnalysisStore,
         jobRunner: AnalysisJobRunner,
@@ -79,6 +82,7 @@ actor AnalysisWorkScheduler {
         )
         do {
             try await store.insertJob(job)
+            queueWaitStates[job.jobId] = PreAnalysisInstrumentation.beginQueueWait(jobId: job.jobId)
             logger.info("Enqueued job \(job.jobId) for episode \(episodeId), priority=\(priority), coverage=\(coverage)s")
         } catch {
             logger.error("Failed to enqueue job: \(error)")
@@ -200,6 +204,11 @@ actor AnalysisWorkScheduler {
         currentEpisodeId = job.episodeId
         shouldCancelCurrentJob = false
 
+        // End queue-wait signpost interval.
+        if let queueState = queueWaitStates.removeValue(forKey: job.jobId) {
+            PreAnalysisInstrumentation.endQueueWait(queueState)
+        }
+
         // Lease renewal task: renew every 120s.
         let leaseRenewalTask = Task {
             while !Task.isCancelled {
@@ -232,8 +241,17 @@ actor AnalysisWorkScheduler {
             priority: .medium
         )
 
+        let jobSignpost = PreAnalysisInstrumentation.beginJobDuration(jobId: job.jobId)
         do {
             let outcome = await jobRunner.run(request)
+            PreAnalysisInstrumentation.endJobDuration(jobSignpost)
+
+            // Log outcome metric.
+            PreAnalysisInstrumentation.logJobOutcome(
+                jobId: job.jobId,
+                stopReason: String(describing: outcome.stopReason),
+                coverageSec: outcome.cueCoverageSec
+            )
 
             // Update progress in the store.
             try? await store.updateJobProgress(
@@ -279,9 +297,11 @@ actor AnalysisWorkScheduler {
                     )
                     try? await store.insertJob(nextJob)
                     try? await store.updateJobState(jobId: job.jobId, state: "complete")
+                    PreAnalysisInstrumentation.logTierCompletion(tier: "\(Int(job.desiredCoverageSec))s", completed: true)
                     logger.info("Tier advancement: \(job.desiredCoverageSec)s -> \(nextCoverage)s for episode \(job.episodeId)")
                 } else {
                     try? await store.updateJobState(jobId: job.jobId, state: "complete")
+                    PreAnalysisInstrumentation.logTierCompletion(tier: "\(Int(job.desiredCoverageSec))s", completed: true)
                     logger.info("Job \(job.jobId) complete (all tiers done)")
                 }
 
@@ -326,6 +346,7 @@ actor AnalysisWorkScheduler {
                 logger.info("Job \(job.jobId) cancelled by playback, requeued")
             }
         } catch {
+            PreAnalysisInstrumentation.endJobDuration(jobSignpost)
             let backoff = min(pow(2.0, Double(job.attemptCount + 1)) * 60, 3600)
             let nextEligible = Date().timeIntervalSince1970 + backoff
             try? await store.updateJobState(

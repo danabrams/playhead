@@ -52,6 +52,7 @@ actor AnalysisJobRunner {
 
         // -- Stage 1: Audio decode --
 
+        let decodeSignpost = PreAnalysisInstrumentation.beginStage("decode")
         let allShards: [AnalysisShard]
         do {
             allShards = try await audioProvider.decode(
@@ -59,7 +60,9 @@ actor AnalysisJobRunner {
                 episodeID: request.episodeId,
                 shardDuration: AnalysisAudioService.defaultShardDuration
             )
+            PreAnalysisInstrumentation.endStage(decodeSignpost)
         } catch {
+            PreAnalysisInstrumentation.endStage(decodeSignpost)
             logger.error("Decode failed for job \(request.jobId): \(error)")
             return makeOutcome(assetId: assetId, request: request, stopReason: .failed("decode: \(error)"))
         }
@@ -78,6 +81,7 @@ actor AnalysisJobRunner {
 
         // -- Stage 2: Feature extraction --
 
+        let featureSignpost = PreAnalysisInstrumentation.beginStage("features")
         let existingFeatureCoverage: Double
         do {
             let asset = try await store.fetchAsset(id: assetId)
@@ -92,7 +96,9 @@ actor AnalysisJobRunner {
                 analysisAssetId: assetId,
                 existingCoverage: existingFeatureCoverage
             )
+            PreAnalysisInstrumentation.endStage(featureSignpost)
         } catch {
+            PreAnalysisInstrumentation.endStage(featureSignpost)
             logger.error("Feature extraction failed for job \(request.jobId): \(error)")
             return makeOutcome(assetId: assetId, request: request, stopReason: .failed("features: \(error)"))
         }
@@ -110,6 +116,7 @@ actor AnalysisJobRunner {
 
         // -- Stage 3: Transcription --
 
+        let transcriptSignpost = PreAnalysisInstrumentation.beginStage("transcription")
         let snapshot = PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: false)
 
         // Fire-and-forget: startTranscription kicks off work internally.
@@ -140,6 +147,8 @@ actor AnalysisJobRunner {
             }
         }
 
+        PreAnalysisInstrumentation.endStage(transcriptSignpost)
+
         // Read coverage from the store after transcription completes.
         do {
             let asset = try await store.fetchAsset(id: assetId)
@@ -160,10 +169,12 @@ actor AnalysisJobRunner {
 
         // -- Stage 4: Ad detection --
 
+        let detectionSignpost = PreAnalysisInstrumentation.beginStage("ad_detection")
         let chunks: [TranscriptChunk]
         do {
             chunks = try await store.fetchTranscriptChunks(assetId: assetId)
         } catch {
+            PreAnalysisInstrumentation.endStage(detectionSignpost)
             logger.error("Failed to fetch transcript chunks for job \(request.jobId): \(error)")
             return makeOutcome(
                 assetId: assetId,
@@ -185,6 +196,7 @@ actor AnalysisJobRunner {
                 episodeDuration: episodeDuration
             )
         } catch {
+            PreAnalysisInstrumentation.endStage(detectionSignpost)
             logger.error("Hot-path detection failed for job \(request.jobId): \(error)")
             return makeOutcome(
                 assetId: assetId,
@@ -196,6 +208,7 @@ actor AnalysisJobRunner {
         }
 
         if let earlyStop = checkStopConditions() {
+            PreAnalysisInstrumentation.endStage(detectionSignpost)
             return makeOutcome(
                 assetId: assetId,
                 request: request,
@@ -214,6 +227,7 @@ actor AnalysisJobRunner {
                 episodeDuration: episodeDuration
             )
         } catch {
+            PreAnalysisInstrumentation.endStage(detectionSignpost)
             logger.error("Backfill detection failed for job \(request.jobId): \(error)")
             return makeOutcome(
                 assetId: assetId,
@@ -232,6 +246,8 @@ actor AnalysisJobRunner {
             finalWindows = adWindows
         }
 
+        PreAnalysisInstrumentation.endStage(detectionSignpost)
+
         let cueCoverage = finalWindows.map(\.endTime).max() ?? 0
 
         // -- Stage 5: Cue materialization (policy-dependent) --
@@ -239,6 +255,7 @@ actor AnalysisJobRunner {
         var newCueCount = 0
 
         if request.outputPolicy == .writeWindowsAndCues {
+            let cueSignpost = PreAnalysisInstrumentation.beginStage("cue_materialization")
             do {
                 let cues = try await cueMaterializer.materialize(
                     windows: finalWindows,
@@ -246,7 +263,9 @@ actor AnalysisJobRunner {
                     source: request.mode == .preRollWarmup ? "preAnalysis" : "playback"
                 )
                 newCueCount = cues.count
+                PreAnalysisInstrumentation.endStage(cueSignpost)
             } catch {
+                PreAnalysisInstrumentation.endStage(cueSignpost)
                 logger.error("Cue materialization failed for job \(request.jobId): \(error)")
                 return makeOutcome(
                     assetId: assetId,

@@ -158,8 +158,8 @@ struct AnalysisWorkSchedulerTests {
         let job = makeAnalysisJob(
             jobId: "fail-job",
             episodeId: "ep-1",
-            attemptCount: 2,
-            state: "queued"
+            state: "queued",
+            attemptCount: 2
         )
         try await store.insertJob(job)
 
