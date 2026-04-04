@@ -115,6 +115,7 @@ actor AnalysisCoordinator {
     private let capabilitiesService: CapabilitiesService
     private let adDetectionService: AdDetectionService
     private let skipOrchestrator: SkipOrchestrator
+    private let downloadProgressStream: AsyncStream<DownloadProgress>
 
     // MARK: - Active Session State
 
@@ -128,6 +129,8 @@ actor AnalysisCoordinator {
     private var activePodcastId: String?
     /// Decoded shards for the current episode (cached in memory for reuse).
     private var activeShards: [AnalysisShard]?
+    /// Audio file URL for incremental re-decode as download progresses.
+    private var activeAudioURL: LocalAudioURL?
     /// Latest playback snapshot for prioritization.
     private var latestSnapshot: PlaybackSnapshot?
     /// Snapshot captured when the pipeline started — used for initial
@@ -142,6 +145,8 @@ actor AnalysisCoordinator {
     private var transcriptEventTask: Task<Void, Never>?
     /// Task listening for capability changes.
     private var capabilityObserverTask: Task<Void, Never>?
+    /// Task observing download progress for incremental decode.
+    private var downloadProgressTask: Task<Void, Never>?
 
     // MARK: - Configuration
 
@@ -161,7 +166,8 @@ actor AnalysisCoordinator {
         transcriptEngine: TranscriptEngineService,
         capabilitiesService: CapabilitiesService,
         adDetectionService: AdDetectionService,
-        skipOrchestrator: SkipOrchestrator
+        skipOrchestrator: SkipOrchestrator,
+        downloadProgressStream: AsyncStream<DownloadProgress> = AsyncStream { $0.finish() }
     ) {
         self.store = store
         self.audioService = audioService
@@ -170,6 +176,7 @@ actor AnalysisCoordinator {
         self.capabilitiesService = capabilitiesService
         self.adDetectionService = adDetectionService
         self.skipOrchestrator = skipOrchestrator
+        self.downloadProgressStream = downloadProgressStream
     }
 
     // MARK: - Lifecycle
@@ -198,6 +205,7 @@ actor AnalysisCoordinator {
         activeEpisodeId = nil
         activePodcastId = nil
         activeShards = nil
+        activeAudioURL = nil
         latestSnapshot = nil
         logger.info("AnalysisCoordinator stopped")
     }
@@ -407,6 +415,7 @@ actor AnalysisCoordinator {
         activeSessionId = nil
         activeAssetId = nil
         activeShards = nil
+        activeAudioURL = nil
         latestSnapshot = nil
     }
 
@@ -444,6 +453,14 @@ actor AnalysisCoordinator {
         let totalAudio = shards.map(\.duration).reduce(0, +)
         logger.info("Spooling: decoded \(shards.count) shards (\(String(format: "%.0f", totalAudio))s audio) in \(decodeElapsed)")
         activeShards = shards
+        activeAudioURL = audioURL
+
+        // Start observing download progress for incremental decode.
+        startObservingDownloadProgress(
+            episodeId: episodeId,
+            audioURL: audioURL,
+            assetId: assetId
+        )
 
         // Extract features for the hot zone.
         let existingCoverage: Double
@@ -725,6 +742,71 @@ actor AnalysisCoordinator {
         }
     }
 
+    // MARK: - Incremental Decode on Download Progress
+
+    /// Minimum new audio (seconds) before triggering an incremental re-decode.
+    private static let incrementalDecodeThreshold: TimeInterval = 60.0
+
+    private func startObservingDownloadProgress(
+        episodeId: String,
+        audioURL: LocalAudioURL,
+        assetId: String
+    ) {
+        downloadProgressTask?.cancel()
+        downloadProgressTask = Task {
+            var lastShardCount = self.activeShards?.count ?? 0
+
+            for await progress in self.downloadProgressStream {
+                guard !Task.isCancelled else { return }
+                guard progress.episodeId == episodeId else { continue }
+
+                // Re-decode to pick up newly downloaded audio.
+                do {
+                    let freshShards = try await self.audioService.decode(
+                        fileURL: audioURL,
+                        episodeID: episodeId
+                    )
+
+                    guard freshShards.count > lastShardCount else { continue }
+
+                    let newShards = Array(freshShards.dropFirst(lastShardCount))
+                    let newAudio = newShards.map(\.duration).reduce(0, +)
+
+                    // Only push if enough new audio to be worthwhile.
+                    guard newAudio >= Self.incrementalDecodeThreshold else { continue }
+
+                    self.logger.info("Incremental decode: \(newShards.count) new shards (\(String(format: "%.0f", newAudio))s)")
+
+                    self.activeShards = freshShards
+                    lastShardCount = freshShards.count
+
+                    // Feed new shards to transcript engine without cancelling.
+                    let snapshot = self.latestSnapshot ?? PlaybackSnapshot(
+                        playheadTime: 0, playbackRate: 1.0, isPlaying: true
+                    )
+                    await self.transcriptEngine.appendShards(
+                        newShards,
+                        analysisAssetId: assetId,
+                        snapshot: snapshot
+                    )
+
+                    // Also extract features for the new shards.
+                    let existingCoverage = freshShards.dropLast(newShards.count)
+                        .map(\.duration).reduce(0, +)
+                    try await self.featureService.extractAndPersist(
+                        shards: newShards,
+                        analysisAssetId: assetId,
+                        existingCoverage: existingCoverage
+                    )
+                } catch is CancellationError {
+                    return
+                } catch {
+                    self.logger.error("Incremental decode failed: \(error)")
+                }
+            }
+        }
+    }
+
     // MARK: - Pipeline Control
 
     private func cancelPipeline() {
@@ -732,6 +814,8 @@ actor AnalysisCoordinator {
         pipelineTask = nil
         transcriptEventTask?.cancel()
         transcriptEventTask = nil
+        downloadProgressTask?.cancel()
+        downloadProgressTask = nil
     }
 
     private func startObservingTranscriptEvents(sessionId: String, assetId: String) {

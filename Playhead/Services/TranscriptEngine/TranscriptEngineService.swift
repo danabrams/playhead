@@ -109,6 +109,9 @@ actor TranscriptEngineService {
     /// Running chunk index counter per asset, for ordering.
     private var chunkCounter: Int = 0
 
+    /// Shards queued for processing while the main loop is running.
+    private var appendedShards: [AnalysisShard] = []
+
     /// Broadcasts persisted chunk batches and completion signals to the
     /// analysis coordinator without forcing it to poll SQLite.
     private var eventContinuations: [UUID: AsyncStream<TranscriptEngineEvent>.Continuation] = [:]
@@ -188,6 +191,29 @@ actor TranscriptEngineService {
         )
     }
 
+    /// Append new shards to the running transcription without cancelling.
+    /// If no transcription is active, starts a new loop.
+    func appendShards(
+        _ newShards: [AnalysisShard],
+        analysisAssetId: String,
+        snapshot: PlaybackSnapshot
+    ) {
+        latestSnapshot = snapshot
+        appendedShards.append(contentsOf: newShards)
+
+        // If no active loop, start one for the appended shards.
+        if activeTask == nil || activeTask?.isCancelled == true {
+            activeAssetId = analysisAssetId
+            activeTask = Task { [weak self] in
+                guard let self else { return }
+                await self.runTranscriptionLoop(
+                    shards: [],  // empty — the loop will pick up from appendedShards
+                    analysisAssetId: analysisAssetId
+                )
+            }
+        }
+    }
+
     /// Stop all transcription work (e.g., episode ended or user switched).
     func stop() {
         activeTask?.cancel()
@@ -195,6 +221,7 @@ actor TranscriptEngineService {
         activeAssetId = nil
         latestSnapshot = nil
         chunkCounter = 0
+        appendedShards = []
     }
 
     /// Whether transcription is currently in progress.
@@ -278,6 +305,36 @@ actor TranscriptEngineService {
                     """)
                 // Continue with next shard — partial coverage is better than none.
                 continue
+            }
+        }
+
+        // Drain any shards that were appended while we were processing.
+        while !appendedShards.isEmpty {
+            let newBatch = appendedShards
+            appendedShards = []
+
+            let newPrioritized = prioritizeShards(
+                newBatch,
+                existingCoverage: existingCoverage
+            )
+
+            for shard in newPrioritized {
+                guard !Task.isCancelled else {
+                    logger.info("Transcription cancelled during appended batch")
+                    return
+                }
+                do {
+                    try await transcribeShard(shard, analysisAssetId: analysisAssetId)
+                } catch is CancellationError {
+                    logger.info("Transcription cancelled during appended shard \(shard.id)")
+                    return
+                } catch {
+                    logger.error("""
+                        Transcription failed for appended shard \(shard.id) \
+                        [start=\(String(format: "%.2f", shard.startTime))s]: \(error)
+                        """)
+                    continue
+                }
             }
         }
 

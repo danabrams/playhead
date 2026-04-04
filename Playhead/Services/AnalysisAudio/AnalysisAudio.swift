@@ -484,10 +484,12 @@ actor AnalysisAudioService {
             shardIndex += 1
         }
 
-        // 10. Persist shards for reuse across hot-path, boundary snapping, and
-        //     backfill passes. Truncated files are still cached — partial data
-        //     is better than re-decoding every time.
-        ShardCache.saveShards(shards, episodeID: episodeID)
+        // 10. Persist shards for reuse — but only when the file was fully decoded.
+        //     Truncated files (still downloading) must not be cached, otherwise
+        //     the partial result is returned permanently even after download completes.
+        if !isTruncated {
+            ShardCache.saveShards(shards, episodeID: episodeID)
+        }
 
         // 11. Log truncation warning but return partial shards — throwing here
         //     causes the coordinator to treat it as noAudioAvailable and retry-loop.

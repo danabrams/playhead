@@ -107,6 +107,7 @@ final class PlayheadRuntime {
             store: analysisStore,
             trustService: trustService
         )
+        self.downloadManager = DownloadManager()
         self.analysisCoordinator = AnalysisCoordinator(
             store: analysisStore,
             audioService: audioService,
@@ -114,13 +115,13 @@ final class PlayheadRuntime {
             transcriptEngine: transcriptEngine,
             capabilitiesService: capabilitiesService,
             adDetectionService: adDetectionService,
-            skipOrchestrator: skipOrchestrator
+            skipOrchestrator: skipOrchestrator,
+            downloadProgressStream: downloadManager.progressStream
         )
         self.backgroundProcessingService = BackgroundProcessingService(
             coordinator: analysisCoordinator,
             capabilitiesService: capabilitiesService
         )
-        self.downloadManager = DownloadManager()
 
         let cueMaterializer = SkipCueMaterializer(store: analysisStore)
         self.analysisJobRunner = AnalysisJobRunner(
