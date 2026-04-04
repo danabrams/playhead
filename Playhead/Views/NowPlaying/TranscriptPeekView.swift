@@ -188,20 +188,12 @@ private extension TranscriptPeekView {
             }
 
             VStack(alignment: .leading, spacing: Spacing.xxs) {
-                // Timestamp + ad score debug badge
-                HStack(spacing: Spacing.xs) {
-                    Text(TimeFormatter.formatTime(chunk.startTime))
-                        .font(AppTypography.mono(size: 10, weight: .medium))
-                        .foregroundStyle(
-                            isActive ? AppColors.accent : AppColors.metadata
-                        )
-
-                    if let score = adScore {
-                        Text(String(format: "AD %.0f%%", score * 100))
-                            .font(AppTypography.mono(size: 9, weight: .bold))
-                            .foregroundStyle(.red)
-                    }
-                }
+                // Timestamp (with ad score debug suffix when detected)
+                Text(timestampLabel(chunk: chunk, adScore: adScore))
+                    .font(AppTypography.mono(size: 10, weight: .medium))
+                    .foregroundStyle(
+                        adScore != nil ? .red : (isActive ? AppColors.accent : AppColors.metadata)
+                    )
 
                 // Transcript text
                 Text(chunk.text)
@@ -225,6 +217,12 @@ private extension TranscriptPeekView {
             return AppColors.metadata
         }
         return isActive ? AppColors.text : AppColors.secondary
+    }
+
+    func timestampLabel(chunk: TranscriptChunk, adScore: Double?) -> String {
+        let ts = TimeFormatter.formatTime(chunk.startTime)
+        guard let score = adScore else { return ts }
+        return ts + String(format: " AD %.0f%%", score * 100)
     }
 }
 
