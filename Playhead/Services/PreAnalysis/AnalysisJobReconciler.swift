@@ -24,25 +24,41 @@ actor AnalysisJobReconciler {
     private let store: AnalysisStore
     private let downloadManager: any DownloadProviding
     private let capabilitiesService: any CapabilitiesProviding
+    private let config: PreAnalysisConfig
     private let logger = Logger(subsystem: "com.playhead", category: "JobReconciler")
+    private var isReconciling = false
 
     /// The current analysis version. Jobs whose workKey encodes a different
     /// version are considered stale and will be superseded.
-    static let currentAnalysisVersion = 1
+    static var currentAnalysisVersion: Int { PreAnalysisConfig.analysisVersion }
 
     init(
         store: AnalysisStore,
         downloadManager: any DownloadProviding,
-        capabilitiesService: any CapabilitiesProviding
+        capabilitiesService: any CapabilitiesProviding,
+        config: PreAnalysisConfig = .load()
     ) {
         self.store = store
         self.downloadManager = downloadManager
         self.capabilitiesService = capabilitiesService
+        self.config = config
     }
 
     // MARK: - Reconcile
 
     func reconcile() async throws -> ReconciliationReport {
+        guard !isReconciling else {
+            logger.info("Reconciliation already in progress, skipping")
+            return ReconciliationReport(
+                expiredLeasesRecovered: 0, missingFilesUnblocked: 0,
+                missingFilesStillBlocked: 0, modelsUnblocked: 0,
+                staleVersionsSuperseded: 0, completedJobsGarbageCollected: 0,
+                failedJobsBackedOff: 0, unEnqueuedDownloadsCreated: 0
+            )
+        }
+        isReconciling = true
+        defer { isReconciling = false }
+
         let step1 = try await recoverExpiredLeases()
         let step2 = try await unblockMissingFiles()
         let step3 = try await unblockModelUnavailable()
@@ -82,15 +98,15 @@ actor AnalysisJobReconciler {
     private func recoverExpiredLeases() async throws -> Int {
         let now = Date().timeIntervalSince1970
         let expired = try await store.fetchJobsWithExpiredLeases(before: now)
-        // Only recover jobs that are still in 'running' state.
-        let running = expired.filter { $0.state == "running" }
-        for job in running {
+        // Recover any job with an expired lease — the lease proves it was being processed.
+        let recoverable = expired.filter { $0.state == "running" || $0.state == "queued" || $0.state == "paused" }
+        for job in recoverable {
             try await store.recoverExpiredLease(jobId: job.jobId)
         }
-        if !running.isEmpty {
-            logger.info("Recovered \(running.count) expired lease(s)")
+        if !recoverable.isEmpty {
+            logger.info("Recovered \(recoverable.count) expired lease(s)")
         }
-        return running.count
+        return recoverable.count
     }
 
     // MARK: - Step 2: Unblock missingFile jobs
@@ -211,7 +227,7 @@ actor AnalysisJobReconciler {
                 sourceFingerprint: fp.strong ?? fp.weak,
                 downloadId: episodeId,
                 priority: 0,
-                desiredCoverageSec: 90,
+                desiredCoverageSec: config.defaultT0DepthSeconds,
                 featureCoverageSec: 0,
                 transcriptCoverageSec: 0,
                 cueCoverageSec: 0,
@@ -234,13 +250,16 @@ actor AnalysisJobReconciler {
 
     // MARK: - Helpers
 
-    /// Extracts the analysis version from a workKey formatted as "fingerprint:version:jobType".
+    /// Extracts the analysis version from a workKey.
+    /// Base format: "fingerprint:version:jobType"
+    /// Tier-advanced format: "fingerprint:version:jobType:coverage"
+    /// The version is always the component immediately before the jobType token.
     private func parseVersionFromWorkKey(_ workKey: String) -> Int? {
         let parts = workKey.split(separator: ":")
-        guard parts.count >= 3 else { return nil }
-        // The version is the second-to-last component (fingerprint may contain colons).
-        // WorkKey format: "fingerprint:version:jobType"
-        // Since fingerprint could contain colons, version is parts[count-2]
-        return Int(parts[parts.count - 2])
+        // Find the jobType component (preAnalysis, playback, backfill)
+        let jobTypes: Set<Substring> = ["preAnalysis", "playback", "backfill"]
+        guard let jobTypeIndex = parts.firstIndex(where: { jobTypes.contains($0) }),
+              jobTypeIndex > 0 else { return nil }
+        return Int(parts[jobTypeIndex - 1])
     }
 }

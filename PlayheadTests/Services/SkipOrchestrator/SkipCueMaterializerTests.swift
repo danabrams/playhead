@@ -68,14 +68,20 @@ final class SkipCueMaterializerTests: XCTestCase {
     }
 
     func testCueHashRounding() {
-        // Windows at 12.3-45.7 and 12.8-45.2 both truncate to Int(12):Int(45).
+        // Windows at 12.3-45.3 and 12.4-45.4 both round to Int(12):Int(45).
         let hash1 = SkipCueMaterializer.computeCueHash(
-            analysisAssetId: "asset-1", startTime: 12.3, endTime: 45.7
+            analysisAssetId: "asset-1", startTime: 12.3, endTime: 45.3
         )
         let hash2 = SkipCueMaterializer.computeCueHash(
-            analysisAssetId: "asset-1", startTime: 12.8, endTime: 45.2
+            analysisAssetId: "asset-1", startTime: 12.4, endTime: 45.4
         )
         XCTAssertEqual(hash1, hash2, "Fractional seconds should round to same integer hash")
+
+        // Windows that round to different integers should NOT match.
+        let hash3 = SkipCueMaterializer.computeCueHash(
+            analysisAssetId: "asset-1", startTime: 12.6, endTime: 45.6
+        )
+        XCTAssertNotEqual(hash1, hash3, "12.6 rounds to 13, should differ from 12.3→12")
     }
 
     func testBelowThresholdFiltered() async throws {

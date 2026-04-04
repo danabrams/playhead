@@ -242,6 +242,9 @@ actor DownloadManager {
             delegate: sessionDelegate,
             delegateQueue: nil
         )
+        sessionDelegate.onDownloadComplete = { [weak self] episodeId, fileURL in
+            Task { await self?.handleBackgroundDownloadComplete(episodeId: episodeId, fileURL: fileURL) }
+        }
         _backgroundSession = session
         return session
     }
@@ -623,21 +626,21 @@ actor DownloadManager {
 
     /// Derive a filesystem-safe name from an episode ID.
     /// Episode IDs can contain URL characters (://) so we SHA-256 hash them.
-    private func safeFilename(for episodeId: String) -> String {
+    static func safeFilename(for episodeId: String) -> String {
         let digest = SHA256.hash(data: Data(episodeId.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     /// URL for a partially-downloaded episode file.
     func partialFileURL(for episodeId: String) -> URL {
-        partialsDirectory.appendingPathComponent("\(safeFilename(for: episodeId)).partial")
+        partialsDirectory.appendingPathComponent("\(Self.safeFilename(for: episodeId)).partial")
     }
 
     /// URL for a fully-downloaded, verified episode file.
     /// Uses the cached source extension so AVURLAsset can identify the codec.
     func completeFileURL(for episodeId: String) -> URL {
         let ext = resolveExtension(for: episodeId)
-        return completeDirectory.appendingPathComponent("\(safeFilename(for: episodeId)).\(ext)")
+        return completeDirectory.appendingPathComponent("\(Self.safeFilename(for: episodeId)).\(ext)")
     }
 
     /// Audio extensions AVURLAsset can identify.
@@ -652,7 +655,7 @@ actor DownloadManager {
             return cached
         }
         // Scan the directory for any file matching this hash prefix.
-        let prefix = safeFilename(for: episodeId)
+        let prefix = Self.safeFilename(for: episodeId)
         let fm = FileManager.default
         if let files = try? fm.contentsOfDirectory(atPath: completeDirectory.path) {
             for file in files where file.hasPrefix(prefix) {
@@ -777,15 +780,21 @@ actor DownloadManager {
         ) else { return }
 
         var candidates: [(episodeId: String, url: URL, size: Int64, lastAccess: Date)] = []
+        // Build a reverse map from hashed filename → episode ID using the access log,
+        // so we can check analysis protection correctly.
+        let hashToEpisodeId: [String: String] = Dictionary(
+            uniqueKeysWithValues: accessLog.keys.map { (Self.safeFilename(for: $0), $0) }
+        )
         for fileURL in contents {
             let name = fileURL.deletingPathExtension().lastPathComponent
-            guard !analysisProtectedEpisodes.contains(name) else { continue }
-            guard !activeDownloads.keys.contains(name) else { continue }
+            let episodeId = hashToEpisodeId[name]
+            guard !(episodeId.map { analysisProtectedEpisodes.contains($0) } ?? false) else { continue }
+            guard !(episodeId.map { activeDownloads.keys.contains($0) } ?? false) else { continue }
 
             let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey])
             let size = Int64(values?.fileSize ?? 0)
-            let lastAccess = accessLog[name] ?? .distantPast
-            candidates.append((name, fileURL, size, lastAccess))
+            let lastAccess = episodeId.flatMap { accessLog[$0] } ?? .distantPast
+            candidates.append((episodeId ?? name, fileURL, size, lastAccess))
         }
 
         // Sort: least recently accessed first.
@@ -842,6 +851,20 @@ actor DownloadManager {
         accessLog[episodeId] = Date()
     }
 
+    /// Called by the background download delegate when a transfer completes.
+    /// Computes a strong fingerprint and enqueues analysis.
+    func handleBackgroundDownloadComplete(episodeId: String, fileURL: URL) async {
+        if let strongHash = try? FileHasher.sha256(fileURL: fileURL) {
+            fingerprintCache[episodeId] = AudioFingerprint(weak: "", strong: strongHash)
+            await enqueueAnalysisIfNeeded(
+                episodeId: episodeId,
+                sourceFingerprint: strongHash,
+                context: nil
+            )
+        }
+        touchAccess(episodeId: episodeId)
+    }
+
     /// Rebuilds the LRU access log from file modification dates.
     private func rebuildAccessLog() throws {
         let fm = FileManager.default
@@ -871,6 +894,9 @@ extension DownloadManager: DownloadProviding {}
 final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Sendable {
     private let logger = Logger(subsystem: "com.playhead", category: "EpisodeDownload")
 
+    /// Callback for completed downloads: (episodeId, fileURL) -> Void.
+    nonisolated(unsafe) var onDownloadComplete: ((String, URL) -> Void)?
+
     func urlSession(
         _ session: URLSession,
         downloadTask: URLSessionDownloadTask,
@@ -881,10 +907,17 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
             return
         }
 
+        // Derive extension from the original request URL, falling back to mp3.
+        let ext: String = {
+            let raw = downloadTask.originalRequest?.url?.pathExtension ?? ""
+            return raw.isEmpty ? "mp3" : raw
+        }()
+        let filename = DownloadManager.safeFilename(for: episodeId)
+
         // Move the file to the complete directory.
         let cacheDir = DownloadManager.defaultCacheDirectory()
             .appendingPathComponent("complete", isDirectory: true)
-        let destURL = cacheDir.appendingPathComponent("\(episodeId).audio")
+        let destURL = cacheDir.appendingPathComponent("\(filename).\(ext)")
 
         let fm = FileManager.default
         do {
@@ -898,6 +931,7 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
             }
             try fm.moveItem(at: location, to: destURL)
             logger.info("Background download complete for \(episodeId)")
+            onDownloadComplete?(episodeId, destURL)
         } catch {
             logger.error("Failed to move background download for \(episodeId): \(error.localizedDescription)")
         }

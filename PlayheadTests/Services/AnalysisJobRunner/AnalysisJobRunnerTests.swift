@@ -44,7 +44,11 @@ private func makeShards(count: Int, shardDuration: Double = 30) -> [AnalysisShar
 }
 
 /// Seed the store with a minimal AnalysisAsset row so fetches succeed.
-private func seedAsset(store: AnalysisStore, assetId: String = "test-asset") async throws {
+private func seedAsset(
+    store: AnalysisStore,
+    assetId: String = "test-asset",
+    fastTranscriptCoverageEndTime: Double? = nil
+) async throws {
     let asset = AnalysisAsset(
         id: assetId,
         episodeId: "test-ep",
@@ -52,7 +56,7 @@ private func seedAsset(store: AnalysisStore, assetId: String = "test-asset") asy
         weakFingerprint: nil,
         sourceURL: "",
         featureCoverageEndTime: nil,
-        fastTranscriptCoverageEndTime: nil,
+        fastTranscriptCoverageEndTime: fastTranscriptCoverageEndTime,
         confirmedAdCoverageEndTime: nil,
         analysisState: SessionState.queued.rawValue,
         analysisVersion: 1,
@@ -69,13 +73,14 @@ struct AnalysisJobRunnerTests {
     @Test("Happy path runs all stages and returns reachedTarget")
     func testHappyPath() async throws {
         let store = try await makeTestStore()
-        try await seedAsset(store: store)
+        try await seedAsset(store: store, fastTranscriptCoverageEndTime: 120)
 
         let audioStub = StubAnalysisAudioProvider()
         audioStub.shardsToReturn = makeShards(count: 4) // 0-120s
 
         let featureService = FeatureExtractionService(store: store)
-        let speechService = SpeechService()
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
         let transcriptEngine = TranscriptEngineService(
             speechService: speechService,
             store: store
@@ -107,14 +112,15 @@ struct AnalysisJobRunnerTests {
     @Test("Shard filtering by desired coverage depth")
     func testShardFilteringByDepth() async throws {
         let store = try await makeTestStore()
-        try await seedAsset(store: store)
+        try await seedAsset(store: store, fastTranscriptCoverageEndTime: 90)
 
         let audioStub = StubAnalysisAudioProvider()
         // 10 shards covering 0-300s
         audioStub.shardsToReturn = makeShards(count: 10)
 
         let featureService = FeatureExtractionService(store: store)
-        let speechService = SpeechService()
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
         let transcriptEngine = TranscriptEngineService(
             speechService: speechService,
             store: store
@@ -147,13 +153,14 @@ struct AnalysisJobRunnerTests {
     @Test("writeWindowsOnly policy skips cue materialization")
     func testWriteWindowsOnlySkipsCueMaterialization() async throws {
         let store = try await makeTestStore()
-        try await seedAsset(store: store)
+        try await seedAsset(store: store, fastTranscriptCoverageEndTime: 60)
 
         let audioStub = StubAnalysisAudioProvider()
         audioStub.shardsToReturn = makeShards(count: 2)
 
         let featureService = FeatureExtractionService(store: store)
-        let speechService = SpeechService()
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
         let transcriptEngine = TranscriptEngineService(
             speechService: speechService,
             store: store

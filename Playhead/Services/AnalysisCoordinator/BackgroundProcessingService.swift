@@ -205,6 +205,8 @@ actor BackgroundProcessingService {
         }
 
         logger.info("BackgroundProcessingService started")
+        // Kick off the initial pre-analysis recovery schedule.
+        schedulePreAnalysisRecovery()
     }
 
     /// Stop all observation and cancel pending work.

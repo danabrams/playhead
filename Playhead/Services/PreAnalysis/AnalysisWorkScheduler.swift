@@ -19,6 +19,11 @@ actor AnalysisWorkScheduler {
     private var currentJobId: String?
     private var currentEpisodeId: String?
     private var shouldCancelCurrentJob = false
+    private var leaseRenewalTask: Task<Void, any Error>?
+    private static let maxAttemptCount = 5
+
+    private var wakeContinuation: AsyncStream<Void>.Continuation?
+    private var wakeStream: AsyncStream<Void>
 
     /// Tracks OSSignposter queue-wait intervals keyed by jobId.
     private var queueWaitStates: [String: OSSignpostIntervalState] = [:]
@@ -35,6 +40,9 @@ actor AnalysisWorkScheduler {
         self.capabilitiesService = capabilitiesService
         self.downloadManager = downloadManager
         self.config = config
+        var continuation: AsyncStream<Void>.Continuation?
+        self.wakeStream = AsyncStream<Void> { continuation = $0 }
+        self.wakeContinuation = continuation
     }
 
     // MARK: - Public API
@@ -107,10 +115,13 @@ actor AnalysisWorkScheduler {
             currentRunningTask?.cancel()
         }
         do {
-            let queued = try await store.fetchJobsByState("queued")
-            let paused = try await store.fetchJobsByState("paused")
-            for job in (queued + paused) where job.episodeId == episodeId {
-                try await store.updateJobState(jobId: job.jobId, state: "superseded")
+            let states = ["queued", "paused", "running", "failed",
+                          "blocked:missingFile", "blocked:modelUnavailable"]
+            for state in states {
+                let jobs = try await store.fetchJobsByState(state)
+                for job in jobs where job.episodeId == episodeId {
+                    try await store.updateJobState(jobId: job.jobId, state: "superseded")
+                }
             }
         } catch {
             logger.error("Failed to supersede jobs for deleted episode \(episodeId): \(error)")
@@ -138,6 +149,8 @@ actor AnalysisWorkScheduler {
         schedulerTask = nil
         currentRunningTask?.cancel()
         currentRunningTask = nil
+        leaseRenewalTask?.cancel()
+        leaseRenewalTask = nil
     }
 
     // MARK: - Scheduler Loop
@@ -145,7 +158,7 @@ actor AnalysisWorkScheduler {
     private func runLoop() async {
         while !Task.isCancelled {
             guard config.isEnabled else {
-                try? await Task.sleep(for: .seconds(30))
+                await sleepOrWake(seconds: 30)
                 continue
             }
 
@@ -158,7 +171,7 @@ actor AnalysisWorkScheduler {
                 t0ThresholdSec: config.defaultT0DepthSeconds,
                 now: now
             ) else {
-                try? await Task.sleep(for: .seconds(5))
+                await sleepOrWake(seconds: 5)
                 continue
             }
 
@@ -166,9 +179,22 @@ actor AnalysisWorkScheduler {
         }
     }
 
+    private func sleepOrWake(seconds: UInt64) async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try? await Task.sleep(for: .seconds(seconds))
+            }
+            group.addTask { [wakeStream] in
+                var iterator = wakeStream.makeAsyncIterator()
+                _ = await iterator.next()
+            }
+            _ = await group.next()
+            group.cancelAll()
+        }
+    }
+
     private func wakeSchedulerLoop() {
-        schedulerTask?.cancel()
-        startSchedulerLoop()
+        wakeContinuation?.yield()
     }
 
     // MARK: - Job Processing
@@ -177,13 +203,21 @@ actor AnalysisWorkScheduler {
         // Resolve audio URL from download cache.
         guard let fileURL = await downloadManager.cachedFileURL(for: job.episodeId) else {
             logger.warning("No cached audio for episode \(job.episodeId), blocking job \(job.jobId)")
-            try? await store.updateJobState(jobId: job.jobId, state: "blocked:missingFile")
+            do {
+                try await store.updateJobState(jobId: job.jobId, state: "blocked:missingFile")
+            } catch {
+                logger.error("Failed to update job state: \(error)")
+            }
             return
         }
 
         guard let localAudioURL = LocalAudioURL(fileURL) else {
             logger.error("cachedFileURL returned non-file URL for episode \(job.episodeId)")
-            try? await store.updateJobState(jobId: job.jobId, state: "blocked:missingFile")
+            do {
+                try await store.updateJobState(jobId: job.jobId, state: "blocked:missingFile")
+            } catch {
+                logger.error("Failed to update job state: \(error)")
+            }
             return
         }
 
@@ -210,7 +244,7 @@ actor AnalysisWorkScheduler {
         }
 
         // Lease renewal task: renew every 120s.
-        let leaseRenewalTask = Task {
+        leaseRenewalTask = Task {
             while !Task.isCancelled {
                 try await Task.sleep(for: .seconds(120))
                 let newExpiry = Date().timeIntervalSince1970 + 300
@@ -219,12 +253,10 @@ actor AnalysisWorkScheduler {
         }
 
         defer {
-            leaseRenewalTask.cancel()
+            leaseRenewalTask?.cancel()
+            leaseRenewalTask = nil
             currentJobId = nil
             currentEpisodeId = nil
-            Task {
-                try? await self.store.releaseLease(jobId: job.jobId)
-            }
         }
 
         // Build request and run.
@@ -243,7 +275,41 @@ actor AnalysisWorkScheduler {
 
         let jobSignpost = PreAnalysisInstrumentation.beginJobDuration(jobId: job.jobId)
         do {
-            let outcome = await jobRunner.run(request)
+            guard !shouldCancelCurrentJob else {
+                PreAnalysisInstrumentation.endJobDuration(jobSignpost)
+                try? await store.releaseLease(jobId: job.jobId)
+                return
+            }
+
+            let runTask = Task<AnalysisOutcome, Error> {
+                try Task.checkCancellation()
+                let result = await self.jobRunner.run(request)
+                try Task.checkCancellation()
+                return result
+            }
+            currentRunningTask = Task {
+                await withTaskCancellationHandler {
+                    _ = try? await runTask.value
+                } onCancel: {
+                    runTask.cancel()
+                }
+            }
+
+            let outcome: AnalysisOutcome
+            do {
+                outcome = try await runTask.value
+            } catch is CancellationError {
+                PreAnalysisInstrumentation.endJobDuration(jobSignpost)
+                do {
+                    try await store.updateJobState(jobId: job.jobId, state: "queued")
+                } catch {
+                    logger.error("Failed to update job state: \(error)")
+                }
+                try? await store.releaseLease(jobId: job.jobId)
+                return
+            }
+            currentRunningTask = nil
+
             PreAnalysisInstrumentation.endJobDuration(jobSignpost)
 
             // Log outcome metric.
@@ -254,18 +320,21 @@ actor AnalysisWorkScheduler {
             )
 
             // Update progress in the store.
-            try? await store.updateJobProgress(
-                jobId: job.jobId,
-                featureCoverageSec: outcome.featureCoverageSec,
-                transcriptCoverageSec: outcome.transcriptCoverageSec,
-                cueCoverageSec: outcome.cueCoverageSec
-            )
+            do {
+                try await store.updateJobProgress(
+                    jobId: job.jobId,
+                    featureCoverageSec: outcome.featureCoverageSec,
+                    transcriptCoverageSec: outcome.transcriptCoverageSec,
+                    cueCoverageSec: outcome.cueCoverageSec
+                )
+            } catch {
+                logger.error("Failed to update job progress: \(error)")
+            }
 
             // Handle outcome.
             switch outcome.stopReason {
             case .reachedTarget where outcome.cueCoverageSec >= job.desiredCoverageSec:
                 if let nextCoverage = nextTierCoverage(current: job.desiredCoverageSec) {
-                    // Advance to next tier with a paused job.
                     let tierWorkKey = AnalysisJob.computeWorkKey(
                         fingerprint: job.sourceFingerprint,
                         analysisVersion: PreAnalysisConfig.analysisVersion,
@@ -295,83 +364,146 @@ actor AnalysisWorkScheduler {
                         createdAt: now,
                         updatedAt: now
                     )
-                    try? await store.insertJob(nextJob)
-                    try? await store.updateJobState(jobId: job.jobId, state: "complete")
+                    try await store.insertJob(nextJob)
+                    try await store.updateJobState(jobId: job.jobId, state: "complete")
                     PreAnalysisInstrumentation.logTierCompletion(tier: "\(Int(job.desiredCoverageSec))s", completed: true)
                     logger.info("Tier advancement: \(job.desiredCoverageSec)s -> \(nextCoverage)s for episode \(job.episodeId)")
                 } else {
-                    try? await store.updateJobState(jobId: job.jobId, state: "complete")
+                    try await store.updateJobState(jobId: job.jobId, state: "complete")
                     PreAnalysisInstrumentation.logTierCompletion(tier: "\(Int(job.desiredCoverageSec))s", completed: true)
                     logger.info("Job \(job.jobId) complete (all tiers done)")
                 }
 
             case .reachedTarget:
-                try? await store.updateJobState(jobId: job.jobId, state: "queued")
+                // Re-queue, but with a guard against infinite loops for short episodes
+                // or episodes that can never reach the desired coverage.
+                do {
+                    try await store.incrementAttemptCount(jobId: job.jobId)
+                    let updatedJob = try await store.fetchJob(byId: job.jobId)
+                    if (updatedJob?.attemptCount ?? 0) >= Self.maxAttemptCount {
+                        try await store.updateJobState(
+                            jobId: job.jobId,
+                            state: "complete",
+                            lastErrorCode: "maxAttemptsReached:coverageInsufficient"
+                        )
+                        logger.info("Job \(job.jobId) marked complete after max attempts (coverage insufficient)")
+                    } else {
+                        try await store.updateJobState(jobId: job.jobId, state: "queued")
+                    }
+                } catch {
+                    logger.error("Failed to update job state: \(error)")
+                }
 
             case .blockedByModel:
                 let nextEligible = Date().timeIntervalSince1970 + 300
-                try? await store.updateJobState(
-                    jobId: job.jobId,
-                    state: "blocked:modelUnavailable",
-                    nextEligibleAt: nextEligible
-                )
+                do {
+                    try await store.updateJobState(
+                        jobId: job.jobId,
+                        state: "blocked:modelUnavailable",
+                        nextEligibleAt: nextEligible
+                    )
+                } catch {
+                    logger.error("Failed to update job state: \(error)")
+                }
                 logger.info("Job \(job.jobId) blocked: model unavailable, retry in 300s")
 
             case .pausedForThermal, .memoryPressure:
                 let nextEligible = Date().timeIntervalSince1970 + 30
-                try? await store.updateJobState(
-                    jobId: job.jobId,
-                    state: "paused",
-                    nextEligibleAt: nextEligible
-                )
+                do {
+                    try await store.updateJobState(
+                        jobId: job.jobId,
+                        state: "paused",
+                        nextEligibleAt: nextEligible
+                    )
+                } catch {
+                    logger.error("Failed to update job state: \(error)")
+                }
                 logger.info("Job \(job.jobId) paused for thermal/memory, retry in 30s")
 
             case .failed(let reason):
-                let backoff = min(pow(2.0, Double(job.attemptCount + 1)) * 60, 3600)
-                let nextEligible = Date().timeIntervalSince1970 + backoff
-                try? await store.updateJobState(
-                    jobId: job.jobId,
-                    state: "failed",
-                    nextEligibleAt: nextEligible,
-                    lastErrorCode: reason
-                )
-                logger.warning("Job \(job.jobId) failed: \(reason), backoff \(backoff)s")
+                do {
+                    try await store.incrementAttemptCount(jobId: job.jobId)
+                    let updated = try await store.fetchJob(byId: job.jobId)
+                    let attempts = updated?.attemptCount ?? job.attemptCount + 1
+                    if attempts >= Self.maxAttemptCount {
+                        try await store.updateJobState(
+                            jobId: job.jobId,
+                            state: "superseded",
+                            lastErrorCode: "maxAttemptsReached:\(reason)"
+                        )
+                        logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: \(reason)")
+                    } else {
+                        let backoff = min(pow(2.0, Double(attempts)) * 60, 3600)
+                        let nextEligible = Date().timeIntervalSince1970 + backoff
+                        try await store.updateJobState(
+                            jobId: job.jobId,
+                            state: "failed",
+                            nextEligibleAt: nextEligible,
+                            lastErrorCode: reason
+                        )
+                        logger.warning("Job \(job.jobId) failed: \(reason), attempt \(attempts), backoff \(backoff)s")
+                    }
+                } catch {
+                    logger.error("Failed to update job state: \(error)")
+                }
 
             case .backgroundExpired:
-                try? await store.updateJobState(jobId: job.jobId, state: "queued")
+                do {
+                    try await store.updateJobState(jobId: job.jobId, state: "queued")
+                } catch {
+                    logger.error("Failed to update job state: \(error)")
+                }
                 logger.info("Job \(job.jobId) background expired, requeued")
 
             case .cancelledByPlayback:
-                try? await store.updateJobState(jobId: job.jobId, state: "queued")
+                do {
+                    try await store.updateJobState(jobId: job.jobId, state: "queued")
+                } catch {
+                    logger.error("Failed to update job state: \(error)")
+                }
                 logger.info("Job \(job.jobId) cancelled by playback, requeued")
             }
         } catch {
             PreAnalysisInstrumentation.endJobDuration(jobSignpost)
-            let backoff = min(pow(2.0, Double(job.attemptCount + 1)) * 60, 3600)
-            let nextEligible = Date().timeIntervalSince1970 + backoff
-            try? await store.updateJobState(
-                jobId: job.jobId,
-                state: "failed",
-                nextEligibleAt: nextEligible,
-                lastErrorCode: error.localizedDescription
-            )
+            do {
+                try await store.incrementAttemptCount(jobId: job.jobId)
+                let updated = try await store.fetchJob(byId: job.jobId)
+                let attempts = updated?.attemptCount ?? job.attemptCount + 1
+                if attempts >= Self.maxAttemptCount {
+                    try await store.updateJobState(
+                        jobId: job.jobId,
+                        state: "superseded",
+                        lastErrorCode: "maxAttemptsReached:\(error.localizedDescription)"
+                    )
+                } else {
+                    let backoff = min(pow(2.0, Double(attempts)) * 60, 3600)
+                    let nextEligible = Date().timeIntervalSince1970 + backoff
+                    try await store.updateJobState(
+                        jobId: job.jobId,
+                        state: "failed",
+                        nextEligibleAt: nextEligible,
+                        lastErrorCode: error.localizedDescription
+                    )
+                }
+            } catch {
+                logger.error("Failed to update job state after failure: \(error)")
+            }
             logger.error("Job \(job.jobId) threw: \(error)")
         }
+
+        try? await store.releaseLease(jobId: job.jobId)
     }
 
     // MARK: - Tier Definitions
 
     /// Returns the next tier's coverage target, or nil if all tiers are complete.
     private func nextTierCoverage(current: Double) -> Double? {
-        switch current {
-        case ..<config.defaultT0DepthSeconds:
-            return config.defaultT0DepthSeconds
-        case ..<config.t1DepthSeconds:
-            return config.t1DepthSeconds
-        case ..<config.t2DepthSeconds:
-            return config.t2DepthSeconds
-        default:
-            return nil
+        // Ensure tiers are ascending; skip any that aren't.
+        let tiers = [config.defaultT0DepthSeconds, config.t1DepthSeconds, config.t2DepthSeconds]
+            .sorted()
+        for tier in tiers where tier > current {
+            return tier
         }
+        return nil
     }
 }

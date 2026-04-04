@@ -126,35 +126,57 @@ actor AnalysisJobRunner {
             snapshot: snapshot
         )
 
-        // Observe the event stream for completion.
+        // Observe the event stream for completion, with a 5-minute timeout
+        // to avoid hanging indefinitely if the stream never emits .completed.
         let transcriptStream = await transcriptEngine.events()
-        var transcriptCoverage: Double = 0
 
-        for await event in transcriptStream {
-            switch event {
-            case .chunksPersisted:
-                // Chunks are being written — continue waiting for completion.
-                break
-            case .completed(let completedAssetId):
-                if completedAssetId == assetId {
-                    // Transcription finished for our asset.
-                    break
+        let transcriptCoverage: Double = await withTaskGroup(of: Double.self) { [weak self] group in
+            // Timeout task
+            group.addTask {
+                try? await Task.sleep(for: .seconds(300))
+                return 0
+            }
+            // Event stream task
+            group.addTask { [weak self] in
+                var coverage: Double = 0
+                for await event in transcriptStream {
+                    if Task.isCancelled { break }
+                    if case .completed(let completedAssetId) = event, completedAssetId == assetId {
+                        // Read coverage from the store after transcription completes.
+                        if let asset = try? await self?.store.fetchAsset(id: assetId) {
+                            coverage = asset.fastTranscriptCoverageEndTime ?? 0
+                        }
+                        break
+                    }
                 }
+                // Stream ended without .completed — log and return whatever we have.
+                if coverage == 0 {
+                    if let asset = try? await self?.store.fetchAsset(id: assetId) {
+                        coverage = asset.fastTranscriptCoverageEndTime ?? 0
+                    }
+                }
+                return coverage
             }
-
-            if case .completed(let completedAssetId) = event, completedAssetId == assetId {
-                break
-            }
+            // Return whichever finishes first
+            let result = await group.next() ?? 0
+            group.cancelAll()
+            return result
         }
 
         PreAnalysisInstrumentation.endStage(transcriptSignpost)
 
-        // Read coverage from the store after transcription completes.
-        do {
-            let asset = try await store.fetchAsset(id: assetId)
-            transcriptCoverage = asset?.fastTranscriptCoverageEndTime ?? 0
-        } catch {
-            logger.warning("Could not read transcript coverage: \(error)")
+        // TODO: Stop the transcript engine to prevent orphaned work if the timeout fired.
+        // TranscriptEngineService does not yet expose a stopTranscription() method.
+
+        if transcriptCoverage == 0 {
+            logger.warning("Transcription for asset \(assetId) finished with zero coverage — stream may have ended prematurely or timed out")
+            return makeOutcome(
+                assetId: assetId,
+                request: request,
+                featureCoverageSec: featureCoverage,
+                transcriptCoverageSec: 0,
+                stopReason: .failed("transcription:zeroCoverage")
+            )
         }
 
         if let earlyStop = checkStopConditions() {
@@ -248,7 +270,14 @@ actor AnalysisJobRunner {
 
         PreAnalysisInstrumentation.endStage(detectionSignpost)
 
-        let cueCoverage = finalWindows.map(\.endTime).max() ?? 0
+        // Compute coverage from confidence-filtered windows only, matching
+        // the threshold used by SkipCueMaterializer, so that tier advancement
+        // reflects actual materialized cues rather than raw ad detections.
+        let confidenceThreshold = cueMaterializer.confidenceThreshold
+        let cueCoverage = finalWindows
+            .filter { $0.confidence >= confidenceThreshold && $0.endTime > $0.startTime }
+            .map(\.endTime)
+            .max() ?? 0
 
         // -- Stage 5: Cue materialization (policy-dependent) --
 

@@ -70,6 +70,7 @@ struct AnalysisWorkSchedulerTests {
 
         let t1Job = makeAnalysisJob(
             jobId: "t1-job",
+            jobType: "preAnalysis",
             episodeId: "ep-deferred",
             desiredCoverageSec: 300,
             state: "paused"
@@ -151,7 +152,7 @@ struct AnalysisWorkSchedulerTests {
         #expect(!t1Jobs.isEmpty)
     }
 
-    @Test("exponential backoff formula: min(2^(attempt+1) * 60, 3600)")
+    @Test("exponential backoff formula: min(2^attempt * 60, 3600)")
     func testExponentialBackoffOnFailure() async throws {
         let store = try await makeTestStore()
 
@@ -164,8 +165,8 @@ struct AnalysisWorkSchedulerTests {
         try await store.insertJob(job)
 
         // Simulate scheduler handling a failure with attemptCount=2
-        // backoff = min(2^(2+1) * 60, 3600) = min(480, 3600) = 480
-        let backoff = min(pow(2.0, Double(job.attemptCount + 1)) * 60, 3600)
+        // backoff = min(2^2 * 60, 3600) = min(240, 3600) = 240
+        let backoff = min(pow(2.0, Double(job.attemptCount)) * 60, 3600)
         let nextEligible = Date().timeIntervalSince1970 + backoff
         try await store.updateJobState(
             jobId: "fail-job",
@@ -177,13 +178,13 @@ struct AnalysisWorkSchedulerTests {
         let failedJob = try await store.fetchJob(byId: "fail-job")
         #expect(failedJob?.state == "failed")
         #expect(failedJob?.lastErrorCode == "testError")
-        #expect(backoff == 480.0)
+        #expect(backoff == 240.0)
     }
 
     @Test("backoff capped at 3600s")
     func testBackoffCappedAt3600() async throws {
         let attemptCount = 10
-        let backoff = min(pow(2.0, Double(attemptCount + 1)) * 60, 3600)
+        let backoff = min(pow(2.0, Double(attemptCount)) * 60, 3600)
         #expect(backoff == 3600.0)
     }
 

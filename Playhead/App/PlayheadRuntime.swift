@@ -150,13 +150,26 @@ final class PlayheadRuntime {
 
         Task { await capabilitiesService.startObserving() }
 
-        Task { [downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService] in
+        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService] in
+            // Migrate the analysis store before any component queries its tables.
+            do {
+                try await analysisStore.migrate()
+            } catch {
+                Logger(subsystem: "com.playhead", category: "Runtime")
+                    .fault("Analysis store migration failed — pre-analysis pipeline disabled: \(error)")
+                return  // Don't start the pipeline if tables don't exist
+            }
             await downloadManager.setAnalysisWorkScheduler(analysisWorkScheduler)
             await backgroundProcessingService.setPreAnalysisServices(
                 scheduler: analysisWorkScheduler,
                 reconciler: analysisJobReconciler
             )
-            try? await analysisJobReconciler.reconcile()
+            do {
+                _ = try await analysisJobReconciler.reconcile()
+            } catch {
+                Logger(subsystem: "com.playhead", category: "Runtime")
+                    .error("Job reconciliation failed at startup: \(error)")
+            }
             await analysisWorkScheduler.startSchedulerLoop()
         }
 
@@ -206,12 +219,6 @@ final class PlayheadRuntime {
         backgroundProcessingService.registerBackgroundTasks()
 
         Task { [downloadManager] in
-            do {
-                try await analysisStore.migrate()
-            } catch {
-                // The app can still launch, but analysis persistence will be degraded.
-            }
-
             do {
                 try await downloadManager.bootstrap()
             } catch {
@@ -318,19 +325,8 @@ final class PlayheadRuntime {
                     }
                     await self.playbackService.play()
 
-                    // Wait for the full download before starting analysis —
-                    // the decoder needs the complete file to get all shards.
-                    try await result.downloadComplete()
-                    guard !Task.isCancelled, self.currentEpisodeId == episodeId else { return }
-
-                    // Release the progressive loader — download is complete,
-                    // all bytes are on disk and already served.
-                    self.activeProgressiveLoader = nil
-
-                    // Evict any stale shard cache from a prior partial decode
-                    // (the truncated 2MB file had different shard count/content).
-                    await self.audioService.evictCache(episodeID: episodeId)
-
+                    // Resolve the analysis asset ID early so pre-materialized
+                    // skip cues can be loaded before the download finishes.
                     guard let analysisURL = LocalAudioURL(result.fileURL) else {
                         self.logger.error("Download returned non-local URL: \(result.fileURL)")
                         return
@@ -352,6 +348,19 @@ final class PlayheadRuntime {
                             podcastId: podcastId
                         )
                     }
+
+                    // Wait for the full download before starting analysis —
+                    // the decoder needs the complete file to get all shards.
+                    try await result.downloadComplete()
+                    guard !Task.isCancelled, self.currentEpisodeId == episodeId else { return }
+
+                    // Release the progressive loader — download is complete,
+                    // all bytes are on disk and already served.
+                    self.activeProgressiveLoader = nil
+
+                    // Evict any stale shard cache from a prior partial decode
+                    // (the truncated 2MB file had different shard count/content).
+                    await self.audioService.evictCache(episodeID: episodeId)
                 } catch {
                     guard !Task.isCancelled else { return }
                     self.logger.error("Episode download failed: \(error)")

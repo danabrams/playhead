@@ -399,7 +399,7 @@ struct AnalysisStoreCRUDTests {
     func adWindowCRUD() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAnalysisAsset())
-        let ad = makeAdWindow()
+        let ad = makeAdWindow(id: "ad-1")
         try await store.insertAdWindow(ad)
         let fetched = try await store.fetchAdWindows(assetId: "asset-1")
         #expect(fetched.count == 1)
@@ -411,7 +411,7 @@ struct AnalysisStoreCRUDTests {
     func updateAdDecision() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAnalysisAsset())
-        try await store.insertAdWindow(makeAdWindow())
+        try await store.insertAdWindow(makeAdWindow(id: "ad-1"))
         try await store.updateAdWindowDecision(id: "ad-1", decisionState: "applied")
         let fetched = try await store.fetchAdWindows(assetId: "asset-1")
         #expect(fetched[0].decisionState == "applied")
@@ -421,7 +421,7 @@ struct AnalysisStoreCRUDTests {
     func updateWasSkipped() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAnalysisAsset())
-        try await store.insertAdWindow(makeAdWindow())
+        try await store.insertAdWindow(makeAdWindow(id: "ad-1"))
         try await store.updateAdWindowWasSkipped(id: "ad-1", wasSkipped: true)
         let fetched = try await store.fetchAdWindows(assetId: "asset-1")
         #expect(fetched[0].wasSkipped == true)

@@ -253,6 +253,7 @@ actor AnalysisStore {
         try exec("PRAGMA journal_mode = WAL")
         try exec("PRAGMA synchronous = NORMAL")
         try exec("PRAGMA foreign_keys = ON")
+        try exec("PRAGMA busy_timeout = 3000")
     }
 
     // MARK: DDL
@@ -1117,7 +1118,8 @@ actor AnalysisStore {
 
     // MARK: - CRUD: analysis_jobs
 
-    func insertJob(_ job: AnalysisJob) throws {
+    @discardableResult
+    func insertJob(_ job: AnalysisJob) throws -> Bool {
         let sql = """
             INSERT OR IGNORE INTO analysis_jobs
             (jobId, jobType, episodeId, podcastId, analysisAssetId, workKey,
@@ -1151,6 +1153,7 @@ actor AnalysisStore {
         bind(stmt, 20, job.createdAt)
         bind(stmt, 21, job.updatedAt)
         try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
     }
 
     func fetchJob(byId jobId: String) throws -> AnalysisJob? {
@@ -1173,8 +1176,12 @@ actor AnalysisStore {
         // and nextEligibleAt <= now (or NULL).
         let sql = """
             SELECT * FROM analysis_jobs
-            WHERE state IN ('queued', 'paused')
-              AND (leaseOwner IS NULL OR leaseExpiresAt < ?)
+            WHERE (
+                (state IN ('queued', 'paused')
+                  AND (leaseOwner IS NULL OR leaseExpiresAt < ?)
+                  AND (nextEligibleAt IS NULL OR nextEligibleAt <= ?))
+                OR (state = 'failed' AND nextEligibleAt IS NOT NULL AND nextEligibleAt <= ?)
+              )
               AND (
                 (jobType = 'playback' AND featureCoverageSec < ?)
                 OR (
@@ -1188,10 +1195,12 @@ actor AnalysisStore {
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, now)
-        bind(stmt, 2, t0ThresholdSec)
-        bind(stmt, 3, isCharging ? 1 : 0)
-        bind(stmt, 4, isThermalOk ? 1 : 0)
-        bind(stmt, 5, now)
+        bind(stmt, 2, now)
+        bind(stmt, 3, now)
+        bind(stmt, 4, t0ThresholdSec)
+        bind(stmt, 5, isCharging ? 1 : 0)
+        bind(stmt, 6, isThermalOk ? 1 : 0)
+        bind(stmt, 7, now)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         return readJob(stmt)
     }
@@ -1237,7 +1246,7 @@ actor AnalysisStore {
     func acquireLease(jobId: String, owner: String, expiresAt: Double) throws -> Bool {
         let sql = """
             UPDATE analysis_jobs
-            SET leaseOwner = ?, leaseExpiresAt = ?, updatedAt = ?
+            SET leaseOwner = ?, leaseExpiresAt = ?, state = 'running', updatedAt = ?
             WHERE jobId = ? AND (leaseOwner IS NULL OR leaseExpiresAt < ?)
             """
         let stmt = try prepare(sql)
@@ -1330,7 +1339,7 @@ actor AnalysisStore {
 
     /// Fetches episode IDs that have at least one active (non-terminal) job.
     func fetchActiveJobEpisodeIds() throws -> Set<String> {
-        let sql = "SELECT DISTINCT episodeId FROM analysis_jobs WHERE state NOT IN ('complete', 'superseded', 'failed')"
+        let sql = "SELECT DISTINCT episodeId FROM analysis_jobs WHERE state NOT IN ('complete', 'superseded')"
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         var ids = Set<String>()
@@ -1356,11 +1365,41 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    /// Increments the attempt count for a job. Used after failures to drive exponential backoff.
+    func incrementAttemptCount(jobId: String) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET attemptCount = attemptCount + 1, updatedAt = ?
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, Date().timeIntervalSince1970)
+        bind(stmt, 2, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Resets a failed job back to queued state, clearing the error and backoff.
+    /// Used by reconciliation when a previously-failed episode's download is still present.
+    func resetFailedJobToQueued(jobId: String) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET state = 'queued', nextEligibleAt = NULL, lastErrorCode = NULL, updatedAt = ?
+            WHERE jobId = ? AND state = 'failed'
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, Date().timeIntervalSince1970)
+        bind(stmt, 2, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
     /// Batch-updates the state (and optionally nextEligibleAt) for multiple jobs.
     func batchUpdateJobState(jobIds: [String], state: String, nextEligibleAt: Double? = nil) throws {
         guard !jobIds.isEmpty else { return }
-        let now = Date().timeIntervalSince1970
-        for jobId in jobIds {
+        try exec("BEGIN TRANSACTION")
+        do {
+            let now = Date().timeIntervalSince1970
             let sql = """
                 UPDATE analysis_jobs
                 SET state = ?, nextEligibleAt = ?, updatedAt = ?
@@ -1368,11 +1407,18 @@ actor AnalysisStore {
                 """
             let stmt = try prepare(sql)
             defer { sqlite3_finalize(stmt) }
-            bind(stmt, 1, state)
-            bind(stmt, 2, nextEligibleAt)
-            bind(stmt, 3, now)
-            bind(stmt, 4, jobId)
-            try step(stmt, expecting: SQLITE_DONE)
+            for jobId in jobIds {
+                sqlite3_reset(stmt)
+                bind(stmt, 1, state)
+                bind(stmt, 2, nextEligibleAt)
+                bind(stmt, 3, now)
+                bind(stmt, 4, jobId)
+                try step(stmt, expecting: SQLITE_DONE)
+            }
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
         }
     }
 

@@ -21,7 +21,7 @@ struct SkipCueMaterializer: Sendable {
         analysisAssetId: String,
         source: String = "preAnalysis"
     ) async throws -> [SkipCue] {
-        let eligible = windows.filter { $0.confidence >= confidenceThreshold }
+        let eligible = windows.filter { $0.confidence >= confidenceThreshold && $0.endTime > $0.startTime }
         let cues = eligible.map { window -> SkipCue in
             let hash = Self.computeCueHash(
                 analysisAssetId: analysisAssetId,
@@ -48,7 +48,7 @@ struct SkipCueMaterializer: Sendable {
     /// Deterministic hash: rounds start/end to integer seconds so that
     /// windows at e.g. 12.3-45.7 and 12.8-45.2 produce the same hash.
     static func computeCueHash(analysisAssetId: String, startTime: Double, endTime: Double) -> String {
-        let input = "\(analysisAssetId):\(Int(startTime)):\(Int(endTime))"
+        let input = "\(analysisAssetId):\(Int(startTime.rounded())):\(Int(endTime.rounded()))"
         let digest = SHA256.hash(data: Data(input.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
