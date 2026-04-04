@@ -51,10 +51,57 @@ func makeAdWindow(
     )
 }
 
-// MARK: - AnalysisJob (placeholder)
-// makeAnalysisJob(overrides:) will be added when the AnalysisJob type
-// is introduced by the AnalysisJobRunner bead.
+// MARK: - AnalysisJob
 
-// MARK: - AnalysisRangeRequest (placeholder)
-// makeAnalysisRangeRequest(overrides:) will be added when the
-// AnalysisRangeRequest type is introduced by the AnalysisWorkScheduler bead.
+func makeAnalysisJob(
+    jobId: String = UUID().uuidString,
+    jobType: String = "playback",
+    episodeId: String = "ep-1",
+    podcastId: String? = nil,
+    analysisAssetId: String? = nil,
+    workKey: String? = nil,
+    sourceFingerprint: String = "fp-test",
+    downloadId: String = "dl-1",
+    priority: Int = 0,
+    desiredCoverageSec: Double = 1800,
+    featureCoverageSec: Double = 0,
+    transcriptCoverageSec: Double = 0,
+    cueCoverageSec: Double = 0,
+    state: String = "queued",
+    attemptCount: Int = 0,
+    nextEligibleAt: Double? = nil,
+    leaseOwner: String? = nil,
+    leaseExpiresAt: Double? = nil,
+    lastErrorCode: String? = nil,
+    createdAt: Double = Date().timeIntervalSince1970,
+    updatedAt: Double = Date().timeIntervalSince1970
+) -> AnalysisJob {
+    let resolvedWorkKey = workKey ?? AnalysisJob.computeWorkKey(
+        fingerprint: sourceFingerprint,
+        analysisVersion: 1,
+        jobType: jobType
+    )
+    return AnalysisJob(
+        jobId: jobId,
+        jobType: jobType,
+        episodeId: episodeId,
+        podcastId: podcastId,
+        analysisAssetId: analysisAssetId,
+        workKey: resolvedWorkKey,
+        sourceFingerprint: sourceFingerprint,
+        downloadId: downloadId,
+        priority: priority,
+        desiredCoverageSec: desiredCoverageSec,
+        featureCoverageSec: featureCoverageSec,
+        transcriptCoverageSec: transcriptCoverageSec,
+        cueCoverageSec: cueCoverageSec,
+        state: state,
+        attemptCount: attemptCount,
+        nextEligibleAt: nextEligibleAt,
+        leaseOwner: leaseOwner,
+        leaseExpiresAt: leaseExpiresAt,
+        lastErrorCode: lastErrorCode,
+        createdAt: createdAt,
+        updatedAt: updatedAt
+    )
+}

@@ -104,6 +104,34 @@ struct PreviewBudget: Sendable {
     let lastUpdated: Double
 }
 
+struct AnalysisJob: Sendable {
+    let jobId: String
+    let jobType: String         // "preAnalysis" | "playback" | "backfill"
+    let episodeId: String
+    let podcastId: String?
+    let analysisAssetId: String?
+    let workKey: String         // fingerprint + analysisVersion + jobType
+    let sourceFingerprint: String
+    let downloadId: String
+    let priority: Int
+    let desiredCoverageSec: Double
+    let featureCoverageSec: Double
+    let transcriptCoverageSec: Double
+    let cueCoverageSec: Double
+    let state: String
+    let attemptCount: Int
+    let nextEligibleAt: Double?
+    let leaseOwner: String?
+    let leaseExpiresAt: Double?
+    let lastErrorCode: String?
+    let createdAt: Double
+    let updatedAt: Double
+
+    static func computeWorkKey(fingerprint: String, analysisVersion: Int, jobType: String) -> String {
+        "\(fingerprint):\(analysisVersion):\(jobType)"
+    }
+}
+
 // MARK: - Store errors
 
 enum AnalysisStoreError: Error, CustomStringConvertible {
@@ -334,6 +362,36 @@ actor AnalysisStore {
                 lastUpdated              REAL NOT NULL
             )
             """)
+
+        // analysis_jobs
+        try exec("""
+            CREATE TABLE IF NOT EXISTS analysis_jobs (
+                jobId TEXT PRIMARY KEY,
+                jobType TEXT NOT NULL,
+                episodeId TEXT NOT NULL,
+                podcastId TEXT,
+                analysisAssetId TEXT,
+                workKey TEXT NOT NULL UNIQUE,
+                sourceFingerprint TEXT NOT NULL,
+                downloadId TEXT NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 0,
+                desiredCoverageSec REAL NOT NULL,
+                featureCoverageSec REAL NOT NULL DEFAULT 0,
+                transcriptCoverageSec REAL NOT NULL DEFAULT 0,
+                cueCoverageSec REAL NOT NULL DEFAULT 0,
+                state TEXT NOT NULL DEFAULT 'queued',
+                attemptCount INTEGER NOT NULL DEFAULT 0,
+                nextEligibleAt REAL,
+                leaseOwner TEXT,
+                leaseExpiresAt REAL,
+                lastErrorCode TEXT,
+                createdAt REAL NOT NULL,
+                updatedAt REAL NOT NULL
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_jobs_state_priority ON analysis_jobs(state, priority DESC, createdAt ASC)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_jobs_workkey ON analysis_jobs(workKey)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_jobs_episode ON analysis_jobs(episodeId)")
 
         // FTS5 virtual table over transcript_chunks
         try exec("""
@@ -941,6 +999,245 @@ actor AnalysisStore {
             consumedAnalysisSeconds: sqlite3_column_double(stmt, 1),
             graceBreakWindow: sqlite3_column_double(stmt, 2),
             lastUpdated: sqlite3_column_double(stmt, 3)
+        )
+    }
+
+    // MARK: - CRUD: analysis_jobs
+
+    func insertJob(_ job: AnalysisJob) throws {
+        let sql = """
+            INSERT OR IGNORE INTO analysis_jobs
+            (jobId, jobType, episodeId, podcastId, analysisAssetId, workKey,
+             sourceFingerprint, downloadId, priority, desiredCoverageSec,
+             featureCoverageSec, transcriptCoverageSec, cueCoverageSec,
+             state, attemptCount, nextEligibleAt, leaseOwner, leaseExpiresAt,
+             lastErrorCode, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, job.jobId)
+        bind(stmt, 2, job.jobType)
+        bind(stmt, 3, job.episodeId)
+        bind(stmt, 4, job.podcastId)
+        bind(stmt, 5, job.analysisAssetId)
+        bind(stmt, 6, job.workKey)
+        bind(stmt, 7, job.sourceFingerprint)
+        bind(stmt, 8, job.downloadId)
+        bind(stmt, 9, job.priority)
+        bind(stmt, 10, job.desiredCoverageSec)
+        bind(stmt, 11, job.featureCoverageSec)
+        bind(stmt, 12, job.transcriptCoverageSec)
+        bind(stmt, 13, job.cueCoverageSec)
+        bind(stmt, 14, job.state)
+        bind(stmt, 15, job.attemptCount)
+        bind(stmt, 16, job.nextEligibleAt)
+        bind(stmt, 17, job.leaseOwner)
+        bind(stmt, 18, job.leaseExpiresAt)
+        bind(stmt, 19, job.lastErrorCode)
+        bind(stmt, 20, job.createdAt)
+        bind(stmt, 21, job.updatedAt)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func fetchJob(byId jobId: String) throws -> AnalysisJob? {
+        let sql = "SELECT * FROM analysis_jobs WHERE jobId = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, jobId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return readJob(stmt)
+    }
+
+    func fetchNextEligibleJob(
+        isCharging: Bool,
+        isThermalOk: Bool,
+        t0ThresholdSec: Double,
+        now: TimeInterval
+    ) throws -> AnalysisJob? {
+        // T0 jobs: playback jobs that have zero coverage — always eligible.
+        // Deferred jobs: backfill/preAnalysis require charging + thermal ok
+        // and nextEligibleAt <= now (or NULL).
+        let sql = """
+            SELECT * FROM analysis_jobs
+            WHERE state IN ('queued', 'paused')
+              AND (leaseOwner IS NULL OR leaseExpiresAt < ?)
+              AND (
+                (jobType = 'playback' AND featureCoverageSec < ?)
+                OR (
+                  ? = 1 AND ? = 1
+                  AND (nextEligibleAt IS NULL OR nextEligibleAt <= ?)
+                )
+              )
+            ORDER BY priority DESC, createdAt ASC
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, now)
+        bind(stmt, 2, t0ThresholdSec)
+        bind(stmt, 3, isCharging ? 1 : 0)
+        bind(stmt, 4, isThermalOk ? 1 : 0)
+        bind(stmt, 5, now)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return readJob(stmt)
+    }
+
+    func updateJobProgress(
+        jobId: String,
+        featureCoverageSec: Double,
+        transcriptCoverageSec: Double,
+        cueCoverageSec: Double
+    ) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET featureCoverageSec = ?, transcriptCoverageSec = ?, cueCoverageSec = ?,
+                updatedAt = ?
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, featureCoverageSec)
+        bind(stmt, 2, transcriptCoverageSec)
+        bind(stmt, 3, cueCoverageSec)
+        bind(stmt, 4, Date().timeIntervalSince1970)
+        bind(stmt, 5, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func updateJobState(jobId: String, state: String, nextEligibleAt: Double? = nil, lastErrorCode: String? = nil) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET state = ?, nextEligibleAt = ?, lastErrorCode = ?, updatedAt = ?
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, state)
+        bind(stmt, 2, nextEligibleAt)
+        bind(stmt, 3, lastErrorCode)
+        bind(stmt, 4, Date().timeIntervalSince1970)
+        bind(stmt, 5, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func acquireLease(jobId: String, owner: String, expiresAt: Double) throws -> Bool {
+        let sql = """
+            UPDATE analysis_jobs
+            SET leaseOwner = ?, leaseExpiresAt = ?, updatedAt = ?
+            WHERE jobId = ? AND (leaseOwner IS NULL OR leaseExpiresAt < ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        let now = Date().timeIntervalSince1970
+        bind(stmt, 1, owner)
+        bind(stmt, 2, expiresAt)
+        bind(stmt, 3, now)
+        bind(stmt, 4, jobId)
+        bind(stmt, 5, now)
+        try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
+    }
+
+    func releaseLease(jobId: String) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET leaseOwner = NULL, leaseExpiresAt = NULL, updatedAt = ?
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, Date().timeIntervalSince1970)
+        bind(stmt, 2, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func renewLease(jobId: String, newExpiresAt: Double) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET leaseExpiresAt = ?, updatedAt = ?
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, newExpiresAt)
+        bind(stmt, 2, Date().timeIntervalSince1970)
+        bind(stmt, 3, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func fetchJobsByState(_ state: String) throws -> [AnalysisJob] {
+        let sql = "SELECT * FROM analysis_jobs WHERE state = ? ORDER BY priority DESC, createdAt ASC"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, state)
+        var results: [AnalysisJob] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(readJob(stmt))
+        }
+        return results
+    }
+
+    func fetchJobsWithExpiredLeases(before: TimeInterval) throws -> [AnalysisJob] {
+        let sql = "SELECT * FROM analysis_jobs WHERE leaseOwner IS NOT NULL AND leaseExpiresAt < ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, before)
+        var results: [AnalysisJob] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(readJob(stmt))
+        }
+        return results
+    }
+
+    func deleteOldJobs(olderThan: TimeInterval, inStates: [String]) throws -> Int {
+        guard !inStates.isEmpty else { return 0 }
+        let placeholders = inStates.map { _ in "?" }.joined(separator: ", ")
+        let sql = "DELETE FROM analysis_jobs WHERE updatedAt < ? AND state IN (\(placeholders))"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, olderThan)
+        for (i, state) in inStates.enumerated() {
+            bind(stmt, Int32(i + 2), state)
+        }
+        try step(stmt, expecting: SQLITE_DONE)
+        return Int(sqlite3_changes(db))
+    }
+
+    func fetchAllJobEpisodeIds() throws -> Set<String> {
+        let sql = "SELECT DISTINCT episodeId FROM analysis_jobs"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        var ids = Set<String>()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            ids.insert(text(stmt, 0))
+        }
+        return ids
+    }
+
+    private func readJob(_ stmt: OpaquePointer?) -> AnalysisJob {
+        AnalysisJob(
+            jobId: text(stmt, 0),
+            jobType: text(stmt, 1),
+            episodeId: text(stmt, 2),
+            podcastId: optionalText(stmt, 3),
+            analysisAssetId: optionalText(stmt, 4),
+            workKey: text(stmt, 5),
+            sourceFingerprint: text(stmt, 6),
+            downloadId: text(stmt, 7),
+            priority: Int(sqlite3_column_int(stmt, 8)),
+            desiredCoverageSec: sqlite3_column_double(stmt, 9),
+            featureCoverageSec: sqlite3_column_double(stmt, 10),
+            transcriptCoverageSec: sqlite3_column_double(stmt, 11),
+            cueCoverageSec: sqlite3_column_double(stmt, 12),
+            state: text(stmt, 13),
+            attemptCount: Int(sqlite3_column_int(stmt, 14)),
+            nextEligibleAt: optionalDouble(stmt, 15),
+            leaseOwner: optionalText(stmt, 16),
+            leaseExpiresAt: optionalDouble(stmt, 17),
+            lastErrorCode: optionalText(stmt, 18),
+            createdAt: sqlite3_column_double(stmt, 19),
+            updatedAt: sqlite3_column_double(stmt, 20)
         )
     }
 
