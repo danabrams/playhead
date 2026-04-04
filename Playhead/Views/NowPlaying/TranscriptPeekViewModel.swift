@@ -122,6 +122,21 @@ final class TranscriptPeekViewModel {
         return overlapping.map(\.confidence).max()
     }
 
+    /// Debug stats summary for TestFlight diagnostics.
+    var debugStats: String {
+        let count = chunks.count
+        guard count > 0 else { return "0 chunks" }
+        let minTime = chunks.first?.startTime ?? 0
+        let maxTime = chunks.last?.endTime ?? 0
+        let adCount = adWindows.count
+        let fmt = { (t: Double) -> String in
+            let m = Int(t) / 60
+            let s = Int(t) % 60
+            return String(format: "%d:%02d", m, s)
+        }
+        return "\(count) chunks · \(fmt(minTime))–\(fmt(maxTime)) · \(adCount) ads"
+    }
+
     // MARK: - Private
 
     private func refresh() async {

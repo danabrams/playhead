@@ -149,6 +149,13 @@ private extension TranscriptPeekView {
                             .id(chunk.id)
                     }
 
+                    // Debug stats for TestFlight diagnostics
+                    Text(peekViewModel.debugStats)
+                        .font(AppTypography.mono(size: 9, weight: .medium))
+                        .foregroundStyle(AppColors.metadata.opacity(0.5))
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, Spacing.sm)
+
                     // Bottom padding so the last chunk isn't flush with edge
                     Color.clear.frame(height: Spacing.xxl)
                 }
