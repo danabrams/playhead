@@ -242,8 +242,13 @@ actor DownloadManager {
             delegate: sessionDelegate,
             delegateQueue: nil
         )
-        sessionDelegate.onDownloadComplete = { [weak self] episodeId, fileURL in
-            Task { await self?.handleBackgroundDownloadComplete(episodeId: episodeId, fileURL: fileURL) }
+        sessionDelegate.onDownloadComplete = { [manager = self] episodeId, fileURL in
+            Task {
+                await manager.handleBackgroundDownloadComplete(
+                    episodeId: episodeId,
+                    fileURL: fileURL
+                )
+            }
         }
         _backgroundSession = session
         return session
