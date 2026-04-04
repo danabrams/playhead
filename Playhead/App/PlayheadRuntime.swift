@@ -261,7 +261,6 @@ final class PlayheadRuntime {
                             startPosition: position
                         )
                     } else {
-                        // No Content-Length — fall back to direct file load.
                         await self.playbackService.load(url: result.fileURL, startPosition: position)
                     }
                     await self.playbackService.play()
@@ -270,6 +269,16 @@ final class PlayheadRuntime {
                     // the decoder needs the complete file to get all shards.
                     try await result.downloadComplete()
                     guard !Task.isCancelled, self.currentEpisodeId == episodeId else { return }
+
+                    // Switch from progressive loader to standard file:// playback.
+                    // The progressive loader's AVAssetResourceLoaderDelegate
+                    // conflicts with PlaybackServiceActor during audio session
+                    // interruptions (Siri, phone calls). Once the file is complete,
+                    // we no longer need progressive byte serving.
+                    let currentTime = await self.playbackService.snapshot().currentTime
+                    await self.playbackService.load(url: result.fileURL, startPosition: currentTime)
+                    await self.playbackService.play()
+                    self.logger.info("Switched to file playback at \(String(format: "%.1f", currentTime))s")
 
                     // Evict any stale shard cache from a prior partial decode
                     // (the truncated 2MB file had different shard count/content).
