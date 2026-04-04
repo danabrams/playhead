@@ -67,14 +67,6 @@ final class PlaybackService: NSObject, Sendable {
     private var playerItem: AVPlayerItem?
     private var timeObserverToken: Any?
 
-    // MARK: - Progressive Loader
-
-    /// Retains the resource loader delegate for progressive playback.
-    /// nonisolated(unsafe) because the loader's delegate callbacks run on
-    /// its own dispatch queue, not on PlaybackServiceActor. The loader is
-    /// only set/cleared from the actor; its methods are thread-safe.
-    nonisolated(unsafe) private var progressiveLoader: ProgressiveResourceLoader?
-
     // MARK: - State
 
     private var _state = PlaybackState()
@@ -153,78 +145,34 @@ final class PlaybackService: NSObject, Sendable {
     ///   - url: Remote or local audio URL.
     ///   - startPosition: Resume position in seconds (0 for start).
     func load(url: URL, startPosition: TimeInterval = 0) async {
-        // Tear down any progressive loader from a prior session.
-        progressiveLoader = nil
-
         // Determine if this is a local file.
         isLocalAsset = url.isFileURL
 
         let asset = AVURLAsset(url: url)
         let item = AVPlayerItem(asset: asset)
-        playerItem = item
+        loadPlayerItem(item)
 
-        // Observe item status.
-        itemStatusObservation?.invalidate()
-        itemStatusObservation = item.observe(\.status, options: [.new]) {
-            [weak self] item, _ in
-            guard let self else { return }
-            Task { @PlaybackServiceActor in
-                self.handleItemStatusChange(item)
-            }
-        }
-
-        updateState { $0.status = .loading }
-        player.replaceCurrentItem(with: item)
-
-        // Wait for the item to become ready, then seek to start position.
         if startPosition > 0 {
             let target = CMTime(seconds: startPosition, preferredTimescale: 600)
             await player.currentItem?.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
         }
     }
 
-    /// Load a podcast episode for progressive playback from a file that is
-    /// still being downloaded. Uses AVAssetResourceLoaderDelegate with a
-    /// custom URL scheme so AVPlayer sees the full content length upfront
-    /// and buffers naturally as bytes arrive on disk.
-    ///
-    /// - Parameters:
-    ///   - fileURL: Local file URL being written to by the download manager.
-    ///   - totalBytes: Expected total file size from HTTP Content-Length.
-    ///   - contentType: UTI for the audio format (e.g. "public.mp3").
-    ///   - startPosition: Resume position in seconds (0 for start).
-    func loadProgressive(
-        fileURL: URL,
-        totalBytes: Int64,
-        contentType: String,
-        startPosition: TimeInterval = 0
-    ) async {
+    /// Load a pre-built AVPlayerItem. Used by the runtime to hand in a
+    /// player item backed by a ProgressiveResourceLoader without storing
+    /// the loader on this actor (which causes executor conflicts during
+    /// audio session interruptions).
+    func loadItem(_ item: AVPlayerItem, startPosition: TimeInterval = 0) async {
         isLocalAsset = true
+        loadPlayerItem(item)
 
-        // Create the progressive resource loader that serves bytes from
-        // the growing file.
-        let loader = ProgressiveResourceLoader(
-            fileURL: fileURL,
-            totalBytes: totalBytes,
-            contentType: contentType
-        )
-        progressiveLoader = loader
-
-        // Use a custom scheme so AVPlayer invokes our resource loader delegate
-        // instead of reading the file directly.
-        var components = URLComponents()
-        components.scheme = "playhead-progressive"
-        components.host = "audio"
-        components.path = "/\(fileURL.lastPathComponent)"
-        guard let proxyURL = components.url else {
-            updateState { $0.status = .failed("Failed to create progressive URL") }
-            return
+        if startPosition > 0 {
+            let target = CMTime(seconds: startPosition, preferredTimescale: 600)
+            await player.currentItem?.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
         }
+    }
 
-        let asset = AVURLAsset(url: proxyURL)
-        asset.resourceLoader.setDelegate(loader, queue: loader.queue)
-
-        let item = AVPlayerItem(asset: asset)
+    private func loadPlayerItem(_ item: AVPlayerItem) {
         playerItem = item
 
         itemStatusObservation?.invalidate()
@@ -238,11 +186,6 @@ final class PlaybackService: NSObject, Sendable {
 
         updateState { $0.status = .loading }
         player.replaceCurrentItem(with: item)
-
-        if startPosition > 0 {
-            let target = CMTime(seconds: startPosition, preferredTimescale: 600)
-            await player.currentItem?.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
-        }
     }
 
     private func handleItemStatusChange(_ item: AVPlayerItem) {
@@ -451,10 +394,8 @@ final class PlaybackService: NSObject, Sendable {
 
         switch type {
         case .began:
-            progressiveLoader?.suspend()
             pause()
         case .ended:
-            progressiveLoader?.resume()
             if let optionsValue = info[AVAudioSessionInterruptionOptionKey] as? UInt {
                 let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
                 if options.contains(.shouldResume) {

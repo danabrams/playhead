@@ -1,6 +1,7 @@
 // PlayheadRuntime.swift
 // Shared app-level composition root for long-lived services.
 
+@preconcurrency import AVFoundation
 import Foundation
 import OSLog
 
@@ -36,6 +37,8 @@ final class PlayheadRuntime {
 
     /// Background download task for the current episode's audio cache.
     private var audioCacheTask: Task<Void, Never>?
+    /// Retains the progressive resource loader outside PlaybackServiceActor.
+    private var activeProgressiveLoader: ProgressiveResourceLoader?
 
     /// True when an episode is actively loaded for playback.
     var isPlayingEpisode: Bool {
@@ -250,16 +253,32 @@ final class PlayheadRuntime {
                     )
                     guard !Task.isCancelled, self.currentEpisodeId == episodeId else { return }
 
-                    // Start playback via the progressive resource loader so
-                    // AVPlayer sees the full duration upfront and streams
-                    // from the growing file with no reload glitch.
+                    // Build the progressive player item outside the actor.
+                    // The ProgressiveResourceLoader must NOT live on
+                    // PlaybackServiceActor — its AVFoundation delegate callbacks
+                    // run on a separate dispatch queue and trigger actor executor
+                    // assertions during Siri/phone call interruptions.
                     if let totalBytes = result.totalBytes {
-                        await self.playbackService.loadProgressive(
+                        let loader = ProgressiveResourceLoader(
                             fileURL: result.fileURL,
                             totalBytes: totalBytes,
-                            contentType: result.contentType,
-                            startPosition: position
+                            contentType: result.contentType
                         )
+                        // Hold a strong reference so the loader outlives this scope.
+                        self.activeProgressiveLoader = loader
+
+                        var components = URLComponents()
+                        components.scheme = "playhead-progressive"
+                        components.host = "audio"
+                        components.path = "/\(result.fileURL.lastPathComponent)"
+                        if let proxyURL = components.url {
+                            let asset = AVURLAsset(url: proxyURL)
+                            asset.resourceLoader.setDelegate(loader, queue: loader.queue)
+                            let item = AVPlayerItem(asset: asset)
+                            await self.playbackService.loadItem(item, startPosition: position)
+                        } else {
+                            await self.playbackService.load(url: result.fileURL, startPosition: position)
+                        }
                     } else {
                         await self.playbackService.load(url: result.fileURL, startPosition: position)
                     }
@@ -270,15 +289,9 @@ final class PlayheadRuntime {
                     try await result.downloadComplete()
                     guard !Task.isCancelled, self.currentEpisodeId == episodeId else { return }
 
-                    // Switch from progressive loader to standard file:// playback.
-                    // The progressive loader's AVAssetResourceLoaderDelegate
-                    // conflicts with PlaybackServiceActor during audio session
-                    // interruptions (Siri, phone calls). Once the file is complete,
-                    // we no longer need progressive byte serving.
-                    let currentTime = await self.playbackService.snapshot().currentTime
-                    await self.playbackService.load(url: result.fileURL, startPosition: currentTime)
-                    await self.playbackService.play()
-                    self.logger.info("Switched to file playback at \(String(format: "%.1f", currentTime))s")
+                    // Release the progressive loader — download is complete,
+                    // all bytes are on disk and already served.
+                    self.activeProgressiveLoader = nil
 
                     // Evict any stale shard cache from a prior partial decode
                     // (the truncated 2MB file had different shard count/content).
