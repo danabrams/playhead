@@ -86,6 +86,14 @@ enum DownloadManagerError: Error, CustomStringConvertible {
     }
 }
 
+// MARK: - DownloadContext
+
+/// Metadata passed by the caller to connect a download to the analysis pipeline.
+struct DownloadContext: Sendable {
+    let podcastId: String?
+    let isExplicitDownload: Bool
+}
+
 // MARK: - DownloadProviding
 
 /// Protocol abstraction for download queries, enabling test stubs.
@@ -148,6 +156,9 @@ actor DownloadManager {
     /// Cached file extension per episode ID (e.g. "mp3", "m4a").
     private var extensionCache: [String: String] = [:]
 
+    /// Optional scheduler for enqueuing pre-analysis jobs after download.
+    private var analysisWorkScheduler: AnalysisWorkScheduler?
+
     /// Background URL session for pre-caching.
     private var _backgroundSession: URLSession?
 
@@ -176,6 +187,11 @@ actor DownloadManager {
         let (stream, continuation) = AsyncStream<DownloadProgress>.makeStream()
         self.progressStream = stream
         self.progressContinuation = continuation
+    }
+
+    /// Wire up the analysis scheduler so downloads automatically enqueue jobs.
+    func setAnalysisWorkScheduler(_ scheduler: AnalysisWorkScheduler) {
+        self.analysisWorkScheduler = scheduler
     }
 
     static func defaultCacheDirectory() -> URL {
@@ -239,7 +255,8 @@ actor DownloadManager {
     /// If the file is already fully cached, returns immediately.
     func progressiveDownload(
         episodeId: String,
-        from url: URL
+        from url: URL,
+        context: DownloadContext? = nil
     ) async throws -> URL {
         // Cache the source extension for this episode.
         let sourceExt = url.pathExtension.isEmpty ? "mp3" : url.pathExtension
@@ -259,7 +276,7 @@ actor DownloadManager {
 
         let task = Task<URL, Error> { [weak self] in
             guard let self else { throw DownloadManagerError.cancelled }
-            return try await self.performDownload(episodeId: episodeId, url: url)
+            return try await self.performDownload(episodeId: episodeId, url: url, context: context)
         }
 
         activeDownloads[episodeId] = task
@@ -276,7 +293,7 @@ actor DownloadManager {
 
     /// Core download logic: downloads to a temp file, then moves to cache.
     /// Uses URLSession.shared.download(for:) to avoid byte-at-a-time iteration.
-    private func performDownload(episodeId: String, url: URL) async throws -> URL {
+    private func performDownload(episodeId: String, url: URL, context: DownloadContext? = nil) async throws -> URL {
         let completeURL = completeFileURL(for: episodeId)
 
         let request = URLRequest(url: url)
@@ -320,6 +337,17 @@ actor DownloadManager {
         // Compute strong fingerprint from the final file.
         let strongHash = try FileHasher.sha256(fileURL: completeURL)
         fingerprintCache[episodeId] = AudioFingerprint(weak: weakFP, strong: strongHash)
+
+        // Enqueue pre-analysis if scheduler is wired up.
+        if let scheduler = analysisWorkScheduler {
+            await scheduler.enqueue(
+                episodeId: episodeId,
+                podcastId: context?.podcastId,
+                downloadId: episodeId,
+                sourceFingerprint: strongHash,
+                isExplicitDownload: context?.isExplicitDownload ?? false
+            )
+        }
 
         touchAccess(episodeId: episodeId)
 
@@ -366,7 +394,8 @@ actor DownloadManager {
     func streamingDownload(
         episodeId: String,
         from url: URL,
-        playableThreshold: Int64 = DownloadManager.defaultPlayableThreshold
+        playableThreshold: Int64 = DownloadManager.defaultPlayableThreshold,
+        context: DownloadContext? = nil
     ) async throws -> StreamingDownloadResult {
         let sourceExt = url.pathExtension.isEmpty ? "mp3" : url.pathExtension
         extensionCache[episodeId] = sourceExt
@@ -488,6 +517,12 @@ actor DownloadManager {
                         await self?.setFingerprint(
                             episodeId: capturedEpisodeId, weak: weakFP, strong: strongHash
                         )
+                        // Enqueue pre-analysis if scheduler is wired up.
+                        await self?.enqueueAnalysisIfNeeded(
+                            episodeId: capturedEpisodeId,
+                            sourceFingerprint: strongHash,
+                            context: context
+                        )
                         capturedLogger.info("Download complete for \(capturedEpisodeId): \(bytesWritten) bytes, hash=\(strongHash.prefix(16))...")
                     }
 
@@ -521,6 +556,22 @@ actor DownloadManager {
     /// Helper for detached task to update fingerprint cache.
     fileprivate func setFingerprint(episodeId: String, weak weakFP: String, strong strongFP: String) {
         fingerprintCache[episodeId] = AudioFingerprint(weak: weakFP, strong: strongFP)
+    }
+
+    /// Helper for detached task to enqueue analysis after download completes.
+    fileprivate func enqueueAnalysisIfNeeded(
+        episodeId: String,
+        sourceFingerprint: String,
+        context: DownloadContext?
+    ) async {
+        guard let scheduler = analysisWorkScheduler else { return }
+        await scheduler.enqueue(
+            episodeId: episodeId,
+            podcastId: context?.podcastId,
+            downloadId: episodeId,
+            sourceFingerprint: sourceFingerprint,
+            isExplicitDownload: context?.isExplicitDownload ?? false
+        )
     }
 
     /// Map file extension to UTI for AVAssetResourceLoaderDelegate.
