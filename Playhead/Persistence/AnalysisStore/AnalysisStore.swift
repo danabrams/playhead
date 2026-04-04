@@ -84,6 +84,19 @@ struct AdWindow: Sendable {
     let userDismissedBanner: Bool
 }
 
+struct SkipCue: Sendable {
+    let id: String
+    let analysisAssetId: String
+    let cueHash: String
+    let startTime: Double
+    let endTime: Double
+    let confidence: Double
+    let source: String      // "preAnalysis" | "live"
+    let materializedAt: Double
+    let wasSkipped: Bool
+    let userDismissed: Bool
+}
+
 struct PodcastProfile: Sendable {
     let podcastId: String
     let sponsorLexicon: String?
@@ -336,6 +349,25 @@ actor AnalysisStore {
             )
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_ad_asset ON ad_windows(analysisAssetId)")
+
+        // skip_cues
+        try exec("""
+            CREATE TABLE IF NOT EXISTS skip_cues (
+                id TEXT PRIMARY KEY,
+                analysisAssetId TEXT NOT NULL,
+                cueHash TEXT NOT NULL,
+                startTime REAL NOT NULL,
+                endTime REAL NOT NULL,
+                confidence REAL NOT NULL,
+                source TEXT NOT NULL DEFAULT 'preAnalysis',
+                materializedAt REAL NOT NULL,
+                wasSkipped INTEGER NOT NULL DEFAULT 0,
+                userDismissed INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(cueHash)
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_skip_cues_asset ON skip_cues(analysisAssetId)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_skip_cues_time ON skip_cues(analysisAssetId, startTime)")
 
         // podcast_profiles
         try exec("""
@@ -910,6 +942,87 @@ actor AnalysisStore {
             ))
         }
         return results
+    }
+
+    // MARK: - CRUD: skip_cues
+
+    func insertSkipCue(_ cue: SkipCue) throws {
+        let sql = """
+            INSERT OR IGNORE INTO skip_cues
+            (id, analysisAssetId, cueHash, startTime, endTime, confidence,
+             source, materializedAt, wasSkipped, userDismissed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, cue.id)
+        bind(stmt, 2, cue.analysisAssetId)
+        bind(stmt, 3, cue.cueHash)
+        bind(stmt, 4, cue.startTime)
+        bind(stmt, 5, cue.endTime)
+        bind(stmt, 6, cue.confidence)
+        bind(stmt, 7, cue.source)
+        bind(stmt, 8, cue.materializedAt)
+        bind(stmt, 9, cue.wasSkipped ? 1 : 0)
+        bind(stmt, 10, cue.userDismissed ? 1 : 0)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func insertSkipCues(_ cues: [SkipCue]) throws {
+        guard !cues.isEmpty else { return }
+        try exec("BEGIN TRANSACTION")
+        do {
+            for cue in cues {
+                try insertSkipCue(cue)
+            }
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    func fetchSkipCues(for analysisAssetId: String) throws -> [SkipCue] {
+        let sql = "SELECT * FROM skip_cues WHERE analysisAssetId = ? ORDER BY startTime ASC"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        var results: [SkipCue] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(readSkipCue(stmt))
+        }
+        return results
+    }
+
+    func markSkipCueSkipped(id: String) throws {
+        let sql = "UPDATE skip_cues SET wasSkipped = 1 WHERE id = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func markSkipCueDismissed(id: String) throws {
+        let sql = "UPDATE skip_cues SET userDismissed = 1 WHERE id = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    private func readSkipCue(_ stmt: OpaquePointer?) -> SkipCue {
+        SkipCue(
+            id: text(stmt, 0),
+            analysisAssetId: text(stmt, 1),
+            cueHash: text(stmt, 2),
+            startTime: sqlite3_column_double(stmt, 3),
+            endTime: sqlite3_column_double(stmt, 4),
+            confidence: sqlite3_column_double(stmt, 5),
+            source: text(stmt, 6),
+            materializedAt: sqlite3_column_double(stmt, 7),
+            wasSkipped: sqlite3_column_int(stmt, 8) != 0,
+            userDismissed: sqlite3_column_int(stmt, 9) != 0
+        )
     }
 
     // MARK: - CRUD: podcast_profiles

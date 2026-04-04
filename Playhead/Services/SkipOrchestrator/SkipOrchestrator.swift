@@ -240,6 +240,33 @@ actor SkipOrchestrator {
             cachedFeatureWindows = []
         }
 
+        // Pre-load materialized skip cues from prior analysis.
+        do {
+            let preCues = try await store.fetchSkipCues(for: analysisAssetId)
+            if !preCues.isEmpty {
+                let syntheticWindows = preCues.map { cue in
+                    AdWindow(
+                        id: cue.id,
+                        analysisAssetId: analysisAssetId,
+                        startTime: cue.startTime,
+                        endTime: cue.endTime,
+                        confidence: cue.confidence,
+                        boundaryState: "confirmed",
+                        decisionState: "confirmed",
+                        detectorVersion: "preAnalysis",
+                        advertiser: nil, product: nil, adDescription: nil,
+                        evidenceText: nil, evidenceStartTime: nil,
+                        metadataSource: "preAnalysis",
+                        metadataConfidence: nil, metadataPromptVersion: nil,
+                        wasSkipped: false, userDismissedBanner: false
+                    )
+                }
+                await receiveAdWindows(syntheticWindows)
+            }
+        } catch {
+            logger.warning("Failed to load pre-materialized cues: \(error.localizedDescription)")
+        }
+
         logger.info("Begin episode: asset=\(analysisAssetId)")
     }
 
