@@ -320,8 +320,8 @@ struct PreAnalysisIntegrationTests {
         let job = makeAnalysisJob(
             jobId: "flag-off",
             jobType: "playback",
-            state: "queued",
-            featureCoverageSec: 0
+            featureCoverageSec: 0,
+            state: "queued"
         )
         try await store.insertJob(job)
 

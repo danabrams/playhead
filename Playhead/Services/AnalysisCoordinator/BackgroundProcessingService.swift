@@ -30,6 +30,50 @@ private struct UncheckedSendableBox<T>: @unchecked Sendable {
     init(_ value: T) { self.value = value }
 }
 
+// MARK: - Protocols for Testability
+
+/// Abstracts BGProcessingTask for testability.
+@preconcurrency
+protocol BackgroundProcessingTaskProtocol: AnyObject, Sendable {
+    func setTaskCompleted(success: Bool)
+    var expirationHandler: (() -> Void)? { get set }
+}
+
+extension BGProcessingTask: BackgroundProcessingTaskProtocol {}
+
+/// Abstracts BGTaskScheduler for testability.
+protocol BackgroundTaskScheduling: Sendable {
+    func submit(_ taskRequest: BGTaskRequest) throws
+}
+
+extension BGTaskScheduler: BackgroundTaskScheduling {}
+
+/// Abstracts the analysis coordinator for testability.
+protocol AnalysisCoordinating: Sendable {
+    func start() async
+    func stop() async
+}
+
+extension AnalysisCoordinator: AnalysisCoordinating {}
+
+/// Abstracts battery state for testability.
+protocol BatteryStateProviding: Sendable {
+    func currentBatteryState() async -> (level: Float, isCharging: Bool)
+}
+
+/// Production implementation using UIDevice.
+struct UIDeviceBatteryProvider: BatteryStateProviding {
+    func currentBatteryState() async -> (level: Float, isCharging: Bool) {
+        await MainActor.run {
+            let device = UIDevice.current
+            device.isBatteryMonitoringEnabled = true
+            let level = device.batteryLevel
+            let charging = device.batteryState == .charging || device.batteryState == .full
+            return (level, charging)
+        }
+    }
+}
+
 // MARK: - Task Identifiers
 
 enum BackgroundTaskID {
@@ -49,8 +93,10 @@ actor BackgroundProcessingService {
 
     // MARK: - Dependencies
 
-    private let coordinator: AnalysisCoordinator
+    private let coordinator: any AnalysisCoordinating
     private let capabilitiesService: CapabilitiesService
+    private let taskScheduler: any BackgroundTaskScheduling
+    private let batteryProvider: any BatteryStateProviding
 
     /// Pre-analysis services, injected after construction via
     /// ``setPreAnalysisServices(scheduler:reconciler:)``.
@@ -98,9 +144,16 @@ actor BackgroundProcessingService {
 
     // MARK: - Init
 
-    init(coordinator: AnalysisCoordinator, capabilitiesService: CapabilitiesService) {
+    init(
+        coordinator: any AnalysisCoordinating,
+        capabilitiesService: CapabilitiesService,
+        taskScheduler: any BackgroundTaskScheduling = BGTaskScheduler.shared,
+        batteryProvider: any BatteryStateProviding = UIDeviceBatteryProvider()
+    ) {
         self.coordinator = coordinator
         self.capabilitiesService = capabilitiesService
+        self.taskScheduler = taskScheduler
+        self.batteryProvider = batteryProvider
     }
 
     /// Inject pre-analysis services after construction. Called once the
@@ -266,7 +319,7 @@ actor BackgroundProcessingService {
         request.requiresExternalPower = true
 
         do {
-            try BGTaskScheduler.shared.submit(request)
+            try taskScheduler.submit(request)
             logger.info("Backfill task scheduled")
         } catch {
             logger.error("Failed to schedule backfill task: \(error)")
@@ -281,7 +334,7 @@ actor BackgroundProcessingService {
         request.requiresExternalPower = false
 
         do {
-            try BGTaskScheduler.shared.submit(request)
+            try taskScheduler.submit(request)
             logger.info("Continued processing task scheduled: \(reason)")
         } catch {
             logger.error("Failed to schedule continued processing: \(error)")
@@ -292,7 +345,7 @@ actor BackgroundProcessingService {
 
     /// Safely complete a BGProcessingTask, guarding against double-completion.
     /// Both the work path and expiration handler call this; only the first wins.
-    private func markComplete(_ task: BGProcessingTask, success: Bool) {
+    func markComplete(_ task: any BackgroundProcessingTaskProtocol, success: Bool) {
         guard !bgTaskCompleted else {
             logger.debug("BGTask completion already called, ignoring duplicate")
             return
@@ -305,7 +358,7 @@ actor BackgroundProcessingService {
 
     /// Handle the backfill BGProcessingTask. Runs analysis on episodes that
     /// have incomplete transcription or ad detection.
-    private func handleBackfillTask(_ task: BGProcessingTask) {
+    func handleBackfillTask(_ task: any BackgroundProcessingTaskProtocol) {
         logger.info("Backfill task started")
 
         // Reset completion guard for this task invocation.
@@ -314,13 +367,12 @@ actor BackgroundProcessingService {
         // Schedule the next occurrence.
         scheduleBackfillIfNeeded()
 
-        let sendableTask = UncheckedSendableBox(task)
         let workTask = Task {
             // Check constraints before starting.
             let snapshot = await self.capabilitiesService.currentSnapshot
             guard !snapshot.shouldThrottleAnalysis else {
                 self.logger.info("Backfill skipped: thermal throttle active")
-                await self.markComplete(sendableTask.value, success: true)
+                await self.markComplete(task, success: true)
                 return
             }
 
@@ -330,7 +382,7 @@ actor BackgroundProcessingService {
             await self.coordinator.start()
 
             // Let the coordinator run until the task expires or completes.
-            await self.markComplete(sendableTask.value, success: true)
+            await self.markComplete(task, success: true)
             self.logger.info("Backfill task completed")
         }
 
@@ -340,27 +392,26 @@ actor BackgroundProcessingService {
         // hops to the actor via Task to check the completion guard.
         task.expirationHandler = { [weak self] in
             workTask.cancel()
-            Task { [weak self, sendableTask] in
-                await self?.handleExpiredProcessingTask(sendableTask.value)
+            Task { [weak self] in
+                await self?.handleExpiredProcessingTask(task)
             }
         }
     }
 
     /// Handle the continued processing BGProcessingTask. Only for
     /// user-initiated long-running work.
-    private func handleContinuedProcessingTask(_ task: BGProcessingTask) {
+    func handleContinuedProcessingTask(_ task: any BackgroundProcessingTaskProtocol) {
         logger.info("Continued processing task started")
 
         // Reset completion guard for this task invocation.
         bgTaskCompleted = false
 
-        let sendableTask = UncheckedSendableBox(task)
         let workTask = Task {
             // Continued processing is for user-initiated work like model
             // downloads. The coordinator handles checkpoint/resume.
             await self.coordinator.start()
 
-            await self.markComplete(sendableTask.value, success: true)
+            await self.markComplete(task, success: true)
             self.logger.info("Continued processing task completed")
         }
 
@@ -368,8 +419,8 @@ actor BackgroundProcessingService {
 
         task.expirationHandler = { [weak self] in
             workTask.cancel()
-            Task { [weak self, sendableTask] in
-                await self?.handleExpiredProcessingTask(sendableTask.value)
+            Task { [weak self] in
+                await self?.handleExpiredProcessingTask(task)
             }
         }
     }
@@ -377,7 +428,7 @@ actor BackgroundProcessingService {
     // MARK: - Thermal & Battery Management
 
     /// React to capability snapshot changes.
-    private func handleCapabilityUpdate(_ snapshot: CapabilitySnapshot) async {
+    func handleCapabilityUpdate(_ snapshot: CapabilitySnapshot) async {
         let previousThermalState = currentThermalState
         currentThermalState = snapshot.thermalState
         isLowPowerMode = snapshot.isLowPowerMode
@@ -425,17 +476,11 @@ actor BackgroundProcessingService {
         }
     }
 
-    /// Update cached battery state from UIDevice.
+    /// Update cached battery state from the battery provider.
     private func updateBatteryState() async {
-        let state = await MainActor.run { () -> (Float, Bool) in
-            let device = UIDevice.current
-            device.isBatteryMonitoringEnabled = true
-            let level = device.batteryLevel
-            let charging = device.batteryState == .charging || device.batteryState == .full
-            return (level, charging)
-        }
-        currentBatteryLevel = state.0
-        isCharging = state.1
+        let state = await batteryProvider.currentBatteryState()
+        currentBatteryLevel = state.level
+        isCharging = state.isCharging
     }
 
     /// Whether battery is below threshold and device is not charging.
@@ -443,7 +488,7 @@ actor BackgroundProcessingService {
         currentBatteryLevel >= 0 && currentBatteryLevel < Self.lowBatteryThreshold && !isCharging
     }
 
-    private func handleExpiredProcessingTask(_ task: BGProcessingTask) async {
+    func handleExpiredProcessingTask(_ task: any BackgroundProcessingTaskProtocol) async {
         await coordinator.stop()
         await markComplete(task, success: false)
     }
@@ -452,7 +497,7 @@ actor BackgroundProcessingService {
 
     /// Handle the pre-analysis recovery BGProcessingTask. Runs reconciliation
     /// to find interrupted T0/T1+ jobs and resumes them.
-    private func handlePreAnalysisRecovery(_ task: BGProcessingTask) async {
+    func handlePreAnalysisRecovery(_ task: any BackgroundProcessingTaskProtocol) async {
         logger.info("Pre-analysis recovery task started")
 
         bgTaskCompleted = false
@@ -466,10 +511,9 @@ actor BackgroundProcessingService {
             return
         }
 
-        let sendableTask = UncheckedSendableBox(task)
         let workTask = Task {
             _ = try? await reconciler.reconcile()
-            await self.markComplete(sendableTask.value, success: true)
+            await self.markComplete(task, success: true)
             self.logger.info("Pre-analysis recovery task completed")
         }
 
@@ -477,9 +521,9 @@ actor BackgroundProcessingService {
 
         task.expirationHandler = { [weak self] in
             workTask.cancel()
-            Task { [weak self, sendableTask] in
+            Task { [weak self] in
                 await self?.analysisWorkScheduler?.cancelCurrentJob()
-                await self?.markComplete(sendableTask.value, success: false)
+                await self?.markComplete(task, success: false)
             }
         }
     }
@@ -491,7 +535,7 @@ actor BackgroundProcessingService {
         request.requiresExternalPower = true
         request.earliestBeginDate = Date(timeIntervalSinceNow: 60)
         do {
-            try BGTaskScheduler.shared.submit(request)
+            try taskScheduler.submit(request)
             logger.info("Scheduled pre-analysis recovery task")
         } catch {
             logger.error("Failed to schedule pre-analysis recovery: \(error)")
