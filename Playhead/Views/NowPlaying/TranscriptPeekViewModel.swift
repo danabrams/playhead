@@ -123,18 +123,46 @@ final class TranscriptPeekViewModel {
     }
 
     /// Debug stats summary for TestFlight diagnostics.
-    var debugStats: String {
+    private(set) var debugStats: String = "loading…"
+
+    private func updateDebugStats() async {
         let count = chunks.count
-        guard count > 0 else { return "0 chunks" }
-        let minTime = chunks.first?.startTime ?? 0
-        let maxTime = chunks.last?.endTime ?? 0
-        let adCount = adWindows.count
         let fmt = { (t: Double) -> String in
             let m = Int(t) / 60
             let s = Int(t) % 60
             return String(format: "%d:%02d", m, s)
         }
-        return "\(count) chunks · \(fmt(minTime))–\(fmt(maxTime)) · \(adCount) ads"
+
+        var parts: [String] = []
+
+        // Chunk count + time range
+        if count > 0 {
+            let minTime = chunks.first?.startTime ?? 0
+            let maxTime = chunks.last?.endTime ?? 0
+            parts.append("\(count) chunks \(fmt(minTime))–\(fmt(maxTime))")
+        } else {
+            parts.append("0 chunks")
+        }
+
+        // Ad window count
+        parts.append("\(adWindows.count) ads")
+
+        // Asset coverage watermark + session state from store
+        do {
+            let asset = try await store.fetchAsset(id: analysisAssetId)
+            if let cov = asset?.fastTranscriptCoverageEndTime {
+                parts.append("cov \(fmt(cov))")
+            }
+
+            let session = try await store.fetchLatestSessionForAsset(assetId: analysisAssetId)
+            if let session {
+                parts.append(session.state)
+            }
+        } catch {
+            parts.append("err")
+        }
+
+        debugStats = parts.joined(separator: " · ")
     }
 
     // MARK: - Private
@@ -154,6 +182,7 @@ final class TranscriptPeekViewModel {
 
             chunks = deduped
             adWindows = freshAds
+            await updateDebugStats()
         } catch {
             logger.error("Failed to refresh transcript chunks: \(error)")
         }
