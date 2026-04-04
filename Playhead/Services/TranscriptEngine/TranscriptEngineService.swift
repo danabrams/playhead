@@ -157,6 +157,7 @@ actor TranscriptEngineService {
                 shards: shards,
                 analysisAssetId: analysisAssetId
             )
+            await self.clearActiveTask()
         }
     }
 
@@ -210,6 +211,7 @@ actor TranscriptEngineService {
                     shards: [],  // empty — the loop will pick up from appendedShards
                     analysisAssetId: analysisAssetId
                 )
+                await self.clearActiveTask()
             }
         }
     }
@@ -222,6 +224,12 @@ actor TranscriptEngineService {
         latestSnapshot = nil
         chunkCounter = 0
         appendedShards = []
+    }
+
+    /// Clear the active task reference when the loop completes,
+    /// so appendShards knows to start a new loop.
+    private func clearActiveTask() {
+        activeTask = nil
     }
 
     /// Whether transcription is currently in progress.
