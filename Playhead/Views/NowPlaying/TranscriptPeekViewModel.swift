@@ -147,11 +147,22 @@ final class TranscriptPeekViewModel {
         // Ad window count
         parts.append("\(adWindows.count) ads")
 
-        // Asset coverage watermark + session state from store
+        // Raw chunk count (before dedup) to detect if writes are missing
+        do {
+            let rawChunks = try await store.fetchTranscriptChunks(assetId: analysisAssetId)
+            if rawChunks.count != count {
+                parts.append("raw \(rawChunks.count)")
+            }
+        } catch {}
+
+        // Asset coverage watermarks + session state from store
         do {
             let asset = try await store.fetchAsset(id: analysisAssetId)
-            if let cov = asset?.fastTranscriptCoverageEndTime {
-                parts.append("cov \(fmt(cov))")
+            if let featCov = asset?.featureCoverageEndTime {
+                parts.append("feat \(fmt(featCov))")
+            }
+            if let txCov = asset?.fastTranscriptCoverageEndTime {
+                parts.append("tx \(fmt(txCov))")
             }
 
             let session = try await store.fetchLatestSessionForAsset(assetId: analysisAssetId)
