@@ -63,6 +63,14 @@ enum AdBoundaryState: String, Sendable {
     case acousticRefined
 }
 
+// MARK: - AdDetectionProviding
+
+/// Protocol abstraction for ad detection, enabling test stubs.
+protocol AdDetectionProviding: Sendable {
+    func runHotPath(chunks: [TranscriptChunk], analysisAssetId: String, episodeDuration: Double) async throws -> [AdWindow]
+    func runBackfill(chunks: [TranscriptChunk], analysisAssetId: String, podcastId: String, episodeDuration: Double) async throws
+}
+
 // MARK: - AdDetectionService
 
 /// Composes LexicalScanner (Layer 1), acoustic boundary refinement (Layer 0),
@@ -626,3 +634,7 @@ actor AdDetectionService {
         return merged.sorted()
     }
 }
+
+// MARK: - AdDetectionProviding Conformance
+
+extension AdDetectionService: AdDetectionProviding {}

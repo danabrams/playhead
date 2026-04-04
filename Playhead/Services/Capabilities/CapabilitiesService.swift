@@ -11,6 +11,14 @@ import UIKit
 import FoundationModels
 #endif
 
+// MARK: - CapabilitiesProviding
+
+/// Protocol abstraction for capability queries, enabling test stubs.
+protocol CapabilitiesProviding: Sendable {
+    var currentSnapshot: CapabilitySnapshot { get async }
+    func capabilityUpdates() async -> AsyncStream<CapabilitySnapshot>
+}
+
 // MARK: - CapabilitiesService
 
 /// Actor that detects device capabilities and publishes changes.
@@ -217,3 +225,7 @@ actor CapabilitiesService {
         observerTokens.removeAll()
     }
 }
+
+// MARK: - CapabilitiesProviding Conformance
+
+extension CapabilitiesService: CapabilitiesProviding {}

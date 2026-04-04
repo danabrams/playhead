@@ -177,6 +177,13 @@ private struct ShardManifestEntry: Codable, Sendable {
     let duration: TimeInterval
 }
 
+// MARK: - AnalysisAudioProviding
+
+/// Protocol abstraction for audio decoding, enabling test stubs.
+protocol AnalysisAudioProviding: Sendable {
+    func decode(fileURL: LocalAudioURL, episodeID: String, shardDuration: TimeInterval) async throws -> [AnalysisShard]
+}
+
 // MARK: - AnalysisAudioService
 
 /// Decodes cached podcast audio into reusable 16 kHz mono shards for the
@@ -569,3 +576,7 @@ actor AnalysisAudioService {
         return Array(UnsafeBufferPointer(start: outData[0], count: outputCount))
     }
 }
+
+// MARK: - AnalysisAudioProviding Conformance
+
+extension AnalysisAudioService: AnalysisAudioProviding {}

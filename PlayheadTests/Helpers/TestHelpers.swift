@@ -2,6 +2,7 @@
 // Shared test utilities used across PlayheadTests suites.
 
 import Foundation
+@testable import Playhead
 
 /// Creates a uniquely-named temporary directory for test isolation.
 /// Caller is responsible for cleanup (e.g., via `defer`, `addTeardownBlock`,
@@ -31,4 +32,38 @@ final class TestTempDirTracker: @unchecked Sendable {
             try? FileManager.default.removeItem(at: dir)
         }
     }
+}
+
+// MARK: - AnalysisStore Factory
+
+/// Shared tracker for test store temp directories.
+private let _sharedTestStoreDirs = TestTempDirTracker()
+
+/// Creates an AnalysisStore backed by a temporary directory for isolated testing.
+/// The directory is automatically cleaned up when the test process ends.
+func makeTestStore() async throws -> AnalysisStore {
+    let dir = try makeTempDir(prefix: "PlayheadTests")
+    _sharedTestStoreDirs.track(dir)
+    let store = try AnalysisStore(directory: dir)
+    try await store.migrate()
+    return store
+}
+
+// MARK: - AnalysisShard Factory
+
+/// Creates a test AnalysisShard with sensible defaults. Silence samples are used
+/// so the shard is lightweight yet passes any non-empty-sample checks.
+func makeShard(
+    id: Int = 0,
+    episodeID: String = "test-ep",
+    startTime: TimeInterval = 0,
+    duration: TimeInterval = 30
+) -> AnalysisShard {
+    AnalysisShard(
+        id: id,
+        episodeID: episodeID,
+        startTime: startTime,
+        duration: duration,
+        samples: [Float](repeating: 0, count: 16000 * Int(duration))
+    )
 }

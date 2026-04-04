@@ -86,6 +86,14 @@ enum DownloadManagerError: Error, CustomStringConvertible {
     }
 }
 
+// MARK: - DownloadProviding
+
+/// Protocol abstraction for download queries, enabling test stubs.
+protocol DownloadProviding: Sendable {
+    func cachedFileURL(for episodeId: String) async -> URL?
+    func fingerprint(for episodeId: String) async -> AudioFingerprint?
+}
+
 // MARK: - DownloadManager
 
 /// Manages background downloads and progressive caching for podcast
@@ -793,6 +801,10 @@ actor DownloadManager {
     }
 
 }
+
+// MARK: - DownloadProviding Conformance
+
+extension DownloadManager: DownloadProviding {}
 
 // MARK: - EpisodeDownloadDelegate
 
