@@ -70,7 +70,10 @@ final class PlaybackService: NSObject, Sendable {
     // MARK: - Progressive Loader
 
     /// Retains the resource loader delegate for progressive playback.
-    private var progressiveLoader: ProgressiveResourceLoader?
+    /// nonisolated(unsafe) because the loader's delegate callbacks run on
+    /// its own dispatch queue, not on PlaybackServiceActor. The loader is
+    /// only set/cleared from the actor; its methods are thread-safe.
+    nonisolated(unsafe) private var progressiveLoader: ProgressiveResourceLoader?
 
     // MARK: - State
 
