@@ -173,6 +173,10 @@ private extension TranscriptPeekView {
             startTime: chunk.startTime,
             endTime: chunk.endTime
         )
+        let adScore = peekViewModel.adConfidence(
+            startTime: chunk.startTime,
+            endTime: chunk.endTime
+        )
 
         return HStack(alignment: .top, spacing: Spacing.xs) {
             // Copper accent bar for active chunk
@@ -184,12 +188,20 @@ private extension TranscriptPeekView {
             }
 
             VStack(alignment: .leading, spacing: Spacing.xxs) {
-                // Timestamp
-                Text(TimeFormatter.formatTime(chunk.startTime))
-                    .font(AppTypography.mono(size: 10, weight: .medium))
-                    .foregroundStyle(
-                        isActive ? AppColors.accent : AppColors.metadata
-                    )
+                // Timestamp + ad score debug badge
+                HStack(spacing: Spacing.xs) {
+                    Text(TimeFormatter.formatTime(chunk.startTime))
+                        .font(AppTypography.mono(size: 10, weight: .medium))
+                        .foregroundStyle(
+                            isActive ? AppColors.accent : AppColors.metadata
+                        )
+
+                    if let score = adScore {
+                        Text(String(format: "AD %.0f%%", score * 100))
+                            .font(AppTypography.mono(size: 9, weight: .bold))
+                            .foregroundStyle(.red)
+                    }
+                }
 
                 // Transcript text
                 Text(chunk.text)

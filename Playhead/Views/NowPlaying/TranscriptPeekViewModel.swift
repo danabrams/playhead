@@ -114,6 +114,14 @@ final class TranscriptPeekViewModel {
         }
     }
 
+    /// Returns the highest ad confidence score overlapping this chunk, or nil.
+    func adConfidence(startTime: Double, endTime: Double) -> Double? {
+        let overlapping = adWindows.filter { ad in
+            ad.startTime < endTime && ad.endTime > startTime
+        }
+        return overlapping.map(\.confidence).max()
+    }
+
     // MARK: - Private
 
     private func refresh() async {
