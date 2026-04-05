@@ -785,10 +785,15 @@ actor AnalysisCoordinator {
         // feedData emits shards before anyone is listening (continuation would be nil).
         let shardStream = await decoder.shards()
 
-        // Task 1: Seed decoder with bytes already on disk, then stream new bytes.
+        // Task 1: Subscribe to live stream first, then seed from disk.
+        // Subscribe BEFORE reading the file so we don't miss chunks that
+        // arrive between the file read and the subscription.
         downloadProgressTask = Task {
-            // Seed with existing file contents — the download is already in
-            // progress, so the first N bytes are on disk but missed the stream.
+            let dataStream = await dm.audioDataUpdates()
+
+            // Seed with the file already on disk. This captures all bytes
+            // downloaded before we subscribed, including the case where the
+            // download has already completed.
             if let url = self.activeAudioURL?.url,
                let existingData = try? Data(contentsOf: url) {
                 self.streamingSeededBytes = existingData.count
@@ -798,17 +803,32 @@ actor AnalysisCoordinator {
                 self.logger.warning("Streaming decode: no file to seed from (activeAudioURL=\(String(describing: self.activeAudioURL)))")
             }
 
-            // Now subscribe to live bytes as they arrive.
-            let dataStream = await dm.audioDataUpdates()
+            // Consume live bytes. If the download already completed before
+            // we subscribed, this loop receives zero chunks and exits when
+            // we break below via timeout.
+            var receivedAny = false
             for await chunk in dataStream {
                 guard !Task.isCancelled else { break }
                 guard chunk.episodeId == episodeId else { continue }
+                receivedAny = true
                 self.streamingChunksReceived += 1
                 await decoder.feedData(chunk.data)
             }
-            // Download finished — flush remaining audio.
+
+            // If we never received live chunks, the download completed
+            // before we subscribed. Re-read the file to get everything.
+            if !receivedAny, let url = self.activeAudioURL?.url,
+               let fullData = try? Data(contentsOf: url) {
+                let alreadySeeded = self.streamingSeededBytes
+                if fullData.count > alreadySeeded {
+                    let newBytes = fullData.subdata(in: alreadySeeded..<fullData.count)
+                    self.logger.info("Streaming decode: late read \(newBytes.count) new bytes (total \(fullData.count))")
+                    await decoder.feedData(newBytes)
+                }
+            }
+
             await decoder.finish()
-            self.logger.info("Streaming decode: download complete, decoder finished")
+            self.logger.info("Streaming decode complete, decoder finished")
         }
 
         // Task 2: Consume emitted shards and feed to transcript + features.
