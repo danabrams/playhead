@@ -11,6 +11,21 @@ import Foundation
 import Testing
 @testable import Playhead
 
+private actor LoaderDriver {
+    let loader: ProgressiveResourceLoader
+
+    init(loader: ProgressiveResourceLoader) {
+        self.loader = loader
+    }
+
+    func toggleSuspendResume(times: Int) {
+        for _ in 0..<times {
+            loader.suspend()
+            loader.resume()
+        }
+    }
+}
+
 // MARK: - Actor Isolation
 
 @Suite("PlaybackServiceActor – Isolation")
@@ -130,6 +145,7 @@ struct ProgressiveLoaderDecouplingTests {
             totalBytes: 8192,
             contentType: "public.mp3"
         )
+        let loaderDriver = LoaderDriver(loader: loader)
 
         let service = await PlaybackService()
 
@@ -145,13 +161,8 @@ struct ProgressiveLoaderDecouplingTests {
                 }
             }
 
-            // Loader-side: suspend/resume (simulating interruption).
-            nonisolated(unsafe) let unsafeLoader = loader
             group.addTask {
-                for _ in 0..<50 {
-                    unsafeLoader.suspend()
-                    unsafeLoader.resume()
-                }
+                await loaderDriver.toggleSuspendResume(times: 50)
             }
         }
 
