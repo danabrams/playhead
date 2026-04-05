@@ -470,23 +470,27 @@ final class PlaybackService: NSObject, Sendable {
     private func configureRemoteCommands() {
         let center = MPRemoteCommandCenter.shared()
 
+        // NOTE: These closures run on whatever thread MediaPlayer dispatches
+        // the command from (usually main). Accessing `self` synchronously
+        // here triggers a Swift 6 actor isolation check and aborts because
+        // we're on @PlaybackServiceActor, not the main thread. Move all
+        // weak-self unwrapping inside the Task to avoid the isolation trap.
+
         let playTarget = center.playCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            Task { @PlaybackServiceActor in self.play() }
+            Task { @PlaybackServiceActor [weak self] in self?.play() }
             return .success
         }
         remoteCommandTargets.append((center.playCommand, playTarget))
 
         let pauseTarget = center.pauseCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            Task { @PlaybackServiceActor in self.pause() }
+            Task { @PlaybackServiceActor [weak self] in self?.pause() }
             return .success
         }
         remoteCommandTargets.append((center.pauseCommand, pauseTarget))
 
         let toggleTarget = center.togglePlayPauseCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            Task { @PlaybackServiceActor in
+            Task { @PlaybackServiceActor [weak self] in
+                guard let self else { return }
                 if case .playing = self._state.status {
                     self.pause()
                 } else {
@@ -501,8 +505,7 @@ final class PlaybackService: NSObject, Sendable {
             NSNumber(value: Self.skipForwardSeconds)
         ]
         let skipFwdTarget = center.skipForwardCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            Task { @PlaybackServiceActor in await self.skipForward() }
+            Task { @PlaybackServiceActor [weak self] in await self?.skipForward() }
             return .success
         }
         remoteCommandTargets.append((center.skipForwardCommand, skipFwdTarget))
@@ -511,18 +514,17 @@ final class PlaybackService: NSObject, Sendable {
             NSNumber(value: Self.skipBackwardSeconds)
         ]
         let skipBwdTarget = center.skipBackwardCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            Task { @PlaybackServiceActor in await self.skipBackward() }
+            Task { @PlaybackServiceActor [weak self] in await self?.skipBackward() }
             return .success
         }
         remoteCommandTargets.append((center.skipBackwardCommand, skipBwdTarget))
 
         let positionTarget = center.changePlaybackPositionCommand.addTarget { [weak self] event in
-            guard let self,
-                  let positionEvent = event as? MPChangePlaybackPositionCommandEvent
+            guard let positionEvent = event as? MPChangePlaybackPositionCommandEvent
             else { return .commandFailed }
-            Task { @PlaybackServiceActor in
-                await self.seek(to: positionEvent.positionTime)
+            let position = positionEvent.positionTime
+            Task { @PlaybackServiceActor [weak self] in
+                await self?.seek(to: position)
             }
             return .success
         }
@@ -532,11 +534,11 @@ final class PlaybackService: NSObject, Sendable {
             0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
         ]
         let rateTarget = center.changePlaybackRateCommand.addTarget { [weak self] event in
-            guard let self,
-                  let rateEvent = event as? MPChangePlaybackRateCommandEvent
+            guard let rateEvent = event as? MPChangePlaybackRateCommandEvent
             else { return .commandFailed }
-            Task { @PlaybackServiceActor in
-                self.setSpeed(rateEvent.playbackRate)
+            let rate = rateEvent.playbackRate
+            Task { @PlaybackServiceActor [weak self] in
+                self?.setSpeed(rate)
             }
             return .success
         }
