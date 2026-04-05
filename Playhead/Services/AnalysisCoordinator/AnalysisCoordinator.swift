@@ -853,8 +853,10 @@ actor AnalysisCoordinator {
             for await shard in shardStream {
                 guard !Task.isCancelled else { break }
 
-                // Skip shards already covered by the initial decode.
-                if shard.startTime + shard.duration <= initialCoverageEnd {
+                // Skip shards that overlap with the initial decode at all.
+                // A shard starting at 2:00 with the initial covering 0:00-2:23
+                // would produce duplicate transcript for the 2:00-2:23 range.
+                if shard.startTime < initialCoverageEnd {
                     continue
                 }
 
