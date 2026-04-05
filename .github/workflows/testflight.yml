@@ -171,10 +171,24 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload to TestFlight
-        uses: apple-actions/upload-testflight-build@v4
-        with:
-          app-path: ${{ env.IPA_PATH }}
-          issuer-id: ${{ secrets.APPSTORE_ISSUER_ID }}
-          api-key-id: ${{ secrets.APPSTORE_KEY_ID }}
-          api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
-          release-notes: ${{ inputs.release_notes }}
+        shell: bash
+        env:
+          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+          APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          key_dir="$HOME/.appstoreconnect/private_keys"
+          key_path="$key_dir/AuthKey_${APPSTORE_KEY_ID}.p8"
+          mkdir -p "$key_dir"
+          trap 'rm -f "$key_path"' EXIT
+          printf '%s' "$APPSTORE_API_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+
+          xcrun altool \
+            --output-format xml \
+            --upload-app \
+            --file "$IPA_PATH" \
+            --type ios \
+            --apiKey "$APPSTORE_KEY_ID" \
+            --apiIssuer "$APPSTORE_ISSUER_ID"
