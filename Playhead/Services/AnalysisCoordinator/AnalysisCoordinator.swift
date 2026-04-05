@@ -753,6 +753,12 @@ actor AnalysisCoordinator {
     private var streamingShardsEmitted: Int = 0 {
         didSet { UserDefaults.standard.set(streamingShardsEmitted, forKey: "debug_streamingShards") }
     }
+    private var streamingSeededBytes: Int = 0 {
+        didSet { UserDefaults.standard.set(streamingSeededBytes, forKey: "debug_streamingSeeded") }
+    }
+    private var streamingChunksReceived: Int = 0 {
+        didSet { UserDefaults.standard.set(streamingChunksReceived, forKey: "debug_streamingChunks") }
+    }
 
     private func startStreamingDecode(
         episodeId: String,
@@ -766,6 +772,8 @@ actor AnalysisCoordinator {
         }
 
         streamingShardsEmitted = 0
+        streamingSeededBytes = 0
+        streamingChunksReceived = 0
         let decoder = StreamingAudioDecoder(
             episodeID: episodeId,
             shardDuration: 30.0,
@@ -783,8 +791,11 @@ actor AnalysisCoordinator {
             // progress, so the first N bytes are on disk but missed the stream.
             if let url = self.activeAudioURL?.url,
                let existingData = try? Data(contentsOf: url) {
+                self.streamingSeededBytes = existingData.count
                 self.logger.info("Streaming decode: seeding \(existingData.count) bytes from disk")
                 await decoder.feedData(existingData)
+            } else {
+                self.logger.warning("Streaming decode: no file to seed from (activeAudioURL=\(String(describing: self.activeAudioURL)))")
             }
 
             // Now subscribe to live bytes as they arrive.
@@ -792,6 +803,7 @@ actor AnalysisCoordinator {
             for await chunk in dataStream {
                 guard !Task.isCancelled else { break }
                 guard chunk.episodeId == episodeId else { continue }
+                self.streamingChunksReceived += 1
                 await decoder.feedData(chunk.data)
             }
             // Download finished — flush remaining audio.

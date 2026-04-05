@@ -174,10 +174,10 @@ final class TranscriptPeekViewModel {
         }
 
         // Streaming decode diagnostics.
-        let streamShards = UserDefaults.standard.integer(forKey: "debug_streamingShards")
-        if streamShards > 0 {
-            parts.append("str:\(streamShards)")
-        }
+        let seed = UserDefaults.standard.integer(forKey: "debug_streamingSeeded")
+        let chunks = UserDefaults.standard.integer(forKey: "debug_streamingChunks")
+        let strShards = UserDefaults.standard.integer(forKey: "debug_streamingShards")
+        parts.append("s:\(seed/1024)k c:\(chunks) sh:\(strShards)")
 
         debugStats = parts.joined(separator: " · ")
     }
