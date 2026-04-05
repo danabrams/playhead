@@ -2,6 +2,7 @@
 // Tests for the Speech integration layer and dual-pass transcript engine.
 
 import Foundation
+import os
 import Testing
 @testable import Playhead
 
@@ -259,5 +260,103 @@ struct TranscriptTypeTests {
     func passTypeValues() {
         #expect(TranscriptPassType.fast.rawValue == "fast")
         #expect(TranscriptPassType.final_.rawValue == "final")
+    }
+}
+
+// MARK: - Tracking Recognizer
+
+/// Mock recognizer that records which shard IDs were transcribed.
+private final class TrackingRecognizer: SpeechRecognizer, @unchecked Sendable {
+    private var loaded = false
+    private let _shardIds = OSAllocatedUnfairLock(initialState: [Int]())
+    var transcribedShardIds: [Int] { _shardIds.withLock { $0 } }
+
+    func loadModel(from directory: URL) async throws { loaded = true }
+    func unloadModel() async { loaded = false }
+    func isModelLoaded() async -> Bool { loaded }
+
+    func transcribe(shard: AnalysisShard) async throws -> [TranscriptSegment] {
+        guard loaded else { throw TranscriptEngineError.modelNotLoaded }
+        _shardIds.withLock { $0.append(shard.id) }
+
+        let word = TranscriptWord(
+            text: "shard\(shard.id)",
+            startTime: shard.startTime,
+            endTime: shard.startTime + shard.duration,
+            confidence: 0.9
+        )
+        return [TranscriptSegment(
+            id: shard.id,
+            words: [word],
+            text: "shard\(shard.id)",
+            startTime: shard.startTime,
+            endTime: shard.startTime + shard.duration,
+            avgConfidence: 0.9,
+            passType: .fast
+        )]
+    }
+
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
+        [VADResult(isSpeech: true, speechProbability: 1.0,
+                   startTime: shard.startTime,
+                   endTime: shard.startTime + shard.duration)]
+    }
+}
+
+// MARK: - Incremental Shard Append Regression Tests
+
+@Suite("TranscriptEngine – Incremental Shard Append")
+struct IncrementalShardAppendTests {
+
+    @Test("appendShards processes new shards after initial loop completes")
+    func appendShardsAfterCompletion() async throws {
+        let store = try await makeTestStore()
+        let recognizer = TrackingRecognizer()
+        let speech = SpeechService(recognizer: recognizer)
+        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+
+        let initialShards = [
+            makeShard(id: 0, startTime: 0, duration: 30),
+            makeShard(id: 1, startTime: 30, duration: 30),
+            makeShard(id: 2, startTime: 60, duration: 30),
+        ]
+
+        // Start transcription with initial shards and wait for completion.
+        let events = await engine.events()
+        await engine.startTranscription(
+            shards: initialShards,
+            analysisAssetId: "asset-1",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+
+        // Wait for .completed event.
+        for await event in events {
+            if case .completed = event { break }
+        }
+
+        // Verify initial shards were transcribed.
+        let initialCount = recognizer.transcribedShardIds.count
+        #expect(initialCount >= 3, "Expected at least 3 shards transcribed, got \(initialCount)")
+
+        // Now append new shards (simulating incremental download).
+        let newShards = [
+            makeShard(id: 10, startTime: 300, duration: 30),
+            makeShard(id: 11, startTime: 330, duration: 30),
+        ]
+        await engine.appendShards(
+            newShards,
+            analysisAssetId: "asset-1",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+
+        // Give the loop time to process (it runs in a Task on the actor).
+        try await Task.sleep(for: .seconds(2))
+
+        // The appended shards must have been transcribed.
+        let allIds = recognizer.transcribedShardIds
+        #expect(allIds.contains(10), "Shard 10 should have been transcribed after append")
+        #expect(allIds.contains(11), "Shard 11 should have been transcribed after append")
     }
 }
