@@ -85,8 +85,8 @@ final class PlaybackService: NSObject, Sendable {
     private var rateObservation: NSKeyValueObservation?
     private var itemStatusObservation: NSKeyValueObservation?
 
-    /// Opaque targets returned by MPRemoteCommandCenter.addTarget so we can remove them.
-    private var remoteCommandTargets: [(MPRemoteCommand, Any)] = []
+    /// Commands we registered target/action on, for cleanup.
+    private var registeredCommands: [MPRemoteCommand] = []
 
     // MARK: - Init
 
@@ -467,90 +467,104 @@ final class PlaybackService: NSObject, Sendable {
 
     // MARK: - Remote Commands
 
+    /// Register for remote commands using ObjC target/action instead of
+    /// Swift closures. Closures formed inside a @PlaybackServiceActor method
+    /// inherit actor isolation; when MediaPlayer invokes them from the main
+    /// thread the Swift 6 runtime aborts with an isolation check failure.
+    /// ObjC target/action dispatch bypasses Swift actor isolation entirely.
     private func configureRemoteCommands() {
         let center = MPRemoteCommandCenter.shared()
 
-        // NOTE: These closures run on whatever thread MediaPlayer dispatches
-        // the command from (usually main). Accessing `self` synchronously
-        // here triggers a Swift 6 actor isolation check and aborts because
-        // we're on @PlaybackServiceActor, not the main thread. Move all
-        // weak-self unwrapping inside the Task to avoid the isolation trap.
-
-        let playTarget = center.playCommand.addTarget { [weak self] _ in
-            Task { @PlaybackServiceActor [weak self] in self?.play() }
-            return .success
-        }
-        remoteCommandTargets.append((center.playCommand, playTarget))
-
-        let pauseTarget = center.pauseCommand.addTarget { [weak self] _ in
-            Task { @PlaybackServiceActor [weak self] in self?.pause() }
-            return .success
-        }
-        remoteCommandTargets.append((center.pauseCommand, pauseTarget))
-
-        let toggleTarget = center.togglePlayPauseCommand.addTarget { [weak self] _ in
-            Task { @PlaybackServiceActor [weak self] in
-                guard let self else { return }
-                if case .playing = self._state.status {
-                    self.pause()
-                } else {
-                    self.play()
-                }
-            }
-            return .success
-        }
-        remoteCommandTargets.append((center.togglePlayPauseCommand, toggleTarget))
+        center.playCommand.addTarget(self, action: #selector(handlePlayCommand(_:)))
+        center.pauseCommand.addTarget(self, action: #selector(handlePauseCommand(_:)))
+        center.togglePlayPauseCommand.addTarget(self, action: #selector(handleToggleCommand(_:)))
 
         center.skipForwardCommand.preferredIntervals = [
             NSNumber(value: Self.skipForwardSeconds)
         ]
-        let skipFwdTarget = center.skipForwardCommand.addTarget { [weak self] _ in
-            Task { @PlaybackServiceActor [weak self] in await self?.skipForward() }
-            return .success
-        }
-        remoteCommandTargets.append((center.skipForwardCommand, skipFwdTarget))
+        center.skipForwardCommand.addTarget(self, action: #selector(handleSkipForwardCommand(_:)))
 
         center.skipBackwardCommand.preferredIntervals = [
             NSNumber(value: Self.skipBackwardSeconds)
         ]
-        let skipBwdTarget = center.skipBackwardCommand.addTarget { [weak self] _ in
-            Task { @PlaybackServiceActor [weak self] in await self?.skipBackward() }
-            return .success
-        }
-        remoteCommandTargets.append((center.skipBackwardCommand, skipBwdTarget))
+        center.skipBackwardCommand.addTarget(self, action: #selector(handleSkipBackwardCommand(_:)))
 
-        let positionTarget = center.changePlaybackPositionCommand.addTarget { [weak self] event in
-            guard let positionEvent = event as? MPChangePlaybackPositionCommandEvent
-            else { return .commandFailed }
-            let position = positionEvent.positionTime
-            Task { @PlaybackServiceActor [weak self] in
-                await self?.seek(to: position)
-            }
-            return .success
-        }
-        remoteCommandTargets.append((center.changePlaybackPositionCommand, positionTarget))
+        center.changePlaybackPositionCommand.addTarget(self, action: #selector(handleChangePositionCommand(_:)))
 
         center.changePlaybackRateCommand.supportedPlaybackRates = [
             0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
         ]
-        let rateTarget = center.changePlaybackRateCommand.addTarget { [weak self] event in
-            guard let rateEvent = event as? MPChangePlaybackRateCommandEvent
-            else { return .commandFailed }
-            let rate = rateEvent.playbackRate
-            Task { @PlaybackServiceActor [weak self] in
-                self?.setSpeed(rate)
-            }
-            return .success
-        }
-        remoteCommandTargets.append((center.changePlaybackRateCommand, rateTarget))
+        center.changePlaybackRateCommand.addTarget(self, action: #selector(handleChangeRateCommand(_:)))
+
+        registeredCommands = [
+            center.playCommand,
+            center.pauseCommand,
+            center.togglePlayPauseCommand,
+            center.skipForwardCommand,
+            center.skipBackwardCommand,
+            center.changePlaybackPositionCommand,
+            center.changePlaybackRateCommand,
+        ]
     }
 
     /// Remove all registered remote command targets to prevent leaks.
     private func removeRemoteCommandTargets() {
-        for (command, target) in remoteCommandTargets {
-            command.removeTarget(target)
+        for command in registeredCommands {
+            command.removeTarget(self)
         }
-        remoteCommandTargets.removeAll()
+        registeredCommands.removeAll()
+    }
+
+    // MARK: - Remote Command Handlers (nonisolated @objc for ObjC dispatch)
+
+    // These are nonisolated so MediaPlayer can call them from any thread
+    // without triggering Swift actor isolation checks. Each handler fires
+    // a Task to hop onto PlaybackServiceActor for the actual work.
+
+    @objc nonisolated private func handlePlayCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        Task { @PlaybackServiceActor [weak self] in self?.play() }
+        return .success
+    }
+
+    @objc nonisolated private func handlePauseCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        Task { @PlaybackServiceActor [weak self] in self?.pause() }
+        return .success
+    }
+
+    @objc nonisolated private func handleToggleCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        Task { @PlaybackServiceActor [weak self] in
+            guard let self else { return }
+            if case .playing = self._state.status {
+                self.pause()
+            } else {
+                self.play()
+            }
+        }
+        return .success
+    }
+
+    @objc nonisolated private func handleSkipForwardCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        Task { @PlaybackServiceActor [weak self] in await self?.skipForward() }
+        return .success
+    }
+
+    @objc nonisolated private func handleSkipBackwardCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        Task { @PlaybackServiceActor [weak self] in await self?.skipBackward() }
+        return .success
+    }
+
+    @objc nonisolated private func handleChangePositionCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        guard let positionEvent = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+        let position = positionEvent.positionTime
+        Task { @PlaybackServiceActor [weak self] in await self?.seek(to: position) }
+        return .success
+    }
+
+    @objc nonisolated private func handleChangeRateCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        guard let rateEvent = event as? MPChangePlaybackRateCommandEvent else { return .commandFailed }
+        let rate = rateEvent.playbackRate
+        Task { @PlaybackServiceActor [weak self] in self?.setSpeed(rate) }
+        return .success
     }
 
     // MARK: - State Update
