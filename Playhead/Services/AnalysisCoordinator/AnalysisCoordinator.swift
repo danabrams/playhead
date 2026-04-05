@@ -410,6 +410,8 @@ actor AnalysisCoordinator {
     private func handleStopped() {
         cancelPipeline()
         Task { await self.transcriptEngine.stop() }
+        Task { await self.activeDecoder?.cleanup() }
+        activeDecoder = nil
         activeEpisodeId = nil
         activePodcastId = nil
         activeSessionId = nil
@@ -455,10 +457,10 @@ actor AnalysisCoordinator {
         activeShards = shards
         activeAudioURL = audioURL
 
-        // Start observing download progress for incremental decode.
-        startObservingDownloadProgress(
+        // Start streaming decode — feeds download bytes directly into
+        // the decoder, emitting shards as audio arrives.
+        startStreamingDecode(
             episodeId: episodeId,
-            audioURL: audioURL,
             assetId: assetId
         )
 
@@ -742,148 +744,93 @@ actor AnalysisCoordinator {
         }
     }
 
-    // MARK: - Incremental Decode on Download Progress
+    // MARK: - Streaming Decode from Download
 
-    /// Minimum new audio (seconds) before triggering an incremental re-decode.
-    private static let incrementalDecodeThreshold: TimeInterval = 60.0
+    /// Active streaming decoder for the current episode.
+    private var activeDecoder: StreamingAudioDecoder?
 
     /// Debug counters for TestFlight diagnostics (written to UserDefaults).
-    private var progressEventsReceived: Int = 0 {
-        didSet { UserDefaults.standard.set(progressEventsReceived, forKey: "debug_progressEvents") }
-    }
-    private var progressDecodesTriggered: Int = 0 {
-        didSet { UserDefaults.standard.set(progressDecodesTriggered, forKey: "debug_progressDecodes") }
-    }
-    private var progressObserverStarted: Bool = false {
-        didSet { UserDefaults.standard.set(progressObserverStarted, forKey: "debug_progressObserverStarted") }
+    private var streamingShardsEmitted: Int = 0 {
+        didSet { UserDefaults.standard.set(streamingShardsEmitted, forKey: "debug_streamingShards") }
     }
 
-    private func startObservingDownloadProgress(
+    private func startStreamingDecode(
         episodeId: String,
-        audioURL: LocalAudioURL,
-        assetId: String
+        assetId: String,
+        contentType: String = "mp3"
     ) {
         downloadProgressTask?.cancel()
         guard let dm = downloadManager else {
-            logger.warning("No download manager — skipping progress observation")
+            logger.warning("No download manager — skipping streaming decode")
             return
         }
-        progressEventsReceived = 0
-        progressDecodesTriggered = 0
-        progressObserverStarted = true
-        // Estimate initial bytes from shard count: each 30s shard ≈ 30*128/8 KB compressed.
-        let initialShardCount = activeShards?.count ?? 0
-        let estimatedInitialBytes = Int64(initialShardCount) * 30 * 128 / 8 * 1024
+
+        streamingShardsEmitted = 0
+        let decoder = StreamingAudioDecoder(
+            episodeID: episodeId,
+            shardDuration: 30.0,
+            contentType: contentType
+        )
+        activeDecoder = decoder
+
+        // Task 1: Feed download bytes into the decoder.
         downloadProgressTask = Task {
-            let stream = await dm.progressUpdates()
-            var lastShardCount = initialShardCount
-            var lastBytesDecoded: Int64 = estimatedInitialBytes
-            self.logger.info("Download progress observer started, lastShardCount=\(lastShardCount), lastBytes=\(lastBytesDecoded)")
-
-            for await progress in stream {
-                guard !Task.isCancelled else {
-                    self.logger.info("Download progress observer cancelled")
-                    return
-                }
-                guard progress.episodeId == episodeId else { continue }
-
-                self.progressEventsReceived += 1
-
-                // Estimate whether enough new audio has arrived before decoding.
-                // ~16KB/s at 128kbps → 1MB ≈ 60s of audio. Only decode when
-                // we expect at least one new shard worth of audio.
-                let newBytes = progress.bytesWritten - lastBytesDecoded
-                guard newBytes >= 1_000_000 else { continue }
-
-                // Re-decode to pick up newly downloaded audio.
-                do {
-                    let freshShards = try await self.audioService.decode(
-                        fileURL: audioURL,
-                        episodeID: episodeId
-                    )
-
-                    self.progressDecodesTriggered += 1
-                    lastBytesDecoded = progress.bytesWritten
-                    self.logger.info("Progress decode: \(freshShards.count) shards (was \(lastShardCount))")
-
-                    guard freshShards.count > lastShardCount else { continue }
-
-                    let newShards = Array(freshShards.dropFirst(lastShardCount))
-                    let newAudio = newShards.map(\.duration).reduce(0, +)
-
-                    // Only push if enough new audio to be worthwhile.
-                    guard newAudio >= Self.incrementalDecodeThreshold else { continue }
-
-                    self.logger.info("Incremental decode: \(newShards.count) new shards (\(String(format: "%.0f", newAudio))s)")
-
-                    self.activeShards = freshShards
-                    lastShardCount = freshShards.count
-
-                    // Feed new shards to transcript engine without cancelling.
-                    let snapshot = self.latestSnapshot ?? PlaybackSnapshot(
-                        playheadTime: 0, playbackRate: 1.0, isPlaying: true
-                    )
-                    await self.transcriptEngine.appendShards(
-                        newShards,
-                        analysisAssetId: assetId,
-                        snapshot: snapshot
-                    )
-
-                    // Also extract features for the new shards.
-                    let existingCoverage = freshShards.dropLast(newShards.count)
-                        .map(\.duration).reduce(0, +)
-                    try await self.featureService.extractAndPersist(
-                        shards: newShards,
-                        analysisAssetId: assetId,
-                        existingCoverage: existingCoverage
-                    )
-                } catch is CancellationError {
-                    return
-                } catch {
-                    self.logger.error("Incremental decode failed: \(error)")
-                }
+            let dataStream = await dm.audioDataUpdates()
+            for await chunk in dataStream {
+                guard !Task.isCancelled else { break }
+                guard chunk.episodeId == episodeId else { continue }
+                await decoder.feedData(chunk.data)
             }
+            // Download finished — flush remaining audio.
+            await decoder.finish()
+            self.logger.info("Streaming decode: download complete, decoder finished")
+        }
 
-            // Stream ended — download likely complete. Do one final decode
-            // to pick up any remaining audio. AVAssetReader may not see
-            // bytes written while the file was actively being appended.
-            self.logger.info("Download progress stream ended — final decode")
-            do {
-                // Evict any stale shard cache before the final decode.
-                await self.audioService.evictCache(episodeID: episodeId)
+        // Task 2: Consume emitted shards and feed to transcript + features.
+        Task {
+            let shardStream = await decoder.shards()
+            var shardBatch: [AnalysisShard] = []
 
-                let finalShards = try await self.audioService.decode(
-                    fileURL: audioURL,
-                    episodeID: episodeId
-                )
-                guard finalShards.count > lastShardCount else { return }
+            for await shard in shardStream {
+                guard !Task.isCancelled else { break }
 
-                let newShards = Array(finalShards.dropFirst(lastShardCount))
-                self.logger.info("Final decode: \(newShards.count) new shards")
+                shardBatch.append(shard)
+                self.streamingShardsEmitted += 1
 
-                self.activeShards = finalShards
+                // Append to activeShards for the coordinator's state.
+                if self.activeShards != nil {
+                    self.activeShards?.append(shard)
+                } else {
+                    self.activeShards = [shard]
+                }
 
+                // Feed each shard to the transcript engine immediately.
                 let snapshot = self.latestSnapshot ?? PlaybackSnapshot(
                     playheadTime: 0, playbackRate: 1.0, isPlaying: true
                 )
                 await self.transcriptEngine.appendShards(
-                    newShards,
+                    [shard],
                     analysisAssetId: assetId,
                     snapshot: snapshot
                 )
 
-                let existingCoverage = finalShards.dropLast(newShards.count)
-                    .map(\.duration).reduce(0, +)
-                try await self.featureService.extractAndPersist(
-                    shards: newShards,
-                    analysisAssetId: assetId,
-                    existingCoverage: existingCoverage
-                )
-            } catch is CancellationError {
-                return
-            } catch {
-                self.logger.error("Final decode failed: \(error)")
+                // Extract features for this shard.
+                do {
+                    try await self.featureService.extractAndPersist(
+                        shards: [shard],
+                        analysisAssetId: assetId,
+                        existingCoverage: shard.startTime
+                    )
+                } catch is CancellationError {
+                    break
+                } catch {
+                    self.logger.error("Feature extraction failed for streaming shard \(shard.id): \(error)")
+                }
             }
+
+            await decoder.cleanup()
+            self.activeDecoder = nil
+            self.logger.info("Streaming decode complete: \(self.streamingShardsEmitted) shards emitted")
         }
     }
 

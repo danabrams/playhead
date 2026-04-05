@@ -19,6 +19,14 @@ struct DownloadProgress: Sendable {
     }
 }
 
+/// A chunk of raw compressed audio data from a streaming download.
+struct AudioDataChunk: Sendable {
+    let episodeId: String
+    let data: Data
+    /// Total bytes written so far (including this chunk).
+    let totalBytesWritten: Int64
+}
+
 /// Metadata harvested from HTTP response headers for fingerprinting.
 struct HTTPAssetMetadata: Sendable, Equatable {
     let etag: String?
@@ -174,6 +182,9 @@ actor DownloadManager {
     /// Multi-subscriber continuations for download progress.
     private var progressSubscribers: [UUID: AsyncStream<DownloadProgress>.Continuation] = [:]
 
+    /// Multi-subscriber continuations for raw audio data chunks.
+    private var audioDataSubscribers: [UUID: AsyncStream<AudioDataChunk>.Continuation] = [:]
+
     // MARK: - Init
 
     init(
@@ -216,6 +227,30 @@ actor DownloadManager {
         progressContinuation.yield(progress)
         for (_, continuation) in progressSubscribers {
             continuation.yield(progress)
+        }
+    }
+
+    /// Returns a fresh AsyncStream of raw audio data chunks for streaming decode.
+    /// Each caller gets its own stream — multiple subscribers supported.
+    func audioDataUpdates() -> AsyncStream<AudioDataChunk> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            self.audioDataSubscribers[id] = continuation
+            continuation.onTermination = { @Sendable _ in
+                Task { [weak self] in
+                    await self?.removeAudioDataSubscriber(id: id)
+                }
+            }
+        }
+    }
+
+    private func removeAudioDataSubscriber(id: UUID) {
+        audioDataSubscribers.removeValue(forKey: id)
+    }
+
+    private func broadcastAudioData(_ chunk: AudioDataChunk) {
+        for (_, continuation) in audioDataSubscribers {
+            continuation.yield(chunk)
         }
     }
 
@@ -504,6 +539,11 @@ actor DownloadManager {
                         if buffer.count >= flushSize {
                             fileHandle.write(buffer)
                             bytesWritten += Int64(buffer.count)
+                            await self?.broadcastAudioData(AudioDataChunk(
+                                episodeId: capturedEpisodeId,
+                                data: buffer,
+                                totalBytesWritten: bytesWritten
+                            ))
                             buffer.removeAll(keepingCapacity: true)
 
                             if !signaled, bytesWritten >= threshold {
@@ -537,6 +577,11 @@ actor DownloadManager {
                     if !buffer.isEmpty {
                         fileHandle.write(buffer)
                         bytesWritten += Int64(buffer.count)
+                        await self?.broadcastAudioData(AudioDataChunk(
+                            episodeId: capturedEpisodeId,
+                            data: buffer,
+                            totalBytesWritten: bytesWritten
+                        ))
                     }
                     try fileHandle.close()
 
