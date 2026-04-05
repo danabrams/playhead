@@ -459,7 +459,7 @@ actor AnalysisCoordinator {
 
         // Start streaming decode — feeds download bytes directly into
         // the decoder, emitting shards as audio arrives.
-        startStreamingDecode(
+        await startStreamingDecode(
             episodeId: episodeId,
             assetId: assetId
         )
@@ -758,7 +758,7 @@ actor AnalysisCoordinator {
         episodeId: String,
         assetId: String,
         contentType: String = "mp3"
-    ) {
+    ) async {
         downloadProgressTask?.cancel()
         guard let dm = downloadManager else {
             logger.warning("No download manager — skipping streaming decode")
@@ -773,8 +773,21 @@ actor AnalysisCoordinator {
         )
         activeDecoder = decoder
 
-        // Task 1: Feed download bytes into the decoder.
+        // Create the shard stream BEFORE feeding data to avoid the race where
+        // feedData emits shards before anyone is listening (continuation would be nil).
+        let shardStream = await decoder.shards()
+
+        // Task 1: Seed decoder with bytes already on disk, then stream new bytes.
         downloadProgressTask = Task {
+            // Seed with existing file contents — the download is already in
+            // progress, so the first N bytes are on disk but missed the stream.
+            if let url = self.activeAudioURL?.url,
+               let existingData = try? Data(contentsOf: url) {
+                self.logger.info("Streaming decode: seeding \(existingData.count) bytes from disk")
+                await decoder.feedData(existingData)
+            }
+
+            // Now subscribe to live bytes as they arrive.
             let dataStream = await dm.audioDataUpdates()
             for await chunk in dataStream {
                 guard !Task.isCancelled else { break }
@@ -788,13 +801,10 @@ actor AnalysisCoordinator {
 
         // Task 2: Consume emitted shards and feed to transcript + features.
         Task {
-            let shardStream = await decoder.shards()
-            var shardBatch: [AnalysisShard] = []
 
             for await shard in shardStream {
                 guard !Task.isCancelled else { break }
 
-                shardBatch.append(shard)
                 self.streamingShardsEmitted += 1
 
                 // Append to activeShards for the coordinator's state.
