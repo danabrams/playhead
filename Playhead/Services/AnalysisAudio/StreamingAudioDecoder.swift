@@ -221,7 +221,10 @@ actor StreamingAudioDecoder {
 
         audioFile.framePosition = framesRead
 
-        // Read available frames in chunks.
+        // Read available frames in chunks and convert each chunk with a
+        // fresh converter. AVAudioConverter enters a "finished" state after
+        // the input block returns .endOfStream, so reusing a converter
+        // across multiple convert calls produces no output after the first.
         let framesToRead = fileLength - framesRead
         var framesRemaining = AVAudioFrameCount(framesToRead)
 
@@ -239,8 +242,6 @@ actor StreamingAudioDecoder {
             do {
                 try audioFile.read(into: readBuffer, frameCount: chunkSize)
             } catch {
-                // Partial frame at the end of current data. This is normal for
-                // streaming -- the rest of the frame will arrive in the next feed.
                 logger.debug("Read stopped (likely partial frame): \(error.localizedDescription)")
                 break
             }
@@ -251,8 +252,12 @@ actor StreamingAudioDecoder {
             framesRead += AVAudioFramePosition(framesActuallyRead)
             framesRemaining -= framesActuallyRead
 
-            // Convert to 16 kHz mono.
-            let converted = convertBuffer(readBuffer, using: converter)
+            // Fresh converter per chunk — endOfStream kills the converter state.
+            guard let chunkConverter = AVAudioConverter(from: srcFormat, to: outputFormat) else {
+                logger.error("Failed to create chunk converter")
+                break
+            }
+            let converted = convertBuffer(readBuffer, using: chunkConverter)
             if !converted.isEmpty {
                 accumulatedSamples.append(contentsOf: converted)
             }
