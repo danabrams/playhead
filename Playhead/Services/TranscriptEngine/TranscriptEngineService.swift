@@ -112,6 +112,10 @@ actor TranscriptEngineService {
     /// Shards queued for processing while the main loop is running.
     private var appendedShards: [AnalysisShard] = []
 
+    /// True while the transcription loop is actively processing.
+    /// Used by appendShards to decide whether to start a new loop.
+    private var loopRunning: Bool = false
+
     /// Broadcasts persisted chunk batches and completion signals to the
     /// analysis coordinator without forcing it to poll SQLite.
     private var eventContinuations: [UUID: AsyncStream<TranscriptEngineEvent>.Continuation] = [:]
@@ -203,7 +207,7 @@ actor TranscriptEngineService {
         appendedShards.append(contentsOf: newShards)
 
         // If no active loop, start one for the appended shards.
-        if activeTask == nil || activeTask?.isCancelled == true {
+        if !loopRunning {
             activeAssetId = analysisAssetId
             activeTask = Task { [weak self] in
                 guard let self else { return }
@@ -211,7 +215,6 @@ actor TranscriptEngineService {
                     shards: [],  // empty — the loop will pick up from appendedShards
                     analysisAssetId: analysisAssetId
                 )
-                await self.clearActiveTask()
             }
         }
     }
@@ -224,6 +227,7 @@ actor TranscriptEngineService {
         latestSnapshot = nil
         chunkCounter = 0
         appendedShards = []
+        loopRunning = false
     }
 
     /// Clear the active task reference when the loop completes,
@@ -255,10 +259,12 @@ actor TranscriptEngineService {
         shards: [AnalysisShard],
         analysisAssetId: String
     ) async {
+        loopRunning = true
+        defer { loopRunning = false }
         logger.info("Starting transcription loop: \(shards.count) shards for asset \(analysisAssetId)")
         let loopStart = ContinuousClock.now
 
-        guard !shards.isEmpty else {
+        guard !shards.isEmpty || !appendedShards.isEmpty else {
             logger.warning("No shards to transcribe")
             return
         }
