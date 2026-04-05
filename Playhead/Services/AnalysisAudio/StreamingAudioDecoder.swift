@@ -264,11 +264,7 @@ actor StreamingAudioDecoder {
         }
 
         // Emit full shards from accumulated samples.
-        let before = accumulatedSamples.count
         emitFullShards()
-        if before > 0 || accumulatedSamples.count > 0 {
-            logger.info("Accumulated \(self.accumulatedSamples.count) samples (need \(self.samplesPerShard) per shard, read to frame \(self.framesRead))")
-        }
     }
 
     // MARK: - Sample rate conversion
