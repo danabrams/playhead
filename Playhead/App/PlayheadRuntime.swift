@@ -4,6 +4,7 @@
 @preconcurrency import AVFoundation
 import Foundation
 import OSLog
+import UIKit
 
 @MainActor
 @Observable
@@ -268,10 +269,21 @@ final class PlayheadRuntime {
         currentAnalysisAssetId = nil
 
         await backgroundProcessingService.playbackDidStart()
+
+        // Load artwork for lock screen / CarPlay Now Playing.
+        var artwork: UIImage?
+        if let artworkURL = episode.podcast?.artworkURL {
+            if let (data, _) = try? await URLSession.shared.data(from: artworkURL),
+               let image = UIImage(data: data) {
+                artwork = image
+            }
+        }
+
         await playbackService.setNowPlayingMetadata(
             title: episode.title,
             artist: episode.podcast?.author,
-            albumTitle: episode.podcast?.title
+            albumTitle: episode.podcast?.title,
+            artworkImage: artwork
         )
 
         // Resolve a local audio file. Both playback and analysis use the
