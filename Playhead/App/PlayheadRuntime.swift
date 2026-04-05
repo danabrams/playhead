@@ -116,7 +116,7 @@ final class PlayheadRuntime {
             capabilitiesService: capabilitiesService,
             adDetectionService: adDetectionService,
             skipOrchestrator: skipOrchestrator,
-            downloadProgressStream: downloadManager.progressStream
+            downloadManager: downloadManager
         )
         self.backgroundProcessingService = BackgroundProcessingService(
             coordinator: analysisCoordinator,

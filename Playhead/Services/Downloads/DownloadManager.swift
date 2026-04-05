@@ -168,8 +168,11 @@ actor DownloadManager {
     // MARK: - Streams
 
     private let progressContinuation: AsyncStream<DownloadProgress>.Continuation
-    /// Subscribe for download progress updates.
+    /// Single-consumer stream (legacy). Prefer progressUpdates() for new code.
     nonisolated let progressStream: AsyncStream<DownloadProgress>
+
+    /// Multi-subscriber continuations for download progress.
+    private var progressSubscribers: [UUID: AsyncStream<DownloadProgress>.Continuation] = [:]
 
     // MARK: - Init
 
@@ -187,6 +190,33 @@ actor DownloadManager {
         let (stream, continuation) = AsyncStream<DownloadProgress>.makeStream()
         self.progressStream = stream
         self.progressContinuation = continuation
+    }
+
+    /// Returns a fresh AsyncStream that receives all future download progress
+    /// events. Each caller gets its own stream — multiple subscribers are supported.
+    /// The stream ends when the continuation is cancelled or the manager is deallocated.
+    func progressUpdates() -> AsyncStream<DownloadProgress> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            self.progressSubscribers[id] = continuation
+            continuation.onTermination = { @Sendable _ in
+                Task { [weak self] in
+                    await self?.removeProgressSubscriber(id: id)
+                }
+            }
+        }
+    }
+
+    private func removeProgressSubscriber(id: UUID) {
+        progressSubscribers.removeValue(forKey: id)
+    }
+
+    /// Yield progress to both the legacy single-consumer stream and all subscribers.
+    private func broadcastProgress(_ progress: DownloadProgress) {
+        progressContinuation.yield(progress)
+        for (_, continuation) in progressSubscribers {
+            continuation.yield(progress)
+        }
     }
 
     /// Wire up the analysis scheduler so downloads automatically enqueue jobs.
@@ -364,7 +394,7 @@ actor DownloadManager {
         // Evict if over budget.
         try await evictIfNeeded()
 
-        progressContinuation.yield(DownloadProgress(
+        broadcastProgress(DownloadProgress(
             episodeId: episodeId,
             bytesWritten: downloaded,
             totalBytes: downloaded
@@ -495,7 +525,7 @@ actor DownloadManager {
                                 ))
                             }
 
-                            await self?.progressContinuation.yield(DownloadProgress(
+                            await self?.broadcastProgress(DownloadProgress(
                                 episodeId: capturedEpisodeId,
                                 bytesWritten: bytesWritten,
                                 totalBytes: totalContentLength ?? bytesWritten
@@ -537,7 +567,7 @@ actor DownloadManager {
                     await self?.touchAccess(episodeId: capturedEpisodeId)
                     try await self?.evictIfNeeded()
 
-                    await self?.progressContinuation.yield(DownloadProgress(
+                    await self?.broadcastProgress(DownloadProgress(
                         episodeId: capturedEpisodeId,
                         bytesWritten: bytesWritten,
                         totalBytes: bytesWritten

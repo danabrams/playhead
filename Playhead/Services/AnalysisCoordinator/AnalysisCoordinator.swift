@@ -115,7 +115,7 @@ actor AnalysisCoordinator {
     private let capabilitiesService: CapabilitiesService
     private let adDetectionService: AdDetectionService
     private let skipOrchestrator: SkipOrchestrator
-    private let downloadProgressStream: AsyncStream<DownloadProgress>
+    private let downloadManager: DownloadManager?
 
     // MARK: - Active Session State
 
@@ -167,7 +167,7 @@ actor AnalysisCoordinator {
         capabilitiesService: CapabilitiesService,
         adDetectionService: AdDetectionService,
         skipOrchestrator: SkipOrchestrator,
-        downloadProgressStream: AsyncStream<DownloadProgress> = AsyncStream { $0.finish() }
+        downloadManager: DownloadManager? = nil
     ) {
         self.store = store
         self.audioService = audioService
@@ -176,7 +176,7 @@ actor AnalysisCoordinator {
         self.capabilitiesService = capabilitiesService
         self.adDetectionService = adDetectionService
         self.skipOrchestrator = skipOrchestrator
-        self.downloadProgressStream = downloadProgressStream
+        self.downloadManager = downloadManager
     }
 
     // MARK: - Lifecycle
@@ -753,10 +753,12 @@ actor AnalysisCoordinator {
         assetId: String
     ) {
         downloadProgressTask?.cancel()
+        guard let dm = downloadManager else { return }
         downloadProgressTask = Task {
+            let stream = await dm.progressUpdates()
             var lastShardCount = self.activeShards?.count ?? 0
 
-            for await progress in self.downloadProgressStream {
+            for await progress in stream {
                 guard !Task.isCancelled else { return }
                 guard progress.episodeId == episodeId else { continue }
 
