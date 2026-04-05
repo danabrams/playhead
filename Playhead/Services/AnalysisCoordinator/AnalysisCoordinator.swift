@@ -771,11 +771,14 @@ actor AnalysisCoordinator {
         progressEventsReceived = 0
         progressDecodesTriggered = 0
         progressObserverStarted = true
+        // Estimate initial bytes from shard count: each 30s shard ≈ 30*128/8 KB compressed.
+        let initialShardCount = activeShards?.count ?? 0
+        let estimatedInitialBytes = Int64(initialShardCount) * 30 * 128 / 8 * 1024
         downloadProgressTask = Task {
             let stream = await dm.progressUpdates()
-            var lastShardCount = self.activeShards?.count ?? 0
-            var lastBytesDecoded: Int64 = 0
-            self.logger.info("Download progress observer started, lastShardCount=\(lastShardCount)")
+            var lastShardCount = initialShardCount
+            var lastBytesDecoded: Int64 = estimatedInitialBytes
+            self.logger.info("Download progress observer started, lastShardCount=\(lastShardCount), lastBytes=\(lastBytesDecoded)")
 
             for await progress in stream {
                 guard !Task.isCancelled else {
@@ -839,6 +842,47 @@ actor AnalysisCoordinator {
                 } catch {
                     self.logger.error("Incremental decode failed: \(error)")
                 }
+            }
+
+            // Stream ended — download likely complete. Do one final decode
+            // to pick up any remaining audio. AVAssetReader may not see
+            // bytes written while the file was actively being appended.
+            self.logger.info("Download progress stream ended — final decode")
+            do {
+                // Evict any stale shard cache before the final decode.
+                await self.audioService.evictCache(episodeID: episodeId)
+
+                let finalShards = try await self.audioService.decode(
+                    fileURL: audioURL,
+                    episodeID: episodeId
+                )
+                guard finalShards.count > lastShardCount else { return }
+
+                let newShards = Array(finalShards.dropFirst(lastShardCount))
+                self.logger.info("Final decode: \(newShards.count) new shards")
+
+                self.activeShards = finalShards
+
+                let snapshot = self.latestSnapshot ?? PlaybackSnapshot(
+                    playheadTime: 0, playbackRate: 1.0, isPlaying: true
+                )
+                await self.transcriptEngine.appendShards(
+                    newShards,
+                    analysisAssetId: assetId,
+                    snapshot: snapshot
+                )
+
+                let existingCoverage = finalShards.dropLast(newShards.count)
+                    .map(\.duration).reduce(0, +)
+                try await self.featureService.extractAndPersist(
+                    shards: newShards,
+                    analysisAssetId: assetId,
+                    existingCoverage: existingCoverage
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                self.logger.error("Final decode failed: \(error)")
             }
         }
     }
