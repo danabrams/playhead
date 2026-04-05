@@ -24,6 +24,7 @@ env:
   INFO_PLIST: Playhead/Support/Info.plist
   SCHEME: Playhead
   APP_BUNDLE_ID: com.playhead.app
+  APP_STORE_PROFILE_NAME: Playhead App Store
   APPLE_TEAM_ID: 36Z6VYTT9X
   ARCHIVE_PATH: ${{ github.workspace }}/build/Playhead.xcarchive
   EXPORT_PATH: ${{ github.workspace }}/build/export
@@ -71,10 +72,34 @@ jobs:
           api-key-id: ${{ secrets.APPSTORE_KEY_ID }}
           api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
 
+      - name: Select App Store provisioning profile
+        id: selected_profile
+        shell: bash
+        env:
+          EXPECTED_PROFILE_NAME: ${{ env.APP_STORE_PROFILE_NAME }}
+          PROFILES_JSON: ${{ steps.provisioning_profiles.outputs.profiles }}
+        run: |
+          set -euo pipefail
+          profiles_file="$(mktemp)"
+          printf '%s' "$PROFILES_JSON" > "$profiles_file"
+
+          selected_name="$(jq -r --arg name "$EXPECTED_PROFILE_NAME" '.[] | select(.name == $name) | .name' "$profiles_file" | head -n 1)"
+          selected_uuid="$(jq -r --arg name "$EXPECTED_PROFILE_NAME" '.[] | select(.name == $name) | .udid' "$profiles_file" | head -n 1)"
+
+          if [[ -z "$selected_name" || -z "$selected_uuid" ]]; then
+            echo "Expected provisioning profile '$EXPECTED_PROFILE_NAME' was not found." >&2
+            echo "Available profiles:" >&2
+            jq -r '.[].name' "$profiles_file" >&2
+            exit 1
+          fi
+
+          echo "name=$selected_name" >> "$GITHUB_OUTPUT"
+          echo "uuid=$selected_uuid" >> "$GITHUB_OUTPUT"
+
       - name: Create export options plist
         shell: bash
         env:
-          PROFILE_NAME: ${{ fromJson(steps.provisioning_profiles.outputs.profiles)[0].name }}
+          PROFILE_NAME: ${{ steps.selected_profile.outputs.name }}
         run: |
           set -euo pipefail
           cat > ExportOptions.plist <<PLIST
@@ -111,8 +136,8 @@ jobs:
         shell: bash
         env:
           BUILD_NUMBER: ${{ github.run_number }}
-          PROFILE_NAME: ${{ fromJson(steps.provisioning_profiles.outputs.profiles)[0].name }}
-          PROFILE_UUID: ${{ fromJson(steps.provisioning_profiles.outputs.profiles)[0].udid }}
+          PROFILE_NAME: ${{ steps.selected_profile.outputs.name }}
+          PROFILE_UUID: ${{ steps.selected_profile.outputs.uuid }}
         run: |
           set -euo pipefail
           xcodebuild archive \
