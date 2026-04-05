@@ -142,6 +142,8 @@ private extension LibraryView {
 private struct PodcastGridCell: View {
 
     let podcast: Podcast
+    @State private var artworkImage: UIImage?
+    @State private var loadFailed = false
 
     private var unplayedCount: Int {
         podcast.episodes.filter { !$0.isPlayed }.count
@@ -156,28 +158,36 @@ private struct PodcastGridCell: View {
                     .aspectRatio(1, contentMode: .fit)
                     .overlay(
                         Group {
-                            if let artworkURL = podcast.artworkURL {
-                                AsyncImage(url: artworkURL) { phase in
-                                    switch phase {
-                                    case .success(let image):
-                                        image
-                                            .resizable()
-                                            .scaledToFill()
-                                    case .failure:
-                                        artworkPlaceholder
-                                    case .empty:
-                                        ProgressView()
-                                            .tint(AppColors.secondary)
-                                    @unknown default:
-                                        artworkPlaceholder
-                                    }
-                                }
+                            if let artworkImage {
+                                Image(uiImage: artworkImage)
+                                    .resizable()
+                                    .scaledToFill()
+                            } else if podcast.artworkURL != nil && !loadFailed {
+                                ProgressView()
+                                    .tint(AppColors.secondary)
                             } else {
                                 artworkPlaceholder
                             }
                         }
                         .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md))
                     )
+                    .task(id: podcast.artworkURL) {
+                        guard let url = podcast.artworkURL else { return }
+                        artworkImage = nil
+                        loadFailed = false
+                        do {
+                            let (data, _) = try await URLSession.shared.data(from: url)
+                            if let image = UIImage(data: data) {
+                                artworkImage = image
+                            } else {
+                                loadFailed = true
+                            }
+                        } catch is CancellationError {
+                            // Task cancelled by SwiftUI — not a real failure.
+                        } catch {
+                            loadFailed = true
+                        }
+                    }
                     .overlay(
                         RoundedRectangle(cornerRadius: CornerRadius.md)
                             .stroke(AppColors.secondary.opacity(0.15), lineWidth: 1)

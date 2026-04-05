@@ -81,7 +81,6 @@ final class PlaybackService: NSObject, Sendable {
 
     // MARK: - Observation
 
-    private var statusObservation: NSKeyValueObservation?
     private var rateObservation: NSKeyValueObservation?
     private var itemStatusObservation: NSKeyValueObservation?
 
@@ -120,7 +119,6 @@ final class PlaybackService: NSObject, Sendable {
             player.removeTimeObserver(token)
             timeObserverToken = nil
         }
-        statusObservation?.invalidate()
         rateObservation?.invalidate()
         itemStatusObservation?.invalidate()
         removeRemoteCommandTargets()
@@ -181,16 +179,23 @@ final class PlaybackService: NSObject, Sendable {
         playerItem = item
 
         itemStatusObservation?.invalidate()
-        itemStatusObservation = item.observe(\.status, options: [.new]) {
-            [weak self] item, _ in
+        let block = makeItemStatusBlock()
+        itemStatusObservation = item.observe(\.status, options: [.new], changeHandler: block)
+
+        updateState { $0.status = .loading }
+        player.replaceCurrentItem(with: item)
+    }
+
+    /// Non-isolated so the closure avoids actor-executor crashes at call site.
+    private nonisolated func makeItemStatusBlock()
+        -> @Sendable (AVPlayerItem, NSKeyValueObservedChange<AVPlayerItem.Status>) -> Void
+    {
+        { [weak self] item, _ in
             guard let self else { return }
             Task { @PlaybackServiceActor in
                 self.handleItemStatusChange(item)
             }
         }
-
-        updateState { $0.status = .loading }
-        player.replaceCurrentItem(with: item)
     }
 
     private func handleItemStatusChange(_ item: AVPlayerItem) {
@@ -312,24 +317,13 @@ final class PlaybackService: NSObject, Sendable {
         }
     }
 
-    /// Perform a perceptually clean skip transition.
-    ///
-    /// - Streamed audio: duck volume, seek, release.
-    /// - Local audio: optional micro-crossfade (two-item queue).
+    /// Perform a perceptually clean skip transition: duck volume, seek, release.
     private func performSkipTransition(to targetSeconds: TimeInterval) async {
         guard !isHandlingSkip else { return }
         isHandlingSkip = true
         defer { isHandlingSkip = false }
 
-        if isLocalAsset {
-            // Micro-crossfade for local: brief duck, seek, restore.
-            // True two-item crossfade is only reliable for local files, but
-            // a duck/seek/release is more predictable and still clean.
-            await duckSeekRelease(to: targetSeconds)
-        } else {
-            // Streamed audio: duck → seek → release. Never attempt crossfade.
-            await duckSeekRelease(to: targetSeconds)
-        }
+        await duckSeekRelease(to: targetSeconds)
     }
 
     /// Duck volume, seek precisely, then restore volume.
@@ -359,9 +353,15 @@ final class PlaybackService: NSObject, Sendable {
 
     private func startPeriodicTimeObserver() {
         let interval = CMTime(seconds: 0.25, preferredTimescale: 600)
+        let block = makeTimeObserverBlock()
         timeObserverToken = player.addPeriodicTimeObserver(
-            forInterval: interval, queue: nil
-        ) { [weak self] time in
+            forInterval: interval, queue: nil, using: block
+        )
+    }
+
+    /// Non-isolated so the closure avoids actor-executor crashes at call site.
+    private nonisolated func makeTimeObserverBlock() -> @Sendable (CMTime) -> Void {
+        { [weak self] time in
             guard let self else { return }
             Task { @PlaybackServiceActor in
                 let seconds = CMTimeGetSeconds(time)
@@ -375,8 +375,15 @@ final class PlaybackService: NSObject, Sendable {
     // MARK: - Rate Observation
 
     private func observePlayerRate() {
-        rateObservation = player.observe(\.rate, options: [.new]) {
-            [weak self] player, _ in
+        let block = makeRateObserverBlock()
+        rateObservation = player.observe(\.rate, options: [.new], changeHandler: block)
+    }
+
+    /// Non-isolated so the closure avoids actor-executor crashes at call site.
+    private nonisolated func makeRateObserverBlock()
+        -> @Sendable (AVPlayer, NSKeyValueObservedChange<Float>) -> Void
+    {
+        { [weak self] player, _ in
             guard let self else { return }
             Task { @PlaybackServiceActor in
                 self.applyObservedRate(player.rate)
@@ -466,13 +473,17 @@ final class PlaybackService: NSObject, Sendable {
         if let artist { info[MPMediaItemPropertyArtist] = artist }
         if let albumTitle { info[MPMediaItemPropertyAlbumTitle] = albumTitle }
         if let image = artworkImage {
-            let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
-            info[MPMediaItemPropertyArtwork] = artwork
+            info[MPMediaItemPropertyArtwork] = Self.makeArtwork(image: image)
         }
         info[MPMediaItemPropertyPlaybackDuration] = _state.duration
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = _state.currentTime
         info[MPNowPlayingInfoPropertyPlaybackRate] = _state.rate
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    /// Non-isolated so the closure avoids actor-executor crashes at call site.
+    private nonisolated static func makeArtwork(image: UIImage) -> MPMediaItemArtwork {
+        MPMediaItemArtwork(boundsSize: image.size) { _ in image }
     }
 
     // MARK: - Remote Commands

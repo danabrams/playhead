@@ -8,6 +8,7 @@
 
 @preconcurrency import AVFoundation
 import Foundation
+import MediaPlayer
 import Testing
 @testable import Playhead
 
@@ -168,5 +169,136 @@ struct ProgressiveLoaderDecouplingTests {
 
         // If we get here without crashing, the decoupling works.
         _ = loader
+    }
+}
+
+// MARK: - Callback Isolation
+
+@Suite("PlaybackService – Callback Isolation")
+struct PlaybackServiceCallbackIsolationTests {
+
+    /// 1×1 pixel test image, cheap to create and sufficient for artwork tests.
+    private static var testImage: UIImage {
+        UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1))
+            .image { $0.fill(CGRect(x: 0, y: 0, width: 1, height: 1)) }
+    }
+
+    @Test("setNowPlayingMetadata with artwork doesn't crash from actor")
+    func setNowPlayingMetadataWithArtwork() async {
+        let service = await PlaybackService()
+        let image = Self.testImage
+
+        // The MPMediaItemArtwork closure must be non-isolated; if it were
+        // tainted with @PlaybackServiceActor the runtime would crash when
+        // MediaPlayer invokes the provider from the main thread.
+        await service.setNowPlayingMetadata(
+            title: "Test Episode",
+            artist: "Test Podcast",
+            albumTitle: "Test Album",
+            artworkImage: image
+        )
+
+        // Verify the title was actually written to Now Playing info.
+        let title: String? = await MainActor.run {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String
+        }
+        #expect(title == "Test Episode")
+    }
+
+    @Test("MPMediaItemArtwork provider callable from main thread")
+    func artworkProviderCallableFromMain() async {
+        let service = await PlaybackService()
+        let image = Self.testImage
+
+        // Set metadata so the artwork provider closure is installed.
+        await service.setNowPlayingMetadata(
+            title: "Artwork Test",
+            artworkImage: image
+        )
+
+        // Read back the artwork and invoke its image(at:) from MainActor,
+        // exactly as MediaPlayer does when rendering the lock screen.
+        // This is the exact scenario that crashed before the fix.
+        let rendered: UIImage? = await MainActor.run {
+            let info = MPNowPlayingInfoCenter.default().nowPlayingInfo
+            let artwork = info?[MPMediaItemPropertyArtwork] as? MPMediaItemArtwork
+            return artwork?.image(at: CGSize(width: 1, height: 1))
+        }
+        #expect(rendered != nil)
+    }
+
+    @Test("loadItem triggers KVO without executor assertion")
+    func loadItemKVOSafe() async throws {
+        let service = await PlaybackService()
+
+        // Create a player item from a progressive URL. The asset won't load
+        // real audio, but AVPlayerItem will still fire status KVO (to .unknown
+        // or .failed) which exercises the nonisolated KVO callback path.
+        let asset = AVURLAsset(url: URL(string: "playhead-progressive://audio/kvo-test.mp3")!)
+        let item = AVPlayerItem(asset: asset)
+
+        await service.loadItem(item)
+
+        // Give KVO callbacks time to fire on their arbitrary queue.
+        try await Task.sleep(for: .milliseconds(100))
+
+        // If the KVO closure were actor-tainted, we would have crashed
+        // before reaching this snapshot.
+        let snapshot = await service.snapshot()
+        #expect(snapshot.status != .idle)
+    }
+
+    @Test("State updates after play don't crash")
+    func stateUpdatesAfterPlay() async {
+        let service = await PlaybackService()
+
+        // Inject a playing state so play() has a playerItem-like path to
+        // exercise. _testingInjectState bypasses AVPlayer so we can test
+        // the updateNowPlayingInfo codepath in isolation.
+        let playingState = PlaybackState(
+            status: .playing,
+            currentTime: 30,
+            duration: 3600,
+            rate: 1.0,
+            playbackSpeed: 1.0
+        )
+        await service._testingInjectState(playingState)
+
+        // play() calls updateNowPlayingInfo which touches
+        // MPNowPlayingInfoCenter — if any closure in that path is
+        // actor-tainted and called from the wrong executor, we crash.
+        await service.play()
+
+        let snapshot = await service.snapshot()
+        #expect(snapshot.status == .playing)
+    }
+
+    @Test("Concurrent metadata and snapshot access")
+    func concurrentMetadataAndSnapshot() async {
+        let service = await PlaybackService()
+        let image = Self.testImage
+
+        await withTaskGroup(of: Void.self) { group in
+            // Task A: set metadata with artwork (exercises makeArtwork).
+            group.addTask {
+                await service.setNowPlayingMetadata(
+                    title: "Concurrent Test",
+                    artist: "Podcast Host",
+                    artworkImage: image
+                )
+            }
+
+            // Task B: rapid snapshot reads, simulating KVO storm.
+            group.addTask {
+                for _ in 0..<20 {
+                    let snap = await service.snapshot()
+                    // Status should be consistent (idle since no media loaded).
+                    #expect(snap.status == .idle)
+                }
+            }
+        }
+
+        // If we reach here, concurrent artwork closure creation didn't
+        // interfere with actor-serialized snapshot access.
     }
 }
