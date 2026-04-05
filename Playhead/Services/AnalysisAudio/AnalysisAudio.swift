@@ -304,8 +304,7 @@ actor AnalysisAudioService {
         }
 
         // 2. Load the asset and get its audio track.
-        // Disable URL asset caching so re-reads of a growing file see new bytes.
-        let asset = AVURLAsset(url: fileURL.url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+        let asset = AVURLAsset(url: fileURL.url)
         let assetDuration: TimeInterval
         let audioTrack: AVAssetTrack
 
