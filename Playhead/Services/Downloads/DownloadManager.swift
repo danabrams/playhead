@@ -254,6 +254,14 @@ actor DownloadManager {
         }
     }
 
+    /// Finish all audio data subscriber streams so `for await` loops exit.
+    private func finishAudioDataSubscribers() {
+        for (id, continuation) in audioDataSubscribers {
+            continuation.finish()
+        }
+        audioDataSubscribers.removeAll()
+    }
+
     /// Wire up the analysis scheduler so downloads automatically enqueue jobs.
     func setAnalysisWorkScheduler(_ scheduler: AnalysisWorkScheduler) {
         self.analysisWorkScheduler = scheduler
@@ -425,6 +433,8 @@ actor DownloadManager {
         touchAccess(episodeId: episodeId)
 
         logger.info("Download complete for \(episodeId): \(downloaded) bytes, hash=\(strongHash.prefix(16))...")
+
+        finishAudioDataSubscribers()
 
         // Evict if over budget.
         try await evictIfNeeded()
@@ -609,6 +619,7 @@ actor DownloadManager {
                         capturedLogger.info("Download complete for \(capturedEpisodeId): \(bytesWritten) bytes, hash=\(strongHash.prefix(16))...")
                     }
 
+                    await self?.finishAudioDataSubscribers()
                     await self?.touchAccess(episodeId: capturedEpisodeId)
                     try await self?.evictIfNeeded()
 
@@ -626,6 +637,7 @@ actor DownloadManager {
                     if !signaled {
                         continuation.resume(throwing: error)
                     }
+                    await self?.finishAudioDataSubscribers()
                     completionContinuation.yield(.failure(error))
                     completionContinuation.finish()
                     capturedLogger.error("Streaming download failed for \(capturedEpisodeId): \(error)")

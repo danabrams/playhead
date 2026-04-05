@@ -145,8 +145,10 @@ actor AnalysisCoordinator {
     private var transcriptEventTask: Task<Void, Never>?
     /// Task listening for capability changes.
     private var capabilityObserverTask: Task<Void, Never>?
-    /// Task observing download progress for incremental decode.
-    private var downloadProgressTask: Task<Void, Never>?
+    /// Task feeding live download chunks into the streaming decoder.
+    private var streamingDecodeTask: Task<Void, Never>?
+    /// Task consuming streaming decoder shards.
+    private var shardConsumerTask: Task<Void, Never>?
 
     // MARK: - Configuration
 
@@ -204,6 +206,8 @@ actor AnalysisCoordinator {
         activeAssetId = nil
         activeEpisodeId = nil
         activePodcastId = nil
+        shardConsumerTask?.cancel()
+        shardConsumerTask = nil
         activeShards = nil
         activeAudioURL = nil
         latestSnapshot = nil
@@ -411,6 +415,8 @@ actor AnalysisCoordinator {
         cancelPipeline()
         Task { await self.transcriptEngine.stop() }
         Task { await self.activeDecoder?.cleanup() }
+        shardConsumerTask?.cancel()
+        shardConsumerTask = nil
         activeDecoder = nil
         activeEpisodeId = nil
         activePodcastId = nil
@@ -750,6 +756,7 @@ actor AnalysisCoordinator {
     private var activeDecoder: StreamingAudioDecoder?
 
     /// Debug counters for TestFlight diagnostics (written to UserDefaults).
+#if DEBUG
     private var streamingShardsEmitted: Int = 0 {
         didSet { UserDefaults.standard.set(streamingShardsEmitted, forKey: "debug_streamingShards") }
     }
@@ -759,13 +766,18 @@ actor AnalysisCoordinator {
     private var streamingChunksReceived: Int = 0 {
         didSet { UserDefaults.standard.set(streamingChunksReceived, forKey: "debug_streamingChunks") }
     }
+#else
+    private var streamingShardsEmitted: Int = 0
+    private var streamingSeededBytes: Int = 0
+    private var streamingChunksReceived: Int = 0
+#endif
 
     private func startStreamingDecode(
         episodeId: String,
         assetId: String,
         contentType: String = "mp3"
     ) async {
-        downloadProgressTask?.cancel()
+        streamingDecodeTask?.cancel()
         guard let dm = downloadManager else {
             logger.warning("No download manager — skipping streaming decode")
             return
@@ -788,7 +800,7 @@ actor AnalysisCoordinator {
         // Task 1: Subscribe to live stream first, then seed from disk.
         // Subscribe BEFORE reading the file so we don't miss chunks that
         // arrive between the file read and the subscription.
-        downloadProgressTask = Task {
+        streamingDecodeTask = Task {
             let dataStream = await dm.audioDataUpdates()
 
             // Seed with the file already on disk. This captures all bytes
@@ -806,11 +818,14 @@ actor AnalysisCoordinator {
             // Consume live bytes. If the download already completed before
             // we subscribed, this loop receives zero chunks and exits when
             // we break below via timeout.
+            let seededBytes = Int64(self.streamingSeededBytes)
             var receivedAny = false
             for await chunk in dataStream {
                 guard !Task.isCancelled else { break }
                 guard chunk.episodeId == episodeId else { continue }
                 receivedAny = true
+                // Skip chunks that overlap bytes already seeded from disk.
+                guard chunk.totalBytesWritten > seededBytes else { continue }
                 self.streamingChunksReceived += 1
                 await decoder.feedData(chunk.data)
             }
@@ -832,10 +847,16 @@ actor AnalysisCoordinator {
         }
 
         // Task 2: Consume emitted shards and feed to transcript + features.
-        Task {
+        let initialCoverageEnd = activeShards?.last.map { $0.startTime + $0.duration } ?? 0
+        shardConsumerTask = Task {
 
             for await shard in shardStream {
                 guard !Task.isCancelled else { break }
+
+                // Skip shards already covered by the initial decode.
+                if shard.startTime + shard.duration <= initialCoverageEnd {
+                    continue
+                }
 
                 self.streamingShardsEmitted += 1
 
@@ -883,8 +904,10 @@ actor AnalysisCoordinator {
         pipelineTask = nil
         transcriptEventTask?.cancel()
         transcriptEventTask = nil
-        downloadProgressTask?.cancel()
-        downloadProgressTask = nil
+        streamingDecodeTask?.cancel()
+        streamingDecodeTask = nil
+        shardConsumerTask?.cancel()
+        shardConsumerTask = nil
     }
 
     private func startObservingTranscriptEvents(sessionId: String, assetId: String) {

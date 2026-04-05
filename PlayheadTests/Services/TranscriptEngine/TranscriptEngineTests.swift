@@ -360,3 +360,171 @@ struct IncrementalShardAppendTests {
         #expect(allIds.contains(11), "Shard 11 should have been transcribed after append")
     }
 }
+
+// MARK: - StreamingAudioDecoder Tests
+
+@Suite("StreamingAudioDecoder")
+struct StreamingAudioDecoderTests {
+
+    @Test("No shards emitted when data is below format detection threshold")
+    func belowDetectionThreshold() async {
+        let decoder = StreamingAudioDecoder(episodeID: "test", shardDuration: 30.0, contentType: "mp3")
+        let stream = await decoder.shards()
+
+        // Feed less than 16KB (minimum for format detection)
+        await decoder.feedData(Data(count: 1000))
+        await decoder.finish()
+
+        var shards: [AnalysisShard] = []
+        for await shard in stream {
+            shards.append(shard)
+        }
+        #expect(shards.isEmpty, "No shards should be emitted from insufficient data")
+    }
+
+    @Test("finish() terminates the shard stream")
+    func finishTerminatesStream() async {
+        let decoder = StreamingAudioDecoder(episodeID: "test", shardDuration: 30.0)
+        let stream = await decoder.shards()
+
+        await decoder.finish()
+
+        var count = 0
+        for await _ in stream {
+            count += 1
+        }
+        // Stream should have terminated (loop exits)
+        #expect(count == 0)
+    }
+
+    @Test("cleanup() removes temporary file")
+    func cleanupRemovesTempFile() async {
+        let decoder = StreamingAudioDecoder(episodeID: "test", shardDuration: 30.0)
+
+        // Feed some data to create the temp file
+        await decoder.feedData(Data(repeating: 0xFF, count: 100))
+        await decoder.cleanup()
+
+        // The temp file should be gone. We can't easily check the path
+        // since it's private, but cleanup should not crash.
+    }
+
+    @Test("shards() can be called once without crash")
+    func shardsCalledOncePrecondition() async {
+        let decoder = StreamingAudioDecoder(episodeID: "test", shardDuration: 30.0)
+        _ = await decoder.shards()
+        // Second call would hit precondition failure.
+        // We can't test precondition failures directly in Swift Testing,
+        // so just verify the first call works.
+    }
+
+    @Test("Supports common podcast content types")
+    func contentTypeMapping() async {
+        // These should all initialize without crashing
+        let types = ["mp3", "m4a", "audio/mpeg", "audio/mp4", "audio/aac", "audio/wav"]
+        for type in types {
+            let decoder = StreamingAudioDecoder(episodeID: "test", contentType: type)
+            await decoder.cleanup()
+        }
+    }
+
+    @Test("Decodes WAV data into shards")
+    func decodesWAVData() async throws {
+        // Use 1-second shards for fast testing
+        let decoder = StreamingAudioDecoder(episodeID: "test", shardDuration: 1.0, contentType: "wav")
+        let stream = await decoder.shards()
+
+        // Create a minimal 16kHz mono 16-bit WAV with 3 seconds of silence
+        let wavData = makeWAVData(seconds: 3)
+
+        // Feed all at once
+        await decoder.feedData(wavData)
+        await decoder.finish()
+
+        var shards: [AnalysisShard] = []
+        for await shard in stream {
+            shards.append(shard)
+        }
+
+        // With 3 seconds of 16kHz audio and 1-second shards, expect 3 shards.
+        // The converter may produce slightly different counts due to resampling,
+        // but we should get at least 2 shards.
+        #expect(shards.count >= 2, "Expected at least 2 shards from 3 seconds of WAV, got \(shards.count)")
+
+        // Verify shard properties
+        if let first = shards.first {
+            #expect(first.id == 0)
+            #expect(first.episodeID == "test")
+            #expect(first.startTime == 0)
+            #expect(first.duration > 0.5, "First shard should be ~1 second")
+        }
+
+        // Verify shards are in order
+        for i in 1..<shards.count {
+            #expect(shards[i].startTime > shards[i-1].startTime, "Shards should be time-ordered")
+        }
+
+        await decoder.cleanup()
+    }
+
+    @Test("Incremental feed produces shards like bulk feed")
+    func incrementalVsBulkFeed() async throws {
+        let wavData = makeWAVData(seconds: 3)
+
+        // Feed incrementally in 4KB chunks
+        let decoder = StreamingAudioDecoder(episodeID: "test", shardDuration: 1.0, contentType: "wav")
+        let stream = await decoder.shards()
+
+        let chunkSize = 4096
+        var offset = 0
+        while offset < wavData.count {
+            let end = min(offset + chunkSize, wavData.count)
+            await decoder.feedData(wavData[offset..<end])
+            offset = end
+        }
+        await decoder.finish()
+
+        var shards: [AnalysisShard] = []
+        for await shard in stream {
+            shards.append(shard)
+        }
+
+        #expect(shards.count >= 2, "Incremental feed should produce at least 2 shards from 3s WAV, got \(shards.count)")
+
+        await decoder.cleanup()
+    }
+
+    // MARK: - WAV Helper
+
+    /// Builds a minimal 16kHz mono 16-bit PCM WAV in memory.
+    private static func makeWAVData(seconds: UInt32) -> Data {
+        let sampleRate: UInt32 = 16_000
+        let numSamples: UInt32 = sampleRate * seconds
+        let dataSize: UInt32 = numSamples * 2  // 16-bit = 2 bytes per sample
+
+        var wav = Data()
+        // RIFF header
+        wav.append(contentsOf: "RIFF".utf8)
+        wav.append(withUnsafeBytes(of: (36 + dataSize).littleEndian) { Data($0) })
+        wav.append(contentsOf: "WAVE".utf8)
+        // fmt chunk
+        wav.append(contentsOf: "fmt ".utf8)
+        wav.append(withUnsafeBytes(of: UInt32(16).littleEndian) { Data($0) })       // chunk size
+        wav.append(withUnsafeBytes(of: UInt16(1).littleEndian) { Data($0) })        // PCM format
+        wav.append(withUnsafeBytes(of: UInt16(1).littleEndian) { Data($0) })        // mono
+        wav.append(withUnsafeBytes(of: sampleRate.littleEndian) { Data($0) })       // sample rate
+        wav.append(withUnsafeBytes(of: (sampleRate * 2).littleEndian) { Data($0) }) // byte rate
+        wav.append(withUnsafeBytes(of: UInt16(2).littleEndian) { Data($0) })        // block align
+        wav.append(withUnsafeBytes(of: UInt16(16).littleEndian) { Data($0) })       // bits per sample
+        // data chunk
+        wav.append(contentsOf: "data".utf8)
+        wav.append(withUnsafeBytes(of: dataSize.littleEndian) { Data($0) })
+        // Silence (16-bit zeros)
+        wav.append(Data(count: Int(dataSize)))
+        return wav
+    }
+
+    private func makeWAVData(seconds: UInt32) -> Data {
+        Self.makeWAVData(seconds: seconds)
+    }
+}

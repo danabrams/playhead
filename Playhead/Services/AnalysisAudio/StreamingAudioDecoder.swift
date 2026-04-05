@@ -373,7 +373,7 @@ actor StreamingAudioDecoder {
 
         // Already a file extension.
         switch normalized {
-        case "mp3", "m4a", "aac", "wav", "caf", "aiff", "mp4", "ogg":
+        case "mp3", "m4a", "aac", "wav", "caf", "aiff", "mp4":
             return normalized
         default:
             break
@@ -391,8 +391,6 @@ actor StreamingAudioDecoder {
             return "wav"
         case "audio/aiff", "audio/x-aiff":
             return "aiff"
-        case "audio/ogg":
-            return "ogg"
         default:
             // Default to mp3 -- the most common podcast format.
             return "mp3"
