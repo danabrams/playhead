@@ -774,6 +774,7 @@ actor AnalysisCoordinator {
         downloadProgressTask = Task {
             let stream = await dm.progressUpdates()
             var lastShardCount = self.activeShards?.count ?? 0
+            var lastBytesDecoded: Int64 = 0
             self.logger.info("Download progress observer started, lastShardCount=\(lastShardCount)")
 
             for await progress in stream {
@@ -785,6 +786,12 @@ actor AnalysisCoordinator {
 
                 self.progressEventsReceived += 1
 
+                // Estimate whether enough new audio has arrived before decoding.
+                // ~16KB/s at 128kbps → 1MB ≈ 60s of audio. Only decode when
+                // we expect at least one new shard worth of audio.
+                let newBytes = progress.bytesWritten - lastBytesDecoded
+                guard newBytes >= 1_000_000 else { continue }
+
                 // Re-decode to pick up newly downloaded audio.
                 do {
                     let freshShards = try await self.audioService.decode(
@@ -793,6 +800,7 @@ actor AnalysisCoordinator {
                     )
 
                     self.progressDecodesTriggered += 1
+                    lastBytesDecoded = progress.bytesWritten
                     self.logger.info("Progress decode: \(freshShards.count) shards (was \(lastShardCount))")
 
                     guard freshShards.count > lastShardCount else { continue }
