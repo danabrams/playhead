@@ -85,8 +85,10 @@ final class PlaybackService: NSObject, Sendable {
     private var rateObservation: NSKeyValueObservation?
     private var itemStatusObservation: NSKeyValueObservation?
 
-    /// Commands we registered target/action on, for cleanup.
-    private var registeredCommands: [MPRemoteCommand] = []
+    /// Separate NSObject that receives remote command callbacks without actor
+    /// isolation, then hops to PlaybackServiceActor via Tasks. Stored strongly
+    /// here because MPRemoteCommand only holds an unretained reference to targets.
+    private nonisolated(unsafe) var commandHandler: RemoteCommandHandler?
 
     // MARK: - Init
 
@@ -219,6 +221,14 @@ final class PlaybackService: NSObject, Sendable {
         player.pause()
         updateState { $0.status = .paused }
         updateNowPlayingInfo()
+    }
+
+    func togglePlayPause() {
+        if case .playing = _state.status {
+            pause()
+        } else {
+            play()
+        }
     }
 
     /// Returns the latest transport snapshot for higher-level coordinators.
@@ -467,36 +477,43 @@ final class PlaybackService: NSObject, Sendable {
 
     // MARK: - Remote Commands
 
-    /// Register for remote commands using ObjC target/action instead of
-    /// Swift closures. Closures formed inside a @PlaybackServiceActor method
-    /// inherit actor isolation; when MediaPlayer invokes them from the main
-    /// thread the Swift 6 runtime aborts with an isolation check failure.
-    /// ObjC target/action dispatch bypasses Swift actor isolation entirely.
+    /// Register for remote commands via a separate, non-isolated handler object.
+    /// Swift 6 taints closures AND @objc methods on @globalActor-isolated classes
+    /// with the actor's isolation, causing runtime aborts when MediaPlayer calls
+    /// them from the main thread. A plain NSObject subclass sidesteps this entirely.
     private func configureRemoteCommands() {
+        let handler = RemoteCommandHandler(service: self)
         let center = MPRemoteCommandCenter.shared()
 
-        center.playCommand.addTarget(self, action: #selector(handlePlayCommand(_:)))
-        center.pauseCommand.addTarget(self, action: #selector(handlePauseCommand(_:)))
-        center.togglePlayPauseCommand.addTarget(self, action: #selector(handleToggleCommand(_:)))
+        center.playCommand.addTarget(handler, action: #selector(RemoteCommandHandler.handlePlay(_:)))
+        center.pauseCommand.addTarget(handler, action: #selector(RemoteCommandHandler.handlePause(_:)))
+        center.togglePlayPauseCommand.addTarget(handler, action: #selector(RemoteCommandHandler.handleToggle(_:)))
 
         center.skipForwardCommand.preferredIntervals = [
             NSNumber(value: Self.skipForwardSeconds)
         ]
-        center.skipForwardCommand.addTarget(self, action: #selector(handleSkipForwardCommand(_:)))
+        center.skipForwardCommand.addTarget(handler, action: #selector(RemoteCommandHandler.handleSkipForward(_:)))
 
         center.skipBackwardCommand.preferredIntervals = [
             NSNumber(value: Self.skipBackwardSeconds)
         ]
-        center.skipBackwardCommand.addTarget(self, action: #selector(handleSkipBackwardCommand(_:)))
+        center.skipBackwardCommand.addTarget(handler, action: #selector(RemoteCommandHandler.handleSkipBackward(_:)))
 
-        center.changePlaybackPositionCommand.addTarget(self, action: #selector(handleChangePositionCommand(_:)))
+        center.changePlaybackPositionCommand.addTarget(handler, action: #selector(RemoteCommandHandler.handleChangePosition(_:)))
 
         center.changePlaybackRateCommand.supportedPlaybackRates = [
             0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
         ]
-        center.changePlaybackRateCommand.addTarget(self, action: #selector(handleChangeRateCommand(_:)))
+        center.changePlaybackRateCommand.addTarget(handler, action: #selector(RemoteCommandHandler.handleChangeRate(_:)))
 
-        registeredCommands = [
+        commandHandler = handler
+    }
+
+    /// Remove all registered remote command targets to prevent leaks.
+    private func removeRemoteCommandTargets() {
+        guard let handler = commandHandler else { return }
+        let center = MPRemoteCommandCenter.shared()
+        for command in [
             center.playCommand,
             center.pauseCommand,
             center.togglePlayPauseCommand,
@@ -504,67 +521,10 @@ final class PlaybackService: NSObject, Sendable {
             center.skipBackwardCommand,
             center.changePlaybackPositionCommand,
             center.changePlaybackRateCommand,
-        ]
-    }
-
-    /// Remove all registered remote command targets to prevent leaks.
-    private func removeRemoteCommandTargets() {
-        for command in registeredCommands {
-            command.removeTarget(self)
+        ] {
+            command.removeTarget(handler)
         }
-        registeredCommands.removeAll()
-    }
-
-    // MARK: - Remote Command Handlers (nonisolated @objc for ObjC dispatch)
-
-    // These are nonisolated so MediaPlayer can call them from any thread
-    // without triggering Swift actor isolation checks. Each handler fires
-    // a Task to hop onto PlaybackServiceActor for the actual work.
-
-    @objc nonisolated private func handlePlayCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
-        Task { @PlaybackServiceActor [weak self] in self?.play() }
-        return .success
-    }
-
-    @objc nonisolated private func handlePauseCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
-        Task { @PlaybackServiceActor [weak self] in self?.pause() }
-        return .success
-    }
-
-    @objc nonisolated private func handleToggleCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
-        Task { @PlaybackServiceActor [weak self] in
-            guard let self else { return }
-            if case .playing = self._state.status {
-                self.pause()
-            } else {
-                self.play()
-            }
-        }
-        return .success
-    }
-
-    @objc nonisolated private func handleSkipForwardCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
-        Task { @PlaybackServiceActor [weak self] in await self?.skipForward() }
-        return .success
-    }
-
-    @objc nonisolated private func handleSkipBackwardCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
-        Task { @PlaybackServiceActor [weak self] in await self?.skipBackward() }
-        return .success
-    }
-
-    @objc nonisolated private func handleChangePositionCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
-        guard let positionEvent = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
-        let position = positionEvent.positionTime
-        Task { @PlaybackServiceActor [weak self] in await self?.seek(to: position) }
-        return .success
-    }
-
-    @objc nonisolated private func handleChangeRateCommand(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
-        guard let rateEvent = event as? MPChangePlaybackRateCommandEvent else { return .commandFailed }
-        let rate = rateEvent.playbackRate
-        Task { @PlaybackServiceActor [weak self] in self?.setSpeed(rate) }
-        return .success
+        commandHandler = nil
     }
 
     // MARK: - State Update
@@ -621,6 +581,62 @@ final class PlaybackService: NSObject, Sendable {
         applyObservedRate(rate)
     }
 #endif
+}
+
+// MARK: - RemoteCommandHandler
+
+/// Plain NSObject that receives MPRemoteCommand callbacks without any Swift
+/// actor isolation. Delegates to PlaybackService by hopping onto
+/// PlaybackServiceActor via Tasks. This exists because Swift 6 contaminates
+/// both closures and @objc methods on @globalActor-isolated classes with the
+/// actor's isolation, causing runtime aborts when MediaPlayer dispatches
+/// commands from the main thread.
+final class RemoteCommandHandler: NSObject {
+    weak var service: PlaybackService?
+
+    init(service: PlaybackService) {
+        self.service = service
+        super.init()
+    }
+
+    @objc func handlePlay(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        Task { @PlaybackServiceActor [weak service] in service?.play() }
+        return .success
+    }
+
+    @objc func handlePause(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        Task { @PlaybackServiceActor [weak service] in service?.pause() }
+        return .success
+    }
+
+    @objc func handleToggle(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        Task { @PlaybackServiceActor [weak service] in service?.togglePlayPause() }
+        return .success
+    }
+
+    @objc func handleSkipForward(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        Task { @PlaybackServiceActor [weak service] in await service?.skipForward() }
+        return .success
+    }
+
+    @objc func handleSkipBackward(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        Task { @PlaybackServiceActor [weak service] in await service?.skipBackward() }
+        return .success
+    }
+
+    @objc func handleChangePosition(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        guard let positionEvent = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+        let position = positionEvent.positionTime
+        Task { @PlaybackServiceActor [weak service] in await service?.seek(to: position) }
+        return .success
+    }
+
+    @objc func handleChangeRate(_ event: MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus {
+        guard let rateEvent = event as? MPChangePlaybackRateCommandEvent else { return .commandFailed }
+        let rate = rateEvent.playbackRate
+        Task { @PlaybackServiceActor [weak service] in service?.setSpeed(rate) }
+        return .success
+    }
 }
 
 // MARK: - ProgressiveResourceLoader
