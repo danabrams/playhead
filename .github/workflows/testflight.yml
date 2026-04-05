@@ -171,7 +171,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload to TestFlight
-        uses: apple-actions/upload-testflight-build@v3
+        uses: apple-actions/upload-testflight-build@v4
         with:
           app-path: ${{ env.IPA_PATH }}
           issuer-id: ${{ secrets.APPSTORE_ISSUER_ID }}
