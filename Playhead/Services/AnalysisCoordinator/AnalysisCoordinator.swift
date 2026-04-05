@@ -747,20 +747,43 @@ actor AnalysisCoordinator {
     /// Minimum new audio (seconds) before triggering an incremental re-decode.
     private static let incrementalDecodeThreshold: TimeInterval = 60.0
 
+    /// Debug counters for TestFlight diagnostics (written to UserDefaults).
+    private var progressEventsReceived: Int = 0 {
+        didSet { UserDefaults.standard.set(progressEventsReceived, forKey: "debug_progressEvents") }
+    }
+    private var progressDecodesTriggered: Int = 0 {
+        didSet { UserDefaults.standard.set(progressDecodesTriggered, forKey: "debug_progressDecodes") }
+    }
+    private var progressObserverStarted: Bool = false {
+        didSet { UserDefaults.standard.set(progressObserverStarted, forKey: "debug_progressObserverStarted") }
+    }
+
     private func startObservingDownloadProgress(
         episodeId: String,
         audioURL: LocalAudioURL,
         assetId: String
     ) {
         downloadProgressTask?.cancel()
-        guard let dm = downloadManager else { return }
+        guard let dm = downloadManager else {
+            logger.warning("No download manager — skipping progress observation")
+            return
+        }
+        progressEventsReceived = 0
+        progressDecodesTriggered = 0
+        progressObserverStarted = true
         downloadProgressTask = Task {
             let stream = await dm.progressUpdates()
             var lastShardCount = self.activeShards?.count ?? 0
+            self.logger.info("Download progress observer started, lastShardCount=\(lastShardCount)")
 
             for await progress in stream {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled else {
+                    self.logger.info("Download progress observer cancelled")
+                    return
+                }
                 guard progress.episodeId == episodeId else { continue }
+
+                self.progressEventsReceived += 1
 
                 // Re-decode to pick up newly downloaded audio.
                 do {
@@ -768,6 +791,9 @@ actor AnalysisCoordinator {
                         fileURL: audioURL,
                         episodeID: episodeId
                     )
+
+                    self.progressDecodesTriggered += 1
+                    self.logger.info("Progress decode: \(freshShards.count) shards (was \(lastShardCount))")
 
                     guard freshShards.count > lastShardCount else { continue }
 

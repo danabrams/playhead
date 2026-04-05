@@ -173,6 +173,12 @@ final class TranscriptPeekViewModel {
             parts.append("err")
         }
 
+        // Download progress observer diagnostics.
+        let obsStarted = UserDefaults.standard.bool(forKey: "debug_progressObserverStarted")
+        let pEvents = UserDefaults.standard.integer(forKey: "debug_progressEvents")
+        let pDecodes = UserDefaults.standard.integer(forKey: "debug_progressDecodes")
+        parts.append("dl:\(obsStarted ? "Y" : "N") ev:\(pEvents) dec:\(pDecodes)")
+
         debugStats = parts.joined(separator: " · ")
     }
 
