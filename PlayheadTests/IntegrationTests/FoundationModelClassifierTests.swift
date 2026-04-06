@@ -1,179 +1,299 @@
-// FoundationModelClassifierTests.swift
-// Phase 3.1 de-risking test: can Foundation Models catch the ads that
-// LexicalScanner cannot? Runs the coarse FM classifier against specific
-// segments from the Conan "Fanhausen Revisited" transcript that have
-// known ground truth.
-
 import Foundation
 import Testing
 @testable import Playhead
 
-@Suite("Foundation Model Classifier — Phase 3.1 de-risking")
+@Suite("Foundation Model Classifier — Pass A")
 struct FoundationModelClassifierTests {
 
-    // MARK: - Ground truth segments from the Conan Fanhausen transcript
+    @Test("coarse screening schema round-trips with certainty bands")
+    func coarseScreeningSchemaRoundTrip() throws {
+        let schema = CoarseScreeningSchema(
+            transcriptQuality: .degraded,
+            disposition: .uncertain,
+            support: CoarseSupportSchema(
+                supportLineRefs: [3, 7],
+                certainty: .moderate
+            )
+        )
 
-    /// Each test segment is pulled directly from the real Conan transcript
-    /// fixture and has a known ad/non-ad label.
-    private struct TestSegment {
-        let label: String
-        let knownIntent: FMCoarseScanOutput.Intent  // expected
-        let text: String
+        let data = try JSONEncoder().encode(schema)
+        let json = try #require(String(data: data, encoding: .utf8))
+        let decoded = try JSONDecoder().decode(CoarseScreeningSchema.self, from: data)
+
+        #expect(decoded == schema)
+        #expect(json.contains("\"certainty\":\"moderate\""))
+        #expect(!json.contains("0."))
     }
 
-    /// These are the critical segments — especially Kelly Ripa, which
-    /// LexicalScanner cannot detect.
-    private static let segments: [TestSegment] = [
-        // 0:00-0:26 — CVS pharmacy pre-roll (LexicalScanner CAN catch via URL)
-        TestSegment(
-            label: "CVS pre-roll (0:00-0:26)",
-            knownIntent: .commercial,
-            text: "getting your vaccines matters but with so much confusing information out there it can be hard to know for sure your local cvs pharmacists are here to help with the answers to your questions and important vaccines like shingles rsv and pneumococcal pneumonia if eligible so you can get the protection you need and peace of mind too schedule yours today at cvs.com or on the cvs health app"
-        ),
-        // 0:30-0:56 — Kelly Ripa cross-promo (LexicalScanner CANNOT catch — no URL, no promo code)
-        TestSegment(
-            label: "Kelly Ripa cross-promo (0:30-0:56) — the critical test",
-            knownIntent: .commercial,
-            text: "hey everyone it's kelly ripper and we're celebrating 3 years of my podcast let's talk off camera no hair no makeup just 3 great years of the most honest conversations real stories and unfiltered talk and we're joined every week by celebrity guests like nicky glaser kate hudson oprah and more 3 years in and we're not done yet listen to let's talk off camera wherever you get your podcasts"
-        ),
-        // 1:00-1:30 — actual show content, should be editorial
-        TestSegment(
-            label: "Show intro — Danhausen anniversary (1:00-1:30)",
-            knownIntent: .editorial,
-            text: "well we have come up on a very nice anniversary hard to believe but 5 years ago this month we did our very first fan episode and it's been 5 years and i really love these segments and the very first one featured a fan of mine named dan hausen now dan hausen is a wrestler and he explained to me when we did this very first fan episode that he had loosely based his character his wrestler character on me if i was an interdimensional demon"
-        ),
-        // 3:17-3:26 — teamcoco.com call-in instructions (show structure, NOT an ad)
-        // This is the critical false-positive test for LexicalScanner
-        TestSegment(
-            label: "teamcoco.com call-in (3:17-3:26) — false-positive test",
-            knownIntent: .editorial,
-            text: "conan o'brien needs a fan want to talk to conan visit teamcoco.com slash call conan okay let's get started hey everybody conan o'brien"
-        ),
-        // 15:52-15:59 — SiriusXM in credits (edge case, 50% ad in user's gradient model)
-        TestSegment(
-            label: "SiriusXM in credits (15:52-15:59)",
-            knownIntent: .commercial,
-            text: "incidental music by jimmy vivino take it away jimmy supervising producer aaron blair associate talent producer jennifer samples associate producers sean doherty and lisa burm engineering by eduardo perez get three free months of siriusxm when you sign up at siriusxm.com slash conan please rate review and subscribe"
-        ),
-        // 16:11-16:29 — Kelly Ripa cross-promo repeat at end
-        TestSegment(
-            label: "Kelly Ripa cross-promo repeat (16:11-16:29)",
-            knownIntent: .commercial,
-            text: "hey everyone it's kelly ripa and we're celebrating 3 years of my podcast let's talk off camera no hair no makeup just 3 great years of the most honest conversations real stories and unfiltered talk and we're joined every week by celebrity guests like nikki glaser"
-        ),
-    ]
+    @Test("prompt is minimal and uses quoted line refs")
+    func promptFormat() {
+        let prompt = FoundationModelClassifier.buildPrompt(for: [
+            makeSegment(index: 7, text: "This is the sponsor read."),
+            makeSegment(index: 8, text: "Use code SAVE for discounts.")
+        ])
 
-    // MARK: - Tests
+        #expect(prompt == """
+        Classify ad content.
+        7: "This is the sponsor read."
+        8: "Use code SAVE for discounts."
+        """)
+        #expect(!prompt.localizedCaseInsensitiveContains("reason"))
+        #expect(!prompt.localizedCaseInsensitiveContains("evidence"))
+    }
 
-    @Test("FM coarse scan distinguishes commercial from editorial content")
-    func coarseScanClassification() async throws {
-        let classifier = FoundationModelClassifier()
+    @Test("planner covers the full real-episode transcript and respects the token budget")
+    func plannerCoverageOnRealEpisode() async throws {
+        let segments = buildFixtureSegments()
+        #expect(!segments.isEmpty)
 
-        var correctCount = 0
-        var totalLatencyMs: Double = 0
-        var unavailableCount = 0
-        var results: [(TestSegment, FMCoarseScanOutput)] = []
-
-        print("\n=== Foundation Model Coarse Scan Benchmark ===")
-        print("Segments under test: \(Self.segments.count)")
-
-        for segment in Self.segments {
-            let output: FMCoarseScanOutput
-            do {
-                output = try await classifier.coarse(segmentText: segment.text)
-            } catch {
-                print("\n[\(segment.label)]")
-                print("  ERROR: \(error.localizedDescription)")
-                continue
+        let recorder = RuntimeRecorder(
+            contextSize: 30,
+            schemaTokens: 4,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 5
             }
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
+        )
 
-            results.append((segment, output))
+        let plans = try await classifier.planPassA(segments: segments)
+        let covered = Set(plans.flatMap(\.lineRefs))
 
-            if output.intent == .unavailable {
-                unavailableCount += 1
-                print("\n[\(segment.label)]")
-                print("  UNAVAILABLE: \(output.reason)")
-                continue
+        #expect(plans.count > 1)
+        #expect(covered == Set(segments.map(\.segmentIndex)))
+        #expect(plans.allSatisfy { !$0.lineRefs.isEmpty })
+        #expect(plans.allSatisfy { $0.promptTokenCount <= 15 })
+        #expect(plans.allSatisfy { isContiguous($0.lineRefs) })
+    }
+
+    @Test("coarse pass prewarms once, uses a fresh session per window, and sanitizes support refs")
+    func prewarmAndFreshSessionPerWindow() async throws {
+        let segments = [
+            makeSegment(index: 0, startTime: 0, endTime: 8, text: "The hosts catch up before the break."),
+            makeSegment(index: 1, startTime: 8, endTime: 16, text: "This episode is brought to you by ExampleCo."),
+            makeSegment(index: 2, startTime: 16, endTime: 24, text: "Use code SAVE for twenty percent off."),
+        ]
+
+        let recorder = RuntimeRecorder(
+            contextSize: 30,
+            schemaTokens: 4,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 5
+            },
+            responses: [
+                CoarseScreeningSchema(
+                    transcriptQuality: .good,
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [999, 1, 1],
+                        certainty: .strong
+                    )
+                ),
+                CoarseScreeningSchema(
+                    transcriptQuality: .good,
+                    disposition: .noAds,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [42],
+                        certainty: .weak
+                    )
+                ),
+            ]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 2)
+        #expect(output.windows.map(\.lineRefs) == [[0, 1], [2]])
+        #expect(output.windows[0].screening.support?.supportLineRefs == [1])
+        #expect(output.windows[1].screening.support == nil)
+        #expect(snapshot.prewarmCalls == [
+            RuntimeRecorder.PrewarmCall(sessionID: 1, promptPrefix: "Classify ad content.")
+        ])
+        #expect(snapshot.respondCalls.count == 2)
+        #expect(Set(snapshot.respondCalls.map(\.sessionID)).count == 2)
+        #expect(snapshot.sessionCount == 3)
+    }
+
+    @Test("capability gating returns the FM status without creating sessions")
+    func availabilityGating() async throws {
+        let recorder = RuntimeRecorder(
+            availabilityStatus: .unsupportedLocale,
+            contextSize: 30,
+            schemaTokens: 4,
+            tokenCountRule: { _ in 1 }
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.coarsePassA(segments: [
+            makeSegment(index: 0, text: "Bonjour tout le monde.")
+        ])
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .unsupportedLocale)
+        #expect(output.windows.isEmpty)
+        #expect(snapshot.sessionCount == 0)
+        #expect(snapshot.respondCalls.isEmpty)
+        #expect(snapshot.prewarmCalls.isEmpty)
+    }
+}
+
+private func makeSegment(
+    index: Int,
+    startTime: Double = 0,
+    endTime: Double = 5,
+    text: String
+) -> AdTranscriptSegment {
+    AdTranscriptSegment(
+        atoms: [
+            TranscriptAtom(
+                atomKey: TranscriptAtomKey(
+                    analysisAssetId: "asset-1",
+                    transcriptVersion: "transcript-v1",
+                    atomOrdinal: index
+                ),
+                contentHash: "hash-\(index)",
+                startTime: startTime,
+                endTime: endTime,
+                text: text,
+                chunkIndex: index
+            )
+        ],
+        segmentIndex: index
+    )
+}
+
+private func buildFixtureSegments() -> [AdTranscriptSegment] {
+    let chunks = ConanFanhausenRevisitedFixture.parseChunks()
+    let (atoms, _) = TranscriptAtomizer.atomize(
+        chunks: chunks,
+        analysisAssetId: ConanFanhausenRevisitedFixture.assetId,
+        normalizationHash: "fm-classifier-tests",
+        sourceHash: "fixture"
+    )
+    return TranscriptSegmenter.segment(atoms: atoms)
+}
+
+private func isContiguous(_ values: [Int]) -> Bool {
+    zip(values, values.dropFirst()).allSatisfy { lhs, rhs in
+        rhs == lhs + 1
+    }
+}
+
+private actor RuntimeRecorder {
+    struct PrewarmCall: Sendable, Equatable {
+        let sessionID: Int
+        let promptPrefix: String
+    }
+
+    struct RespondCall: Sendable, Equatable {
+        let sessionID: Int
+        let prompt: String
+    }
+
+    struct Snapshot: Sendable, Equatable {
+        let sessionCount: Int
+        let prewarmCalls: [PrewarmCall]
+        let respondCalls: [RespondCall]
+    }
+
+    private let availabilityStatus: SemanticScanStatus?
+    private let contextSize: Int
+    private let schemaTokens: Int
+    private let tokenCountRule: @Sendable (String) -> Int
+    private var queuedResponses: [CoarseScreeningSchema]
+    private var sessionCount = 0
+    private var prewarmCalls: [PrewarmCall] = []
+    private var respondCalls: [RespondCall] = []
+
+    init(
+        availabilityStatus: SemanticScanStatus? = nil,
+        contextSize: Int,
+        schemaTokens: Int,
+        tokenCountRule: @escaping @Sendable (String) -> Int,
+        responses: [CoarseScreeningSchema] = []
+    ) {
+        self.availabilityStatus = availabilityStatus
+        self.contextSize = contextSize
+        self.schemaTokens = schemaTokens
+        self.tokenCountRule = tokenCountRule
+        self.queuedResponses = responses
+    }
+
+    nonisolated var runtime: FoundationModelClassifier.Runtime {
+        FoundationModelClassifier.Runtime(
+            availabilityStatus: { _ in await self.currentAvailabilityStatus() },
+            contextSize: { await self.currentContextSize() },
+            tokenCount: { prompt in await self.currentTokenCount(for: prompt) },
+            schemaTokenCount: { await self.currentSchemaTokenCount() },
+            makeSession: {
+                let sessionID = await self.nextSessionID()
+                return FoundationModelClassifier.Runtime.Session(
+                    prewarm: { promptPrefix in
+                        await self.recordPrewarm(sessionID: sessionID, promptPrefix: promptPrefix)
+                    },
+                    respond: { prompt in
+                        try await self.recordResponse(sessionID: sessionID, prompt: prompt)
+                    }
+                )
             }
+        )
+    }
 
-            let correct = output.intent == segment.knownIntent
-            if correct { correctCount += 1 }
-            totalLatencyMs += output.latencyMillis
+    func snapshot() -> Snapshot {
+        Snapshot(
+            sessionCount: sessionCount,
+            prewarmCalls: prewarmCalls,
+            respondCalls: respondCalls
+        )
+    }
 
-            print("\n[\(segment.label)]")
-            print("  Expected: \(segment.knownIntent.rawValue)")
-            print("  Got:      \(output.intent.rawValue) (conf=\(String(format: "%.2f", output.confidence)))")
-            print("  Reason:   \(output.reason)")
-            print("  Latency:  \(String(format: "%.0fms", output.latencyMillis))")
-            print("  Verdict:  \(correct ? "✓ CORRECT" : "✗ INCORRECT")")
+    private func currentAvailabilityStatus() -> SemanticScanStatus? {
+        availabilityStatus
+    }
+
+    private func currentContextSize() -> Int {
+        contextSize
+    }
+
+    private func currentTokenCount(for prompt: String) -> Int {
+        tokenCountRule(prompt)
+    }
+
+    private func currentSchemaTokenCount() -> Int {
+        schemaTokens
+    }
+
+    private func nextSessionID() -> Int {
+        sessionCount += 1
+        return sessionCount
+    }
+
+    private func recordPrewarm(sessionID: Int, promptPrefix: String) {
+        prewarmCalls.append(
+            PrewarmCall(
+                sessionID: sessionID,
+                promptPrefix: promptPrefix
+            )
+        )
+    }
+
+    private func recordResponse(sessionID: Int, prompt: String) throws -> CoarseScreeningSchema {
+        respondCalls.append(RespondCall(sessionID: sessionID, prompt: prompt))
+        if queuedResponses.isEmpty {
+            return CoarseScreeningSchema(
+                transcriptQuality: .good,
+                disposition: .noAds,
+                support: nil
+            )
         }
-
-        let scoredCount = Self.segments.count - unavailableCount
-        if unavailableCount > 0 {
-            print("\n⚠️  FM unavailable on \(unavailableCount)/\(Self.segments.count) segments — simulator may not support Foundation Models. Run on a real iOS 26 device to get real numbers.")
-        }
-
-        if scoredCount > 0 {
-            let accuracy = Double(correctCount) / Double(scoredCount)
-            let avgLatency = totalLatencyMs / Double(scoredCount)
-            print("\n=== Summary ===")
-            print("Accuracy: \(correctCount)/\(scoredCount) = \(Int(accuracy * 100))%")
-            print("Average latency: \(String(format: "%.0fms", avgLatency))")
-
-            // Specifically report on the critical Kelly Ripa case
-            if let kellyResult = results.first(where: { $0.0.label.contains("Kelly Ripa cross-promo (0:30") }) {
-                print("\n🎯 Critical Kelly Ripa case (LexicalScanner cannot catch this):")
-                print("   FM result: \(kellyResult.1.intent.rawValue) (conf=\(String(format: "%.2f", kellyResult.1.confidence)))")
-                let kellyCorrect = kellyResult.1.intent == .commercial
-                print("   \(kellyCorrect ? "✅ FM CAUGHT the conversational cross-promo — Phase 3 is viable" : "❌ FM MISSED the cross-promo — plan needs rethinking")")
-            }
-
-            // Specifically report on the teamcoco false-positive case
-            if let teamcocoResult = results.first(where: { $0.0.label.contains("teamcoco") }) {
-                print("\n🎯 Critical teamcoco false-positive case:")
-                print("   FM result: \(teamcocoResult.1.intent.rawValue) (conf=\(String(format: "%.2f", teamcocoResult.1.confidence)))")
-                let teamcocoCorrect = teamcocoResult.1.intent == .editorial
-                print("   \(teamcocoCorrect ? "✅ FM correctly identified first-party show structure" : "❌ FM treated first-party URL as commercial (same problem as LexicalScanner)")")
-            }
-        }
-
-        // Conditional hard assertions:
-        // - Simulator (FM unavailable or errors out on every segment): skip
-        //   with a clear log message so simulator runs stay green. We treat
-        //   thrown errors the same as `.unavailable` because the simulator
-        //   typically fails with a Model Catalog asset error rather than
-        //   returning a tagged unavailable result.
-        // - Real device (FM successfully classified at least one segment):
-        //   hard-assert the de-risking expectations from the 2026-04-06
-        //   baseline run.
-        let scoredResults = results.filter { $0.1.intent != .unavailable }
-        if scoredResults.isEmpty {
-            print("\n⚠️  FM unavailable or errored on all \(Self.segments.count) segments (likely simulator with no model assets). Skipping hard assertions.")
-            #expect(true)
-            return
-        }
-
-        // Pull the specific results we need to gate on.
-        let kellyFirstResult = results.first(where: { $0.0.label.contains("Kelly Ripa cross-promo (0:30") })?.1
-        let teamcocoResult = results.first(where: { $0.0.label.contains("teamcoco") })?.1
-
-        // Phase 3 de-risking: FM MUST classify the Kelly Ripa cross-promo as
-        // commercial. This is the case LexicalScanner cannot catch and the
-        // entire reason FM is in the pipeline.
-        #expect(kellyFirstResult?.intent == .commercial,
-                "Kelly Ripa cross-promo (0:30-0:56) must be classified commercial — Phase 3 de-risking gate")
-
-        // Document the known false positive: teamcoco.com first-party URL is
-        // currently classified commercial. Phase 8 will fix this. Asserting
-        // the broken state here means Phase 8 cannot silently change the
-        // behavior without updating this test.
-        #expect(teamcocoResult?.intent == .commercial,
-                "teamcoco.com call-in is currently a known false positive (classified commercial). Phase 8 will fix this — when it does, update this assertion.")
-
-        // Overall accuracy floor: matches the 2026-04-06 real-device run
-        // (4/6 segments correct). The known misses are the truncated Kelly
-        // Ripa repeat (#6) and the teamcoco false positive (#4).
-        #expect(correctCount >= 4,
-                "FM coarse scan accuracy regressed: expected at least 4/6 segments correct (2026-04-06 baseline), got \(correctCount)/\(Self.segments.count - unavailableCount)")
+        return queuedResponses.removeFirst()
     }
 }

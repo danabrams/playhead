@@ -1,148 +1,461 @@
-// FoundationModelClassifier.swift
-// Minimum viable Foundation Models coarse scan for ad detection. Given a
-// chunk of transcript text, asks the on-device language model whether it
-// is commercial content (sponsor read, cross-promo, etc.) or editorial
-// show content. This is the Phase 3.1 de-risking implementation — one
-// function, no persistence, no zoom/refinement passes, no evidence
-// grounding. Just: does FM catch what lexical scanning cannot?
-
 import Foundation
 import OSLog
+
 #if canImport(FoundationModels)
 import FoundationModels
 #endif
 
-// MARK: - Output schema
+// MARK: - Coarse screening schema
 
-/// The commercial-intent classification produced by the FM coarse scan.
 #if canImport(FoundationModels)
+@available(iOS 26.0, *)
 @Generable
-struct CoarseScanResult: Sendable {
-    @Guide(description: "The primary intent of this transcript segment. 'commercial' = sponsor read, ad, cross-promo, or any content primarily promoting a product, service, brand, or other podcast/show. 'editorial' = actual show content, interview, commentary, or storytelling. 'mixed' = a transition or brief mention that is neither purely commercial nor purely editorial.")
-    var intent: CommercialIntent
-
-    @Guide(description: "Confidence in the classification from 0.0 (uncertain) to 1.0 (certain). Use values below 0.5 when the segment is ambiguous.")
-    var confidence: Double
-
-    @Guide(description: "A brief (one-sentence) reason for the classification. If commercial, name the advertiser or promoted entity if identifiable. If editorial, name the topic briefly.")
-    var reason: String
+enum TranscriptQuality: String, Sendable, Codable, Hashable {
+    case good
+    case degraded
+    case unusable
 }
 
+@available(iOS 26.0, *)
 @Generable
-enum CommercialIntent: String, Sendable {
-    case commercial
-    case editorial
-    case mixed
+enum CoarseDisposition: String, Sendable, Codable, Hashable {
+    case noAds
+    case containsAd
+    case uncertain
+    case abstain
+}
+
+@available(iOS 26.0, *)
+@Generable
+enum CertaintyBand: String, Sendable, Codable, Hashable {
+    case weak
+    case moderate
+    case strong
+}
+
+@available(iOS 26.0, *)
+@Generable
+struct CoarseSupportSchema: Sendable, Codable, Hashable {
+    @Guide(description: "Line reference integers from the quoted transcript that directly support the disposition.")
+    var supportLineRefs: [Int]
+
+    @Guide(description: "Calibrated certainty band for the support.")
+    var certainty: CertaintyBand
+}
+
+@available(iOS 26.0, *)
+@Generable
+struct CoarseScreeningSchema: Sendable, Codable, Hashable {
+    @Guide(description: "Transcript quality for this window. Use unusable when the quoted transcript is too degraded to classify reliably.")
+    var transcriptQuality: TranscriptQuality
+
+    @Guide(description: "Coarse ad-screening disposition for the window.")
+    var disposition: CoarseDisposition
+
+    @Guide(description: "Optional supporting line references and certainty band. Leave null when abstaining or when no specific support lines apply.")
+    var support: CoarseSupportSchema?
+}
+#else
+enum TranscriptQuality: String, Sendable, Codable, Hashable {
+    case good
+    case degraded
+    case unusable
+}
+
+enum CoarseDisposition: String, Sendable, Codable, Hashable {
+    case noAds
+    case containsAd
+    case uncertain
+    case abstain
+}
+
+enum CertaintyBand: String, Sendable, Codable, Hashable {
+    case weak
+    case moderate
+    case strong
+}
+
+struct CoarseSupportSchema: Sendable, Codable, Hashable {
+    var supportLineRefs: [Int]
+    var certainty: CertaintyBand
+}
+
+struct CoarseScreeningSchema: Sendable, Codable, Hashable {
+    var transcriptQuality: TranscriptQuality
+    var disposition: CoarseDisposition
+    var support: CoarseSupportSchema?
 }
 #endif
 
-// MARK: - Classifier
+// MARK: - Output
 
-/// Public, FM-availability-aware result type used outside the
-/// `canImport(FoundationModels)` guard.
-struct FMCoarseScanOutput: Sendable {
-    enum Intent: String, Sendable {
-        case commercial
-        case editorial
-        case mixed
-        case unavailable  // FM not available on this device
-    }
-    let intent: Intent
-    let confidence: Double
-    let reason: String
-    /// Wall clock time in milliseconds for the FM call.
+struct CoarsePassWindowPlan: Sendable, Equatable {
+    let windowIndex: Int
+    let lineRefs: [Int]
+    let prompt: String
+    let promptTokenCount: Int
+    let startTime: Double
+    let endTime: Double
+    let transcriptQuality: TranscriptQuality
+}
+
+struct FMCoarseWindowOutput: Sendable, Equatable {
+    let windowIndex: Int
+    let lineRefs: [Int]
+    let startTime: Double
+    let endTime: Double
+    let screening: CoarseScreeningSchema
     let latencyMillis: Double
 }
 
-/// Minimum viable coarse FM classifier. Takes a transcript segment text
-/// and returns a commercial-intent classification. No persistence, no
-/// multi-pass, no grounding. Phase 3.1 proof of concept only.
+struct FMCoarseScanOutput: Sendable, Equatable {
+    let status: SemanticScanStatus
+    let windows: [FMCoarseWindowOutput]
+    let latencyMillis: Double
+}
+
+enum FoundationModelClassifierError: Error, Sendable, LocalizedError {
+    case segmentExceedsTokenBudget(lineRef: Int, tokenCount: Int, budget: Int)
+    case runtimeUnavailable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .segmentExceedsTokenBudget(lineRef, tokenCount, budget):
+            "Transcript segment \(lineRef) needs \(tokenCount) tokens, exceeding the coarse-pass budget of \(budget)."
+        case let .runtimeUnavailable(reason):
+            reason
+        }
+    }
+}
+
+// MARK: - Classifier
+
 struct FoundationModelClassifier: Sendable {
+    struct Config: Sendable {
+        let safetyMarginTokens: Int
+        let maximumResponseTokens: Int
 
-    private let logger = Logger(subsystem: "com.playhead", category: "FoundationModelClassifier")
+        static let `default` = Config(
+            safetyMarginTokens: 128,
+            maximumResponseTokens: 96
+        )
+    }
 
-    /// Run the coarse scan on a single transcript segment.
-    /// Returns `.unavailable` if FM is not available on this device / OS.
-    func coarse(segmentText: String) async throws -> FMCoarseScanOutput {
+    struct Runtime: Sendable {
+        struct Session: Sendable {
+            let prewarm: @Sendable (_ promptPrefix: String) async -> Void
+            let respond: @Sendable (_ prompt: String) async throws -> CoarseScreeningSchema
+        }
+
+        let availabilityStatus: @Sendable (_ locale: Locale) async -> SemanticScanStatus?
+        let contextSize: @Sendable () async -> Int
+        let tokenCount: @Sendable (_ prompt: String) async throws -> Int
+        let schemaTokenCount: @Sendable () async throws -> Int
+        let makeSession: @Sendable () async -> Session
+    }
+
+    private static let promptPrefix = "Classify ad content."
+    private static let fallbackSchemaTokenEstimate = 128
+
+    private let runtime: Runtime
+    private let config: Config
+
+    init(
+        runtime: Runtime? = nil,
+        config: Config = .default,
+        logger: Logger = Logger(subsystem: "com.playhead", category: "FoundationModelClassifier")
+    ) {
+        self.config = config
+        self.runtime = runtime ?? Self.liveRuntime(logger: logger, config: config)
+    }
+
+    func coarsePassA(
+        segments: [AdTranscriptSegment],
+        locale: Locale = .current
+    ) async throws -> FMCoarseScanOutput {
         let clock = ContinuousClock()
         let start = clock.now
 
-        #if canImport(FoundationModels)
-        guard #available(iOS 26.0, *) else {
-            return FMCoarseScanOutput(intent: .unavailable, confidence: 0, reason: "iOS < 26", latencyMillis: 0)
+        if let status = await runtime.availabilityStatus(locale) {
+            return FMCoarseScanOutput(status: status, windows: [], latencyMillis: 0)
         }
 
-        let model = SystemLanguageModel.default
-        if let availabilityStatus = SemanticScanStatus.from(availability: model.availability) {
-            return FMCoarseScanOutput(intent: .unavailable, confidence: 0, reason: availabilityStatus.rawValue, latencyMillis: 0)
-        }
-        guard model.supportsLocale() else {
-            return FMCoarseScanOutput(intent: .unavailable, confidence: 0, reason: SemanticScanStatus.unsupportedLocale.rawValue, latencyMillis: 0)
-        }
-        guard await FoundationModelsUsabilityProbe.probeIfNeeded(logger: logger) else {
-            return FMCoarseScanOutput(intent: .unavailable, confidence: 0, reason: "foundationModelsProbeFailed", latencyMillis: 0)
+        let plans = try await planPassA(segments: segments)
+        guard !plans.isEmpty else {
+            return FMCoarseScanOutput(
+                status: .success,
+                windows: [],
+                latencyMillis: 0
+            )
         }
 
-        let session = LanguageModelSession(model: model)
-        let prompt = Self.buildPrompt(segmentText: segmentText)
+        let prewarmSession = await runtime.makeSession()
+        await prewarmSession.prewarm(Self.promptPrefix)
 
-        let response: CoarseScanResult
-        do {
-            let fullResponse = try await session.respond(to: prompt, generating: CoarseScanResult.self)
-            response = fullResponse.content
-        } catch {
-            logger.error("Coarse scan failed: \(error.localizedDescription)")
-            throw error
-        }
+        var windows: [FMCoarseWindowOutput] = []
+        windows.reserveCapacity(plans.count)
 
-        let elapsed = clock.now - start
-        let elapsedMs = Double(elapsed.components.attoseconds) / 1e15 +
-                        Double(elapsed.components.seconds) * 1000.0
-
-        let intent: FMCoarseScanOutput.Intent
-        switch response.intent {
-        case .commercial: intent = .commercial
-        case .editorial:  intent = .editorial
-        case .mixed:      intent = .mixed
+        for plan in plans {
+            let session = await runtime.makeSession()
+            let windowStart = clock.now
+            let response = try await session.respond(plan.prompt)
+            let screening = sanitize(
+                schema: response,
+                validLineRefs: Set(plan.lineRefs),
+                transcriptQuality: plan.transcriptQuality
+            )
+            windows.append(
+                FMCoarseWindowOutput(
+                    windowIndex: plan.windowIndex,
+                    lineRefs: plan.lineRefs,
+                    startTime: plan.startTime,
+                    endTime: plan.endTime,
+                    screening: screening,
+                    latencyMillis: Self.latencyMillis(since: windowStart, clock: clock)
+                )
+            )
         }
 
         return FMCoarseScanOutput(
-            intent: intent,
-            confidence: min(max(response.confidence, 0), 1),
-            reason: response.reason,
-            latencyMillis: elapsedMs
+            status: .success,
+            windows: windows,
+            latencyMillis: Self.latencyMillis(since: start, clock: clock)
+        )
+    }
+
+    func planPassA(segments: [AdTranscriptSegment]) async throws -> [CoarsePassWindowPlan] {
+        let ordered = segments.sorted { lhs, rhs in
+            if lhs.segmentIndex == rhs.segmentIndex {
+                return lhs.startTime < rhs.startTime
+            }
+            return lhs.segmentIndex < rhs.segmentIndex
+        }
+        guard !ordered.isEmpty else { return [] }
+
+        let budget = try await promptBudget()
+        var plans: [CoarsePassWindowPlan] = []
+        plans.reserveCapacity(ordered.count)
+
+        var lowerBound = 0
+        while lowerBound < ordered.count {
+            let firstSegment = ordered[lowerBound]
+            var upperBound = lowerBound
+            var bestPrompt = Self.buildPrompt(for: [firstSegment])
+            var bestTokens = try await runtime.tokenCount(bestPrompt)
+
+            if bestTokens > budget {
+                throw FoundationModelClassifierError.segmentExceedsTokenBudget(
+                    lineRef: firstSegment.segmentIndex,
+                    tokenCount: bestTokens,
+                    budget: budget
+                )
+            }
+
+            var probe = lowerBound + 1
+            while probe < ordered.count {
+                let candidate = Array(ordered[lowerBound...probe])
+                let prompt = Self.buildPrompt(for: candidate)
+                let tokenCount = try await runtime.tokenCount(prompt)
+                guard tokenCount <= budget else { break }
+                upperBound = probe
+                bestPrompt = prompt
+                bestTokens = tokenCount
+                probe += 1
+            }
+
+            let windowSegments = Array(ordered[lowerBound...upperBound])
+            plans.append(
+                CoarsePassWindowPlan(
+                    windowIndex: plans.count,
+                    lineRefs: windowSegments.map(\.segmentIndex),
+                    prompt: bestPrompt,
+                    promptTokenCount: bestTokens,
+                    startTime: windowSegments.first?.startTime ?? 0,
+                    endTime: windowSegments.last?.endTime ?? 0,
+                    transcriptQuality: aggregateTranscriptQuality(for: windowSegments)
+                )
+            )
+
+            lowerBound = upperBound + 1
+        }
+
+        return plans
+    }
+
+    static func buildPrompt(for segments: [AdTranscriptSegment]) -> String {
+        let transcriptLines = segments.map { segment in
+            "\(segment.segmentIndex): \"\(escapedLine(segment.text))\""
+        }
+
+        return ([promptPrefix] + transcriptLines).joined(separator: "\n")
+    }
+
+    private func promptBudget() async throws -> Int {
+        let contextSize = await runtime.contextSize()
+        let schemaTokens = try await runtime.schemaTokenCount()
+        return max(1, contextSize - schemaTokens - config.maximumResponseTokens - config.safetyMarginTokens)
+    }
+
+    private func aggregateTranscriptQuality(for segments: [AdTranscriptSegment]) -> TranscriptQuality {
+        let qualities = TranscriptQualityEstimator.assess(segments: segments).map(\.quality)
+        if qualities.contains(.unusable) {
+            return .unusable
+        }
+        if qualities.contains(.degraded) {
+            return .degraded
+        }
+        return .good
+    }
+
+    private func sanitize(
+        schema: CoarseScreeningSchema,
+        validLineRefs: Set<Int>,
+        transcriptQuality: TranscriptQuality
+    ) -> CoarseScreeningSchema {
+        let sanitizedSupport: CoarseSupportSchema?
+        switch schema.disposition {
+        case .noAds, .abstain:
+            sanitizedSupport = nil
+        case .containsAd, .uncertain:
+            if let support = schema.support {
+                var deduped: [Int] = []
+                var seen: Set<Int> = []
+                for lineRef in support.supportLineRefs where validLineRefs.contains(lineRef) {
+                    if seen.insert(lineRef).inserted {
+                        deduped.append(lineRef)
+                    }
+                }
+
+                if deduped.isEmpty {
+                    sanitizedSupport = nil
+                } else {
+                    sanitizedSupport = CoarseSupportSchema(
+                        supportLineRefs: deduped,
+                        certainty: support.certainty
+                    )
+                }
+            } else {
+                sanitizedSupport = nil
+            }
+        }
+
+        return CoarseScreeningSchema(
+            transcriptQuality: transcriptQuality,
+            disposition: schema.disposition,
+            support: sanitizedSupport
+        )
+    }
+
+    private static func latencyMillis(
+        since start: ContinuousClock.Instant,
+        clock: ContinuousClock
+    ) -> Double {
+        let elapsed = clock.now - start
+        return Double(elapsed.components.attoseconds) / 1e15 +
+            Double(elapsed.components.seconds) * 1000.0
+    }
+
+    private static func escapedLine(_ text: String) -> String {
+        let collapsed = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return collapsed
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+}
+
+// MARK: - Live runtime
+
+private extension FoundationModelClassifier {
+    static func liveRuntime(logger: Logger, config: Config) -> Runtime {
+        #if canImport(FoundationModels)
+        Runtime(
+            availabilityStatus: { locale in
+                guard #available(iOS 26.0, *) else {
+                    return .unavailable
+                }
+
+                let model = SystemLanguageModel.default
+                if let status = SemanticScanStatus.from(availability: model.availability) {
+                    return status
+                }
+                guard model.supportsLocale(locale) else {
+                    return .unsupportedLocale
+                }
+                guard await FoundationModelsUsabilityProbe.probeIfNeeded(logger: logger) else {
+                    return .failedTransient
+                }
+                return nil
+            },
+            contextSize: {
+                guard #available(iOS 26.0, *) else { return 0 }
+                return SystemLanguageModel.default.contextSize
+            },
+            tokenCount: { prompt in
+                guard #available(iOS 26.0, *) else {
+                    return fallbackTokenEstimate(for: prompt)
+                }
+                let model = SystemLanguageModel.default
+                if #available(iOS 26.4, *) {
+                    return try await model.tokenCount(for: prompt)
+                }
+                return fallbackTokenEstimate(for: prompt)
+            },
+            schemaTokenCount: {
+                guard #available(iOS 26.0, *) else {
+                    return fallbackSchemaTokenEstimate
+                }
+                let model = SystemLanguageModel.default
+                if #available(iOS 26.4, *) {
+                    return try await model.tokenCount(for: CoarseScreeningSchema.generationSchema)
+                }
+                return fallbackSchemaTokenEstimate
+            },
+            makeSession: {
+                guard #available(iOS 26.0, *) else {
+                    return Runtime.Session(
+                        prewarm: { _ in },
+                        respond: { _ in
+                            throw FoundationModelClassifierError.runtimeUnavailable("Foundation Models require iOS 26 or newer.")
+                        }
+                    )
+                }
+
+                let session = LanguageModelSession(model: SystemLanguageModel.default)
+                return Runtime.Session(
+                    prewarm: { promptPrefix in
+                        session.prewarm(promptPrefix: Prompt(promptPrefix))
+                    },
+                    respond: { prompt in
+                        let response = try await session.respond(
+                            to: prompt,
+                            generating: CoarseScreeningSchema.self,
+                            options: GenerationOptions(maximumResponseTokens: config.maximumResponseTokens)
+                        )
+                        return response.content
+                    }
+                )
+            }
         )
         #else
-        return FMCoarseScanOutput(intent: .unavailable, confidence: 0, reason: "FoundationModels framework not available", latencyMillis: 0)
+        Runtime(
+            availabilityStatus: { _ in .unavailable },
+            contextSize: { 0 },
+            tokenCount: { prompt in fallbackTokenEstimate(for: prompt) },
+            schemaTokenCount: { fallbackSchemaTokenEstimate },
+            makeSession: {
+                Runtime.Session(
+                    prewarm: { _ in },
+                    respond: { _ in
+                        throw FoundationModelClassifierError.runtimeUnavailable("FoundationModels framework not available.")
+                    }
+                )
+            }
+        )
         #endif
     }
 
-    // MARK: - Prompt
-
-    private static func buildPrompt(segmentText: String) -> String {
-        // Keep under ~1500 chars to be safe with token budgets.
-        let truncated = String(segmentText.prefix(1200))
-        return """
-        You are analyzing a 10-30 second segment from a podcast transcript. \
-        Classify whether this segment is commercial content (advertisement, \
-        sponsor read, cross-promotion for another podcast or show, product \
-        promotion with URL or promo code) or editorial content (the host \
-        talking about the show's actual topic, interviewing a guest, \
-        narrating a story, discussing news or opinion).
-
-        Important guidance:
-        - A segment that mentions a brand or product in passing while \
-          telling a personal story is usually editorial.
-        - A segment that promotes another podcast ("check out [show name]", \
-          "listen wherever you get your podcasts") is commercial.
-        - A segment with a URL + call to action ("go to X dot com", \
-          "use code X") is almost always commercial.
-        - A segment that is structural show information ("call our show at \
-          X dot com slash call") is editorial — it's show structure, not a \
-          sponsor.
-
-        Transcript segment:
-        \(truncated)
-        """
+    static func fallbackTokenEstimate(for prompt: String) -> Int {
+        let wordCount = prompt.split(whereSeparator: \.isWhitespace).count
+        return max(1, Int(ceil(Double(wordCount) * 1.35)))
     }
 }
