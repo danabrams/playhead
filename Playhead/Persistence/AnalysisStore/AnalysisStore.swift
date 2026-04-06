@@ -520,8 +520,18 @@ actor AnalysisStore {
         return readAsset(stmt)
     }
 
+#if DEBUG
     /// Fetch every analysis asset in the store, ordered by creation time (newest first).
-    /// Used for library-wide exports and diagnostic reporting.
+    ///
+    /// DEBUG-ONLY: this method loads every `analysis_assets` row into memory in
+    /// a single pass with no pagination, no `LIMIT`, and no streaming. It exists
+    /// solely to back `DebugEpisodeExporter.buildLibraryExport`, which is itself
+    /// `#if DEBUG`-gated. It is not safe for production callers — on a real
+    /// listener's library this can OOM or stall the actor for seconds.
+    ///
+    /// If you find yourself wanting to call this from production code: STOP and
+    /// add a paginated/streaming variant instead. Do not remove this `#if DEBUG`
+    /// gate without first thinking through the scale implications.
     func fetchAllAssets() throws -> [AnalysisAsset] {
         let sql = "SELECT * FROM analysis_assets ORDER BY createdAt DESC, rowid DESC"
         let stmt = try prepare(sql)
@@ -532,6 +542,7 @@ actor AnalysisStore {
         }
         return results
     }
+#endif
 
     func updateAssetState(id: String, state: String) throws {
         let sql = "UPDATE analysis_assets SET analysisState = ? WHERE id = ?"
