@@ -258,6 +258,108 @@ struct BackfillJobStoreTests {
         #expect(fetched == nil)
     }
 
+    // MARK: - C-2: split lifecycle methods
+
+    @Test("C-2: markBackfillJobRunning preserves existing deferReason for audit trail")
+    func markBackfillJobRunning_preservesDeferReason() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(
+            jobId: "running-preserves-defer",
+            phase: .scanLikelyAdSlots,
+            coveragePolicy: .targetedWithAudit
+        )
+        try await store.insertBackfillJob(job)
+        try await store.markBackfillJobDeferred(jobId: job.jobId, reason: "thermal")
+
+        try await store.markBackfillJobRunning(jobId: job.jobId)
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .running)
+        #expect(fetched.deferReason == "thermal")
+    }
+
+    @Test("C-2: markBackfillJobRunning preserves progressCursor and retryCount")
+    func markBackfillJobRunning_preservesCursorAndRetry() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(
+            jobId: "running-preserves-all",
+            phase: .scanLikelyAdSlots,
+            coveragePolicy: .targetedWithAudit,
+            progressCursor: BackfillProgressCursor(
+                processedUnitCount: 3,
+                lastProcessedUpperBoundSec: 45
+            ),
+            retryCount: 2
+        )
+        try await store.insertBackfillJob(job)
+
+        try await store.markBackfillJobRunning(jobId: job.jobId)
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .running)
+        #expect(fetched.progressCursor?.processedUnitCount == 3)
+        #expect(fetched.retryCount == 2)
+    }
+
+    @Test("C-2: markBackfillJobComplete writes final cursor and preserves deferReason")
+    func markBackfillJobComplete_writesFinalCursor() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(
+            jobId: "complete-writes-cursor",
+            phase: .scanLikelyAdSlots,
+            coveragePolicy: .targetedWithAudit,
+            deferReason: "prior-defer"
+        )
+        try await store.insertBackfillJob(job)
+        try await store.checkpointBackfillJobProgress(
+            jobId: job.jobId,
+            progressCursor: BackfillProgressCursor(processedUnitCount: 3)
+        )
+
+        try await store.markBackfillJobComplete(
+            jobId: job.jobId,
+            progressCursor: BackfillProgressCursor(
+                processedUnitCount: 5,
+                lastProcessedUpperBoundSec: 120
+            )
+        )
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .complete)
+        #expect(fetched.progressCursor == BackfillProgressCursor(
+            processedUnitCount: 5,
+            lastProcessedUpperBoundSec: 120
+        ))
+        // Audit trail preserved.
+        #expect(fetched.deferReason == "prior-defer")
+    }
+
+    @Test("C-2: markBackfillJobFailed writes reason and retryCount")
+    func markBackfillJobFailed_writesReason() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(
+            jobId: "failed-writes-reason",
+            phase: .scanLikelyAdSlots,
+            coveragePolicy: .targetedWithAudit
+        )
+        try await store.insertBackfillJob(job)
+
+        try await store.markBackfillJobFailed(
+            jobId: job.jobId,
+            reason: "classifier threw",
+            retryCount: 2
+        )
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .failed)
+        #expect(fetched.deferReason == "classifier threw")
+        #expect(fetched.retryCount == 2)
+    }
+
     @Test("WAL durability: insertBackfillJob survives a store reopen")
     func testInsertBackfillJobIsDurable() async throws {
         let dir = try makeTempDir(prefix: "WALDurability")

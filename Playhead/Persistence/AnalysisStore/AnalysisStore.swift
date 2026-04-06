@@ -1711,10 +1711,69 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    /// C-2: transition a job row to `status='running'` without clobbering
+    /// `deferReason`, `progressCursor`, or `retryCount`. Preserving the
+    /// `deferReason` on a running-after-defer transition keeps the audit
+    /// trail intact: the row reflects that an earlier defer happened even
+    /// as the next runner attempt starts executing.
+    func markBackfillJobRunning(jobId: String) throws {
+        let sql = """
+            UPDATE backfill_jobs
+            SET status = 'running'
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// C-2: terminal success transition. Writes the final `progressCursor`
+    /// and flips `status='complete'` while preserving `deferReason` (audit
+    /// trail) and `retryCount`.
+    func markBackfillJobComplete(
+        jobId: String,
+        progressCursor: BackfillProgressCursor?
+    ) throws {
+        let sql = """
+            UPDATE backfill_jobs
+            SET status = 'complete', progressCursor = ?
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, try encodeJSONString(progressCursor))
+        bind(stmt, 2, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// C-2: terminal failure transition. The prior shim silently dropped
+    /// `deferReason` on `.failed`; this method ensures the reason is
+    /// written so operators can diagnose why a job failed without scraping
+    /// logs.
+    func markBackfillJobFailed(
+        jobId: String,
+        reason: String,
+        retryCount: Int
+    ) throws {
+        let sql = """
+            UPDATE backfill_jobs
+            SET status = 'failed', deferReason = ?, retryCount = ?
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, reason)
+        bind(stmt, 2, retryCount)
+        bind(stmt, 3, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
     /// Legacy combined API. Now thin shim that delegates to the split methods.
-    /// Production code should call `checkpointBackfillJobProgress` or
-    /// `markBackfillJobDeferred` directly.
-    @available(*, deprecated, message: "Use checkpointBackfillJobProgress or markBackfillJobDeferred")
+    /// Production code should call `checkpointBackfillJobProgress`,
+    /// `markBackfillJobDeferred`, `markBackfillJobRunning`,
+    /// `markBackfillJobComplete`, or `markBackfillJobFailed` directly.
+    @available(*, deprecated, message: "Use markBackfillJobRunning/Complete/Failed/Deferred or checkpointBackfillJobProgress")
     func checkpointBackfillJob(
         jobId: String,
         progressCursor: BackfillProgressCursor?,
