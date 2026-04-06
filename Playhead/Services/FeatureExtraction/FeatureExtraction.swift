@@ -45,7 +45,7 @@ struct FeatureExtractionConfig: Sendable {
         overlapFraction: 0.0,
         sampleRate: 16_000,
         fftSize: 1024,
-        pauseRmsThreshold: 0.005,
+        pauseRmsThreshold: 0.03,
         featureVersion: 1
     )
 }
@@ -312,23 +312,21 @@ actor FeatureExtractionService {
 
     /// Simple pause detector based on RMS energy.
     /// Returns a probability in [0, 1] — 1.0 = definite pause, 0.0 = loud audio.
+    ///
+    /// Uses a smooth, monotonic curve anchored on `pauseRmsThreshold`:
+    ///   rms ≤ threshold/4  → 1.0 (definite silence / room tone)
+    ///   rms == threshold    → 0.5 (boundary between pause and speech)
+    ///   rms ≥ threshold*4   → 0.0 (definite speech/music)
+    /// Linear interpolation in log-RMS space keeps the curve well-behaved
+    /// across the wide dynamic range of real podcast audio.
     private func computePauseProbability(rms: Float) -> Float {
-        guard rms >= 0 else { return 1.0 }
-
+        guard rms > 0 else { return 1.0 }
         let threshold = config.pauseRmsThreshold
-        if rms < threshold * 0.5 {
-            // Well below threshold — very likely a pause.
-            return 1.0
-        } else if rms < threshold {
-            // Near threshold — interpolate linearly.
-            let t = (rms - threshold * 0.5) / (threshold * 0.5)
-            return 1.0 - t
-        } else if rms < threshold * 2.0 {
-            // Above threshold but still quiet — low probability.
-            let t = (rms - threshold) / threshold
-            return max(0, 0.3 * (1.0 - t))
-        } else {
-            return 0
-        }
+        guard threshold > 0 else { return 0 }
+
+        // Map log2(rms/threshold) from [-2, +2] onto [1, 0].
+        let ratio = log2(rms / threshold)
+        let t = (ratio + 2.0) / 4.0  // 0 at ratio=-2, 1 at ratio=+2
+        return max(0, min(1, 1.0 - t))
     }
 }
