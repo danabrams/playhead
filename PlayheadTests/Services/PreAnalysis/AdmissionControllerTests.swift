@@ -211,4 +211,57 @@ struct AdmissionControllerTests {
         let readmit = await controller.admitNextEligibleJob(snapshot: snapshot, batteryLevel: 0.9)
         #expect(readmit.job?.jobId == "explodes")
     }
+
+    @Test("C-R3-3: retry budget is consistent — 3 failed attempts total, no off-by-one")
+    func retryBudgetIsConsistentBetweenRunnerAndController() async {
+        // C-R3-3: the runner's skip check was
+        //   `existing.retryCount >= maxRetries (3)` — 3 total attempts
+        // while the admission controller was
+        //   `nextRetryCount <= maxRetries (3)` — 4 total attempts.
+        // These are off-by-one. Standardize on 3 total attempts: after
+        // three consecutive failures the persisted retryCount is 3 and the
+        // job is exhausted. The controller must NOT requeue on the third
+        // failure, and a fresh runner pass must NOT re-admit.
+        let controller = AdmissionController()
+        let snapshot = makeCapabilitySnapshot(thermalState: .nominal, isCharging: true)
+        await controller.enqueue(makeBackfillJob(jobId: "three-strikes", priority: 5))
+
+        // Attempt 1: admit, fail. retryCount becomes 1, requeued.
+        _ = await controller.admitNextEligibleJob(snapshot: snapshot, batteryLevel: 0.9)
+        let afterFirst = await controller.failed(jobId: "three-strikes", reason: "fail1")
+        #expect(afterFirst?.retryCount == 1, "first failure bumps to 1")
+
+        // Attempt 2: admit, fail. retryCount becomes 2, requeued.
+        _ = await controller.admitNextEligibleJob(snapshot: snapshot, batteryLevel: 0.9)
+        let afterSecond = await controller.failed(jobId: "three-strikes", reason: "fail2")
+        #expect(afterSecond?.retryCount == 2, "second failure bumps to 2")
+
+        // Attempt 3: admit, fail. retryCount WOULD become 3 — this is the
+        // budget boundary. The controller must NOT requeue, matching the
+        // runner's `retryCount >= maxRetries` skip gate.
+        _ = await controller.admitNextEligibleJob(snapshot: snapshot, batteryLevel: 0.9)
+        let afterThird = await controller.failed(jobId: "three-strikes", reason: "fail3")
+        #expect(afterThird == nil,
+                "third failure must exhaust the retry budget, not requeue a 4th attempt")
+        let running = await controller.runningJob
+        #expect(running == nil)
+    }
+
+    @Test("defers Low Power Mode via the shared DeviceAdmissionPolicy")
+    func testLowPowerModeDeferral() async {
+        let controller = AdmissionController()
+        await controller.enqueue(makeBackfillJob(jobId: "lpm-job", priority: 5))
+
+        let blocked = await controller.admitNextEligibleJob(
+            snapshot: makeCapabilitySnapshot(
+                thermalState: .nominal,
+                isLowPowerMode: true,
+                isCharging: true
+            ),
+            batteryLevel: 0.95
+        )
+
+        #expect(blocked.job == nil)
+        #expect(blocked.deferReason == .lowPowerMode)
+    }
 }

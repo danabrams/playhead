@@ -1,10 +1,10 @@
 // AdmissionController.swift
 // Minimal serial queue for phase-3 backfill jobs gated by device capability.
 //
-// TODO: [H6] Consolidate with BackgroundProcessingService — pending user
-// decision, see review. The two components currently maintain separate
-// admission policies; the consolidation requires a Decision Authority sign-off
-// because it changes the service/actor architecture.
+// Device-state gating (thermal, battery, low power mode) is delegated to the
+// shared `DeviceAdmissionPolicy` so this controller and
+// `BackgroundProcessingService` cannot drift on thresholds. Only queue-state
+// gates (`serialBusy`, `queueEmpty`) live here.
 //
 // Lifecycle contract:
 // Every successful call to ``admitNextEligibleJob(snapshot:batteryLevel:)`` —
@@ -21,13 +21,24 @@ import Foundation
 
 /// Discrete reasons the controller will defer a job rather than admit it.
 ///
+/// Device-state cases mirror ``DeviceAdmissionPolicy/DeferReason``; queue-state
+/// cases (`serialBusy`, `queueEmpty`) are admission-controller-specific.
 /// `BackfillJob.deferReason` remains a `String` for SQLite compatibility — the
 /// mapping there uses ``rawValue`` so the wire format is unchanged.
-enum AdmissionDeferReason: String, Sendable, Equatable {
+enum AdmissionDeferReason: String, Sendable, Equatable, CaseIterable {
     case serialBusy
     case thermalThrottled
     case batteryTooLow
+    case lowPowerMode
     case queueEmpty
+
+    init(_ deviceReason: DeviceAdmissionPolicy.DeferReason) {
+        switch deviceReason {
+        case .thermalThrottled: self = .thermalThrottled
+        case .batteryTooLow:    self = .batteryTooLow
+        case .lowPowerMode:     self = .lowPowerMode
+        }
+    }
 }
 
 struct AdmissionDecision: Sendable, Equatable {
@@ -46,9 +57,13 @@ struct AdmissionDecision: Sendable, Equatable {
 }
 
 actor AdmissionController {
-    static let lowBatteryThreshold: Float = 0.20
-    // TODO: [H6] Consolidate with BackgroundProcessingService — pending user
-    // decision, see review. Same constant lives in two places today.
+    /// The number of FAILED attempts allowed before a job is considered
+    /// exhausted. After `maxRetries` failures the persisted `retryCount`
+    /// equals `maxRetries`, the controller stops requeueing, and the runner
+    /// skips the job on future invocations (see
+    /// `BackfillJobRunner.runPendingBackfill`'s `retryCount >= maxRetries`
+    /// gate). Keep this aligned with the runner; the C-R3-3 fix standardized
+    /// both sides on `maxRetries == 3` total attempts.
     static let maxRetries: Int = 3
 
     private var queuedJobs: [BackfillJob] = []
@@ -79,13 +94,11 @@ actor AdmissionController {
             return .deferred(.serialBusy)
         }
 
-        guard !snapshot.shouldThrottleAnalysis else {
-            return .deferred(.thermalThrottled)
-        }
-
-        let batteryKnownAndLow = batteryLevel >= 0 && batteryLevel < Self.lowBatteryThreshold
-        guard snapshot.isCharging || !batteryKnownAndLow else {
-            return .deferred(.batteryTooLow)
+        switch DeviceAdmissionPolicy.evaluate(snapshot: snapshot, batteryLevel: batteryLevel) {
+        case .admit:
+            break
+        case .deferred(let deviceReason):
+            return .deferred(AdmissionDeferReason(deviceReason))
         }
 
         let job = queuedJobs.removeFirst()
@@ -113,8 +126,14 @@ actor AdmissionController {
         }
         runningJob = nil
 
+        // C-R3-3: budget boundary. `maxRetries` is the number of FAILED
+        // attempts allowed before giving up; on the (maxRetries)-th failure
+        // the retry counter reaches `maxRetries` and the job is exhausted.
+        // Using `<` (rather than `<=`) matches the runner's
+        // `retryCount >= maxRetries` skip gate — together they give
+        // `maxRetries` total attempts, off-by-one free.
         let nextRetryCount = running.retryCount + 1
-        guard nextRetryCount <= Self.maxRetries else {
+        guard nextRetryCount < Self.maxRetries else {
             return nil
         }
 
