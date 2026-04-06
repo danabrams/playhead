@@ -6,6 +6,7 @@
 // that promotes FM evidence to user-visible cues; until then, .enabled silently
 // degrades to .shadow with a logged warning.
 
+import CryptoKit
 import Foundation
 import OSLog
 
@@ -124,7 +125,19 @@ actor BackfillJobRunner {
             // under a new transcriptVersion. Keep the embedding — it costs
             // nothing and unblocks the Phase 4 re-analysis trigger when
             // transcripts regenerate without another round of id surgery.
-            let jobId = "fm-\(inputs.analysisAssetId)-\(inputs.transcriptVersion)-\(phase.rawValue)-\(offset)"
+            // R7-Fix11: jobId is a stable hash over the canonical tuple.
+            // String concatenation with `-` separators is ambiguous when
+            // `analysisAssetId` or `transcriptVersion` contains a hyphen
+            // (UUIDs do), which would let two distinct tuples collide on
+            // the same id. SHA-256 truncated to 16 hex chars gives ~64
+            // bits of collision resistance — comfortably more than the
+            // logical-tuple cardinality of one device's backfill history.
+            let jobId = Self.makeJobIdForTesting(
+                analysisAssetId: inputs.analysisAssetId,
+                transcriptVersion: inputs.transcriptVersion,
+                phase: phase,
+                offset: offset
+            )
 
             // M5: idempotent re-invocation. Job ids are deterministic, so a
             // second call would otherwise throw `duplicateJobId`. Check first:
@@ -457,6 +470,53 @@ actor BackfillJobRunner {
     /// (`evidenceEventBodyMismatch`) are all permanent by
     /// construction: the runner will produce the exact same row on
     /// the next attempt.
+    /// R7-Fix11: canonical hash helper. SHA-256 of `canonical` truncated
+    /// to 16 hex chars (~64 bits). The `|` separator is safe inside the
+    /// hash input because it is never parsed back out — the id is an
+    /// opaque handle, not a structured key.
+    nonisolated private static func hashedId(prefix: String, canonical: String) -> String {
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        return "\(prefix)-\(hex.prefix(16))"
+    }
+
+    /// R7-Fix11: stable id for pass-A / pass-B scan rows. Exposed as
+    /// `internal static` so tests can assert determinism and
+    /// collision-immunity without reaching into the private helpers.
+    nonisolated static func makeScanResultIdForTesting(
+        assetId: String,
+        transcriptVersion: String,
+        pass: String,
+        windowIndex: Int
+    ) -> String {
+        let canonical = "asset=\(assetId)|version=\(transcriptVersion)|pass=\(pass)|window=\(windowIndex)"
+        return hashedId(prefix: "scan", canonical: canonical)
+    }
+
+    /// R7-Fix11: stable id for the "no windows, record the failure"
+    /// sentinel row. Distinct keyspace from the normal per-window ids so
+    /// a future `windowIndex = -1` tuple cannot collide with it.
+    nonisolated static func makeFailureScanResultIdForTesting(
+        assetId: String,
+        transcriptVersion: String,
+        pass: String
+    ) -> String {
+        let canonical = "asset=\(assetId)|version=\(transcriptVersion)|pass=\(pass)|kind=failure"
+        return hashedId(prefix: "scan", canonical: canonical)
+    }
+
+    /// R7-Fix11: stable id for backfill jobs. Mirrors the scan-result
+    /// helper so both id spaces are immune to asset-id hyphen drift.
+    nonisolated static func makeJobIdForTesting(
+        analysisAssetId: String,
+        transcriptVersion: String,
+        phase: BackfillJobPhase,
+        offset: Int
+    ) -> String {
+        let canonical = "asset=\(analysisAssetId)|version=\(transcriptVersion)|phase=\(phase.rawValue)|offset=\(offset)"
+        return hashedId(prefix: "fm", canonical: canonical)
+    }
+
     private static func isPermanent(_ error: AnalysisStoreError) -> Bool {
         switch error {
         case .invalidEvidenceEvent,
@@ -509,7 +569,12 @@ actor BackfillJobRunner {
             // collide on a transcriptVersion-free PK — INSERT OR REPLACE
             // then deletes the prior run's row regardless of H-1's
             // success-protection probe (which keys off reuseKeyHash).
-            id: "scan-\(inputs.analysisAssetId)-\(inputs.transcriptVersion)-\(scanPass)-\(windowOutput.windowIndex)",
+            id: Self.makeScanResultIdForTesting(
+                assetId: inputs.analysisAssetId,
+                transcriptVersion: inputs.transcriptVersion,
+                pass: scanPass,
+                windowIndex: windowOutput.windowIndex
+            ),
             analysisAssetId: inputs.analysisAssetId,
             windowFirstAtomOrdinal: firstAtom,
             windowLastAtomOrdinal: lastAtom,
@@ -552,7 +617,12 @@ actor BackfillJobRunner {
             // H-3: deterministic id (see makeScanResult for the full
             // note). C-R3-2: transcriptVersion must be included so rows
             // from different transcript versions cannot collide on the PK.
-            id: "scan-\(inputs.analysisAssetId)-\(inputs.transcriptVersion)-passB-\(windowOutput.windowIndex)",
+            id: Self.makeScanResultIdForTesting(
+                assetId: inputs.analysisAssetId,
+                transcriptVersion: inputs.transcriptVersion,
+                pass: "passB",
+                windowIndex: windowOutput.windowIndex
+            ),
             analysisAssetId: inputs.analysisAssetId,
             windowFirstAtomOrdinal: firstAtom,
             windowLastAtomOrdinal: lastAtom,
@@ -585,7 +655,11 @@ actor BackfillJobRunner {
             return nil
         }
         return SemanticScanResult(
-            id: "scan-\(inputs.analysisAssetId)-\(inputs.transcriptVersion)-\(scanPass)-failure",
+            id: Self.makeFailureScanResultIdForTesting(
+                assetId: inputs.analysisAssetId,
+                transcriptVersion: inputs.transcriptVersion,
+                pass: scanPass
+            ),
             analysisAssetId: inputs.analysisAssetId,
             windowFirstAtomOrdinal: range.firstAtomOrdinal,
             windowLastAtomOrdinal: range.lastAtomOrdinal,

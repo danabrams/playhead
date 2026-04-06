@@ -291,7 +291,12 @@ struct BackfillJobRunnerTests {
         try await store.insertAsset(makeAsset())
 
         let inputs = makeInputs()
-        let jobId = "fm-asset-runner-tx-runner-v1-fullEpisodeScan-0"
+        let jobId = BackfillJobRunner.makeJobIdForTesting(
+            analysisAssetId: "asset-runner",
+            transcriptVersion: "tx-runner-v1",
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
 
         // Custom Runtime: respondCoarse marks the row .complete BEFORE
         // returning a successful screening. Combined with a malformed
@@ -681,7 +686,12 @@ struct BackfillJobRunnerTests {
         // Seed a failed job matching the deterministic jobId format the
         // runner synthesizes for a cold-start fullEpisodeScan plan.
         let exhausted = BackfillJob(
-            jobId: "fm-asset-runner-tx-runner-v1-fullEpisodeScan-0",
+            jobId: BackfillJobRunner.makeJobIdForTesting(
+                analysisAssetId: "asset-runner",
+                transcriptVersion: "tx-runner-v1",
+                phase: .fullEpisodeScan,
+                offset: 0
+            ),
             analysisAssetId: "asset-runner",
             podcastId: "podcast-runner",
             phase: .fullEpisodeScan,
@@ -728,7 +738,12 @@ struct BackfillJobRunnerTests {
         try await store.insertAsset(makeAsset())
 
         let failedJob = BackfillJob(
-            jobId: "fm-asset-runner-tx-runner-v1-fullEpisodeScan-0",
+            jobId: BackfillJobRunner.makeJobIdForTesting(
+                analysisAssetId: "asset-runner",
+                transcriptVersion: "tx-runner-v1",
+                phase: .fullEpisodeScan,
+                offset: 0
+            ),
             analysisAssetId: "asset-runner",
             podcastId: "podcast-runner",
             phase: .fullEpisodeScan,
@@ -834,7 +849,12 @@ struct BackfillJobRunnerTests {
         // phase as `.failed` so the M-5 idempotency probe matches by jobId
         // and re-enqueues the existing terminal row.
         let failedJob = BackfillJob(
-            jobId: "fm-asset-runner-tx-runner-v1-scanHarvesterProposals-0",
+            jobId: BackfillJobRunner.makeJobIdForTesting(
+                analysisAssetId: "asset-runner",
+                transcriptVersion: "tx-runner-v1",
+                phase: .scanHarvesterProposals,
+                offset: 0
+            ),
             analysisAssetId: "asset-runner",
             podcastId: "podcast-runner",
             phase: .scanHarvesterProposals,
@@ -941,7 +961,14 @@ struct BackfillJobRunnerTests {
                 "v2 must invoke the classifier again; v1=\(coarseAfterV1) v2=\(coarseAfterV2)")
 
         // The store must contain a job whose id encodes "tx-runner-v2".
-        let v2Job = try await store.fetchBackfillJob(byId: "fm-asset-runner-tx-runner-v2-fullEpisodeScan-0")
+        let v2Job = try await store.fetchBackfillJob(
+            byId: BackfillJobRunner.makeJobIdForTesting(
+                analysisAssetId: "asset-runner",
+                transcriptVersion: "tx-runner-v2",
+                phase: .fullEpisodeScan,
+                offset: 0
+            )
+        )
         #expect(v2Job != nil, "expected a v2-tagged backfill job row")
         #expect(v2Job?.status == .complete)
     }
@@ -977,7 +1004,12 @@ struct BackfillJobRunnerTests {
         // combined checkpoint API to force the status back to .queued —
         // direct `markBackfillJobDeferred` can no longer demote a terminal
         // row after the C-R3-1 guard fix.
-        let jobId = "fm-asset-runner-tx-runner-v1-fullEpisodeScan-0"
+        let jobId = BackfillJobRunner.makeJobIdForTesting(
+            analysisAssetId: "asset-runner",
+            transcriptVersion: "tx-runner-v1",
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
         try await store.checkpointBackfillJob(
             jobId: jobId,
             progressCursor: nil,
@@ -1098,7 +1130,12 @@ struct BackfillJobRunnerTests {
 
         // Force the job row back so the second run actually re-runs the
         // passA pipeline; the job ids don't depend on transcriptVersion.
-        let jobId = "fm-asset-runner-tx-runner-v1-fullEpisodeScan-0"
+        let jobId = BackfillJobRunner.makeJobIdForTesting(
+            analysisAssetId: "asset-runner",
+            transcriptVersion: "tx-runner-v1",
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
         try await store.checkpointBackfillJob(
             jobId: jobId,
             progressCursor: nil,
@@ -1219,5 +1256,73 @@ struct BackfillJobRunnerTests {
         #expect(windows.isEmpty, "enabled mode must not yet write AdWindows")
         let scans = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")
         #expect(!scans.isEmpty, "FM must still run and persist results in fallback")
+    }
+
+    // MARK: - R7-Fix11: scan id / job id hashing
+
+    @Test("R7-Fix11: scan IDs are stable hashes immune to separator collision")
+    func scanIdsHashCollisionImmune() {
+        // Two distinct tuples that would collide under naive `-` joining:
+        //   ("abc", "def-123") vs ("abc-def", "123")
+        // both produce "scan-abc-def-123-passA-0" with the old format.
+        let a = BackfillJobRunner.makeScanResultIdForTesting(
+            assetId: "abc", transcriptVersion: "def-123", pass: "passA", windowIndex: 0
+        )
+        let b = BackfillJobRunner.makeScanResultIdForTesting(
+            assetId: "abc-def", transcriptVersion: "123", pass: "passA", windowIndex: 0
+        )
+        #expect(a != b, "distinct tuples must produce distinct hashed ids")
+    }
+
+    @Test("R7-Fix11: scan ID is deterministic for same inputs")
+    func scanIdsAreDeterministic() {
+        let a = BackfillJobRunner.makeScanResultIdForTesting(
+            assetId: "asset-1", transcriptVersion: "v1", pass: "passA", windowIndex: 0
+        )
+        let b = BackfillJobRunner.makeScanResultIdForTesting(
+            assetId: "asset-1", transcriptVersion: "v1", pass: "passA", windowIndex: 0
+        )
+        #expect(a == b)
+        #expect(a.hasPrefix("scan-"))
+        #expect(a.count == "scan-".count + 16) // 16-char hex hash
+    }
+
+    @Test("R7-Fix11: job IDs are stable hashes immune to separator collision")
+    func jobIdsHashCollisionImmune() {
+        // Analogous to the scan-id collision test: a hyphen drifting
+        // between assetId and transcriptVersion must not collapse two
+        // logical tuples onto the same jobId.
+        let a = BackfillJobRunner.makeJobIdForTesting(
+            analysisAssetId: "abc",
+            transcriptVersion: "def-v1",
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+        let b = BackfillJobRunner.makeJobIdForTesting(
+            analysisAssetId: "abc-def",
+            transcriptVersion: "v1",
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+        #expect(a != b, "distinct tuples must produce distinct hashed jobIds")
+        #expect(a.hasPrefix("fm-"))
+        #expect(a.count == "fm-".count + 16)
+    }
+
+    @Test("R7-Fix11: job ID is deterministic for same inputs")
+    func jobIdsAreDeterministic() {
+        let a = BackfillJobRunner.makeJobIdForTesting(
+            analysisAssetId: "asset-1",
+            transcriptVersion: "v1",
+            phase: .scanHarvesterProposals,
+            offset: 2
+        )
+        let b = BackfillJobRunner.makeJobIdForTesting(
+            analysisAssetId: "asset-1",
+            transcriptVersion: "v1",
+            phase: .scanHarvesterProposals,
+            offset: 2
+        )
+        #expect(a == b)
     }
 }
