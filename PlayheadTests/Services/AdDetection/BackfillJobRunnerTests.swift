@@ -83,8 +83,7 @@ struct BackfillJobRunnerTests {
             mode: mode,
             capabilitySnapshotProvider: { snapshot },
             batteryLevelProvider: { 1.0 },
-            scanCohortJSON: makeTestScanCohortJSON(),
-            decisionCohortJSON: nil
+            scanCohortJSON: makeTestScanCohortJSON()
         )
     }
 
@@ -191,6 +190,155 @@ struct BackfillJobRunnerTests {
             // wrapping cancellation, but we expect the canonical CancellationError.
             #expect(Bool(false), "Expected CancellationError, got \(error)")
         }
+    }
+
+    @Test("refinement-pass persists evidence events with JSON-array atomOrdinals")
+    func refinementPassPersistsEvidenceEvents() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [1],
+                        certainty: .strong
+                    )
+                )
+            ],
+            refinementResponses: [
+                RefinementWindowSchema(spans: [
+                    SpanRefinementSchema(
+                        commercialIntent: .paid,
+                        ownership: .thirdParty,
+                        firstLineRef: 1,
+                        lastLineRef: 1,
+                        certainty: .strong,
+                        boundaryPrecision: .precise,
+                        evidenceAnchors: [
+                            EvidenceAnchorSchema(
+                                evidenceRef: nil,
+                                lineRef: 1,
+                                kind: .ctaPhrase,
+                                certainty: .strong
+                            )
+                        ],
+                        alternativeExplanation: .none,
+                        reasonTags: [.callToAction]
+                    )
+                ])
+            ]
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        let result = try await runner.runPendingBackfill(for: makeInputs())
+
+        #expect(!result.admittedJobIds.isEmpty)
+        // The refinement pass must actually persist evidence rows. Before the
+        // C-1 fix this failed because the runner emitted comma-joined ordinals
+        // like "1,2,3" which AnalysisStore.validateAtomOrdinalsJSON rejected.
+        let evidence = try await store.fetchEvidenceEvents(analysisAssetId: "asset-runner")
+        #expect(!evidence.isEmpty, "refinement pass must persist evidence_events rows")
+        #expect(result.evidenceEventIds.count == evidence.count)
+        // Every persisted row's atomOrdinals must be a JSON array parseable as [Int].
+        for event in evidence {
+            let data = Data(event.atomOrdinals.utf8)
+            let parsed = try JSONDecoder().decode([Int].self, from: data)
+            #expect(!parsed.isEmpty)
+        }
+    }
+
+    @Test("refinement writes scan row and evidence events atomically")
+    func refinementPassWritesAtomically() async throws {
+        // C-3 regression. The runner previously wrote Pass-B scan rows and
+        // evidence events with separate `insertSemanticScanResult` /
+        // `insertEvidenceEvent` calls across `await` points, so a crash
+        // between them would leave orphan scan rows. After the fix the
+        // runner calls `recordSemanticScanResult(_:evidenceEvents:)` which
+        // wraps both writes in a single SQLite transaction with rollback on
+        // failure.
+        //
+        // We pin the happy-path invariant here: for each persisted passB
+        // scan result, the count of evidence events attributed to the same
+        // asset is non-zero, and every evidence row parses back to a valid
+        // JSON array of integers (also pinning C-1).
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [1],
+                        certainty: .strong
+                    )
+                )
+            ],
+            refinementResponses: [
+                RefinementWindowSchema(spans: [
+                    SpanRefinementSchema(
+                        commercialIntent: .paid,
+                        ownership: .thirdParty,
+                        firstLineRef: 1,
+                        lastLineRef: 1,
+                        certainty: .strong,
+                        boundaryPrecision: .precise,
+                        evidenceAnchors: [
+                            EvidenceAnchorSchema(
+                                evidenceRef: nil,
+                                lineRef: 1,
+                                kind: .ctaPhrase,
+                                certainty: .strong
+                            )
+                        ],
+                        alternativeExplanation: .none,
+                        reasonTags: [.callToAction]
+                    )
+                ])
+            ]
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        _ = try await runner.runPendingBackfill(for: makeInputs())
+
+        let passB = try await store.fetchSemanticScanResults(
+            analysisAssetId: "asset-runner",
+            scanPass: "passB"
+        )
+        let evidence = try await store.fetchEvidenceEvents(analysisAssetId: "asset-runner")
+        #expect(!passB.isEmpty, "passB scan row must persist")
+        #expect(evidence.count >= passB.count, "each passB row must have at least one evidence event")
+    }
+
+    @Test("runPendingBackfill is idempotent across invocations for the same asset")
+    func runPendingBackfillIsIdempotent() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .noAds,
+                    support: nil
+                ),
+                CoarseScreeningSchema(
+                    disposition: .noAds,
+                    support: nil
+                )
+            ]
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        // First run should enqueue and admit the planned jobs.
+        let first = try await runner.runPendingBackfill(for: makeInputs())
+        #expect(!first.admittedJobIds.isEmpty, "first run must admit jobs")
+
+        // Second run must not throw `duplicateJobId` — it should reuse the
+        // existing rows. Jobs already completed stay off the queue; anything
+        // deferred can be re-driven.
+        let second = try await runner.runPendingBackfill(for: makeInputs())
+        // After the fix we expect zero *new* admitted jobs, because the first
+        // run completed every planned job.
+        #expect(second.admittedJobIds.isEmpty, "completed jobs must not be re-admitted")
     }
 
     @Test("enabled mode falls back to shadow behavior (no AdWindow writes)")

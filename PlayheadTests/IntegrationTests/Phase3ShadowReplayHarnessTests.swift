@@ -105,8 +105,7 @@ struct Phase3ShadowReplayHarnessTests {
                     mode: mode,
                     capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
                     batteryLevelProvider: { 1.0 },
-                    scanCohortJSON: makeTestScanCohortJSON(),
-                    decisionCohortJSON: nil
+                    scanCohortJSON: makeTestScanCohortJSON()
                 )
             }
         )

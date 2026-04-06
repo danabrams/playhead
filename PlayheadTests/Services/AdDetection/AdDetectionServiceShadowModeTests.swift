@@ -169,8 +169,7 @@ struct AdDetectionServiceShadowModeTests {
                     mode: mode,
                     capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
                     batteryLevelProvider: { 1.0 },
-                    scanCohortJSON: makeTestScanCohortJSON(),
-                    decisionCohortJSON: nil
+                    scanCohortJSON: makeTestScanCohortJSON()
                 )
             }
         )

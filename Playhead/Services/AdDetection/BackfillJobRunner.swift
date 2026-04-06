@@ -62,7 +62,6 @@ actor BackfillJobRunner {
     private let capabilitySnapshotProvider: @Sendable () async -> CapabilitySnapshot
     private let batteryLevelProvider: @Sendable () async -> Float
     private let scanCohortJSON: String
-    private let decisionCohortJSON: String?
     private let clock: @Sendable () -> Date
     private let logger = Logger(subsystem: "com.playhead", category: "BackfillJobRunner")
 
@@ -75,7 +74,6 @@ actor BackfillJobRunner {
         capabilitySnapshotProvider: @escaping @Sendable () async -> CapabilitySnapshot,
         batteryLevelProvider: @escaping @Sendable () async -> Float,
         scanCohortJSON: String,
-        decisionCohortJSON: String? = nil,
         clock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.store = store
@@ -86,7 +84,6 @@ actor BackfillJobRunner {
         self.capabilitySnapshotProvider = capabilitySnapshotProvider
         self.batteryLevelProvider = batteryLevelProvider
         self.scanCohortJSON = scanCohortJSON
-        self.decisionCohortJSON = decisionCohortJSON
         self.clock = clock
     }
 
@@ -113,8 +110,26 @@ actor BackfillJobRunner {
 
         var enqueuedJobs: [BackfillJob] = []
         for (offset, phase) in plan.phases.enumerated() {
+            let jobId = "fm-\(inputs.analysisAssetId)-\(phase.rawValue)-\(offset)"
+
+            // M5: idempotent re-invocation. Job ids are deterministic, so a
+            // second call would otherwise throw `duplicateJobId`. Check first:
+            //   - complete: skip entirely (already done)
+            //   - queued / running / deferred / failed: re-drive the existing
+            //     row by enqueueing it against the admission controller; do
+            //     NOT insert a duplicate.
+            //   - missing: insert a fresh row.
+            if let existing = try await store.fetchBackfillJob(byId: jobId) {
+                if existing.status == .complete {
+                    continue
+                }
+                await admissionController.enqueue(existing)
+                enqueuedJobs.append(existing)
+                continue
+            }
+
             let job = BackfillJob(
-                jobId: "fm-\(inputs.analysisAssetId)-\(phase.rawValue)-\(offset)",
+                jobId: jobId,
                 analysisAssetId: inputs.analysisAssetId,
                 podcastId: inputs.podcastId,
                 phase: phase,
@@ -125,7 +140,6 @@ actor BackfillJobRunner {
                 deferReason: nil,
                 status: .queued,
                 scanCohortJSON: scanCohortJSON,
-                decisionCohortJSON: decisionCohortJSON,
                 createdAt: now + Double(offset) * 0.0001
             )
             try await store.insertBackfillJob(job)
@@ -153,11 +167,15 @@ actor BackfillJobRunner {
                 if let next = enqueuedJobs.first(where: {
                     !admitted.contains($0.jobId) && !deferred.contains($0.jobId)
                 }) {
-                    try await store.checkpointBackfillJob(
+                    // C-2 (partial): prefer the split defer API so the
+                    // deferReason is never clobbered by a concurrent progress
+                    // checkpoint. The terminal `.complete` and `.failed`
+                    // transitions still route through the deprecated shim
+                    // because the split API has no replacement for them —
+                    // tracked in C-2 gap report.
+                    try await store.markBackfillJobDeferred(
                         jobId: next.jobId,
-                        progressCursor: nil,
-                        status: .deferred,
-                        deferReason: reason
+                        reason: reason.rawValue
                     )
                     deferred.append(next.jobId)
                 }
@@ -191,11 +209,9 @@ actor BackfillJobRunner {
                 )
             } catch is CancellationError {
                 await admissionController.finish(jobId: job.jobId)
-                try await store.checkpointBackfillJob(
+                try await store.markBackfillJobDeferred(
                     jobId: job.jobId,
-                    progressCursor: nil,
-                    status: .deferred,
-                    deferReason: "cancelled"
+                    reason: "cancelled"
                 )
                 throw CancellationError()
             } catch {
@@ -265,17 +281,18 @@ actor BackfillJobRunner {
                         inputs: inputs,
                         status: refinement.status
                     )
-                    try await store.insertSemanticScanResult(result)
-                    scanResultIds.append(result.id)
-
-                    for evidence in makeEvidenceEvents(
+                    let events = makeEvidenceEvents(
                         windowOutput: window,
                         inputs: inputs,
                         jobId: job.jobId
-                    ) {
-                        try await store.insertEvidenceEvent(evidence)
-                        evidenceEventIds.append(evidence.id)
-                    }
+                    )
+                    // C-3: Pass-B scan row and its evidence events must be
+                    // written atomically. The store's batch API wraps both in
+                    // `BEGIN IMMEDIATE … COMMIT` with rollback on failure, so
+                    // a crash mid-write cannot leave orphan scan rows.
+                    try await store.recordSemanticScanResult(result, evidenceEvents: events)
+                    scanResultIds.append(result.id)
+                    evidenceEventIds.append(contentsOf: events.map(\.id))
                 }
             }
         }
@@ -376,9 +393,14 @@ actor BackfillJobRunner {
     ) -> [EvidenceEvent] {
         var events: [EvidenceEvent] = []
         for (spanOffset, span) in windowOutput.spans.enumerated() {
-            let atomOrdinals = (span.firstAtomOrdinal...span.lastAtomOrdinal)
-                .map(String.init)
-                .joined(separator: ",")
+            // Store validator `validateAtomOrdinalsJSON` requires a JSON array of
+            // integers. Previously we wrote the comma-joined form ("1,2,3") which
+            // the validator rejected, causing every refinement-pass evidence
+            // insert to throw `AnalysisStoreError.invalidEvidenceEvent` and
+            // silently drop the row.
+            let ordinals = Array(span.firstAtomOrdinal...span.lastAtomOrdinal)
+            let atomOrdinals = (try? JSONEncoder().encode(ordinals))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
             let payload = EvidencePayload(
                 commercialIntent: span.commercialIntent.rawValue,
                 ownership: span.ownership.rawValue,
