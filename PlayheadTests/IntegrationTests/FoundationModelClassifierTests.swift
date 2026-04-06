@@ -415,11 +415,13 @@ struct FoundationModelClassifierTests {
         #expect(output.windows[0].spans.count == 2)
         #expect(output.windows[0].spans[0].firstAtomOrdinal == 1)
         #expect(output.windows[0].spans[0].lastAtomOrdinal == 2)
-        #expect(output.windows[0].spans[0].resolvedEvidenceAnchors[0].entry.evidenceRef == 11)
+        #expect(output.windows[0].spans[0].resolvedEvidenceAnchors[0].entry?.evidenceRef == 11)
         #expect(output.windows[0].spans[0].resolvedEvidenceAnchors[0].kind == .url)
         #expect(output.windows[0].spans[0].resolvedEvidenceAnchors[0].lineRef == 1)
-        #expect(output.windows[0].spans[1].resolvedEvidenceAnchors[0].entry.evidenceRef == 12)
+        #expect(output.windows[0].spans[1].resolvedEvidenceAnchors[0].entry?.evidenceRef == 12)
         #expect(output.windows[0].spans[1].resolvedEvidenceAnchors[0].kind == .ctaPhrase)
+        #expect(output.windows[0].spans[0].memoryWriteEligible)
+        #expect(output.windows[0].spans[1].memoryWriteEligible)
         #expect(snapshot.prewarmCalls == [
             RuntimeRecorder.PrewarmCall(sessionID: 1, promptPrefix: "Refine ad spans.")
         ])
@@ -516,6 +518,78 @@ struct FoundationModelClassifierTests {
         #expect(output.windows.count == 1)
         #expect(output.windows[0].spans.count == 1)
         #expect(output.windows[0].spans[0].resolvedEvidenceAnchors.isEmpty)
+        #expect(!output.windows[0].spans[0].memoryWriteEligible)
+    }
+
+    @Test("refinement keeps unresolved in-window anchors for scoring but blocks memory writes")
+    func refinementKeepsUnresolvedWindowAnchors() async throws {
+        let segments = [
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Our sponsor is terrific today."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "We love great products.")
+        ]
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 4,
+            lineRefs: [1, 2],
+            focusLineRefs: [1, 2],
+            focusClusters: [[1, 2]],
+            prompt: "Refine ad spans.",
+            promptTokenCount: 8,
+            startTime: 5,
+            endTime: 15,
+            stopReason: .minimumSpan,
+            promptEvidence: []
+        )
+        let recorder = RuntimeRecorder(
+            contextSize: 64,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementResponses: [
+                RefinementWindowSchema(
+                    spans: [
+                        SpanRefinementSchema(
+                            commercialIntent: .paid,
+                            ownership: .thirdParty,
+                            firstLineRef: 1,
+                            lastLineRef: 2,
+                            certainty: .moderate,
+                            boundaryPrecision: .usable,
+                            evidenceAnchors: [
+                                EvidenceAnchorSchema(
+                                    evidenceRef: nil,
+                                    lineRef: 1,
+                                    kind: .brandSpan,
+                                    certainty: .weak
+                                )
+                            ],
+                            alternativeExplanation: .guestPromotion,
+                            reasonTags: [.hostReadPitch]
+                        )
+                    ]
+                )
+            ]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 1)
+        #expect(output.windows[0].spans.count == 1)
+        #expect(output.windows[0].spans[0].resolvedEvidenceAnchors.count == 1)
+        #expect(output.windows[0].spans[0].resolvedEvidenceAnchors[0].entry == nil)
+        #expect(output.windows[0].spans[0].resolvedEvidenceAnchors[0].resolutionSource == .unresolved)
+        #expect(!output.windows[0].spans[0].resolvedEvidenceAnchors[0].memoryWriteEligible)
+        #expect(!output.windows[0].spans[0].memoryWriteEligible)
     }
 
     @Test("adaptive zoom keeps the Kelly Ripa repeat region when nearby coarse support spans the repeat cluster")

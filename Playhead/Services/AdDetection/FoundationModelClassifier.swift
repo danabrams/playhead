@@ -306,10 +306,12 @@ struct RefinementWindowPlan: Sendable {
 }
 
 struct ResolvedEvidenceAnchor: Sendable {
-    let entry: EvidenceEntry
+    let entry: EvidenceEntry?
     let lineRef: Int
     let kind: EvidenceCategory
     let certainty: CertaintyBand
+    let resolutionSource: CommercialEvidenceResolutionSource
+    let memoryWriteEligible: Bool
 }
 
 struct RefinedAdSpan: Sendable {
@@ -322,6 +324,7 @@ struct RefinedAdSpan: Sendable {
     let certainty: CertaintyBand
     let boundaryPrecision: BoundaryPrecision
     let resolvedEvidenceAnchors: [ResolvedEvidenceAnchor]
+    let memoryWriteEligible: Bool
     let alternativeExplanation: AlternativeExplanation
     let reasonTags: [ReasonTag]
 }
@@ -806,6 +809,13 @@ struct FoundationModelClassifier: Sendable {
                 continue
             }
 
+            let resolvedEvidenceAnchors = CommercialEvidenceResolver.resolve(
+                anchors: span.evidenceAnchors,
+                plan: plan,
+                lineRefLookup: lineRefLookup,
+                evidenceCatalog: evidenceCatalog
+            )
+
             spans.append(
                 RefinedAdSpan(
                     commercialIntent: span.commercialIntent,
@@ -816,12 +826,9 @@ struct FoundationModelClassifier: Sendable {
                     lastAtomOrdinal: lastSegment.lastAtomOrdinal,
                     certainty: span.certainty,
                     boundaryPrecision: span.boundaryPrecision,
-                    resolvedEvidenceAnchors: resolveEvidenceAnchors(
-                        span.evidenceAnchors,
-                        plan: plan,
-                        lineRefLookup: lineRefLookup,
-                        evidenceCatalog: evidenceCatalog
-                    ),
+                    resolvedEvidenceAnchors: resolvedEvidenceAnchors,
+                    memoryWriteEligible: !resolvedEvidenceAnchors.isEmpty &&
+                        resolvedEvidenceAnchors.allSatisfy(\.memoryWriteEligible),
                     alternativeExplanation: span.alternativeExplanation,
                     reasonTags: Array(Set(span.reasonTags)).sorted { $0.rawValue < $1.rawValue }
                 )
@@ -829,45 +836,6 @@ struct FoundationModelClassifier: Sendable {
         }
 
         return spans
-    }
-
-    private func resolveEvidenceAnchors(
-        _ anchors: [EvidenceAnchorSchema],
-        plan: RefinementWindowPlan,
-        lineRefLookup: [Int: AdTranscriptSegment],
-        evidenceCatalog: EvidenceCatalog
-    ) -> [ResolvedEvidenceAnchor] {
-        let validLineRefs = Set(plan.lineRefs)
-        return anchors.compactMap { anchor in
-            if let evidenceRef = anchor.evidenceRef,
-               let promptEntry = plan.promptEvidence.first(where: { $0.entry.evidenceRef == evidenceRef }) {
-                return ResolvedEvidenceAnchor(
-                    entry: promptEntry.entry,
-                    lineRef: promptEntry.lineRef,
-                    kind: promptEntry.entry.category,
-                    certainty: anchor.certainty
-                )
-            }
-
-            guard validLineRefs.contains(anchor.lineRef) else {
-                return nil
-            }
-            guard let segment = lineRefLookup[anchor.lineRef] else {
-                return nil
-            }
-            guard let entry = evidenceCatalog.entries.first(where: { entry in
-                segment.atoms.contains(where: { $0.atomKey.atomOrdinal == entry.atomOrdinal }) &&
-                entry.category == anchor.kind.category
-            }) else {
-                return nil
-            }
-            return ResolvedEvidenceAnchor(
-                entry: entry,
-                lineRef: anchor.lineRef,
-                kind: entry.category,
-                certainty: anchor.certainty
-            )
-        }
     }
 
     private func shouldRefine(_ disposition: CoarseDisposition) -> Bool {
@@ -1110,22 +1078,5 @@ private extension FoundationModelClassifier {
     static func fallbackTokenEstimate(for prompt: String) -> Int {
         let wordCount = prompt.split(whereSeparator: \.isWhitespace).count
         return max(1, Int(ceil(Double(wordCount) * 1.35)))
-    }
-}
-
-private extension EvidenceAnchorKind {
-    var category: EvidenceCategory {
-        switch self {
-        case .url:
-            .url
-        case .promoCode:
-            .promoCode
-        case .ctaPhrase:
-            .ctaPhrase
-        case .disclosurePhrase:
-            .disclosurePhrase
-        case .brandSpan:
-            .brandSpan
-        }
     }
 }
