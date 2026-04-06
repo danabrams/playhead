@@ -312,15 +312,18 @@ actor AnalysisStore {
         Self.migratedPaths.insert(path)
     }
 
+    #if DEBUG
     /// H-3: test-only helper that clears the process-global `migratedPaths`
     /// cache. Invoke from test setup when constructing temp-dir stores to
     /// prevent long test runs from accumulating stale entries. Not for
-    /// production use.
+    /// production use — H3-2 gates this behind `#if DEBUG` so release
+    /// builds cannot accidentally invalidate the migration cache.
     static func resetMigratedPathsForTesting() {
         migratedLock.withLock {
             migratedPaths.removeAll()
         }
     }
+    #endif
 
     /// Probes `sqlite_master` for the `_meta` table. Used by `migrate()` to
     /// detect a stale `migratedPaths` cache entry pointing at a file that
