@@ -453,6 +453,119 @@ struct BackfillJobStoreTests {
         }
     }
 
+    // MARK: - C3-2: terminal transitions on markBackfillJobComplete/Failed
+
+    @Test("C3-2: markBackfillJobComplete throws on a failed row")
+    func markBackfillJobComplete_throwsOnFailedRow() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(jobId: "c32-complete-on-failed")
+        try await store.insertBackfillJob(job)
+        try await store.markBackfillJobFailed(
+            jobId: job.jobId,
+            reason: "boom",
+            retryCount: 1
+        )
+
+        await #expect(throws: AnalysisStoreError.self) {
+            try await store.markBackfillJobComplete(
+                jobId: job.jobId,
+                progressCursor: BackfillProgressCursor(processedUnitCount: 1)
+            )
+        }
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .failed, "failed row must not be resurrected to complete")
+    }
+
+    @Test("C3-2: markBackfillJobComplete is idempotent on an already-complete row")
+    func markBackfillJobComplete_idempotentOnCompleteRow() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(jobId: "c32-complete-idempotent")
+        try await store.insertBackfillJob(job)
+        let cursor = BackfillProgressCursor(processedUnitCount: 2)
+        try await store.markBackfillJobComplete(jobId: job.jobId, progressCursor: cursor)
+
+        // Second call must not throw.
+        try await store.markBackfillJobComplete(jobId: job.jobId, progressCursor: cursor)
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .complete)
+    }
+
+    @Test("C3-2: markBackfillJobComplete throws on a nonexistent row")
+    func markBackfillJobComplete_throwsOnMissingRow() async throws {
+        let store = try await makeTestStore()
+        await #expect(throws: AnalysisStoreError.self) {
+            try await store.markBackfillJobComplete(
+                jobId: "c32-missing",
+                progressCursor: nil
+            )
+        }
+    }
+
+    @Test("C3-2: markBackfillJobFailed throws on a complete row")
+    func markBackfillJobFailed_throwsOnCompleteRow() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(jobId: "c32-failed-on-complete")
+        try await store.insertBackfillJob(job)
+        try await store.markBackfillJobComplete(
+            jobId: job.jobId,
+            progressCursor: BackfillProgressCursor(processedUnitCount: 1)
+        )
+
+        await #expect(throws: AnalysisStoreError.self) {
+            try await store.markBackfillJobFailed(
+                jobId: job.jobId,
+                reason: "too late",
+                retryCount: 1
+            )
+        }
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .complete, "complete row must not be demoted to failed")
+    }
+
+    @Test("C3-2: markBackfillJobFailed is idempotent on an already-failed row")
+    func markBackfillJobFailed_idempotentOnFailedRow() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(jobId: "c32-failed-idempotent")
+        try await store.insertBackfillJob(job)
+        try await store.markBackfillJobFailed(
+            jobId: job.jobId,
+            reason: "first",
+            retryCount: 1
+        )
+
+        // Second call on an already-failed row must NOT throw (idempotent)
+        // and must NOT bump retryCount or mutate deferReason.
+        try await store.markBackfillJobFailed(
+            jobId: job.jobId,
+            reason: "second",
+            retryCount: 99
+        )
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .failed)
+        #expect(fetched.retryCount == 1, "idempotent path must not bump retryCount")
+        #expect(fetched.deferReason == "first", "idempotent path must not overwrite deferReason")
+    }
+
+    @Test("C3-2: markBackfillJobFailed throws on a nonexistent row")
+    func markBackfillJobFailed_throwsOnMissingRow() async throws {
+        let store = try await makeTestStore()
+        await #expect(throws: AnalysisStoreError.self) {
+            try await store.markBackfillJobFailed(
+                jobId: "c32-missing",
+                reason: "nope",
+                retryCount: 1
+            )
+        }
+    }
+
     // MARK: - M-4: markBackfillJobFailed overwrites deferReason (documented, pinned)
 
     @Test("M-4: markBackfillJobFailed overwrites any prior deferReason by design")

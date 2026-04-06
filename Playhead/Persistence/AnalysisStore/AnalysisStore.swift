@@ -1830,6 +1830,15 @@ actor AnalysisStore {
     /// C-2: terminal success transition. Writes the final `progressCursor`
     /// and flips `status='complete'` while preserving `deferReason` (audit
     /// trail) and `retryCount`.
+    ///
+    /// C3-2: guarded against silent terminal resurrection. The update is
+    /// restricted to rows in `queued`, `deferred`, or `running`; if zero
+    /// rows are affected we probe the current state and:
+    ///   - return silently when the row is already `complete` (idempotent
+    ///     retry after an earlier successful call),
+    ///   - throw `invalidStateTransition` on any other state (including a
+    ///     missing row or a `failed` row) so callers can never silently
+    ///     promote a failed job to complete.
     func markBackfillJobComplete(
         jobId: String,
         progressCursor: BackfillProgressCursor?
@@ -1837,19 +1846,49 @@ actor AnalysisStore {
         let sql = """
             UPDATE backfill_jobs
             SET status = 'complete', progressCursor = ?
-            WHERE jobId = ?
+            WHERE jobId = ? AND status IN ('queued', 'deferred', 'running')
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, try encodeJSONString(progressCursor))
         bind(stmt, 2, jobId)
         try step(stmt, expecting: SQLITE_DONE)
+        if sqlite3_changes(db) == 0 {
+            let current = try probeBackfillJobStatus(jobId: jobId)
+            if current == "complete" {
+                // Already complete: idempotent retry path, silent success.
+                return
+            }
+            throw AnalysisStoreError.invalidStateTransition(
+                jobId: jobId,
+                toStatus: "complete"
+            )
+        }
     }
 
     /// C-2: terminal failure transition. The prior shim silently dropped
     /// `deferReason` on `.failed`; this method ensures the reason is
     /// written so operators can diagnose why a job failed without scraping
     /// logs.
+    ///
+    /// M-4: note that this intentionally overwrites any prior
+    /// `deferReason`. A job that was previously `.deferred` for thermal
+    /// throttling and then failed the next attempt must record the newer
+    /// *failure* cause, not the older defer reason. Operators diagnosing a
+    /// failed job care about why it failed, not the cooldown that preceded
+    /// it; the defer history is still recoverable from structured logs.
+    /// This behavior is pinned by
+    /// `markBackfillJobFailed_overwritesDeferReason`.
+    ///
+    /// C3-2: guarded against silent terminal resurrection. The update is
+    /// restricted to rows in `queued`, `deferred`, or `running`; if zero
+    /// rows are affected we probe the current state and:
+    ///   - return silently when the row is already `failed` (idempotent
+    ///     retry after an earlier failure was recorded; `retryCount` and
+    ///     the original failure `deferReason` are preserved),
+    ///   - throw `invalidStateTransition` on any other state (including a
+    ///     missing row or a `complete` row) so a late exception cannot
+    ///     silently demote a completed job.
     func markBackfillJobFailed(
         jobId: String,
         reason: String,
@@ -1858,7 +1897,7 @@ actor AnalysisStore {
         let sql = """
             UPDATE backfill_jobs
             SET status = 'failed', deferReason = ?, retryCount = ?
-            WHERE jobId = ?
+            WHERE jobId = ? AND status IN ('queued', 'deferred', 'running')
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -1866,6 +1905,32 @@ actor AnalysisStore {
         bind(stmt, 2, retryCount)
         bind(stmt, 3, jobId)
         try step(stmt, expecting: SQLITE_DONE)
+        if sqlite3_changes(db) == 0 {
+            let current = try probeBackfillJobStatus(jobId: jobId)
+            if current == "failed" {
+                // Already failed: idempotent retry path, silent success.
+                // retryCount and the original deferReason are preserved —
+                // the caller's newer values are intentionally discarded so
+                // a double-catch at a higher layer cannot double-bump the
+                // retry counter.
+                return
+            }
+            throw AnalysisStoreError.invalidStateTransition(
+                jobId: jobId,
+                toStatus: "failed"
+            )
+        }
+    }
+
+    /// C3-2: small helper used by the guarded terminal transitions to
+    /// distinguish "no row" from "row present in a disallowed state". Returns
+    /// `nil` when no row exists for `jobId`.
+    private func probeBackfillJobStatus(jobId: String) throws -> String? {
+        let stmt = try prepare("SELECT status FROM backfill_jobs WHERE jobId = ? LIMIT 1")
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, jobId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return optionalText(stmt, 0)
     }
 
     /// Legacy combined API. Now thin shim that delegates to the split methods.
