@@ -115,23 +115,46 @@ final class PlayheadRuntime {
         // AdDetectionServiceShadowModeTests).
         let capabilitiesServiceForFactory = capabilitiesService
         let batteryProvider = UIDeviceBatteryProvider()
-        let scanCohortJSON = ScanCohort.productionJSON()
-        let backfillJobRunnerFactory: @Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner = { store, mode in
+
+        // M-B: a single shared AdmissionController hoisted out of the factory
+        // closure. Actor instances are reference types, so capturing the same
+        // instance into every factory invocation preserves the serial
+        // admission guarantee across concurrent `runBackfill` calls. The
+        // prior version allocated a fresh controller per call, which let two
+        // parallel runs bypass each other's serial slot.
+        let sharedAdmissionController = AdmissionController()
+
+        let backfillJobRunnerFactory: @Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner = {
+            [sharedAdmissionController, capabilitiesServiceForFactory, batteryProvider] store, mode in
             BackfillJobRunner(
                 store: store,
-                admissionController: AdmissionController(),
+                admissionController: sharedAdmissionController,
                 classifier: FoundationModelClassifier(),
                 coveragePlanner: CoveragePlanner(),
                 mode: mode,
                 capabilitySnapshotProvider: { await capabilitiesServiceForFactory.currentSnapshot },
                 batteryLevelProvider: { await batteryProvider.currentBatteryState().level },
-                scanCohortJSON: scanCohortJSON
+                // H-A: compute the scan cohort JSON per factory invocation
+                // rather than freezing it at runtime init. Locale changes
+                // mid-process were previously invisible to the cohort hash,
+                // leaving reuse-cache lookups keyed off stale values. The
+                // per-call cost is microseconds (a handful of string fields
+                // JSON-encoded with sorted keys) and buys cohort freshness.
+                scanCohortJSON: ScanCohort.productionJSON()
             )
         }
         self.adDetectionService = AdDetectionService(
             store: analysisStore,
             metadataExtractor: FallbackExtractor(),
-            backfillJobRunnerFactory: backfillJobRunnerFactory
+            backfillJobRunnerFactory: backfillJobRunnerFactory,
+            // M-D: capabilities provider lets the shadow phase short-circuit
+            // before building atom/segment/catalog inputs on devices that
+            // cannot run Foundation Models. The closure hits the actor on
+            // every invocation so the result stays current with runtime
+            // capability changes (FM became unavailable, AI disabled, etc.).
+            canUseFoundationModelsProvider: { [capabilitiesServiceForFactory] in
+                await capabilitiesServiceForFactory.currentSnapshot.canUseFoundationModels
+            }
         )
         self.skipOrchestrator = SkipOrchestrator(
             store: analysisStore,
@@ -177,6 +200,16 @@ final class PlayheadRuntime {
         // Set error state after all stored properties are initialized.
         if let storeError {
             self.initializationError = storeError
+        }
+
+        // H-B: enable battery monitoring exactly once at runtime init rather
+        // than paying a MainActor hop every time `UIDeviceBatteryProvider`
+        // reads the level. The provider's per-call setter becomes a harmless
+        // no-op and the warning about "every refinement window pays a hop
+        // for the setter" is mitigated. The actual battery read still
+        // requires a MainActor hop but that's unavoidable on UIKit.
+        Task { @MainActor in
+            UIDevice.current.isBatteryMonitoringEnabled = true
         }
 
         Task { await capabilitiesService.startObserving() }

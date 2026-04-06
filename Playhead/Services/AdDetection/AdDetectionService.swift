@@ -112,6 +112,14 @@ actor AdDetectionService {
     /// Tests inject a deterministic runner; production wiring lives in
     /// `PlayheadRuntime`.
     private let backfillJobRunnerFactory: (@Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner)?
+    /// M-D: predicate the runner consults before doing any shadow-phase work
+    /// (atomization, segmentation, catalog build). Returning `false` makes the
+    /// phase an immediate no-op on devices that cannot run Foundation Models
+    /// — previously we built the entire input graph and then let the runner
+    /// tear it down inside the factory closure. Production wiring captures a
+    /// reference to `CapabilitiesService.currentSnapshot`; tests default to
+    /// `{ true }` so existing fixtures continue to exercise the shadow path.
+    private let canUseFoundationModelsProvider: @Sendable () async -> Bool
 
     // MARK: - Cached State
 
@@ -130,7 +138,8 @@ actor AdDetectionService {
         metadataExtractor: MetadataExtractor,
         config: AdDetectionConfig = .default,
         podcastProfile: PodcastProfile? = nil,
-        backfillJobRunnerFactory: (@Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner)? = nil
+        backfillJobRunnerFactory: (@Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner)? = nil,
+        canUseFoundationModelsProvider: @escaping @Sendable () async -> Bool = { true }
     ) {
         self.store = store
         self.classifier = classifier
@@ -139,6 +148,7 @@ actor AdDetectionService {
         self.scanner = LexicalScanner(podcastProfile: podcastProfile)
         self.showPriors = ShowPriors.from(profile: podcastProfile)
         self.backfillJobRunnerFactory = backfillJobRunnerFactory
+        self.canUseFoundationModelsProvider = canUseFoundationModelsProvider
     }
 
     // MARK: - Profile Update
@@ -359,8 +369,19 @@ actor AdDetectionService {
         analysisAssetId: String,
         podcastId: String
     ) async {
+        guard config.fmBackfillMode != .disabled else { return }
+
         guard let factory = backfillJobRunnerFactory else {
             logger.debug("Shadow FM phase skipped: no runner factory injected")
+            return
+        }
+
+        // M-D: skip the entire shadow phase on devices that can't run
+        // Foundation Models. Atomization, segmentation, and catalog builds
+        // are not free — there's no point doing the work only to have the
+        // runner's admission controller immediately reject it.
+        guard await canUseFoundationModelsProvider() else {
+            logger.debug("Shadow FM phase skipped: canUseFoundationModels=false")
             return
         }
 
