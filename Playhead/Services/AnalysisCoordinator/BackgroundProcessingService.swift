@@ -150,11 +150,6 @@ actor BackgroundProcessingService {
     /// Whether Low Power Mode is active.
     private var isLowPowerMode = false
 
-    // MARK: - Configuration
-
-    /// Battery threshold below which non-critical analysis is paused.
-    private static let lowBatteryThreshold: Float = 0.20
-
     // MARK: - Init
 
     init(
@@ -484,8 +479,14 @@ actor BackgroundProcessingService {
 
         await updateBatteryState()
 
+        // `shouldPauseBackfill` mirrors the shared DeviceAdmissionPolicy gate
+        // (thermal throttle, low battery while not charging, or Low Power
+        // Mode), so this service and AdmissionController stay in sync.
+        // `shouldPauseAll` is BPS-specific service logic layered on top: it
+        // pauses every analysis path (including the foreground hot-path) when
+        // the device is in distress.
         let shouldPauseAll = snapshot.thermalState == .critical || isBatteryTooLow()
-        let shouldPauseBackfill = snapshot.shouldThrottleAnalysis || isLowPowerMode || isBatteryTooLow()
+        let shouldPauseBackfill = deviceAdmissionDecision(for: snapshot) != .admit
 
         // Pause all analysis.
         if shouldPauseAll && !allAnalysisPaused {
@@ -533,8 +534,37 @@ actor BackgroundProcessingService {
     }
 
     /// Whether battery is below threshold and device is not charging.
+    /// The threshold is sourced from `DeviceAdmissionPolicy` so this service
+    /// and `AdmissionController` cannot drift on the cutoff.
     private func isBatteryTooLow() -> Bool {
-        currentBatteryLevel >= 0 && currentBatteryLevel < Self.lowBatteryThreshold && !isCharging
+        currentBatteryLevel >= 0
+            && currentBatteryLevel < DeviceAdmissionPolicy.lowBatteryThreshold
+            && !isCharging
+    }
+
+    /// Evaluate the shared `DeviceAdmissionPolicy` against the latest
+    /// capability snapshot, using the BPS-cached battery and charging state
+    /// (which is refreshed from the battery provider on every capability
+    /// update). The returned decision answers "may backfill-class work run
+    /// right now?" — service-specific gates (e.g. `shouldPauseAll`) are
+    /// layered on top by callers.
+    private func deviceAdmissionDecision(for snapshot: CapabilitySnapshot) -> DeviceAdmissionPolicy.Decision {
+        let effectiveSnapshot = CapabilitySnapshot(
+            foundationModelsAvailable: snapshot.foundationModelsAvailable,
+            foundationModelsUsable: snapshot.foundationModelsUsable,
+            appleIntelligenceEnabled: snapshot.appleIntelligenceEnabled,
+            foundationModelsLocaleSupported: snapshot.foundationModelsLocaleSupported,
+            thermalState: snapshot.thermalState,
+            isLowPowerMode: isLowPowerMode,
+            isCharging: isCharging,
+            backgroundProcessingSupported: snapshot.backgroundProcessingSupported,
+            availableDiskSpaceBytes: snapshot.availableDiskSpaceBytes,
+            capturedAt: snapshot.capturedAt
+        )
+        return DeviceAdmissionPolicy.evaluate(
+            snapshot: effectiveSnapshot,
+            batteryLevel: currentBatteryLevel
+        )
     }
 
     func handleExpiredProcessingTask(_ task: any BackgroundProcessingTaskProtocol) async {
