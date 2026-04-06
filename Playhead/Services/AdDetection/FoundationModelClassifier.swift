@@ -1477,6 +1477,14 @@ struct FoundationModelClassifier: Sendable {
     // U+202E and ZWJ U+200D), and U+2028/U+2029 line separators. Apply NFKC
     // normalization BEFORE escaping to prevent compatibility-character based
     // injection. Whitespace collapse is preserved.
+    //
+    // H14b: After Unicode scrubbing and whitespace collapse, defang any
+    // smuggled transcript fence (`<<<TRANSCRIPT>>>` / `<<<END TRANSCRIPT>>>`)
+    // and any forged `L<digits>>` line-ref prefix. A host that successfully
+    // smuggled the verbatim close fence into a transcript line could close
+    // the planner's fenced region prematurely; a forged `L42>` could
+    // impersonate a real line ref. Both are rewritten to safe equivalents
+    // that preserve the visible content but break the literal token boundary.
     static func escapedLine(_ text: String) -> String {
         // NFKC normalize first.
         let normalized = text.precomposedStringWithCompatibilityMapping
@@ -1499,10 +1507,37 @@ struct FoundationModelClassifier: Sendable {
         })
 
         let collapsed = scrubbed.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-        return collapsed
+
+        // H14b: Defang smuggled fences. Order matters — rewrite the close
+        // fence first because it is a strict superstring of the open fence
+        // would not be (open is `<<<TRANSCRIPT>>>`, close is
+        // `<<<END TRANSCRIPT>>>`); doing close first keeps the rewrites
+        // unambiguous regardless of order.
+        let defangedFences = collapsed
+            .replacingOccurrences(of: transcriptCloseFence, with: "«END TRANSCRIPT»")
+            .replacingOccurrences(of: transcriptOpenFence, with: "«TRANSCRIPT»")
+
+        // H14b: Defang forged `L<digits>>` line-ref prefixes by inserting a
+        // space between the digits and `>`. The visible characters survive
+        // but no downstream parser scanning for `L\d+>` will pick them up.
+        let defangedLineRefs = Self.lineRefPrefixSmugglingPattern.stringByReplacingMatches(
+            in: defangedFences,
+            range: NSRange(defangedFences.startIndex..., in: defangedFences),
+            withTemplate: "L$1 >"
+        )
+
+        return defangedLineRefs
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
     }
+
+    // H14b: Compiled once at init to avoid recompiling per call. Matches
+    // any `L<digits>>` token. Force-try is safe — the literal pattern is
+    // valid and tested.
+    private static let lineRefPrefixSmugglingPattern: NSRegularExpression = {
+        // swiftlint:disable:next force_try
+        try! NSRegularExpression(pattern: #"L(\d+)>"#)
+    }()
 }
 
 // MARK: - Session Confinement
