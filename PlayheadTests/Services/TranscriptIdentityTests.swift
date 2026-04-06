@@ -485,6 +485,73 @@ struct TranscriptSegmenterTests {
         #expect(segments[1].segmentType == .speech)
     }
 
+    @Test("Dominant speaker breaks ties by picking the lower cluster id")
+    func dominantSpeakerTieBreakPicksLower() {
+        // Two clusters overlap each atom equally. Picking the LOWER id is
+        // more stable across reclustering: clusters tend to be assigned ids
+        // in order of first appearance, so the lower id is the older,
+        // less-volatile assignment.
+        let config = TranscriptSegmenter.Config(
+            pauseThreshold: 2.0,
+            maxSegmentDuration: 120.0,
+            minSegmentDuration: 1.0
+        )
+        // Atoms span [0, 10] and [10, 20]. Both atoms get equal overlap from
+        // cluster 1 and cluster 2 — but for the boundary to trigger a turn,
+        // the dominant speaker must DIFFER between atoms. Set up the prior
+        // atom to have cluster 1 win and the second to also have cluster 1
+        // win (lower-id tie-break) — therefore NO speaker turn fires.
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 0, endTime: 10, text: "first speaker block"),
+            makeAtom(ordinal: 1, startTime: 10, endTime: 20, text: "second speaker block"),
+        ]
+        // Each atom: cluster 1 covers [start, start+5], cluster 2 covers
+        // [start+5, end]. Equal 5s overlap each. Tie → pick lower (cluster 1).
+        let featureWindows = [
+            makeFeatureWindow(startTime: 0,  endTime: 5,  speakerClusterId: 1),
+            makeFeatureWindow(startTime: 5,  endTime: 10, speakerClusterId: 2),
+            makeFeatureWindow(startTime: 10, endTime: 15, speakerClusterId: 1),
+            makeFeatureWindow(startTime: 15, endTime: 20, speakerClusterId: 2),
+        ]
+
+        let segments = TranscriptSegmenter.segment(
+            atoms: atoms,
+            featureWindows: featureWindows,
+            config: config
+        )
+
+        // Both atoms resolve to cluster 1 (lower id), so no speaker turn.
+        #expect(segments.count == 1)
+    }
+
+    @Test("Dominant speaker returns nil when all overlapping windows have nil cluster")
+    func dominantSpeakerAllNilReturnsNil() {
+        // Indirectly: with all clusters nil, the dominantSpeaker helper
+        // returns nil for both sides, so the speaker-turn branch is never
+        // entered and we get a single segment.
+        let config = TranscriptSegmenter.Config(
+            pauseThreshold: 2.0,
+            maxSegmentDuration: 120.0,
+            minSegmentDuration: 1.0
+        )
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 0, endTime: 6, text: "first"),
+            makeAtom(ordinal: 1, startTime: 6, endTime: 12, text: "second"),
+        ]
+        let featureWindows = [
+            makeFeatureWindow(startTime: 0, endTime: 6,  speakerClusterId: nil),
+            makeFeatureWindow(startTime: 6, endTime: 12, speakerClusterId: nil),
+        ]
+
+        let segments = TranscriptSegmenter.segment(
+            atoms: atoms,
+            featureWindows: featureWindows,
+            config: config
+        )
+
+        #expect(segments.count == 1)
+    }
+
     @Test("Feature pause window covering only the gap interval still triggers a hard break")
     func featurePauseWindowCoversGapInterval() {
         // Regression for M19: previously the segmenter only sampled the

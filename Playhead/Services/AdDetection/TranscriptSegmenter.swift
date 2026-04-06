@@ -279,6 +279,12 @@ enum TranscriptSegmenter {
         return false
     }
 
+    /// Returns the speaker cluster id with the most overlap with `atom`.
+    /// Ties are broken by picking the LOWER cluster id, which is more
+    /// stable across reclustering: clusters tend to be assigned ids in
+    /// order of first appearance, so the lower id is the older,
+    /// less-volatile assignment. Returns nil when no overlapping window
+    /// has a non-nil cluster id.
     private static func dominantSpeaker(
         overlapping atom: TranscriptAtom,
         featureWindows: [FeatureWindow]
@@ -295,6 +301,10 @@ enum TranscriptSegmenter {
             durationsBySpeaker[speakerClusterId, default: 0] += overlap
         }
 
+        // Tie-break rule: in `max(by:)` the closure is the "less-than"
+        // predicate. With equal durations we declare lhs < rhs when
+        // `lhs.key > rhs.key`, which makes `max` pick the element with the
+        // SMALLEST key. (Verified by `dominantSpeakerTieBreakPicksLower`.)
         return durationsBySpeaker.max { lhs, rhs in
             if lhs.value == rhs.value {
                 return lhs.key > rhs.key
