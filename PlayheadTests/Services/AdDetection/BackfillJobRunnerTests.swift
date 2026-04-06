@@ -602,6 +602,75 @@ struct BackfillJobRunnerTests {
         #expect(uniqueKeys == firstKeys, "second run introduced new logical keys")
     }
 
+    @Test("HIGH-1: concurrent runBackfill calls with per-call controllers do not mass-defer each other")
+    func concurrentRunBackfillsDoNotMassDeferEachOther() async throws {
+        // HIGH-1 regression: the round-2 M-B hoist made the runtime factory
+        // capture a single shared AdmissionController. Because
+        // AdDetectionService is actor-reentrant on `await`, two concurrent
+        // `runBackfill` calls on different episodes would each hit the
+        // shared controller. The second call saw `runningJob != nil`,
+        // mass-deferred its whole batch with `serialBusy`, and lost
+        // telemetry. The correct wiring is per-call controllers (one per
+        // `runBackfill` invocation), which this test pins by mimicking the
+        // runtime factory: allocate a fresh controller for each runner.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "asset-concurrent-A"))
+        try await store.insertAsset(makeAsset(id: "asset-concurrent-B"))
+
+        let fmRuntimeA = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ]
+        )
+        let fmRuntimeB = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ]
+        )
+
+        // Per-call admission controllers, matching the corrected factory.
+        let runnerA = BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(runtime: fmRuntimeA.runtime),
+            coveragePlanner: CoveragePlanner(),
+            mode: .shadow,
+            capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+            batteryLevelProvider: { 1.0 },
+            scanCohortJSON: makeTestScanCohortJSON()
+        )
+        let runnerB = BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(runtime: fmRuntimeB.runtime),
+            coveragePlanner: CoveragePlanner(),
+            mode: .shadow,
+            capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+            batteryLevelProvider: { 1.0 },
+            scanCohortJSON: makeTestScanCohortJSON()
+        )
+
+        async let a = runnerA.runPendingBackfill(
+            for: makeInputs(assetId: "asset-concurrent-A", transcriptVersion: "tx-A")
+        )
+        async let b = runnerB.runPendingBackfill(
+            for: makeInputs(assetId: "asset-concurrent-B", transcriptVersion: "tx-B")
+        )
+        let (resultA, resultB) = try await (a, b)
+
+        #expect(!resultA.admittedJobIds.isEmpty, "runner A must admit its jobs")
+        #expect(!resultB.admittedJobIds.isEmpty, "runner B must admit its jobs")
+        #expect(resultA.deferredJobIds.isEmpty, "runner A must not mass-defer")
+        #expect(resultB.deferredJobIds.isEmpty, "runner B must not mass-defer")
+
+        // Neither run should have left a `serialBusy` defer reason behind.
+        for jobId in resultA.admittedJobIds + resultB.admittedJobIds {
+            let row = try #require(await store.fetchBackfillJob(byId: jobId))
+            #expect(row.deferReason != "serialBusy",
+                    "concurrent runs must not poison each other with serialBusy")
+        }
+    }
+
     @Test("enabled mode falls back to shadow behavior (no AdWindow writes)")
     func enabledModeFallsBackToShadow() async throws {
         let store = try await makeTestStore()

@@ -116,19 +116,23 @@ final class PlayheadRuntime {
         let capabilitiesServiceForFactory = capabilitiesService
         let batteryProvider = UIDeviceBatteryProvider()
 
-        // M-B: a single shared AdmissionController hoisted out of the factory
-        // closure. Actor instances are reference types, so capturing the same
-        // instance into every factory invocation preserves the serial
-        // admission guarantee across concurrent `runBackfill` calls. The
-        // prior version allocated a fresh controller per call, which let two
-        // parallel runs bypass each other's serial slot.
-        let sharedAdmissionController = AdmissionController()
-
+        // HIGH-1: round-2's M-B hoist shared one AdmissionController across
+        // every factory invocation. AdDetectionService is actor-reentrant on
+        // `await`, so two concurrent `runBackfill` calls would contend on the
+        // same controller: the second call saw `runningJob != nil` and
+        // mass-deferred its entire batch with `serialBusy`. Per-call
+        // controllers correctly give each `runBackfill` invocation its own
+        // queue. The original M-B concern (parallel FM inference) is not
+        // solved by sharing the controller — it would require a separate FM
+        // session manager, which is out of scope here. The concurrent
+        // no-mass-defer invariant is pinned by
+        // `concurrentRunBackfillsDoNotMassDeferEachOther` in
+        // BackfillJobRunnerTests.
         let backfillJobRunnerFactory: @Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner = {
-            [sharedAdmissionController, capabilitiesServiceForFactory, batteryProvider] store, mode in
+            [capabilitiesServiceForFactory, batteryProvider] store, mode in
             BackfillJobRunner(
                 store: store,
-                admissionController: sharedAdmissionController,
+                admissionController: AdmissionController(),
                 classifier: FoundationModelClassifier(),
                 coveragePlanner: CoveragePlanner(),
                 mode: mode,
