@@ -100,9 +100,38 @@ final class PlayheadRuntime {
             store: analysisStore
         )
         self.trustService = TrustScoringService(store: analysisStore)
+
+        // Phase 3 shadow-mode wiring. The factory receives the store and the
+        // config-selected FMBackfillMode and returns a fully-wired runner that
+        // uses:
+        //   • FoundationModelClassifier's live on-device runtime (default init)
+        //   • CapabilitiesService.currentSnapshot for thermal/charging state
+        //   • UIDeviceBatteryProvider for battery level (same source as BPS)
+        //   • ScanCohort.productionJSON() as the reuse-cache key
+        // When AdDetectionConfig.fmBackfillMode == .disabled, the factory is
+        // never invoked. When .shadow (default), FM runs and writes telemetry
+        // to semantic_scan_results / evidence_events but never influences
+        // AdWindow rows (shadow invariant pinned by
+        // AdDetectionServiceShadowModeTests).
+        let capabilitiesServiceForFactory = capabilitiesService
+        let batteryProvider = UIDeviceBatteryProvider()
+        let scanCohortJSON = ScanCohort.productionJSON()
+        let backfillJobRunnerFactory: @Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner = { store, mode in
+            BackfillJobRunner(
+                store: store,
+                admissionController: AdmissionController(),
+                classifier: FoundationModelClassifier(),
+                coveragePlanner: CoveragePlanner(),
+                mode: mode,
+                capabilitySnapshotProvider: { await capabilitiesServiceForFactory.currentSnapshot },
+                batteryLevelProvider: { await batteryProvider.currentBatteryState().level },
+                scanCohortJSON: scanCohortJSON
+            )
+        }
         self.adDetectionService = AdDetectionService(
             store: analysisStore,
-            metadataExtractor: FallbackExtractor()
+            metadataExtractor: FallbackExtractor(),
+            backfillJobRunnerFactory: backfillJobRunnerFactory
         )
         self.skipOrchestrator = SkipOrchestrator(
             store: analysisStore,
