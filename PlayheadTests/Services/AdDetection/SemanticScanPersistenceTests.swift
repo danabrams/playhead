@@ -1406,4 +1406,113 @@ struct SemanticScanPersistenceTests {
         #expect(fetched.count == 1)
         #expect(fetched.first?.id == "ev-drift")
     }
+
+    // MARK: - Fix #9: length caps on errorContext / spansJSON
+
+    private func makeLargeString(bytes: Int) -> String {
+        String(repeating: "x", count: bytes)
+    }
+
+    @Test("insertSemanticScanResult rejects oversized errorContext")
+    func insertSemanticScanResult_rejectsLargeErrorContext() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+        let cohort = try makeScanCohortJSON()
+
+        let oversized = makeLargeString(bytes: 1_500_000)
+        let row = SemanticScanResult(
+            id: "scan-large-err",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 0,
+            windowLastAtomOrdinal: 4,
+            windowStartTime: 0,
+            windowEndTime: 40,
+            scanPass: "passA",
+            transcriptQuality: .good,
+            disposition: .abstain,
+            spansJSON: "[]",
+            status: .refusal,
+            attemptCount: 1,
+            errorContext: oversized,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: cohort,
+            transcriptVersion: "tx-v1"
+        )
+
+        await #expect(throws: AnalysisStoreError.self) {
+            try await store.insertSemanticScanResult(row)
+        }
+    }
+
+    @Test("insertSemanticScanResult rejects oversized spansJSON")
+    func insertSemanticScanResult_rejectsLargeSpansJSON() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+        let cohort = try makeScanCohortJSON()
+
+        let oversized = makeLargeString(bytes: 1_500_000)
+        let row = SemanticScanResult(
+            id: "scan-large-spans",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 0,
+            windowLastAtomOrdinal: 4,
+            windowStartTime: 0,
+            windowEndTime: 40,
+            scanPass: "passA",
+            transcriptQuality: .good,
+            disposition: .containsAd,
+            spansJSON: oversized,
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: cohort,
+            transcriptVersion: "tx-v1"
+        )
+
+        await #expect(throws: AnalysisStoreError.self) {
+            try await store.insertSemanticScanResult(row)
+        }
+    }
+
+    @Test("insertSemanticScanResult accepts blobs under the 1MB cap")
+    func insertSemanticScanResult_acceptsBlobsUnderCap() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+        let cohort = try makeScanCohortJSON()
+
+        // 999_000 bytes — safely under the 1_000_000 byte cap.
+        let justUnder = makeLargeString(bytes: 999_000)
+        let row = SemanticScanResult(
+            id: "scan-ok-large",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 0,
+            windowLastAtomOrdinal: 4,
+            windowStartTime: 0,
+            windowEndTime: 40,
+            scanPass: "passA",
+            transcriptQuality: .good,
+            disposition: .abstain,
+            spansJSON: "[]",
+            status: .refusal,
+            attemptCount: 1,
+            errorContext: justUnder,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: cohort,
+            transcriptVersion: "tx-v1"
+        )
+
+        try await store.insertSemanticScanResult(row)
+        let fetched = try await store.fetchSemanticScanResult(id: row.id)
+        #expect(fetched?.errorContext?.count == justUnder.count)
+    }
 }

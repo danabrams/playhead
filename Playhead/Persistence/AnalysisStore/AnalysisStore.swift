@@ -2183,6 +2183,29 @@ actor AnalysisStore {
 
     func insertSemanticScanResult(_ result: SemanticScanResult) throws {
         try validateScanCohortJSON(result.scanCohortJSON)
+
+        // Fix #9: length caps on the two free-form blob columns. A runaway
+        // error blob (e.g. a malformed model response echoed back verbatim)
+        // or a bloated spansJSON payload would otherwise accumulate on disk
+        // without bound. Reject at insert time so operators get a loud
+        // signal instead of a silently growing SQLite file.
+        //
+        // NOTE: `BackfillJobRunner.isPermanent` already classifies
+        // `insertFailed("payloadTooLarge: ...")` as a permanent error via
+        // a string-prefix match, so oversized payloads are short-circuited
+        // out of the retry budget without needing a dedicated enum case.
+        let maxBlobLength = 1_000_000 // 1MB
+        if let ctx = result.errorContext, ctx.utf8.count > maxBlobLength {
+            throw AnalysisStoreError.insertFailed(
+                "payloadTooLarge: errorContext \(ctx.utf8.count) bytes (max \(maxBlobLength))"
+            )
+        }
+        if result.spansJSON.utf8.count > maxBlobLength {
+            throw AnalysisStoreError.insertFailed(
+                "payloadTooLarge: spansJSON \(result.spansJSON.utf8.count) bytes (max \(maxBlobLength))"
+            )
+        }
+
         let reuseKeyHash = Self.semanticScanReuseKeyHash(
             analysisAssetId: result.analysisAssetId,
             windowFirstAtomOrdinal: result.windowFirstAtomOrdinal,
