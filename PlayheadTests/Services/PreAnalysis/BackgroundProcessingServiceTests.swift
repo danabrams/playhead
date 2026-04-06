@@ -137,41 +137,26 @@ struct BackfillTaskHandlerTests {
 @Suite("Continued Processing Handler")
 struct ContinuedProcessingHandlerTests {
 
-    @Test("Continued processing completes successfully")
-    func continuedProcessingCompletes() async throws {
+    @Test("Continued processing is a no-op that completes successfully")
+    func continuedProcessingNoOpCompletes() async throws {
+        // handleContinuedProcessingTask is a deliberate no-op today: there is
+        // no user-initiated continuation work wired (e.g. FM asset download
+        // future from AssetProvider). The handler marks the task complete
+        // with success=true because "nothing to do" is not a failure. It must
+        // NOT drain the backfill queue — that is handleBackfillTask's job.
         let (bps, coordinator, _, _) = makeBPS()
         let task = StubBackgroundTask()
 
         await bps.handleContinuedProcessingTask(task)
         try await waitForCompletion(of: task)
 
-        #expect(coordinator.runPendingBackfillCallCount >= 1)
         #expect(task.completedSuccess == true)
-    }
-
-    @Test("Continued processing expiration cancels work")
-    func continuedProcessingExpiration() async throws {
-        let coordinator = StubAnalysisCoordinator()
-        coordinator.runPendingBackfillDuration = .seconds(10)
-        let (bps, _, _, _) = makeBPS(coordinator: coordinator)
-        let task = StubBackgroundTask()
-
-        let workTask = Task {
-            await bps.handleContinuedProcessingTask(task)
-        }
-
-        // Wait for the expiration handler to be set (the actor method must execute first)
-        let deadline = ContinuousClock.now + .seconds(5)
-        while task.expirationHandler == nil && ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
-
-        task.simulateExpiration()
-        try await waitForCompletion(of: task)
-        workTask.cancel()
-
-        #expect(coordinator.stopCallCount >= 1)
-        #expect(task.completedSuccess == false)
+        // Explicit regression: continuation handler must not piggyback on
+        // the backfill drain. See git history around commit 740f727.
+        #expect(coordinator.runPendingBackfillCallCount == 0,
+                "handleContinuedProcessingTask must not call runPendingBackfill — that is handleBackfillTask's job")
+        #expect(coordinator.startCallCount == 0,
+                "handleContinuedProcessingTask must not call start() either")
     }
 }
 

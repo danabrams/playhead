@@ -134,6 +134,17 @@ actor AnalysisWorkScheduler {
         currentRunningTask?.cancel()
     }
 
+    /// Wake the scheduler loop externally. Used by BackgroundProcessingService
+    /// when a BGProcessingTask window opens so the loop immediately polls for
+    /// eligible jobs instead of waiting out its current sleep interval.
+    ///
+    /// This is the explicit public handle for the private `wakeSchedulerLoop`
+    /// signal and makes the BPS→WorkScheduler dependency visible at the call
+    /// site.
+    func wake() {
+        wakeSchedulerLoop()
+    }
+
     /// Start the scheduler loop. Call after reconciliation is complete.
     func startSchedulerLoop() {
         schedulerTask?.cancel()

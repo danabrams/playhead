@@ -381,16 +381,27 @@ actor BackgroundProcessingService {
             }
 
             // Drive the analysis pipeline to drain pending backfill jobs.
-            // runPendingBackfill polls the analysis_jobs table and yields
-            // between checks, keeping this BGProcessingTask alive while the
-            // AnalysisWorkScheduler loop processes the queue. It returns when
-            // the queue is empty or when the task is cancelled (expiration).
+            //
+            // Two cooperating pieces are in play here:
+            //  1. AnalysisWorkScheduler runs its own long-lived loop (started
+            //     once in PlayheadRuntime) that actually executes jobs. We
+            //     wake it explicitly so it does not wait out its sleep
+            //     interval before polling for eligible work.
+            //  2. runPendingBackfill polls the analysis_jobs table and yields
+            //     between checks, keeping this BGProcessingTask alive while
+            //     the scheduler loop drains the queue. It returns when the
+            //     queue is empty or when the task is cancelled (expiration).
+            //
+            // Waking the scheduler here makes the BPS→WorkScheduler dependency
+            // explicit rather than relying on the loop's idle sleep happening
+            // to wake on its own timer.
             //
             // NOTE: this is the actual work payload — the previous version of
             // this handler called coordinator.start(), which is a fire-and-
             // forget capability-observer setup that returned in microseconds
             // and let iOS reclaim the granted background time without any
             // analysis happening. See git blame for context.
+            await self.analysisWorkScheduler?.wake()
             await self.coordinator.runPendingBackfill()
 
             // If the task was cancelled (expiration fired), bail out without
@@ -420,41 +431,35 @@ actor BackgroundProcessingService {
         }
     }
 
-    /// Handle the continued processing BGProcessingTask. Only for
-    /// user-initiated long-running work.
+    /// Handle the continued processing BGProcessingTask.
+    ///
+    /// This identifier is reserved for user-initiated long-running work such
+    /// as the initial Foundation Models asset download (see AssetProvider).
+    /// It is intentionally NOT a backfill drain path — `handleBackfillTask`
+    /// already covers idle/charging backfill via `runPendingBackfill`.
+    ///
+    /// Today there is no user-facing continuation work path that actually
+    /// enqueues this task from the foreground, and no "model download future"
+    /// is exposed by AssetProvider that we could await here. Rather than
+    /// piggyback on `runPendingBackfill` (which duplicates the backfill path
+    /// and misuses the continuation semantics), this handler is a deliberate
+    /// no-op that marks the task complete. The task registration is kept
+    /// alive so a future wiring of the real continuation work can slot in
+    /// without touching registration.
+    ///
+    /// TODO: When AssetProvider exposes an awaitable model-download future,
+    /// call it here and report success/failure from its result.
+    /// See bead for design: BGContinuedProcessingTask rewiring.
     func handleContinuedProcessingTask(_ task: any BackgroundProcessingTaskProtocol) {
-        logger.info("Continued processing task started")
+        logger.info("Continued processing task started (no-op: no continuation work wired)")
 
         // Reset completion guard for this task invocation.
         bgTaskCompleted = false
 
-        let workTask = Task {
-            // Continued processing is for user-initiated work like model
-            // downloads. We drain the analysis job queue here too — see the
-            // comment in handleBackfillTask for why this calls
-            // runPendingBackfill rather than coordinator.start().
-            await self.coordinator.runPendingBackfill()
-
-            // If the task was cancelled (expiration fired), bail out without
-            // marking success. The expiration handler will mark the task
-            // completed with success=false via handleExpiredProcessingTask.
-            guard !Task.isCancelled else {
-                self.logger.info("Continued processing work task cancelled before completion")
-                return
-            }
-
-            await self.markComplete(task, success: true)
-            self.logger.info("Continued processing task completed")
-        }
-
-        activeBackgroundTask = workTask
-
-        task.expirationHandler = { [weak self] in
-            workTask.cancel()
-            Task { [weak self] in
-                await self?.handleExpiredProcessingTask(task)
-            }
-        }
+        // Honest no-op: there is no continuation work to perform today.
+        // Mark complete so iOS does not treat this as a hang, and return
+        // success=true because "nothing to do" is not a failure.
+        markComplete(task, success: true)
     }
 
     // MARK: - Thermal & Battery Management
