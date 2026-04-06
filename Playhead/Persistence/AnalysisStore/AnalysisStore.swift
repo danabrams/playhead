@@ -473,6 +473,49 @@ actor AnalysisStore {
         try exec("CREATE INDEX IF NOT EXISTS idx_backfill_jobs_status_priority ON backfill_jobs(status, priority DESC, createdAt ASC)")
         try exec("CREATE INDEX IF NOT EXISTS idx_backfill_jobs_asset_phase ON backfill_jobs(analysisAssetId, phase)")
 
+        // semantic_scan_results
+        try exec("""
+            CREATE TABLE IF NOT EXISTS semantic_scan_results (
+                id TEXT PRIMARY KEY,
+                analysisAssetId TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                windowFirstAtomOrdinal INTEGER NOT NULL,
+                windowLastAtomOrdinal INTEGER NOT NULL,
+                windowStartTime REAL NOT NULL,
+                windowEndTime REAL NOT NULL,
+                scanPass TEXT NOT NULL,
+                transcriptQuality TEXT NOT NULL,
+                disposition TEXT NOT NULL,
+                spansJSON TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attemptCount INTEGER NOT NULL DEFAULT 0,
+                errorContext TEXT,
+                inputTokenCount INTEGER,
+                outputTokenCount INTEGER,
+                latencyMs REAL,
+                prewarmHit INTEGER NOT NULL DEFAULT 0,
+                scanCohortJSON TEXT NOT NULL,
+                transcriptVersion TEXT NOT NULL
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_pass ON semantic_scan_results(analysisAssetId, scanPass)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_reuse ON semantic_scan_results(analysisAssetId, windowFirstAtomOrdinal, windowLastAtomOrdinal, scanPass, transcriptVersion)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_reuse_cohort ON semantic_scan_results(analysisAssetId, windowFirstAtomOrdinal, windowLastAtomOrdinal, scanPass, transcriptVersion, scanCohortJSON)")
+
+        // evidence_events
+        try exec("""
+            CREATE TABLE IF NOT EXISTS evidence_events (
+                id TEXT PRIMARY KEY,
+                analysisAssetId TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                eventType TEXT NOT NULL,
+                sourceType TEXT NOT NULL,
+                atomOrdinals TEXT NOT NULL,
+                evidenceJSON TEXT NOT NULL,
+                scanCohortJSON TEXT NOT NULL,
+                createdAt REAL NOT NULL
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_evidence_events_asset_created ON evidence_events(analysisAssetId, createdAt ASC)")
+
         // FTS5 virtual table over transcript_chunks
         try exec("""
             CREATE VIRTUAL TABLE IF NOT EXISTS transcript_chunks_fts USING fts5(
@@ -1579,6 +1622,160 @@ actor AnalysisStore {
         return sqlite3_changes(db) > 0
     }
 
+    // MARK: - CRUD: semantic_scan_results
+
+    func insertSemanticScanResult(_ result: SemanticScanResult) throws {
+        let sql = """
+            INSERT INTO semantic_scan_results
+            (id, analysisAssetId, windowFirstAtomOrdinal, windowLastAtomOrdinal,
+             windowStartTime, windowEndTime, scanPass, transcriptQuality,
+             disposition, spansJSON, status, attemptCount, errorContext,
+             inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
+             scanCohortJSON, transcriptVersion)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, result.id)
+        bind(stmt, 2, result.analysisAssetId)
+        bind(stmt, 3, result.windowFirstAtomOrdinal)
+        bind(stmt, 4, result.windowLastAtomOrdinal)
+        bind(stmt, 5, result.windowStartTime)
+        bind(stmt, 6, result.windowEndTime)
+        bind(stmt, 7, result.scanPass)
+        bind(stmt, 8, result.transcriptQuality.rawValue)
+        bind(stmt, 9, result.disposition.rawValue)
+        bind(stmt, 10, result.spansJSON)
+        bind(stmt, 11, result.status.rawValue)
+        bind(stmt, 12, result.attemptCount)
+        bind(stmt, 13, result.errorContext)
+        bind(stmt, 14, result.inputTokenCount)
+        bind(stmt, 15, result.outputTokenCount)
+        bind(stmt, 16, result.latencyMs)
+        bind(stmt, 17, result.prewarmHit ? 1 : 0)
+        bind(stmt, 18, result.scanCohortJSON)
+        bind(stmt, 19, result.transcriptVersion)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func fetchSemanticScanResult(id: String) throws -> SemanticScanResult? {
+        let sql = "SELECT * FROM semantic_scan_results WHERE id = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, id)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return try readSemanticScanResult(stmt)
+    }
+
+    func fetchSemanticScanResults(
+        analysisAssetId: String,
+        scanPass: String? = nil
+    ) throws -> [SemanticScanResult] {
+        let sql: String
+        if scanPass != nil {
+            sql = """
+                SELECT * FROM semantic_scan_results
+                WHERE analysisAssetId = ? AND scanPass = ?
+                ORDER BY windowFirstAtomOrdinal ASC, rowid ASC
+                """
+        } else {
+            sql = """
+                SELECT * FROM semantic_scan_results
+                WHERE analysisAssetId = ?
+                ORDER BY windowFirstAtomOrdinal ASC, rowid ASC
+                """
+        }
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        if let scanPass {
+            bind(stmt, 2, scanPass)
+        }
+        var results: [SemanticScanResult] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(try readSemanticScanResult(stmt))
+        }
+        return results
+    }
+
+    func fetchReusableSemanticScanResult(
+        analysisAssetId: String,
+        windowFirstAtomOrdinal: Int,
+        windowLastAtomOrdinal: Int,
+        scanPass: String,
+        scanCohortJSON: String,
+        transcriptVersion: String,
+        decisionCohortJSON: String? = nil
+    ) throws -> SemanticScanResult? {
+        let sql = """
+            SELECT * FROM semantic_scan_results
+            WHERE analysisAssetId = ?
+              AND windowFirstAtomOrdinal = ?
+              AND windowLastAtomOrdinal = ?
+              AND scanPass = ?
+              AND transcriptVersion = ?
+              AND scanCohortJSON = ?
+            ORDER BY attemptCount DESC, rowid DESC
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        bind(stmt, 2, windowFirstAtomOrdinal)
+        bind(stmt, 3, windowLastAtomOrdinal)
+        bind(stmt, 4, scanPass)
+        bind(stmt, 5, transcriptVersion)
+        bind(stmt, 6, scanCohortJSON)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let result = try readSemanticScanResult(stmt)
+        guard result.isReusable(
+            scanCohortJSON: scanCohortJSON,
+            transcriptVersion: transcriptVersion,
+            decisionCohortJSON: decisionCohortJSON
+        ) else {
+            return nil
+        }
+        return result
+    }
+
+    // MARK: - CRUD: evidence_events
+
+    func insertEvidenceEvent(_ event: EvidenceEvent) throws {
+        let sql = """
+            INSERT INTO evidence_events
+            (id, analysisAssetId, eventType, sourceType, atomOrdinals,
+             evidenceJSON, scanCohortJSON, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, event.id)
+        bind(stmt, 2, event.analysisAssetId)
+        bind(stmt, 3, event.eventType)
+        bind(stmt, 4, event.sourceType.rawValue)
+        bind(stmt, 5, event.atomOrdinals)
+        bind(stmt, 6, event.evidenceJSON)
+        bind(stmt, 7, event.scanCohortJSON)
+        bind(stmt, 8, event.createdAt)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func fetchEvidenceEvents(analysisAssetId: String) throws -> [EvidenceEvent] {
+        let sql = """
+            SELECT * FROM evidence_events
+            WHERE analysisAssetId = ?
+            ORDER BY createdAt ASC, rowid ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        var events: [EvidenceEvent] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            events.append(try readEvidenceEvent(stmt))
+        }
+        return events
+    }
+
     private func readJob(_ stmt: OpaquePointer?) -> AnalysisJob {
         AnalysisJob(
             jobId: text(stmt, 0),
@@ -1602,6 +1799,63 @@ actor AnalysisStore {
             lastErrorCode: optionalText(stmt, 18),
             createdAt: sqlite3_column_double(stmt, 19),
             updatedAt: sqlite3_column_double(stmt, 20)
+        )
+    }
+
+    private func readSemanticScanResult(_ stmt: OpaquePointer?) throws -> SemanticScanResult {
+        let transcriptQualityRaw = text(stmt, 7)
+        guard let transcriptQuality = TranscriptQuality(rawValue: transcriptQualityRaw) else {
+            throw AnalysisStoreError.queryFailed("Unknown transcript quality '\(transcriptQualityRaw)'")
+        }
+
+        let dispositionRaw = text(stmt, 8)
+        guard let disposition = CoarseDisposition(rawValue: dispositionRaw) else {
+            throw AnalysisStoreError.queryFailed("Unknown coarse disposition '\(dispositionRaw)'")
+        }
+
+        let statusRaw = text(stmt, 10)
+        guard let status = SemanticScanStatus(rawValue: statusRaw) else {
+            throw AnalysisStoreError.queryFailed("Unknown semantic scan status '\(statusRaw)'")
+        }
+
+        return SemanticScanResult(
+            id: text(stmt, 0),
+            analysisAssetId: text(stmt, 1),
+            windowFirstAtomOrdinal: Int(sqlite3_column_int(stmt, 2)),
+            windowLastAtomOrdinal: Int(sqlite3_column_int(stmt, 3)),
+            windowStartTime: sqlite3_column_double(stmt, 4),
+            windowEndTime: sqlite3_column_double(stmt, 5),
+            scanPass: text(stmt, 6),
+            transcriptQuality: transcriptQuality,
+            disposition: disposition,
+            spansJSON: text(stmt, 9),
+            status: status,
+            attemptCount: Int(sqlite3_column_int(stmt, 11)),
+            errorContext: optionalText(stmt, 12),
+            inputTokenCount: optionalInt(stmt, 13),
+            outputTokenCount: optionalInt(stmt, 14),
+            latencyMs: optionalDouble(stmt, 15),
+            prewarmHit: sqlite3_column_int(stmt, 16) != 0,
+            scanCohortJSON: text(stmt, 17),
+            transcriptVersion: text(stmt, 18)
+        )
+    }
+
+    private func readEvidenceEvent(_ stmt: OpaquePointer?) throws -> EvidenceEvent {
+        let sourceTypeRaw = text(stmt, 3)
+        guard let sourceType = EvidenceSourceType(rawValue: sourceTypeRaw) else {
+            throw AnalysisStoreError.queryFailed("Unknown evidence source type '\(sourceTypeRaw)'")
+        }
+
+        return EvidenceEvent(
+            id: text(stmt, 0),
+            analysisAssetId: text(stmt, 1),
+            eventType: text(stmt, 2),
+            sourceType: sourceType,
+            atomOrdinals: text(stmt, 4),
+            evidenceJSON: text(stmt, 5),
+            scanCohortJSON: text(stmt, 6),
+            createdAt: sqlite3_column_double(stmt, 7)
         )
     }
 

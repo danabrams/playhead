@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import Playhead
 
-@Suite("Foundation Model Classifier — Pass A")
+@Suite("Foundation Model Classifier — Pass A/B")
 struct FoundationModelClassifierTests {
 
     @Test("coarse screening schema round-trips with certainty bands")
@@ -23,6 +23,41 @@ struct FoundationModelClassifierTests {
         #expect(decoded == schema)
         #expect(json.contains("\"certainty\":\"moderate\""))
         #expect(!json.contains("0."))
+    }
+
+    @Test("refinement schema round-trips with structured fields")
+    func refinementSchemaRoundTrip() throws {
+        let schema = RefinementWindowSchema(
+            spans: [
+                SpanRefinementSchema(
+                    commercialIntent: .paid,
+                    ownership: .thirdParty,
+                    firstLineRef: 11,
+                    lastLineRef: 14,
+                    certainty: .strong,
+                    boundaryPrecision: .precise,
+                    evidenceAnchors: [
+                        EvidenceAnchorSchema(
+                            evidenceRef: 7,
+                            lineRef: 12,
+                            kind: .url,
+                            certainty: .strong
+                        )
+                    ],
+                    alternativeExplanation: .none,
+                    reasonTags: [.callToAction, .urlMention]
+                )
+            ]
+        )
+
+        let data = try JSONEncoder().encode(schema)
+        let json = try #require(String(data: data, encoding: .utf8))
+        let decoded = try JSONDecoder().decode(RefinementWindowSchema.self, from: data)
+
+        #expect(decoded == schema)
+        #expect(json.contains("\"commercialIntent\":\"paid\""))
+        #expect(json.contains("\"boundaryPrecision\":\"precise\""))
+        #expect(!json.localizedCaseInsensitiveContains("reasoning"))
     }
 
     @Test("prompt is minimal and uses quoted line refs")
@@ -48,7 +83,8 @@ struct FoundationModelClassifierTests {
 
         let recorder = RuntimeRecorder(
             contextSize: 30,
-            schemaTokens: 4,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
                 prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 5
             }
@@ -78,7 +114,8 @@ struct FoundationModelClassifierTests {
 
         let recorder = RuntimeRecorder(
             contextSize: 30,
-            schemaTokens: 4,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
                 prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 5
             },
@@ -127,10 +164,19 @@ struct FoundationModelClassifierTests {
         let recorder = RuntimeRecorder(
             availabilityStatus: .unsupportedLocale,
             contextSize: 30,
-            schemaTokens: 4,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
             tokenCountRule: { _ in 1 }
         )
-        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(
+                safetyMarginTokens: 4,
+                coarseMaximumResponseTokens: 6,
+                refinementMaximumResponseTokens: 12,
+                maximumRefinementSpansPerWindow: 3
+            )
+        )
 
         let output = try await classifier.coarsePassA(segments: [
             makeSegment(index: 0, text: "Bonjour tout le monde.")
@@ -142,6 +188,316 @@ struct FoundationModelClassifierTests {
         #expect(snapshot.sessionCount == 0)
         #expect(snapshot.respondCalls.isEmpty)
         #expect(snapshot.prewarmCalls.isEmpty)
+    }
+
+    @Test("adaptive zoom narrows positive windows and injects deterministic evidence refs")
+    func adaptiveZoomNarrowsAroundSupportLines() async throws {
+        let segments = [
+            makeSegment(index: 0, text: "Hosts banter before the ad."),
+            makeSegment(index: 1, text: "Visit example.com for the offer."),
+            makeSegment(index: 2, text: "Use promo code SAVE."),
+            makeSegment(index: 3, text: "Short bridge back to the show."),
+            makeSegment(index: 4, text: "Check out our sister show off camera."),
+            makeSegment(index: 5, text: "Listen wherever you get your podcasts.")
+        ]
+        let evidenceCatalog = EvidenceCatalog(
+            analysisAssetId: "asset-1",
+            transcriptVersion: "transcript-v1",
+            entries: [
+                EvidenceEntry(
+                    evidenceRef: 11,
+                    category: .url,
+                    matchedText: "example.com",
+                    normalizedText: "example.com",
+                    atomOrdinal: 1,
+                    startTime: 5,
+                    endTime: 10
+                ),
+                EvidenceEntry(
+                    evidenceRef: 12,
+                    category: .ctaPhrase,
+                    matchedText: "Listen wherever you get your podcasts",
+                    normalizedText: "listen wherever you get your podcasts",
+                    atomOrdinal: 5,
+                    startTime: 25,
+                    endTime: 30
+                )
+            ]
+        )
+
+        let recorder = RuntimeRecorder(
+            contextSize: 64,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 4
+            }
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(
+                safetyMarginTokens: 4,
+                coarseMaximumResponseTokens: 6,
+                refinementMaximumResponseTokens: 10,
+                zoomAmbiguityBudget: 0,
+                minimumZoomSpanLines: 2,
+                maximumRefinementSpansPerWindow: 2
+            )
+        )
+
+        let coarse = FMCoarseScanOutput(
+            status: .success,
+            windows: [
+                FMCoarseWindowOutput(
+                    windowIndex: 0,
+                    lineRefs: [0, 1, 2, 3, 4, 5],
+                    startTime: 0,
+                    endTime: 30,
+                    screening: CoarseScreeningSchema(
+                        transcriptQuality: .good,
+                        disposition: .containsAd,
+                        support: CoarseSupportSchema(
+                            supportLineRefs: [1, 5],
+                            certainty: .moderate
+                        )
+                    ),
+                    latencyMillis: 10
+                ),
+                FMCoarseWindowOutput(
+                    windowIndex: 1,
+                    lineRefs: [6, 7],
+                    startTime: 30,
+                    endTime: 40,
+                    screening: CoarseScreeningSchema(
+                        transcriptQuality: .good,
+                        disposition: .noAds,
+                        support: nil
+                    ),
+                    latencyMillis: 10
+                )
+            ],
+            latencyMillis: 25
+        )
+
+        let zoomPlans = try await classifier.planAdaptiveZoom(
+            coarse: coarse,
+            segments: segments,
+            evidenceCatalog: evidenceCatalog
+        )
+
+        #expect(zoomPlans.count == 1)
+        #expect(zoomPlans[0].sourceWindowIndex == 0)
+        #expect(zoomPlans[0].lineRefs == [1, 2, 4, 5])
+        #expect(zoomPlans[0].stopReason == .ambiguityBudget)
+        #expect(zoomPlans[0].prompt.contains("[E11] \"example.com\" (url, line 1)"))
+        #expect(zoomPlans[0].prompt.contains("[E12] \"Listen wherever you get your podcasts\" (ctaPhrase, line 5)"))
+    }
+
+    @Test("refinement runs only on zoomed windows and resolves anchors to deterministic catalog entries")
+    func refinementResolvesEvidenceAnchors() async throws {
+        let segments = [
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Visit example.com for the offer."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Use promo code SAVE."),
+            makeSegment(index: 4, startTime: 20, endTime: 25, text: "Check out our sister show off camera."),
+            makeSegment(index: 5, startTime: 25, endTime: 30, text: "Listen wherever you get your podcasts.")
+        ]
+        let evidenceCatalog = EvidenceCatalog(
+            analysisAssetId: "asset-1",
+            transcriptVersion: "transcript-v1",
+            entries: [
+                EvidenceEntry(
+                    evidenceRef: 11,
+                    category: .url,
+                    matchedText: "example.com",
+                    normalizedText: "example.com",
+                    atomOrdinal: 1,
+                    startTime: 5,
+                    endTime: 10
+                ),
+                EvidenceEntry(
+                    evidenceRef: 12,
+                    category: .ctaPhrase,
+                    matchedText: "Listen wherever you get your podcasts",
+                    normalizedText: "listen wherever you get your podcasts",
+                    atomOrdinal: 5,
+                    startTime: 25,
+                    endTime: 30
+                )
+            ]
+        )
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 7,
+            lineRefs: [1, 2, 4, 5],
+            focusLineRefs: [1, 5],
+            focusClusters: [[1], [5]],
+            prompt: "Refine ad spans.",
+            promptTokenCount: 12,
+            startTime: 5,
+            endTime: 30,
+            stopReason: .tokenBudget,
+            promptEvidence: [
+                PromptEvidenceEntry(entry: evidenceCatalog.entries[0], lineRef: 1),
+                PromptEvidenceEntry(entry: evidenceCatalog.entries[1], lineRef: 5)
+            ]
+        )
+
+        let recorder = RuntimeRecorder(
+            contextSize: 64,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementResponses: [
+                RefinementWindowSchema(
+                    spans: [
+                        SpanRefinementSchema(
+                            commercialIntent: .paid,
+                            ownership: .thirdParty,
+                            firstLineRef: 1,
+                            lastLineRef: 2,
+                            certainty: .strong,
+                            boundaryPrecision: .precise,
+                            evidenceAnchors: [
+                                EvidenceAnchorSchema(
+                                    evidenceRef: 11,
+                                    lineRef: 999,
+                                    kind: .promoCode,
+                                    certainty: .moderate
+                                )
+                            ],
+                            alternativeExplanation: .none,
+                            reasonTags: [.urlMention, .callToAction]
+                        ),
+                        SpanRefinementSchema(
+                            commercialIntent: .owned,
+                            ownership: .show,
+                            firstLineRef: 4,
+                            lastLineRef: 5,
+                            certainty: .moderate,
+                            boundaryPrecision: .usable,
+                            evidenceAnchors: [
+                                EvidenceAnchorSchema(
+                                    evidenceRef: 12,
+                                    lineRef: 4,
+                                    kind: .brandSpan,
+                                    certainty: .weak
+                                )
+                            ],
+                            alternativeExplanation: .editorialContext,
+                            reasonTags: [.crossPromoLanguage]
+                        ),
+                        SpanRefinementSchema(
+                            commercialIntent: .paid,
+                            ownership: .thirdParty,
+                            firstLineRef: 1,
+                            lastLineRef: 5,
+                            certainty: .weak,
+                            boundaryPrecision: .rough,
+                            evidenceAnchors: [],
+                            alternativeExplanation: .unknown,
+                            reasonTags: [.hostReadPitch]
+                        )
+                    ]
+                )
+            ]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: evidenceCatalog
+        )
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 1)
+        #expect(output.windows[0].spans.count == 2)
+        #expect(output.windows[0].spans[0].firstAtomOrdinal == 1)
+        #expect(output.windows[0].spans[0].lastAtomOrdinal == 2)
+        #expect(output.windows[0].spans[0].resolvedEvidenceAnchors[0].entry.evidenceRef == 11)
+        #expect(output.windows[0].spans[0].resolvedEvidenceAnchors[0].kind == .url)
+        #expect(output.windows[0].spans[0].resolvedEvidenceAnchors[0].lineRef == 1)
+        #expect(output.windows[0].spans[1].resolvedEvidenceAnchors[0].entry.evidenceRef == 12)
+        #expect(output.windows[0].spans[1].resolvedEvidenceAnchors[0].kind == .ctaPhrase)
+        #expect(snapshot.prewarmCalls == [
+            RuntimeRecorder.PrewarmCall(sessionID: 1, promptPrefix: "Refine ad spans.")
+        ])
+        #expect(snapshot.respondRefinementCalls.count == 1)
+        #expect(snapshot.respondCalls.isEmpty)
+    }
+
+    @Test("adaptive zoom keeps the Kelly Ripa repeat region when nearby coarse support spans the repeat cluster")
+    func kellyRipaRepeatRegression() async throws {
+        let segments = buildFixtureSegments()
+        let evidenceCatalog = buildFixtureEvidenceCatalog()
+
+        let siriusSegment = try #require(segments.first { $0.text.localizedCaseInsensitiveContains("Siriusxm.com slash Conan") })
+        let kellyRepeatSegment = try #require(segments.first { $0.text.localizedCaseInsensitiveContains("Kelly Ripa") })
+        let repeatFollowupSegment = try #require(segments.first { $0.text.localizedCaseInsensitiveContains("Let's talk off camera") && $0.startTime >= 970 })
+
+        let candidateLineRefs = segments
+            .filter { $0.startTime >= 952 && $0.endTime <= 989 }
+            .map(\.segmentIndex)
+
+        let coarse = FMCoarseScanOutput(
+            status: .success,
+            windows: [
+                FMCoarseWindowOutput(
+                    windowIndex: 0,
+                    lineRefs: candidateLineRefs,
+                    startTime: 952,
+                    endTime: 989,
+                    screening: CoarseScreeningSchema(
+                        transcriptQuality: .good,
+                        disposition: .uncertain,
+                        support: CoarseSupportSchema(
+                            supportLineRefs: [
+                                siriusSegment.segmentIndex,
+                                kellyRepeatSegment.segmentIndex,
+                                repeatFollowupSegment.segmentIndex
+                            ],
+                            certainty: .weak
+                        )
+                    ),
+                    latencyMillis: 1
+                )
+            ],
+            latencyMillis: 1
+        )
+        let recorder = RuntimeRecorder(
+            contextSize: 96,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 10,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 3
+            }
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(
+                safetyMarginTokens: 4,
+                coarseMaximumResponseTokens: 6,
+                refinementMaximumResponseTokens: 12,
+                zoomAmbiguityBudget: 1,
+                minimumZoomSpanLines: 2,
+                maximumRefinementSpansPerWindow: 2
+            )
+        )
+
+        let zoomPlans = try await classifier.planAdaptiveZoom(
+            coarse: coarse,
+            segments: segments,
+            evidenceCatalog: evidenceCatalog
+        )
+
+        let retainedTexts = zoomPlans
+            .flatMap(\.lineRefs)
+            .compactMap { lineRef in segments.first { $0.segmentIndex == lineRef }?.text }
+
+        #expect(!zoomPlans.isEmpty)
+        #expect(retainedTexts.contains { $0.localizedCaseInsensitiveContains("Kelly Ripa") })
+        #expect(retainedTexts.contains { $0.localizedCaseInsensitiveContains("Let's talk off camera") })
     }
 }
 
@@ -181,6 +537,21 @@ private func buildFixtureSegments() -> [AdTranscriptSegment] {
     return TranscriptSegmenter.segment(atoms: atoms)
 }
 
+private func buildFixtureEvidenceCatalog() -> EvidenceCatalog {
+    let chunks = ConanFanhausenRevisitedFixture.parseChunks()
+    let (atoms, version) = TranscriptAtomizer.atomize(
+        chunks: chunks,
+        analysisAssetId: ConanFanhausenRevisitedFixture.assetId,
+        normalizationHash: "fm-classifier-tests",
+        sourceHash: "fixture"
+    )
+    return EvidenceCatalogBuilder.build(
+        atoms: atoms,
+        analysisAssetId: ConanFanhausenRevisitedFixture.assetId,
+        transcriptVersion: version.transcriptVersion
+    )
+}
+
 private func isContiguous(_ values: [Int]) -> Bool {
     zip(values, values.dropFirst()).allSatisfy { lhs, rhs in
         rhs == lhs + 1
@@ -198,33 +569,46 @@ private actor RuntimeRecorder {
         let prompt: String
     }
 
+    struct RespondRefinementCall: Sendable, Equatable {
+        let sessionID: Int
+        let prompt: String
+    }
+
     struct Snapshot: Sendable, Equatable {
         let sessionCount: Int
         let prewarmCalls: [PrewarmCall]
         let respondCalls: [RespondCall]
+        let respondRefinementCalls: [RespondRefinementCall]
     }
 
     private let availabilityStatus: SemanticScanStatus?
     private let contextSize: Int
-    private let schemaTokens: Int
+    private let coarseSchemaTokens: Int
+    private let refinementSchemaTokens: Int
     private let tokenCountRule: @Sendable (String) -> Int
     private var queuedResponses: [CoarseScreeningSchema]
+    private var queuedRefinementResponses: [RefinementWindowSchema]
     private var sessionCount = 0
     private var prewarmCalls: [PrewarmCall] = []
     private var respondCalls: [RespondCall] = []
+    private var respondRefinementCalls: [RespondRefinementCall] = []
 
     init(
         availabilityStatus: SemanticScanStatus? = nil,
         contextSize: Int,
-        schemaTokens: Int,
+        coarseSchemaTokens: Int,
+        refinementSchemaTokens: Int,
         tokenCountRule: @escaping @Sendable (String) -> Int,
-        responses: [CoarseScreeningSchema] = []
+        responses: [CoarseScreeningSchema] = [],
+        refinementResponses: [RefinementWindowSchema] = []
     ) {
         self.availabilityStatus = availabilityStatus
         self.contextSize = contextSize
-        self.schemaTokens = schemaTokens
+        self.coarseSchemaTokens = coarseSchemaTokens
+        self.refinementSchemaTokens = refinementSchemaTokens
         self.tokenCountRule = tokenCountRule
         self.queuedResponses = responses
+        self.queuedRefinementResponses = refinementResponses
     }
 
     nonisolated var runtime: FoundationModelClassifier.Runtime {
@@ -232,15 +616,19 @@ private actor RuntimeRecorder {
             availabilityStatus: { _ in await self.currentAvailabilityStatus() },
             contextSize: { await self.currentContextSize() },
             tokenCount: { prompt in await self.currentTokenCount(for: prompt) },
-            schemaTokenCount: { await self.currentSchemaTokenCount() },
+            coarseSchemaTokenCount: { await self.currentCoarseSchemaTokenCount() },
+            refinementSchemaTokenCount: { await self.currentRefinementSchemaTokenCount() },
             makeSession: {
                 let sessionID = await self.nextSessionID()
                 return FoundationModelClassifier.Runtime.Session(
                     prewarm: { promptPrefix in
                         await self.recordPrewarm(sessionID: sessionID, promptPrefix: promptPrefix)
                     },
-                    respond: { prompt in
+                    respondCoarse: { prompt in
                         try await self.recordResponse(sessionID: sessionID, prompt: prompt)
+                    },
+                    respondRefinement: { prompt in
+                        try await self.recordRefinementResponse(sessionID: sessionID, prompt: prompt)
                     }
                 )
             }
@@ -251,7 +639,8 @@ private actor RuntimeRecorder {
         Snapshot(
             sessionCount: sessionCount,
             prewarmCalls: prewarmCalls,
-            respondCalls: respondCalls
+            respondCalls: respondCalls,
+            respondRefinementCalls: respondRefinementCalls
         )
     }
 
@@ -267,8 +656,12 @@ private actor RuntimeRecorder {
         tokenCountRule(prompt)
     }
 
-    private func currentSchemaTokenCount() -> Int {
-        schemaTokens
+    private func currentCoarseSchemaTokenCount() -> Int {
+        coarseSchemaTokens
+    }
+
+    private func currentRefinementSchemaTokenCount() -> Int {
+        refinementSchemaTokens
     }
 
     private func nextSessionID() -> Int {
@@ -295,5 +688,13 @@ private actor RuntimeRecorder {
             )
         }
         return queuedResponses.removeFirst()
+    }
+
+    private func recordRefinementResponse(sessionID: Int, prompt: String) throws -> RefinementWindowSchema {
+        respondRefinementCalls.append(RespondRefinementCall(sessionID: sessionID, prompt: prompt))
+        if queuedRefinementResponses.isEmpty {
+            return RefinementWindowSchema(spans: [])
+        }
+        return queuedRefinementResponses.removeFirst()
     }
 }
