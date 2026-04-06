@@ -238,6 +238,28 @@ actor BackfillJobRunner {
                     logger.error("Failed to mark cancelled job deferred: \(error.localizedDescription, privacy: .public)")
                 }
                 throw CancellationError()
+            } catch let storeError as AnalysisStoreError {
+                // C3-1: the C3-2 guards on `markBackfillJobComplete` /
+                // `markBackfillJobFailed` / `markBackfillJobRunning` throw
+                // `invalidStateTransition` when the runner tries to move a
+                // row that is already in a terminal state (e.g. a prior run
+                // left it `.failed` and the M-5 idempotency path re-enqueued
+                // it). Do not cascade into `markBackfillJobFailed` — that
+                // write is wasted at best and, without C3-2's idempotency
+                // shim, would double-bump `retryCount`. Log and continue.
+                if case .invalidStateTransition = storeError {
+                    logger.warning("FM job already in terminal state, skipping: \(job.jobId, privacy: .public)")
+                    await admissionController.finish(jobId: job.jobId)
+                    continue
+                }
+                // Any other store error is a genuine failure of the run;
+                // fall through to the generic failure path below.
+                try await store.markBackfillJobFailed(
+                    jobId: job.jobId,
+                    reason: String(describing: storeError),
+                    retryCount: job.retryCount + 1
+                )
+                logger.error("FM backfill job \(job.jobId) failed: \(storeError.localizedDescription)")
             } catch {
                 // C-2: markBackfillJobFailed writes deferReason so operators
                 // can diagnose the failure without scraping logs. The prior

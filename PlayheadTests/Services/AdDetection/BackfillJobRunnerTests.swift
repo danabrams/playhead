@@ -441,6 +441,58 @@ struct BackfillJobRunnerTests {
         #expect(row.retryCount == AdmissionController.maxRetries)
     }
 
+    @Test("C3-1: invalidStateTransition on a pre-failed row is logged and skipped, not re-failed")
+    func preFailedRowTriggersInvalidStateTransition_runnerSkips() async throws {
+        // Setup: pre-insert a `.failed` row with the deterministic jobId the
+        // runner will synthesize, and retryCount=0 so the M-5 idempotency
+        // path re-enqueues it (retryCount < maxRetries). Once the drain
+        // calls `markBackfillJobRunning`, the C-2 guard rejects
+        // `.failed -> .running` and throws `invalidStateTransition`.
+        //
+        // The C3-1 catch arm recognises the typed store error, logs, and
+        // continues the drain. It must NOT route the error through the
+        // generic `catch` branch that calls `markBackfillJobFailed` — the
+        // row is already terminal and the secondary write is wasted work
+        // (and, pre-fix-1, would double-bump retryCount). This test pins
+        // the no-op: the row must stay at exactly the state we seeded.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        let failedJob = BackfillJob(
+            jobId: "fm-asset-runner-fullEpisodeScan-0",
+            analysisAssetId: "asset-runner",
+            podcastId: "podcast-runner",
+            phase: .fullEpisodeScan,
+            coveragePolicy: .fullCoverage,
+            priority: 5,
+            progressCursor: nil,
+            retryCount: 0,
+            deferReason: "seeded failure",
+            status: .failed,
+            scanCohortJSON: makeTestScanCohortJSON(),
+            createdAt: Date().timeIntervalSince1970
+        )
+        try await store.insertBackfillJob(failedJob)
+
+        let fmRuntime = TestFMRuntime()
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        // Must not throw: the C3-1 path handles the invalidStateTransition.
+        let result = try await runner.runPendingBackfill(for: makeInputs())
+
+        // FM must not have been called — the transition failed before
+        // reaching the classifier.
+        #expect(await fmRuntime.coarseCallCount == 0, "FM must not run for a terminal row")
+        #expect(result.scanResultIds.isEmpty)
+        #expect(result.evidenceEventIds.isEmpty)
+
+        let row = try #require(await store.fetchBackfillJob(byId: failedJob.jobId))
+        #expect(row.status == .failed, "row must remain .failed")
+        #expect(row.retryCount == 0, "retryCount must not be bumped by the C3-1 skip path")
+        #expect(row.deferReason == "seeded failure",
+                "the seeded failure reason must be preserved, not overwritten by the invalidStateTransition cascade")
+    }
+
     @Test("H-1: thermal defer marks ALL planned jobs, not just the first")
     func thermalDeferMarksAllPlannedJobs() async throws {
         // Use a planner context that emits the 3-phase targeted plan
