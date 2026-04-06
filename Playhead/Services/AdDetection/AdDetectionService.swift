@@ -107,6 +107,11 @@ actor AdDetectionService {
     private let classifier: ClassifierService
     private let metadataExtractor: MetadataExtractor
     private let config: AdDetectionConfig
+    /// Optional factory that returns a `BackfillJobRunner` for the FM shadow
+    /// phase. When `nil`, FM is skipped entirely (equivalent to .disabled).
+    /// Tests inject a deterministic runner; production wiring lives in
+    /// `PlayheadRuntime`.
+    private let backfillJobRunnerFactory: (@Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner)?
 
     // MARK: - Cached State
 
@@ -124,7 +129,8 @@ actor AdDetectionService {
         classifier: ClassifierService = RuleBasedClassifier(),
         metadataExtractor: MetadataExtractor,
         config: AdDetectionConfig = .default,
-        podcastProfile: PodcastProfile? = nil
+        podcastProfile: PodcastProfile? = nil,
+        backfillJobRunnerFactory: (@Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner)? = nil
     ) {
         self.store = store
         self.classifier = classifier
@@ -132,6 +138,7 @@ actor AdDetectionService {
         self.config = config
         self.scanner = LexicalScanner(podcastProfile: podcastProfile)
         self.showPriors = ShowPriors.from(profile: podcastProfile)
+        self.backfillJobRunnerFactory = backfillJobRunnerFactory
     }
 
     // MARK: - Profile Update
@@ -328,6 +335,73 @@ actor AdDetectionService {
         }
 
         logger.info("Backfill complete: \(confirmedWindows.count) confirmed, \(existingCandidates.count - confirmedWindowIds.count) suppressed")
+
+        // 9. Phase 3 shadow phase. Runs the FM classifier purely for telemetry;
+        // its output never feeds back into AdWindow rows in this phase. The
+        // shadow invariant test in PlayheadTests pins this property.
+        if config.fmBackfillMode != .disabled {
+            await runShadowFMPhase(
+                chunks: chunks,
+                analysisAssetId: analysisAssetId,
+                podcastId: podcastId
+            )
+        }
+    }
+
+    // MARK: - Shadow FM Phase
+
+    /// Invokes `BackfillJobRunner` to execute the Foundation Model backfill in
+    /// shadow mode. Failures are logged but never propagated, because shadow
+    /// mode must never affect cue computation or user-visible behavior. Reads
+    /// `config.fmBackfillMode` to decide whether to actually execute.
+    private func runShadowFMPhase(
+        chunks: [TranscriptChunk],
+        analysisAssetId: String,
+        podcastId: String
+    ) async {
+        guard let factory = backfillJobRunnerFactory else {
+            logger.debug("Shadow FM phase skipped: no runner factory injected")
+            return
+        }
+
+        let runner = factory(store, config.fmBackfillMode)
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: chunks,
+            analysisAssetId: analysisAssetId,
+            normalizationHash: "norm-v1",
+            sourceHash: "asr-v1"
+        )
+        let segments = TranscriptSegmenter.segment(atoms: atoms)
+        let evidenceCatalog = EvidenceCatalogBuilder.build(
+            atoms: atoms,
+            analysisAssetId: analysisAssetId,
+            transcriptVersion: version.transcriptVersion
+        )
+        let plannerContext = CoveragePlannerContext(
+            observedEpisodeCount: 0,
+            stablePrecision: false,
+            isFirstEpisodeAfterCohortInvalidation: false,
+            recallDegrading: false,
+            sponsorDriftDetected: false,
+            auditMissDetected: false,
+            episodesSinceLastFullRescan: 0,
+            periodicFullRescanIntervalEpisodes: 10
+        )
+        let inputs = BackfillJobRunner.AssetInputs(
+            analysisAssetId: analysisAssetId,
+            podcastId: podcastId,
+            segments: segments,
+            evidenceCatalog: evidenceCatalog,
+            transcriptVersion: version.transcriptVersion,
+            plannerContext: plannerContext
+        )
+
+        do {
+            let result = try await runner.runPendingBackfill(for: inputs)
+            logger.info("Shadow FM phase: admitted=\(result.admittedJobIds.count) scans=\(result.scanResultIds.count) deferred=\(result.deferredJobIds.count)")
+        } catch {
+            logger.warning("Shadow FM phase failed (suppressed by invariant): \(error.localizedDescription)")
+        }
     }
 
     // MARK: - User Behavior Feedback
