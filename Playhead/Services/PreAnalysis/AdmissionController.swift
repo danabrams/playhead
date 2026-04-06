@@ -60,10 +60,13 @@ struct AdmissionDecision: Sendable, Equatable {
 }
 
 actor AdmissionController {
-    /// The number of failed attempts allowed before a job is considered
+    /// The number of FAILED attempts allowed before a job is considered
     /// exhausted. After `maxRetries` failures the persisted `retryCount`
     /// equals `maxRetries`, the controller stops requeueing, and the runner
-    /// skips the job on future invocations. Keep this aligned with the runner.
+    /// skips the job on future invocations (see
+    /// `BackfillJobRunner.runPendingBackfill`'s `retryCount >= maxRetries`
+    /// gate). Keep this aligned with the runner; the C-R3-3 fix standardized
+    /// both sides on `maxRetries == 3` total attempts.
     static let maxRetries: Int = 3
 
     private var queuedJobs: [BackfillJob] = []
@@ -124,8 +127,14 @@ actor AdmissionController {
         }
         runningJob = nil
 
+        // C-R3-3: budget boundary. `maxRetries` is the number of FAILED
+        // attempts allowed before giving up; on the (maxRetries)-th failure
+        // the retry counter reaches `maxRetries` and the job is exhausted.
+        // Using `<` (rather than `<=`) matches the runner's
+        // `retryCount >= maxRetries` skip gate — together they give
+        // `maxRetries` total attempts, off-by-one free.
         let nextRetryCount = running.retryCount + 1
-        guard nextRetryCount <= Self.maxRetries else {
+        guard nextRetryCount < Self.maxRetries else {
             return nil
         }
 
