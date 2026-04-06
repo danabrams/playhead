@@ -221,8 +221,12 @@ struct RealEpisodeBenchmarkTests {
             print("  [\(fires ? "FIRES" : "clean")] \(nonAd.description)")
         }
 
-        // Soft assertion: just confirm the pipeline ran end-to-end on real data.
-        #expect(recall >= 0.0)
+        // Hard assertion: matches current Phase 2 baseline (recall = 0.50, 2/4
+        // ground-truth ads have an evidence entry within ±5s). If this drops,
+        // it's a real regression and the baseline should not be weakened to
+        // make this pass.
+        #expect(caught.count >= 2,
+                "Evidence catalog should catch at least 2/4 ground-truth ads (current baseline: 50% recall). Got \(caught.count)/\(total).")
     }
 
     @Test("LexicalScanner coverage on real transcript")
@@ -257,7 +261,13 @@ struct RealEpisodeBenchmarkTests {
         print("  Caught: \(caught.map(\.advertiser).joined(separator: ", "))")
         print("  Missed: \(missed.map(\.advertiser).joined(separator: ", "))")
 
-        #expect(recall >= 0.0)
+        // Hard assertions tied to the current Phase 2 baseline
+        // (lexicalCandidateRecall = 0.75, lexicalCandidateCount = 3).
+        // If these fail, do not weaken — investigate the regression.
+        #expect(caught.count >= 3,
+                "LexicalScanner should overlap at least 3/4 ground-truth ads within ±10s (current baseline: 75% recall). Got \(caught.count)/\(total).")
+        #expect(candidates.count >= 2 && candidates.count <= 6,
+                "Lexical candidate count should fall in [2, 6] (current baseline: 3). Got \(candidates.count).")
     }
 
     @Test("Boundary span coverage on real transcript")
@@ -294,7 +304,12 @@ struct RealEpisodeBenchmarkTests {
             print("  [\(ad.advertiser)] ad=\(String(format: "%.0fs", adSpan)) hit=\(String(format: "%.0fs", hitSpan)) coverage=\(Int(coverage * 100))%")
         }
 
-        #expect(true)
+        // Soft assertion by design: span coverage is intentionally low at this
+        // phase. Evidence entries are point-in-time hits, not span detectors —
+        // CVS hits at 0:21 inside a 0:00-0:26 ad gives ~19% coverage at best.
+        // Phase 4+ (boundary refinement) is where this metric will get teeth.
+        // Until then we just assert that the test ran end-to-end on real data.
+        #expect(catalog.entries.count >= 0)
     }
 
     @Test("Full AdDetectionService hot path on real transcript")
@@ -318,7 +333,13 @@ struct RealEpisodeBenchmarkTests {
         print("  Missed: \(score.missed.map(\.advertiser).joined(separator: ", "))")
         print("Ad-second coverage: \(Int(score.adSecondCoverage * 100))% of \(Int(ConanFanhausenRevisitedFixture.groundTruthAds.reduce(0.0) { $0 + $1.duration }))s total ad content")
 
-        #expect(true)
+        // Hard assertion: detected AdWindow count should stay within a sane
+        // range. Current baseline is 0 (Phase 2 has no AdWindow emission yet);
+        // when Phase 3+ starts producing windows, this allows headroom up to
+        // 5 before the test fails. A regression that suddenly emits 50 windows
+        // would trip this loudly.
+        #expect(detected.count >= 0 && detected.count <= 5,
+                "Detected AdWindow count should be in [0, 5] (current baseline: 0). Got \(detected.count).")
     }
 
     @Test("Compare current run to baseline history")
@@ -510,10 +531,21 @@ struct RealEpisodeBenchmarkTests {
         print("")
         print(delta.summary)
 
-        // Soft regression guard: only hard-fail if evidence catalog recall
-        // collapses by more than 10 absolute percentage points. Drift below
-        // that threshold is logged but not fatal.
-        let majorRegression = delta.evidenceCatalogRecallDelta < -0.1
-        #expect(!majorRegression, "Major regression: evidence catalog recall dropped by more than 10pp vs \(baseline.label)")
+        // Tight regression gates: every metric in DetectionBenchmark is
+        // asserted with a 5pp tolerance against the latest baseline. The
+        // baseline is now an honest measurement of the production pipeline
+        // (post C1/C2 fix), so any drift greater than 5pp is a real signal.
+        #expect(delta.adWindowRecallDelta >= -0.05,
+                "AdWindow recall regressed by more than 5pp vs \(baseline.label) (delta=\(String(format: "%.3f", delta.adWindowRecallDelta)))")
+        #expect(delta.adSecondCoverageDelta >= -0.05,
+                "Ad-second coverage regressed by more than 5pp vs \(baseline.label) (delta=\(String(format: "%.3f", delta.adSecondCoverageDelta)))")
+        #expect(delta.evidenceCatalogRecallDelta >= -0.05,
+                "Evidence catalog recall regressed by more than 5pp vs \(baseline.label) (delta=\(String(format: "%.3f", delta.evidenceCatalogRecallDelta)))")
+        #expect(delta.evidenceCatalogPrecisionDelta >= -0.05,
+                "Evidence catalog precision regressed by more than 5pp vs \(baseline.label) (delta=\(String(format: "%.3f", delta.evidenceCatalogPrecisionDelta)))")
+        #expect(delta.lexicalCandidateRecallDelta >= -0.05,
+                "Lexical candidate recall regressed by more than 5pp vs \(baseline.label) (delta=\(String(format: "%.3f", delta.lexicalCandidateRecallDelta)))")
+        #expect(delta.weightedRecallDelta >= -0.05,
+                "Weighted recall regressed by more than 5pp vs \(baseline.label) (delta=\(String(format: "%.3f", delta.weightedRecallDelta)))")
     }
 }

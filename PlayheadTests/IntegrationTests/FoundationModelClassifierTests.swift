@@ -137,8 +137,43 @@ struct FoundationModelClassifierTests {
             }
         }
 
-        // Soft assertion only — this is a benchmark, not a pass/fail gate.
-        // We want the numbers in the log.
-        #expect(true)
+        // Conditional hard assertions:
+        // - Simulator (FM unavailable or errors out on every segment): skip
+        //   with a clear log message so simulator runs stay green. We treat
+        //   thrown errors the same as `.unavailable` because the simulator
+        //   typically fails with a Model Catalog asset error rather than
+        //   returning a tagged unavailable result.
+        // - Real device (FM successfully classified at least one segment):
+        //   hard-assert the de-risking expectations from the 2026-04-06
+        //   baseline run.
+        let scoredResults = results.filter { $0.1.intent != .unavailable }
+        if scoredResults.isEmpty {
+            print("\n⚠️  FM unavailable or errored on all \(Self.segments.count) segments (likely simulator with no model assets). Skipping hard assertions.")
+            #expect(true)
+            return
+        }
+
+        // Pull the specific results we need to gate on.
+        let kellyFirstResult = results.first(where: { $0.0.label.contains("Kelly Ripa cross-promo (0:30") })?.1
+        let teamcocoResult = results.first(where: { $0.0.label.contains("teamcoco") })?.1
+
+        // Phase 3 de-risking: FM MUST classify the Kelly Ripa cross-promo as
+        // commercial. This is the case LexicalScanner cannot catch and the
+        // entire reason FM is in the pipeline.
+        #expect(kellyFirstResult?.intent == .commercial,
+                "Kelly Ripa cross-promo (0:30-0:56) must be classified commercial — Phase 3 de-risking gate")
+
+        // Document the known false positive: teamcoco.com first-party URL is
+        // currently classified commercial. Phase 8 will fix this. Asserting
+        // the broken state here means Phase 8 cannot silently change the
+        // behavior without updating this test.
+        #expect(teamcocoResult?.intent == .commercial,
+                "teamcoco.com call-in is currently a known false positive (classified commercial). Phase 8 will fix this — when it does, update this assertion.")
+
+        // Overall accuracy floor: matches the 2026-04-06 real-device run
+        // (4/6 segments correct). The known misses are the truncated Kelly
+        // Ripa repeat (#6) and the teamcoco false positive (#4).
+        #expect(correctCount >= 4,
+                "FM coarse scan accuracy regressed: expected at least 4/6 segments correct (2026-04-06 baseline), got \(correctCount)/\(Self.segments.count - unavailableCount)")
     }
 }
