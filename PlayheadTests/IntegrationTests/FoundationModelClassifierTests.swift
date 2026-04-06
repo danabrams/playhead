@@ -1309,6 +1309,246 @@ struct FoundationModelClassifierTests {
         #expect(output.windows[0].spans[0].memoryWriteEligible)
     }
 
+    // M26: Span breadth must scale with the number of supporting evidence
+    // anchors. Spans with zero anchors are rejected outright; spans with N
+    // anchors are bounded to a width of N*4 lines. The previous floor of 8
+    // let an 8-line span through with zero or one anchor, defeating the
+    // purpose of the breadth check.
+    @Test("refinement rejects spans with no evidence anchors regardless of breadth")
+    func refinementRejectsAnchorlessSpans() async throws {
+        let segments = (1...3).map { idx in
+            makeSegment(index: idx, startTime: Double(idx), endTime: Double(idx) + 1, text: "Line \(idx).")
+        }
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 0,
+            lineRefs: [1, 2, 3],
+            focusLineRefs: [1, 2, 3],
+            focusClusters: [[1, 2, 3]],
+            prompt: "Refine ad spans.",
+            promptTokenCount: 8,
+            startTime: 1,
+            endTime: 4,
+            stopReason: .minimumSpan,
+            promptEvidence: []
+        )
+        let recorder = RuntimeRecorder(
+            contextSize: 64,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementResponses: [
+                RefinementWindowSchema(
+                    spans: [
+                        SpanRefinementSchema(
+                            commercialIntent: .paid,
+                            ownership: .thirdParty,
+                            firstLineRef: 1,
+                            lastLineRef: 2,
+                            certainty: .strong,
+                            boundaryPrecision: .usable,
+                            evidenceAnchors: [],  // zero anchors → must be rejected
+                            alternativeExplanation: .none,
+                            reasonTags: [.hostReadPitch]
+                        )
+                    ]
+                )
+            ]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+        #expect(output.status == .success)
+        #expect(output.windows.count == 1)
+        #expect(output.windows[0].spans.isEmpty)
+    }
+
+    @Test("refinement rejects spans whose breadth exceeds anchor count times four")
+    func refinementRejectsOverbroadSpans() async throws {
+        // 12 lines, 1 anchor → max breadth = 4. A span from line 1..6 has
+        // breadth 5 → must be rejected.
+        let segments = (1...12).map { idx in
+            makeSegment(index: idx, startTime: Double(idx), endTime: Double(idx) + 1, text: "Line \(idx).")
+        }
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 0,
+            lineRefs: Array(1...12),
+            focusLineRefs: Array(1...12),
+            focusClusters: [Array(1...12)],
+            prompt: "Refine ad spans.",
+            promptTokenCount: 8,
+            startTime: 1,
+            endTime: 13,
+            stopReason: .minimumSpan,
+            promptEvidence: []
+        )
+        let recorder = RuntimeRecorder(
+            contextSize: 256,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementResponses: [
+                RefinementWindowSchema(
+                    spans: [
+                        SpanRefinementSchema(
+                            commercialIntent: .paid,
+                            ownership: .thirdParty,
+                            firstLineRef: 1,
+                            lastLineRef: 6,
+                            certainty: .strong,
+                            boundaryPrecision: .usable,
+                            evidenceAnchors: [
+                                EvidenceAnchorSchema(
+                                    evidenceRef: nil,
+                                    lineRef: 3,
+                                    kind: .brandSpan,
+                                    certainty: .moderate
+                                )
+                            ],
+                            alternativeExplanation: .none,
+                            reasonTags: [.brandMention]
+                        )
+                    ]
+                )
+            ]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+        #expect(output.status == .success)
+        #expect(output.windows.count == 1)
+        #expect(output.windows[0].spans.isEmpty)
+    }
+
+    @Test("refinement keeps spans whose breadth is within the anchor count budget")
+    func refinementKeepsBoundedBreadthSpans() async throws {
+        // 12 lines, 2 anchors → max breadth = 8. A span from 1..9 has
+        // breadth 8 → must be retained.
+        let segments = (1...12).map { idx in
+            makeSegment(index: idx, startTime: Double(idx), endTime: Double(idx) + 1, text: "Line \(idx).")
+        }
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 0,
+            lineRefs: Array(1...12),
+            focusLineRefs: Array(1...12),
+            focusClusters: [Array(1...12)],
+            prompt: "Refine ad spans.",
+            promptTokenCount: 8,
+            startTime: 1,
+            endTime: 13,
+            stopReason: .minimumSpan,
+            promptEvidence: []
+        )
+        let recorder = RuntimeRecorder(
+            contextSize: 256,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementResponses: [
+                RefinementWindowSchema(
+                    spans: [
+                        SpanRefinementSchema(
+                            commercialIntent: .paid,
+                            ownership: .thirdParty,
+                            firstLineRef: 1,
+                            lastLineRef: 9,
+                            certainty: .strong,
+                            boundaryPrecision: .usable,
+                            evidenceAnchors: [
+                                EvidenceAnchorSchema(
+                                    evidenceRef: nil,
+                                    lineRef: 2,
+                                    kind: .brandSpan,
+                                    certainty: .moderate
+                                ),
+                                EvidenceAnchorSchema(
+                                    evidenceRef: nil,
+                                    lineRef: 8,
+                                    kind: .brandSpan,
+                                    certainty: .moderate
+                                )
+                            ],
+                            alternativeExplanation: .none,
+                            reasonTags: [.brandMention]
+                        )
+                    ]
+                )
+            ]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+        #expect(output.status == .success)
+        #expect(output.windows.count == 1)
+        #expect(output.windows[0].spans.count == 1)
+    }
+
+    // M25: The coarse sanitize path deduplicates supportLineRefs but did
+    // not cap their count. A model could (or, under FM compression, would)
+    // emit dozens of refs per window; we keep at most 32 and drop the rest
+    // with a log.
+    @Test("coarse sanitize caps supportLineRefs at the documented maximum")
+    func coarseSanitizeCapsSupportLineRefs() async throws {
+        // 64 unique valid line refs — only the first 32 may survive.
+        let validRefs = Array(0..<64)
+        let segments = validRefs.map { idx in
+            makeSegment(index: idx, startTime: Double(idx), endTime: Double(idx) + 1, text: "Line \(idx).")
+        }
+        let recorder = RuntimeRecorder(
+            contextSize: 2048,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            responses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: validRefs,
+                        certainty: .strong
+                    )
+                )
+            ]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 4, maximumResponseTokens: 6)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 1)
+        let support = try #require(output.windows[0].screening.support)
+        #expect(support.supportLineRefs.count == 32)
+        // The cap preserves the deterministic prefix, so the first 32 input
+        // refs are exactly what we keep.
+        #expect(support.supportLineRefs == Array(0..<32))
+    }
+
     // H14b: A malicious host could try to smuggle a literal `<<<END TRANSCRIPT>>>`
     // fence or a forged `L42>` line-ref prefix into transcript text. escapedLine
     // must rewrite both so that no untrusted line can close the transcript fence

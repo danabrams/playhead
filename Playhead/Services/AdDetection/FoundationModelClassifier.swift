@@ -904,6 +904,12 @@ struct FoundationModelClassifier: Sendable {
         return .good
     }
 
+    /// M25: Maximum number of supportLineRefs the coarse sanitize path will
+    /// retain per window. The model can (or, under FM compression, will)
+    /// occasionally emit dozens of refs; everything beyond this cap is
+    /// dropped with a log so downstream zoom planning sees a bounded set.
+    static let maximumCoarseSupportLineRefs = 32
+
     private func sanitize(
         schema: CoarseScreeningSchema,
         validLineRefs: Set<Int>
@@ -920,6 +926,21 @@ struct FoundationModelClassifier: Sendable {
                     if seen.insert(lineRef).inserted {
                         deduped.append(lineRef)
                     }
+                }
+
+                // M25: Cap supportLineRefs after dedup so we keep the
+                // deterministic prefix the model emitted first.
+                let droppedCount: Int
+                if deduped.count > Self.maximumCoarseSupportLineRefs {
+                    droppedCount = deduped.count - Self.maximumCoarseSupportLineRefs
+                    deduped = Array(deduped.prefix(Self.maximumCoarseSupportLineRefs))
+                } else {
+                    droppedCount = 0
+                }
+                if droppedCount > 0 {
+                    logger.warning(
+                        "fm.classifier.support_line_refs_capped dropped=\(droppedCount, privacy: .public) cap=\(Self.maximumCoarseSupportLineRefs, privacy: .public)"
+                    )
                 }
 
                 if deduped.isEmpty {
@@ -980,10 +1001,21 @@ struct FoundationModelClassifier: Sendable {
                 continue
             }
 
-            // M15: Bound refinement span breadth vs. supporting evidence width.
-            // Reject spans that try to claim a whole window from one support line.
-            let supportCount = max(1, span.evidenceAnchors.count)
-            let maxBreadth = max(8, supportCount * 4)
+            // M15/M26: Bound refinement span breadth vs. supporting evidence
+            // width. Reject anchorless spans outright — without any FM-cited
+            // anchor we have nothing to anchor a skip cut to. For non-empty
+            // anchor sets, allow at most `count * 4` lines of breadth.
+            //
+            // The previous floor of `max(8, count * 4)` let an 8-line span
+            // through with zero or one anchor, defeating the purpose of the
+            // breadth check.
+            if span.evidenceAnchors.isEmpty {
+                logger.warning(
+                    "fm.classifier.span_breadth_rejected reason=anchorless breadth=\(lastLineRef - firstLineRef, privacy: .public)"
+                )
+                continue
+            }
+            let maxBreadth = span.evidenceAnchors.count * 4
             if (lastLineRef - firstLineRef) > maxBreadth {
                 logger.warning(
                     "fm.classifier.span_breadth_rejected breadth=\(lastLineRef - firstLineRef, privacy: .public) max=\(maxBreadth, privacy: .public)"
@@ -1055,6 +1087,17 @@ struct FoundationModelClassifier: Sendable {
     /// brand/host-read pitches, cross-promo language). Paid/owned/affiliate
     /// spans accept any tag. Unknown intent is treated conservatively the
     /// same as other commercial variants (no filtering).
+    ///
+    /// **`.guestPlug` is intentionally allowed on organic spans.** This is
+    /// not an oversight: the project's ad-content gradient (see the project
+    /// memory note `project_ad_gradient.md`) treats borderline content as
+    /// banner-eligible. The `commercialIntent` field drives the auto-skip
+    /// decision, and the `reasonTags` field drives the banner hint shown to
+    /// the user. Stripping `.guestPlug` from organic spans would erase the
+    /// banner cue for guest self-promotion (e.g. "go pre-order my book"),
+    /// which the user has explicitly opted in to seeing. Guests plugging
+    /// their own work without commerce structure stays organic on intent
+    /// but still surfaces in the banner via this tag.
     ///
     /// Produces a sorted, unique array without allocating an intermediate
     /// Set — the tag list is short, so a sort + manual dedup is cheaper than
