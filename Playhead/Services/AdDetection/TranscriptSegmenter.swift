@@ -71,6 +71,14 @@ enum TranscriptSegmenter {
     }
 
     /// Segment atoms into coherent regions.
+    ///
+    /// When `featureWindows` is non-empty, segment boundaries may be
+    /// influenced by speaker-turn and acoustic-pause metadata derived from
+    /// the audio feature pipeline. Currently only tests pass
+    /// `featureWindows`; production wiring is pending Phase 3.x. Production
+    /// callers today pass only `atoms`, so the segmenter operates purely on
+    /// timestamp gaps, max-duration limits, discourse markers, and sentence
+    /// punctuation.
     static func segment(
         atoms: [TranscriptAtom],
         featureWindows: [FeatureWindow] = [],
@@ -167,6 +175,9 @@ enum TranscriptSegmenter {
         let strength: BreakStrength
         let metadata: BoundaryMetadata
 
+        // Metadata is ignored when strength == .none; do not rely on this
+        // placeholder. The .startOfTranscript value is just a non-optional
+        // sentinel so callers can construct a "no break" return cheaply.
         static let none = BreakType(strength: .none, metadata: .startOfTranscript)
     }
 
