@@ -58,7 +58,7 @@ struct BackfillProgressCursor: Codable, Sendable, Equatable, Hashable {
 struct BackfillJob: Sendable, Equatable {
     let jobId: String
     let analysisAssetId: String
-    let podcastId: String
+    let podcastId: String?
     let phase: BackfillJobPhase
     let coveragePolicy: CoveragePolicy
     let priority: Int
@@ -67,7 +67,6 @@ struct BackfillJob: Sendable, Equatable {
     let deferReason: String?
     let status: BackfillJobStatus
     let scanCohortJSON: String?
-    let decisionCohortJSON: String?
     let createdAt: Double
 
     func remainingUnitRange(totalUnits: Int) -> Range<Int> {

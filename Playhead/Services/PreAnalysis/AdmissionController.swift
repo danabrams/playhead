@@ -130,7 +130,6 @@ actor AdmissionController {
             deferReason: reason,
             status: .queued,
             scanCohortJSON: running.scanCohortJSON,
-            decisionCohortJSON: running.decisionCohortJSON,
             createdAt: running.createdAt
         )
         enqueue(requeued)

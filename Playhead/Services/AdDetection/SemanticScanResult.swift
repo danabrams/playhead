@@ -1,14 +1,9 @@
 // SemanticScanResult.swift
 // Persistence-facing FM scan result and evidence-event models.
 //
-// COORDINATION TODO (H16): `BackfillJob.decisionCohortJSON` is dead plumbing.
-// The reuse contract here intentionally ignores `decisionCohortJSON` because
-// decision-time changes never invalidate the FM scan output. The `BackfillJob`
-// field and the `backfill_jobs.decisionCohortJSON` column should be removed
-// in a follow-up coordinated with the agent that owns BackfillJob.swift /
-// PlayheadTests/Helpers/TestFactories.swift. Until that lands the parameter
-// has been removed from `isReusable` and `fetchReusableSemanticScanResult`
-// to make the dead-plumbing problem statically obvious.
+// H16 resolved: `decisionCohortJSON` was removed from BackfillJob, the
+// backfill_jobs column, and the reuse contract. Decision-time changes never
+// invalidate FM scan output, so there is nothing to key on.
 
 import Foundation
 import OSLog

@@ -54,8 +54,7 @@ struct BackfillJobStoreTests {
             coveragePolicy: .targetedWithAudit,
             priority: 10,
             status: .running,
-            scanCohortJSON: encodedScanCohort,
-            decisionCohortJSON: #"{"schema":"decision-v1"}"#
+            scanCohortJSON: encodedScanCohort
         )
 
         try await store.insertBackfillJob(job)

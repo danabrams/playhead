@@ -508,15 +508,13 @@ actor AnalysisStore {
 
         // backfill_jobs
         // M8: FK CASCADE so deleting an asset cleans up its backfill rows.
-        // H16 TODO: `decisionCohortJSON` is dead plumbing, kept here only
-        // because removing the field requires editing BackfillJob.swift +
-        // TestFactories.swift (owned by other agents). The reuse contract in
-        // SemanticScanResult intentionally ignores this column.
+        // H16/M26: decisionCohortJSON removed (dead plumbing); podcastId
+        // nullable because orphan/local episodes have no podcast.
         try exec("""
             CREATE TABLE IF NOT EXISTS backfill_jobs (
                 jobId TEXT PRIMARY KEY,
                 analysisAssetId TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
-                podcastId TEXT NOT NULL,
+                podcastId TEXT,
                 phase TEXT NOT NULL,
                 coveragePolicy TEXT NOT NULL,
                 priority INTEGER NOT NULL DEFAULT 0,
@@ -525,7 +523,6 @@ actor AnalysisStore {
                 deferReason TEXT,
                 status TEXT NOT NULL DEFAULT 'queued',
                 scanCohortJSON TEXT,
-                decisionCohortJSON TEXT,
                 createdAt REAL NOT NULL
             )
             """)
@@ -1622,8 +1619,8 @@ actor AnalysisStore {
             INSERT INTO backfill_jobs
             (jobId, analysisAssetId, podcastId, phase, coveragePolicy, priority,
              progressCursor, retryCount, deferReason, status, scanCohortJSON,
-             decisionCohortJSON, createdAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             createdAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -1638,8 +1635,7 @@ actor AnalysisStore {
         bind(stmt, 9, job.deferReason)
         bind(stmt, 10, job.status.rawValue)
         bind(stmt, 11, job.scanCohortJSON)
-        bind(stmt, 12, job.decisionCohortJSON)
-        bind(stmt, 13, job.createdAt)
+        bind(stmt, 12, job.createdAt)
         do {
             try step(stmt, expecting: SQLITE_DONE)
         } catch {
@@ -1660,11 +1656,11 @@ actor AnalysisStore {
     func fetchBackfillJob(byId jobId: String) throws -> BackfillJob? {
         // Column order: jobId, analysisAssetId, podcastId, phase, coveragePolicy,
         // priority, progressCursor, retryCount, deferReason, status,
-        // scanCohortJSON, decisionCohortJSON, createdAt.
+        // scanCohortJSON, createdAt.
         let sql = """
             SELECT jobId, analysisAssetId, podcastId, phase, coveragePolicy,
                    priority, progressCursor, retryCount, deferReason, status,
-                   scanCohortJSON, decisionCohortJSON, createdAt
+                   scanCohortJSON, createdAt
             FROM backfill_jobs WHERE jobId = ?
             """
         let stmt = try prepare(sql)
@@ -2167,7 +2163,7 @@ actor AnalysisStore {
         return BackfillJob(
             jobId: try requireText(stmt, 0),
             analysisAssetId: try requireText(stmt, 1),
-            podcastId: try requireText(stmt, 2),
+            podcastId: optionalText(stmt, 2),
             phase: phase,
             coveragePolicy: coveragePolicy,
             priority: Int(sqlite3_column_int(stmt, 5)),
@@ -2176,8 +2172,7 @@ actor AnalysisStore {
             deferReason: optionalText(stmt, 8),
             status: status,
             scanCohortJSON: optionalText(stmt, 10),
-            decisionCohortJSON: optionalText(stmt, 11),
-            createdAt: sqlite3_column_double(stmt, 12)
+            createdAt: sqlite3_column_double(stmt, 11)
         )
     }
 

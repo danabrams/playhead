@@ -118,7 +118,7 @@ func makeAnalysisJob(
 func makeBackfillJob(
     jobId: String = UUID().uuidString,
     analysisAssetId: String = "asset-1",
-    podcastId: String = "podcast-1",
+    podcastId: String? = "podcast-1",
     phase: BackfillJobPhase = .fullEpisodeScan,
     coveragePolicy: CoveragePolicy = .fullCoverage,
     priority: Int = 0,
@@ -127,7 +127,6 @@ func makeBackfillJob(
     deferReason: String? = nil,
     status: BackfillJobStatus = .queued,
     scanCohortJSON: String? = nil,
-    decisionCohortJSON: String? = nil,
     createdAt: Double = Date().timeIntervalSince1970
 ) -> BackfillJob {
     BackfillJob(
@@ -142,7 +141,6 @@ func makeBackfillJob(
         deferReason: deferReason,
         status: status,
         scanCohortJSON: scanCohortJSON,
-        decisionCohortJSON: decisionCohortJSON,
         createdAt: createdAt
     )
 }
