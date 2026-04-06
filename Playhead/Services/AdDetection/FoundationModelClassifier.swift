@@ -920,20 +920,28 @@ struct FoundationModelClassifier: Sendable {
             sanitizedSupport = nil
         case .containsAd, .uncertain:
             if let support = schema.support {
+                // M-R3-2: Cap BEFORE dedup so an attacker/FM cannot flood
+                // the list with duplicates that dedupe to exactly 32 and
+                // hide the legitimate top-32 evidence behind a fabricated
+                // prefix. The cap must bound INGESTED data, not the
+                // post-dedup tail.
+                //
+                // We also pre-filter to valid line refs before the cap, so
+                // junk refs cannot burn the 32-slot budget. The dedup pass
+                // then runs on the capped prefix and may legitimately
+                // produce fewer than 32 survivors if duplicates exist.
+                let validInOrder = support.supportLineRefs.filter { validLineRefs.contains($0) }
+                let rawIncoming = validInOrder.count
+                let capped = Array(validInOrder.prefix(Self.maximumCoarseSupportLineRefs))
                 var deduped: [Int] = []
                 var seen: Set<Int> = []
-                for lineRef in support.supportLineRefs where validLineRefs.contains(lineRef) {
-                    if seen.insert(lineRef).inserted {
-                        deduped.append(lineRef)
-                    }
+                for lineRef in capped where seen.insert(lineRef).inserted {
+                    deduped.append(lineRef)
                 }
 
-                // M25: Cap supportLineRefs after dedup so we keep the
-                // deterministic prefix the model emitted first.
                 let droppedCount: Int
-                if deduped.count > Self.maximumCoarseSupportLineRefs {
-                    droppedCount = deduped.count - Self.maximumCoarseSupportLineRefs
-                    deduped = Array(deduped.prefix(Self.maximumCoarseSupportLineRefs))
+                if rawIncoming > Self.maximumCoarseSupportLineRefs {
+                    droppedCount = rawIncoming - Self.maximumCoarseSupportLineRefs
                 } else {
                     droppedCount = 0
                 }
@@ -1015,7 +1023,20 @@ struct FoundationModelClassifier: Sendable {
                 )
                 continue
             }
-            let maxBreadth = span.evidenceAnchors.count * 4
+            // H-R3-2: Dedupe anchors by (kind, lineRef, evidenceRef) BEFORE
+            // sizing the breadth cap. Without this, an FM could submit four
+            // identical duplicate anchors and stretch an anchorless-in-effect
+            // 17-line span through a `count * 4` bound. The real resolver
+            // collapses these duplicates anyway, so the breadth budget must
+            // match what we'll actually retain.
+            let uniqueAnchorKeys = Set(span.evidenceAnchors.map { anchor in
+                AnchorDedupKey(
+                    kind: anchor.kind,
+                    lineRef: anchor.lineRef,
+                    evidenceRef: anchor.evidenceRef
+                )
+            })
+            let maxBreadth = uniqueAnchorKeys.count * 4
             if (lastLineRef - firstLineRef) > maxBreadth {
                 logger.warning(
                     "fm.classifier.span_breadth_rejected breadth=\(lastLineRef - firstLineRef, privacy: .public) max=\(maxBreadth, privacy: .public)"
@@ -1044,12 +1065,36 @@ struct FoundationModelClassifier: Sendable {
                 return presentedEvidenceRefs.contains(ref)
             }
 
-            let resolvedEvidenceAnchors = CommercialEvidenceResolver.resolve(
+            let rawResolvedEvidenceAnchors = CommercialEvidenceResolver.resolve(
                 anchors: validatedAnchors,
                 plan: plan,
                 lineRefLookup: lineRefLookup,
                 evidenceCatalog: evidenceCatalog
             )
+
+            // H-R3-1: Enforce span-range containment on `.evidenceRef`-sourced
+            // anchors. The FM can hallucinate a span at lines 1...5 while
+            // citing an evidenceRef whose true lineRef is 11 (outside the
+            // span). The resolver, by design, maps anchor.evidenceRef back to
+            // the catalog entry's ORIGINAL lineRef — so a valid catalog match
+            // can still carry a line ref that falls outside the claimed span.
+            // Without this check such an anchor would be marked
+            // memoryWriteEligible=true and could poison sponsor memory.
+            //
+            // Non-.evidenceRef anchors (line-ref fallback, unresolved) are
+            // already gated to `anchor.lineRef` values the resolver saw as
+            // in-window; we only need to re-check the evidenceRef path here
+            // because that is the only path whose stored `lineRef` comes from
+            // the catalog entry rather than from the raw FM anchor.
+            let resolvedEvidenceAnchors = rawResolvedEvidenceAnchors.filter { anchor in
+                guard anchor.resolutionSource == .evidenceRef else { return true }
+                return anchor.lineRef >= firstLineRef && anchor.lineRef <= lastLineRef
+            }
+            if resolvedEvidenceAnchors.count < rawResolvedEvidenceAnchors.count {
+                logger.warning(
+                    "fm.classifier.out_of_range_evidence_ref_dropped dropped=\(rawResolvedEvidenceAnchors.count - resolvedEvidenceAnchors.count, privacy: .public) span=\(firstLineRef, privacy: .public)-\(lastLineRef, privacy: .public)"
+                )
+            }
 
             // M21: `memoryWriteEligible` uses a CONJUNCTIVE policy: a single
             // unresolved anchor voids the entire span. This is intentional —
@@ -1079,6 +1124,15 @@ struct FoundationModelClassifier: Sendable {
         }
 
         return spans
+    }
+
+    /// H-R3-2: Dedup key for evidence anchors. Two anchors with the same
+    /// `(kind, lineRef, evidenceRef)` tuple attest the same piece of
+    /// evidence and must collapse to one before sizing the breadth cap.
+    private struct AnchorDedupKey: Hashable {
+        let kind: EvidenceAnchorKind
+        let lineRef: Int
+        let evidenceRef: Int?
     }
 
     /// Dedupes `reasonTags` and drops tags that are semantically inconsistent

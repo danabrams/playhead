@@ -781,6 +781,206 @@ struct FoundationModelClassifierTests {
         #expect(!output.windows[0].spans[0].memoryWriteEligible)
     }
 
+    // H-R3-1: The FM can hallucinate a span at lines 1...5 while citing an
+    // evidenceRef whose true lineRef is 11 (outside the span). Without a
+    // containment check, the resolver returns an anchor marked
+    // memoryWriteEligible=true and the pipeline would persist hallucinated
+    // sponsor memory. Sanitize must drop out-of-range evidenceRef anchors.
+    @Test("refinement drops evidenceRef anchors whose lineRef falls outside the span range")
+    func refinementDropsOutOfRangeEvidenceRefAnchors() async throws {
+        let segments = [
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Hosts banter about the weather."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "They discuss last week's guest."),
+            makeSegment(index: 3, startTime: 15, endTime: 20, text: "More idle chatter continues."),
+            makeSegment(index: 4, startTime: 20, endTime: 25, text: "Quick aside about a movie."),
+            makeSegment(index: 5, startTime: 25, endTime: 30, text: "Wrapping up the banter."),
+            makeSegment(index: 11, startTime: 55, endTime: 60, text: "Use promo code SAVE for the real ad.")
+        ]
+        let evidenceCatalog = EvidenceCatalog(
+            analysisAssetId: "asset-1",
+            transcriptVersion: "transcript-v1",
+            entries: [
+                EvidenceEntry(
+                    evidenceRef: 11,
+                    category: .promoCode,
+                    matchedText: "SAVE",
+                    normalizedText: "save",
+                    atomOrdinal: 11,
+                    startTime: 55,
+                    endTime: 60
+                )
+            ]
+        )
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 1,
+            lineRefs: [1, 2, 3, 4, 5, 11],
+            focusLineRefs: [1, 5],
+            focusClusters: [[1, 2, 3, 4, 5]],
+            prompt: "Refine ad spans.",
+            promptTokenCount: 12,
+            startTime: 5,
+            endTime: 60,
+            stopReason: .minimumSpan,
+            promptEvidence: [
+                // evidenceRef=11 actually lives at lineRef=11 — deliberately
+                // outside the span the FM will claim below.
+                PromptEvidenceEntry(entry: evidenceCatalog.entries[0], lineRef: 11)
+            ]
+        )
+
+        let recorder = RuntimeRecorder(
+            contextSize: 64,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementResponses: [
+                RefinementWindowSchema(
+                    spans: [
+                        SpanRefinementSchema(
+                            commercialIntent: .paid,
+                            ownership: .thirdParty,
+                            // FM hallucinates a 1...5 span…
+                            firstLineRef: 1,
+                            lastLineRef: 5,
+                            certainty: .strong,
+                            boundaryPrecision: .precise,
+                            evidenceAnchors: [
+                                // …and cites evidenceRef=11 (true lineRef=11)
+                                // to "attest" it. Sanitize must drop this
+                                // anchor and deny memoryWriteEligible.
+                                EvidenceAnchorSchema(
+                                    evidenceRef: 11,
+                                    lineRef: 1,
+                                    kind: .promoCode,
+                                    certainty: .strong
+                                )
+                            ],
+                            alternativeExplanation: .none,
+                            reasonTags: [.promoCode]
+                        )
+                    ]
+                )
+            ]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: evidenceCatalog
+        )
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 1)
+        // Anchor lineRef 11 is outside the span's 1...5 range: the anchor
+        // must be stripped (or, equivalently, all survivors must be
+        // non-memory-write-eligible). Either way the span must NOT attest
+        // sponsor memory.
+        if let span = output.windows[0].spans.first {
+            let evidenceRefAnchors = span.resolvedEvidenceAnchors
+                .filter { $0.resolutionSource == .evidenceRef }
+            #expect(evidenceRefAnchors.allSatisfy { $0.lineRef >= span.firstLineRef && $0.lineRef <= span.lastLineRef })
+            #expect(!span.memoryWriteEligible)
+        }
+    }
+
+    // H-R3-2: The breadth check used the raw anchor count, so an FM could
+    // submit four duplicate (kind, lineRef, evidenceRef) anchors to stretch
+    // an otherwise anchorless 17-line span through a `count * 4` bound.
+    // Sanitize must dedupe before sizing the breadth cap.
+    @Test("refinement rejects over-broad spans padded by duplicate-tuple anchors")
+    func refinementRejectsDuplicateAnchorBreadthFlood() async throws {
+        let segments = (1...17).map { idx in
+            makeSegment(
+                index: idx,
+                startTime: Double(idx),
+                endTime: Double(idx) + 1,
+                text: "Line \(idx)."
+            )
+        }
+        let evidenceCatalog = EvidenceCatalog(
+            analysisAssetId: "asset-1",
+            transcriptVersion: "transcript-v1",
+            entries: [
+                EvidenceEntry(
+                    evidenceRef: 5,
+                    category: .url,
+                    matchedText: "example.com",
+                    normalizedText: "example.com",
+                    atomOrdinal: 1,
+                    startTime: 1,
+                    endTime: 2
+                )
+            ]
+        )
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 1,
+            lineRefs: Array(1...17),
+            focusLineRefs: [1, 17],
+            focusClusters: [Array(1...17)],
+            prompt: "Refine ad spans.",
+            promptTokenCount: 12,
+            startTime: 1,
+            endTime: 18,
+            stopReason: .minimumSpan,
+            promptEvidence: [
+                PromptEvidenceEntry(entry: evidenceCatalog.entries[0], lineRef: 1)
+            ]
+        )
+
+        // Four IDENTICAL anchors — post-dedup they collapse to one, so the
+        // breadth cap is 1*4=4 lines. The span claims 1...17 (breadth 16)
+        // and must be rejected.
+        let duplicateAnchor = EvidenceAnchorSchema(
+            evidenceRef: 5,
+            lineRef: 1,
+            kind: .url,
+            certainty: .strong
+        )
+        let recorder = RuntimeRecorder(
+            contextSize: 256,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementResponses: [
+                RefinementWindowSchema(
+                    spans: [
+                        SpanRefinementSchema(
+                            commercialIntent: .paid,
+                            ownership: .thirdParty,
+                            firstLineRef: 1,
+                            lastLineRef: 17,
+                            certainty: .strong,
+                            boundaryPrecision: .rough,
+                            evidenceAnchors: [
+                                duplicateAnchor,
+                                duplicateAnchor,
+                                duplicateAnchor,
+                                duplicateAnchor
+                            ],
+                            alternativeExplanation: .none,
+                            reasonTags: [.urlMention]
+                        )
+                    ]
+                )
+            ]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: evidenceCatalog
+        )
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 1)
+        // Span must be rejected for being over-broad vs. deduped anchor count.
+        #expect(output.windows[0].spans.isEmpty)
+    }
+
     @Test("refinement shrinks to the focus window and retries once after exceeded context window")
     func refinementRetriesAfterExceededContextWindow() async throws {
         let segments = [
@@ -1547,6 +1747,59 @@ struct FoundationModelClassifierTests {
         // The cap preserves the deterministic prefix, so the first 32 input
         // refs are exactly what we keep.
         #expect(support.supportLineRefs == Array(0..<32))
+    }
+
+    // M-R3-2: The old pipeline deduped supportLineRefs first and capped
+    // after. An attacker/FM could flood with 1000 unique refs, watch the
+    // dedup become a no-op, and then use the deterministic prefix cap to
+    // hide the *legitimate* top-32 evidence behind a fabricated prefix.
+    // The fix caps BEFORE dedup so the cap bounds ingested data, not the
+    // post-dedup tail. When the cap slices duplicates, the surviving
+    // deduped set may legitimately be smaller than 32.
+    @Test("coarse sanitize caps supportLineRefs before dedup so duplicates cannot hide evidence")
+    func coarseSanitizeCapsBeforeDedup() async throws {
+        // 32 unique refs, each repeated twice, in interleaved order:
+        // [0, 0, 1, 1, 2, 2, ..., 31, 31] → 64 refs total. The first 32
+        // entries cover refs 0..15 twice. After cap-then-dedup, we expect
+        // exactly 16 survivors (0..15).
+        var floodedRefs: [Int] = []
+        for idx in 0..<32 {
+            floodedRefs.append(idx)
+            floodedRefs.append(idx)
+        }
+        #expect(floodedRefs.count == 64)
+
+        let segments = (0..<32).map { idx in
+            makeSegment(index: idx, startTime: Double(idx), endTime: Double(idx) + 1, text: "Line \(idx).")
+        }
+        let recorder = RuntimeRecorder(
+            contextSize: 2048,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            responses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: floodedRefs,
+                        certainty: .strong
+                    )
+                )
+            ]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 4, maximumResponseTokens: 6)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 1)
+        let support = try #require(output.windows[0].screening.support)
+        // Cap-before-dedup: first 32 entries are [0,0,1,1,...,15,15] →
+        // after dedup, 16 unique refs survive.
+        #expect(support.supportLineRefs == Array(0..<16))
     }
 
     // H14b: A malicious host could try to smuggle a literal `<<<END TRANSCRIPT>>>`
