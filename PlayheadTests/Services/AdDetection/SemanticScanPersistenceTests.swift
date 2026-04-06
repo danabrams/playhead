@@ -1281,4 +1281,90 @@ struct SemanticScanPersistenceTests {
         #expect(found?.id == "perf-150")
         #expect(elapsed < 0.05, "fetch took \(elapsed)s")
     }
+
+    // MARK: - Fix #4: cohort orphan row GC
+
+    @Test("pruneOrphanedScansForCurrentCohort removes rows not matching current cohort")
+    func pruneOrphanedScansForCurrentCohort_removesNonCurrentCohortRows() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        // Canonicalize both cohorts exactly as the store does on insert, so
+        // the test compares against the same canonical form that lives in
+        // the SQLite rows after persistence.
+        let cohortARaw = try makeScanCohortJSON(promptHash: "cohort-A", schemaHash: "schema-A")
+        let cohortBRaw = try makeScanCohortJSON(promptHash: "cohort-B", schemaHash: "schema-B")
+        func canonicalize(_ raw: String) throws -> String {
+            let decoded = try JSONDecoder().decode(ScanCohort.self, from: Data(raw.utf8))
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            return String(decoding: try encoder.encode(decoded), as: UTF8.self)
+        }
+        let cohortA = try canonicalize(cohortARaw)
+        let cohortB = try canonicalize(cohortBRaw)
+
+        func scan(id: String, firstOrdinal: Int, cohort: String) -> SemanticScanResult {
+            SemanticScanResult(
+                id: id,
+                analysisAssetId: "asset-1",
+                windowFirstAtomOrdinal: firstOrdinal,
+                windowLastAtomOrdinal: firstOrdinal + 4,
+                windowStartTime: Double(firstOrdinal) * 10,
+                windowEndTime: Double(firstOrdinal) * 10 + 40,
+                scanPass: "passA",
+                transcriptQuality: .good,
+                disposition: .containsAd,
+                spansJSON: "[]",
+                status: .success,
+                attemptCount: 1,
+                errorContext: nil,
+                inputTokenCount: nil,
+                outputTokenCount: nil,
+                latencyMs: nil,
+                prewarmHit: false,
+                scanCohortJSON: cohort,
+                transcriptVersion: "tx-v1"
+            )
+        }
+        func event(id: String, ordinal: Int, cohort: String) -> EvidenceEvent {
+            EvidenceEvent(
+                id: id,
+                analysisAssetId: "asset-1",
+                eventType: "fm.windowScan",
+                sourceType: .fm,
+                atomOrdinals: "[\(ordinal)]",
+                evidenceJSON: #"{"id":"\#(id)"}"#,
+                scanCohortJSON: cohort,
+                createdAt: Double(ordinal)
+            )
+        }
+
+        // Insert 3 scan rows + 3 evidence events under cohort A.
+        try await store.insertSemanticScanResult(scan(id: "a1", firstOrdinal: 0, cohort: cohortA))
+        try await store.insertSemanticScanResult(scan(id: "a2", firstOrdinal: 10, cohort: cohortA))
+        try await store.insertSemanticScanResult(scan(id: "a3", firstOrdinal: 20, cohort: cohortA))
+        try await store.insertEvidenceEvent(event(id: "ae1", ordinal: 0, cohort: cohortA))
+        try await store.insertEvidenceEvent(event(id: "ae2", ordinal: 1, cohort: cohortA))
+        try await store.insertEvidenceEvent(event(id: "ae3", ordinal: 2, cohort: cohortA))
+
+        // Insert 2 scan rows + 2 evidence events under cohort B.
+        try await store.insertSemanticScanResult(scan(id: "b1", firstOrdinal: 30, cohort: cohortB))
+        try await store.insertSemanticScanResult(scan(id: "b2", firstOrdinal: 40, cohort: cohortB))
+        try await store.insertEvidenceEvent(event(id: "be1", ordinal: 30, cohort: cohortB))
+        try await store.insertEvidenceEvent(event(id: "be2", ordinal: 31, cohort: cohortB))
+
+        // Prune orphans relative to cohort B.
+        let deleted = try await store.pruneOrphanedScansForCurrentCohort(
+            currentScanCohortJSON: cohortB
+        )
+
+        #expect(deleted == 6, "3 scan-A + 3 evidence-A rows must be deleted")
+
+        let scansRemaining = try await store.fetchSemanticScanResults(analysisAssetId: "asset-1")
+        let eventsRemaining = try await store.fetchEvidenceEvents(analysisAssetId: "asset-1")
+        #expect(scansRemaining.count == 2)
+        #expect(Set(scansRemaining.map(\.id)) == ["b1", "b2"])
+        #expect(eventsRemaining.count == 2)
+        #expect(Set(eventsRemaining.map(\.id)) == ["be1", "be2"])
+    }
 }

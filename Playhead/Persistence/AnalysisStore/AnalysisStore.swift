@@ -2060,6 +2060,57 @@ actor AnalysisStore {
         return sqlite3_changes(db) > 0
     }
 
+    // MARK: - Cohort GC
+
+    /// Fix #4: deletes every `semantic_scan_results` and `evidence_events`
+    /// row whose `scanCohortJSON` does not canonicalize to the supplied
+    /// current cohort. Intended to be called once per app launch from
+    /// `PlayheadRuntime.init` so old rows persisted under prior cohort
+    /// hashes (e.g. after an app upgrade bumps the prompt hash, or a user
+    /// changes locale) are reaped instead of accumulating forever.
+    ///
+    /// Both DELETEs run inside a single `BEGIN IMMEDIATE … COMMIT`
+    /// transaction so a crash mid-prune cannot leave the two tables in
+    /// divergent cohort states. Returns the total number of rows deleted
+    /// across both tables, as reported by `sqlite3_changes`.
+    ///
+    /// NOTE: this method is exposed but NOT called by `migrate()`
+    /// automatically. Wiring the production call in `PlayheadRuntime.init`
+    /// is intentionally out of scope here (architectural; runtime changes
+    /// are owned by a sibling agent). Call it once at app launch from the
+    /// runtime with `ScanCohort.productionJSON()` as input.
+    @discardableResult
+    func pruneOrphanedScansForCurrentCohort(currentScanCohortJSON: String) throws -> Int {
+        let canonical = Self.canonicalizeCohortJSON(currentScanCohortJSON)
+
+        try exec("BEGIN IMMEDIATE")
+        var totalDeleted = 0
+        do {
+            // Delete semantic scan rows under a non-current cohort.
+            let scanSQL = "DELETE FROM semantic_scan_results WHERE scanCohortJSON != ?"
+            let scanStmt = try prepare(scanSQL)
+            bind(scanStmt, 1, canonical)
+            try step(scanStmt, expecting: SQLITE_DONE)
+            totalDeleted += Int(sqlite3_changes(db))
+            sqlite3_finalize(scanStmt)
+
+            // Delete evidence events under a non-current cohort.
+            let evSQL = "DELETE FROM evidence_events WHERE scanCohortJSON != ?"
+            let evStmt = try prepare(evSQL)
+            bind(evStmt, 1, canonical)
+            try step(evStmt, expecting: SQLITE_DONE)
+            totalDeleted += Int(sqlite3_changes(db))
+            sqlite3_finalize(evStmt)
+
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+
+        return totalDeleted
+    }
+
     // MARK: - CRUD: semantic_scan_results
 
     /// Canonical column order shared by all `semantic_scan_results` readers:
