@@ -244,13 +244,13 @@ struct DoubleCompletionGuardTests {
         let (bps, _, _, _) = makeBPS()
         let task = StubBackgroundTask()
 
-        // On a fresh BPS, bgTaskCompleted starts as false.
-        // First markComplete sets it to true and completes the task.
+        // On a fresh BPS, completedTaskIDs is empty.
+        // First markComplete inserts the task's ID and completes the task.
         await bps.markComplete(task, success: true)
         #expect(task.completedSuccess == true)
 
-        // Second markComplete sees bgTaskCompleted == true and skips.
-        // The task's completedSuccess should NOT be overwritten to false.
+        // Second markComplete sees the task's ID already in completedTaskIDs
+        // and returns early. completedSuccess should NOT be overwritten to false.
         await bps.markComplete(task, success: false)
         #expect(task.completedSuccess == true, "Second markComplete should be ignored")
     }
@@ -272,7 +272,7 @@ struct DoubleCompletionGuardTests {
 
         let task = StubBackgroundTask()
 
-        // Manually call markComplete twice on a fresh BPS (bgTaskCompleted starts false).
+        // Manually call markComplete twice on a fresh BPS (completedTaskIDs starts empty).
         await bps2.markComplete(task, success: true)
         #expect(task.completedSuccess == true)
 
@@ -719,5 +719,47 @@ struct RunPendingBackfillPollingLoopTests {
 
         let served = await counts.count()
         #expect(served >= 4, "Loop should have polled through the full script; served=\(served)")
+    }
+
+    @Test("Polling loop honors deadline under perpetual alternation")
+    func drainedLoopHonorsDeadlineWithAlternatingPending() async throws {
+        // Regression for H3: the deadline must be honored in the `while`
+        // condition even when the pending-count source never stabilizes
+        // into two consecutive zeros. An adversarial queue that flips
+        // between 1 and 0 forever must not hang the loop; it must exit
+        // at the deadline.
+        actor Counter {
+            var n = 0
+            func nextPending() -> Int {
+                n += 1
+                // Alternates: 1, 0, 1, 0, 1, 0, ... forever.
+                return n % 2 == 1 ? 1 : 0
+            }
+            func count() -> Int { n }
+        }
+        let counter = Counter()
+
+        let start = ContinuousClock.now
+        let deadline = start + .milliseconds(200)
+
+        await AnalysisCoordinator.runBackfillPollingLoop(
+            deadline: deadline,
+            pollInterval: .milliseconds(5),
+            isStopRequested: { false },
+            fetchPendingCount: { await counter.nextPending() },
+            // Short sleep so the loop iterates many times within the deadline.
+            sleep: { _ in try await Task.sleep(for: .milliseconds(5)) },
+            logger: Self.testLogger
+        )
+        let elapsed = ContinuousClock.now - start
+
+        // Loop must have exited at (or shortly after) the deadline, not hung.
+        #expect(elapsed < .milliseconds(800),
+                "Loop must respect the deadline even under perpetual alternation (elapsed=\(elapsed))")
+
+        // Verify we actually iterated many times (not exited after the first poll).
+        let polls = await counter.count()
+        #expect(polls >= 5,
+                "Loop should have polled multiple times before hitting deadline, got \(polls)")
     }
 }
