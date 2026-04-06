@@ -130,6 +130,50 @@ struct BackfillTaskHandlerTests {
                 "handleBackfillTask must not call start() — that path was the bug")
         #expect(task.completedSuccess == true)
     }
+
+    @Test("Overlapping BG handlers each complete their own task independently")
+    func overlappingHandlersCompleteIndependently() async throws {
+        // Regression for H1: prior to this fix, BackgroundProcessingService
+        // shared a single `bgTaskCompleted` flag and a single
+        // `activeBackgroundTask` slot across the backfill, continued-
+        // processing and pre-analysis recovery handlers. Once backfill
+        // started awaiting `runPendingBackfill` (up to 25 minutes), iOS
+        // firing the pre-analysis recovery identifier inside that window
+        // would overwrite the shared state; whichever handler completed
+        // first would silently drop the other's markComplete, leaving iOS
+        // holding a BGProcessingTask that was never reported complete.
+        let coordinator = StubAnalysisCoordinator()
+        coordinator.runPendingBackfillDuration = .milliseconds(300)
+        let (bps, _, _, _) = makeBPS(coordinator: coordinator)
+
+        let backfillTask = StubBackgroundTask()
+        let recoveryTask = StubBackgroundTask()
+
+        // Start backfill — it will await runPendingBackfill for ~300ms.
+        let backfillWork = Task { await bps.handleBackfillTask(backfillTask) }
+
+        // Wait just long enough for the backfill handler to have spawned
+        // its work task and installed its expiration handler.
+        try await Task.sleep(for: .milliseconds(30))
+
+        // Kick off recovery while backfill is still suspended. Recovery
+        // has no reconciler (none injected), so it marks complete
+        // immediately — that is fine for this test: we just need to verify
+        // the recovery completion doesn't clobber the in-flight backfill.
+        await bps.handlePreAnalysisRecovery(recoveryTask)
+
+        #expect(recoveryTask.completedSuccess != nil,
+                "Recovery task must complete independently of in-flight backfill")
+
+        // Let backfill finish.
+        try await waitForCompletion(of: backfillTask)
+        _ = await backfillWork.value
+
+        #expect(backfillTask.completedSuccess != nil,
+                "Backfill task must not be silently dropped after the recovery handler ran in the middle")
+        #expect(backfillTask.completedSuccess == true,
+                "Backfill should complete successfully after overlap")
+    }
 }
 
 // MARK: - Continued Processing Handler
@@ -543,5 +587,137 @@ struct LifecycleTests {
         await bps.stop()
 
         #expect(await bps.isHotPathActive() == false)
+    }
+}
+
+// MARK: - runPendingBackfill Polling Loop
+
+/// Regression tests for H2 and H3. These drive
+/// `AnalysisCoordinator.runBackfillPollingLoop` directly with injected
+/// closures so we can exercise the stop-request and two-consecutive-zero
+/// behaviors without standing up a full coordinator (which would require
+/// audio/feature/transcript/ad-detection/skip-orchestrator dependencies).
+import OSLog
+
+@Suite("runPendingBackfill Polling Loop")
+struct RunPendingBackfillPollingLoopTests {
+
+    private static let testLogger = Logger(subsystem: "com.playhead.tests", category: "backfill-loop")
+
+    @Test("Stop request exits the polling loop promptly")
+    func runPendingBackfillRespectsStop() async throws {
+        // Regression for H2: prior to this fix, the polling loop only
+        // consulted `Task.isCancelled` and the 25-min deadline. When
+        // BackgroundProcessingService observed thermal=critical and called
+        // `await coordinator.stop()`, the stop ran on the coordinator actor
+        // concurrently with the loop but did nothing to cancel the Task
+        // hosting the loop — so the loop would continue polling for up to
+        // 25 minutes after the coordinator logged "stopped".
+        //
+        // The fix adds a `stopRequested` flag on the coordinator and a
+        // closure hook in the loop that checks it each iteration.
+
+        // Box used so the closures can race stop-state safely.
+        actor StopBox {
+            var stopped = false
+            func stop() { stopped = true }
+            func value() -> Bool { stopped }
+        }
+        let box = StopBox()
+
+        // Fire the stop shortly after the loop begins.
+        Task {
+            try? await Task.sleep(for: .milliseconds(50))
+            await box.stop()
+        }
+
+        let start = ContinuousClock.now
+        await AnalysisCoordinator.runBackfillPollingLoop(
+            deadline: start + .seconds(25 * 60),
+            pollInterval: .milliseconds(20),
+            isStopRequested: { await box.value() },
+            // Pending count stays positive so the loop would never drain
+            // on its own — only stopRequested can end it.
+            fetchPendingCount: { 3 },
+            sleep: { try await Task.sleep(for: $0) },
+            logger: Self.testLogger
+        )
+        let elapsed = ContinuousClock.now - start
+
+        #expect(elapsed < .milliseconds(500),
+                "runBackfillPollingLoop must exit within 500ms once stopRequested=true (was \(elapsed))")
+    }
+
+    @Test("Drain requires two consecutive zero polls")
+    func drainedRequiresTwoConsecutivePolls() async throws {
+        // Regression for H3: the loop used to return on the first zero
+        // pending poll. AnalysisWorkScheduler has a transient zero window
+        // between finishing one job and picking up a tier-advanced next
+        // job (e.g. T0 → T1 rollover); returning early was surrendering BG
+        // time prematurely on small single-job queues.
+
+        // Scripted sequence: [job] → [] → [jobAfterTierAdvancement] → [] → []
+        actor Counts {
+            var sequence: [Int]
+            var index = 0
+            var maxServed = 0
+            init(_ seq: [Int]) { self.sequence = seq }
+            func next() -> Int {
+                let value = index < sequence.count ? sequence[index] : 0
+                index += 1
+                maxServed = max(maxServed, index)
+                return value
+            }
+            func served() -> Int { maxServed }
+        }
+        let counts = Counts([1, 0, 1, 0, 0])
+
+        await AnalysisCoordinator.runBackfillPollingLoop(
+            deadline: ContinuousClock.now + .seconds(30),
+            pollInterval: .milliseconds(5),
+            isStopRequested: { false },
+            fetchPendingCount: { await counts.next() },
+            sleep: { try await Task.sleep(for: $0) },
+            logger: Self.testLogger
+        )
+
+        // We must have consumed all five entries before declaring drain.
+        // If the loop had returned on the first zero (index 2) it would
+        // have served only 2 polls and missed the tier-advanced job.
+        let served = await counts.served()
+        #expect(served >= 5,
+                "Loop must not declare drain on a transient zero; served only \(served) polls")
+    }
+
+    @Test("Single persistent zero poll does not declare drain")
+    func singleZeroPollDoesNotDrain() async throws {
+        // Belt-and-braces companion for H3: a single zero followed by more
+        // work must not end the loop; only two consecutive zeros should.
+        actor Counts {
+            var index = 0
+            // [0, 2, 0, 0] — one zero, then work, then two zeros.
+            let sequence = [0, 2, 0, 0]
+            var served = 0
+            func next() -> Int {
+                let v = index < sequence.count ? sequence[index] : 0
+                index += 1
+                served = index
+                return v
+            }
+            func count() -> Int { served }
+        }
+        let counts = Counts()
+
+        await AnalysisCoordinator.runBackfillPollingLoop(
+            deadline: ContinuousClock.now + .seconds(30),
+            pollInterval: .milliseconds(5),
+            isStopRequested: { false },
+            fetchPendingCount: { await counts.next() },
+            sleep: { try await Task.sleep(for: $0) },
+            logger: Self.testLogger
+        )
+
+        let served = await counts.count()
+        #expect(served >= 4, "Loop should have polled through the full script; served=\(served)")
     }
 }

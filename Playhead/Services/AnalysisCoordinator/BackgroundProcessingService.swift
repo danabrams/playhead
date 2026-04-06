@@ -121,13 +121,22 @@ actor BackgroundProcessingService {
     /// Task observing capability changes for thermal/battery management.
     private var capabilityObserverTask: Task<Void, Never>?
 
-    /// Task for the active background processing expiration handler.
-    private var activeBackgroundTask: Task<Void, Never>?
+    /// Tasks for active background processing work, keyed by the identity of
+    /// the BGProcessingTask they are servicing. Each handler inserts its own
+    /// entry on entry and removes it on completion; `stop()` cancels every
+    /// in-flight entry. Keyed per-task so overlapping handlers (e.g. the
+    /// pre-analysis recovery task fires while the backfill task is suspended
+    /// inside `runPendingBackfill`) do not orphan each other.
+    private var activeBackgroundTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
 
-    /// Guards against double-completion of BGProcessingTask. Both the work
+    /// Task identifiers that have already had `setTaskCompleted` called.
+    /// Guards against double-completion of BGProcessingTask: both the work
     /// completion path and the expiration handler check this before calling
-    /// setTaskCompleted.
-    private var bgTaskCompleted = false
+    /// setTaskCompleted. Per-task (rather than a single shared bool) so that
+    /// an overlapping handler completing its own task does not silently drop
+    /// another handler's completion, which would leave iOS holding an
+    /// unreported BGProcessingTask.
+    private var completedTaskIDs = Set<ObjectIdentifier>()
 
     /// Current thermal state, cached for decision-making.
     private var currentThermalState: ThermalState = .nominal
@@ -270,8 +279,10 @@ actor BackgroundProcessingService {
     func stop() {
         capabilityObserverTask?.cancel()
         capabilityObserverTask = nil
-        activeBackgroundTask?.cancel()
-        activeBackgroundTask = nil
+        for (_, task) in activeBackgroundTasks {
+            task.cancel()
+        }
+        activeBackgroundTasks.removeAll()
         hotPathActive = false
         logger.info("BackgroundProcessingService stopped")
     }
@@ -349,12 +360,17 @@ actor BackgroundProcessingService {
 
     /// Safely complete a BGProcessingTask, guarding against double-completion.
     /// Both the work path and expiration handler call this; only the first wins.
+    /// Tracked per-task so overlapping handlers cannot silently drop each
+    /// other's completions.
     func markComplete(_ task: any BackgroundProcessingTaskProtocol, success: Bool) {
-        guard !bgTaskCompleted else {
+        let id = ObjectIdentifier(task as AnyObject)
+        guard !completedTaskIDs.contains(id) else {
             logger.debug("BGTask completion already called, ignoring duplicate")
             return
         }
-        bgTaskCompleted = true
+        completedTaskIDs.insert(id)
+        // Clean up the active-task entry for this BGProcessingTask, if any.
+        activeBackgroundTasks.removeValue(forKey: id)
         task.setTaskCompleted(success: success)
     }
 
@@ -365,8 +381,7 @@ actor BackgroundProcessingService {
     func handleBackfillTask(_ task: any BackgroundProcessingTaskProtocol) {
         logger.info("Backfill task started")
 
-        // Reset completion guard for this task invocation.
-        bgTaskCompleted = false
+        let taskID = ObjectIdentifier(task as AnyObject)
 
         // Schedule the next occurrence.
         scheduleBackfillIfNeeded()
@@ -419,7 +434,7 @@ actor BackgroundProcessingService {
             self.logger.info("Backfill task completed")
         }
 
-        activeBackgroundTask = workTask
+        activeBackgroundTasks[taskID] = workTask
 
         // Handle expiration: cancel work gracefully. The nonisolated callback
         // hops to the actor via Task to check the completion guard.
@@ -452,9 +467,6 @@ actor BackgroundProcessingService {
     /// See bead for design: BGContinuedProcessingTask rewiring.
     func handleContinuedProcessingTask(_ task: any BackgroundProcessingTaskProtocol) {
         logger.info("Continued processing task started (no-op: no continuation work wired)")
-
-        // Reset completion guard for this task invocation.
-        bgTaskCompleted = false
 
         // Honest no-op: there is no continuation work to perform today.
         // Mark complete so iOS does not treat this as a hang, and return
@@ -537,7 +549,7 @@ actor BackgroundProcessingService {
     func handlePreAnalysisRecovery(_ task: any BackgroundProcessingTaskProtocol) async {
         logger.info("Pre-analysis recovery task started")
 
-        bgTaskCompleted = false
+        let taskID = ObjectIdentifier(task as AnyObject)
 
         // Schedule the next occurrence.
         schedulePreAnalysisRecovery()
@@ -554,7 +566,7 @@ actor BackgroundProcessingService {
             self.logger.info("Pre-analysis recovery task completed")
         }
 
-        activeBackgroundTask = workTask
+        activeBackgroundTasks[taskID] = workTask
 
         task.expirationHandler = { [weak self] in
             workTask.cancel()

@@ -159,6 +159,13 @@ actor AnalysisCoordinator {
     /// Last time we processed a time update, to debounce.
     private var lastTimeUpdateProcessed: TimeInterval = 0
 
+    /// Set to `true` when `stop()` is called. Observed by `runPendingBackfill`
+    /// so that a coordinator stop initiated mid-backfill (e.g. thermal=critical
+    /// triggering `BackgroundProcessingService.handleCapabilityUpdate`) tears
+    /// down the polling loop promptly instead of spinning for up to 25 minutes.
+    /// Reset in `start()`.
+    private var stopRequested = false
+
     // MARK: - Init
 
     init(
@@ -185,6 +192,9 @@ actor AnalysisCoordinator {
 
     /// Start observing capability changes. Call once at app launch.
     func start() {
+        // Clear any prior stop request so a stop/start cycle re-enables the
+        // polling loop in runPendingBackfill.
+        stopRequested = false
         capabilityObserverTask?.cancel()
         capabilityObserverTask = Task { [weak self] in
             guard let self else { return }
@@ -199,6 +209,7 @@ actor AnalysisCoordinator {
 
     /// Stop all work and clean up.
     func stop() {
+        stopRequested = true
         cancelPipeline()
         capabilityObserverTask?.cancel()
         capabilityObserverTask = nil
@@ -237,27 +248,84 @@ actor AnalysisCoordinator {
         // without burning the actor on tight queries.
         let pollInterval: Duration = .seconds(1)
 
+        await Self.runBackfillPollingLoop(
+            deadline: deadline,
+            pollInterval: pollInterval,
+            isStopRequested: { [weak self] in
+                guard let self else { return true }
+                return await self.stopRequested
+            },
+            fetchPendingCount: { [weak self] in
+                guard let self else { return 0 }
+                return await self.fetchPendingJobCount()
+            },
+            sleep: { duration in
+                try await Task.sleep(for: duration)
+            },
+            logger: logger
+        )
+    }
+
+    /// Read the current pending job count across queued/running/paused.
+    /// Extracted so `runPendingBackfill` can delegate to a closure-driven
+    /// polling loop that is unit-testable without a full coordinator.
+    private func fetchPendingJobCount() async -> Int {
+        let queued = (try? await store.fetchJobsByState("queued")) ?? []
+        let running = (try? await store.fetchJobsByState("running")) ?? []
+        let paused = (try? await store.fetchJobsByState("paused")) ?? []
+        return queued.count + running.count + paused.count
+    }
+
+    /// The polling loop used by `runPendingBackfill`. Exposed as a static
+    /// helper so regression tests can drive it with injected closures without
+    /// standing up a full `AnalysisCoordinator` (which transitively requires
+    /// AudioService / FeatureService / TranscriptEngine / AdDetection / etc.).
+    ///
+    /// Behaviour notes covered by regression tests:
+    ///   - H2: the loop exits promptly when `isStopRequested` returns true,
+    ///     not just on `Task.isCancelled` / deadline.
+    ///   - H3: requires two consecutive zero-pending polls before declaring
+    ///     the queue drained. Single-job queues with tier advancement expose
+    ///     a transient zero window between AnalysisWorkScheduler completing
+    ///     one job and picking up a tier-advanced next job; returning on the
+    ///     first zero was causing BG time to be surrendered prematurely.
+    static func runBackfillPollingLoop(
+        deadline: ContinuousClock.Instant,
+        pollInterval: Duration,
+        zeroPollThreshold: Int = 2,
+        isStopRequested: @Sendable () async -> Bool,
+        fetchPendingCount: @Sendable () async -> Int,
+        sleep: @Sendable (Duration) async throws -> Void,
+        logger: Logger
+    ) async {
         var processedAny = false
+        var consecutiveZeroCount = 0
 
         while !Task.isCancelled, ContinuousClock.now < deadline {
-            let queued = (try? await store.fetchJobsByState("queued")) ?? []
-            let running = (try? await store.fetchJobsByState("running")) ?? []
-            let paused = (try? await store.fetchJobsByState("paused")) ?? []
-
-            let pendingCount = queued.count + running.count + paused.count
-
-            if pendingCount == 0 {
-                logger.info("runPendingBackfill: queue drained (processed=\(processedAny))")
+            if await isStopRequested() {
+                logger.info("runPendingBackfill: coordinator stop requested, exiting loop")
                 return
             }
 
-            processedAny = true
-            logger.debug("runPendingBackfill: \(pendingCount) jobs pending (queued=\(queued.count) running=\(running.count) paused=\(paused.count))")
+            let pendingCount = await fetchPendingCount()
+
+            if pendingCount == 0 {
+                consecutiveZeroCount += 1
+                if consecutiveZeroCount >= zeroPollThreshold {
+                    logger.info("runPendingBackfill: queue drained after \(zeroPollThreshold) consecutive empty polls (processed=\(processedAny))")
+                    return
+                }
+                logger.debug("runPendingBackfill: zero pending (\(consecutiveZeroCount)/\(zeroPollThreshold)) — waiting for tier advancement")
+            } else {
+                consecutiveZeroCount = 0
+                processedAny = true
+                logger.debug("runPendingBackfill: \(pendingCount) jobs pending")
+            }
 
             // Sleep returns CancellationError when the task is cancelled,
             // which propagates expiration through the loop guard above.
             do {
-                try await Task.sleep(for: pollInterval)
+                try await sleep(pollInterval)
             } catch {
                 logger.info("runPendingBackfill: cancelled by expiration")
                 return
