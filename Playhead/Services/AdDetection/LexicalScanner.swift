@@ -20,12 +20,37 @@ struct LexicalScannerConfig: Sendable {
     /// Minimum number of distinct pattern hits required to emit a candidate.
     let minHitsForCandidate: Int
 
+    /// Weight threshold for single-hit promotion. If any hit in a merge group
+    /// has weight >= this value, the group bypasses `minHitsForCandidate` and
+    /// is emitted as a candidate. Set to `.infinity` to disable the bypass.
+    ///
+    /// Default 0.95 targets strong signals (sponsor disclosures, promo codes,
+    /// literal-TLD URLs) while excluding weaker purchase-language phrases
+    /// (weight 0.9) and spoken "dot com" URL CTAs (weight 0.8).
+    let highWeightBypassThreshold: Double
+
     /// Detector version tag written to each candidate.
     let detectorVersion: String
+
+    /// Explicit initializer with a default for `highWeightBypassThreshold`,
+    /// preserving source compatibility for existing call sites that were
+    /// built against the older three-field config.
+    init(
+        mergeGapThreshold: TimeInterval,
+        minHitsForCandidate: Int,
+        highWeightBypassThreshold: Double = 0.95,
+        detectorVersion: String
+    ) {
+        self.mergeGapThreshold = mergeGapThreshold
+        self.minHitsForCandidate = minHitsForCandidate
+        self.highWeightBypassThreshold = highWeightBypassThreshold
+        self.detectorVersion = detectorVersion
+    }
 
     static let `default` = LexicalScannerConfig(
         mergeGapThreshold: 30.0,
         minHitsForCandidate: 2,
+        highWeightBypassThreshold: 0.95,
         detectorVersion: "lexical-v1"
     )
 }
@@ -98,6 +123,16 @@ struct LexicalScanner: Sendable {
     /// Built once at init — regex compilation is expensive.
     private let patternGroups: [LexicalPatternCategory: [NSRegularExpression]]
 
+    /// Compiled "strong URL" patterns — literal-TLD matches like `cvs.com`
+    /// or `teamcoco.io`. Emitted as `.urlCTA` hits with a boosted weight
+    /// (`strongUrlWeight`) so a single match can bypass `minHitsForCandidate`
+    /// via the `highWeightBypassThreshold` check.
+    private let strongUrlPatterns: [NSRegularExpression]
+
+    /// Weight used for literal-TLD URL hits. Set slightly above the default
+    /// high-weight bypass threshold so a single URL promotes to a candidate.
+    private static let strongUrlWeight: Double = 0.95
+
     /// Per-show sponsor terms parsed from PodcastProfile.sponsorLexicon.
     /// Empty array when no profile is available.
     private let showSponsorPatterns: [NSRegularExpression]
@@ -110,6 +145,7 @@ struct LexicalScanner: Sendable {
     ) {
         self.config = config
         self.patternGroups = Self.compileBuiltInPatterns()
+        self.strongUrlPatterns = Self.compileStrongUrlPatterns()
         self.showSponsorPatterns = Self.compileSponsorLexicon(
             from: podcastProfile
         )
@@ -193,6 +229,30 @@ struct LexicalScanner: Sendable {
                         weight: weight
                     ))
                 }
+            }
+        }
+
+        // Scan strong URL patterns (literal TLDs like `cvs.com`).
+        // These match written-form URLs that the generic urlCTA patterns miss,
+        // and are given a boosted weight so a single hit is enough to promote
+        // to a candidate via the high-weight bypass.
+        for pattern in strongUrlPatterns {
+            let matches = pattern.matches(in: text, range: fullRange)
+            for match in matches {
+                let matchedText = nsText.substring(with: match.range)
+                let (startTime, endTime) = interpolateTiming(
+                    matchRange: match.range,
+                    textLength: nsText.length,
+                    chunkStart: chunk.startTime,
+                    chunkEnd: chunk.endTime
+                )
+                hits.append(LexicalHit(
+                    category: .urlCTA,
+                    matchedText: matchedText,
+                    startTime: startTime,
+                    endTime: endTime,
+                    weight: Self.strongUrlWeight
+                ))
             }
         }
 
@@ -293,6 +353,25 @@ struct LexicalScanner: Sendable {
         ])
 
         return groups
+    }
+
+    /// Compile the "strong URL" pattern set: literal domain-like tokens
+    /// with a recognizable TLD (`host.com`, `host.net`, `host.io`, etc).
+    ///
+    /// Uses explicit character classes rather than `\w` because `\w` does
+    /// not consume the `.` and produces overlapping/partial matches. The
+    /// leading `\b` anchor prevents matching inside larger words, and the
+    /// trailing `(?![a-z0-9])` guard keeps us from matching a longer TLD
+    /// prefix (e.g. ".coach" when looking for ".co").
+    private static func compileStrongUrlPatterns() -> [NSRegularExpression] {
+        let tlds = ["com", "net", "org", "io", "co", "app", "fm", "tv"]
+        let tldAlternation = tlds.joined(separator: "|")
+        // host: one or more dot-separated alnum/hyphen labels
+        // (matches `cvs`, `team-coco`, `siriusxm`, `news.example`)
+        let pattern = #"\b[a-z0-9][a-z0-9\-]*(?:\.[a-z0-9][a-z0-9\-]*)*\.(?:"# +
+            tldAlternation +
+            #")\b(?![a-z0-9])"#
+        return compilePatterns([pattern])
     }
 
     /// Compile pattern strings into NSRegularExpression instances.
@@ -431,7 +510,15 @@ struct LexicalScanner: Sendable {
         endTime: Double,
         analysisAssetId: String
     ) -> LexicalCandidate? {
-        guard hits.count >= config.minHitsForCandidate else { return nil }
+        // A merge group normally needs `minHitsForCandidate` hits to emit,
+        // but a single sufficiently strong hit (e.g. a sponsor disclosure,
+        // promo code, or literal-TLD URL) bypasses that threshold.
+        let hasHighWeightHit = hits.contains { hit in
+            hit.weight >= config.highWeightBypassThreshold
+        }
+        if hits.count < config.minHitsForCandidate && !hasHighWeightHit {
+            return nil
+        }
 
         let categories = Set(hits.map(\.category))
         let totalWeight = hits.reduce(0.0) { $0 + $1.weight }

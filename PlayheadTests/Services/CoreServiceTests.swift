@@ -673,9 +673,12 @@ struct LexicalScannerMergingTests {
 
     @Test("Single hit below minHitsForCandidate is filtered out")
     func belowMinHits() {
+        // Disable the high-weight bypass (set threshold above any pattern weight)
+        // to test minHitsForCandidate behavior in isolation.
         let config = LexicalScannerConfig(
             mergeGapThreshold: 30.0,
             minHitsForCandidate: 3,
+            highWeightBypassThreshold: 10.0,
             detectorVersion: "test-v1"
         )
         let scanner = LexicalScanner(config: config)
@@ -687,7 +690,28 @@ struct LexicalScannerMergingTests {
             analysisAssetId: "asset-1"
         )
         #expect(candidates.isEmpty,
-                "A single hit should not meet minHitsForCandidate=3")
+                "A single hit should not meet minHitsForCandidate=3 (bypass disabled)")
+    }
+
+    @Test("Single high-weight hit promotes via bypass")
+    func singleHighWeightHitBypass() {
+        // Default config has highWeightBypassThreshold = 0.95, so a single
+        // sponsor-pattern hit (weight 1.0) should promote to candidate
+        // even though minHitsForCandidate defaults to 2.
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(
+            text: "brought to you by acme corp"
+        )
+        let candidates = scanner.scan(
+            chunks: [chunk],
+            analysisAssetId: "asset-1"
+        )
+        #expect(candidates.count == 1,
+                "Single high-weight sponsor hit should bypass minHitsForCandidate=2")
+        if let c = candidates.first {
+            #expect(c.hitCount == 1)
+            #expect(c.categories.contains(.sponsor))
+        }
     }
 
     @Test("Confidence scales with total weight")
