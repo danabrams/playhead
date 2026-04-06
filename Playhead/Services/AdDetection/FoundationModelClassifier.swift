@@ -838,7 +838,7 @@ struct FoundationModelClassifier: Sendable {
         evidenceCatalog: EvidenceCatalog
     ) -> [ResolvedEvidenceAnchor] {
         let validLineRefs = Set(plan.lineRefs)
-        anchors.compactMap { anchor in
+        return anchors.compactMap { anchor in
             if let evidenceRef = anchor.evidenceRef,
                let promptEntry = plan.promptEvidence.first(where: { $0.entry.evidenceRef == evidenceRef }) {
                 return ResolvedEvidenceAnchor(
