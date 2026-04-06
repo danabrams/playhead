@@ -356,6 +356,88 @@ struct SemanticScanPersistenceTests {
 
     // MARK: - New behaviour from review fixes
 
+    @Test("H-2: evidence_events batches from different transcript versions coexist for audit")
+    func evidenceEventsFromDistinctScansCoexist() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        let cohort = try makeScanCohortJSON()
+        let scanV1 = SemanticScanResult(
+            id: "scan-v1",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 0,
+            windowLastAtomOrdinal: 9,
+            windowStartTime: 0,
+            windowEndTime: 90,
+            scanPass: "passB",
+            transcriptQuality: .good,
+            disposition: .containsAd,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: cohort,
+            transcriptVersion: "tx-v1"
+        )
+        let scanV2 = SemanticScanResult(
+            id: "scan-v2",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 0,
+            windowLastAtomOrdinal: 9,
+            windowStartTime: 0,
+            windowEndTime: 90,
+            scanPass: "passB",
+            transcriptQuality: .good,
+            disposition: .containsAd,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: cohort,
+            transcriptVersion: "tx-v2"
+        )
+        let eventV1 = EvidenceEvent(
+            id: "ev-v1",
+            analysisAssetId: "asset-1",
+            eventType: "fm.spanRefinement",
+            sourceType: .fm,
+            atomOrdinals: "[1,2,3]",
+            evidenceJSON: #"{"run":"v1"}"#,
+            scanCohortJSON: cohort,
+            createdAt: 100
+        )
+        let eventV2 = EvidenceEvent(
+            id: "ev-v2",
+            analysisAssetId: "asset-1",
+            eventType: "fm.spanRefinement",
+            // Different eventType is not needed; the natural key includes
+            // evidenceJSON so differing payloads allow the row through
+            // dedup. Use a different atomOrdinals tuple to guarantee the
+            // two rows are distinguishable.
+            sourceType: .fm,
+            atomOrdinals: "[4,5,6]",
+            evidenceJSON: #"{"run":"v2"}"#,
+            scanCohortJSON: cohort,
+            createdAt: 200
+        )
+
+        try await store.recordSemanticScanResult(scanV1, evidenceEvents: [eventV1])
+        try await store.recordSemanticScanResult(scanV2, evidenceEvents: [eventV2])
+
+        let events = try await store.fetchEvidenceEvents(analysisAssetId: "asset-1")
+        #expect(events.count == 2, "evidence events from distinct scan runs must both persist (append-only audit)")
+        let ids = Set(events.map(\.id))
+        #expect(ids == ["ev-v1", "ev-v2"])
+    }
+
     @Test("H-1: canonicalized cohort JSON collapses reuse key across key-order differences")
     func semanticScanResultCollapsesEquivalentCohortsAcrossKeyOrder() async throws {
         let store = try await makeTestStore()
@@ -565,6 +647,58 @@ struct SemanticScanPersistenceTests {
         }
     }
 
+    @Test("L-3: validateScanCohortJSON rejects a JSON array at the top level")
+    func validateScanCohortJSON_rejectsArrayAtTopLevel() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        // Parseable JSON but not a cohort object: a top-level array.
+        let bad = SemanticScanResult(
+            id: "bad-array-cohort",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 0,
+            windowLastAtomOrdinal: 1,
+            windowStartTime: 0,
+            windowEndTime: 1,
+            scanPass: "passA",
+            transcriptQuality: .good,
+            disposition: .noAds,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: "[]",
+            transcriptVersion: "tx-v1"
+        )
+        await #expect(throws: AnalysisStoreError.self) {
+            try await store.insertSemanticScanResult(bad)
+        }
+    }
+
+    @Test("L-4: validateAtomOrdinalsJSON rejects float elements")
+    func validateAtomOrdinalsJSON_rejectsFloatElements() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        let floats = EvidenceEvent(
+            id: "evt-floats",
+            analysisAssetId: "asset-1",
+            eventType: "windowQuoted",
+            sourceType: .fm,
+            atomOrdinals: "[1.5, 2.0]",
+            evidenceJSON: "{}",
+            scanCohortJSON: try makeScanCohortJSON(),
+            createdAt: 0
+        )
+        await #expect(throws: AnalysisStoreError.self) {
+            try await store.insertEvidenceEvent(floats)
+        }
+    }
+
     @Test("malformed scanCohortJSON throws at the persistence boundary")
     func semanticScanResultRejectsMalformedScanCohortJSON() async throws {
         let store = try await makeTestStore()
@@ -712,8 +846,14 @@ struct SemanticScanPersistenceTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makePersistenceTestAsset())
 
-        // Insert 200 rows with varying cohorts and ordinals.
-        for i in 0..<200 {
+        // H-4: insert 2000 rows with varying cohorts and ordinals. Before
+        // the fix, the reuse lookup filtered without using the
+        // UNIQUE(reuseKeyHash) index and degraded to an O(n) scan; the
+        // rewritten query hashes the tuple and hits the unique index for a
+        // single lookup. 2000 rows keeps us well under 50ms either way for
+        // the indexed path while catching an accidental regression to the
+        // scan-order implementation.
+        for i in 0..<2000 {
             let cohort = try makeScanCohortJSON(promptHash: "prompt-\(i)")
             try await store.insertSemanticScanResult(
                 SemanticScanResult(

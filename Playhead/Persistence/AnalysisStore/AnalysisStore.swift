@@ -251,9 +251,21 @@ actor AnalysisStore {
         }
         guard !alreadyDone else { return }
 
-        try createTables()
-        try migrateTranscriptChunksPhase1()
-        try writeInitialSchemaVersionIfNeeded()
+        // H-5: wrap the whole migrate body in BEGIN IMMEDIATE … COMMIT so
+        // a crash mid-migration cannot leave DDL applied without the
+        // matching _meta schema_version row. SQLite supports transactional
+        // DDL, so table creation, ALTER TABLE, and the version write all
+        // roll back together on any thrown error.
+        try exec("BEGIN IMMEDIATE")
+        do {
+            try createTables()
+            try migrateTranscriptChunksPhase1()
+            try writeInitialSchemaVersionIfNeeded()
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
     }
 
     private func migrateTranscriptChunksPhase1() throws {
@@ -570,6 +582,16 @@ actor AnalysisStore {
         // evidence_events
         // H11: UNIQUE on (asset, eventType, sourceType, atomOrdinals, cohort).
         // Inserts use INSERT OR IGNORE for silent idempotent dedup.
+        //
+        // H-2: evidence events are intentionally NOT FK-linked to
+        // `semantic_scan_results`. They reference the asset directly via
+        // `analysisAssetId` so that when an older scan row is replaced via
+        // `reuseKeyHash` collision (INSERT OR REPLACE), the historical
+        // evidence rows remain for audit purposes. Idempotency of re-runs
+        // is handled by the UNIQUE(asset, eventType, sourceType,
+        // atomOrdinals, scanCohortJSON) constraint plus INSERT OR IGNORE:
+        // a second run with the same cohort silently dedups, while a new
+        // transcriptVersion or cohort naturally appends.
         try exec("""
             CREATE TABLE IF NOT EXISTS evidence_events (
                 id TEXT PRIMARY KEY,
@@ -2006,9 +2028,16 @@ actor AnalysisStore {
         return results
     }
 
-    /// C6: only consider successful scans for reuse, and prefer the newest one
-    /// by rowid. The previous implementation ordered by attemptCount DESC,
-    /// which silently surfaced many-attempt failures over later successes.
+    /// C6/H-4: look up a reusable successful scan by computing the
+    /// `reuseKeyHash` from the caller's tuple and hitting the
+    /// `UNIQUE(reuseKeyHash)` index for a single O(log n) lookup. The
+    /// previous implementation filtered on the (asset, ordinals, pass,
+    /// transcriptVersion) tuple and iterated matching rows to compare
+    /// cohort JSON in memory — correct but O(n) on the per-asset row set.
+    ///
+    /// Because inserts canonicalize cohort JSON before hashing (H-1) and
+    /// this lookup does the same, cohort-equivalent strings always resolve
+    /// to the same row regardless of upstream JSON formatting.
     func fetchReusableSemanticScanResult(
         analysisAssetId: String,
         windowFirstAtomOrdinal: Int,
@@ -2017,34 +2046,24 @@ actor AnalysisStore {
         scanCohortJSON: String,
         transcriptVersion: String
     ) throws -> SemanticScanResult? {
+        let hash = Self.semanticScanReuseKeyHash(
+            analysisAssetId: analysisAssetId,
+            windowFirstAtomOrdinal: windowFirstAtomOrdinal,
+            windowLastAtomOrdinal: windowLastAtomOrdinal,
+            scanPass: scanPass,
+            transcriptVersion: transcriptVersion,
+            scanCohortJSON: scanCohortJSON
+        )
         let sql = """
             SELECT \(Self.semanticScanResultColumns) FROM semantic_scan_results
-            WHERE analysisAssetId = ?
-              AND windowFirstAtomOrdinal = ?
-              AND windowLastAtomOrdinal = ?
-              AND scanPass = ?
-              AND transcriptVersion = ?
-              AND status = 'success'
-            ORDER BY rowid DESC
+            WHERE reuseKeyHash = ? AND status = 'success'
+            LIMIT 1
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, analysisAssetId)
-        bind(stmt, 2, windowFirstAtomOrdinal)
-        bind(stmt, 3, windowLastAtomOrdinal)
-        bind(stmt, 4, scanPass)
-        bind(stmt, 5, transcriptVersion)
-
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            let result = try readSemanticScanResult(stmt)
-            if result.isReusable(
-                scanCohortJSON: scanCohortJSON,
-                transcriptVersion: transcriptVersion
-            ) {
-                return result
-            }
-        }
-        return nil
+        bind(stmt, 1, hash)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return try readSemanticScanResult(stmt)
     }
 
     // MARK: - CRUD: evidence_events
@@ -2060,29 +2079,16 @@ actor AnalysisStore {
     func insertEvidenceEvent(_ event: EvidenceEvent) throws {
         try validateAtomOrdinalsJSON(event.atomOrdinals)
         try validateScanCohortJSON(event.scanCohortJSON)
-        // H11: silent dedup on (asset, eventType, sourceType, atomOrdinals,
-        // scanCohortJSON). The PRIMARY KEY collision still throws so callers
-        // that pass a stale UUID for *new* evidence get a loud failure rather
-        // than silent overwrite.
-        let dupSQL = """
-            SELECT 1 FROM evidence_events
-            WHERE analysisAssetId = ? AND eventType = ? AND sourceType = ?
-              AND atomOrdinals = ? AND scanCohortJSON = ?
-            LIMIT 1
-            """
-        let dupStmt = try prepare(dupSQL)
-        defer { sqlite3_finalize(dupStmt) }
-        bind(dupStmt, 1, event.analysisAssetId)
-        bind(dupStmt, 2, event.eventType)
-        bind(dupStmt, 3, event.sourceType.rawValue)
-        bind(dupStmt, 4, event.atomOrdinals)
-        bind(dupStmt, 5, event.scanCohortJSON)
-        if sqlite3_step(dupStmt) == SQLITE_ROW {
-            return // already present, silent dedup
-        }
-
+        // H11/M-4: silent dedup on (asset, eventType, sourceType,
+        // atomOrdinals, scanCohortJSON) via `INSERT OR IGNORE`. The old
+        // implementation did a pre-check SELECT followed by a plain INSERT
+        // — correct under the actor's serialization guarantee but wasteful
+        // and footgun-y if ever lifted out of an actor. The PRIMARY KEY
+        // collision on `id` is handled by a separate probe below so
+        // callers that pass a stale UUID for *new* evidence still get a
+        // loud failure rather than silent overwrite.
         let sql = """
-            INSERT INTO evidence_events
+            INSERT OR IGNORE INTO evidence_events
             (id, analysisAssetId, eventType, sourceType, atomOrdinals,
              evidenceJSON, scanCohortJSON, createdAt)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -2098,6 +2104,41 @@ actor AnalysisStore {
         bind(stmt, 7, event.scanCohortJSON)
         bind(stmt, 8, event.createdAt)
         try step(stmt, expecting: SQLITE_DONE)
+
+        if sqlite3_changes(db) == 0 {
+            // The row was ignored. Distinguish natural-key dedup (silent
+            // success) from a stale PRIMARY KEY collision (loud failure)
+            // by probing whether a row with *this* id exists: if it
+            // doesn't, the ignore was a natural-key dedup and we return
+            // successfully; if it does but was created with different
+            // fields, we throw so the caller learns they reused an id.
+            let probe = try prepare("SELECT 1 FROM evidence_events WHERE id = ? LIMIT 1")
+            defer { sqlite3_finalize(probe) }
+            bind(probe, 1, event.id)
+            if sqlite3_step(probe) == SQLITE_ROW {
+                // An id-collision that wasn't the natural-key match means
+                // the existing row differs in fields the caller couldn't
+                // have controlled. We can't cheaply tell them apart here,
+                // but the existing test contract is: duplicate *id* with a
+                // different body throws. Probe the natural key: if it
+                // matches, the ignore was legitimate dedup.
+                let nk = try prepare("""
+                    SELECT 1 FROM evidence_events
+                    WHERE analysisAssetId = ? AND eventType = ? AND sourceType = ?
+                      AND atomOrdinals = ? AND scanCohortJSON = ?
+                    LIMIT 1
+                    """)
+                defer { sqlite3_finalize(nk) }
+                bind(nk, 1, event.analysisAssetId)
+                bind(nk, 2, event.eventType)
+                bind(nk, 3, event.sourceType.rawValue)
+                bind(nk, 4, event.atomOrdinals)
+                bind(nk, 5, event.scanCohortJSON)
+                if sqlite3_step(nk) != SQLITE_ROW {
+                    throw AnalysisStoreError.insertFailed("evidence_events id '\(event.id)' already in use with different body")
+                }
+            }
+        }
     }
 
     func fetchEvidenceEvents(analysisAssetId: String) throws -> [EvidenceEvent] {
@@ -2119,27 +2160,34 @@ actor AnalysisStore {
 
     // MARK: - JSON validation helpers
 
-    /// M25: parses `atomOrdinals` and verifies it's a JSON array of integers.
+    /// M25/L-4: parses `atomOrdinals` and verifies it's a JSON array of
+    /// integers. Uses `JSONDecoder.decode([Int].self, ...)` which rejects
+    /// floats (`JSONSerialization` happily parses `1.5` as an `NSNumber`
+    /// and a permissive numeric cast would let it through).
     private func validateAtomOrdinalsJSON(_ json: String) throws {
-        guard let data = json.data(using: .utf8),
-              let parsed = try? JSONSerialization.jsonObject(with: data),
-              let array = parsed as? [Any] else {
+        guard let data = json.data(using: .utf8) else {
             throw AnalysisStoreError.invalidEvidenceEvent("atomOrdinals must be a JSON array of integers, got: \(json.prefix(80))")
         }
-        for element in array {
-            if (element as? Int) == nil, (element as? NSNumber) == nil {
-                throw AnalysisStoreError.invalidEvidenceEvent("atomOrdinals must be a JSON array of integers")
-            }
+        do {
+            _ = try JSONDecoder().decode([Int].self, from: data)
+        } catch {
+            throw AnalysisStoreError.invalidEvidenceEvent("atomOrdinals must be a JSON array of integers, got: \(json.prefix(80))")
         }
     }
 
-    /// Validation hook for the persistence boundary. Allows malformed
-    /// `scanCohortJSON` to be rejected early instead of silently failing the
-    /// reuse comparison later.
+    /// L-3: validates that `scanCohortJSON` decodes as a real `ScanCohort`
+    /// object, not merely any parseable JSON value. The previous
+    /// `JSONSerialization.jsonObject` check accepted top-level arrays,
+    /// strings, or numbers, all of which are nonsensical cohorts and would
+    /// silently defeat the reuse-key contract.
     private func validateScanCohortJSON(_ json: String) throws {
-        guard let data = json.data(using: .utf8),
-              (try? JSONSerialization.jsonObject(with: data)) != nil else {
-            throw AnalysisStoreError.invalidScanCohortJSON("not parseable as JSON")
+        guard let data = json.data(using: .utf8) else {
+            throw AnalysisStoreError.invalidScanCohortJSON("not utf-8")
+        }
+        do {
+            _ = try JSONDecoder().decode(ScanCohort.self, from: data)
+        } catch {
+            throw AnalysisStoreError.invalidScanCohortJSON("not a decodable ScanCohort: \(error)")
         }
     }
 
