@@ -380,8 +380,22 @@ actor AdDetectionService {
         // Foundation Models. Atomization, segmentation, and catalog builds
         // are not free — there's no point doing the work only to have the
         // runner's admission controller immediately reject it.
+        //
+        // HIGH-2 (known limitation): this gate is one-shot per `runBackfill`
+        // invocation. A transient false (Apple Intelligence still
+        // downloading, thermal probe momentarily failing) permanently skips
+        // FM shadow telemetry for THIS episode pass. Shadow telemetry may
+        // therefore be silently missed during FM-unavailability windows.
+        // This is acceptable for shadow mode because the FM output never
+        // feeds AdWindows; the worst case is a gap in observation data.
+        //
+        // TODO(HIGH-2): add a capability-change observer in PlayheadRuntime
+        // that re-triggers backfill on `canUseFoundationModels` false→true
+        // transitions. Adding that observer creates a new architectural
+        // component and crosses the "no unilateral swaps" line; defer until
+        // explicitly approved.
         guard await canUseFoundationModelsProvider() else {
-            logger.debug("Shadow FM phase skipped: canUseFoundationModels=false")
+            logger.debug("Shadow FM phase skipped: canUseFoundationModels=false (HIGH-2: no auto-retry on recovery)")
             return
         }
 
