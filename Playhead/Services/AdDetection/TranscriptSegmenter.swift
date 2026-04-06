@@ -33,8 +33,6 @@ struct AdTranscriptSegment: Sendable {
     var startTime: Double { atoms.first?.startTime ?? 0 }
     var endTime: Double { atoms.last?.endTime ?? 0 }
     var duration: Double { endTime - startTime }
-    var startAtomOrdinal: Int { atoms.first?.atomKey.atomOrdinal ?? 0 }
-    var endAtomOrdinal: Int { atoms.last?.atomKey.atomOrdinal ?? 0 }
     var firstAtomOrdinal: Int { atoms.first?.atomKey.atomOrdinal ?? 0 }
     var lastAtomOrdinal: Int { atoms.last?.atomKey.atomOrdinal ?? 0 }
     var text: String { atoms.map(\.text).joined(separator: " ") }

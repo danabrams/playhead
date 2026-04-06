@@ -416,9 +416,9 @@ struct TranscriptSegmenterTests {
         )
 
         #expect(segments.count == 2)
-        #expect(segments[0].startAtomOrdinal == 0)
-        #expect(segments[0].endAtomOrdinal == 1)
-        #expect(segments[1].startAtomOrdinal == 2)
+        #expect(segments[0].firstAtomOrdinal == 0)
+        #expect(segments[0].lastAtomOrdinal == 1)
+        #expect(segments[1].firstAtomOrdinal == 2)
         #expect(segments[1].boundaryReason == .speakerTurn)
         #expect(segments[1].boundaryConfidence >= 0.8)
         #expect(segments[1].segmentType == .speech)
@@ -476,10 +476,10 @@ struct TranscriptSegmenterTests {
         )
 
         #expect(segments.count == 2)
-        #expect(segments[0].startAtomOrdinal == 0)
-        #expect(segments[0].endAtomOrdinal == 0)
-        #expect(segments[1].startAtomOrdinal == 1)
-        #expect(segments[1].endAtomOrdinal == 2)
+        #expect(segments[0].firstAtomOrdinal == 0)
+        #expect(segments[0].lastAtomOrdinal == 0)
+        #expect(segments[1].firstAtomOrdinal == 1)
+        #expect(segments[1].lastAtomOrdinal == 2)
         #expect(segments[1].boundaryReason == .pause)
         #expect(segments[1].boundaryConfidence >= 0.9)
         #expect(segments[1].segmentType == .speech)
@@ -596,8 +596,12 @@ struct TranscriptQualityEstimatorTests {
         #expect(noisyAssessment.wordLengthScore < cleanAssessment.wordLengthScore)
     }
 
-    @Test("Bad region ranks below clean region when density matches")
-    func badRegionRanksBelowCleanRegionWhenDensityMatches() {
+    @Test("Signal agreement score is lower for noisy region than clean region with similar density")
+    func signalAgreementIsLowerForNoisyRegion() {
+        // This test pins behavior of `signalAgreementScore`: it computes
+        // mean(other_signals) * (1 - variance(other_signals)). A noisy region
+        // produces lower mean and higher variance than a clean region, so the
+        // composite agreement score should be strictly smaller.
         let clean = makeSegment(
             text: "We are explaining the topic clearly with normal phrasing and enough punctuation to keep the transcript easy to follow throughout.",
             duration: 14
@@ -612,7 +616,31 @@ struct TranscriptQualityEstimatorTests {
 
         #expect(noisyAssessment.qualityScore < cleanAssessment.qualityScore)
         #expect(noisyAssessment.quality != .good)
-        #expect(noisyAssessment.confidenceProxyScore < cleanAssessment.confidenceProxyScore)
+        #expect(noisyAssessment.signalAgreementScore < cleanAssessment.signalAgreementScore)
+    }
+
+    @Test("Signal agreement penalizes a single outlier signal among consistent signals")
+    func signalAgreementPenalizesOutlier() {
+        // Direct unit on the formula via the static `score` shape. We compute
+        // signalAgreementScore via the static helper exposed for tests.
+        let consistent = TranscriptQualityAssessment.signalAgreementScore(
+            punctuationScore: 0.9,
+            tokenDensityScore: 0.9,
+            repetitionScore: 0.9,
+            wordLengthScore: 0.9
+        )
+        let withOutlier = TranscriptQualityAssessment.signalAgreementScore(
+            punctuationScore: 0.9,
+            tokenDensityScore: 0.9,
+            repetitionScore: 0.9,
+            wordLengthScore: 0.1
+        )
+
+        // Consistent (low variance) → high output, near the mean.
+        #expect(consistent > 0.85)
+        // Outlier (high variance) → meaningfully lower output (>25% drop).
+        #expect(withOutlier < consistent)
+        #expect(withOutlier < consistent * 0.75)
     }
 
     @Test("Batch assess processes all segments with correct indices")

@@ -21,7 +21,12 @@ struct TranscriptQualityAssessment: Sendable {
     let tokenDensityScore: Double
     let repetitionScore: Double
     let wordLengthScore: Double
-    let confidenceProxyScore: Double
+    /// Self-consistency score: high when the four other signals agree,
+    /// low when they disagree (one outlier among consistent signals).
+    /// This is NOT an ASR-confidence proxy — the underlying ASR stack does
+    /// not expose per-word confidence on iOS, so this serves as a much
+    /// weaker self-consistency penalty rather than independent confidence.
+    let signalAgreementScore: Double
 
     /// Numeric quality score (0.0 = worst, 1.0 = best) used for finer-grained decisions.
     let qualityScore: Double
@@ -31,19 +36,48 @@ struct TranscriptQualityAssessment: Sendable {
         qualityScore
     }
 
+    // MARK: - Weight calibration
+    //
+    // The 0.30 / 0.25 / 0.20 / 0.15 / 0.10 weights below are hand-tuned
+    // priors. They reflect the order in which the signals empirically
+    // discriminate between good vs. degraded vs. unusable transcripts in
+    // ad-hoc spot checks but they are NOT calibrated against ground-truth
+    // labels. Re-evaluate (and ideally fit via logistic regression) once
+    // SponsorKnowledgeStore (Phase 8) provides labeled positive/negative
+    // ad-segment transcripts. The `signalAgreementScore` weight is
+    // intentionally the smallest because it is a self-consistency
+    // diagnostic, not an independent quality signal.
     static func score(
         punctuationScore: Double,
         tokenDensityScore: Double,
         repetitionScore: Double,
         wordLengthScore: Double,
-        confidenceProxyScore: Double
+        signalAgreementScore: Double
     ) -> Double {
         // Weighted combination
         0.30 * punctuationScore +
         0.25 * tokenDensityScore +
         0.20 * repetitionScore +
         0.15 * wordLengthScore +
-        0.10 * confidenceProxyScore
+        0.10 * signalAgreementScore
+    }
+
+    /// Self-consistency score: `mean * (1 - variance)` over the four
+    /// independent signals. High when signals agree (low variance), low
+    /// when one signal disagrees with the others. Not a substitute for
+    /// per-word ASR confidence.
+    static func signalAgreementScore(
+        punctuationScore: Double,
+        tokenDensityScore: Double,
+        repetitionScore: Double,
+        wordLengthScore: Double
+    ) -> Double {
+        let scores = [punctuationScore, tokenDensityScore, repetitionScore, wordLengthScore]
+        let mean = scores.reduce(0, +) / Double(scores.count)
+        let variance = scores
+            .map { ($0 - mean) * ($0 - mean) }
+            .reduce(0, +) / Double(scores.count)
+        return max(0.0, min(1.0, mean * (1.0 - variance)))
     }
 }
 
@@ -72,7 +106,7 @@ enum TranscriptQualityEstimator {
         let tokenDensity = tokenDensityScore(segment)
         let repetition = repetitionScore(text)
         let wordLength = wordLengthDistributionScore(text)
-        let confidenceProxy = confidenceProxyScore(
+        let agreement = TranscriptQualityAssessment.signalAgreementScore(
             punctuationScore: punctuation,
             tokenDensityScore: tokenDensity,
             repetitionScore: repetition,
@@ -84,7 +118,7 @@ enum TranscriptQualityEstimator {
             tokenDensityScore: tokenDensity,
             repetitionScore: repetition,
             wordLengthScore: wordLength,
-            confidenceProxyScore: confidenceProxy
+            signalAgreementScore: agreement
         )
 
         let quality: TranscriptQualityLevel
@@ -103,7 +137,7 @@ enum TranscriptQualityEstimator {
             tokenDensityScore: tokenDensity,
             repetitionScore: repetition,
             wordLengthScore: wordLength,
-            confidenceProxyScore: confidenceProxy,
+            signalAgreementScore: agreement,
             qualityScore: qualityScore
         )
     }
@@ -204,23 +238,6 @@ enum TranscriptQualityEstimator {
         let unusualTokenPenalty = unusualTokenPenalty(words: words.map(String.init))
 
         return max(0.0, min(1.0, ((meanScore + stddevScore) / 2.0) * (1.0 - unusualTokenPenalty)))
-    }
-
-    private static func confidenceProxyScore(
-        punctuationScore: Double,
-        tokenDensityScore: Double,
-        repetitionScore: Double,
-        wordLengthScore: Double
-    ) -> Double {
-        let scores = [punctuationScore, tokenDensityScore, repetitionScore, wordLengthScore]
-        let mean = scores.reduce(0, +) / Double(scores.count)
-        let variance = scores
-            .map { ($0 - mean) * ($0 - mean) }
-            .reduce(0, +) / Double(scores.count)
-
-        // Stable agreement across signals is a useful stand-in when no explicit
-        // ASR confidence stream is available.
-        return max(0.0, min(1.0, mean * (1.0 - variance)))
     }
 
     private static func unusualTokenPenalty(words: [String]) -> Double {
