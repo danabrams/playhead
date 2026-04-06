@@ -39,6 +39,7 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         NSSpeechRecognitionUsageDescription: Playhead uses on-device speech transcription to generate episode transcripts and ad-skip markers.
         UIBackgroundModes:
+          - audio
           - processing
         BGTaskSchedulerPermittedIdentifiers:
           - com.playhead.app.analysis.backfill
