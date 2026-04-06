@@ -1077,23 +1077,18 @@ struct FoundationModelClassifier: Sendable {
                 evidenceCatalog: evidenceCatalog
             )
 
-            // H-R3-1: Enforce span-range containment on `.evidenceRef`-sourced
-            // anchors. The FM can hallucinate a span at lines 1...5 while
-            // citing an evidenceRef whose true lineRef is 11 (outside the
-            // span). The resolver, by design, maps anchor.evidenceRef back to
-            // the catalog entry's ORIGINAL lineRef — so a valid catalog match
-            // can still carry a line ref that falls outside the claimed span.
-            // Without this check such an anchor would be marked
-            // memoryWriteEligible=true and could poison sponsor memory.
-            //
-            // Non-.evidenceRef anchors (line-ref fallback, unresolved) are
-            // already gated to `anchor.lineRef` values the resolver saw as
-            // in-window; we only need to re-check the evidenceRef path here
-            // because that is the only path whose stored `lineRef` comes from
-            // the catalog entry rather than from the raw FM anchor.
+            // H-R3-1 / R4-Fix5: Enforce span-range containment on ALL
+            // resolved anchors regardless of resolution source. The FM can
+            // hallucinate a span at lines 1...5 while citing an
+            // evidenceRef whose true lineRef is 11 (the resolver maps
+            // back to the catalog entry's ORIGINAL lineRef), OR a fallback
+            // anchor at lineRef 11 that lives in the window but outside
+            // the claimed span. Both are span-range violations and must
+            // be dropped — the prior `.evidenceRef`-only gate let
+            // fallback anchors slip through and stay attached to the
+            // span, defeating the in-memory protection.
             let resolvedEvidenceAnchors = rawResolvedEvidenceAnchors.filter { anchor in
-                guard anchor.resolutionSource == .evidenceRef else { return true }
-                return anchor.lineRef >= firstLineRef && anchor.lineRef <= lastLineRef
+                anchor.lineRef >= firstLineRef && anchor.lineRef <= lastLineRef
             }
             if resolvedEvidenceAnchors.count < rawResolvedEvidenceAnchors.count {
                 logger.warning(

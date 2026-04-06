@@ -618,6 +618,100 @@ struct FoundationModelClassifierTests {
         #expect(snapshot.respondCalls.isEmpty)
     }
 
+    // R4-Fix5: H-R3-1's containment filter only gated `.evidenceRef`-sourced
+    // anchors. A `.lineRefFallback` (or `.windowContextFallback`) anchor at
+    // a window line that falls OUTSIDE the span's claimed range slipped
+    // through and stayed attached to the span. ALL resolved anchors must
+    // be in the span's range, regardless of resolution source.
+    @Test("R4-Fix5: refinement drops in-window fallback anchors that fall outside the span range")
+    func refinementDropsInWindowOutOfSpanFallbackAnchors() async throws {
+        // Window includes lineRef 11; span claims only 1...5. The fallback
+        // anchor at lineRef 11 lives in the window but outside the span.
+        let segments = [
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Hosts banter."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "More banter."),
+            makeSegment(index: 3, startTime: 15, endTime: 20, text: "Idle chatter."),
+            makeSegment(index: 4, startTime: 20, endTime: 25, text: "Quick aside."),
+            makeSegment(index: 5, startTime: 25, endTime: 30, text: "Wrapping up."),
+            makeSegment(index: 11, startTime: 55, endTime: 60, text: "Use code SAVE.")
+        ]
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 1,
+            // Window covers BOTH the fake-span lines AND lineRef 11.
+            lineRefs: [1, 2, 3, 4, 5, 11],
+            focusLineRefs: [1, 5],
+            focusClusters: [[1, 2, 3, 4, 5]],
+            prompt: "Refine ad spans.",
+            promptTokenCount: 12,
+            startTime: 5,
+            endTime: 60,
+            stopReason: .minimumSpan,
+            promptEvidence: []
+        )
+
+        let recorder = RuntimeRecorder(
+            contextSize: 64,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementResponses: [
+                RefinementWindowSchema(
+                    spans: [
+                        SpanRefinementSchema(
+                            commercialIntent: .paid,
+                            ownership: .thirdParty,
+                            // Span is 1...5 — the FM hallucinates an ad
+                            // there even though no commercial cue exists.
+                            firstLineRef: 1,
+                            lastLineRef: 5,
+                            certainty: .moderate,
+                            boundaryPrecision: .usable,
+                            evidenceAnchors: [
+                                // Fallback anchor (no evidenceRef) at
+                                // lineRef 11 — inside the window but
+                                // outside the claimed span range.
+                                EvidenceAnchorSchema(
+                                    evidenceRef: nil,
+                                    lineRef: 11,
+                                    kind: .promoCode,
+                                    certainty: .moderate
+                                )
+                            ],
+                            alternativeExplanation: .none,
+                            reasonTags: [.promoCode]
+                        )
+                    ]
+                )
+            ]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 1)
+        // Either the span is rejected outright (no anchors left → breadth
+        // check trips) or the offending anchor is stripped. Either way the
+        // out-of-range anchor must NOT survive on a span.
+        for span in output.windows[0].spans {
+            #expect(
+                span.resolvedEvidenceAnchors.allSatisfy { anchor in
+                    anchor.lineRef >= span.firstLineRef && anchor.lineRef <= span.lastLineRef
+                },
+                "anchor at lineRef 11 must not attach to span [\(span.firstLineRef)...\(span.lastLineRef)]"
+            )
+        }
+    }
+
     @Test("refinement ignores fallback anchors that point outside the zoomed window")
     func refinementRejectsOffWindowFallbackAnchors() async throws {
         let segments = [
