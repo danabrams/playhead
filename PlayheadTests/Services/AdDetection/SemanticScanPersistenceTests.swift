@@ -91,6 +91,47 @@ struct SemanticScanPersistenceTests {
         #expect(byAsset == [result])
     }
 
+    @Test("bind helper preserves UTF-8 edge cases (emoji, RTL, combining marks)")
+    func bindHelperPreservesUTF8EdgeCases() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        // Payload mixes: multi-byte emoji (incl. ZWJ family sequence), RTL
+        // Arabic, Devanagari + combining mark, a grapheme cluster with a
+        // combining accent, and a 4-byte CJK supplement character. All
+        // NUL-free so `withCString` sees the full string.
+        let trickySpansJSON = """
+        [{"label":"emoji 👨‍👩‍👧‍👦 family","rtl":"مرحبا بالعالم","combining":"e\u{0301}","devanagari":"हिन्दी","cjkSupplement":"\u{2070E}"}]
+        """
+        let result = SemanticScanResult(
+            id: "scan-utf8-edge",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 0,
+            windowLastAtomOrdinal: 5,
+            windowStartTime: 0,
+            windowEndTime: 50,
+            scanPass: "passA",
+            transcriptQuality: .good,
+            disposition: .containsAd,
+            spansJSON: trickySpansJSON,
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: 64,
+            outputTokenCount: 8,
+            latencyMs: 12,
+            prewarmHit: false,
+            scanCohortJSON: try makeScanCohortJSON(),
+            transcriptVersion: "tx-v1"
+        )
+
+        try await store.insertSemanticScanResult(result)
+
+        let fetched = try await store.fetchSemanticScanResult(id: result.id)
+        #expect(fetched == result)
+        #expect(fetched?.spansJSON == trickySpansJSON)
+    }
+
     @Test("refusal scan results round-trip with failure metadata intact")
     func refusalSemanticScanResultRoundTrip() async throws {
         let store = try await makeTestStore()

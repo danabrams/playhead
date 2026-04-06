@@ -2213,7 +2213,12 @@ actor AnalysisStore {
 
     private func bind(_ stmt: OpaquePointer?, _ idx: Int32, _ value: String?) {
         if let value {
-            sqlite3_bind_text(stmt, idx, (value as NSString).utf8String, -1, SQLITE_TRANSIENT_PTR)
+            // `withCString` guarantees the pointer is valid for the closure, and
+            // `SQLITE_TRANSIENT` tells SQLite to copy the bytes immediately, so
+            // no autoreleased NSString trampoline is needed per bind call.
+            value.withCString { cstr in
+                _ = sqlite3_bind_text(stmt, idx, cstr, -1, SQLITE_TRANSIENT_PTR)
+            }
         } else {
             sqlite3_bind_null(stmt, idx)
         }
@@ -2244,7 +2249,9 @@ actor AnalysisStore {
     }
 
     private func bind(_ stmt: OpaquePointer?, _ idx: Int32, _ value: String) {
-        sqlite3_bind_text(stmt, idx, (value as NSString).utf8String, -1, SQLITE_TRANSIENT_PTR)
+        value.withCString { cstr in
+            _ = sqlite3_bind_text(stmt, idx, cstr, -1, SQLITE_TRANSIENT_PTR)
+        }
     }
 
     // Read helpers
