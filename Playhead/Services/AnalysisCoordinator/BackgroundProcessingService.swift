@@ -381,6 +381,16 @@ actor BackgroundProcessingService {
             // transcript chunk, so expiration is safe at any point.
             await self.coordinator.start()
 
+            // If the task was cancelled (expiration fired), bail out without
+            // marking success. The expiration handler will mark the task
+            // completed with success=false via handleExpiredProcessingTask.
+            // Without this guard, a coordinator that returns quickly after
+            // cancellation would race the expiration handler in markComplete.
+            guard !Task.isCancelled else {
+                self.logger.info("Backfill work task cancelled before completion")
+                return
+            }
+
             // Let the coordinator run until the task expires or completes.
             await self.markComplete(task, success: true)
             self.logger.info("Backfill task completed")
@@ -410,6 +420,14 @@ actor BackgroundProcessingService {
             // Continued processing is for user-initiated work like model
             // downloads. The coordinator handles checkpoint/resume.
             await self.coordinator.start()
+
+            // If the task was cancelled (expiration fired), bail out without
+            // marking success. The expiration handler will mark the task
+            // completed with success=false via handleExpiredProcessingTask.
+            guard !Task.isCancelled else {
+                self.logger.info("Continued processing work task cancelled before completion")
+                return
+            }
 
             await self.markComplete(task, success: true)
             self.logger.info("Continued processing task completed")

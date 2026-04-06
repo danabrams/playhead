@@ -86,8 +86,13 @@ struct BackfillTaskHandlerTests {
             await bps.handleBackfillTask(task)
         }
 
-        // Give the handler time to set the expiration handler and begin work.
-        try await Task.sleep(for: .milliseconds(50))
+        // Wait deterministically for the expiration handler to be set.
+        // The actor method must execute through to the point where it installs
+        // the expiration handler before we can simulate iOS firing it.
+        let setupDeadline = ContinuousClock.now + .seconds(5)
+        while task.expirationHandler == nil && ContinuousClock.now < setupDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
 
         // Simulate iOS firing expiration.
         task.simulateExpiration()
