@@ -26,11 +26,9 @@ extension CapabilitiesService {
         // Verify round-trip encode/decode
         do {
             let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
             let data = try encoder.encode(snapshot)
 
             let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
             let decoded = try decoder.decode(CapabilitySnapshot.self, from: data)
 
             guard decoded == snapshot else {
