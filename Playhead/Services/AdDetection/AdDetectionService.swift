@@ -412,6 +412,19 @@ actor AdDetectionService {
             analysisAssetId: analysisAssetId,
             transcriptVersion: version.transcriptVersion
         )
+        // R4-Fix8 / HIGH-3: production planner context is hardwired to
+        // cold-start values. CoveragePlanner's `targetedWithAudit` branch
+        // requires `observedEpisodeCount >= coldStartEpisodeThreshold`
+        // and `stablePrecision == true`, so with these inputs the planner
+        // always returns `[.fullEpisodeScan]`. This is intentional for
+        // Phase 3 shadow mode (no user-facing impact) — the targeted
+        // branch is unreachable until Phase 4 wires real per-show planner
+        // state through `AnalysisStore` (new columns for
+        // `observedEpisodeCount`, `episodesSinceLastFullRescan`, etc).
+        // Per CLAUDE.md "no unilateral architectural changes", we do not
+        // touch the persistence schema in this round.
+        // TODO(phase-4): wire real planner state from AnalysisStore so the
+        // targeted-with-audit branch becomes reachable in production.
         let plannerContext = CoveragePlannerContext(
             observedEpisodeCount: 0,
             stablePrecision: false,
