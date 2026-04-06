@@ -129,4 +129,155 @@ struct BackfillJobStoreTests {
         #expect(fetched?.status == .queued)
         #expect(staleAdvance == false)
     }
+
+    // MARK: - New behaviour from review fixes
+
+    @Test("H7: re-inserting an existing job throws duplicateJobId")
+    func testInsertBackfillJobDuplicateThrows() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(jobId: "dup-job")
+
+        try await store.insertBackfillJob(job)
+        await #expect(throws: AnalysisStoreError.self) {
+            try await store.insertBackfillJob(job)
+        }
+    }
+
+    @Test("H5: progress checkpoint preserves existing deferReason")
+    func testProgressCheckpointPreservesDeferReason() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(
+            jobId: "preserve-defer",
+            phase: .scanLikelyAdSlots,
+            coveragePolicy: .targetedWithAudit,
+            deferReason: "thermal"
+        )
+
+        try await store.insertBackfillJob(job)
+        try await store.checkpointBackfillJobProgress(
+            jobId: job.jobId,
+            progressCursor: BackfillProgressCursor(processedUnitCount: 4)
+        )
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.deferReason == "thermal")
+        #expect(fetched.progressCursor?.processedUnitCount == 4)
+    }
+
+    @Test("H5: markBackfillJobDeferred preserves existing progressCursor")
+    func testMarkDeferredPreservesProgressCursor() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(
+            jobId: "preserve-cursor",
+            phase: .scanLikelyAdSlots,
+            coveragePolicy: .targetedWithAudit,
+            progressCursor: BackfillProgressCursor(
+                processedUnitCount: 7,
+                lastProcessedUpperBoundSec: 123.0
+            )
+        )
+
+        try await store.insertBackfillJob(job)
+        try await store.markBackfillJobDeferred(jobId: job.jobId, reason: "battery")
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .deferred)
+        #expect(fetched.deferReason == "battery")
+        #expect(fetched.progressCursor == BackfillProgressCursor(
+            processedUnitCount: 7,
+            lastProcessedUpperBoundSec: 123.0
+        ))
+    }
+
+    @Test("M4: foreign_keys is ON for every connection on the same path")
+    func testPragmasAppliedToAllConnections() async throws {
+        let dir = try makeTempDir(prefix: "PragmaCache")
+        let first = try await AnalysisStore.open(directory: dir)
+        try await insertParentAsset(first, id: "fk-test")
+
+        // Second store on the same path; the previous implementation
+        // short-circuited migrate() and skipped configurePragmas().
+        let second = try await AnalysisStore.open(directory: dir)
+
+        // FK enforcement is observable: inserting a backfill job for a
+        // non-existent asset must fail with a constraint error.
+        let orphan = makeBackfillJob(
+            jobId: "orphan-\(UUID().uuidString)",
+            analysisAssetId: "no-such-asset"
+        )
+        await #expect(throws: AnalysisStoreError.self) {
+            try await second.insertBackfillJob(orphan)
+        }
+
+        // Sanity: the legitimate insert through the second connection works.
+        let good = makeBackfillJob(
+            jobId: "good-\(UUID().uuidString)",
+            analysisAssetId: "fk-test"
+        )
+        try await second.insertBackfillJob(good)
+    }
+
+    @Test("M5: migrate is idempotent across multiple opens")
+    func testMigrateIsIdempotent() async throws {
+        let dir = try makeTempDir(prefix: "MigrateIdempotent")
+        let first = try await AnalysisStore.open(directory: dir)
+        // Force a second migrate() on a fresh actor to exercise the
+        // ALTER TABLE / column-existence path against an already-migrated db.
+        let second = try AnalysisStore(directory: dir)
+        try await second.migrate()
+        try await second.migrate()
+
+        // Both stores should be usable.
+        try await insertParentAsset(first, id: "idem-1")
+        let job = makeBackfillJob(jobId: "idem-1", analysisAssetId: "idem-1")
+        try await second.insertBackfillJob(job)
+    }
+
+    @Test("M7: schema_version is recorded on first migration")
+    func testSchemaVersionRecorded() async throws {
+        let store = try await makeTestStore()
+        let version = try await store.schemaVersion()
+        #expect(version == 1)
+    }
+
+    @Test("M8: deleting an asset cascades to its backfill_jobs rows")
+    func testFKCascadeOnAssetDelete() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store, id: "cascade-asset")
+        let job = makeBackfillJob(
+            jobId: "cascade-job",
+            analysisAssetId: "cascade-asset"
+        )
+        try await store.insertBackfillJob(job)
+
+        try await store.deleteAsset(id: "cascade-asset")
+
+        let fetched = try await store.fetchBackfillJob(byId: "cascade-job")
+        #expect(fetched == nil)
+    }
+
+    @Test("WAL durability: insertBackfillJob survives a store reopen")
+    func testInsertBackfillJobIsDurable() async throws {
+        let dir = try makeTempDir(prefix: "WALDurability")
+        let writer = try await AnalysisStore.open(directory: dir)
+        try await insertParentAsset(writer, id: "wal-asset")
+        let job = makeBackfillJob(
+            jobId: "wal-job",
+            analysisAssetId: "wal-asset",
+            phase: .scanHarvesterProposals,
+            coveragePolicy: .targetedWithAudit
+        )
+        try await writer.insertBackfillJob(job)
+        // Drop the writer reference so the actor and its connection are
+        // released before reopening.
+        _ = writer
+
+        let reader = try await AnalysisStore.open(directory: dir)
+        let fetched = try #require(await reader.fetchBackfillJob(byId: "wal-job"))
+        #expect(fetched.jobId == "wal-job")
+        #expect(fetched.phase == .scanHarvesterProposals)
+    }
 }
