@@ -252,14 +252,24 @@ actor BackfillJobRunner {
                     await admissionController.finish(jobId: job.jobId)
                     continue
                 }
-                // Any other store error is a genuine failure of the run;
-                // fall through to the generic failure path below.
+                // H-R3-2: classify permanent vs recoverable store errors.
+                // Permanent errors (schema validators, malformed cohort,
+                // NULL column surprises, evidence-body collisions) will
+                // never succeed on retry — replaying the same inputs
+                // against the same schema hits the same validator. Burning
+                // through `maxRetries` attempts on them is wasted work and
+                // delays the failure signal reaching operators. Short-
+                // circuit `retryCount` to `maxRetries` so the C-B gate on
+                // the next run skips the row immediately.
+                let persistedRetryCount = Self.isPermanent(storeError)
+                    ? AdmissionController.maxRetries
+                    : job.retryCount + 1
                 try await store.markBackfillJobFailed(
                     jobId: job.jobId,
                     reason: String(describing: storeError),
-                    retryCount: job.retryCount + 1
+                    retryCount: persistedRetryCount
                 )
-                logger.error("FM backfill job \(job.jobId) failed: \(storeError.localizedDescription)")
+                logger.error("FM backfill job \(job.jobId) failed: \(storeError.localizedDescription) (permanent=\(Self.isPermanent(storeError)))")
             } catch {
                 // C-2: markBackfillJobFailed writes deferReason so operators
                 // can diagnose the failure without scraping logs. The prior
@@ -348,6 +358,29 @@ actor BackfillJobRunner {
     }
 
     // MARK: - Helpers
+
+    /// H-R3-2: classify `AnalysisStoreError` cases that will never succeed
+    /// on retry against the same schema/inputs. Permanent errors are
+    /// short-circuited to `retryCount = maxRetries` so the C-B gate skips
+    /// them on the next run — there is no point admitting them again.
+    ///
+    /// Schema-validator rejections (`invalidEvidenceEvent`,
+    /// `invalidScanCohortJSON`), unexpected-NULL surprises
+    /// (`invalidRow`), and body collisions (`evidenceEventBodyMismatch`)
+    /// are all permanent by construction: the runner will produce the
+    /// exact same row on the next attempt.
+    private static func isPermanent(_ error: AnalysisStoreError) -> Bool {
+        switch error {
+        case .invalidEvidenceEvent,
+             .evidenceEventBodyMismatch,
+             .invalidScanCohortJSON,
+             .invalidRow:
+            return true
+        case .openFailed, .migrationFailed, .queryFailed, .insertFailed,
+             .notFound, .duplicateJobId, .invalidStateTransition:
+            return false
+        }
+    }
 
     private func phasePriority(_ phase: BackfillJobPhase) -> Int {
         switch phase {

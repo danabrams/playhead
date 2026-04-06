@@ -602,6 +602,68 @@ struct BackfillJobRunnerTests {
         #expect(uniqueKeys == firstKeys, "second run introduced new logical keys")
     }
 
+    @Test("H-R3-2: permanent store errors exhaust retries immediately, not after maxRetries attempts")
+    func permanentStoreErrorsExhaustRetriesImmediately() async throws {
+        // H-R3-2: `AnalysisStoreError.invalidEvidenceEvent`,
+        // `.evidenceEventBodyMismatch`, `.invalidScanCohortJSON`, and
+        // `.invalidRow` are permanent — replaying the same inputs against
+        // the same schema will always fail the same validator. Burning
+        // through the retry budget on them is wasted work. The runner must
+        // classify them as permanent and short-circuit the retry counter
+        // to `maxRetries`, so the next run's C-B gate skips the row.
+        //
+        // We inject a classifier whose refinement pass returns a span with
+        // an evidence anchor whose line refs point outside the segment
+        // window. The runner's `makeEvidenceEvents` builder encodes this
+        // into an atomOrdinals JSON array that the store's validator
+        // rejects with `invalidEvidenceEvent` when the transcript version
+        // mismatches the catalog's expected version (H-1 integrity check).
+        //
+        // Simpler path: use an invalid scanCohortJSON. That is rejected by
+        // `insertSemanticScanResult` as `invalidScanCohortJSON` and is
+        // genuinely permanent — the cohort is fixed at runner init, so
+        // every retry will hit the same error.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ]
+        )
+        let runner = BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(runtime: fmRuntime.runtime),
+            coveragePlanner: CoveragePlanner(),
+            mode: .shadow,
+            capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+            batteryLevelProvider: { 1.0 },
+            // Malformed cohort JSON: not a valid JSON object. The store's
+            // `validateScanCohortJSON` rejects this with
+            // `AnalysisStoreError.invalidScanCohortJSON`.
+            scanCohortJSON: "not-json"
+        )
+
+        let result = try await runner.runPendingBackfill(for: makeInputs())
+        #expect(!result.admittedJobIds.isEmpty, "runner must have admitted at least one job")
+
+        // After the permanent failure path the row must be `.failed` with
+        // `retryCount == maxRetries`, so the C-B gate skips it on re-runs.
+        let jobId = try #require(result.admittedJobIds.first)
+        let row = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(row.status == .failed)
+        #expect(row.retryCount == AdmissionController.maxRetries,
+                "permanent error must short-circuit retryCount to maxRetries, got \(row.retryCount)")
+
+        // Second run must skip the exhausted row entirely.
+        let fmCallsBefore = await fmRuntime.coarseCallCount
+        let second = try await runner.runPendingBackfill(for: makeInputs())
+        let fmCallsAfter = await fmRuntime.coarseCallCount
+        #expect(second.admittedJobIds.isEmpty, "exhausted row must not be re-admitted")
+        #expect(fmCallsAfter == fmCallsBefore,
+                "FM must not be called again for an exhausted permanent failure")
+    }
+
     @Test("C-R3-2: scan results from different transcript versions coexist under distinct ids")
     func scanResultsFromDifferentTranscriptVersionsCoexist() async throws {
         // C-R3-2: the deterministic scan id was `scan-{assetId}-{pass}-{idx}`,
