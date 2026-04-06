@@ -27,13 +27,34 @@ struct AdDetectionConfig: Sendable {
     let hotPathLookahead: TimeInterval
     /// Detector version tag written to each AdWindow.
     let detectorVersion: String
+    /// Phase 3 Foundation Model backfill toggle. Defaults to `.shadow`:
+    /// FM runs and persists results, but never influences skip cues. See
+    /// `FMBackfillMode` for the full contract.
+    let fmBackfillMode: FMBackfillMode
+
+    init(
+        candidateThreshold: Double,
+        confirmationThreshold: Double,
+        suppressionThreshold: Double,
+        hotPathLookahead: TimeInterval,
+        detectorVersion: String,
+        fmBackfillMode: FMBackfillMode = .shadow
+    ) {
+        self.candidateThreshold = candidateThreshold
+        self.confirmationThreshold = confirmationThreshold
+        self.suppressionThreshold = suppressionThreshold
+        self.hotPathLookahead = hotPathLookahead
+        self.detectorVersion = detectorVersion
+        self.fmBackfillMode = fmBackfillMode
+    }
 
     static let `default` = AdDetectionConfig(
         candidateThreshold: 0.40,
         confirmationThreshold: 0.70,
         suppressionThreshold: 0.25,
         hotPathLookahead: 90.0,
-        detectorVersion: "detection-v1"
+        detectorVersion: "detection-v1",
+        fmBackfillMode: .shadow
     )
 }
 
