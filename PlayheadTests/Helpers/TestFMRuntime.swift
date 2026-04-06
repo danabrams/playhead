@@ -6,6 +6,10 @@
 import Foundation
 @testable import Playhead
 
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
+
 /// Builds a deterministic `FoundationModelClassifier.Runtime` that returns
 /// pre-canned coarse and refinement responses with zero-latency, fake token
 /// counts. Used by tests that exercise the runner / shadow path orchestration
@@ -13,6 +17,8 @@ import Foundation
 actor TestFMRuntime {
     private var coarseQueue: [CoarseScreeningSchema]
     private var refinementQueue: [RefinementWindowSchema]
+    private var coarseFailureQueue: [TestFMRuntimeFailure?]
+    private var refinementFailureQueue: [TestFMRuntimeFailure?]
     private let defaultCoarse: CoarseScreeningSchema
     private let defaultRefinement: RefinementWindowSchema
     private(set) var coarseCallCount = 0
@@ -21,6 +27,8 @@ actor TestFMRuntime {
     init(
         coarseResponses: [CoarseScreeningSchema] = [],
         refinementResponses: [RefinementWindowSchema] = [],
+        coarseFailures: [TestFMRuntimeFailure?] = [],
+        refinementFailures: [TestFMRuntimeFailure?] = [],
         defaultCoarse: CoarseScreeningSchema = CoarseScreeningSchema(
             transcriptQuality: .good,
             disposition: .noAds,
@@ -30,6 +38,8 @@ actor TestFMRuntime {
     ) {
         self.coarseQueue = coarseResponses
         self.refinementQueue = refinementResponses
+        self.coarseFailureQueue = coarseFailures
+        self.refinementFailureQueue = refinementFailures
         self.defaultCoarse = defaultCoarse
         self.defaultRefinement = defaultRefinement
     }
@@ -46,27 +56,68 @@ actor TestFMRuntime {
             makeSession: {
                 FoundationModelClassifier.Runtime.Session(
                     prewarm: { _ in },
-                    respondCoarse: { _ in await self.nextCoarse() },
-                    respondRefinement: { _ in await self.nextRefinement() }
+                    respondCoarse: { _ in try await self.nextCoarse() },
+                    respondRefinement: { _ in try await self.nextRefinement() }
                 )
             }
         )
     }
 
-    private func nextCoarse() -> CoarseScreeningSchema {
+    private func nextCoarse() throws -> CoarseScreeningSchema {
         coarseCallCount += 1
+        if !coarseFailureQueue.isEmpty {
+            let failure = coarseFailureQueue.removeFirst()
+            if let failure {
+                throw failure.error
+            }
+        }
         if coarseQueue.isEmpty {
             return defaultCoarse
         }
         return coarseQueue.removeFirst()
     }
 
-    private func nextRefinement() -> RefinementWindowSchema {
+    private func nextRefinement() throws -> RefinementWindowSchema {
         refinementCallCount += 1
+        if !refinementFailureQueue.isEmpty {
+            let failure = refinementFailureQueue.removeFirst()
+            if let failure {
+                throw failure.error
+            }
+        }
         if refinementQueue.isEmpty {
             return defaultRefinement
         }
         return refinementQueue.removeFirst()
+    }
+}
+
+enum TestFMRuntimeFailure: Sendable {
+    case exceededContextWindow
+    case refusal
+    case guardrailViolation
+
+    var error: Error {
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, *) {
+            let context = LanguageModelSession.GenerationError.Context(debugDescription: "test-fm-runtime")
+            switch self {
+            case .exceededContextWindow:
+                return LanguageModelSession.GenerationError.exceededContextWindowSize(context)
+            case .refusal:
+                let refusal = LanguageModelSession.GenerationError.Refusal(transcriptEntries: [])
+                return LanguageModelSession.GenerationError.refusal(refusal, context)
+            case .guardrailViolation:
+                return LanguageModelSession.GenerationError.guardrailViolation(context)
+            }
+        }
+        #endif
+
+        return NSError(
+            domain: "TestFMRuntimeFailure",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "\(self)"]
+        )
     }
 }
 

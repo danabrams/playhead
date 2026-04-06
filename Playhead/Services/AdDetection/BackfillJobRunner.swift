@@ -451,10 +451,12 @@ actor BackfillJobRunner {
     /// them on the next run — there is no point admitting them again.
     ///
     /// Schema-validator rejections (`invalidEvidenceEvent`,
-    /// `invalidScanCohortJSON`), unexpected-NULL surprises
-    /// (`invalidRow`), and body collisions (`evidenceEventBodyMismatch`)
-    /// are all permanent by construction: the runner will produce the
-    /// exact same row on the next attempt.
+    /// `invalidScanCohortJSON`), oversized blob payloads (currently
+    /// surfaced as `insertFailed("payloadTooLarge: ...")`),
+    /// unexpected-NULL surprises (`invalidRow`), and body collisions
+    /// (`evidenceEventBodyMismatch`) are all permanent by
+    /// construction: the runner will produce the exact same row on
+    /// the next attempt.
     private static func isPermanent(_ error: AnalysisStoreError) -> Bool {
         switch error {
         case .invalidEvidenceEvent,
@@ -462,7 +464,9 @@ actor BackfillJobRunner {
              .invalidScanCohortJSON,
              .invalidRow:
             return true
-        case .openFailed, .migrationFailed, .queryFailed, .insertFailed,
+        case .insertFailed(let message):
+            return message.hasPrefix("payloadTooLarge:")
+        case .openFailed, .migrationFailed, .queryFailed,
              .notFound, .duplicateJobId, .invalidStateTransition:
             return false
         }

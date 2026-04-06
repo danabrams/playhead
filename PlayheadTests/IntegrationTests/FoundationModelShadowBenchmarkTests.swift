@@ -106,6 +106,118 @@ final class FoundationModelShadowBenchmarkTests: XCTestCase {
         XCTAssertEqual(summary.malformedEvidenceEventCount, 0)
     }
 
+    func testBlockedSummaryReportsPolicyBlockWithoutRecallAssertions() throws {
+        let segments = makeMultiAtomBenchmarkSegments()
+        let transcriptVersion = "transcript-v1"
+        let scanResults = [
+            makeBenchmarkScanResult(
+                id: "scan-passA-blocked",
+                analysisAssetId: "asset-benchmark",
+                transcriptVersion: transcriptVersion,
+                scanPass: "passA",
+                windowFirstAtomOrdinal: 0,
+                windowLastAtomOrdinal: 3,
+                windowStartTime: 0,
+                windowEndTime: 26,
+                disposition: .abstain,
+                status: .guardrailViolation,
+                latencyMs: 95
+            )
+        ]
+        let groundTruth = [
+            GroundTruthAd(
+                id: "sponsor-core",
+                startTime: 6,
+                endTime: 18,
+                type: .sponsor,
+                skipConfidence: 1.0,
+                advertiser: "Example Sponsor",
+                description: "Core sponsor copy only",
+                expectedSignals: [],
+                missedSignals: []
+            )
+        ]
+
+        let summary = FoundationModelShadowBenchmarkSummary.build(
+            scanResults: scanResults,
+            evidenceEvents: [],
+            segments: segments,
+            groundTruth: groundTruth,
+            falsePositives: []
+        )
+        let rendered = summary.render()
+
+        XCTAssertEqual(summary.blockingStatus, .guardrailViolation)
+        XCTAssertEqual(summary.coarseStatus, .guardrailViolation)
+        XCTAssertEqual(summary.refinementStatus, .guardrailViolation)
+        XCTAssertEqual(summary.coarseWindowCount, 1)
+        XCTAssertEqual(summary.refinedHitCount, 0)
+        XCTAssertTrue(rendered.contains("Benchmark blocked by FM policy: guardrailViolation"))
+        XCTAssertTrue(rendered.contains("Ground-truth recall is not meaningful for blocked FM runs."))
+        XCTAssertFalse(rendered.contains("Ground-truth recall: coarse"))
+    }
+
+    func testTargetedClipSummarySeparatesBlockedAdsFromHits() {
+        let summary = LiveTargetedClipBenchmarkSummary(
+            adReports: [
+                LiveClipBenchmarkReport(
+                    id: "caught-ad",
+                    label: "Caught Ad",
+                    coarseStatus: .success,
+                    refinementStatus: .success,
+                    coarseHit: true,
+                    refinedHit: true,
+                    coarseLatencyMs: 120,
+                    refinementLatencyMs: 180
+                ),
+                LiveClipBenchmarkReport(
+                    id: "missed-ad",
+                    label: "Missed Ad",
+                    coarseStatus: .success,
+                    refinementStatus: .success,
+                    coarseHit: false,
+                    refinedHit: false,
+                    coarseLatencyMs: 90,
+                    refinementLatencyMs: 0
+                ),
+                LiveClipBenchmarkReport(
+                    id: "blocked-ad",
+                    label: "Blocked Ad",
+                    coarseStatus: .guardrailViolation,
+                    refinementStatus: .guardrailViolation,
+                    coarseHit: false,
+                    refinedHit: false,
+                    coarseLatencyMs: 6000,
+                    refinementLatencyMs: 0
+                )
+            ],
+            controlReports: [
+                LiveClipBenchmarkReport(
+                    id: "control-hit",
+                    label: "Control",
+                    coarseStatus: .success,
+                    refinementStatus: .success,
+                    coarseHit: true,
+                    refinedHit: false,
+                    coarseLatencyMs: 80,
+                    refinementLatencyMs: 0
+                )
+            ]
+        )
+
+        XCTAssertEqual(summary.coarseHitCount, 1)
+        XCTAssertEqual(summary.refinedHitCount, 1)
+        XCTAssertEqual(summary.policyBlockedAdCount, 1)
+        XCTAssertEqual(summary.evaluableAdCount, 2)
+        XCTAssertEqual(summary.coarseFalsePositiveCount, 1)
+        XCTAssertEqual(summary.refinedFalsePositiveCount, 0)
+
+        let rendered = summary.render()
+        XCTAssertTrue(rendered.contains("Ads: coarse hits 1/3, refined hits 1/3, policy-blocked 1/3"))
+        XCTAssertTrue(rendered.contains("Evaluable ads: 2/3"))
+        XCTAssertTrue(rendered.contains("False-positive watch: coarse 1/1, refined 0/1"))
+    }
+
     @available(iOS 26.0, *)
     func testLiveRuntimeShadowBenchmark() async throws {
         #if targetEnvironment(simulator)
@@ -149,11 +261,75 @@ final class FoundationModelShadowBenchmarkTests: XCTestCase {
             falsePositives: fixture.falsePositives
         )
 
+        print(summary.render(runResult: result))
+
+        if let blockingStatus = summary.blockingStatus {
+            XCTAssertTrue(
+                blockingStatus == .guardrailViolation || blockingStatus == .refusal,
+                "Only FM safety/refusal outcomes should short-circuit the live benchmark."
+            )
+            return
+        }
+
         XCTAssertGreaterThan(summary.coarseWindowCount, 0, "Expected persisted passA windows.")
         XCTAssertEqual(summary.coarseStatus, .success, "Coarse shadow pass did not complete successfully.")
         XCTAssertEqual(summary.refinementStatus, .success, "Refinement shadow pass did not complete successfully.")
+        #endif
+    }
 
-        print(summary.render(runResult: result))
+    @available(iOS 26.0, *)
+    func testLiveRuntimeTargetedClipBenchmark() async throws {
+        #if targetEnvironment(simulator)
+        throw XCTSkip("Requires a real Apple Intelligence-capable device.")
+        #else
+        let fixture = buildFixtureShadowBenchmark()
+        let classifier = FoundationModelClassifier()
+
+        var adReports: [LiveClipBenchmarkReport] = []
+        for ad in fixture.groundTruth {
+            let clipSegments = makeClipSegments(
+                from: fixture.inputs.segments,
+                startTime: ad.startTime,
+                endTime: ad.endTime,
+                padding: 4
+            )
+            XCTAssertFalse(clipSegments.isEmpty, "Expected non-empty clip for \(ad.id)")
+            let report = try await runLiveClipBenchmark(
+                id: ad.id,
+                label: ad.advertiser,
+                targetRange: BenchmarkRange(startTime: ad.startTime, endTime: ad.endTime),
+                segments: clipSegments,
+                evidenceCatalog: fixture.inputs.evidenceCatalog,
+                classifier: classifier
+            )
+            adReports.append(report)
+        }
+
+        var controlReports: [LiveClipBenchmarkReport] = []
+        for signal in fixture.falsePositives {
+            let clipSegments = makeClipSegments(
+                from: fixture.inputs.segments,
+                startTime: signal.startTime,
+                endTime: signal.endTime,
+                padding: 4
+            )
+            XCTAssertFalse(clipSegments.isEmpty, "Expected non-empty control clip for \(signal.description)")
+            let report = try await runLiveClipBenchmark(
+                id: signal.description,
+                label: signal.description,
+                targetRange: BenchmarkRange(startTime: signal.startTime, endTime: signal.endTime),
+                segments: clipSegments,
+                evidenceCatalog: fixture.inputs.evidenceCatalog,
+                classifier: classifier
+            )
+            controlReports.append(report)
+        }
+
+        let summary = LiveTargetedClipBenchmarkSummary(
+            adReports: adReports,
+            controlReports: controlReports
+        )
+        print(summary.render())
         #endif
     }
 }
@@ -162,6 +338,70 @@ private struct FixtureShadowBenchmark {
     let inputs: BackfillJobRunner.AssetInputs
     let groundTruth: [GroundTruthAd]
     let falsePositives: [NonAdSignal]
+}
+
+private struct LiveClipBenchmarkReport {
+    let id: String
+    let label: String
+    let coarseStatus: SemanticScanStatus
+    let refinementStatus: SemanticScanStatus
+    let coarseHit: Bool
+    let refinedHit: Bool
+    let coarseLatencyMs: Double
+    let refinementLatencyMs: Double
+
+    var policyBlocked: Bool {
+        coarseStatus == .guardrailViolation || coarseStatus == .refusal ||
+        refinementStatus == .guardrailViolation || refinementStatus == .refusal
+    }
+}
+
+private struct LiveTargetedClipBenchmarkSummary {
+    let adReports: [LiveClipBenchmarkReport]
+    let controlReports: [LiveClipBenchmarkReport]
+
+    var coarseHitCount: Int { adReports.filter(\.coarseHit).count }
+    var refinedHitCount: Int { adReports.filter(\.refinedHit).count }
+    var policyBlockedAdCount: Int { adReports.filter(\.policyBlocked).count }
+    var evaluableAdCount: Int { adReports.count - policyBlockedAdCount }
+    var coarseFalsePositiveCount: Int { controlReports.filter(\.coarseHit).count }
+    var refinedFalsePositiveCount: Int { controlReports.filter(\.refinedHit).count }
+
+    func render() -> String {
+        var lines: [String] = []
+        lines.append("\n=== Foundation Model Targeted Clip Benchmark ===")
+        lines.append(
+            "Ads: coarse hits \(coarseHitCount)/\(adReports.count), refined hits \(refinedHitCount)/\(adReports.count), policy-blocked \(policyBlockedAdCount)/\(adReports.count)"
+        )
+        lines.append("Evaluable ads: \(evaluableAdCount)/\(adReports.count)")
+        if !controlReports.isEmpty {
+            lines.append(
+                "False-positive watch: coarse \(coarseFalsePositiveCount)/\(controlReports.count), refined \(refinedFalsePositiveCount)/\(controlReports.count)"
+            )
+        }
+
+        lines.append("\nPer-ad clips:")
+        for report in adReports {
+            lines.append(
+                "  [\(report.coarseHit ? "coarse" : "-") / \(report.refinedHit ? "refined" : "-")] \(report.id) \(report.label) coarse=\(report.coarseStatus.rawValue) refined=\(report.refinementStatus.rawValue) latency=\(fmt(report.coarseLatencyMs))/\(fmt(report.refinementLatencyMs))ms"
+            )
+        }
+
+        if !controlReports.isEmpty {
+            lines.append("\nControl clips:")
+            for report in controlReports {
+                lines.append(
+                    "  [\(report.coarseHit ? "coarse-hit" : "clean") / \(report.refinedHit ? "refined-hit" : "clean")] \(report.label) coarse=\(report.coarseStatus.rawValue) refined=\(report.refinementStatus.rawValue)"
+                )
+            }
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func fmt(_ value: Double) -> String {
+        String(format: "%.1f", value)
+    }
 }
 
 private struct FoundationModelShadowBenchmarkSummary {
@@ -195,6 +435,12 @@ private struct FoundationModelShadowBenchmarkSummary {
     let falsePositiveReports: [FalsePositiveReport]
     let commercialIntentCounts: [(String, Int)]
     let boundaryPrecisionCounts: [(String, Int)]
+
+    var blockingStatus: SemanticScanStatus? {
+        [coarseStatus, refinementStatus].first(where: {
+            $0 == .guardrailViolation || $0 == .refusal
+        })
+    }
 
     static func build(
         scanResults: [SemanticScanResult],
@@ -269,9 +515,18 @@ private struct FoundationModelShadowBenchmarkSummary {
             )
         }
 
+        let coarseStatus = aggregateStatus(
+            rows: passA,
+            defaultStatus: scanResults.isEmpty ? .failedTransient : .success
+        )
+        let refinementStatus = aggregateStatus(
+            rows: passB,
+            defaultStatus: defaultRefinementStatus(passAStatus: coarseStatus, passBRows: passB)
+        )
+
         return FoundationModelShadowBenchmarkSummary(
-            coarseStatus: aggregateStatus(rows: passA, defaultStatus: scanResults.isEmpty ? .failedTransient : .success),
-            refinementStatus: aggregateStatus(rows: passB, defaultStatus: .success),
+            coarseStatus: coarseStatus,
+            refinementStatus: refinementStatus,
             coarseWindowCount: passA.count,
             coarsePositiveWindowCount: coarseRanges.count,
             refinementWindowCount: passB.count,
@@ -296,15 +551,22 @@ private struct FoundationModelShadowBenchmarkSummary {
                 "Jobs: admitted=\(runResult.admittedJobIds.count) deferred=\(runResult.deferredJobIds.count) scans=\(runResult.scanResultIds.count) evidence=\(runResult.evidenceEventIds.count)"
             )
         }
+        if let blockingStatus {
+            lines.append("Benchmark blocked by FM policy: \(blockingStatus.rawValue)")
+        }
         lines.append(
             "Coarse status: \(coarseStatus.rawValue) latency=\(fmt(coarseLatencyMs))ms windows=\(coarseWindowCount) positives=\(coarsePositiveWindowCount)"
         )
         lines.append(
             "Refinement status: \(refinementStatus.rawValue) latency=\(fmt(refinementLatencyMs))ms windows=\(refinementWindowCount) spans=\(refinedSpanCount)"
         )
-        lines.append(
-            "Ground-truth recall: coarse \(coarseHitCount)/\(adReports.count), refined \(refinedHitCount)/\(adReports.count)"
-        )
+        if blockingStatus == nil {
+            lines.append(
+                "Ground-truth recall: coarse \(coarseHitCount)/\(adReports.count), refined \(refinedHitCount)/\(adReports.count)"
+            )
+        } else {
+            lines.append("Ground-truth recall is not meaningful for blocked FM runs.")
+        }
 
         lines.append("\nPer-ad results:")
         for report in adReports {
@@ -355,6 +617,16 @@ private struct FoundationModelShadowBenchmarkSummary {
         rows.first?.status ??
         defaultStatus
     }
+
+    private static func defaultRefinementStatus(
+        passAStatus: SemanticScanStatus,
+        passBRows: [SemanticScanResult]
+    ) -> SemanticScanStatus {
+        guard passBRows.isEmpty else {
+            return .success
+        }
+        return passAStatus == .success ? .success : passAStatus
+    }
 }
 
 private struct BenchmarkRange: Sendable {
@@ -382,6 +654,82 @@ private struct BenchmarkRange: Sendable {
 
     func overlap(with other: BenchmarkRange) -> Double {
         max(0, min(endTime, other.endTime) - max(startTime, other.startTime))
+    }
+}
+
+private func runLiveClipBenchmark(
+    id: String,
+    label: String,
+    targetRange: BenchmarkRange,
+    segments: [AdTranscriptSegment],
+    evidenceCatalog: EvidenceCatalog,
+    classifier: FoundationModelClassifier
+) async throws -> LiveClipBenchmarkReport {
+    let coarse = try await classifier.coarsePassA(segments: segments)
+    let coarseHit = coarse.windows
+        .filter { $0.screening.disposition == .containsAd || $0.screening.disposition == .uncertain }
+        .contains { window in
+            BenchmarkRange(startTime: window.startTime, endTime: window.endTime).overlap(with: targetRange) > 0
+        }
+
+    if coarse.status != .success {
+        return LiveClipBenchmarkReport(
+            id: id,
+            label: label,
+            coarseStatus: coarse.status,
+            refinementStatus: coarse.status,
+            coarseHit: coarseHit,
+            refinedHit: false,
+            coarseLatencyMs: coarse.latencyMillis,
+            refinementLatencyMs: 0
+        )
+    }
+
+    let zoomPlans = try await classifier.planAdaptiveZoom(
+        coarse: coarse,
+        segments: segments,
+        evidenceCatalog: evidenceCatalog
+    )
+    let refinement = try await classifier.refinePassB(
+        zoomPlans: zoomPlans,
+        segments: segments,
+        evidenceCatalog: evidenceCatalog
+    )
+
+    let lineRefLookup = Dictionary(uniqueKeysWithValues: segments.map { ($0.segmentIndex, $0) })
+    let refinedHit = refinement.windows
+        .flatMap(\.spans)
+        .contains { span in
+            guard let first = lineRefLookup[span.firstLineRef],
+                  let last = lineRefLookup[span.lastLineRef] else {
+                return false
+            }
+            return BenchmarkRange(startTime: first.startTime, endTime: last.endTime)
+                .overlap(with: targetRange) > 0
+        }
+
+    return LiveClipBenchmarkReport(
+        id: id,
+        label: label,
+        coarseStatus: coarse.status,
+        refinementStatus: refinement.status,
+        coarseHit: coarseHit,
+        refinedHit: refinedHit,
+        coarseLatencyMs: coarse.latencyMillis,
+        refinementLatencyMs: refinement.latencyMillis
+    )
+}
+
+private func makeClipSegments(
+    from segments: [AdTranscriptSegment],
+    startTime: Double,
+    endTime: Double,
+    padding: Double
+) -> [AdTranscriptSegment] {
+    let clipStart = max(0, startTime - padding)
+    let clipEnd = endTime + padding
+    return segments.filter { segment in
+        segment.endTime > clipStart && segment.startTime < clipEnd
     }
 }
 
