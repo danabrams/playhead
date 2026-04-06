@@ -485,6 +485,93 @@ struct TranscriptSegmenterTests {
         #expect(segments[1].segmentType == .speech)
     }
 
+    @Test("Default pause threshold pins segment count for synthetic ad-cluster transcript")
+    func defaultPauseThresholdRegressionGuard() {
+        // H12: pin the segment count produced by the default pauseThreshold
+        // (1.5s) over a hand-built transcript with deliberately-placed
+        // pauses. A future change to the default threshold (e.g. 1.5 → 2.0)
+        // will reorder pauses across the threshold and shift the segment
+        // count, failing this test loudly.
+        //
+        // Topology (gaps in seconds):
+        //   atom 0  end=10  gap 1.6  (>1.5, hard break)
+        //   atom 1  end=21  gap 0.8  (no break)
+        //   atom 2  end=30  gap 1.4  (no break — sub-1.5)
+        //   atom 3  end=42  gap 1.6  (>1.5, hard break)
+        //   atom 4  end=55  gap 0.6  (no break)
+        //   atom 5  end=68  gap 2.5  (>1.5, hard break)
+        //   atom 6  end=80
+        // Expected: 4 segments under default threshold 1.5.
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 0,    endTime: 10,   text: "intro thought continues here"),
+            makeAtom(ordinal: 1, startTime: 11.6, endTime: 21,   text: "second thought rolling along"),
+            makeAtom(ordinal: 2, startTime: 21.8, endTime: 30,   text: "still in the same beat"),
+            makeAtom(ordinal: 3, startTime: 31.4, endTime: 42,   text: "another sentence in cluster"),
+            makeAtom(ordinal: 4, startTime: 43.6, endTime: 55,   text: "fresh topic begins now"),
+            makeAtom(ordinal: 5, startTime: 55.6, endTime: 68,   text: "continuing the fresh topic"),
+            makeAtom(ordinal: 6, startTime: 70.5, endTime: 80,   text: "final segment after long pause"),
+        ]
+
+        let segments = TranscriptSegmenter.segment(atoms: atoms)
+
+        #expect(segments.count == 4, "Expected 4 segments at default pauseThreshold 1.5; got \(segments.count). If you intentionally changed the default, update this test with the new pinned count.")
+        // First segment must be only atom 0 (gap 1.6 > 1.5).
+        #expect(segments[0].lastAtomOrdinal == 0)
+        // Final segment must start at atom 6 (gap 2.5 > 1.5).
+        #expect(segments.last?.firstAtomOrdinal == 6)
+    }
+
+    @Test("First segment boundaryReason is startOfTranscript")
+    func firstSegmentBoundaryReasonIsStartOfTranscript() {
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 0, endTime: 5, text: "first."),
+            makeAtom(ordinal: 1, startTime: 8, endTime: 13, text: "Second."),
+        ]
+
+        let segments = TranscriptSegmenter.segment(atoms: atoms)
+
+        #expect(segments.count == 2)
+        #expect(segments[0].boundaryReason == .startOfTranscript)
+    }
+
+    @Test("Speaker turn re-fires after segment grows past min duration")
+    func speakerTurnSuppressedThenReFires() {
+        // Reproduces M1: a speaker change at 4s is suppressed because the
+        // segment is below minSegmentDuration (10s). A second speaker
+        // change at 14s — once the running segment has grown beyond 10s —
+        // must fire and produce a segment whose boundaryReason is
+        // .speakerTurn (boundary metadata is correctly attributed to the
+        // turn that actually emitted the break, not the suppressed one).
+        let config = TranscriptSegmenter.Config(
+            pauseThreshold: 2.0,
+            maxSegmentDuration: 120.0,
+            minSegmentDuration: 10.0
+        )
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 0,  endTime: 4,  text: "speaker one starts"),
+            makeAtom(ordinal: 1, startTime: 4,  endTime: 8,  text: "speaker two interjects"),
+            makeAtom(ordinal: 2, startTime: 8,  endTime: 14, text: "speaker two keeps talking"),
+            makeAtom(ordinal: 3, startTime: 14, endTime: 20, text: "speaker three takes over"),
+        ]
+        let featureWindows = [
+            makeFeatureWindow(startTime: 0,  endTime: 4,  speakerClusterId: 1),
+            makeFeatureWindow(startTime: 4,  endTime: 8,  speakerClusterId: 2),
+            makeFeatureWindow(startTime: 8,  endTime: 14, speakerClusterId: 2),
+            makeFeatureWindow(startTime: 14, endTime: 20, speakerClusterId: 3),
+        ]
+
+        let segments = TranscriptSegmenter.segment(
+            atoms: atoms,
+            featureWindows: featureWindows,
+            config: config
+        )
+
+        #expect(segments.count == 2)
+        #expect(segments[0].atoms.count == 3)
+        #expect(segments[1].firstAtomOrdinal == 3)
+        #expect(segments[1].boundaryReason == .speakerTurn)
+    }
+
     @Test("Segmenting 100 atoms against 100 feature windows completes within budget")
     func segmenterScalesWithBinarySearch() {
         // M18 perf guard: 100 atom transitions x 100 windows = 10,000
