@@ -196,9 +196,13 @@ enum TranscriptSegmenter {
         }
 
         // Hard break: feature windows indicate a strong pause boundary even if
-        // atom timestamps are contiguous.
+        // atom timestamps are contiguous. Check the entire gap interval
+        // [previous.endTime, current.startTime] for overlap with a high-pause
+        // window — sampling only the boundary point misses windows that end
+        // exactly at the previous atom's endTime.
         if let featurePauseConfidence = featurePauseConfidence(
-            at: current.startTime,
+            gapStart: previous.endTime,
+            gapEnd: current.startTime,
             featureWindows: featureWindows
         ) {
             return BreakType(
@@ -299,14 +303,22 @@ enum TranscriptSegmenter {
         }?.key
     }
 
+    /// Returns the strongest pauseProbability of any feature window whose
+    /// time range overlaps the gap interval `[gapStart, gapEnd]` (inclusive
+    /// on both endpoints), provided that probability meets the configured
+    /// threshold. Returns nil otherwise.
+    ///
+    /// Two intervals `[a, b]` and `[c, d]` overlap iff `a <= d && c <= b`.
     private static func featurePauseConfidence(
-        at boundaryTime: Double,
+        gapStart: Double,
+        gapEnd: Double,
         featureWindows: [FeatureWindow]
     ) -> Double? {
+        let lo = min(gapStart, gapEnd)
+        let hi = max(gapStart, gapEnd)
         let strongestPause = featureWindows
             .filter { window in
-                window.startTime <= boundaryTime &&
-                window.endTime >= boundaryTime
+                window.startTime <= hi && lo <= window.endTime
             }
             .map(\.pauseProbability)
             .max()

@@ -485,6 +485,62 @@ struct TranscriptSegmenterTests {
         #expect(segments[1].segmentType == .speech)
     }
 
+    @Test("Feature pause window covering only the gap interval still triggers a hard break")
+    func featurePauseWindowCoversGapInterval() {
+        // Regression for M19: previously the segmenter only sampled the
+        // current atom's startTime, so a high-pause window covering [4, 8]
+        // missed gap interval [8.0, 8.5] and no break was emitted.
+        let config = TranscriptSegmenter.Config(
+            pauseThreshold: 2.0, // gap is 0.5s — well below atom-gap threshold
+            maxSegmentDuration: 120.0,
+            minSegmentDuration: 1.0
+        )
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 0, endTime: 8.0, text: "first thought"),
+            makeAtom(ordinal: 1, startTime: 8.5, endTime: 14.0, text: "second thought"),
+        ]
+        let featureWindows = [
+            makeFeatureWindow(startTime: 4, endTime: 8, pauseProbability: 0.95, speakerClusterId: 1),
+        ]
+
+        let segments = TranscriptSegmenter.segment(
+            atoms: atoms,
+            featureWindows: featureWindows,
+            config: config
+        )
+
+        #expect(segments.count == 2)
+        #expect(segments[1].boundaryReason == .pause)
+    }
+
+    @Test("Feature pause window with edge exactly at boundary time still counts")
+    func featurePauseWindowEdgeInclusive() {
+        // Pin inclusive equality: a window ending exactly at the boundary
+        // time (and a window starting exactly at it) should both fire.
+        let config = TranscriptSegmenter.Config(
+            pauseThreshold: 2.0,
+            maxSegmentDuration: 120.0,
+            minSegmentDuration: 1.0
+        )
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 0, endTime: 6.0, text: "first"),
+            makeAtom(ordinal: 1, startTime: 6.0, endTime: 12.0, text: "second"),
+        ]
+        // Window ends exactly at the gap interval [6.0, 6.0].
+        let featureWindows = [
+            makeFeatureWindow(startTime: 4.0, endTime: 6.0, pauseProbability: 0.9, speakerClusterId: 1),
+        ]
+
+        let segments = TranscriptSegmenter.segment(
+            atoms: atoms,
+            featureWindows: featureWindows,
+            config: config
+        )
+
+        #expect(segments.count == 2)
+        #expect(segments[1].boundaryReason == .pause)
+    }
+
     @Test("Every atom appears exactly once across emitted segments")
     func exactAtomCoverage() {
         let atoms = [
