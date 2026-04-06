@@ -453,6 +453,70 @@ struct BackfillJobStoreTests {
         }
     }
 
+    // MARK: - HIGH-R6-1: markBackfillJobRunning must be idempotent on
+    // `.running` rows so a crash between markRunning and the terminal
+    // transition cannot create a zombie that the runner loops on forever.
+
+    @Test("HIGH-R6-1: markBackfillJobRunning is idempotent on an already-running row")
+    func markBackfillJobRunning_idempotentOnRunningRow() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(
+            jobId: "running-idempotent",
+            phase: .scanLikelyAdSlots,
+            coveragePolicy: .targetedWithAudit,
+            progressCursor: BackfillProgressCursor(
+                processedUnitCount: 7,
+                lastProcessedUpperBoundSec: 210
+            ),
+            retryCount: 3,
+            deferReason: "earlier-defer"
+        )
+        try await store.insertBackfillJob(job)
+        try await store.markBackfillJobRunning(jobId: job.jobId)
+
+        // Second call must not throw and must not clobber audit fields.
+        try await store.markBackfillJobRunning(jobId: job.jobId)
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .running)
+        #expect(fetched.progressCursor == BackfillProgressCursor(
+            processedUnitCount: 7,
+            lastProcessedUpperBoundSec: 210
+        ))
+        #expect(fetched.retryCount == 3)
+        #expect(fetched.deferReason == "earlier-defer")
+    }
+
+    @Test("HIGH-R6-1: markBackfillJobRunning recovers from crash-left zombie row")
+    func markBackfillJobRunning_recoversFromCrashLeftZombieRow() async throws {
+        // Simulate a process crash between markBackfillJobRunning and the
+        // terminal transition: the row is already `.running` when the next
+        // drain cycle re-enqueues and calls markBackfillJobRunning again.
+        // Pre-HIGH-R6-1 this threw invalidStateTransition, the runner's catch
+        // arm logged "already in terminal state" without bumping retryCount,
+        // and the job looped forever as a zombie.
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(
+            jobId: "zombie-running",
+            phase: .scanLikelyAdSlots,
+            coveragePolicy: .targetedWithAudit,
+            progressCursor: BackfillProgressCursor(processedUnitCount: 2),
+            retryCount: 1
+        )
+        try await store.insertBackfillJob(job)
+        try await store.markBackfillJobRunning(jobId: job.jobId)
+
+        // Second run after "crash" — must not throw.
+        try await store.markBackfillJobRunning(jobId: job.jobId)
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .running)
+        #expect(fetched.progressCursor?.processedUnitCount == 2)
+        #expect(fetched.retryCount == 1)
+    }
+
     // MARK: - C3-2: terminal transitions on markBackfillJobComplete/Failed
 
     @Test("C3-2: markBackfillJobComplete throws on a failed row")

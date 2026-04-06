@@ -1846,17 +1846,40 @@ actor AnalysisStore {
     /// missing row) throws `AnalysisStoreError.invalidStateTransition` so
     /// callers learn about the programmer/race error instead of silently
     /// re-running a job that already finished.
+    /// HIGH-R6-1: idempotent on an existing `.running` row. The prior
+    /// implementation only accepted `queued`/`deferred` and threw
+    /// `invalidStateTransition` on an already-running row. That asymmetry
+    /// (the Complete/Failed/Deferred guards are all idempotent on their
+    /// own terminal state) meant a process crash between
+    /// `markBackfillJobRunning` and the subsequent terminal transition
+    /// left the row stuck in `.running`. On the next drain the runner
+    /// would re-enqueue via M-5 idempotency, call this method, hit the
+    /// throw, and the runner's "already terminal" catch arm would
+    /// `continue` without bumping `retryCount` — a zombie that loops
+    /// forever. The `IN (..., 'running')` clause restores symmetry; the
+    /// row is left untouched (no field clobbering) because the UPDATE is
+    /// a no-op when the row is already `.running`.
     func markBackfillJobRunning(jobId: String) throws {
         let sql = """
             UPDATE backfill_jobs
             SET status = 'running'
-            WHERE jobId = ? AND status IN ('queued', 'deferred')
+            WHERE jobId = ? AND status IN ('queued', 'deferred', 'running')
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, jobId)
         try step(stmt, expecting: SQLITE_DONE)
         if sqlite3_changes(db) == 0 {
+            // With 'running' included in the IN clause above, a zero-change
+            // result means the row is either missing or in a terminal state
+            // (`complete`/`failed`). Probe for defensive disambiguation: if
+            // the row somehow reports `.running` (e.g. a future schema
+            // change widens the set) treat it as idempotent success;
+            // anything else is a real invalid transition.
+            let current = try probeBackfillJobStatus(jobId: jobId)
+            if current == "running" {
+                return
+            }
             throw AnalysisStoreError.invalidStateTransition(
                 jobId: jobId,
                 toStatus: "running"
