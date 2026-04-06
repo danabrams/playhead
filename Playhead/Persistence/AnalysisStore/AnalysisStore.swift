@@ -520,6 +520,19 @@ actor AnalysisStore {
         return readAsset(stmt)
     }
 
+    /// Fetch every analysis asset in the store, ordered by creation time (newest first).
+    /// Used for library-wide exports and diagnostic reporting.
+    func fetchAllAssets() throws -> [AnalysisAsset] {
+        let sql = "SELECT * FROM analysis_assets ORDER BY createdAt DESC, rowid DESC"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        var results: [AnalysisAsset] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(readAsset(stmt))
+        }
+        return results
+    }
+
     func updateAssetState(id: String, state: String) throws {
         let sql = "UPDATE analysis_assets SET analysisState = ? WHERE id = ?"
         let stmt = try prepare(sql)
