@@ -165,7 +165,7 @@ enum EvidenceCatalogBuilder {
             return []
         }
 
-        let text = atom.text
+        let text = sanitizedText(atom.text)
         guard !text.isEmpty else { return [] }
 
         let nsText = text as NSString
@@ -187,7 +187,7 @@ enum EvidenceCatalogBuilder {
                     } else {
                         matchedText = rawMatchedText
                     }
-                    let normalized = matchedText.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                    let normalized = normalize(matchedText)
                     guard !normalized.isEmpty else { continue }
 
                     let (startTime, endTime) = interpolateTiming(
@@ -228,7 +228,7 @@ enum EvidenceCatalogBuilder {
     ) -> [RawMatch] {
         guard commercialOrdinals.contains(atom.atomKey.atomOrdinal) else { return [] }
 
-        let text = atom.text
+        let text = sanitizedText(atom.text)
         guard !text.isEmpty else { return [] }
 
         let nsText = text as NSString
@@ -244,7 +244,7 @@ enum EvidenceCatalogBuilder {
 
                 let rawText = nsText.substring(with: brandRange)
                 let trimmed = trimTrailingStopWords(rawText)
-                let normalized = trimmed.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                let normalized = normalize(trimmed)
                 guard !normalized.isEmpty else { continue }
                 guard normalized.count >= 3 else { continue }
                 guard !commonNonBrandPhrases.contains(normalized) else { continue }
@@ -277,7 +277,7 @@ enum EvidenceCatalogBuilder {
 
             for match in regex.matches(in: text, range: fullRange) {
                 let rawText = nsText.substring(with: match.range)
-                let normalized = rawText.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                let normalized = normalize(rawText)
                 guard !normalized.isEmpty else { continue }
 
                 let (startTime, endTime) = interpolateTiming(
@@ -343,7 +343,87 @@ enum EvidenceCatalogBuilder {
         })
     }
 
+    /// Sanitize raw atom text BEFORE pattern matching: applies NFKC and strips
+    /// Cc/Cf categories so that zero-width joiners and BOMs do not break `\w`
+    /// boundaries inside brand names. Casing is preserved (the regex engine
+    /// uses `.caseInsensitive`).
+    static func sanitizedText(_ text: String) -> String {
+        let nfkc = text.precomposedStringWithCompatibilityMapping
+        var stripped = String.UnicodeScalarView()
+        stripped.reserveCapacity(nfkc.unicodeScalars.count)
+        for scalar in nfkc.unicodeScalars {
+            if CharacterSet.controlCharacters.contains(scalar) { continue }
+            if formatCategoryScalars.contains(scalar) { continue }
+            stripped.append(scalar)
+        }
+        return String(stripped)
+    }
+
+    /// Normalize a raw matched text for catalog lookup keys.
+    ///
+    /// Applies NFKC compatibility decomposition (so visually-identical glyphs
+    /// like "ﬁ" and "fi" map to the same string), strips Unicode control and
+    /// format characters (Cc/Cf categories — invisible joiners, BOMs, ZWSPs),
+    /// lowercases, and trims whitespace. Lookups are stable when upstream
+    /// transcribers emit zero-width characters or compatibility codepoints.
+    static func normalize(_ text: String) -> String {
+        let nfkc = text.precomposedStringWithCompatibilityMapping
+        var stripped = String.UnicodeScalarView()
+        stripped.reserveCapacity(nfkc.unicodeScalars.count)
+        for scalar in nfkc.unicodeScalars {
+            // Drop control (Cc) and format (Cf) characters: zero-width spaces,
+            // BOMs, joiners, directional marks, etc. Keep whitespace categories
+            // (Zs/Zl/Zp) — those are trimmed by the .whitespacesAndNewlines pass
+            // below.
+            if CharacterSet.controlCharacters.contains(scalar) { continue }
+            if formatCategoryScalars.contains(scalar) { continue }
+            stripped.append(scalar)
+        }
+        return String(stripped)
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Cf (Format) category scalars include zero-width joiners, soft hyphens,
+    /// directional marks, and the byte-order mark. CharacterSet doesn't expose
+    /// the Cf category directly, so we test via the per-scalar Unicode property.
+    private static let formatCategoryScalars: CharacterSet = {
+        var set = CharacterSet()
+        // Build by walking the BMP + supplementary planes is too expensive at
+        // class init; instead, use the documented Unicode general category test.
+        // Apple's CharacterSet doesn't expose Cf, so we approximate by listing
+        // the most common offenders and falling back to a runtime test.
+        let knownFormatScalars: [Unicode.Scalar] = [
+            "\u{00AD}", // SOFT HYPHEN
+            "\u{200B}", // ZERO WIDTH SPACE
+            "\u{200C}", // ZERO WIDTH NON-JOINER
+            "\u{200D}", // ZERO WIDTH JOINER
+            "\u{200E}", // LEFT-TO-RIGHT MARK
+            "\u{200F}", // RIGHT-TO-LEFT MARK
+            "\u{202A}", // LRE
+            "\u{202B}", // RLE
+            "\u{202C}", // PDF
+            "\u{202D}", // LRO
+            "\u{202E}", // RLO
+            "\u{2060}", // WORD JOINER
+            "\u{2061}", "\u{2062}", "\u{2063}", "\u{2064}",
+            "\u{FEFF}", // BYTE ORDER MARK / ZWNBSP
+        ]
+        for scalar in knownFormatScalars {
+            set.insert(scalar)
+        }
+        return set
+    }()
+
     private static func brandStem(from normalizedURL: String) -> String? {
+        // Strip a leading "www." prefix BEFORE splitting on TLD separators so
+        // that "www.acme.com" yields stem "acme" rather than "www.acme".
+        let trimmed: String
+        if normalizedURL.hasPrefix("www.") {
+            trimmed = String(normalizedURL.dropFirst(4))
+        } else {
+            trimmed = normalizedURL
+        }
         let separators = [
             ".com/",
             ".org/",
@@ -368,8 +448,8 @@ enum EvidenceCatalogBuilder {
         ]
 
         for separator in separators {
-            guard let range = normalizedURL.range(of: separator) else { continue }
-            let stem = String(normalizedURL[..<range.lowerBound])
+            guard let range = trimmed.range(of: separator) else { continue }
+            let stem = String(trimmed[..<range.lowerBound])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if stem.count >= 3 {
                 return stem
