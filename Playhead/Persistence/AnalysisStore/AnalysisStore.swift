@@ -2328,7 +2328,44 @@ actor AnalysisStore {
             // No row with this id. The ignore must be from the natural-key
             // dedup path: another row with the same (asset, eventType,
             // sourceType, atomOrdinals, scanCohortJSON) already exists.
-            // That's legitimate dedup; return silently.
+            //
+            // H3-1: before the id-probe fell through we silently assumed
+            // the stored row's body matched the incoming evidenceJSON. A
+            // caller that generated a fresh id for the same logical row
+            // but mutated the body (say, regenerated evidence with a newer
+            // classifier response) would pass through undetected — the
+            // second write vanished into the dedup path while the caller
+            // believed it had landed. Probe the natural key and compare
+            // `evidenceJSON`. On mismatch, fail loudly; on match, it is a
+            // legitimate dedup and we return silently.
+            let naturalProbe = try prepare("""
+                SELECT id, evidenceJSON
+                FROM evidence_events
+                WHERE analysisAssetId = ?
+                  AND eventType = ?
+                  AND sourceType = ?
+                  AND atomOrdinals = ?
+                  AND scanCohortJSON = ?
+                LIMIT 1
+                """)
+            defer { sqlite3_finalize(naturalProbe) }
+            bind(naturalProbe, 1, event.analysisAssetId)
+            bind(naturalProbe, 2, event.eventType)
+            bind(naturalProbe, 3, event.sourceType.rawValue)
+            bind(naturalProbe, 4, event.atomOrdinals)
+            bind(naturalProbe, 5, event.scanCohortJSON)
+
+            if sqlite3_step(naturalProbe) == SQLITE_ROW {
+                let existingId = optionalText(naturalProbe, 0) ?? ""
+                let existingBody = optionalText(naturalProbe, 1) ?? ""
+                if existingBody != event.evidenceJSON {
+                    throw AnalysisStoreError.evidenceEventBodyMismatch(id: existingId)
+                }
+                // Bodies match: legitimate natural-key dedup, silent return.
+            }
+            // No natural-key row either: extremely defensive fall-through
+            // (shouldn't happen if INSERT OR IGNORE reported 0 changes);
+            // return silently to preserve legacy behavior.
         }
     }
 

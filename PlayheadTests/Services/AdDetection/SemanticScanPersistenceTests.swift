@@ -999,6 +999,89 @@ struct SemanticScanPersistenceTests {
         #expect(fetched.first?.evidenceJSON == #"{"quote":"original body"}"#)
     }
 
+    @Test("H3-1: insertEvidenceEvent throws on natural-key collision with a different body")
+    func insertEvidenceEvent_throwsOnNaturalKeyBodyMismatch() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        let cohort = try makeScanCohortJSON()
+        // Two events sharing the natural key (asset, eventType, sourceType,
+        // atomOrdinals, scanCohortJSON) but with *different* evidenceJSON.
+        // The first is a legitimate first-write; the second is a bug where
+        // the caller generated a fresh id for the same logical row but with
+        // a mutated body. Pre-H3-1 the INSERT OR IGNORE swallowed the second
+        // row silently and the id-probe saw no row for `evt-B`, so control
+        // fell through to the "natural-key dedup" return and the caller
+        // believed its write had landed.
+        let first = EvidenceEvent(
+            id: "evt-A",
+            analysisAssetId: "asset-1",
+            eventType: "windowQuoted",
+            sourceType: .fm,
+            atomOrdinals: "[10,11]",
+            evidenceJSON: #"{"quote":"original body"}"#,
+            scanCohortJSON: cohort,
+            createdAt: 100
+        )
+        let second = EvidenceEvent(
+            id: "evt-B",
+            analysisAssetId: "asset-1",
+            eventType: "windowQuoted",
+            sourceType: .fm,
+            atomOrdinals: "[10,11]",
+            evidenceJSON: #"{"quote":"mutated body"}"#,
+            scanCohortJSON: cohort,
+            createdAt: 200
+        )
+
+        try await store.insertEvidenceEvent(first)
+        await #expect(throws: AnalysisStoreError.self) {
+            try await store.insertEvidenceEvent(second)
+        }
+
+        let fetched = try await store.fetchEvidenceEvents(analysisAssetId: "asset-1")
+        #expect(fetched.count == 1, "mutated body must not have been silently persisted")
+        #expect(fetched.first?.id == "evt-A")
+        #expect(fetched.first?.evidenceJSON == #"{"quote":"original body"}"#)
+    }
+
+    @Test("H3-1: insertEvidenceEvent is silently idempotent on natural-key collision with matching body")
+    func insertEvidenceEvent_silentDedupOnNaturalKeyBodyMatch() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        let cohort = try makeScanCohortJSON()
+        // Same natural key, same evidenceJSON, distinct ids — legitimate
+        // append dedup (e.g. a retried pipeline regenerated the id).
+        let first = EvidenceEvent(
+            id: "evt-A",
+            analysisAssetId: "asset-1",
+            eventType: "windowQuoted",
+            sourceType: .fm,
+            atomOrdinals: "[10,11]",
+            evidenceJSON: #"{"quote":"same body"}"#,
+            scanCohortJSON: cohort,
+            createdAt: 100
+        )
+        let second = EvidenceEvent(
+            id: "evt-B",
+            analysisAssetId: "asset-1",
+            eventType: "windowQuoted",
+            sourceType: .fm,
+            atomOrdinals: "[10,11]",
+            evidenceJSON: #"{"quote":"same body"}"#,
+            scanCohortJSON: cohort,
+            createdAt: 200
+        )
+
+        try await store.insertEvidenceEvent(first)
+        try await store.insertEvidenceEvent(second)
+
+        let fetched = try await store.fetchEvidenceEvents(analysisAssetId: "asset-1")
+        #expect(fetched.count == 1, "idempotent natural-key dedup must keep exactly one row")
+        #expect(fetched.first?.id == "evt-A")
+    }
+
     @Test("H-2: insertEvidenceEvent with the identical body at the same id is idempotent")
     func evidenceEventIdenticalBodyIsIdempotent() async throws {
         let store = try await makeTestStore()
