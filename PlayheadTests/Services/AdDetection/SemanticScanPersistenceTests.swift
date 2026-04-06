@@ -1367,4 +1367,43 @@ struct SemanticScanPersistenceTests {
         #expect(eventsRemaining.count == 2)
         #expect(Set(eventsRemaining.map(\.id)) == ["be1", "be2"])
     }
+
+    // MARK: - Fix #7: evidence insert createdAt drift idempotency
+
+    @Test("insertEvidenceEvent idempotent despite createdAt float drift")
+    func insertEvidenceEvent_idempotentDespiteCreatedAtDrift() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        let cohort = try makeScanCohortJSON()
+        let first = EvidenceEvent(
+            id: "ev-drift",
+            analysisAssetId: "asset-1",
+            eventType: "fm.windowScan",
+            sourceType: .fm,
+            atomOrdinals: "[1,2,3]",
+            evidenceJSON: #"{"run":"same"}"#,
+            scanCohortJSON: cohort,
+            createdAt: 100
+        )
+        let drifted = EvidenceEvent(
+            id: "ev-drift",
+            analysisAssetId: "asset-1",
+            eventType: "fm.windowScan",
+            sourceType: .fm,
+            atomOrdinals: "[1,2,3]",
+            evidenceJSON: #"{"run":"same"}"#,
+            scanCohortJSON: cohort,
+            createdAt: 100.0001
+        )
+
+        try await store.insertEvidenceEvent(first)
+        // Must not throw: createdAt drift alone is metadata and should not
+        // cause the body-match probe to flag the row as mismatched.
+        try await store.insertEvidenceEvent(drifted)
+
+        let fetched = try await store.fetchEvidenceEvents(analysisAssetId: "asset-1")
+        #expect(fetched.count == 1)
+        #expect(fetched.first?.id == "ev-drift")
+    }
 }

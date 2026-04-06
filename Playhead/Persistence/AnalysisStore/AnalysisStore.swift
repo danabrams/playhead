@@ -2457,7 +2457,15 @@ actor AnalysisStore {
                 let storedAtomOrdinals = optionalText(probe, 2) ?? ""
                 let storedEvidenceJSON = optionalText(probe, 3) ?? ""
                 let storedScanCohortJSON = optionalText(probe, 4) ?? ""
-                let storedCreatedAt = sqlite3_column_double(probe, 5)
+                // Fix #7: `createdAt` is metadata, not part of the logical
+                // identity of an evidence event. Float-equality on
+                // `timeIntervalSince1970` is fragile across retry calls
+                // that regenerate `Date()` (sub-microsecond drift between
+                // `CFAbsoluteTimeGetCurrent` → `Date()` → `Double` can
+                // fail `==`). The stored value is still fetched here for
+                // potential logging/debugging but is deliberately
+                // excluded from the body-match comparison.
+                _ = sqlite3_column_double(probe, 5)
                 let storedAnalysisAssetId = optionalText(probe, 6) ?? ""
 
                 let bodyMatches =
@@ -2466,8 +2474,7 @@ actor AnalysisStore {
                     storedSourceType == event.sourceType.rawValue &&
                     storedAtomOrdinals == event.atomOrdinals &&
                     storedEvidenceJSON == event.evidenceJSON &&
-                    storedScanCohortJSON == event.scanCohortJSON &&
-                    storedCreatedAt == event.createdAt
+                    storedScanCohortJSON == event.scanCohortJSON
 
                 if !bodyMatches {
                     throw AnalysisStoreError.evidenceEventBodyMismatch(id: event.id)
