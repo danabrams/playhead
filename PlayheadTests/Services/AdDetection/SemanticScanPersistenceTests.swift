@@ -167,8 +167,7 @@ struct SemanticScanPersistenceTests {
                 promptHash: "prompt-v1",
                 schemaHash: "schema-v1"
             ),
-            transcriptVersion: "tx-v1",
-            decisionCohortJSON: #"{"decision":"v2"}"#
+            transcriptVersion: "tx-v1"
         )
         let scanCohortChanged = try await store.fetchReusableSemanticScanResult(
             analysisAssetId: "asset-1",
@@ -176,8 +175,7 @@ struct SemanticScanPersistenceTests {
             windowLastAtomOrdinal: 30,
             scanPass: "passA",
             scanCohortJSON: try makeScanCohortJSON(promptHash: "prompt-v2", schemaHash: "schema-v1"),
-            transcriptVersion: "tx-v1",
-            decisionCohortJSON: #"{"decision":"v1"}"#
+            transcriptVersion: "tx-v1"
         )
         let transcriptChanged = try await store.fetchReusableSemanticScanResult(
             analysisAssetId: "asset-1",
@@ -185,8 +183,7 @@ struct SemanticScanPersistenceTests {
             windowLastAtomOrdinal: 30,
             scanPass: "passA",
             scanCohortJSON: try makeScanCohortJSON(promptHash: "prompt-v1", schemaHash: "schema-v1"),
-            transcriptVersion: "tx-v2",
-            decisionCohortJSON: #"{"decision":"v1"}"#
+            transcriptVersion: "tx-v2"
         )
 
         #expect(decisionCohortOnlyChanged?.id == result.id)

@@ -4,6 +4,7 @@
 // Separated from SwiftData because this data is append-heavy, versioned,
 // needs FTS5, and supports resumable processing with checkpointing.
 
+import CryptoKit
 import Foundation
 import SQLite3
 
@@ -149,12 +150,16 @@ struct AnalysisJob: Sendable {
 
 // MARK: - Store errors
 
-enum AnalysisStoreError: Error, CustomStringConvertible {
+enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
     case openFailed(code: Int32, message: String)
     case migrationFailed(String)
     case queryFailed(String)
     case insertFailed(String)
     case notFound
+    case duplicateJobId(String)
+    case invalidRow(column: Int)
+    case invalidEvidenceEvent(String)
+    case invalidScanCohortJSON(String)
 
     var description: String {
         switch self {
@@ -163,6 +168,10 @@ enum AnalysisStoreError: Error, CustomStringConvertible {
         case .queryFailed(let msg): "Query failed: \(msg)"
         case .insertFailed(let msg): "Insert failed: \(msg)"
         case .notFound: "Row not found"
+        case .duplicateJobId(let id): "Duplicate backfill job id: \(id)"
+        case .invalidRow(let col): "Unexpected NULL in non-null column \(col)"
+        case .invalidEvidenceEvent(let msg): "Invalid evidence event: \(msg)"
+        case .invalidScanCohortJSON(let msg): "Invalid scanCohortJSON: \(msg)"
         }
     }
 }
@@ -225,39 +234,76 @@ actor AnalysisStore {
     nonisolated(unsafe) private static var migratedPaths: Set<String> = []
 
     /// Run pragmas and create all tables / indexes / FTS triggers. Safe to call
-    /// more than once (every DDL statement uses IF NOT EXISTS). Skips work if
-    /// this database path has already been migrated in the current process.
+    /// more than once. Pragmas are always (re)applied since they live on the
+    /// per-connection state, not on the database file. The schema DDL itself
+    /// only runs once per database path per process — every DDL statement
+    /// uses IF NOT EXISTS so re-running is correct, just unnecessary work.
     func migrate() throws {
+        // M4 fix: pragmas must be applied to *every* connection. The previous
+        // implementation short-circuited the entire migrate() call when the
+        // path had already been seen, leaving second-instance connections with
+        // foreign_keys=OFF, the default journal mode, and no busy_timeout.
+        try configurePragmas()
+
         let path = databaseURL.path
         let alreadyDone = Self.migratedLock.withLock {
             !Self.migratedPaths.insert(path).inserted
         }
         guard !alreadyDone else { return }
 
-        try configurePragmas()
         try createTables()
         try migrateTranscriptChunksPhase1()
+        try writeInitialSchemaVersionIfNeeded()
     }
 
     private func migrateTranscriptChunksPhase1() throws {
-        // Add columns for transcript identity. ALTER TABLE ADD COLUMN fails
-        // if the column already exists — catch and ignore that specific case.
+        // Add columns for transcript identity. The old implementation parsed
+        // the SQLite error string for "duplicate column name"; we now check
+        // PRAGMA table_info first and only ALTER when the column is missing.
         try addColumnIfNeeded(table: "transcript_chunks", column: "transcriptVersion", definition: "TEXT")
         try addColumnIfNeeded(table: "transcript_chunks", column: "atomOrdinal", definition: "INTEGER")
     }
 
-    private func addColumnIfNeeded(table: String, column: String, definition: String) throws {
-        do {
-            try exec("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)")
-        } catch let error as AnalysisStoreError {
-            // SQLite reports "duplicate column name" when the column already exists.
-            // Only swallow that specific case; re-throw anything else (disk full,
-            // corruption, permissions, etc.).
-            if case .migrationFailed(let msg) = error, msg.contains("duplicate column") {
-                return
-            }
-            throw error
+    private func columnExists(table: String, column: String) throws -> Bool {
+        // PRAGMA table_info(...) cannot be parameterized via bind, so the
+        // table name is interpolated. Both arguments are in-process constants
+        // (no user input), so SQL injection is not in scope here.
+        let sql = "PRAGMA table_info(\(table))"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            // Column 1 of table_info is the column name.
+            let name = optionalText(stmt, 1) ?? ""
+            if name == column { return true }
         }
+        return false
+    }
+
+    private func addColumnIfNeeded(table: String, column: String, definition: String) throws {
+        if try columnExists(table: table, column: column) {
+            return
+        }
+        try exec("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)")
+    }
+
+    /// Records `_meta('schema_version', '1')` on first migration. Future
+    /// migrations should read this value, branch on it, and bump it inside the
+    /// same transaction as the DDL change.
+    private func writeInitialSchemaVersionIfNeeded() throws {
+        let stmt = try prepare("INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '1')")
+        defer { sqlite3_finalize(stmt) }
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Reads the current schema version from `_meta`. Returns `nil` if the row
+    /// is missing (only possible on a corrupted store, since `migrate()` writes
+    /// it on first run).
+    func schemaVersion() throws -> Int? {
+        let stmt = try prepare("SELECT value FROM _meta WHERE key = 'schema_version'")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        guard let raw = optionalText(stmt, 0) else { return nil }
+        return Int(raw)
     }
 
     deinit {
@@ -283,6 +329,14 @@ actor AnalysisStore {
     // MARK: DDL
 
     private func createTables() throws {
+        // _meta — anchor for schema version + future migration coordination.
+        try exec("""
+            CREATE TABLE IF NOT EXISTS _meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """)
+
         // analysis_assets
         try exec("""
             CREATE TABLE IF NOT EXISTS analysis_assets (
@@ -453,10 +507,15 @@ actor AnalysisStore {
         try exec("CREATE INDEX IF NOT EXISTS idx_jobs_episode ON analysis_jobs(episodeId)")
 
         // backfill_jobs
+        // M8: FK CASCADE so deleting an asset cleans up its backfill rows.
+        // H16 TODO: `decisionCohortJSON` is dead plumbing, kept here only
+        // because removing the field requires editing BackfillJob.swift +
+        // TestFactories.swift (owned by other agents). The reuse contract in
+        // SemanticScanResult intentionally ignores this column.
         try exec("""
             CREATE TABLE IF NOT EXISTS backfill_jobs (
                 jobId TEXT PRIMARY KEY,
-                analysisAssetId TEXT NOT NULL,
+                analysisAssetId TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
                 podcastId TEXT NOT NULL,
                 phase TEXT NOT NULL,
                 coveragePolicy TEXT NOT NULL,
@@ -474,6 +533,12 @@ actor AnalysisStore {
         try exec("CREATE INDEX IF NOT EXISTS idx_backfill_jobs_asset_phase ON backfill_jobs(analysisAssetId, phase)")
 
         // semantic_scan_results
+        // C5: `reuseKeyHash` is a SHA-256 over the canonical concatenation of
+        // (analysisAssetId, windowFirstAtomOrdinal, windowLastAtomOrdinal,
+        // scanPass, transcriptVersion, scanCohortJSON). UNIQUE on the hash
+        // gives us bounded cache growth (one row per reuse key) without the
+        // cost of indexing the long scanCohortJSON column directly. Insert
+        // path uses INSERT OR REPLACE so the latest write wins.
         try exec("""
             CREATE TABLE IF NOT EXISTS semantic_scan_results (
                 id TEXT PRIMARY KEY,
@@ -494,14 +559,20 @@ actor AnalysisStore {
                 latencyMs REAL,
                 prewarmHit INTEGER NOT NULL DEFAULT 0,
                 scanCohortJSON TEXT NOT NULL,
-                transcriptVersion TEXT NOT NULL
+                transcriptVersion TEXT NOT NULL,
+                reuseKeyHash TEXT NOT NULL,
+                UNIQUE(reuseKeyHash)
             )
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_pass ON semantic_scan_results(analysisAssetId, scanPass)")
-        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_reuse ON semantic_scan_results(analysisAssetId, windowFirstAtomOrdinal, windowLastAtomOrdinal, scanPass, transcriptVersion)")
-        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_reuse_cohort ON semantic_scan_results(analysisAssetId, windowFirstAtomOrdinal, windowLastAtomOrdinal, scanPass, transcriptVersion, scanCohortJSON)")
+        // M1/L3: dropped `idx_semantic_scan_results_reuse` and
+        // `idx_semantic_scan_results_reuse_cohort` — neither is used by the
+        // primary reuse query (which now hits the UNIQUE(reuseKeyHash) index).
+        // The asset_pass index above is sufficient for diagnostic listings.
 
         // evidence_events
+        // H11: UNIQUE on (asset, eventType, sourceType, atomOrdinals, cohort).
+        // Inserts use INSERT OR IGNORE for silent idempotent dedup.
         try exec("""
             CREATE TABLE IF NOT EXISTS evidence_events (
                 id TEXT PRIMARY KEY,
@@ -511,7 +582,8 @@ actor AnalysisStore {
                 atomOrdinals TEXT NOT NULL,
                 evidenceJSON TEXT NOT NULL,
                 scanCohortJSON TEXT NOT NULL,
-                createdAt REAL NOT NULL
+                createdAt REAL NOT NULL,
+                UNIQUE(analysisAssetId, eventType, sourceType, atomOrdinals, scanCohortJSON)
             )
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_evidence_events_asset_created ON evidence_events(analysisAssetId, createdAt ASC)")
@@ -1542,9 +1614,12 @@ actor AnalysisStore {
 
     // MARK: - CRUD: backfill_jobs
 
+    /// Inserts a new backfill job. Throws `AnalysisStoreError.duplicateJobId`
+    /// if the row already exists — callers must explicitly choose between
+    /// insert-new and update-existing semantics (H7).
     func insertBackfillJob(_ job: BackfillJob) throws {
         let sql = """
-            INSERT OR REPLACE INTO backfill_jobs
+            INSERT INTO backfill_jobs
             (jobId, analysisAssetId, podcastId, phase, coveragePolicy, priority,
              progressCursor, retryCount, deferReason, status, scanCohortJSON,
              decisionCohortJSON, createdAt)
@@ -1565,11 +1640,33 @@ actor AnalysisStore {
         bind(stmt, 11, job.scanCohortJSON)
         bind(stmt, 12, job.decisionCohortJSON)
         bind(stmt, 13, job.createdAt)
-        try step(stmt, expecting: SQLITE_DONE)
+        do {
+            try step(stmt, expecting: SQLITE_DONE)
+        } catch {
+            // SQLite constraint errors come back as the primary code
+            // SQLITE_CONSTRAINT (19); the extended subcodes are stable across
+            // versions but are not exported as Swift symbols by the SQLite3
+            // module. We hand-roll the literals here.
+            //   SQLITE_CONSTRAINT_PRIMARYKEY = 19 | (6<<8) = 1555
+            //   SQLITE_CONSTRAINT_UNIQUE     = 19 | (8<<8) = 2067
+            let extended = sqlite3_extended_errcode(db)
+            if extended == 1555 || extended == 2067 {
+                throw AnalysisStoreError.duplicateJobId(job.jobId)
+            }
+            throw error
+        }
     }
 
     func fetchBackfillJob(byId jobId: String) throws -> BackfillJob? {
-        let sql = "SELECT * FROM backfill_jobs WHERE jobId = ?"
+        // Column order: jobId, analysisAssetId, podcastId, phase, coveragePolicy,
+        // priority, progressCursor, retryCount, deferReason, status,
+        // scanCohortJSON, decisionCohortJSON, createdAt.
+        let sql = """
+            SELECT jobId, analysisAssetId, podcastId, phase, coveragePolicy,
+                   priority, progressCursor, retryCount, deferReason, status,
+                   scanCohortJSON, decisionCohortJSON, createdAt
+            FROM backfill_jobs WHERE jobId = ?
+            """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, jobId)
@@ -1577,6 +1674,51 @@ actor AnalysisStore {
         return try readBackfillJob(stmt)
     }
 
+    /// H5: progress-only checkpoint. Writes `progressCursor`, `retryCount`,
+    /// and bumps no other fields. Use this for periodic in-flight progress
+    /// updates so a concurrent or earlier `markBackfillJobDeferred` call is
+    /// not silently overwritten.
+    func checkpointBackfillJobProgress(
+        jobId: String,
+        progressCursor: BackfillProgressCursor?,
+        retryCount: Int? = nil
+    ) throws {
+        let sql = """
+            UPDATE backfill_jobs
+            SET progressCursor = ?, retryCount = COALESCE(?, retryCount)
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, try encodeJSONString(progressCursor))
+        bind(stmt, 2, retryCount)
+        bind(stmt, 3, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// H5: defer a job. Writes `status='deferred'` and the supplied reason
+    /// while preserving the existing `progressCursor` so resumption from the
+    /// last checkpoint still works.
+    func markBackfillJobDeferred(
+        jobId: String,
+        reason: String
+    ) throws {
+        let sql = """
+            UPDATE backfill_jobs
+            SET status = 'deferred', deferReason = ?
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, reason)
+        bind(stmt, 2, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Legacy combined API. Now thin shim that delegates to the split methods.
+    /// Production code should call `checkpointBackfillJobProgress` or
+    /// `markBackfillJobDeferred` directly.
+    @available(*, deprecated, message: "Use checkpointBackfillJobProgress or markBackfillJobDeferred")
     func checkpointBackfillJob(
         jobId: String,
         progressCursor: BackfillProgressCursor?,
@@ -1584,20 +1726,37 @@ actor AnalysisStore {
         retryCount: Int? = nil,
         deferReason: String? = nil
     ) throws {
-        let sql = """
-            UPDATE backfill_jobs
-            SET progressCursor = ?, status = ?, retryCount = COALESCE(?, retryCount),
-                deferReason = ?
-            WHERE jobId = ?
-            """
-        let stmt = try prepare(sql)
-        defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, try encodeJSONString(progressCursor))
-        bind(stmt, 2, status.rawValue)
-        bind(stmt, 3, retryCount)
-        bind(stmt, 4, deferReason)
-        bind(stmt, 5, jobId)
-        try step(stmt, expecting: SQLITE_DONE)
+        // Update only the running-status case to avoid clobbering deferReason.
+        let sql: String
+        if status == .deferred, let deferReason {
+            sql = """
+                UPDATE backfill_jobs
+                SET progressCursor = ?, status = 'deferred',
+                    retryCount = COALESCE(?, retryCount), deferReason = ?
+                WHERE jobId = ?
+                """
+            let stmt = try prepare(sql)
+            defer { sqlite3_finalize(stmt) }
+            bind(stmt, 1, try encodeJSONString(progressCursor))
+            bind(stmt, 2, retryCount)
+            bind(stmt, 3, deferReason)
+            bind(stmt, 4, jobId)
+            try step(stmt, expecting: SQLITE_DONE)
+        } else {
+            sql = """
+                UPDATE backfill_jobs
+                SET progressCursor = ?, status = ?,
+                    retryCount = COALESCE(?, retryCount)
+                WHERE jobId = ?
+                """
+            let stmt = try prepare(sql)
+            defer { sqlite3_finalize(stmt) }
+            bind(stmt, 1, try encodeJSONString(progressCursor))
+            bind(stmt, 2, status.rawValue)
+            bind(stmt, 3, retryCount)
+            bind(stmt, 4, jobId)
+            try step(stmt, expecting: SQLITE_DONE)
+        }
     }
 
     @discardableResult
@@ -1624,15 +1783,52 @@ actor AnalysisStore {
 
     // MARK: - CRUD: semantic_scan_results
 
+    /// Canonical column order shared by all `semantic_scan_results` readers:
+    /// 0  id                         9  spansJSON           17 scanCohortJSON
+    /// 1  analysisAssetId           10 status               18 transcriptVersion
+    /// 2  windowFirstAtomOrdinal    11 attemptCount         19 reuseKeyHash
+    /// 3  windowLastAtomOrdinal     12 errorContext
+    /// 4  windowStartTime           13 inputTokenCount
+    /// 5  windowEndTime             14 outputTokenCount
+    /// 6  scanPass                  15 latencyMs
+    /// 7  transcriptQuality         16 prewarmHit
+    /// 8  disposition
+    private static let semanticScanResultColumns = """
+        id, analysisAssetId, windowFirstAtomOrdinal, windowLastAtomOrdinal,
+        windowStartTime, windowEndTime, scanPass, transcriptQuality,
+        disposition, spansJSON, status, attemptCount, errorContext,
+        inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
+        scanCohortJSON, transcriptVersion, reuseKeyHash
+        """
+
+    /// Computes the canonical reuse-key SHA-256 over the fields that govern
+    /// FM scan reusability. The same field order is used in `fetchReusable…`,
+    /// keeping inserts and lookups in lockstep.
+    static func semanticScanReuseKeyHash(
+        analysisAssetId: String,
+        windowFirstAtomOrdinal: Int,
+        windowLastAtomOrdinal: Int,
+        scanPass: String,
+        transcriptVersion: String,
+        scanCohortJSON: String
+    ) -> String {
+        let canonical =
+            "\(analysisAssetId)|\(windowFirstAtomOrdinal)|\(windowLastAtomOrdinal)|" +
+            "\(scanPass)|\(transcriptVersion)|\(scanCohortJSON)"
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
     func insertSemanticScanResult(_ result: SemanticScanResult) throws {
+        try validateScanCohortJSON(result.scanCohortJSON)
         let sql = """
-            INSERT INTO semantic_scan_results
+            INSERT OR REPLACE INTO semantic_scan_results
             (id, analysisAssetId, windowFirstAtomOrdinal, windowLastAtomOrdinal,
              windowStartTime, windowEndTime, scanPass, transcriptQuality,
              disposition, spansJSON, status, attemptCount, errorContext,
              inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
-             scanCohortJSON, transcriptVersion)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             scanCohortJSON, transcriptVersion, reuseKeyHash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -1655,11 +1851,44 @@ actor AnalysisStore {
         bind(stmt, 17, result.prewarmHit ? 1 : 0)
         bind(stmt, 18, result.scanCohortJSON)
         bind(stmt, 19, result.transcriptVersion)
+        bind(stmt, 20, Self.semanticScanReuseKeyHash(
+            analysisAssetId: result.analysisAssetId,
+            windowFirstAtomOrdinal: result.windowFirstAtomOrdinal,
+            windowLastAtomOrdinal: result.windowLastAtomOrdinal,
+            scanPass: result.scanPass,
+            transcriptVersion: result.transcriptVersion,
+            scanCohortJSON: result.scanCohortJSON
+        ))
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    /// M2: atomic Pass-B write. Wraps a scan result and its evidence events in
+    /// a single `BEGIN IMMEDIATE … COMMIT`. Any thrown error rolls back.
+    func recordSemanticScanResult(
+        _ result: SemanticScanResult,
+        evidenceEvents: [EvidenceEvent]
+    ) throws {
+        try validateScanCohortJSON(result.scanCohortJSON)
+        for event in evidenceEvents {
+            try validateAtomOrdinalsJSON(event.atomOrdinals)
+            try validateScanCohortJSON(event.scanCohortJSON)
+        }
+        try exec("BEGIN IMMEDIATE")
+        do {
+            try insertSemanticScanResult(result)
+            for event in evidenceEvents {
+                try insertEvidenceEvent(event)
+            }
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
     func fetchSemanticScanResult(id: String) throws -> SemanticScanResult? {
-        let sql = "SELECT * FROM semantic_scan_results WHERE id = ?"
+        // Column order: see `semanticScanResultColumns` above.
+        let sql = "SELECT \(Self.semanticScanResultColumns) FROM semantic_scan_results WHERE id = ?"
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, id)
@@ -1671,16 +1900,17 @@ actor AnalysisStore {
         analysisAssetId: String,
         scanPass: String? = nil
     ) throws -> [SemanticScanResult] {
+        // Column order: see `semanticScanResultColumns` above.
         let sql: String
         if scanPass != nil {
             sql = """
-                SELECT * FROM semantic_scan_results
+                SELECT \(Self.semanticScanResultColumns) FROM semantic_scan_results
                 WHERE analysisAssetId = ? AND scanPass = ?
                 ORDER BY windowFirstAtomOrdinal ASC, rowid ASC
                 """
         } else {
             sql = """
-                SELECT * FROM semantic_scan_results
+                SELECT \(Self.semanticScanResultColumns) FROM semantic_scan_results
                 WHERE analysisAssetId = ?
                 ORDER BY windowFirstAtomOrdinal ASC, rowid ASC
                 """
@@ -1698,23 +1928,26 @@ actor AnalysisStore {
         return results
     }
 
+    /// C6: only consider successful scans for reuse, and prefer the newest one
+    /// by rowid. The previous implementation ordered by attemptCount DESC,
+    /// which silently surfaced many-attempt failures over later successes.
     func fetchReusableSemanticScanResult(
         analysisAssetId: String,
         windowFirstAtomOrdinal: Int,
         windowLastAtomOrdinal: Int,
         scanPass: String,
         scanCohortJSON: String,
-        transcriptVersion: String,
-        decisionCohortJSON: String? = nil
+        transcriptVersion: String
     ) throws -> SemanticScanResult? {
         let sql = """
-            SELECT * FROM semantic_scan_results
+            SELECT \(Self.semanticScanResultColumns) FROM semantic_scan_results
             WHERE analysisAssetId = ?
               AND windowFirstAtomOrdinal = ?
               AND windowLastAtomOrdinal = ?
               AND scanPass = ?
               AND transcriptVersion = ?
-            ORDER BY attemptCount DESC, rowid DESC
+              AND status = 'success'
+            ORDER BY rowid DESC
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -1728,19 +1961,48 @@ actor AnalysisStore {
             let result = try readSemanticScanResult(stmt)
             if result.isReusable(
                 scanCohortJSON: scanCohortJSON,
-                transcriptVersion: transcriptVersion,
-                decisionCohortJSON: decisionCohortJSON
+                transcriptVersion: transcriptVersion
             ) {
                 return result
             }
         }
-
         return nil
     }
 
     // MARK: - CRUD: evidence_events
 
+    /// Canonical column order for `evidence_events` readers:
+    /// 0 id, 1 analysisAssetId, 2 eventType, 3 sourceType,
+    /// 4 atomOrdinals, 5 evidenceJSON, 6 scanCohortJSON, 7 createdAt.
+    private static let evidenceEventColumns = """
+        id, analysisAssetId, eventType, sourceType,
+        atomOrdinals, evidenceJSON, scanCohortJSON, createdAt
+        """
+
     func insertEvidenceEvent(_ event: EvidenceEvent) throws {
+        try validateAtomOrdinalsJSON(event.atomOrdinals)
+        try validateScanCohortJSON(event.scanCohortJSON)
+        // H11: silent dedup on (asset, eventType, sourceType, atomOrdinals,
+        // scanCohortJSON). The PRIMARY KEY collision still throws so callers
+        // that pass a stale UUID for *new* evidence get a loud failure rather
+        // than silent overwrite.
+        let dupSQL = """
+            SELECT 1 FROM evidence_events
+            WHERE analysisAssetId = ? AND eventType = ? AND sourceType = ?
+              AND atomOrdinals = ? AND scanCohortJSON = ?
+            LIMIT 1
+            """
+        let dupStmt = try prepare(dupSQL)
+        defer { sqlite3_finalize(dupStmt) }
+        bind(dupStmt, 1, event.analysisAssetId)
+        bind(dupStmt, 2, event.eventType)
+        bind(dupStmt, 3, event.sourceType.rawValue)
+        bind(dupStmt, 4, event.atomOrdinals)
+        bind(dupStmt, 5, event.scanCohortJSON)
+        if sqlite3_step(dupStmt) == SQLITE_ROW {
+            return // already present, silent dedup
+        }
+
         let sql = """
             INSERT INTO evidence_events
             (id, analysisAssetId, eventType, sourceType, atomOrdinals,
@@ -1761,8 +2023,9 @@ actor AnalysisStore {
     }
 
     func fetchEvidenceEvents(analysisAssetId: String) throws -> [EvidenceEvent] {
+        // Column order: see `evidenceEventColumns` above.
         let sql = """
-            SELECT * FROM evidence_events
+            SELECT \(Self.evidenceEventColumns) FROM evidence_events
             WHERE analysisAssetId = ?
             ORDER BY createdAt ASC, rowid ASC
             """
@@ -1774,6 +2037,32 @@ actor AnalysisStore {
             events.append(try readEvidenceEvent(stmt))
         }
         return events
+    }
+
+    // MARK: - JSON validation helpers
+
+    /// M25: parses `atomOrdinals` and verifies it's a JSON array of integers.
+    private func validateAtomOrdinalsJSON(_ json: String) throws {
+        guard let data = json.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data),
+              let array = parsed as? [Any] else {
+            throw AnalysisStoreError.invalidEvidenceEvent("atomOrdinals must be a JSON array of integers, got: \(json.prefix(80))")
+        }
+        for element in array {
+            if (element as? Int) == nil, (element as? NSNumber) == nil {
+                throw AnalysisStoreError.invalidEvidenceEvent("atomOrdinals must be a JSON array of integers")
+            }
+        }
+    }
+
+    /// Validation hook for the persistence boundary. Allows malformed
+    /// `scanCohortJSON` to be rejected early instead of silently failing the
+    /// reuse comparison later.
+    private func validateScanCohortJSON(_ json: String) throws {
+        guard let data = json.data(using: .utf8),
+              (try? JSONSerialization.jsonObject(with: data)) != nil else {
+            throw AnalysisStoreError.invalidScanCohortJSON("not parseable as JSON")
+        }
     }
 
     private func readJob(_ stmt: OpaquePointer?) -> AnalysisJob {
@@ -1803,32 +2092,32 @@ actor AnalysisStore {
     }
 
     private func readSemanticScanResult(_ stmt: OpaquePointer?) throws -> SemanticScanResult {
-        let transcriptQualityRaw = text(stmt, 7)
+        let transcriptQualityRaw = try requireText(stmt, 7)
         guard let transcriptQuality = TranscriptQuality(rawValue: transcriptQualityRaw) else {
             throw AnalysisStoreError.queryFailed("Unknown transcript quality '\(transcriptQualityRaw)'")
         }
 
-        let dispositionRaw = text(stmt, 8)
+        let dispositionRaw = try requireText(stmt, 8)
         guard let disposition = CoarseDisposition(rawValue: dispositionRaw) else {
             throw AnalysisStoreError.queryFailed("Unknown coarse disposition '\(dispositionRaw)'")
         }
 
-        let statusRaw = text(stmt, 10)
+        let statusRaw = try requireText(stmt, 10)
         guard let status = SemanticScanStatus(rawValue: statusRaw) else {
             throw AnalysisStoreError.queryFailed("Unknown semantic scan status '\(statusRaw)'")
         }
 
         return SemanticScanResult(
-            id: text(stmt, 0),
-            analysisAssetId: text(stmt, 1),
+            id: try requireText(stmt, 0),
+            analysisAssetId: try requireText(stmt, 1),
             windowFirstAtomOrdinal: Int(sqlite3_column_int(stmt, 2)),
             windowLastAtomOrdinal: Int(sqlite3_column_int(stmt, 3)),
             windowStartTime: sqlite3_column_double(stmt, 4),
             windowEndTime: sqlite3_column_double(stmt, 5),
-            scanPass: text(stmt, 6),
+            scanPass: try requireText(stmt, 6),
             transcriptQuality: transcriptQuality,
             disposition: disposition,
-            spansJSON: text(stmt, 9),
+            spansJSON: try requireText(stmt, 9),
             status: status,
             attemptCount: Int(sqlite3_column_int(stmt, 11)),
             errorContext: optionalText(stmt, 12),
@@ -1836,49 +2125,49 @@ actor AnalysisStore {
             outputTokenCount: optionalInt(stmt, 14),
             latencyMs: optionalDouble(stmt, 15),
             prewarmHit: sqlite3_column_int(stmt, 16) != 0,
-            scanCohortJSON: text(stmt, 17),
-            transcriptVersion: text(stmt, 18)
+            scanCohortJSON: try requireText(stmt, 17),
+            transcriptVersion: try requireText(stmt, 18)
         )
     }
 
     private func readEvidenceEvent(_ stmt: OpaquePointer?) throws -> EvidenceEvent {
-        let sourceTypeRaw = text(stmt, 3)
+        let sourceTypeRaw = try requireText(stmt, 3)
         guard let sourceType = EvidenceSourceType(rawValue: sourceTypeRaw) else {
             throw AnalysisStoreError.queryFailed("Unknown evidence source type '\(sourceTypeRaw)'")
         }
 
         return EvidenceEvent(
-            id: text(stmt, 0),
-            analysisAssetId: text(stmt, 1),
-            eventType: text(stmt, 2),
+            id: try requireText(stmt, 0),
+            analysisAssetId: try requireText(stmt, 1),
+            eventType: try requireText(stmt, 2),
             sourceType: sourceType,
-            atomOrdinals: text(stmt, 4),
-            evidenceJSON: text(stmt, 5),
-            scanCohortJSON: text(stmt, 6),
+            atomOrdinals: try requireText(stmt, 4),
+            evidenceJSON: try requireText(stmt, 5),
+            scanCohortJSON: try requireText(stmt, 6),
             createdAt: sqlite3_column_double(stmt, 7)
         )
     }
 
     private func readBackfillJob(_ stmt: OpaquePointer?) throws -> BackfillJob {
-        let phaseRaw = text(stmt, 3)
+        let phaseRaw = try requireText(stmt, 3)
         guard let phase = BackfillJobPhase(rawValue: phaseRaw) else {
             throw AnalysisStoreError.queryFailed("Unknown backfill phase '\(phaseRaw)'")
         }
 
-        let coveragePolicyRaw = text(stmt, 4)
+        let coveragePolicyRaw = try requireText(stmt, 4)
         guard let coveragePolicy = CoveragePolicy(rawValue: coveragePolicyRaw) else {
             throw AnalysisStoreError.queryFailed("Unknown coverage policy '\(coveragePolicyRaw)'")
         }
 
-        let statusRaw = text(stmt, 9)
+        let statusRaw = try requireText(stmt, 9)
         guard let status = BackfillJobStatus(rawValue: statusRaw) else {
             throw AnalysisStoreError.queryFailed("Unknown backfill status '\(statusRaw)'")
         }
 
         return BackfillJob(
-            jobId: text(stmt, 0),
-            analysisAssetId: text(stmt, 1),
-            podcastId: text(stmt, 2),
+            jobId: try requireText(stmt, 0),
+            analysisAssetId: try requireText(stmt, 1),
+            podcastId: try requireText(stmt, 2),
             phase: phase,
             coveragePolicy: coveragePolicy,
             priority: Int(sqlite3_column_int(stmt, 5)),
@@ -1908,6 +2197,9 @@ actor AnalysisStore {
         var stmt: OpaquePointer?
         let rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
         guard rc == SQLITE_OK else {
+            // H9: SQLite may have allocated a partial statement before
+            // failing — finalize unconditionally to avoid the leak.
+            sqlite3_finalize(stmt)
             let msg = String(cString: sqlite3_errmsg(db))
             throw AnalysisStoreError.queryFailed("\(msg) (SQL: \(sql.prefix(120)))")
         }
@@ -1964,8 +2256,24 @@ actor AnalysisStore {
 
     /// Read a NOT NULL text column. If the column is unexpectedly NULL, returns
     /// an empty string. Use ``optionalText(_:_:)`` for nullable columns.
+    ///
+    /// NOTE: This silent NULL → "" coercion is preserved for legacy readers
+    /// (`readAsset`, `readSkipCue`, `readJob`, etc.) that are non-throwing.
+    /// New code on the persistence boundary should call ``requireText(_:_:)``
+    /// instead so an unexpected NULL throws `AnalysisStoreError.invalidRow`.
     private func text(_ stmt: OpaquePointer?, _ idx: Int32) -> String {
         sqlite3_column_text(stmt, idx).map { String(cString: $0) } ?? ""
+    }
+
+    /// M9: throwing variant of `text(_:_:)`. Throws
+    /// `AnalysisStoreError.invalidRow` when a non-null column is unexpectedly
+    /// NULL instead of masking the issue with an empty string.
+    private func requireText(_ stmt: OpaquePointer?, _ idx: Int32) throws -> String {
+        guard sqlite3_column_type(stmt, idx) != SQLITE_NULL,
+              let cstr = sqlite3_column_text(stmt, idx) else {
+            throw AnalysisStoreError.invalidRow(column: Int(idx))
+        }
+        return String(cString: cstr)
     }
 
     private func optionalText(_ stmt: OpaquePointer?, _ idx: Int32) -> String? {

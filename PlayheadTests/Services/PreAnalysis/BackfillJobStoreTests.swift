@@ -6,12 +6,34 @@ import Testing
 
 @testable import Playhead
 
+private func insertParentAsset(
+    _ store: AnalysisStore,
+    id: String = "asset-1"
+) async throws {
+    try await store.insertAsset(
+        AnalysisAsset(
+            id: id,
+            episodeId: "episode-\(id)",
+            assetFingerprint: "fp-\(id)",
+            weakFingerprint: nil,
+            sourceURL: "file:///tmp/\(id).m4a",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "new",
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        )
+    )
+}
+
 @Suite("BackfillJob Store")
 struct BackfillJobStoreTests {
 
     @Test("BackfillJob round-trips through SQLite with cohort JSON")
     func testBackfillJobRoundTrip() async throws {
         let store = try await makeTestStore()
+        try await insertParentAsset(store)
         let scanCohort = ScanCohort(
             promptLabel: "phase3",
             promptHash: "prompt-hash",
@@ -46,6 +68,7 @@ struct BackfillJobStoreTests {
     func testCheckpointAndResume() async throws {
         let dir = try makeTempDir(prefix: "BackfillResume")
         let store = try await AnalysisStore.open(directory: dir)
+        try await insertParentAsset(store)
         let job = makeBackfillJob(
             jobId: "resume-job",
             phase: .scanLikelyAdSlots,
@@ -76,6 +99,7 @@ struct BackfillJobStoreTests {
     @Test("phase transition is atomic and clears progress cursor")
     func testPhaseTransitionClearsCursorAtomically() async throws {
         let store = try await makeTestStore()
+        try await insertParentAsset(store)
         let job = makeBackfillJob(
             jobId: "phase-advance",
             phase: .scanHarvesterProposals,
