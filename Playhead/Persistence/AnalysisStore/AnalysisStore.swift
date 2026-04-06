@@ -1783,6 +1783,18 @@ actor AnalysisStore {
     /// H5: defer a job. Writes `status='deferred'` and the supplied reason
     /// while preserving the existing `progressCursor` so resumption from the
     /// last checkpoint still works.
+    ///
+    /// C-R3-1: guarded against silent terminal resurrection — the same pattern
+    /// as C3-2's guards on `markBackfillJobComplete` / `markBackfillJobFailed`.
+    /// The update is restricted to rows in `queued` or `running`; on zero-row
+    /// updates we probe the current state and:
+    ///   - return silently after refreshing `deferReason` when the row is
+    ///     already `deferred` (idempotent retry path — an operator issuing a
+    ///     new defer reason expects the row to reflect the most recent cause),
+    ///   - throw `invalidStateTransition` on any other state (including a
+    ///     missing row or a terminal `.complete` / `.failed` row) so the H-1
+    ///     drain loop cannot silently demote a `.failed` row to `.deferred`
+    ///     and lose the original failure reason.
     func markBackfillJobDeferred(
         jobId: String,
         reason: String
@@ -1790,13 +1802,35 @@ actor AnalysisStore {
         let sql = """
             UPDATE backfill_jobs
             SET status = 'deferred', deferReason = ?
-            WHERE jobId = ?
+            WHERE jobId = ? AND status IN ('queued', 'running')
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, reason)
         bind(stmt, 2, jobId)
         try step(stmt, expecting: SQLITE_DONE)
+        if sqlite3_changes(db) == 0 {
+            let current = try probeBackfillJobStatus(jobId: jobId)
+            if current == "deferred" {
+                // Already deferred: refresh deferReason so the most recent
+                // cause is visible to operators, but leave status untouched.
+                let refreshSQL = """
+                    UPDATE backfill_jobs
+                    SET deferReason = ?
+                    WHERE jobId = ? AND status = 'deferred'
+                    """
+                let refreshStmt = try prepare(refreshSQL)
+                defer { sqlite3_finalize(refreshStmt) }
+                bind(refreshStmt, 1, reason)
+                bind(refreshStmt, 2, jobId)
+                try step(refreshStmt, expecting: SQLITE_DONE)
+                return
+            }
+            throw AnalysisStoreError.invalidStateTransition(
+                jobId: jobId,
+                toStatus: "deferred"
+            )
+        }
     }
 
     /// C-2: transition a job row to `status='running'` without clobbering

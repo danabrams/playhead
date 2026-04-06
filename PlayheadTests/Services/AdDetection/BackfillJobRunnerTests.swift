@@ -572,10 +572,16 @@ struct BackfillJobRunnerTests {
         for jobId in firstRows.map(\.id) {
             _ = jobId // silence warning; we reuse the variable below
         }
-        // We need a job row that still allows re-enqueue. Touch the DB by
-        // resetting the job to .queued directly via the deferred path.
+        // We need a job row that still allows re-enqueue. Use the deprecated
+        // combined checkpoint API to force the status back to .queued —
+        // direct `markBackfillJobDeferred` can no longer demote a terminal
+        // row after the C-R3-1 guard fix.
         let jobId = "fm-asset-runner-fullEpisodeScan-0"
-        try await store.markBackfillJobDeferred(jobId: jobId, reason: "forced for test")
+        try await store.checkpointBackfillJob(
+            jobId: jobId,
+            progressCursor: nil,
+            status: .queued
+        )
 
         _ = try await runner.runPendingBackfill(for: makeInputs())
         let secondRows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")

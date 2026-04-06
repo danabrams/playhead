@@ -566,6 +566,75 @@ struct BackfillJobStoreTests {
         }
     }
 
+    // MARK: - C-R3-1: markBackfillJobDeferred status guard
+
+    @Test("C-R3-1: markBackfillJobDeferred throws on a failed row")
+    func markBackfillJobDeferred_throwsOnFailedRow() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(jobId: "cr31-deferred-on-failed")
+        try await store.insertBackfillJob(job)
+        try await store.markBackfillJobFailed(
+            jobId: job.jobId,
+            reason: "boom",
+            retryCount: 2
+        )
+
+        await #expect(throws: AnalysisStoreError.self) {
+            try await store.markBackfillJobDeferred(jobId: job.jobId, reason: "thermal")
+        }
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .failed, "failed row must not be demoted to deferred")
+        #expect(fetched.deferReason == "boom", "failure reason must be preserved")
+        #expect(fetched.retryCount == 2, "retryCount must not be altered")
+    }
+
+    @Test("C-R3-1: markBackfillJobDeferred throws on a complete row")
+    func markBackfillJobDeferred_throwsOnCompleteRow() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(jobId: "cr31-deferred-on-complete")
+        try await store.insertBackfillJob(job)
+        try await store.markBackfillJobComplete(
+            jobId: job.jobId,
+            progressCursor: BackfillProgressCursor(processedUnitCount: 1)
+        )
+
+        await #expect(throws: AnalysisStoreError.self) {
+            try await store.markBackfillJobDeferred(jobId: job.jobId, reason: "thermal")
+        }
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .complete, "complete row must not be demoted to deferred")
+    }
+
+    @Test("C-R3-1: markBackfillJobDeferred is idempotent on deferred rows and updates the reason")
+    func markBackfillJobDeferred_idempotentOnDeferredRow_updatesReason() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(jobId: "cr31-deferred-idempotent")
+        try await store.insertBackfillJob(job)
+        try await store.markBackfillJobDeferred(jobId: job.jobId, reason: "thermal")
+
+        // Second call on an already-deferred row must not throw, and should
+        // update the reason so operators see the most recent defer cause.
+        try await store.markBackfillJobDeferred(jobId: job.jobId, reason: "batteryTooLow")
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .deferred)
+        #expect(fetched.deferReason == "batteryTooLow",
+                "idempotent defer must refresh the reason to the newer value")
+    }
+
+    @Test("C-R3-1: markBackfillJobDeferred throws on a nonexistent row")
+    func markBackfillJobDeferred_throwsOnMissingRow() async throws {
+        let store = try await makeTestStore()
+        await #expect(throws: AnalysisStoreError.self) {
+            try await store.markBackfillJobDeferred(jobId: "cr31-missing", reason: "nope")
+        }
+    }
+
     // MARK: - M-4: markBackfillJobFailed overwrites deferReason (documented, pinned)
 
     @Test("M-4: markBackfillJobFailed overwrites any prior deferReason by design")
