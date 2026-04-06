@@ -25,21 +25,32 @@ enum CommercialEvidenceResolver {
             evidenceCatalog: evidenceCatalog
         )
 
-        return anchors.compactMap { anchor in
+        var seenAnchorKeys = Set<String>()
+        var resolvedAnchors: [ResolvedEvidenceAnchor] = []
+
+        for anchor in anchors {
+            // Compute a dedup key BEFORE resolution to collapse identical FM anchors.
+            // Same (kind, lineRef, evidenceRef-or-nil) → keep only the first.
+            let anchorDedupKey = "\(anchor.kind.rawValue)|\(anchor.lineRef)|\(anchor.evidenceRef.map(String.init) ?? "-")"
+            guard seenAnchorKeys.insert(anchorDedupKey).inserted else { continue }
+
             if let evidenceRef = anchor.evidenceRef,
                let promptEntry = plan.promptEvidence.first(where: { $0.entry.evidenceRef == evidenceRef }) {
-                return ResolvedEvidenceAnchor(
-                    entry: promptEntry.entry,
-                    lineRef: promptEntry.lineRef,
-                    kind: promptEntry.entry.category,
-                    certainty: anchor.certainty,
-                    resolutionSource: .evidenceRef,
-                    memoryWriteEligible: true
+                resolvedAnchors.append(
+                    ResolvedEvidenceAnchor(
+                        entry: promptEntry.entry,
+                        lineRef: promptEntry.lineRef,
+                        kind: promptEntry.entry.category,
+                        certainty: anchor.certainty,
+                        resolutionSource: .evidenceRef,
+                        memoryWriteEligible: true
+                    )
                 )
+                continue
             }
 
             guard validLineRefs.contains(anchor.lineRef) else {
-                return nil
+                continue
             }
 
             var matchingFallbackEntries = (fallbackEntriesByLineRef[anchor.lineRef] ?? [])
@@ -53,37 +64,59 @@ enum CommercialEvidenceResolver {
                 usedWindowContextFallback = !matchingFallbackEntries.isEmpty
             }
             if matchingFallbackEntries.count == 1, let entry = matchingFallbackEntries.first {
-                let resolvedEntry: EvidenceEntry
-                if usedWindowContextFallback,
-                   let segment = lineRefLookup[anchor.lineRef],
-                   let contextualized = contextualizedBrandEntry(
-                    from: entry,
-                    in: segment
-                   ) {
-                    resolvedEntry = contextualized
+                let resolvedEntry: EvidenceEntry?
+                if usedWindowContextFallback {
+                    // Brand window-context fallback: we MUST contextualize the brand
+                    // back into the anchor's segment so the timing/atomOrdinal we emit
+                    // belong to the line FM actually pointed at — not a different line
+                    // where the brand was originally extracted. If contextualization
+                    // fails (regex misses, anchor's segment text doesn't contain the
+                    // brand), we MUST NOT stamp the anchor's lineRef onto a foreign
+                    // segment's timing — fall through to .unresolved instead.
+                    if let segment = lineRefLookup[anchor.lineRef],
+                       let contextualized = contextualizedBrandEntry(from: entry, in: segment) {
+                        resolvedEntry = contextualized
+                    } else {
+                        resolvedEntry = nil
+                    }
                 } else {
                     resolvedEntry = entry
                 }
 
-                return ResolvedEvidenceAnchor(
-                    entry: resolvedEntry,
-                    lineRef: anchor.lineRef,
-                    kind: resolvedEntry.category,
-                    certainty: anchor.certainty,
-                    resolutionSource: .lineRefFallback,
-                    memoryWriteEligible: true
-                )
+                if let resolved = resolvedEntry {
+                    resolvedAnchors.append(
+                        ResolvedEvidenceAnchor(
+                            entry: resolved,
+                            lineRef: anchor.lineRef,
+                            kind: resolved.category,
+                            certainty: anchor.certainty,
+                            resolutionSource: .lineRefFallback,
+                            // Per the file header contract: only FM-attested .evidenceRef
+                            // resolution is safe for sponsor-memory writes. Both
+                            // line-ref fallback and window-context fallback are
+                            // deterministic-only: they may attach evidence we trust
+                            // for classification, but they are NOT FM-attested.
+                            memoryWriteEligible: false
+                        )
+                    )
+                    continue
+                }
+                // contextualization failed → fall through to unresolved
             }
 
-            return ResolvedEvidenceAnchor(
-                entry: nil,
-                lineRef: anchor.lineRef,
-                kind: anchor.kind.category,
-                certainty: anchor.certainty,
-                resolutionSource: .unresolved,
-                memoryWriteEligible: false
+            resolvedAnchors.append(
+                ResolvedEvidenceAnchor(
+                    entry: nil,
+                    lineRef: anchor.lineRef,
+                    kind: anchor.kind.category,
+                    certainty: anchor.certainty,
+                    resolutionSource: .unresolved,
+                    memoryWriteEligible: false
+                )
             )
         }
+
+        return resolvedAnchors
     }
 
     private static func uniqueWindowFallbackEntries(
@@ -105,6 +138,21 @@ enum CommercialEvidenceResolver {
         return uniqueEntries
     }
 
+    /// Re-locate a brand evidence entry inside a different transcript segment so the
+    /// resulting entry's atomOrdinal/timing belong to that segment rather than the
+    /// segment where the brand was originally extracted.
+    ///
+    /// Timing is computed by **linear interpolation over character offsets**: we
+    /// scale the start/end of the regex match by `matchRange / nsText.length`
+    /// against the segment's wall-clock duration. This is approximate — words at
+    /// the start of a long pause receive bogus offsets — and is suitable for
+    /// banner/diagnostic display only. **Do NOT** use these times for tight
+    /// skip-cut boundaries; use the FM-attested span boundaries instead.
+    ///
+    /// The regex uses `.useUnicodeWordBoundaries` so that brand names containing
+    /// non-ASCII characters (e.g. "Café", "Müller", "naïve") are recognised as
+    /// whole words; the default `\b` only treats `[A-Za-z0-9_]` as word chars
+    /// and would fail on letters with diacritics.
     private static func contextualizedBrandEntry(
         from entry: EvidenceEntry,
         in segment: AdTranscriptSegment
@@ -114,7 +162,7 @@ enum CommercialEvidenceResolver {
         let escaped = NSRegularExpression.escapedPattern(for: entry.normalizedText)
         guard let regex = try? NSRegularExpression(
             pattern: #"\b\#(escaped)\b"#,
-            options: [.caseInsensitive]
+            options: [.caseInsensitive, .useUnicodeWordBoundaries]
         ) else {
             return nil
         }
@@ -142,6 +190,8 @@ enum CommercialEvidenceResolver {
         )
     }
 
+    /// Char-offset linear interpolation. Approximate; see `contextualizedBrandEntry`
+    /// for the precision caveat. Not safe for skip-cut boundaries.
     private static func interpolateTiming(
         matchRange: NSRange,
         textLength: Int,
@@ -168,13 +218,20 @@ enum CommercialEvidenceResolver {
             .compactMap { lineRefLookup[$0] }
         guard !windowSegments.isEmpty else { return [:] }
 
+        // Use uniquingKeysWith: { first, _ in first } so we never trap on duplicate
+        // atomOrdinals (can occur with multi-segment overlap or test fixtures) or
+        // duplicate (category, normalizedText) catalog entries (can occur if the
+        // catalog was rebuilt with overlapping windows). Keeping the first match
+        // is deterministic because windowSegments is pre-sorted by lineRef.
         let lineRefByAtomOrdinal = Dictionary(
-            uniqueKeysWithValues: windowSegments.flatMap { segment in
+            windowSegments.flatMap { segment in
                 segment.atoms.map { ($0.atomKey.atomOrdinal, segment.segmentIndex) }
-            }
+            },
+            uniquingKeysWith: { first, _ in first }
         )
         let catalogEntriesByKey = Dictionary(
-            uniqueKeysWithValues: evidenceCatalog.entries.map { (entryKey(for: $0), $0) }
+            evidenceCatalog.entries.map { (entryKey(for: $0), $0) },
+            uniquingKeysWith: { first, _ in first }
         )
         let localCatalog = EvidenceCatalogBuilder.build(
             atoms: windowSegments.flatMap(\.atoms),
