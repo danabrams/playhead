@@ -356,6 +356,52 @@ struct SemanticScanPersistenceTests {
 
     // MARK: - New behaviour from review fixes
 
+    @Test("H-1: canonicalized cohort JSON collapses reuse key across key-order differences")
+    func semanticScanResultCollapsesEquivalentCohortsAcrossKeyOrder() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        // Identical cohort fields but different JSON key order.
+        let sortedCohort = try makeScanCohortJSON(promptHash: "ph", schemaHash: "sh")
+        let shuffledCohort = makeEquivalentScanCohortJSONWithDifferentKeyOrder(
+            promptHash: "ph",
+            schemaHash: "sh"
+        )
+        #expect(sortedCohort != shuffledCohort, "fixture sanity: the two JSON strings must differ")
+
+        func make(id: String, attempt: Int, cohortJSON: String) -> SemanticScanResult {
+            SemanticScanResult(
+                id: id,
+                analysisAssetId: "asset-1",
+                windowFirstAtomOrdinal: 100,
+                windowLastAtomOrdinal: 110,
+                windowStartTime: 1000,
+                windowEndTime: 1100,
+                scanPass: "passA",
+                transcriptQuality: .good,
+                disposition: .containsAd,
+                spansJSON: "[]",
+                status: .success,
+                attemptCount: attempt,
+                errorContext: nil,
+                inputTokenCount: nil,
+                outputTokenCount: nil,
+                latencyMs: nil,
+                prewarmHit: false,
+                scanCohortJSON: cohortJSON,
+                transcriptVersion: "tx-v1"
+            )
+        }
+
+        try await store.insertSemanticScanResult(make(id: "sorted", attempt: 1, cohortJSON: sortedCohort))
+        try await store.insertSemanticScanResult(make(id: "shuffled", attempt: 9, cohortJSON: shuffledCohort))
+
+        let rows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-1")
+        #expect(rows.count == 1, "UNIQUE(reuseKeyHash) must collapse cohort-equivalent rows")
+        #expect(rows.first?.id == "shuffled")
+        #expect(rows.first?.attemptCount == 9)
+    }
+
     @Test("C5: identical reuse key collapses to one row, latest wins")
     func semanticScanResultUniqueOnReuseKey() async throws {
         let store = try await makeTestStore()

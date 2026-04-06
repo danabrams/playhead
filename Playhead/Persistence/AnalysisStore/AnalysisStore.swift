@@ -1856,9 +1856,31 @@ actor AnalysisStore {
         scanCohortJSON, transcriptVersion, reuseKeyHash
         """
 
+    /// H-1: canonicalize a `scanCohortJSON` before hashing so two
+    /// semantically-equivalent cohorts with different key order or
+    /// whitespace produce the same reuse key. Decodes to `ScanCohort` and
+    /// re-encodes with `.sortedKeys`; if the decode fails, falls back to
+    /// the raw string so the hash still diverges and the caller's malformed
+    /// input cannot silently collide with valid rows.
+    private static func canonicalizeCohortJSON(_ raw: String) -> String {
+        guard let data = raw.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(ScanCohort.self, from: data) else {
+            return raw
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let encoded = try? encoder.encode(decoded),
+              let canonical = String(data: encoded, encoding: .utf8) else {
+            return raw
+        }
+        return canonical
+    }
+
     /// Computes the canonical reuse-key SHA-256 over the fields that govern
     /// FM scan reusability. The same field order is used in `fetchReusable…`,
-    /// keeping inserts and lookups in lockstep.
+    /// keeping inserts and lookups in lockstep. The `scanCohortJSON` field is
+    /// canonicalized (sorted keys) before hashing so cohort-equivalent inputs
+    /// collapse to the same hash regardless of upstream JSON formatting.
     static func semanticScanReuseKeyHash(
         analysisAssetId: String,
         windowFirstAtomOrdinal: Int,
@@ -1867,9 +1889,10 @@ actor AnalysisStore {
         transcriptVersion: String,
         scanCohortJSON: String
     ) -> String {
+        let canonicalCohort = canonicalizeCohortJSON(scanCohortJSON)
         let canonical =
             "\(analysisAssetId)|\(windowFirstAtomOrdinal)|\(windowLastAtomOrdinal)|" +
-            "\(scanPass)|\(transcriptVersion)|\(scanCohortJSON)"
+            "\(scanPass)|\(transcriptVersion)|\(canonicalCohort)"
         let digest = SHA256.hash(data: Data(canonical.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
