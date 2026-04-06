@@ -21,12 +21,19 @@ struct SettingsView: View {
 
     @Query private var allPreferences: [UserPreferences]
     @Environment(\.modelContext) private var modelContext
+    @Environment(PlayheadRuntime.self) private var runtime
 
     @State private var viewModel = SettingsViewModel()
 
     /// Resolved preferences, loaded in .onAppear to avoid SwiftData
     /// inserts during body evaluation.
     @State private var preferences: UserPreferences?
+
+    #if DEBUG
+    /// Active debug export ready to share via ShareLink sheet.
+    @State private var debugExport: DebugEpisodeExport?
+    @State private var debugExportInProgress = false
+    #endif
 
     /// Injected dependencies — set via environment or passed directly.
     var inventory: ModelInventory?
@@ -43,6 +50,9 @@ struct SettingsView: View {
                     backgroundSection(prefs)
                     storageSection
                     purchasesSection
+                    #if DEBUG
+                    debugSection
+                    #endif
                 }
             }
             .listStyle(.insetGrouped)
@@ -523,6 +533,126 @@ private extension SettingsView {
         }
     }
 }
+
+// MARK: - Debug Section (DEBUG builds only)
+
+#if DEBUG
+private extension SettingsView {
+
+    var debugSection: some View {
+        Section {
+            Button {
+                Task { await generateDebugExport() }
+            } label: {
+                HStack {
+                    Label("Export Current Episode", systemImage: "square.and.arrow.up")
+                        .font(AppTypography.body)
+                        .foregroundStyle(hasCurrentEpisode ? AppColors.accent : AppColors.secondary)
+
+                    Spacer()
+
+                    if debugExportInProgress {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(!hasCurrentEpisode || debugExportInProgress)
+            .listRowBackground(AppColors.surface)
+
+            Button {
+                Task { await generateLibraryExport() }
+            } label: {
+                HStack {
+                    Label("Export Entire Library", systemImage: "square.and.arrow.up.on.square")
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.accent)
+
+                    Spacer()
+
+                    if debugExportInProgress {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(debugExportInProgress)
+            .listRowBackground(AppColors.surface)
+
+            if let export = debugExport {
+                ShareLink(
+                    item: export,
+                    preview: SharePreview(
+                        "Playhead Debug Export",
+                        image: Image(systemName: "doc.text")
+                    )
+                ) {
+                    Label("Share Export", systemImage: "square.and.arrow.up.circle.fill")
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.accent)
+                }
+                .listRowBackground(AppColors.surface)
+
+                Text(export.filename)
+                    .font(AppTypography.caption)
+                    .foregroundStyle(AppColors.metadata)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .listRowBackground(AppColors.surface)
+            }
+
+            if !hasCurrentEpisode {
+                Text("Start playing an episode to enable export.")
+                    .font(AppTypography.caption)
+                    .foregroundStyle(AppColors.metadata)
+                    .listRowBackground(AppColors.surface)
+            }
+        } header: {
+            sectionHeader("Debug")
+        } footer: {
+            Text("Exports transcript, detected ads, evidence catalog, feature summary, and acoustic breaks for the current episode. DEBUG builds only.")
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.metadata)
+        }
+    }
+
+    var hasCurrentEpisode: Bool {
+        runtime.currentAnalysisAssetId != nil
+    }
+
+    @MainActor
+    func generateDebugExport() async {
+        guard
+            let assetId = runtime.currentAnalysisAssetId,
+            let episodeId = runtime.currentEpisodeId
+        else { return }
+
+        debugExportInProgress = true
+        defer { debugExportInProgress = false }
+
+        let title = runtime.currentEpisodeTitle ?? "Unknown Episode"
+        let podcast = runtime.currentPodcastTitle ?? "Unknown Podcast"
+
+        debugExport = await DebugEpisodeExporter.build(
+            episodeTitle: title,
+            podcastTitle: podcast,
+            analysisAssetId: assetId,
+            episodeId: episodeId,
+            store: runtime.analysisStore
+        )
+    }
+
+    @MainActor
+    func generateLibraryExport() async {
+        debugExportInProgress = true
+        defer { debugExportInProgress = false }
+
+        debugExport = await DebugEpisodeExporter.buildLibraryExport(
+            store: runtime.analysisStore
+        )
+    }
+}
+#endif
 
 // MARK: - Helpers
 
