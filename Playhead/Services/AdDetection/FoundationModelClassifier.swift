@@ -816,6 +816,29 @@ struct FoundationModelClassifier: Sendable {
     private static let transcriptOpenFence = "<<<TRANSCRIPT>>>"
     private static let transcriptCloseFence = "<<<END TRANSCRIPT>>>"
 
+    /// H14: The static, transcript-independent preamble of the coarse-pass
+    /// prompt — every wrapping line that the planner emits regardless of how
+    /// many segments are inside the fences. Used by `preambleTokenCount` and
+    /// regression tests so any future preamble growth is loud and accounted
+    /// for in budget math.
+    static func coarsePromptPreamble() -> String {
+        [
+            promptPrefix,
+            injectionPreamble,
+            lineRefInstruction,
+            transcriptOpenFence,
+            transcriptCloseFence
+        ].joined(separator: "\n")
+    }
+
+    /// H14: Token count of the static coarse-pass preamble (excluding any
+    /// transcript content). Tests bump their synthetic `contextSize` by this
+    /// value to keep the budget-exceeded paths exercising the same per-line
+    /// budget pressure as before, regardless of preamble growth.
+    static func preambleTokenCount(runtime: Runtime) async throws -> Int {
+        try await runtime.tokenCount(coarsePromptPreamble())
+    }
+
     static func buildPrompt(for segments: [AdTranscriptSegment]) -> String {
         var lines: [String] = [
             promptPrefix,

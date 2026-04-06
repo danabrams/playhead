@@ -135,7 +135,9 @@ struct FoundationModelClassifierTests {
         #expect(!segments.isEmpty)
 
         let recorder = RuntimeRecorder(
-            contextSize: 30,
+            // H14: bumped by preamble overhead (20 tokens = 4 added wrap lines * 5 tokens/line).
+            // The test still exercises the budget-exceeded path for a specific per-line token count.
+            contextSize: 50,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -153,7 +155,8 @@ struct FoundationModelClassifierTests {
         #expect(plans.count > 1)
         #expect(covered == Set(segments.map(\.segmentIndex)))
         #expect(plans.allSatisfy { !$0.lineRefs.isEmpty })
-        #expect(plans.allSatisfy { $0.promptTokenCount <= 15 })
+        // H14: budget = contextSize(50) - schema(4) - response(6) - safety(5) = 35.
+        #expect(plans.allSatisfy { $0.promptTokenCount <= 35 })
         #expect(plans.allSatisfy { isContiguous($0.lineRefs) })
     }
 
@@ -166,7 +169,9 @@ struct FoundationModelClassifierTests {
         ]
 
         let recorder = RuntimeRecorder(
-            contextSize: 30,
+            // H14: bumped by preamble overhead (20 tokens = 4 added wrap lines * 5 tokens/line).
+            // The test still exercises the budget-exceeded path for a specific per-line token count.
+            contextSize: 50,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -332,7 +337,9 @@ struct FoundationModelClassifierTests {
         )
 
         let recorder = RuntimeRecorder(
-            contextSize: 64,
+            // H14: bumped by preamble overhead (16 tokens = 4 added wrap lines * 4 tokens/line).
+            // The test still exercises the planAdaptiveZoom path with the same per-line pressure.
+            contextSize: 80,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -432,7 +439,10 @@ struct FoundationModelClassifierTests {
             prewarmHit: false
         )
         let recorder = RuntimeRecorder(
-            contextSize: 40,
+            // H14: bumped by preamble overhead (16 tokens = 4 added wrap lines * 4 tokens/line).
+            // The test still exercises the budget-exceeded → focus-shrink path: the
+            // single focus line fits the new budget while the full window does not.
+            contextSize: 56,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -465,10 +475,11 @@ struct FoundationModelClassifierTests {
         #expect(zoomPlans[0].focusLineRefs == [2])
         #expect(zoomPlans[0].lineRefs == [2])
         #expect(zoomPlans[0].stopReason == .tokenBudget)
-        #expect(zoomPlans[0].promptTokenCount == 16)
-        #expect(zoomPlans[0].prompt.contains("2: \"Visit example.com for the limited-time deal.\""))
-        #expect(!zoomPlans[0].prompt.contains("1: \"The host sets up the offer.\""))
-        #expect(!zoomPlans[0].prompt.contains("3: \"The host repeats the offer details.\""))
+        // H14: refinement prompt = (7 wrap lines + 1 segment) * 4 tokens/line = 32.
+        #expect(zoomPlans[0].promptTokenCount == 32)
+        #expect(zoomPlans[0].prompt.contains("L2> \"Visit example.com for the limited-time deal.\""))
+        #expect(!zoomPlans[0].prompt.contains("L1> \"The host sets up the offer.\""))
+        #expect(!zoomPlans[0].prompt.contains("L3> \"The host repeats the offer details.\""))
     }
 
     @Test("refinement runs only on zoomed windows and resolves anchors to deterministic catalog entries")
@@ -1057,7 +1068,9 @@ struct FoundationModelClassifierTests {
             makeSegment(index: 2, startTime: 10, endTime: 15, text: "Window two text.")
         ]
         let recorder = RuntimeRecorder(
-            contextSize: 30,
+            // H14: bumped by preamble overhead (20 tokens = 4 added wrap lines * 5 tokens/line).
+            // The test still exercises the partial-results-on-failure path.
+            contextSize: 50,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -1091,7 +1104,9 @@ struct FoundationModelClassifierTests {
             makeSegment(index: 2, startTime: 10, endTime: 15, text: "Window two.")
         ]
         let recorder = RuntimeRecorder(
-            contextSize: 30,
+            // H14: bumped by preamble overhead (20 tokens = 4 added wrap lines * 5 tokens/line).
+            // The test still exercises the cancellation-between-windows path.
+            contextSize: 50,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -1112,6 +1127,36 @@ struct FoundationModelClassifierTests {
         // or after the first if scheduling raced. Either way, status is non-success
         // and partial windows are preserved.
         #expect(output.status == .cancelled || output.status == .success)
+    }
+
+    // H14: The static preamble (promptPrefix + injection preamble + L<n>>
+    // line-ref instruction + open fence + close fence) contributes a fixed
+    // overhead to every coarse prompt. Lock it to a specific count under a
+    // line-counting tokenizer so any future preamble growth fails this test
+    // loudly and requires bumping each test contextSize that depends on it.
+    @Test("preamble token count is bounded and accounted for")
+    func preambleTokenCountIsBoundedAndAccountedFor() async throws {
+        // The coarse preamble has exactly five wrapping lines:
+        // promptPrefix, injectionPreamble, lineRefInstruction,
+        // transcriptOpenFence, transcriptCloseFence.
+        let preamble = FoundationModelClassifier.coarsePromptPreamble()
+        let lineCount = preamble.split(separator: "\n", omittingEmptySubsequences: false).count
+        #expect(lineCount == 5)
+
+        // Under a per-line tokenizer the preamble counts as 5 tokens. Any
+        // future preamble growth changes this number and fails loudly,
+        // requiring a paired update to the test contextSize bumps that
+        // depend on the preamble overhead.
+        let recorder = RuntimeRecorder(
+            contextSize: 1024,
+            coarseSchemaTokens: 0,
+            refinementSchemaTokens: 0,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count
+            }
+        )
+        let tokens = try await FoundationModelClassifier.preambleTokenCount(runtime: recorder.runtime)
+        #expect(tokens == 5)
     }
 
     // H10: fallback estimator must be >= bytes/3 (BPE floor) for safety.
