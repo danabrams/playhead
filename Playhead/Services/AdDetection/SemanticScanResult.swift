@@ -31,8 +31,24 @@ struct SemanticScanResult: Sendable, Equatable {
     ) -> Bool {
         // Decision cohort changes only affect downstream decisioning; the FM
         // scan remains reusable as long as the scan cohort and transcript match.
-        self.scanCohortJSON == scanCohortJSON &&
+        Self.matchesScanCohortJSON(self.scanCohortJSON, scanCohortJSON) &&
         self.transcriptVersion == transcriptVersion
+    }
+
+    private static func matchesScanCohortJSON(_ lhs: String, _ rhs: String) -> Bool {
+        if lhs == rhs {
+            return true
+        }
+
+        let decoder = JSONDecoder()
+        guard let lhsData = lhs.data(using: .utf8),
+              let rhsData = rhs.data(using: .utf8),
+              let lhsCohort = try? decoder.decode(ScanCohort.self, from: lhsData),
+              let rhsCohort = try? decoder.decode(ScanCohort.self, from: rhsData) else {
+            return false
+        }
+
+        return lhsCohort == rhsCohort
     }
 }
 

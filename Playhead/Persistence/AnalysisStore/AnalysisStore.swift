@@ -1714,9 +1714,7 @@ actor AnalysisStore {
               AND windowLastAtomOrdinal = ?
               AND scanPass = ?
               AND transcriptVersion = ?
-              AND scanCohortJSON = ?
             ORDER BY attemptCount DESC, rowid DESC
-            LIMIT 1
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -1725,17 +1723,19 @@ actor AnalysisStore {
         bind(stmt, 3, windowLastAtomOrdinal)
         bind(stmt, 4, scanPass)
         bind(stmt, 5, transcriptVersion)
-        bind(stmt, 6, scanCohortJSON)
-        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
-        let result = try readSemanticScanResult(stmt)
-        guard result.isReusable(
-            scanCohortJSON: scanCohortJSON,
-            transcriptVersion: transcriptVersion,
-            decisionCohortJSON: decisionCohortJSON
-        ) else {
-            return nil
+
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let result = try readSemanticScanResult(stmt)
+            if result.isReusable(
+                scanCohortJSON: scanCohortJSON,
+                transcriptVersion: transcriptVersion,
+                decisionCohortJSON: decisionCohortJSON
+            ) {
+                return result
+            }
         }
-        return result
+
+        return nil
     }
 
     // MARK: - CRUD: evidence_events

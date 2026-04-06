@@ -43,6 +43,15 @@ private func makeScanCohortJSON(
     return String(decoding: try JSONEncoder().encode(cohort), as: UTF8.self)
 }
 
+private func makeEquivalentScanCohortJSONWithDifferentKeyOrder(
+    promptHash: String = "prompt-v1",
+    schemaHash: String = "schema-v1"
+) -> String {
+    """
+    {"schemaHash":"\(schemaHash)","promptHash":"\(promptHash)","promptLabel":"phase3-passA","scanPlanHash":"scan-plan-v1","normalizationHash":"normalization-v1","osBuild":"26A123","locale":"en_US","appBuild":"123"}
+    """
+}
+
 @Suite("Semantic Scan Persistence")
 struct SemanticScanPersistenceTests {
 
@@ -82,6 +91,45 @@ struct SemanticScanPersistenceTests {
         #expect(byAsset == [result])
     }
 
+    @Test("refusal scan results round-trip with failure metadata intact")
+    func refusalSemanticScanResultRoundTrip() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        let result = SemanticScanResult(
+            id: "scan-refusal",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 31,
+            windowLastAtomOrdinal: 36,
+            windowStartTime: 310,
+            windowEndTime: 360,
+            scanPass: "passB",
+            transcriptQuality: .good,
+            disposition: .abstain,
+            spansJSON: "[]",
+            status: .refusal,
+            attemptCount: 1,
+            errorContext: #"{"reason":"safety refusal","lineRefs":[31,32,33]}"#,
+            inputTokenCount: 144,
+            outputTokenCount: nil,
+            latencyMs: 19,
+            prewarmHit: false,
+            scanCohortJSON: try makeScanCohortJSON(),
+            transcriptVersion: "tx-v1"
+        )
+
+        try await store.insertSemanticScanResult(result)
+
+        let fetched = try await store.fetchSemanticScanResult(id: result.id)
+        let byAsset = try await store.fetchSemanticScanResults(analysisAssetId: "asset-1")
+
+        #expect(fetched == result)
+        #expect(fetched?.status == .refusal)
+        #expect(fetched?.status.retryPolicy == .persistFailure)
+        #expect(fetched?.errorContext == #"{"reason":"safety refusal","lineRefs":[31,32,33]}"#)
+        #expect(byAsset == [result])
+    }
+
     @Test("semantic scan reuse invalidates on scan cohort or transcript version but not decision cohort")
     func semanticScanReuseInvalidation() async throws {
         let store = try await makeTestStore()
@@ -115,7 +163,10 @@ struct SemanticScanPersistenceTests {
             windowFirstAtomOrdinal: 20,
             windowLastAtomOrdinal: 30,
             scanPass: "passA",
-            scanCohortJSON: try makeScanCohortJSON(promptHash: "prompt-v1", schemaHash: "schema-v1"),
+            scanCohortJSON: makeEquivalentScanCohortJSONWithDifferentKeyOrder(
+                promptHash: "prompt-v1",
+                schemaHash: "schema-v1"
+            ),
             transcriptVersion: "tx-v1",
             decisionCohortJSON: #"{"decision":"v2"}"#
         )

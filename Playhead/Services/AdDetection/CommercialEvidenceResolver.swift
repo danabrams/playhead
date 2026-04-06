@@ -42,13 +42,33 @@ enum CommercialEvidenceResolver {
                 return nil
             }
 
-            let matchingFallbackEntries = (fallbackEntriesByLineRef[anchor.lineRef] ?? [])
+            var matchingFallbackEntries = (fallbackEntriesByLineRef[anchor.lineRef] ?? [])
                 .filter { $0.category == anchor.kind.category }
+            var usedWindowContextFallback = false
+            if matchingFallbackEntries.isEmpty, anchor.kind == .brandSpan {
+                matchingFallbackEntries = uniqueWindowFallbackEntries(
+                    byLineRef: fallbackEntriesByLineRef,
+                    matching: anchor.kind.category
+                )
+                usedWindowContextFallback = !matchingFallbackEntries.isEmpty
+            }
             if matchingFallbackEntries.count == 1, let entry = matchingFallbackEntries.first {
+                let resolvedEntry: EvidenceEntry
+                if usedWindowContextFallback,
+                   let segment = lineRefLookup[anchor.lineRef],
+                   let contextualized = contextualizedBrandEntry(
+                    from: entry,
+                    in: segment
+                   ) {
+                    resolvedEntry = contextualized
+                } else {
+                    resolvedEntry = entry
+                }
+
                 return ResolvedEvidenceAnchor(
-                    entry: entry,
+                    entry: resolvedEntry,
                     lineRef: anchor.lineRef,
-                    kind: entry.category,
+                    kind: resolvedEntry.category,
                     certainty: anchor.certainty,
                     resolutionSource: .lineRefFallback,
                     memoryWriteEligible: true
@@ -64,6 +84,78 @@ enum CommercialEvidenceResolver {
                 memoryWriteEligible: false
             )
         }
+    }
+
+    private static func uniqueWindowFallbackEntries(
+        byLineRef fallbackEntriesByLineRef: [Int: [EvidenceEntry]],
+        matching category: EvidenceCategory
+    ) -> [EvidenceEntry] {
+        var seenKeys = Set<String>()
+        var uniqueEntries: [EvidenceEntry] = []
+
+        for entry in fallbackEntriesByLineRef.values
+            .flatMap({ $0 })
+            .filter({ $0.category == category }) {
+            let key = entryKey(for: entry)
+            if seenKeys.insert(key).inserted {
+                uniqueEntries.append(entry)
+            }
+        }
+
+        return uniqueEntries
+    }
+
+    private static func contextualizedBrandEntry(
+        from entry: EvidenceEntry,
+        in segment: AdTranscriptSegment
+    ) -> EvidenceEntry? {
+        let text = segment.text
+        let nsText = text as NSString
+        let escaped = NSRegularExpression.escapedPattern(for: entry.normalizedText)
+        guard let regex = try? NSRegularExpression(
+            pattern: #"\b\#(escaped)\b"#,
+            options: [.caseInsensitive]
+        ) else {
+            return nil
+        }
+
+        let range = NSRange(location: 0, length: nsText.length)
+        guard let match = regex.firstMatch(in: text, range: range) else {
+            return nil
+        }
+
+        let matchedText = nsText.substring(with: match.range)
+        let (startTime, endTime) = interpolateTiming(
+            matchRange: match.range,
+            textLength: nsText.length,
+            segment: segment
+        )
+
+        return EvidenceEntry(
+            evidenceRef: entry.evidenceRef,
+            category: entry.category,
+            matchedText: matchedText,
+            normalizedText: entry.normalizedText,
+            atomOrdinal: segment.firstAtomOrdinal,
+            startTime: startTime,
+            endTime: endTime
+        )
+    }
+
+    private static func interpolateTiming(
+        matchRange: NSRange,
+        textLength: Int,
+        segment: AdTranscriptSegment
+    ) -> (Double, Double) {
+        guard textLength > 0 else { return (segment.startTime, segment.endTime) }
+
+        let duration = segment.endTime - segment.startTime
+        let startFraction = Double(matchRange.location) / Double(textLength)
+        let endFraction = Double(matchRange.location + matchRange.length) / Double(textLength)
+        return (
+            segment.startTime + duration * startFraction,
+            segment.startTime + duration * endFraction
+        )
     }
 
     private static func deterministicFallbackEntriesByLineRef(

@@ -100,6 +100,7 @@ enum EvidenceCatalogBuilder {
 
         // Phase 2: Compute commercial context window from anchor matches.
         let commercialAtomOrdinals = commercialContextOrdinals(from: rawMatches, atoms: sorted)
+        let contextualBrandStems = brandStemCandidates(from: rawMatches)
 
         // Phase 3: Extract context-dependent evidence (CTA, brand spans) only near anchors.
         // CTAs like "check it out" and "sign up now" are too common in normal speech
@@ -108,7 +109,11 @@ enum EvidenceCatalogBuilder {
             let ctas = extractMatches(from: atom, categories: contextCategories,
                                       gatedOrdinals: commercialAtomOrdinals)
             rawMatches.append(contentsOf: ctas)
-            let brands = extractBrandSpans(from: atom, commercialOrdinals: commercialAtomOrdinals)
+            let brands = extractBrandSpans(
+                from: atom,
+                commercialOrdinals: commercialAtomOrdinals,
+                contextualBrandStems: contextualBrandStems
+            )
             rawMatches.append(contentsOf: brands)
         }
 
@@ -218,7 +223,8 @@ enum EvidenceCatalogBuilder {
     /// Only runs on atoms within commercial context (±2 atoms of URL/promo/disclosure).
     private static func extractBrandSpans(
         from atom: TranscriptAtom,
-        commercialOrdinals: Set<Int>
+        commercialOrdinals: Set<Int>,
+        contextualBrandStems: Set<String>
     ) -> [RawMatch] {
         guard commercialOrdinals.contains(atom.atomKey.atomOrdinal) else { return [] }
 
@@ -263,6 +269,36 @@ enum EvidenceCatalogBuilder {
             }
         }
 
+        for stem in contextualBrandStems {
+            let pattern = #"\b\#(NSRegularExpression.escapedPattern(for: stem))\b"#
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+                continue
+            }
+
+            for match in regex.matches(in: text, range: fullRange) {
+                let rawText = nsText.substring(with: match.range)
+                let normalized = rawText.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !normalized.isEmpty else { continue }
+
+                let (startTime, endTime) = interpolateTiming(
+                    matchRange: match.range,
+                    textLength: nsText.length,
+                    atomStart: atom.startTime,
+                    atomEnd: atom.endTime
+                )
+
+                matches.append(RawMatch(
+                    category: .brandSpan,
+                    matchedText: rawText,
+                    normalizedText: normalized,
+                    atomOrdinal: atom.atomKey.atomOrdinal,
+                    startTime: startTime,
+                    endTime: endTime,
+                    matchOffset: match.range.location
+                ))
+            }
+        }
+
         return matches
     }
 
@@ -298,6 +334,49 @@ enum EvidenceCatalogBuilder {
         }
 
         return contextOrdinals
+    }
+
+    private static func brandStemCandidates(from rawMatches: [RawMatch]) -> Set<String> {
+        Set(rawMatches.compactMap { match in
+            guard match.category == .url else { return nil }
+            return brandStem(from: match.normalizedText)
+        })
+    }
+
+    private static func brandStem(from normalizedURL: String) -> String? {
+        let separators = [
+            ".com/",
+            ".org/",
+            ".io/",
+            ".co/",
+            " dot com slash ",
+            " dot org slash ",
+            " dot io slash ",
+            " dot co slash ",
+            " com slash ",
+            " org slash ",
+            " io slash ",
+            " co slash ",
+            ".com",
+            ".org",
+            ".io",
+            ".co",
+            " dot com",
+            " dot org",
+            " dot io",
+            " dot co",
+        ]
+
+        for separator in separators {
+            guard let range = normalizedURL.range(of: separator) else { continue }
+            let stem = String(normalizedURL[..<range.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if stem.count >= 3 {
+                return stem
+            }
+        }
+
+        return nil
     }
 
     // MARK: - URL normalization

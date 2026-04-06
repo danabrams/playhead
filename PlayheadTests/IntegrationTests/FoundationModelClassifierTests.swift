@@ -2,6 +2,10 @@ import Foundation
 import Testing
 @testable import Playhead
 
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
+
 @Suite("Foundation Model Classifier — Pass A/B")
 struct FoundationModelClassifierTests {
 
@@ -190,6 +194,58 @@ struct FoundationModelClassifierTests {
         #expect(snapshot.prewarmCalls.isEmpty)
     }
 
+    @Test("coarse pass shrinks and retries once after exceeded context window")
+    func coarsePassRetriesAfterContextWindowOverflow() async throws {
+        let segments = [
+            makeSegment(index: 0, startTime: 0, endTime: 5, text: "Hosts banter before the break."),
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Visit example.com for the offer."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Use promo code SAVE today."),
+            makeSegment(index: 3, startTime: 15, endTime: 20, text: "Back to the show after the ad.")
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: 64,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 8 },
+            responses: [
+                CoarseScreeningSchema(
+                    transcriptQuality: .good,
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [1],
+                        certainty: .strong
+                    )
+                ),
+                CoarseScreeningSchema(
+                    transcriptQuality: .good,
+                    disposition: .noAds,
+                    support: nil
+                )
+            ],
+            coarseFailures: [.exceededContextWindow]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 4, maximumResponseTokens: 6)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .success)
+        #expect(output.windows.map(\.lineRefs) == [[0, 1], [2, 3]])
+        #expect(snapshot.prewarmCalls == [
+            RuntimeRecorder.PrewarmCall(sessionID: 1, promptPrefix: "Classify ad content.")
+        ])
+        #expect(snapshot.respondCalls.count == 3)
+        #expect(snapshot.respondCalls[0].prompt.contains("0: \"Hosts banter before the break.\""))
+        #expect(snapshot.respondCalls[0].prompt.contains("3: \"Back to the show after the ad.\""))
+        #expect(snapshot.respondCalls[1].prompt.contains("1: \"Visit example.com for the offer.\""))
+        #expect(!snapshot.respondCalls[1].prompt.contains("2: \"Use promo code SAVE today.\""))
+        #expect(snapshot.respondCalls[2].prompt.contains("2: \"Use promo code SAVE today.\""))
+        #expect(!snapshot.respondCalls[2].prompt.contains("1: \"Visit example.com for the offer.\""))
+    }
+
     @Test("adaptive zoom narrows positive windows and injects deterministic evidence refs")
     func adaptiveZoomNarrowsAroundSupportLines() async throws {
         let segments = [
@@ -291,6 +347,76 @@ struct FoundationModelClassifierTests {
         #expect(zoomPlans[0].stopReason == .ambiguityBudget)
         #expect(zoomPlans[0].prompt.contains("[E11] \"example.com\" (url, line 1)"))
         #expect(zoomPlans[0].prompt.contains("[E12] \"Listen wherever you get your podcasts\" (ctaPhrase, line 5)"))
+    }
+
+    @Test("adaptive zoom shrinks to focus lines when the token budget rejects the widened window")
+    func adaptiveZoomShrinksOnTokenBudget() async throws {
+        let segments = [
+            makeSegment(index: 0, text: "Opening banter before the promotion."),
+            makeSegment(index: 1, text: "The host sets up the offer."),
+            makeSegment(index: 2, text: "Visit example.com for the limited-time deal."),
+            makeSegment(index: 3, text: "The host repeats the offer details."),
+            makeSegment(index: 4, text: "Return to the main conversation.")
+        ]
+        let coarse = FMCoarseScanOutput(
+            status: .success,
+            windows: [
+                FMCoarseWindowOutput(
+                    windowIndex: 0,
+                    lineRefs: [0, 1, 2, 3, 4],
+                    startTime: 0,
+                    endTime: 25,
+                    screening: CoarseScreeningSchema(
+                        transcriptQuality: .good,
+                        disposition: .containsAd,
+                        support: CoarseSupportSchema(
+                            supportLineRefs: [2],
+                            certainty: .strong
+                        )
+                    ),
+                    latencyMillis: 8
+                )
+            ],
+            latencyMillis: 8
+        )
+        let recorder = RuntimeRecorder(
+            contextSize: 40,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 4
+            }
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(
+                safetyMarginTokens: 4,
+                coarseMaximumResponseTokens: 6,
+                refinementMaximumResponseTokens: 10,
+                zoomAmbiguityBudget: 0,
+                minimumZoomSpanLines: 3,
+                maximumRefinementSpansPerWindow: 2
+            )
+        )
+
+        let zoomPlans = try await classifier.planAdaptiveZoom(
+            coarse: coarse,
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+
+        #expect(zoomPlans.count == 1)
+        #expect(zoomPlans[0].focusLineRefs == [2])
+        #expect(zoomPlans[0].lineRefs == [2])
+        #expect(zoomPlans[0].stopReason == .tokenBudget)
+        #expect(zoomPlans[0].promptTokenCount == 16)
+        #expect(zoomPlans[0].prompt.contains("2: \"Visit example.com for the limited-time deal.\""))
+        #expect(!zoomPlans[0].prompt.contains("1: \"The host sets up the offer.\""))
+        #expect(!zoomPlans[0].prompt.contains("3: \"The host repeats the offer details.\""))
     }
 
     @Test("refinement runs only on zoomed windows and resolves anchors to deterministic catalog entries")
@@ -592,6 +718,181 @@ struct FoundationModelClassifierTests {
         #expect(!output.windows[0].spans[0].memoryWriteEligible)
     }
 
+    @Test("refinement shrinks to the focus window and retries once after exceeded context window")
+    func refinementRetriesAfterExceededContextWindow() async throws {
+        let segments = [
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Hosts banter before the sponsor break."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Visit example.com for the offer."),
+            makeSegment(index: 3, startTime: 15, endTime: 20, text: "Use promo code SAVE today."),
+            makeSegment(index: 4, startTime: 20, endTime: 25, text: "Back to the show after the ad.")
+        ]
+        let evidenceCatalog = EvidenceCatalog(
+            analysisAssetId: "asset-1",
+            transcriptVersion: "transcript-v1",
+            entries: [
+                EvidenceEntry(
+                    evidenceRef: 11,
+                    category: .url,
+                    matchedText: "example.com",
+                    normalizedText: "example.com",
+                    atomOrdinal: 2,
+                    startTime: 10,
+                    endTime: 15
+                ),
+                EvidenceEntry(
+                    evidenceRef: 12,
+                    category: .promoCode,
+                    matchedText: "SAVE",
+                    normalizedText: "save",
+                    atomOrdinal: 3,
+                    startTime: 15,
+                    endTime: 20
+                )
+            ]
+        )
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 7,
+            lineRefs: [1, 2, 3, 4],
+            focusLineRefs: [2, 3],
+            focusClusters: [[2, 3]],
+            prompt: """
+            Refine ad spans.
+            Transcript:
+            1: "Hosts banter before the sponsor break."
+            2: "Visit example.com for the offer."
+            3: "Use promo code SAVE today."
+            4: "Back to the show after the ad."
+            Evidence catalog:
+            [E11] "example.com" (url, line 2)
+            [E12] "SAVE" (promoCode, line 3)
+            Return up to 2 spans.
+            """,
+            promptTokenCount: 20,
+            startTime: 5,
+            endTime: 25,
+            stopReason: .ambiguityBudget,
+            promptEvidence: [
+                PromptEvidenceEntry(entry: evidenceCatalog.entries[0], lineRef: 2),
+                PromptEvidenceEntry(entry: evidenceCatalog.entries[1], lineRef: 3)
+            ]
+        )
+        let recorder = RuntimeRecorder(
+            contextSize: 64,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 4
+            },
+            refinementResponses: [
+                RefinementWindowSchema(
+                    spans: [
+                        SpanRefinementSchema(
+                            commercialIntent: .paid,
+                            ownership: .thirdParty,
+                            firstLineRef: 2,
+                            lastLineRef: 3,
+                            certainty: .strong,
+                            boundaryPrecision: .usable,
+                            evidenceAnchors: [
+                                EvidenceAnchorSchema(
+                                    evidenceRef: 11,
+                                    lineRef: 2,
+                                    kind: .url,
+                                    certainty: .strong
+                                ),
+                                EvidenceAnchorSchema(
+                                    evidenceRef: 12,
+                                    lineRef: 3,
+                                    kind: .promoCode,
+                                    certainty: .strong
+                                )
+                            ],
+                            alternativeExplanation: .none,
+                            reasonTags: [.urlMention, .promoCode]
+                        )
+                    ]
+                )
+            ],
+            refinementFailures: [.exceededContextWindow]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: evidenceCatalog
+        )
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 1)
+        #expect(output.windows[0].lineRefs == [2, 3])
+        #expect(output.windows[0].spans.count == 1)
+        #expect(snapshot.respondRefinementCalls.count == 2)
+        #expect(snapshot.respondRefinementCalls[0].prompt.contains("1: \"Hosts banter before the sponsor break.\""))
+        #expect(snapshot.respondRefinementCalls[0].prompt.contains("4: \"Back to the show after the ad.\""))
+        #expect(!snapshot.respondRefinementCalls[1].prompt.contains("1: \"Hosts banter before the sponsor break.\""))
+        #expect(snapshot.respondRefinementCalls[1].prompt.contains("2: \"Visit example.com for the offer.\""))
+        #expect(snapshot.respondRefinementCalls[1].prompt.contains("3: \"Use promo code SAVE today.\""))
+        #expect(!snapshot.respondRefinementCalls[1].prompt.contains("4: \"Back to the show after the ad.\""))
+        #expect(snapshot.sessionCount == 3)
+    }
+
+    @Test("refinement returns refusal status without retrying when the model refuses the prompt")
+    func refinementReturnsRefusalStatusWithoutRetry() async throws {
+        let segments = [
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Talk about the sponsor."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Visit example.com for details.")
+        ]
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 2,
+            lineRefs: [1, 2],
+            focusLineRefs: [1, 2],
+            focusClusters: [[1, 2]],
+            prompt: """
+            Refine ad spans.
+            Transcript:
+            1: "Talk about the sponsor."
+            2: "Visit example.com for details."
+            Return up to 2 spans.
+            """,
+            promptTokenCount: 12,
+            startTime: 5,
+            endTime: 15,
+            stopReason: .minimumSpan,
+            promptEvidence: []
+        )
+        let recorder = RuntimeRecorder(
+            contextSize: 64,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementFailures: [.refusal]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .refusal)
+        #expect(output.windows.isEmpty)
+        #expect(snapshot.prewarmCalls == [
+            RuntimeRecorder.PrewarmCall(sessionID: 1, promptPrefix: "Refine ad spans.")
+        ])
+        #expect(snapshot.respondRefinementCalls.count == 1)
+        #expect(snapshot.sessionCount == 2)
+    }
+
     @Test("adaptive zoom keeps the Kelly Ripa repeat region when nearby coarse support spans the repeat cluster")
     func kellyRipaRepeatRegression() async throws {
         let segments = buildFixtureSegments()
@@ -753,6 +1054,8 @@ private actor RuntimeRecorder {
     private let tokenCountRule: @Sendable (String) -> Int
     private var queuedResponses: [CoarseScreeningSchema]
     private var queuedRefinementResponses: [RefinementWindowSchema]
+    private var queuedCoarseFailures: [RuntimeFailure]
+    private var queuedRefinementFailures: [RuntimeFailure]
     private var sessionCount = 0
     private var prewarmCalls: [PrewarmCall] = []
     private var respondCalls: [RespondCall] = []
@@ -765,7 +1068,9 @@ private actor RuntimeRecorder {
         refinementSchemaTokens: Int,
         tokenCountRule: @escaping @Sendable (String) -> Int,
         responses: [CoarseScreeningSchema] = [],
-        refinementResponses: [RefinementWindowSchema] = []
+        refinementResponses: [RefinementWindowSchema] = [],
+        coarseFailures: [RuntimeFailure] = [],
+        refinementFailures: [RuntimeFailure] = []
     ) {
         self.availabilityStatus = availabilityStatus
         self.contextSize = contextSize
@@ -774,6 +1079,8 @@ private actor RuntimeRecorder {
         self.tokenCountRule = tokenCountRule
         self.queuedResponses = responses
         self.queuedRefinementResponses = refinementResponses
+        self.queuedCoarseFailures = coarseFailures
+        self.queuedRefinementFailures = refinementFailures
     }
 
     nonisolated var runtime: FoundationModelClassifier.Runtime {
@@ -845,6 +1152,9 @@ private actor RuntimeRecorder {
 
     private func recordResponse(sessionID: Int, prompt: String) throws -> CoarseScreeningSchema {
         respondCalls.append(RespondCall(sessionID: sessionID, prompt: prompt))
+        if !queuedCoarseFailures.isEmpty {
+            throw queuedCoarseFailures.removeFirst().error
+        }
         if queuedResponses.isEmpty {
             return CoarseScreeningSchema(
                 transcriptQuality: .good,
@@ -857,9 +1167,34 @@ private actor RuntimeRecorder {
 
     private func recordRefinementResponse(sessionID: Int, prompt: String) throws -> RefinementWindowSchema {
         respondRefinementCalls.append(RespondRefinementCall(sessionID: sessionID, prompt: prompt))
+        if !queuedRefinementFailures.isEmpty {
+            throw queuedRefinementFailures.removeFirst().error
+        }
         if queuedRefinementResponses.isEmpty {
             return RefinementWindowSchema(spans: [])
         }
         return queuedRefinementResponses.removeFirst()
+    }
+}
+
+private enum RuntimeFailure: Sendable {
+    case exceededContextWindow
+    case refusal
+
+    var error: Error {
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, *) {
+            let context = LanguageModelSession.GenerationError.Context(debugDescription: "runtime-failure")
+            switch self {
+            case .exceededContextWindow:
+                return LanguageModelSession.GenerationError.exceededContextWindowSize(context)
+            case .refusal:
+                let refusal = LanguageModelSession.GenerationError.Refusal(transcriptEntries: [])
+                return LanguageModelSession.GenerationError.refusal(refusal, context)
+            }
+        }
+        #endif
+
+        return NSError(domain: "RuntimeFailure", code: 1, userInfo: [NSLocalizedDescriptionKey: "\(self)"])
     }
 }

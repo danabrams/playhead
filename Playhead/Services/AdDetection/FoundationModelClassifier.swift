@@ -360,6 +360,16 @@ enum FoundationModelClassifierError: Error, Sendable, LocalizedError {
 // MARK: - Classifier
 
 struct FoundationModelClassifier: Sendable {
+    private enum CoarseResponseOutcome {
+        case success([FMCoarseWindowOutput])
+        case failure(SemanticScanStatus)
+    }
+
+    private enum RefinementResponseOutcome {
+        case success(plan: RefinementWindowPlan, schema: RefinementWindowSchema)
+        case failure(SemanticScanStatus)
+    }
+
     struct Config: Sendable {
         let safetyMarginTokens: Int
         let coarseMaximumResponseTokens: Int
@@ -457,6 +467,7 @@ struct FoundationModelClassifier: Sendable {
             )
         }
 
+        let coarseLineRefLookup = lineRefLookup(for: segments)
         let prewarmSession = await runtime.makeSession()
         await prewarmSession.prewarm(Self.promptPrefix)
 
@@ -464,24 +475,31 @@ struct FoundationModelClassifier: Sendable {
         windows.reserveCapacity(plans.count)
 
         for plan in plans {
-            let session = await runtime.makeSession()
-            let windowStart = clock.now
-            let response = try await session.respondCoarse(plan.prompt)
-            let screening = sanitize(
-                schema: response,
-                validLineRefs: Set(plan.lineRefs),
-                transcriptQuality: plan.transcriptQuality
-            )
-            windows.append(
-                FMCoarseWindowOutput(
-                    windowIndex: plan.windowIndex,
-                    lineRefs: plan.lineRefs,
-                    startTime: plan.startTime,
-                    endTime: plan.endTime,
-                    screening: screening,
-                    latencyMillis: Self.latencyMillis(since: windowStart, clock: clock)
+            switch await coarseResponses(
+                for: plan,
+                lineRefLookup: coarseLineRefLookup,
+                clock: clock
+            ) {
+            case let .success(outputs):
+                for output in outputs {
+                    windows.append(
+                        FMCoarseWindowOutput(
+                            windowIndex: windows.count,
+                            lineRefs: output.lineRefs,
+                            startTime: output.startTime,
+                            endTime: output.endTime,
+                            screening: output.screening,
+                            latencyMillis: output.latencyMillis
+                        )
+                    )
+                }
+            case let .failure(status):
+                return FMCoarseScanOutput(
+                    status: status,
+                    windows: windows,
+                    latencyMillis: Self.latencyMillis(since: start, clock: clock)
                 )
-            )
+            }
         }
 
         return FMCoarseScanOutput(
@@ -671,12 +689,29 @@ struct FoundationModelClassifier: Sendable {
         windows.reserveCapacity(zoomPlans.count)
 
         for plan in zoomPlans {
-            let session = await runtime.makeSession()
             let windowStart = clock.now
-            let response = try await session.respondRefinement(plan.prompt)
+            let outcome = await refinementResponse(
+                for: plan,
+                lineRefLookup: lineRefLookup
+            )
+
+            let effectivePlan: RefinementWindowPlan
+            let response: RefinementWindowSchema
+            switch outcome {
+            case let .success(plan, schema):
+                effectivePlan = plan
+                response = schema
+            case let .failure(status):
+                return FMRefinementScanOutput(
+                    status: status,
+                    windows: windows,
+                    latencyMillis: Self.latencyMillis(since: start, clock: clock)
+                )
+            }
+
             let spans = sanitize(
                 schema: response,
-                plan: plan,
+                plan: effectivePlan,
                 lineRefLookup: lineRefLookup,
                 evidenceCatalog: evidenceCatalog
             )
@@ -684,7 +719,7 @@ struct FoundationModelClassifier: Sendable {
                 FMRefinementWindowOutput(
                     windowIndex: plan.windowIndex,
                     sourceWindowIndex: plan.sourceWindowIndex,
-                    lineRefs: plan.lineRefs,
+                    lineRefs: effectivePlan.lineRefs,
                     spans: spans,
                     latencyMillis: Self.latencyMillis(since: windowStart, clock: clock)
                 )
@@ -836,6 +871,170 @@ struct FoundationModelClassifier: Sendable {
         }
 
         return spans
+    }
+
+    private func coarseResponses(
+        for plan: CoarsePassWindowPlan,
+        lineRefLookup: [Int: AdTranscriptSegment],
+        clock: ContinuousClock
+    ) async -> CoarseResponseOutcome {
+        let session = await runtime.makeSession()
+        let windowStart = clock.now
+
+        do {
+            let response = try await session.respondCoarse(plan.prompt)
+            let screening = sanitize(
+                schema: response,
+                validLineRefs: Set(plan.lineRefs),
+                transcriptQuality: plan.transcriptQuality
+            )
+            return .success([
+                FMCoarseWindowOutput(
+                    windowIndex: 0,
+                    lineRefs: plan.lineRefs,
+                    startTime: plan.startTime,
+                    endTime: plan.endTime,
+                    screening: screening,
+                    latencyMillis: Self.latencyMillis(since: windowStart, clock: clock)
+                )
+            ])
+        } catch {
+            let status = SemanticScanStatus.from(error: error)
+            guard status == .exceededContextWindow,
+                  let retryPlans = await shrunkenCoarsePlansForRetry(
+                    from: plan,
+                    lineRefLookup: lineRefLookup
+                  ) else {
+                return .failure(status)
+            }
+
+            var retryOutputs: [FMCoarseWindowOutput] = []
+            retryOutputs.reserveCapacity(retryPlans.count)
+
+            for (offset, retryPlan) in retryPlans.enumerated() {
+                let retrySession = await runtime.makeSession()
+                let retryStart = clock.now
+                do {
+                    let response = try await retrySession.respondCoarse(retryPlan.prompt)
+                    let screening = sanitize(
+                        schema: response,
+                        validLineRefs: Set(retryPlan.lineRefs),
+                        transcriptQuality: retryPlan.transcriptQuality
+                    )
+                    retryOutputs.append(
+                        FMCoarseWindowOutput(
+                            windowIndex: offset,
+                            lineRefs: retryPlan.lineRefs,
+                            startTime: retryPlan.startTime,
+                            endTime: retryPlan.endTime,
+                            screening: screening,
+                            latencyMillis: Self.latencyMillis(since: retryStart, clock: clock)
+                        )
+                    )
+                } catch {
+                    return .failure(SemanticScanStatus.from(error: error))
+                }
+            }
+
+            return .success(retryOutputs)
+        }
+    }
+
+    private func refinementResponse(
+        for plan: RefinementWindowPlan,
+        lineRefLookup: [Int: AdTranscriptSegment]
+    ) async -> RefinementResponseOutcome {
+        let session = await runtime.makeSession()
+
+        do {
+            return .success(plan: plan, schema: try await session.respondRefinement(plan.prompt))
+        } catch {
+            let status = SemanticScanStatus.from(error: error)
+            guard status == .exceededContextWindow,
+                  let retryPlan = await shrunkenRefinementPlanForRetry(
+                    from: plan,
+                    lineRefLookup: lineRefLookup
+                  ) else {
+                return .failure(status)
+            }
+
+            let retrySession = await runtime.makeSession()
+            do {
+                let response = try await retrySession.respondRefinement(retryPlan.prompt)
+                return .success(plan: retryPlan, schema: response)
+            } catch {
+                return .failure(SemanticScanStatus.from(error: error))
+            }
+        }
+    }
+
+    private func shrunkenRefinementPlanForRetry(
+        from plan: RefinementWindowPlan,
+        lineRefLookup: [Int: AdTranscriptSegment]
+    ) async -> RefinementWindowPlan? {
+        let retryLineRefs = Array(Set(plan.focusLineRefs.filter { lineRefLookup[$0] != nil })).sorted()
+        guard !retryLineRefs.isEmpty, retryLineRefs != plan.lineRefs else { return nil }
+
+        let retrySegments = retryLineRefs.compactMap { lineRefLookup[$0] }
+        guard retrySegments.count == retryLineRefs.count else { return nil }
+
+        let retryEvidence = plan.promptEvidence.filter { retryLineRefs.contains($0.lineRef) }
+        let retryPrompt = Self.buildRefinementPrompt(
+            for: retrySegments,
+            promptEvidence: retryEvidence,
+            maximumSpans: config.maximumRefinementSpansPerWindow
+        )
+        let retryTokenCount = (try? await runtime.tokenCount(retryPrompt)) ?? plan.promptTokenCount
+
+        return RefinementWindowPlan(
+            windowIndex: plan.windowIndex,
+            sourceWindowIndex: plan.sourceWindowIndex,
+            lineRefs: retryLineRefs,
+            focusLineRefs: retryLineRefs,
+            focusClusters: buildFocusClusters(from: retryLineRefs),
+            prompt: retryPrompt,
+            promptTokenCount: retryTokenCount,
+            startTime: retrySegments.first?.startTime ?? plan.startTime,
+            endTime: retrySegments.last?.endTime ?? plan.endTime,
+            stopReason: .tokenBudget,
+            promptEvidence: retryEvidence
+        )
+    }
+
+    private func shrunkenCoarsePlansForRetry(
+        from plan: CoarsePassWindowPlan,
+        lineRefLookup: [Int: AdTranscriptSegment]
+    ) async -> [CoarsePassWindowPlan]? {
+        let retrySegments = plan.lineRefs.compactMap { lineRefLookup[$0] }
+        guard retrySegments.count == plan.lineRefs.count, retrySegments.count > 1 else {
+            return nil
+        }
+
+        let midpoint = retrySegments.count / 2
+        let chunks = [Array(retrySegments[..<midpoint]), Array(retrySegments[midpoint...])]
+            .filter { !$0.isEmpty }
+        guard chunks.count > 1 else { return nil }
+
+        var retryPlans: [CoarsePassWindowPlan] = []
+        retryPlans.reserveCapacity(chunks.count)
+
+        for chunk in chunks {
+            let prompt = Self.buildPrompt(for: chunk)
+            let promptTokenCount = (try? await runtime.tokenCount(prompt)) ?? plan.promptTokenCount
+            retryPlans.append(
+                CoarsePassWindowPlan(
+                    windowIndex: retryPlans.count,
+                    lineRefs: chunk.map(\.segmentIndex),
+                    prompt: prompt,
+                    promptTokenCount: promptTokenCount,
+                    startTime: chunk.first?.startTime ?? plan.startTime,
+                    endTime: chunk.last?.endTime ?? plan.endTime,
+                    transcriptQuality: aggregateTranscriptQuality(for: chunk)
+                )
+            )
+        }
+
+        return retryPlans
     }
 
     private func shouldRefine(_ disposition: CoarseDisposition) -> Bool {
