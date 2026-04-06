@@ -191,11 +191,31 @@ actor BackfillJobRunner {
                     // transitions still route through the deprecated shim
                     // because the split API has no replacement for them —
                     // tracked in C-2 gap report.
-                    try await store.markBackfillJobDeferred(
-                        jobId: candidate.jobId,
-                        reason: reason.rawValue
-                    )
-                    deferred.append(candidate.jobId)
+                    // R4-Fix1: tolerate terminal rows. The M-5 idempotency
+                    // path re-enqueues `.failed` rows whose retryCount is
+                    // still under the budget; when admission then defers,
+                    // the C-R3-1 status guard rejects the
+                    // `.failed -> .deferred` write with
+                    // `invalidStateTransition`. Without a per-iteration
+                    // catch, the throw aborts the loop and strands the
+                    // remaining `.queued` siblings. Log and continue on
+                    // `invalidStateTransition`; propagate any other store
+                    // error so we don't silently swallow real bugs.
+                    do {
+                        try await store.markBackfillJobDeferred(
+                            jobId: candidate.jobId,
+                            reason: reason.rawValue
+                        )
+                        deferred.append(candidate.jobId)
+                    } catch let error as AnalysisStoreError {
+                        if case .invalidStateTransition = error {
+                            logger.warning(
+                                "Skipping defer for terminal job: \(candidate.jobId, privacy: .public) reason=\(reason.rawValue, privacy: .public)"
+                            )
+                            continue
+                        }
+                        throw error
+                    }
                 }
                 logger.info("FM backfill deferred: \(reason.rawValue, privacy: .public) count=\(deferred.count)")
                 break
@@ -321,6 +341,19 @@ actor BackfillJobRunner {
             scanResultIds.append(result.id)
         }
 
+        if coarse.status != .success,
+           coarse.windows.isEmpty,
+           let failureResult = makeFailureScanResult(
+                scanPass: "passA",
+                attemptedSegments: inputs.segments,
+                inputs: inputs,
+                status: coarse.status,
+                latencyMs: coarse.latencyMillis
+           ) {
+            try await store.insertSemanticScanResult(failureResult)
+            scanResultIds.append(failureResult.id)
+        }
+
         if coarse.status == .success && !coarse.windows.isEmpty {
             let zoomPlans = try await classifier.planAdaptiveZoom(
                 coarse: coarse,
@@ -352,6 +385,22 @@ actor BackfillJobRunner {
                     try await store.recordSemanticScanResult(result, evidenceEvents: events)
                     scanResultIds.append(result.id)
                     evidenceEventIds.append(contentsOf: events.map(\.id))
+                }
+
+                if refinement.status != .success,
+                   refinement.windows.isEmpty {
+                    let attemptedLineRefs = Set(zoomPlans.flatMap(\.lineRefs))
+                    let attemptedSegments = inputs.segments.filter { attemptedLineRefs.contains($0.segmentIndex) }
+                    if let failureResult = makeFailureScanResult(
+                        scanPass: "passB",
+                        attemptedSegments: attemptedSegments,
+                        inputs: inputs,
+                        status: refinement.status,
+                        latencyMs: refinement.latencyMillis
+                    ) {
+                        try await store.insertSemanticScanResult(failureResult)
+                        scanResultIds.append(failureResult.id)
+                    }
                 }
             }
         }
@@ -486,6 +535,70 @@ actor BackfillJobRunner {
         )
     }
 
+    private func makeFailureScanResult(
+        scanPass: String,
+        attemptedSegments: [AdTranscriptSegment],
+        inputs: AssetInputs,
+        status: SemanticScanStatus,
+        latencyMs: Double
+    ) -> SemanticScanResult? {
+        guard let range = attemptedRange(for: attemptedSegments) else {
+            return nil
+        }
+        return SemanticScanResult(
+            id: "scan-\(inputs.analysisAssetId)-\(inputs.transcriptVersion)-\(scanPass)-failure",
+            analysisAssetId: inputs.analysisAssetId,
+            windowFirstAtomOrdinal: range.firstAtomOrdinal,
+            windowLastAtomOrdinal: range.lastAtomOrdinal,
+            windowStartTime: range.startTime,
+            windowEndTime: range.endTime,
+            scanPass: scanPass,
+            transcriptQuality: range.transcriptQuality,
+            disposition: .abstain,
+            spansJSON: "[]",
+            status: status,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: latencyMs,
+            prewarmHit: false,
+            scanCohortJSON: scanCohortJSON,
+            transcriptVersion: inputs.transcriptVersion
+        )
+    }
+
+    private func attemptedRange(for segments: [AdTranscriptSegment]) -> AttemptedRange? {
+        let ordered = segments.sorted { lhs, rhs in
+            if lhs.segmentIndex == rhs.segmentIndex {
+                return lhs.startTime < rhs.startTime
+            }
+            return lhs.segmentIndex < rhs.segmentIndex
+        }
+        guard let first = ordered.first,
+              let last = ordered.last else {
+            return nil
+        }
+        return AttemptedRange(
+            firstAtomOrdinal: first.firstAtomOrdinal,
+            lastAtomOrdinal: last.lastAtomOrdinal,
+            startTime: first.startTime,
+            endTime: last.endTime,
+            transcriptQuality: aggregateTranscriptQuality(for: ordered)
+        )
+    }
+
+    private func aggregateTranscriptQuality(for segments: [AdTranscriptSegment]) -> TranscriptQuality {
+        let qualities = TranscriptQualityEstimator.assess(segments: segments).map(\.quality)
+        if qualities.contains(.unusable) {
+            return .unusable
+        }
+        if qualities.contains(.degraded) {
+            return .degraded
+        }
+        return .good
+    }
+
     private func makeEvidenceEvents(
         windowOutput: FMRefinementWindowOutput,
         inputs: AssetInputs,
@@ -566,4 +679,12 @@ private struct EvidencePayload: Codable {
     let firstLineRef: Int
     let lastLineRef: Int
     let jobId: String
+}
+
+private struct AttemptedRange {
+    let firstAtomOrdinal: Int
+    let lastAtomOrdinal: Int
+    let startTime: Double
+    let endTime: Double
+    let transcriptQuality: TranscriptQuality
 }

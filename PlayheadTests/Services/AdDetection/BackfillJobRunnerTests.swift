@@ -145,6 +145,30 @@ struct BackfillJobRunnerTests {
         #expect(windows.isEmpty)
     }
 
+    @available(iOS 26.0, *)
+    @Test("coarse guardrail failures persist a terminal passA row even without windows")
+    func coarseGuardrailFailuresPersistFailureRow() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(coarseFailures: [.guardrailViolation])
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        let result = try await runner.runPendingBackfill(for: makeInputs())
+
+        #expect(!result.admittedJobIds.isEmpty)
+        #expect(result.scanResultIds.count == 1)
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")
+        #expect(scans.count == 1, "runner must persist a synthetic failure row for blocked coarse scans")
+        let failure = try #require(scans.first)
+        #expect(failure.scanPass == "passA")
+        #expect(failure.status == .guardrailViolation)
+        #expect(failure.disposition == .abstain)
+        #expect(failure.windowFirstAtomOrdinal == 0)
+        #expect(failure.windowLastAtomOrdinal == 2)
+        let evidence = try await store.fetchEvidenceEvents(analysisAssetId: "asset-runner")
+        #expect(evidence.isEmpty)
+    }
+
     @Test("admission throttling defers the job and records the reason")
     func thermalThrottleIsDeferred() async throws {
         let store = try await makeTestStore()
@@ -246,6 +270,40 @@ struct BackfillJobRunnerTests {
             let parsed = try JSONDecoder().decode([Int].self, from: data)
             #expect(!parsed.isEmpty)
         }
+    }
+
+    @available(iOS 26.0, *)
+    @Test("refinement refusal persists a terminal passB row when no spans are returned")
+    func refinementRefusalPersistsFailureRow() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [1],
+                        certainty: .strong
+                    )
+                )
+            ],
+            refinementFailures: [.refusal]
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        let result = try await runner.runPendingBackfill(for: makeInputs())
+
+        #expect(!result.admittedJobIds.isEmpty)
+        let passB = try await store.fetchSemanticScanResults(
+            analysisAssetId: "asset-runner",
+            scanPass: "passB"
+        )
+        #expect(passB.count == 1, "runner must persist a synthetic passB failure row")
+        let failure = try #require(passB.first)
+        #expect(failure.status == .refusal)
+        #expect(failure.disposition == .abstain)
+        let evidence = try await store.fetchEvidenceEvents(analysisAssetId: "asset-runner")
+        #expect(evidence.isEmpty, "no refinement evidence should be written for a refused prompt")
     }
 
     @Test("refinement writes scan row and evidence events atomically")
@@ -541,6 +599,97 @@ struct BackfillJobRunnerTests {
         for jobId in result.deferredJobIds {
             let row = try #require(await store.fetchBackfillJob(byId: jobId))
             #expect(row.status == .deferred, "job \(jobId) must be .deferred, got \(row.status)")
+            #expect(row.deferReason == "thermalThrottled")
+        }
+    }
+
+    // R4-Fix1: The H-1 defer-all-jobs loop unconditionally called
+    // markBackfillJobDeferred for every non-admitted candidate. When the M-5
+    // idempotency path re-enqueued a `.failed` row (retryCount<maxRetries),
+    // the C-R3-1 status guard rejected the `.failed -> .deferred` write with
+    // `invalidStateTransition`. The throw was unhandled inside the loop and
+    // aborted mid-iteration, leaving subsequent jobs stranded in `.queued`.
+    @Test("R4-Fix1: defer loop tolerates terminal pre-failed rows and continues marking the rest")
+    func deferLoopHandlesTerminalRowsGracefully() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        // Pre-insert a `.failed` row at the deterministic jobId the runner
+        // will synthesize for the first targeted phase. retryCount=0 keeps
+        // it under the C-B exhaustion gate, so the M-5 idempotency path
+        // re-enqueues it instead of skipping.
+        // Targeted plan emits phases in order: scanHarvesterProposals(0),
+        // scanLikelyAdSlots(1), scanRandomAuditWindows(2). Seed the FIRST
+        // phase as `.failed` so the M-5 idempotency probe matches by jobId
+        // and re-enqueues the existing terminal row.
+        let failedJob = BackfillJob(
+            jobId: "fm-asset-runner-scanHarvesterProposals-0",
+            analysisAssetId: "asset-runner",
+            podcastId: "podcast-runner",
+            phase: .scanHarvesterProposals,
+            coveragePolicy: .targetedWithAudit,
+            priority: 20,
+            progressCursor: nil,
+            retryCount: 0,
+            deferReason: "seeded prior failure",
+            status: .failed,
+            scanCohortJSON: makeTestScanCohortJSON(),
+            createdAt: Date().timeIntervalSince1970
+        )
+        try await store.insertBackfillJob(failedJob)
+
+        let fmRuntime = TestFMRuntime()
+        let runner = BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(runtime: fmRuntime.runtime),
+            coveragePlanner: CoveragePlanner(),
+            mode: .shadow,
+            capabilitySnapshotProvider: { makeThermalThrottledSnapshot() },
+            batteryLevelProvider: { 1.0 },
+            scanCohortJSON: makeTestScanCohortJSON()
+        )
+
+        let plannerContext = CoveragePlannerContext(
+            observedEpisodeCount: 20,
+            stablePrecision: true,
+            isFirstEpisodeAfterCohortInvalidation: false,
+            recallDegrading: false,
+            sponsorDriftDetected: false,
+            auditMissDetected: false,
+            episodesSinceLastFullRescan: 0,
+            periodicFullRescanIntervalEpisodes: 10
+        )
+        let base = makeInputs()
+        let inputs = BackfillJobRunner.AssetInputs(
+            analysisAssetId: base.analysisAssetId,
+            podcastId: base.podcastId,
+            segments: base.segments,
+            evidenceCatalog: base.evidenceCatalog,
+            transcriptVersion: base.transcriptVersion,
+            plannerContext: plannerContext
+        )
+
+        // Must not throw: the defer-loop must absorb the C-R3-1
+        // invalidStateTransition on the seeded `.failed` row and keep going.
+        let result = try await runner.runPendingBackfill(for: inputs)
+
+        // The pre-failed row stays exactly as seeded.
+        let preFailed = try #require(await store.fetchBackfillJob(byId: failedJob.jobId))
+        #expect(preFailed.status == .failed, "seeded .failed row must remain .failed")
+        #expect(preFailed.deferReason == "seeded prior failure",
+                "seeded deferReason must be preserved")
+        #expect(preFailed.retryCount == 0)
+
+        // The other 2 planned phases (auditWindows + harvesterProposals)
+        // must have been marked deferred — proving the loop did not abort
+        // after the invalidStateTransition on the .failed row.
+        let otherDeferredIds = result.deferredJobIds.filter { $0 != failedJob.jobId }
+        #expect(otherDeferredIds.count == 2,
+                "expected 2 sibling phases marked deferred, got \(otherDeferredIds.count)")
+        for jobId in otherDeferredIds {
+            let row = try #require(await store.fetchBackfillJob(byId: jobId))
+            #expect(row.status == .deferred, "sibling \(jobId) must be .deferred")
             #expect(row.deferReason == "thermalThrottled")
         }
     }
