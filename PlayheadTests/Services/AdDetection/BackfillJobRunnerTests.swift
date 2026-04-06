@@ -272,6 +272,130 @@ struct BackfillJobRunnerTests {
         }
     }
 
+    // R4-Fix4: `memoryWriteEligible` was computed on RefinedAdSpan but never
+    // serialized into the persisted EvidencePayload. The H-R3-1 in-memory
+    // protection had no production consumer. Persist the flag so a future
+    // sponsor-memory writer reading evidence_events.evidenceJSON sees the
+    // eligibility decision.
+    @Test("R4-Fix4: persisted evidence JSON encodes memoryWriteEligible (true case)")
+    func evidenceJSONIncludesMemoryWriteEligibleTrue() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        let inputs = makeInputs()
+        // The default segments include "Use code SHOW for 20 percent off at
+        // example dot com." which yields catalog entries. Pick one to cite.
+        let entry = try #require(inputs.evidenceCatalog.entries.first,
+                                  "test fixture must yield at least one catalog entry")
+        // Map EvidenceCategory -> EvidenceAnchorKind (raw values match).
+        let anchorKind: EvidenceAnchorKind
+        switch entry.category {
+        case .url: anchorKind = .url
+        case .promoCode: anchorKind = .promoCode
+        case .ctaPhrase: anchorKind = .ctaPhrase
+        case .disclosurePhrase: anchorKind = .disclosurePhrase
+        case .brandSpan: anchorKind = .brandSpan
+        }
+
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [entry.atomOrdinal],
+                        certainty: .strong
+                    )
+                )
+            ],
+            refinementResponses: [
+                RefinementWindowSchema(spans: [
+                    SpanRefinementSchema(
+                        commercialIntent: .paid,
+                        ownership: .thirdParty,
+                        firstLineRef: entry.atomOrdinal,
+                        lastLineRef: entry.atomOrdinal,
+                        certainty: .strong,
+                        boundaryPrecision: .precise,
+                        evidenceAnchors: [
+                            EvidenceAnchorSchema(
+                                evidenceRef: entry.evidenceRef,
+                                lineRef: entry.atomOrdinal,
+                                kind: anchorKind,
+                                certainty: .strong
+                            )
+                        ],
+                        alternativeExplanation: .none,
+                        reasonTags: [.promoCode]
+                    )
+                ])
+            ]
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        _ = try await runner.runPendingBackfill(for: inputs)
+
+        let evidence = try await store.fetchEvidenceEvents(analysisAssetId: "asset-runner")
+        let refinementRows = evidence.filter { $0.eventType == "fm.spanRefinement" }
+        #expect(!refinementRows.isEmpty, "expected at least one refinement evidence row")
+        for row in refinementRows {
+            #expect(row.evidenceJSON.contains("\"memoryWriteEligible\":true"),
+                    "evidenceJSON must encode memoryWriteEligible=true; got: \(row.evidenceJSON)")
+        }
+    }
+
+    @Test("R4-Fix4: persisted evidence JSON encodes memoryWriteEligible (false case)")
+    func evidenceJSONIncludesMemoryWriteEligibleFalse() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        // Anchor with evidenceRef=nil resolves via the lineRefFallback path,
+        // which (per the C8 contract) marks the span as memoryWriteEligible=false.
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [1],
+                        certainty: .strong
+                    )
+                )
+            ],
+            refinementResponses: [
+                RefinementWindowSchema(spans: [
+                    SpanRefinementSchema(
+                        commercialIntent: .paid,
+                        ownership: .thirdParty,
+                        firstLineRef: 1,
+                        lastLineRef: 1,
+                        certainty: .strong,
+                        boundaryPrecision: .precise,
+                        evidenceAnchors: [
+                            EvidenceAnchorSchema(
+                                evidenceRef: nil,
+                                lineRef: 1,
+                                kind: .ctaPhrase,
+                                certainty: .strong
+                            )
+                        ],
+                        alternativeExplanation: .none,
+                        reasonTags: [.callToAction]
+                    )
+                ])
+            ]
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        _ = try await runner.runPendingBackfill(for: makeInputs())
+
+        let evidence = try await store.fetchEvidenceEvents(analysisAssetId: "asset-runner")
+        let refinementRows = evidence.filter { $0.eventType == "fm.spanRefinement" }
+        #expect(!refinementRows.isEmpty)
+        for row in refinementRows {
+            #expect(row.evidenceJSON.contains("\"memoryWriteEligible\":false"),
+                    "evidenceJSON must encode memoryWriteEligible=false; got: \(row.evidenceJSON)")
+        }
+    }
+
     @available(iOS 26.0, *)
     @Test("refinement refusal persists a terminal passB row when no spans are returned")
     func refinementRefusalPersistsFailureRow() async throws {

@@ -621,7 +621,13 @@ actor BackfillJobRunner {
                 boundaryPrecision: span.boundaryPrecision.rawValue,
                 firstLineRef: span.firstLineRef,
                 lastLineRef: span.lastLineRef,
-                jobId: jobId
+                jobId: jobId,
+                // R4-Fix4: persist `memoryWriteEligible` so the H-R3-1
+                // in-memory protection has a production consumer. A future
+                // Phase 8 sponsor-memory writer reading
+                // `evidence_events.evidenceJSON` can honor the eligibility
+                // decision without recomputing it.
+                memoryWriteEligible: span.memoryWriteEligible
             )
             let evidenceJSON = (try? JSONEncoder().encode(payload))
                 .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
@@ -679,6 +685,11 @@ private struct EvidencePayload: Codable {
     let firstLineRef: Int
     let lastLineRef: Int
     let jobId: String
+    /// R4-Fix4: persisted span-level eligibility for sponsor-memory writes.
+    /// `true` only when every resolved evidence anchor passed the
+    /// span-range containment check AND resolved via `.evidenceRef` (the
+    /// C8 contract). Phase 8 sponsor-memory writers must gate on this.
+    let memoryWriteEligible: Bool
 }
 
 private struct AttemptedRange {
