@@ -128,7 +128,9 @@ struct CorpusLoader {
                 text: "Synthetic transcript chunk for corpus replay.",
                 normalizedText: "synthetic transcript chunk for corpus replay",
                 pass: "fast",
-                modelVersion: "corpus-v1"
+                modelVersion: "corpus-v1",
+                transcriptVersion: nil,
+                atomOrdinal: nil
             )
         }
 

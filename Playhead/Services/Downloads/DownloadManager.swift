@@ -452,7 +452,7 @@ actor DownloadManager {
 
     /// Minimum bytes before signaling playback can start.
     /// ~60s at 256 kbps = ~1.9 MB. Round up to 2 MB.
-    static let defaultPlayableThreshold: Int64 = 2 * 1024 * 1024
+    static let defaultPlayableThreshold: Int64 = 8 * 1024 * 1024
 
     /// Result of a streaming download: the local file URL is available for
     /// playback once the threshold is reached; await `downloadComplete` before

@@ -46,7 +46,9 @@ struct ReplaySimulatorBasicTests {
                 text: "This is simulated transcript text for testing purposes.",
                 normalizedText: "this is simulated transcript text for testing purposes",
                 pass: "fast",
-                modelVersion: "sim-v1"
+                modelVersion: "sim-v1",
+                transcriptVersion: nil,
+                atomOrdinal: nil
             )
         }
 
@@ -174,7 +176,9 @@ struct ReplaySimulatorConditionTests {
                 text: "Simulated text.",
                 normalizedText: "simulated text",
                 pass: "fast",
-                modelVersion: "sim-v1"
+                modelVersion: "sim-v1",
+                transcriptVersion: nil,
+                atomOrdinal: nil
             )
         }
 

@@ -69,7 +69,9 @@ private func buildTranscriptChunks(
             text: text,
             normalizedText: normalized,
             pass: "fast",
-            modelVersion: "integration-v1"
+            modelVersion: "integration-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil
         ))
         chunkIndex += 1
     }
@@ -1297,7 +1299,9 @@ struct CombinedTuningReplayTests {
                 .filter { !$0.isEmpty }
                 .joined(separator: " "),
             pass: "fast",
-            modelVersion: "test-v1"
+            modelVersion: "test-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil
         )
     }
 }

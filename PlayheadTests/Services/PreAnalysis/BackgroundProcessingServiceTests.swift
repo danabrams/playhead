@@ -129,7 +129,12 @@ struct ContinuedProcessingHandlerTests {
             await bps.handleContinuedProcessingTask(task)
         }
 
-        try await Task.sleep(for: .milliseconds(50))
+        // Wait for the expiration handler to be set (the actor method must execute first)
+        let deadline = ContinuousClock.now + .seconds(5)
+        while task.expirationHandler == nil && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
         task.simulateExpiration()
         try await waitForCompletion(of: task)
         workTask.cancel()
