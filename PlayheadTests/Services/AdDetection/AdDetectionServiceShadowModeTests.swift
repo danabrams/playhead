@@ -103,24 +103,27 @@ struct AdDetectionServiceShadowModeTests {
         "\(window.startTime)|\(window.endTime)|\(window.confidence)|\(window.boundaryState)|\(window.decisionState)|\(window.detectorVersion)|\(window.advertiser ?? "-")|\(window.product ?? "-")|\(window.evidenceText ?? "-")"
     }
 
-    @Test("shadow mode produces byte-identical cues to disabled mode")
+    @Test("H-R3-3: shadow mode produces byte-identical cues to disabled mode (same store, same asset)")
     func shadowAndDisabledProduceIdenticalAdWindows() async throws {
-        // Test Gap #7 fix: the invariant is meaningful only when the shadow
-        // service ACTUALLY runs the FM pipeline. Previously both services
-        // passed `nil` factory, so "shadow" degraded to "disabled" and the
-        // comparison became vacuous. Now both services receive the same
-        // deterministic factory; the only behavioural difference is the
-        // `config.fmBackfillMode` gate inside `runShadowFMPhase`.
-        let chunksA = makeChunks(assetId: "asset-A")
-        let chunksB = makeChunks(assetId: "asset-B")
+        // H-R3-3: strengthened from the test #7 fix. The original
+        // comparison used two different stores + two different asset ids,
+        // which drifted the comparison: any global state or ordering issue
+        // would be hidden by the store split. Now we run BOTH modes
+        // against the SAME store + SAME asset id, toggling
+        // `fmBackfillMode` by swapping services between calls. The
+        // assertion is that AdWindow rows present on-disk before the
+        // shadow FM run are identical to the rows present after — shadow
+        // mode must never touch AdWindows.
+        let store = try await makeTestStore()
+        let assetId = "asset-shared"
+        try await store.insertAsset(makeAsset(id: assetId))
         let factory = makeDeterministicFactory()
+        let chunks = makeChunks(assetId: assetId)
 
-        // Run #1: disabled — factory is wired but the service's shadow gate
-        // short-circuits, so the runner never fires.
-        let storeA = try await makeTestStore()
-        try await storeA.insertAsset(makeAsset(id: "asset-A"))
-        let serviceA = makeService(
-            store: storeA,
+        // Run #1: disabled — shadow gate short-circuits, no FM work, and
+        // the classical backfill pipeline writes the baseline AdWindows.
+        let disabledService = makeService(
+            store: store,
             config: AdDetectionConfig(
                 candidateThreshold: 0.40,
                 confirmationThreshold: 0.70,
@@ -131,21 +134,27 @@ struct AdDetectionServiceShadowModeTests {
             ),
             factory: factory
         )
-        try await serviceA.runBackfill(
-            chunks: chunksA,
-            analysisAssetId: "asset-A",
-            podcastId: "podcast-1",
+        try await disabledService.runBackfill(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            podcastId: "podcast-shared",
             episodeDuration: 90
         )
-        let disabledWindows = try await storeA.fetchAdWindows(assetId: "asset-A")
+        let preShadowWindows = try await store.fetchAdWindows(assetId: assetId)
+        let preShadowSigs = preShadowWindows.map(adWindowSignature).sorted()
 
-        // Run #2: shadow — factory fires, runner drives the FM pipeline
-        // through TestFMRuntime and writes semantic_scan_results rows. The
-        // shadow invariant says AdWindows must still be byte-identical.
-        let storeB = try await makeTestStore()
-        try await storeB.insertAsset(makeAsset(id: "asset-B"))
-        let serviceB = makeService(
-            store: storeB,
+        // Confirm the baseline: disabled mode must not have written FM
+        // telemetry.
+        let preShadowScans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+        let preShadowEvents = try await store.fetchEvidenceEvents(analysisAssetId: assetId)
+        #expect(preShadowScans.isEmpty, "disabled mode must not persist semantic scan rows")
+        #expect(preShadowEvents.isEmpty, "disabled mode must not persist evidence events")
+
+        // Run #2: shadow — same store, same asset id. The shadow FM path
+        // must write telemetry but MUST NOT mutate the AdWindow rows we
+        // just captured.
+        let shadowService = makeService(
+            store: store,
             config: AdDetectionConfig(
                 candidateThreshold: 0.40,
                 confirmationThreshold: 0.70,
@@ -156,29 +165,28 @@ struct AdDetectionServiceShadowModeTests {
             ),
             factory: factory
         )
-        try await serviceB.runBackfill(
-            chunks: chunksB,
-            analysisAssetId: "asset-B",
-            podcastId: "podcast-1",
+        try await shadowService.runBackfill(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            podcastId: "podcast-shared",
             episodeDuration: 90
         )
-        let shadowWindows = try await storeB.fetchAdWindows(assetId: "asset-B")
+        let postShadowWindows = try await store.fetchAdWindows(assetId: assetId)
+        let postShadowSigs = postShadowWindows.map(adWindowSignature).sorted()
 
-        // Byte-identical signatures (counts and contents).
-        let disabledSigs = disabledWindows.map(adWindowSignature).sorted()
-        let shadowSigs = shadowWindows.map(adWindowSignature).sorted()
-        #expect(disabledSigs == shadowSigs, "shadow vs disabled cue divergence: \(shadowSigs) vs \(disabledSigs)")
+        // The AdWindow set must be byte-identical before vs after the
+        // shadow FM run. This is the shadow invariant: FM is observation-
+        // only until Phase 6 fusion lands.
+        #expect(preShadowSigs == postShadowSigs,
+                "shadow FM run mutated AdWindow rows (pre=\(preShadowSigs), post=\(postShadowSigs))")
+        #expect(preShadowWindows.map(\.id).sorted() == postShadowWindows.map(\.id).sorted(),
+                "shadow FM run changed AdWindow row identities")
 
-        // The shadow run MUST have written semantic scan rows — otherwise
-        // the "actually ran FM" claim is unsupported.
-        let shadowScans = try await storeB.fetchSemanticScanResults(analysisAssetId: "asset-B")
-        #expect(!shadowScans.isEmpty, "shadow service must have exercised the FM pipeline")
-
-        // The disabled run must NOT have written semantic scan / evidence rows.
-        let disabledScans = try await storeA.fetchSemanticScanResults(analysisAssetId: "asset-A")
-        let disabledEvents = try await storeA.fetchEvidenceEvents(analysisAssetId: "asset-A")
-        #expect(disabledScans.isEmpty)
-        #expect(disabledEvents.isEmpty)
+        // And the shadow run MUST have actually exercised the FM pipeline —
+        // otherwise the invariant is vacuous.
+        let postShadowScans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+        #expect(!postShadowScans.isEmpty,
+                "shadow service must have exercised the FM pipeline")
     }
 
     @Test("M-D: shadow phase short-circuits when canUseFoundationModels is false")
