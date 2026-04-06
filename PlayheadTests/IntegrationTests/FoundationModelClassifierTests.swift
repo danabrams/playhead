@@ -885,6 +885,128 @@ struct FoundationModelClassifierTests {
         }
     }
 
+    // R4-Fix3: AnchorDedupKey originally keyed on (kind, lineRef, evidenceRef).
+    // Four anchors at the same (kind, lineRef) but with distinct evidenceRefs
+    // were treated as 4 unique anchors and the breadth cap inflated to 16
+    // lines from a single transcript line. The breadth cap should represent
+    // distinct positions in the transcript, not how many catalog rows the
+    // FM cited at one position. The fix drops evidenceRef from the dedup key.
+    @Test("R4-Fix3: refinement rejects breadth padded by distinct-evidenceRef anchors at the same lineRef")
+    func refinementRejectsDistinctEvidenceRefBreadthFlood() async throws {
+        let segments = (1...17).map { idx in
+            makeSegment(
+                index: idx,
+                startTime: Double(idx),
+                endTime: Double(idx) + 1,
+                text: "Line \(idx)."
+            )
+        }
+        // Catalog with 4 distinct entries — all anchored to the SAME atom
+        // (atomOrdinal=1) so they all live at lineRef=1.
+        let evidenceCatalog = EvidenceCatalog(
+            analysisAssetId: "asset-1",
+            transcriptVersion: "transcript-v1",
+            entries: [
+                EvidenceEntry(
+                    evidenceRef: 10,
+                    category: .url,
+                    matchedText: "a.example",
+                    normalizedText: "a.example",
+                    atomOrdinal: 1,
+                    startTime: 1,
+                    endTime: 2
+                ),
+                EvidenceEntry(
+                    evidenceRef: 11,
+                    category: .url,
+                    matchedText: "b.example",
+                    normalizedText: "b.example",
+                    atomOrdinal: 1,
+                    startTime: 1,
+                    endTime: 2
+                ),
+                EvidenceEntry(
+                    evidenceRef: 12,
+                    category: .url,
+                    matchedText: "c.example",
+                    normalizedText: "c.example",
+                    atomOrdinal: 1,
+                    startTime: 1,
+                    endTime: 2
+                ),
+                EvidenceEntry(
+                    evidenceRef: 13,
+                    category: .url,
+                    matchedText: "d.example",
+                    normalizedText: "d.example",
+                    atomOrdinal: 1,
+                    startTime: 1,
+                    endTime: 2
+                )
+            ]
+        )
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 1,
+            lineRefs: Array(1...17),
+            focusLineRefs: [1, 17],
+            focusClusters: [Array(1...17)],
+            prompt: "Refine ad spans.",
+            promptTokenCount: 12,
+            startTime: 1,
+            endTime: 18,
+            stopReason: .minimumSpan,
+            promptEvidence: evidenceCatalog.entries.map { entry in
+                PromptEvidenceEntry(entry: entry, lineRef: 1)
+            }
+        )
+
+        // Four anchors with distinct evidenceRefs but identical
+        // (kind=.url, lineRef=1). After R4-Fix3 the dedup key collapses
+        // them to ONE position, capping breadth at 1*4=4 lines. The span
+        // claims breadth 16 (1...17) and must be rejected.
+        let recorder = RuntimeRecorder(
+            contextSize: 256,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementResponses: [
+                RefinementWindowSchema(
+                    spans: [
+                        SpanRefinementSchema(
+                            commercialIntent: .paid,
+                            ownership: .thirdParty,
+                            firstLineRef: 1,
+                            lastLineRef: 17,
+                            certainty: .strong,
+                            boundaryPrecision: .rough,
+                            evidenceAnchors: [
+                                EvidenceAnchorSchema(evidenceRef: 10, lineRef: 1, kind: .url, certainty: .strong),
+                                EvidenceAnchorSchema(evidenceRef: 11, lineRef: 1, kind: .url, certainty: .strong),
+                                EvidenceAnchorSchema(evidenceRef: 12, lineRef: 1, kind: .url, certainty: .strong),
+                                EvidenceAnchorSchema(evidenceRef: 13, lineRef: 1, kind: .url, certainty: .strong)
+                            ],
+                            alternativeExplanation: .none,
+                            reasonTags: [.urlMention]
+                        )
+                    ]
+                )
+            ]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: evidenceCatalog
+        )
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 1)
+        #expect(output.windows[0].spans.isEmpty,
+                "span breadth 16 with all anchors at one position must be rejected")
+    }
+
     // H-R3-2: The breadth check used the raw anchor count, so an FM could
     // submit four duplicate (kind, lineRef, evidenceRef) anchors to stretch
     // an otherwise anchorless 17-line span through a `count * 4` bound.

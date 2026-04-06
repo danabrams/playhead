@@ -1029,11 +1029,16 @@ struct FoundationModelClassifier: Sendable {
             // 17-line span through a `count * 4` bound. The real resolver
             // collapses these duplicates anyway, so the breadth budget must
             // match what we'll actually retain.
+            // R4-Fix3: dedupe on (kind, lineRef) only. The breadth cap
+            // represents how many distinct positions in the transcript
+            // attest the span; an FM citing four catalog rows at a single
+            // lineRef is still ONE position. Including evidenceRef in the
+            // key let an FM inflate the cap from 4 lines to 16 by citing
+            // distinct catalog ids at the same atom.
             let uniqueAnchorKeys = Set(span.evidenceAnchors.map { anchor in
                 AnchorDedupKey(
                     kind: anchor.kind,
-                    lineRef: anchor.lineRef,
-                    evidenceRef: anchor.evidenceRef
+                    lineRef: anchor.lineRef
                 )
             })
             let maxBreadth = uniqueAnchorKeys.count * 4
@@ -1126,13 +1131,15 @@ struct FoundationModelClassifier: Sendable {
         return spans
     }
 
-    /// H-R3-2: Dedup key for evidence anchors. Two anchors with the same
-    /// `(kind, lineRef, evidenceRef)` tuple attest the same piece of
-    /// evidence and must collapse to one before sizing the breadth cap.
+    /// H-R3-2 / R4-Fix3: Dedup key for evidence anchors. The key represents
+    /// a distinct position in the transcript: two anchors at the same
+    /// `(kind, lineRef)` collapse to one regardless of which catalog row
+    /// the FM cited. Including `evidenceRef` in the key let an FM cite
+    /// four catalog ids at a single atom and inflate the breadth cap by
+    /// `count * 4` from a single line.
     private struct AnchorDedupKey: Hashable {
         let kind: EvidenceAnchorKind
         let lineRef: Int
-        let evidenceRef: Int?
     }
 
     /// Dedupes `reasonTags` and drops tags that are semantically inconsistent
