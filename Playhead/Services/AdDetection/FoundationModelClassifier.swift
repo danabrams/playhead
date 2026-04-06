@@ -936,7 +936,13 @@ struct FoundationModelClassifier: Sendable {
             )
         }
 
-        let promptEvidenceCount = plan.promptEvidence.count
+        // M24: `evidenceRef` on `EvidenceAnchorSchema` is the catalog-global
+        // STABLE ID assigned by `EvidenceCatalogBuilder.assignRefs`, not a
+        // positional index into `plan.promptEvidence`. Build a set of the
+        // stable ids actually presented to the model so we can reject
+        // fabricated refs without confusing them with valid ids that happen
+        // to fall outside `0..<promptEvidence.count`.
+        let presentedEvidenceRefs: Set<Int> = Set(plan.promptEvidence.map { $0.entry.evidenceRef })
         // H15: Cap evidence anchors per span before passing to the resolver.
         let anchorCap = max(1, config.maximumRefinementSpansPerWindow * 8)
 
@@ -975,10 +981,12 @@ struct FoundationModelClassifier: Sendable {
 
             // M24: Drop anchors whose evidenceRef points outside the prompt's
             // evidence catalog. Keep nil-evidenceRef anchors (those resolve via
-            // lineRefFallback in the resolver).
+            // lineRefFallback in the resolver). Match by stable id, NOT by
+            // positional index into `plan.promptEvidence` — see the comment
+            // on `presentedEvidenceRefs` above.
             let validatedAnchors = cappedAnchors.filter { anchor in
                 guard let ref = anchor.evidenceRef else { return true }
-                return ref >= 0 && ref < promptEvidenceCount
+                return presentedEvidenceRefs.contains(ref)
             }
 
             let resolvedEvidenceAnchors = CommercialEvidenceResolver.resolve(

@@ -1140,6 +1140,130 @@ struct FoundationModelClassifierTests {
         #expect(cleaned.contains("null"))
     }
 
+    // M24: evidenceRef is a catalog-global STABLE ID (assigned in
+    // EvidenceCatalogBuilder.assignRefs as `index` over sorted matches), NOT
+    // a positional index into the per-window `plan.promptEvidence` array. The
+    // sanitize filter must reject refs whose stable id is not present in the
+    // set of presented entries — not refs whose integer value falls outside
+    // `0..<promptEvidence.count`.
+    @Test("refinement preserves anchors that cite stable evidenceRef ids outside the promptEvidence index range")
+    func refinementPreservesNonPositionalEvidenceRefs() async throws {
+        let segments = [
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Visit example.com for the offer."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Use promo code SAVE.")
+        ]
+        // Two entries with stable ids 11 and 12 — both larger than promptEvidence.count (=2),
+        // exercising the bug where the filter treats `evidenceRef` as a positional index.
+        let evidenceCatalog = EvidenceCatalog(
+            analysisAssetId: "asset-1",
+            transcriptVersion: "transcript-v1",
+            entries: [
+                EvidenceEntry(
+                    evidenceRef: 11,
+                    category: .url,
+                    matchedText: "example.com",
+                    normalizedText: "example.com",
+                    atomOrdinal: 1,
+                    startTime: 5,
+                    endTime: 10
+                ),
+                EvidenceEntry(
+                    evidenceRef: 12,
+                    category: .promoCode,
+                    matchedText: "SAVE",
+                    normalizedText: "save",
+                    atomOrdinal: 2,
+                    startTime: 10,
+                    endTime: 15
+                )
+            ]
+        )
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 0,
+            lineRefs: [1, 2],
+            focusLineRefs: [1, 2],
+            focusClusters: [[1, 2]],
+            prompt: "Refine ad spans.",
+            promptTokenCount: 8,
+            startTime: 5,
+            endTime: 15,
+            stopReason: .minimumSpan,
+            promptEvidence: [
+                PromptEvidenceEntry(entry: evidenceCatalog.entries[0], lineRef: 1),
+                PromptEvidenceEntry(entry: evidenceCatalog.entries[1], lineRef: 2)
+            ]
+        )
+        let recorder = RuntimeRecorder(
+            contextSize: 64,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementResponses: [
+                RefinementWindowSchema(
+                    spans: [
+                        SpanRefinementSchema(
+                            commercialIntent: .paid,
+                            ownership: .thirdParty,
+                            firstLineRef: 1,
+                            lastLineRef: 2,
+                            certainty: .strong,
+                            boundaryPrecision: .precise,
+                            evidenceAnchors: [
+                                // Stable id 11 is valid (matches entries[0]) but is
+                                // OUT OF RANGE if interpreted as a positional index
+                                // into promptEvidence (count=2).
+                                EvidenceAnchorSchema(
+                                    evidenceRef: 11,
+                                    lineRef: 1,
+                                    kind: .url,
+                                    certainty: .strong
+                                ),
+                                // Stable id 12 — also valid, also "out of range" positionally.
+                                EvidenceAnchorSchema(
+                                    evidenceRef: 12,
+                                    lineRef: 2,
+                                    kind: .promoCode,
+                                    certainty: .strong
+                                ),
+                                // Stable id 9999 — does NOT match any presented entry.
+                                // Must be rejected.
+                                EvidenceAnchorSchema(
+                                    evidenceRef: 9999,
+                                    lineRef: 1,
+                                    kind: .url,
+                                    certainty: .weak
+                                )
+                            ],
+                            alternativeExplanation: .none,
+                            reasonTags: [.urlMention, .promoCode]
+                        )
+                    ]
+                )
+            ]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: evidenceCatalog
+        )
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 1)
+        #expect(output.windows[0].spans.count == 1)
+        let resolved = output.windows[0].spans[0].resolvedEvidenceAnchors
+        // Both stable-id anchors must survive sanitize and resolve via the resolver.
+        #expect(resolved.count == 2)
+        #expect(resolved.contains { $0.entry?.evidenceRef == 11 && $0.resolutionSource == .evidenceRef })
+        #expect(resolved.contains { $0.entry?.evidenceRef == 12 && $0.resolutionSource == .evidenceRef })
+        // The fabricated 9999 ref must NOT have leaked through.
+        #expect(!resolved.contains { $0.entry?.evidenceRef == 9999 })
+        // Memory write eligibility: every surviving anchor resolved via .evidenceRef.
+        #expect(output.windows[0].spans[0].memoryWriteEligible)
+    }
+
     // H14: transcript text containing a forgeable "0: ad" prefix doesn't confuse
     // sanitization — the model returns lineRef ints via the structured schema and
     // those still resolve correctly.
