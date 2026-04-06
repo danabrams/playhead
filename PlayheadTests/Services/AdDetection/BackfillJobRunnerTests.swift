@@ -341,6 +341,62 @@ struct BackfillJobRunnerTests {
         #expect(second.admittedJobIds.isEmpty, "completed jobs must not be re-admitted")
     }
 
+    @Test("C-2: failing classifier persists deferReason on .failed status")
+    func failedClassifierPersistsDeferReason() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        struct CoarseFailure: Error, CustomStringConvertible {
+            let description = "synthetic classifier failure"
+        }
+
+        // Build a Runtime whose coarse pass always throws. We cannot mutate
+        // TestFMRuntime without crossing ownership boundaries, so build the
+        // Runtime struct inline.
+        // We make `tokenCount` throw so `planPassA` → `coarsePassA` throws
+        // out of the runtime entirely (bypassing the per-window failure
+        // mapping) and trips the runner's terminal-failure catch branch.
+        let failingRuntime = FoundationModelClassifier.Runtime(
+            availabilityStatus: { _ in nil },
+            contextSize: { 4_096 },
+            tokenCount: { _ in throw CoarseFailure() },
+            coarseSchemaTokenCount: { 16 },
+            refinementSchemaTokenCount: { 32 },
+            makeSession: {
+                FoundationModelClassifier.Runtime.Session(
+                    prewarm: { _ in },
+                    respondCoarse: { _ in
+                        CoarseScreeningSchema(disposition: .noAds, support: nil)
+                    },
+                    respondRefinement: { _ in
+                        RefinementWindowSchema(spans: [])
+                    }
+                )
+            }
+        )
+        let runner = BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(runtime: failingRuntime),
+            coveragePlanner: CoveragePlanner(),
+            mode: .shadow,
+            capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+            batteryLevelProvider: { 1.0 },
+            scanCohortJSON: makeTestScanCohortJSON()
+        )
+
+        let result = try await runner.runPendingBackfill(for: makeInputs())
+
+        #expect(!result.admittedJobIds.isEmpty, "runner must have admitted at least one job")
+        // After all admitted jobs failed, the stored row must reflect the
+        // failure with a non-nil deferReason describing the cause.
+        let jobId = try #require(result.admittedJobIds.first)
+        let row = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(row.status == .failed)
+        #expect(row.deferReason != nil)
+        #expect(row.deferReason?.contains("synthetic classifier failure") == true)
+    }
+
     @Test("enabled mode falls back to shadow behavior (no AdWindow writes)")
     func enabledModeFallsBackToShadow() async throws {
         let store = try await makeTestStore()

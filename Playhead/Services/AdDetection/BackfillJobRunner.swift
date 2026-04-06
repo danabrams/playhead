@@ -187,25 +187,21 @@ actor BackfillJobRunner {
             admitted.append(job.jobId)
 
             do {
-                try await store.checkpointBackfillJob(
-                    jobId: job.jobId,
-                    progressCursor: nil,
-                    status: .running,
-                    deferReason: nil
-                )
+                // C-2: split lifecycle API. `markBackfillJobRunning` preserves
+                // progressCursor/retryCount/deferReason so an earlier-deferred
+                // row's audit trail is not lost when it resumes.
+                try await store.markBackfillJobRunning(jobId: job.jobId)
 
                 let (resultIds, eventIds) = try await runJob(job, inputs: inputs)
                 scanResultIds.append(contentsOf: resultIds)
                 evidenceEventIds.append(contentsOf: eventIds)
 
-                try await store.checkpointBackfillJob(
+                try await store.markBackfillJobComplete(
                     jobId: job.jobId,
                     progressCursor: BackfillProgressCursor(
                         processedUnitCount: 1,
                         lastProcessedUpperBoundSec: inputs.segments.last?.endTime
-                    ),
-                    status: .complete,
-                    deferReason: nil
+                    )
                 )
             } catch is CancellationError {
                 await admissionController.finish(jobId: job.jobId)
@@ -215,12 +211,13 @@ actor BackfillJobRunner {
                 )
                 throw CancellationError()
             } catch {
-                try await store.checkpointBackfillJob(
+                // C-2: markBackfillJobFailed writes deferReason so operators
+                // can diagnose the failure without scraping logs. The prior
+                // deprecated shim silently dropped the reason on .failed.
+                try await store.markBackfillJobFailed(
                     jobId: job.jobId,
-                    progressCursor: nil,
-                    status: .failed,
-                    retryCount: job.retryCount + 1,
-                    deferReason: String(describing: error)
+                    reason: String(describing: error),
+                    retryCount: job.retryCount + 1
                 )
                 logger.error("FM backfill job \(job.jobId) failed: \(error.localizedDescription)")
             }
