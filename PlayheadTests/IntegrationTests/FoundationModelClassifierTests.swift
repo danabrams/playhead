@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import Testing
 @testable import Playhead
 
@@ -63,6 +64,48 @@ struct FoundationModelClassifierTests {
         #expect(json.contains("\"commercialIntent\":\"paid\""))
         #expect(json.contains("\"boundaryPrecision\":\"precise\""))
         #expect(!json.localizedCaseInsensitiveContains("reasoning"))
+    }
+
+    @Test("sanitizeReasonTags drops commerce tags from organic spans and dedupes")
+    func sanitizeReasonTagsDropsInconsistentOrganicTags() {
+        let logger = Logger(subsystem: "com.playhead.tests", category: "FoundationModelClassifierTests")
+
+        // Organic with promoCode + CTA + brand + duplicates → all forbidden
+        // tags dropped, result sorted and unique. guestPlug is allowed on
+        // organic (guests can plug their own work without commerce).
+        let organicTags: [ReasonTag] = [
+            .promoCode,
+            .callToAction,
+            .brandMention,
+            .guestPlug,
+            .guestPlug
+        ]
+        let organicFiltered = FoundationModelClassifier.sanitizeReasonTags(
+            organicTags,
+            commercialIntent: .organic,
+            logger: logger
+        )
+        #expect(organicFiltered == [.guestPlug])
+        #expect(!organicFiltered.contains(.promoCode))
+        #expect(!organicFiltered.contains(.callToAction))
+        #expect(!organicFiltered.contains(.brandMention))
+
+        // Paid spans retain every tag, deduped and sorted.
+        let paidTags: [ReasonTag] = [.urlMention, .promoCode, .promoCode, .callToAction]
+        let paidFiltered = FoundationModelClassifier.sanitizeReasonTags(
+            paidTags,
+            commercialIntent: .paid,
+            logger: logger
+        )
+        #expect(paidFiltered == [.callToAction, .promoCode, .urlMention])
+
+        // Empty input returns empty without allocating.
+        let empty = FoundationModelClassifier.sanitizeReasonTags(
+            [],
+            commercialIntent: .organic,
+            logger: logger
+        )
+        #expect(empty.isEmpty)
     }
 
     @Test("prompt is minimal and uses L-prefixed quoted line refs with injection preamble")

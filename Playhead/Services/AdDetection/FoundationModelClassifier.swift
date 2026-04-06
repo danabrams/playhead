@@ -1006,12 +1006,76 @@ struct FoundationModelClassifier: Sendable {
                     memoryWriteEligible: !resolvedEvidenceAnchors.isEmpty &&
                         resolvedEvidenceAnchors.allSatisfy(\.memoryWriteEligible),
                     alternativeExplanation: span.alternativeExplanation,
-                    reasonTags: Array(Set(span.reasonTags)).sorted { $0.rawValue < $1.rawValue }
+                    reasonTags: Self.sanitizeReasonTags(
+                        span.reasonTags,
+                        commercialIntent: span.commercialIntent,
+                        logger: logger
+                    )
                 )
             )
         }
 
         return spans
+    }
+
+    /// Dedupes `reasonTags` and drops tags that are semantically inconsistent
+    /// with the span's `commercialIntent`. Organic spans cannot carry
+    /// commerce-implying tags (promo codes, CTAs, disclosures, URL callouts,
+    /// brand/host-read pitches, cross-promo language). Paid/owned/affiliate
+    /// spans accept any tag. Unknown intent is treated conservatively the
+    /// same as other commercial variants (no filtering).
+    ///
+    /// Produces a sorted, unique array without allocating an intermediate
+    /// Set — the tag list is short, so a sort + manual dedup is cheaper than
+    /// Set materialization and pays off for every refinement span.
+    static func sanitizeReasonTags(
+        _ tags: [ReasonTag],
+        commercialIntent: CommercialIntent,
+        logger: Logger
+    ) -> [ReasonTag] {
+        guard !tags.isEmpty else { return [] }
+
+        // Sort first (small N, rawValue-based stable ordering), then dedup
+        // in place with a single pass — no Set allocation.
+        let sorted = tags.sorted { $0.rawValue < $1.rawValue }
+        var deduped: [ReasonTag] = []
+        deduped.reserveCapacity(sorted.count)
+        for tag in sorted where deduped.last != tag {
+            deduped.append(tag)
+        }
+
+        guard commercialIntent == .organic else {
+            return deduped
+        }
+
+        // Organic content should not carry tags that assert commerce.
+        let forbidden: Set<ReasonTag> = [
+            .promoCode,
+            .callToAction,
+            .urlMention,
+            .disclosure,
+            .brandMention,
+            .hostReadPitch,
+            .crossPromoLanguage
+        ]
+
+        var filtered: [ReasonTag] = []
+        filtered.reserveCapacity(deduped.count)
+        var droppedCount = 0
+        for tag in deduped {
+            if forbidden.contains(tag) {
+                droppedCount += 1
+            } else {
+                filtered.append(tag)
+            }
+        }
+
+        if droppedCount > 0 {
+            logger.debug(
+                "Dropped \(droppedCount, privacy: .public) reasonTag(s) inconsistent with organic commercialIntent"
+            )
+        }
+        return filtered
     }
 
     private func coarseResponses(
