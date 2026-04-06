@@ -2177,6 +2177,37 @@ actor AnalysisStore {
             try validateAtomOrdinalsJSON(event.atomOrdinals)
             try validateScanCohortJSON(event.scanCohortJSON)
         }
+
+        // R4-Fix2: when an incoming non-success row would be silently
+        // dropped by `insertSemanticScanResult`'s H-1 success-protection
+        // probe, the surrounding transaction must NOT commit the evidence
+        // events — otherwise they attach to a phantom scan that the store
+        // never wrote. Probe the same condition here, before BEGIN
+        // IMMEDIATE, and short-circuit so the evidence never enters the
+        // transaction. Same-rank `.success` collisions still fall through
+        // to the existing REPLACE path.
+        if result.status != .success {
+            let reuseKeyHash = Self.semanticScanReuseKeyHash(
+                analysisAssetId: result.analysisAssetId,
+                windowFirstAtomOrdinal: result.windowFirstAtomOrdinal,
+                windowLastAtomOrdinal: result.windowLastAtomOrdinal,
+                scanPass: result.scanPass,
+                transcriptVersion: result.transcriptVersion,
+                scanCohortJSON: result.scanCohortJSON
+            )
+            let probe = try prepare("SELECT status FROM semantic_scan_results WHERE reuseKeyHash = ? LIMIT 1")
+            defer { sqlite3_finalize(probe) }
+            bind(probe, 1, reuseKeyHash)
+            if sqlite3_step(probe) == SQLITE_ROW,
+               let existingStatus = optionalText(probe, 0),
+               existingStatus == SemanticScanStatus.success.rawValue {
+                // Cached success outranks the incoming non-success row.
+                // The scan write will be a no-op; the evidence write must
+                // be skipped entirely so we don't orphan the rows.
+                return
+            }
+        }
+
         try exec("BEGIN IMMEDIATE")
         do {
             try insertSemanticScanResult(result)

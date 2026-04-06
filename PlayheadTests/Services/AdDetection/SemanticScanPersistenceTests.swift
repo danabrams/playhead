@@ -836,6 +836,94 @@ struct SemanticScanPersistenceTests {
         #expect(evRows.first?.evidenceJSON == #"{"planted":"before batch"}"#)
     }
 
+    // R4-Fix2: recordSemanticScanResult opened BEGIN IMMEDIATE then called
+    // insertSemanticScanResult, which silently short-circuits via the H-1
+    // success-protection probe when a `.success` row already exists at the
+    // same reuseKeyHash. The evidence rows were committed anyway, attaching
+    // to a phantom scan that the store never wrote. Verify the refusal
+    // retry path leaves both the cached success AND the evidence table
+    // unchanged.
+    @Test("R4-Fix2: refusal retry over a cached success commits no orphan evidence")
+    func recordSemanticScanResultSkipsOrphanEvidenceOnSuccessCollision() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        let cohort = try makeScanCohortJSON()
+        let success = SemanticScanResult(
+            id: "cached-success",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 400,
+            windowLastAtomOrdinal: 410,
+            windowStartTime: 4000,
+            windowEndTime: 4100,
+            scanPass: "passB",
+            transcriptQuality: .good,
+            disposition: .containsAd,
+            spansJSON: #"[{"startAtom":401,"endAtom":405}]"#,
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: 128,
+            outputTokenCount: 16,
+            latencyMs: 42,
+            prewarmHit: true,
+            scanCohortJSON: cohort,
+            transcriptVersion: "tx-v1"
+        )
+        try await store.insertSemanticScanResult(success)
+
+        // Same reuseKeyHash, but a refusal status. The H-1 probe in
+        // insertSemanticScanResult silently no-ops; without the R4-Fix2
+        // guard, the surrounding recordSemanticScanResult transaction
+        // still commits the 3 evidence events as orphans.
+        let refusal = SemanticScanResult(
+            id: "later-refusal",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 400,
+            windowLastAtomOrdinal: 410,
+            windowStartTime: 4000,
+            windowEndTime: 4100,
+            scanPass: "passB",
+            transcriptQuality: .good,
+            disposition: .abstain,
+            spansJSON: "[]",
+            status: .refusal,
+            attemptCount: 2,
+            errorContext: #"{"reason":"safety"}"#,
+            inputTokenCount: 100,
+            outputTokenCount: nil,
+            latencyMs: 21,
+            prewarmHit: false,
+            scanCohortJSON: cohort,
+            transcriptVersion: "tx-v1"
+        )
+        let orphanEvents = (0..<3).map { idx in
+            EvidenceEvent(
+                id: "orphan-ev-\(idx)",
+                analysisAssetId: "asset-1",
+                eventType: "fm.spanRefinement",
+                sourceType: .fm,
+                atomOrdinals: "[\(401 + idx)]",
+                evidenceJSON: #"{"shouldNotBePersisted":true}"#,
+                scanCohortJSON: cohort,
+                createdAt: Double(idx + 10)
+            )
+        }
+
+        try await store.recordSemanticScanResult(refusal, evidenceEvents: orphanEvents)
+
+        // The cached success row must be untouched.
+        let scanRows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-1")
+        #expect(scanRows.count == 1, "the cached success must remain the only scan row")
+        #expect(scanRows.first?.id == "cached-success")
+        #expect(scanRows.first?.status == .success)
+        #expect(scanRows.first?.spansJSON == #"[{"startAtom":401,"endAtom":405}]"#)
+
+        // None of the orphan evidence rows must have been committed.
+        let evRows = try await store.fetchEvidenceEvents(analysisAssetId: "asset-1")
+        #expect(evRows.isEmpty, "no evidence may attach to a phantom scan; got \(evRows.count) rows")
+    }
+
     // MARK: - Round-2 review fixes
 
     @Test("H-1: a refusal retry must not overwrite a cached success at the same reuse key")
