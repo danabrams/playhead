@@ -272,6 +272,93 @@ struct BackfillJobRunnerTests {
         }
     }
 
+    // R4-Fix7: The catch arms in the drain loop called
+    // `markBackfillJobFailed` with no surrounding try/catch. If the typed
+    // store guard threw `invalidStateTransition` (e.g. another runner
+    // marked the row `.complete` first), the throw escaped the catch arm,
+    // aborted the for-loop, and stranded the rest of the batch.
+    //
+    // We engineer the race deterministically: the classifier marks the
+    // row `.complete` BEFORE throwing. By the time the catch arm calls
+    // `markBackfillJobFailed`, the C-R3-2 guard sees the row in
+    // `.complete` and throws `invalidStateTransition`. After R4-Fix7 the
+    // wrap absorbs that throw, finishes the admission ticket, and the
+    // runner returns normally instead of propagating the throw out of
+    // `runPendingBackfill`.
+    @Test("R4-Fix7: markBackfillJobFailed throw is absorbed and the runner returns normally")
+    func markFailedThrowIsAbsorbedByCatchArm() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        let inputs = makeInputs()
+        let jobId = "fm-asset-runner-tx-runner-v1-fullEpisodeScan-0"
+
+        // Custom Runtime: respondCoarse marks the row .complete BEFORE
+        // returning a successful screening. Combined with a malformed
+        // scanCohortJSON, the runner's `insertSemanticScanResult` then
+        // throws `invalidScanCohortJSON`, the catch arm fires, and the
+        // catch arm's `markBackfillJobFailed` hits a `.complete` row
+        // and throws `invalidStateTransition`. Without R4-Fix7 the throw
+        // escapes the for-loop and `runPendingBackfill` re-throws.
+        let runtime = FoundationModelClassifier.Runtime(
+            availabilityStatus: { _ in nil },
+            contextSize: { 4_096 },
+            tokenCount: { prompt in
+                max(1, prompt.split(whereSeparator: \.isWhitespace).count)
+            },
+            coarseSchemaTokenCount: { 16 },
+            refinementSchemaTokenCount: { 32 },
+            makeSession: {
+                FoundationModelClassifier.Runtime.Session(
+                    prewarm: { _ in },
+                    respondCoarse: { _ in
+                        // Race: flip the row to `.complete` before
+                        // returning. The runner's subsequent store write
+                        // will fail (malformed cohort) and the catch
+                        // arm's markBackfillJobFailed will then see a
+                        // `.complete` row and throw.
+                        try? await store.markBackfillJobComplete(
+                            jobId: jobId,
+                            progressCursor: nil
+                        )
+                        return CoarseScreeningSchema(disposition: .noAds, support: nil)
+                    },
+                    respondRefinement: { _ in
+                        RefinementWindowSchema(spans: [])
+                    }
+                )
+            }
+        )
+
+        let runner = BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(runtime: runtime),
+            coveragePlanner: CoveragePlanner(),
+            mode: .shadow,
+            capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+            batteryLevelProvider: { 1.0 },
+            // Malformed cohort: insertSemanticScanResult will throw
+            // invalidScanCohortJSON, sending the runner into the catch arm.
+            scanCohortJSON: "not-json"
+        )
+
+        // Must NOT throw — the wrap absorbs the invalidStateTransition
+        // from the racing markBackfillJobFailed call and lets the loop
+        // wind down cleanly.
+        let result = try await runner.runPendingBackfill(for: inputs)
+
+        // The classifier ran for the only planned job.
+        #expect(result.admittedJobIds.contains(jobId))
+
+        // The row reflects the racing classifier write. The fix
+        // tolerates the markBackfillJobFailed throw and does not wedge
+        // the loop.
+        let row = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(row.status == .complete,
+                "row reflects the racing classifier write; runner must not have crashed before returning")
+    }
+
     // R4-Fix4: `memoryWriteEligible` was computed on RefinedAdSpan but never
     // serialized into the persisted EvidencePayload. The H-R3-1 in-memory
     // protection had no production consumer. Persist the flag so a future

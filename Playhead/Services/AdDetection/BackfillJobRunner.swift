@@ -291,21 +291,42 @@ actor BackfillJobRunner {
                 let persistedRetryCount = Self.isPermanent(storeError)
                     ? AdmissionController.maxRetries
                     : job.retryCount + 1
-                try await store.markBackfillJobFailed(
-                    jobId: job.jobId,
-                    reason: String(describing: storeError),
-                    retryCount: persistedRetryCount
-                )
+                // R4-Fix7: wrap the markBackfillJobFailed write so a
+                // racing terminal transition (e.g. another runner just
+                // marked the row `.complete`) cannot escape the catch
+                // arm and abort the for-loop. Log and continue — the
+                // admission ticket is still released below.
+                do {
+                    try await store.markBackfillJobFailed(
+                        jobId: job.jobId,
+                        reason: String(describing: storeError),
+                        retryCount: persistedRetryCount
+                    )
+                } catch {
+                    logger.warning(
+                        "Failed to mark FM job failed (likely racing terminal transition): \(job.jobId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                    )
+                }
                 logger.error("FM backfill job \(job.jobId) failed: \(storeError.localizedDescription) (permanent=\(Self.isPermanent(storeError)))")
             } catch {
                 // C-2: markBackfillJobFailed writes deferReason so operators
                 // can diagnose the failure without scraping logs. The prior
                 // deprecated shim silently dropped the reason on .failed.
-                try await store.markBackfillJobFailed(
-                    jobId: job.jobId,
-                    reason: String(describing: error),
-                    retryCount: job.retryCount + 1
-                )
+                //
+                // R4-Fix7: same wrap as the typed-error arm above. A
+                // racing terminal transition must not abort the drain
+                // loop and strand the rest of the batch.
+                do {
+                    try await store.markBackfillJobFailed(
+                        jobId: job.jobId,
+                        reason: String(describing: error),
+                        retryCount: job.retryCount + 1
+                    )
+                } catch {
+                    logger.warning(
+                        "Failed to mark FM job failed (likely racing terminal transition): \(job.jobId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                    )
+                }
                 logger.error("FM backfill job \(job.jobId) failed: \(error.localizedDescription)")
             }
 
