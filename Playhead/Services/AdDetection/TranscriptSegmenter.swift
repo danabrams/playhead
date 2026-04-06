@@ -279,21 +279,54 @@ enum TranscriptSegmenter {
         return false
     }
 
+    /// Binary search: returns the index of the first window whose
+    /// `startTime > upperBound`. The slice [0, returnedIndex) contains
+    /// every window whose startTime is at most `upperBound`. Requires
+    /// `windows` to be sorted ascending by startTime.
+    private static func upperBoundIndex(
+        windows: [FeatureWindow],
+        upperBound: Double
+    ) -> Int {
+        var lo = 0
+        var hi = windows.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if windows[mid].startTime <= upperBound {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        return lo
+    }
+
     /// Returns the speaker cluster id with the most overlap with `atom`.
     /// Ties are broken by picking the LOWER cluster id, which is more
     /// stable across reclustering: clusters tend to be assigned ids in
     /// order of first appearance, so the lower id is the older,
     /// less-volatile assignment. Returns nil when no overlapping window
     /// has a non-nil cluster id.
+    ///
+    /// Uses binary search to narrow the candidate window range to those
+    /// whose startTime is at most `atom.endTime`; windows starting after
+    /// the atom ends cannot overlap. Requires `featureWindows` sorted
+    /// ascending by startTime (the entry point in `segment()` enforces
+    /// this).
     private static func dominantSpeaker(
         overlapping atom: TranscriptAtom,
         featureWindows: [FeatureWindow]
     ) -> Int? {
         guard !featureWindows.isEmpty else { return nil }
 
+        let upper = upperBoundIndex(windows: featureWindows, upperBound: atom.endTime)
         var durationsBySpeaker: [Int: Double] = [:]
-        for window in featureWindows {
+        for i in 0..<upper {
+            let window = featureWindows[i]
             guard let speakerClusterId = window.speakerClusterId else { continue }
+            // Windows are sorted by startTime; once startTime > atom.endTime
+            // we are guaranteed no overlap, so the binary search above is
+            // sufficient. We still need to check the lower edge per-window
+            // because window.endTime can be < atom.startTime.
             let overlapStart = max(atom.startTime, window.startTime)
             let overlapEnd = min(atom.endTime, window.endTime)
             let overlap = overlapEnd - overlapStart
@@ -326,12 +359,18 @@ enum TranscriptSegmenter {
     ) -> Double? {
         let lo = min(gapStart, gapEnd)
         let hi = max(gapStart, gapEnd)
-        let strongestPause = featureWindows
-            .filter { window in
-                window.startTime <= hi && lo <= window.endTime
+        // Binary-search the upper bound: windows starting after `hi` cannot
+        // overlap. We still scan the prefix linearly because we have no
+        // secondary sort by endTime, but the slice is bounded.
+        let upper = upperBoundIndex(windows: featureWindows, upperBound: hi)
+        var strongestPause: Double?
+        for i in 0..<upper {
+            let window = featureWindows[i]
+            guard window.startTime <= hi && lo <= window.endTime else { continue }
+            if strongestPause == nil || window.pauseProbability > strongestPause! {
+                strongestPause = window.pauseProbability
             }
-            .map(\.pauseProbability)
-            .max()
+        }
 
         guard let strongestPause, strongestPause >= featurePauseProbabilityThreshold else {
             return nil

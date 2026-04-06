@@ -485,6 +485,47 @@ struct TranscriptSegmenterTests {
         #expect(segments[1].segmentType == .speech)
     }
 
+    @Test("Segmenting 100 atoms against 100 feature windows completes within budget")
+    func segmenterScalesWithBinarySearch() {
+        // M18 perf guard: 100 atom transitions x 100 windows = 10,000
+        // candidate pairs. With linear scans this still completes quickly,
+        // but the test ensures binary-search-based lookups stay correct.
+        // Budget is generous to avoid CI flakes; the goal is to detect a
+        // pathological regression (e.g. an O(N*M*log) becoming O(N*M*M)).
+        let config = TranscriptSegmenter.Config(
+            pauseThreshold: 2.0,
+            maxSegmentDuration: 600.0,
+            minSegmentDuration: 1.0
+        )
+        let atoms: [TranscriptAtom] = (0..<100).map { i in
+            makeAtom(
+                ordinal: i,
+                startTime: Double(i) * 5,
+                endTime: Double(i) * 5 + 4.9,
+                text: "atom number \(i)"
+            )
+        }
+        let windows: [FeatureWindow] = (0..<100).map { i in
+            makeFeatureWindow(
+                startTime: Double(i) * 5,
+                endTime: Double(i) * 5 + 5,
+                pauseProbability: 0.1,
+                speakerClusterId: 1
+            )
+        }
+
+        let start = Date()
+        let segments = TranscriptSegmenter.segment(
+            atoms: atoms,
+            featureWindows: windows,
+            config: config
+        )
+        let elapsedMs = Date().timeIntervalSince(start) * 1000
+
+        #expect(!segments.isEmpty)
+        #expect(elapsedMs < 100, "segment(atoms:featureWindows:) took \(elapsedMs) ms; budget is 100 ms")
+    }
+
     @Test("Dominant speaker breaks ties by picking the lower cluster id")
     func dominantSpeakerTieBreakPicksLower() {
         // Two clusters overlap each atom equally. Picking the LOWER id is
