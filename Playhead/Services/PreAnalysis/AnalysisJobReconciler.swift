@@ -137,7 +137,7 @@ actor AnalysisJobReconciler {
         guard !blocked.isEmpty else { return 0 }
 
         let snapshot = await capabilitiesService.currentSnapshot
-        guard snapshot.foundationModelsAvailable else { return 0 }
+        guard snapshot.canUseFoundationModels else { return 0 }
 
         let ids = blocked.map(\.jobId)
         try await store.batchUpdateJobState(jobIds: ids, state: "queued")

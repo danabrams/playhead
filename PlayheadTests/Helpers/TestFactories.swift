@@ -8,14 +8,18 @@ import Foundation
 
 func makeCapabilitySnapshot(
     foundationModelsAvailable: Bool = false,
+    foundationModelsUsable: Bool? = nil,
+    appleIntelligenceEnabled: Bool? = nil,
+    foundationModelsLocaleSupported: Bool? = nil,
     thermalState: ThermalState = .nominal,
     isLowPowerMode: Bool = false,
     isCharging: Bool = false
 ) -> CapabilitySnapshot {
     CapabilitySnapshot(
         foundationModelsAvailable: foundationModelsAvailable,
-        appleIntelligenceEnabled: false,
-        foundationModelsLocaleSupported: false,
+        foundationModelsUsable: foundationModelsUsable ?? foundationModelsAvailable,
+        appleIntelligenceEnabled: appleIntelligenceEnabled ?? foundationModelsAvailable,
+        foundationModelsLocaleSupported: foundationModelsLocaleSupported ?? foundationModelsAvailable,
         thermalState: thermalState,
         isLowPowerMode: isLowPowerMode,
         isCharging: isCharging,

@@ -19,6 +19,44 @@ protocol CapabilitiesProviding: Sendable {
     func capabilityUpdates() async -> AsyncStream<CapabilitySnapshot>
 }
 
+struct FoundationModelsCapabilityState: Sendable, Equatable {
+    let available: Bool
+    let appleIntelligenceEnabled: Bool
+    let localeSupported: Bool
+
+    init(
+        available: Bool,
+        appleIntelligenceEnabled: Bool,
+        localeSupported: Bool
+    ) {
+        self.available = available
+        self.appleIntelligenceEnabled = appleIntelligenceEnabled
+        self.localeSupported = localeSupported
+    }
+
+    #if canImport(FoundationModels)
+    @available(iOS 26.0, *)
+    init(availability: SystemLanguageModel.Availability, localeSupported: Bool) {
+        self.localeSupported = localeSupported
+
+        switch availability {
+        case .available:
+            self.available = true
+            self.appleIntelligenceEnabled = true
+        case .unavailable(.modelNotReady):
+            self.available = false
+            self.appleIntelligenceEnabled = true
+        case .unavailable(.appleIntelligenceNotEnabled), .unavailable(.deviceNotEligible):
+            self.available = false
+            self.appleIntelligenceEnabled = false
+        @unknown default:
+            self.available = false
+            self.appleIntelligenceEnabled = false
+        }
+    }
+    #endif
+}
+
 // MARK: - CapabilitiesService
 
 /// Actor that detects device capabilities and publishes changes.
@@ -31,6 +69,9 @@ actor CapabilitiesService {
     /// The most recent capability snapshot.
     private(set) var currentSnapshot: CapabilitySnapshot
 
+    /// At most one readiness probe may run at a time.
+    private var foundationModelsProbeTask: Task<Void, Never>?
+
     // AsyncStream plumbing
     private var continuations: [UUID: AsyncStream<CapabilitySnapshot>.Continuation] = [:]
 
@@ -39,6 +80,7 @@ actor CapabilitiesService {
 
     init() {
         self.currentSnapshot = Self.captureSnapshot()
+        Task { await self.refreshSnapshot() }
     }
 
     // MARK: - Public API
@@ -52,6 +94,7 @@ actor CapabilitiesService {
         logger.info("""
         Capability snapshot captured: \
         foundationModels=\(snapshot.foundationModelsAvailable), \
+        foundationModelsUsable=\(snapshot.foundationModelsUsable), \
         appleIntelligence=\(snapshot.appleIntelligenceEnabled), \
         localeSupported=\(snapshot.foundationModelsLocaleSupported), \
         thermal=\(snapshot.thermalState.description), \
@@ -64,6 +107,8 @@ actor CapabilitiesService {
         for (_, continuation) in continuations {
             continuation.yield(snapshot)
         }
+
+        scheduleFoundationModelsProbeIfNeeded(for: snapshot)
     }
 
     /// Returns an AsyncStream that emits capability snapshots whenever
@@ -121,6 +166,7 @@ actor CapabilitiesService {
         }
 
         observerTokens = [thermalToken, powerToken, batteryToken]
+        refreshSnapshot()
     }
 
     // MARK: - Snapshot Capture
@@ -129,9 +175,7 @@ actor CapabilitiesService {
     private static func captureSnapshot() -> CapabilitySnapshot {
         let processInfo = ProcessInfo.processInfo
 
-        let foundationModelsAvailable = checkFoundationModelsAvailable()
-        let appleIntelligenceEnabled = checkAppleIntelligenceEnabled()
-        let localeSupported = checkFoundationModelsLocaleSupported()
+        let modelState = checkFoundationModelsState()
         let thermalState = ThermalState(from: processInfo.thermalState)
         let isLowPowerMode = processInfo.isLowPowerModeEnabled
         let backgroundProcessingSupported = checkBackgroundProcessingSupported()
@@ -141,9 +185,10 @@ actor CapabilitiesService {
         let isCharging = batteryState == .charging || batteryState == .full
 
         return CapabilitySnapshot(
-            foundationModelsAvailable: foundationModelsAvailable,
-            appleIntelligenceEnabled: appleIntelligenceEnabled,
-            foundationModelsLocaleSupported: localeSupported,
+            foundationModelsAvailable: modelState.available,
+            foundationModelsUsable: FoundationModelsUsabilityProbe.cachedUsability() ?? false,
+            appleIntelligenceEnabled: modelState.appleIntelligenceEnabled,
+            foundationModelsLocaleSupported: modelState.localeSupported,
             thermalState: thermalState,
             isLowPowerMode: isLowPowerMode,
             isCharging: isCharging,
@@ -155,34 +200,26 @@ actor CapabilitiesService {
 
     // MARK: - Capability Checks
 
-    private static func checkFoundationModelsAvailable() -> Bool {
+    private static func checkFoundationModelsState() -> FoundationModelsCapabilityState {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *) {
-            return SystemLanguageModel.default.isAvailable
+            let model = SystemLanguageModel.default
+            return FoundationModelsCapabilityState(
+                availability: model.availability,
+                localeSupported: model.supportsLocale()
+            )
         }
-        return false
+        return FoundationModelsCapabilityState(
+            available: false,
+            appleIntelligenceEnabled: false,
+            localeSupported: false
+        )
         #else
-        return false
-        #endif
-    }
-
-    private static func checkAppleIntelligenceEnabled() -> Bool {
-        // Apple Intelligence availability is gated by the same check as
-        // Foundation Models — if the model is available, AI is enabled.
-        // There is no separate public API to query the AI toggle directly.
-        return checkFoundationModelsAvailable()
-    }
-
-    private static func checkFoundationModelsLocaleSupported() -> Bool {
-        #if canImport(FoundationModels)
-        if #available(iOS 26.0, *) {
-            // SystemLanguageModel.isAvailable already factors in locale.
-            // If the model reports available, the current locale is supported.
-            return SystemLanguageModel.default.isAvailable
-        }
-        return false
-        #else
-        return false
+        return FoundationModelsCapabilityState(
+            available: false,
+            appleIntelligenceEnabled: false,
+            localeSupported: false
+        )
         #endif
     }
 
@@ -215,6 +252,32 @@ actor CapabilitiesService {
         continuations.removeValue(forKey: id)
     }
 
+    private func scheduleFoundationModelsProbeIfNeeded(for snapshot: CapabilitySnapshot) {
+        guard snapshot.foundationModelsAvailable,
+              snapshot.appleIntelligenceEnabled,
+              snapshot.foundationModelsLocaleSupported,
+              !snapshot.foundationModelsUsable,
+              FoundationModelsUsabilityProbe.cachedUsability() == nil,
+              foundationModelsProbeTask == nil else {
+            return
+        }
+
+        foundationModelsProbeTask = Task { [weak self] in
+            #if canImport(FoundationModels)
+            if #available(iOS 26.0, *) {
+                _ = await FoundationModelsUsabilityProbe.probeIfNeeded(logger: self?.logger ?? Logger(subsystem: "com.playhead", category: "Capabilities"))
+            }
+            #endif
+
+            guard let self else { return }
+            await self.finishFoundationModelsProbe()
+        }
+    }
+
+    private func finishFoundationModelsProbe() {
+        foundationModelsProbeTask = nil
+        refreshSnapshot()
+    }
 
     /// Remove all registered notification observers and clear the token list.
     private func removeObservers() {

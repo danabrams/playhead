@@ -1515,10 +1515,11 @@ struct CapabilitiesServiceTests {
         #expect(lowPower.shouldReduceHotPath == true)
     }
 
-    @Test("canUseFoundationModels requires all three flags")
+    @Test("canUseFoundationModels requires availability, settings, locale, and runtime usability")
     func foundationModelsGate() {
         let partial = CapabilitySnapshot(
             foundationModelsAvailable: true,
+            foundationModelsUsable: false,
             appleIntelligenceEnabled: false,
             foundationModelsLocaleSupported: true,
             thermalState: .nominal,
@@ -1529,10 +1530,11 @@ struct CapabilitiesServiceTests {
             capturedAt: .now
         )
         #expect(partial.canUseFoundationModels == false,
-                "All three flags must be true")
+                "Availability, settings, locale, and runtime usability must all be true")
 
         let full = CapabilitySnapshot(
             foundationModelsAvailable: true,
+            foundationModelsUsable: true,
             appleIntelligenceEnabled: true,
             foundationModelsLocaleSupported: true,
             thermalState: .nominal,

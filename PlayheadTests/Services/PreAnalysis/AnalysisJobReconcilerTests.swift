@@ -93,6 +93,37 @@ struct AnalysisJobReconcilerTests {
         #expect(still?.state == "blocked:missingFile")
     }
 
+    // MARK: - Step 3: Unblock modelUnavailable
+
+    @Test("Does not unblock blocked:modelUnavailable when runtime probe says unusable")
+    func testModelUnavailableStaysBlockedWithoutUsabilityProbe() async throws {
+        let store = try await makeTestStore()
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "blocked-model-still",
+            state: "blocked:modelUnavailable"
+        ))
+
+        let capabilities = StubCapabilitiesProvider(snapshot: CapabilitySnapshot(
+            foundationModelsAvailable: true,
+            foundationModelsUsable: false,
+            appleIntelligenceEnabled: true,
+            foundationModelsLocaleSupported: true,
+            thermalState: .nominal,
+            isLowPowerMode: false,
+            isCharging: false,
+            backgroundProcessingSupported: true,
+            availableDiskSpaceBytes: 1_000_000,
+            capturedAt: .now
+        ))
+
+        let reconciler = makeReconciler(store: store, capabilities: capabilities)
+        let report = try await reconciler.reconcile()
+
+        #expect(report.modelsUnblocked == 0)
+        let stillBlocked = try await store.fetchJob(byId: "blocked-model-still")
+        #expect(stillBlocked?.state == "blocked:modelUnavailable")
+    }
+
     // MARK: - Step 4: Supersede stale versions
 
     @Test("Supersedes jobs with stale analysis version")

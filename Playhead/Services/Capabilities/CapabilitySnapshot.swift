@@ -9,6 +9,11 @@ struct CapabilitySnapshot: Codable, Sendable, Equatable {
     /// Whether the Foundation Models framework is available on this device.
     let foundationModelsAvailable: Bool
 
+    /// Whether a real schema-bound Foundation Models probe succeeded on this
+    /// OS boot. `isAvailable` alone is not sufficient on simulator and
+    /// partially provisioned devices.
+    let foundationModelsUsable: Bool
+
     /// Whether Apple Intelligence is enabled in system settings.
     let appleIntelligenceEnabled: Bool
 
@@ -45,7 +50,10 @@ struct CapabilitySnapshot: Codable, Sendable, Equatable {
 
     /// Whether Foundation Models features (banner enrichment) are usable.
     var canUseFoundationModels: Bool {
-        foundationModelsAvailable && appleIntelligenceEnabled && foundationModelsLocaleSupported
+        foundationModelsAvailable &&
+        foundationModelsUsable &&
+        appleIntelligenceEnabled &&
+        foundationModelsLocaleSupported
     }
 
     /// Whether deferred (T1+) analysis work can run: charging and not thermally throttled.
@@ -57,6 +65,7 @@ struct CapabilitySnapshot: Codable, Sendable, Equatable {
 
     init(
         foundationModelsAvailable: Bool,
+        foundationModelsUsable: Bool = false,
         appleIntelligenceEnabled: Bool,
         foundationModelsLocaleSupported: Bool,
         thermalState: ThermalState,
@@ -67,6 +76,7 @@ struct CapabilitySnapshot: Codable, Sendable, Equatable {
         capturedAt: Date
     ) {
         self.foundationModelsAvailable = foundationModelsAvailable
+        self.foundationModelsUsable = foundationModelsUsable
         self.appleIntelligenceEnabled = appleIntelligenceEnabled
         self.foundationModelsLocaleSupported = foundationModelsLocaleSupported
         self.thermalState = thermalState
@@ -82,6 +92,7 @@ struct CapabilitySnapshot: Codable, Sendable, Equatable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         foundationModelsAvailable = try container.decode(Bool.self, forKey: .foundationModelsAvailable)
+        foundationModelsUsable = try container.decodeIfPresent(Bool.self, forKey: .foundationModelsUsable) ?? false
         appleIntelligenceEnabled = try container.decode(Bool.self, forKey: .appleIntelligenceEnabled)
         foundationModelsLocaleSupported = try container.decode(Bool.self, forKey: .foundationModelsLocaleSupported)
         thermalState = try container.decode(ThermalState.self, forKey: .thermalState)

@@ -73,11 +73,17 @@ struct FoundationModelClassifier: Sendable {
         }
 
         let model = SystemLanguageModel.default
-        guard model.isAvailable else {
-            return FMCoarseScanOutput(intent: .unavailable, confidence: 0, reason: "SystemLanguageModel not available", latencyMillis: 0)
+        if let availabilityStatus = SemanticScanStatus.from(availability: model.availability) {
+            return FMCoarseScanOutput(intent: .unavailable, confidence: 0, reason: availabilityStatus.rawValue, latencyMillis: 0)
+        }
+        guard model.supportsLocale() else {
+            return FMCoarseScanOutput(intent: .unavailable, confidence: 0, reason: SemanticScanStatus.unsupportedLocale.rawValue, latencyMillis: 0)
+        }
+        guard await FoundationModelsUsabilityProbe.probeIfNeeded(logger: logger) else {
+            return FMCoarseScanOutput(intent: .unavailable, confidence: 0, reason: "foundationModelsProbeFailed", latencyMillis: 0)
         }
 
-        let session = LanguageModelSession()
+        let session = LanguageModelSession(model: model)
         let prompt = Self.buildPrompt(segmentText: segmentText)
 
         let response: CoarseScanResult

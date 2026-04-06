@@ -55,12 +55,22 @@ struct FoundationModelExtractor: MetadataExtractor {
         guard #available(iOS 26.0, *) else { return nil }
 
         let model = SystemLanguageModel.default
-        guard model.isAvailable else {
-            logger.info("Foundation model not available, skipping extraction")
+        if let availabilityStatus = SemanticScanStatus.from(availability: model.availability) {
+            logger.info("Foundation model unavailable (\(availabilityStatus.rawValue, privacy: .public)), skipping extraction")
             return nil
         }
 
-        let session = LanguageModelSession()
+        guard model.supportsLocale() else {
+            logger.info("Foundation model locale unsupported, skipping extraction")
+            return nil
+        }
+
+        guard await FoundationModelsUsabilityProbe.probeIfNeeded(logger: logger) else {
+            logger.info("Foundation model readiness probe failed, skipping extraction")
+            return nil
+        }
+
+        let session = LanguageModelSession(model: model)
 
         let prompt = Self.buildPrompt(
             evidenceText: evidenceText,

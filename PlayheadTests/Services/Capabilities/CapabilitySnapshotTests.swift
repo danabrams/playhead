@@ -7,6 +7,10 @@ import UIKit
 
 @testable import Playhead
 
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
+
 @Suite("CapabilitySnapshot")
 struct CapabilitySnapshotTests {
 
@@ -16,6 +20,7 @@ struct CapabilitySnapshotTests {
     func testIsChargingFieldPresent() {
         let snapshot = CapabilitySnapshot(
             foundationModelsAvailable: false,
+            foundationModelsUsable: false,
             appleIntelligenceEnabled: false,
             foundationModelsLocaleSupported: false,
             thermalState: .nominal,
@@ -36,6 +41,7 @@ struct CapabilitySnapshotTests {
         let json = """
         {
             "foundationModelsAvailable": true,
+            "foundationModelsUsable": true,
             "appleIntelligenceEnabled": false,
             "foundationModelsLocaleSupported": true,
             "thermalState": 0,
@@ -55,7 +61,36 @@ struct CapabilitySnapshotTests {
 
         #expect(snapshot.isCharging == false,
                 "Missing isCharging should default to false")
+        #expect(snapshot.foundationModelsUsable == true)
         #expect(snapshot.foundationModelsAvailable == true)
+    }
+
+    @Test("Decoding JSON without foundationModelsUsable defaults to false")
+    func testBackwardCompatDecodingFoundationModelsUsable() throws {
+        let json = """
+        {
+            "foundationModelsAvailable": true,
+            "appleIntelligenceEnabled": true,
+            "foundationModelsLocaleSupported": true,
+            "thermalState": 0,
+            "isLowPowerMode": false,
+            "isCharging": true,
+            "backgroundProcessingSupported": true,
+            "availableDiskSpaceBytes": 500000000,
+            "capturedAt": "2023-11-14T22:13:20Z"
+        }
+        """
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let snapshot = try decoder.decode(
+            CapabilitySnapshot.self,
+            from: Data(json.utf8)
+        )
+
+        #expect(snapshot.foundationModelsUsable == false)
+        #expect(snapshot.canUseFoundationModels == false,
+                "Missing runtime usability probe result must default to false")
     }
 
     // MARK: - canRunDeferredWork
@@ -64,6 +99,7 @@ struct CapabilitySnapshotTests {
     func testCanRunDeferredWorkChargingNominal() {
         let snapshot = CapabilitySnapshot(
             foundationModelsAvailable: false,
+            foundationModelsUsable: false,
             appleIntelligenceEnabled: false,
             foundationModelsLocaleSupported: false,
             thermalState: .nominal,
@@ -80,6 +116,7 @@ struct CapabilitySnapshotTests {
     func testCanRunDeferredWorkChargingSerious() {
         let snapshot = CapabilitySnapshot(
             foundationModelsAvailable: false,
+            foundationModelsUsable: false,
             appleIntelligenceEnabled: false,
             foundationModelsLocaleSupported: false,
             thermalState: .serious,
@@ -97,6 +134,7 @@ struct CapabilitySnapshotTests {
     func testCanRunDeferredWorkNotCharging() {
         let snapshot = CapabilitySnapshot(
             foundationModelsAvailable: false,
+            foundationModelsUsable: false,
             appleIntelligenceEnabled: false,
             foundationModelsLocaleSupported: false,
             thermalState: .nominal,
@@ -124,6 +162,7 @@ struct CapabilitySnapshotTests {
         for (state, expected) in states {
             let snapshot = CapabilitySnapshot(
                 foundationModelsAvailable: false,
+                foundationModelsUsable: false,
                 appleIntelligenceEnabled: false,
                 foundationModelsLocaleSupported: false,
                 thermalState: state,
@@ -137,6 +176,87 @@ struct CapabilitySnapshotTests {
                     "thermalState \(state) should\(expected ? "" : " not") throttle")
         }
     }
+
+    @Test("canUseFoundationModels requires successful runtime probe")
+    func testCanUseFoundationModelsRequiresUsableProbe() {
+        let unavailableProbe = CapabilitySnapshot(
+            foundationModelsAvailable: true,
+            foundationModelsUsable: false,
+            appleIntelligenceEnabled: true,
+            foundationModelsLocaleSupported: true,
+            thermalState: .nominal,
+            isLowPowerMode: false,
+            isCharging: true,
+            backgroundProcessingSupported: true,
+            availableDiskSpaceBytes: 1_000_000,
+            capturedAt: .now
+        )
+        #expect(unavailableProbe.canUseFoundationModels == false,
+                "Availability alone is insufficient until the first-call probe succeeds")
+
+        let usableProbe = CapabilitySnapshot(
+            foundationModelsAvailable: true,
+            foundationModelsUsable: true,
+            appleIntelligenceEnabled: true,
+            foundationModelsLocaleSupported: true,
+            thermalState: .nominal,
+            isLowPowerMode: false,
+            isCharging: true,
+            backgroundProcessingSupported: true,
+            availableDiskSpaceBytes: 1_000_000,
+            capturedAt: .now
+        )
+        #expect(usableProbe.canUseFoundationModels == true)
+    }
+
+    @Test("Foundation Models probe cache invalidates on OS build or boot change")
+    func testFoundationModelsProbeCacheMatching() {
+        let cache = FoundationModelsUsabilityProbeCache(
+            osBuild: "Version 26.4 (Build 23F79)",
+            bootEpochSeconds: 12345,
+            usable: true
+        )
+
+        #expect(cache.matches(osBuild: "Version 26.4 (Build 23F79)", bootEpochSeconds: 12345))
+        #expect(!cache.matches(osBuild: "Version 26.5 (Build 23F99)", bootEpochSeconds: 12345))
+        #expect(!cache.matches(osBuild: "Version 26.4 (Build 23F79)", bootEpochSeconds: 12346))
+    }
+
+    #if canImport(FoundationModels)
+    @available(iOS 26.0, *)
+    @Test("Foundation Models capability state distinguishes disabled AI from model-not-ready")
+    func testFoundationModelsCapabilityStateMapping() {
+        let available = FoundationModelsCapabilityState(
+            availability: .available,
+            localeSupported: true
+        )
+        #expect(available.available == true)
+        #expect(available.appleIntelligenceEnabled == true)
+        #expect(available.localeSupported == true)
+
+        let modelNotReady = FoundationModelsCapabilityState(
+            availability: .unavailable(.modelNotReady),
+            localeSupported: true
+        )
+        #expect(modelNotReady.available == false)
+        #expect(modelNotReady.appleIntelligenceEnabled == true)
+
+        let aiDisabled = FoundationModelsCapabilityState(
+            availability: .unavailable(.appleIntelligenceNotEnabled),
+            localeSupported: true
+        )
+        #expect(aiDisabled.available == false)
+        #expect(aiDisabled.appleIntelligenceEnabled == false)
+
+        let deviceNotEligible = FoundationModelsCapabilityState(
+            availability: .unavailable(.deviceNotEligible),
+            localeSupported: false
+        )
+        #expect(deviceNotEligible.available == false)
+        #expect(deviceNotEligible.appleIntelligenceEnabled == false)
+        #expect(deviceNotEligible.localeSupported == false)
+    }
+    #endif
 
     // MARK: - Battery Notification Refresh
 
