@@ -360,6 +360,126 @@ struct BackfillJobStoreTests {
         #expect(fetched.retryCount == 2)
     }
 
+    // MARK: - C-1: migratedPaths cache must not skip migration when the file is gone
+
+    @Test("C-1: reopening after the db file is deleted re-runs migration (stale cache bug)")
+    func migratedPathsCacheInvalidatedWhenFileDisappears() async throws {
+        let dir = try makeTempDir(prefix: "StaleMigrateCache")
+
+        // First open: primes the static migratedPaths cache for this path.
+        do {
+            let first = try await AnalysisStore.open(directory: dir)
+            try await insertParentAsset(first, id: "pre-delete")
+            _ = first
+        }
+
+        // Nuke the directory so the sqlite file no longer exists, but the
+        // static cache still remembers the path. Recreate the directory so
+        // the second open() succeeds at the FS layer.
+        try FileManager.default.removeItem(at: dir)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        // Second open: previously short-circuited on the stale cache entry,
+        // returning a store with no tables. The insert below would fail with
+        // "no such table: analysis_assets".
+        let second = try await AnalysisStore.open(directory: dir)
+        try await insertParentAsset(second, id: "post-recreate")
+
+        let fetched = try await second.fetchBackfillJob(byId: "nonexistent")
+        #expect(fetched == nil) // schema is present; query returns nothing without throwing
+    }
+
+    // MARK: - C-2: terminal rows must not be silently resurrected
+
+    @Test("C-2: markBackfillJobRunning throws on a complete row")
+    func markBackfillJobRunning_throwsOnCompleteRow() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(jobId: "terminal-complete")
+        try await store.insertBackfillJob(job)
+        try await store.markBackfillJobComplete(
+            jobId: job.jobId,
+            progressCursor: BackfillProgressCursor(processedUnitCount: 1)
+        )
+
+        await #expect(throws: AnalysisStoreError.self) {
+            try await store.markBackfillJobRunning(jobId: job.jobId)
+        }
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .complete, "row must not be resurrected to running")
+    }
+
+    @Test("C-2: markBackfillJobRunning throws on a failed row")
+    func markBackfillJobRunning_throwsOnFailedRow() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(jobId: "terminal-failed")
+        try await store.insertBackfillJob(job)
+        try await store.markBackfillJobFailed(
+            jobId: job.jobId,
+            reason: "boom",
+            retryCount: 1
+        )
+
+        await #expect(throws: AnalysisStoreError.self) {
+            try await store.markBackfillJobRunning(jobId: job.jobId)
+        }
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .failed, "row must not be resurrected to running")
+    }
+
+    @Test("C-2: markBackfillJobRunning succeeds on a deferred row")
+    func markBackfillJobRunning_succeedsOnDeferredRow() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(jobId: "from-deferred")
+        try await store.insertBackfillJob(job)
+        try await store.markBackfillJobDeferred(jobId: job.jobId, reason: "thermal")
+
+        try await store.markBackfillJobRunning(jobId: job.jobId)
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .running)
+        #expect(fetched.deferReason == "thermal")
+    }
+
+    @Test("C-2: markBackfillJobRunning throws on a nonexistent row")
+    func markBackfillJobRunning_throwsOnMissingRow() async throws {
+        let store = try await makeTestStore()
+        await #expect(throws: AnalysisStoreError.self) {
+            try await store.markBackfillJobRunning(jobId: "nope")
+        }
+    }
+
+    // MARK: - M-4: markBackfillJobFailed overwrites deferReason (documented, pinned)
+
+    @Test("M-4: markBackfillJobFailed overwrites any prior deferReason by design")
+    func markBackfillJobFailed_overwritesDeferReason() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(
+            jobId: "failed-overwrites-defer",
+            phase: .scanLikelyAdSlots,
+            coveragePolicy: .targetedWithAudit
+        )
+        try await store.insertBackfillJob(job)
+        try await store.markBackfillJobDeferred(jobId: job.jobId, reason: "thermal")
+
+        try await store.markBackfillJobFailed(
+            jobId: job.jobId,
+            reason: "classifier threw",
+            retryCount: 3
+        )
+
+        let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(fetched.status == .failed)
+        #expect(fetched.deferReason == "classifier threw",
+                "failure reason replaces the audit-trail defer reason; this behavior is intentional and must be pinned")
+        #expect(fetched.retryCount == 3)
+    }
+
     @Test("WAL durability: insertBackfillJob survives a store reopen")
     func testInsertBackfillJobIsDurable() async throws {
         let dir = try makeTempDir(prefix: "WALDurability")

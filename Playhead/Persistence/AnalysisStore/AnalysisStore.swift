@@ -160,6 +160,16 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
     case invalidRow(column: Int)
     case invalidEvidenceEvent(String)
     case invalidScanCohortJSON(String)
+    /// C-2: raised when a backfill-job state transition is attempted against
+    /// a row whose current status does not permit it (e.g. transitioning a
+    /// `.complete` or `.failed` row back into `.running`).
+    case invalidStateTransition(jobId: String, toStatus: String)
+    /// H-2: raised when `insertEvidenceEvent` encounters a PRIMARY KEY
+    /// collision where the existing row's body (evidenceJSON/createdAt)
+    /// differs from the incoming row. The M-4 INSERT OR IGNORE path was
+    /// silently preserving the stored body; callers that truly collide on
+    /// id but with different content now get a loud failure.
+    case evidenceEventBodyMismatch(id: String)
 
     var description: String {
         switch self {
@@ -172,6 +182,10 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
         case .invalidRow(let col): "Unexpected NULL in non-null column \(col)"
         case .invalidEvidenceEvent(let msg): "Invalid evidence event: \(msg)"
         case .invalidScanCohortJSON(let msg): "Invalid scanCohortJSON: \(msg)"
+        case .invalidStateTransition(let id, let to):
+            "Invalid backfill job state transition for \(id) -> \(to)"
+        case .evidenceEventBodyMismatch(let id):
+            "Evidence event id '\(id)' already persisted with a different body"
         }
     }
 }
@@ -245,11 +259,38 @@ actor AnalysisStore {
         // foreign_keys=OFF, the default journal mode, and no busy_timeout.
         try configurePragmas()
 
+        // C-1: hold the migration lock for the entire body, NOT just the
+        // cache check. Two stores opening the same path concurrently used
+        // to race: the loser skipped migration on a partially-built DB.
+        //
+        // C-1 (part 2): validate that the sqlite file on disk still exists
+        // before trusting the cache. If the file was deleted (test teardown,
+        // user clearing Library/Caches, etc.), drop the stale cache entry
+        // and re-run migration against the fresh file. Previously the
+        // cache short-circuited and returned a store whose tables did not
+        // exist, blowing up on the first query.
+        //
+        // C-1 (part 3): mark `migratedPaths` only AFTER a successful COMMIT.
+        // On any rollback path the path stays out of the cache so a retry
+        // re-runs migration rather than silently accepting a half-built DB.
         let path = databaseURL.path
-        let alreadyDone = Self.migratedLock.withLock {
-            !Self.migratedPaths.insert(path).inserted
+        Self.migratedLock.lock()
+        defer { Self.migratedLock.unlock() }
+
+        // The sqlite file may have been deleted out from under the static
+        // cache since the last open on this path (test cleanup, user
+        // clearing Library/Caches, etc.). `sqlite3_open_v2` with
+        // `SQLITE_OPEN_CREATE` will have just recreated it as an empty
+        // database, so we can't trust the filesystem presence check alone.
+        // Instead, probe for the `_meta` table that `createTables()` always
+        // builds: its absence means this connection is looking at a fresh
+        // DB that still needs migration, regardless of the cache.
+        if Self.migratedPaths.contains(path) {
+            if try metaTableExists() {
+                return
+            }
+            Self.migratedPaths.remove(path)
         }
-        guard !alreadyDone else { return }
 
         // H-5: wrap the whole migrate body in BEGIN IMMEDIATE … COMMIT so
         // a crash mid-migration cannot leave DDL applied without the
@@ -266,6 +307,28 @@ actor AnalysisStore {
             try? exec("ROLLBACK")
             throw error
         }
+
+        // Only mark as migrated after a successful COMMIT.
+        Self.migratedPaths.insert(path)
+    }
+
+    /// H-3: test-only helper that clears the process-global `migratedPaths`
+    /// cache. Invoke from test setup when constructing temp-dir stores to
+    /// prevent long test runs from accumulating stale entries. Not for
+    /// production use.
+    static func resetMigratedPathsForTesting() {
+        migratedLock.withLock {
+            migratedPaths.removeAll()
+        }
+    }
+
+    /// Probes `sqlite_master` for the `_meta` table. Used by `migrate()` to
+    /// detect a stale `migratedPaths` cache entry pointing at a file that
+    /// has since been deleted and recreated empty.
+    private func metaTableExists() throws -> Bool {
+        let stmt = try prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_meta'")
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW
     }
 
     private func migrateTranscriptChunksPhase1() throws {
@@ -1738,16 +1801,30 @@ actor AnalysisStore {
     /// `deferReason` on a running-after-defer transition keeps the audit
     /// trail intact: the row reflects that an earlier defer happened even
     /// as the next runner attempt starts executing.
+    ///
+    /// Round-2 fix: the unconditional UPDATE silently resurrected terminal
+    /// rows (`.complete` / `.failed`) into `.running`, defeating the whole
+    /// point of the H5 split. The status guard limits the transition to
+    /// rows in `.queued` or `.deferred`; any other state (including a
+    /// missing row) throws `AnalysisStoreError.invalidStateTransition` so
+    /// callers learn about the programmer/race error instead of silently
+    /// re-running a job that already finished.
     func markBackfillJobRunning(jobId: String) throws {
         let sql = """
             UPDATE backfill_jobs
             SET status = 'running'
-            WHERE jobId = ?
+            WHERE jobId = ? AND status IN ('queued', 'deferred')
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, jobId)
         try step(stmt, expecting: SQLITE_DONE)
+        if sqlite3_changes(db) == 0 {
+            throw AnalysisStoreError.invalidStateTransition(
+                jobId: jobId,
+                toStatus: "running"
+            )
+        }
     }
 
     /// C-2: terminal success transition. Writes the final `progressCursor`
