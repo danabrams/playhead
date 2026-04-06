@@ -46,7 +46,22 @@ struct FeatureExtractionConfig: Sendable {
         sampleRate: 16_000,
         fftSize: 1024,
         pauseRmsThreshold: 0.03,
-        featureVersion: 1
+        // featureVersion history:
+        //   v1: initial release. pauseRmsThreshold 0.005, linear RMS curve —
+        //       produced a ~0.002 mean pauseProbability on real podcast audio
+        //       (effectively always "not a pause").
+        //   v2: recalibrated threshold to 0.03 and switched to a smooth
+        //       monotonic log-RMS curve. Observed ~0.020 mean on the Conan
+        //       verification episode — still modest, but non-degenerate.
+        //
+        // TODO(phase-4): neither AnalysisStore nor AcousticBreakDetector
+        // currently filters on featureVersion — bumping this constant alone
+        // will NOT invalidate stale rows. Phase 4 consumers must either
+        // (a) query by featureVersion and re-extract stale rows, or
+        // (b) filter out v1 rows when reading feature_windows. On dev
+        // devices with pre-bump data this means mixed-vintage pause
+        // probabilities until re-extraction is wired up.
+        featureVersion: 2
     )
 }
 
@@ -319,6 +334,14 @@ actor FeatureExtractionService {
     ///   rms ≥ threshold*4   → 0.0 (definite speech/music)
     /// Linear interpolation in log-RMS space keeps the curve well-behaved
     /// across the wide dynamic range of real podcast audio.
+    ///
+    /// Observed behaviour on the Conan verification episode: **~0.020 mean**
+    /// pauseProbability across the full transcript. An earlier design target
+    /// of 0.05-0.15 was aspirational and is not achieved on real podcast
+    /// audio with this curve — most windows contain speech, and the log-RMS
+    /// curve correctly reports low pause probabilities for them. Future
+    /// tuning (Phase 3+) may widen the window or add hysteresis if the
+    /// downstream break detector needs higher recall on inter-ad gaps.
     private func computePauseProbability(rms: Float) -> Float {
         guard rms > 0 else { return 1.0 }
         let threshold = config.pauseRmsThreshold

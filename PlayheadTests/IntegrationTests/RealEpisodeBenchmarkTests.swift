@@ -304,12 +304,17 @@ struct RealEpisodeBenchmarkTests {
             print("  [\(ad.advertiser)] ad=\(String(format: "%.0fs", adSpan)) hit=\(String(format: "%.0fs", hitSpan)) coverage=\(Int(coverage * 100))%")
         }
 
-        // Soft assertion by design: span coverage is intentionally low at this
-        // phase. Evidence entries are point-in-time hits, not span detectors —
-        // CVS hits at 0:21 inside a 0:00-0:26 ad gives ~19% coverage at best.
-        // Phase 4+ (boundary refinement) is where this metric will get teeth.
-        // Until then we just assert that the test ran end-to-end on real data.
-        #expect(catalog.entries.count >= 0)
+        // Span coverage itself is intentionally low at this phase — evidence
+        // entries are point-in-time hits, not span detectors (CVS hits at 0:21
+        // inside a 0:00-0:26 ad gives ~19% coverage at best). Phase 4+
+        // (boundary refinement) is where coverage-as-a-percent will get teeth.
+        //
+        // In the meantime, hard-assert the entry count itself: the current
+        // baseline is 6 evidence catalog entries on the Conan fixture. Allow
+        // modest headroom for dedup/scanner tweaks by requiring >= 3 — less
+        // than that means the URL/phone/promo scanners silently regressed.
+        #expect(catalog.entries.count >= 3,
+                "Catalog should produce at least 3 evidence entries on ads with URLs; baseline is 6. Got \(catalog.entries.count).")
     }
 
     @Test("Full AdDetectionService hot path on real transcript")
