@@ -1623,6 +1623,25 @@ struct FoundationModelClassifierTests {
         // preamble expansion (e.g. adding a new instruction line) has to
         // update this file explicitly.
         #expect(expectedTokens == 5)
+
+        // L-R3-A: also verify the production fallback estimator agrees on
+        // the preamble's order of magnitude. Round 3 reviewer caught that
+        // the synthetic per-line tokenizer above misses tokenizer drift —
+        // this assertion exercises the real `fallbackTokenEstimate(for:)`
+        // code path production hits when `runtime.tokenCount` is
+        // unavailable on iOS 26.0–26.3. Bounds are derived from a
+        // conservative BPE byte floor (`utf8.count / 3`) so that any
+        // future preamble growth OR estimator regression fails loudly.
+        let fallbackEstimate = FoundationModelClassifier.fallbackTokenEstimate(for: preamble)
+        let utf8Floor = preamble.utf8.count / 3
+        #expect(
+            fallbackEstimate >= utf8Floor / 2,
+            "fallback estimator should not drift below half the BPE floor for the preamble"
+        )
+        #expect(
+            fallbackEstimate <= utf8Floor * 4,
+            "fallback estimator should not drift above 4x the BPE floor for the preamble"
+        )
     }
 
     // H10: fallback estimator must be >= bytes/3 (BPE floor) for safety.
