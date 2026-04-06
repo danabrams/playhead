@@ -70,22 +70,28 @@ struct FoundationModelClassifierTests {
     func sanitizeReasonTagsDropsInconsistentOrganicTags() {
         let logger = Logger(subsystem: "com.playhead.tests", category: "FoundationModelClassifierTests")
 
-        // Organic with promoCode + CTA + brand + duplicates → all forbidden
-        // tags dropped, result sorted and unique. guestPlug is allowed on
-        // organic (guests can plug their own work without commerce).
+        // Organic with promoCode + CTA + brand + duplicates → commerce-asserting
+        // tags dropped, result sorted and unique. guestPlug AND disclosure are
+        // allowed on organic: guests can plug their own work without commerce,
+        // and a host saying "this isn't a paid promotion, but..." is editorial
+        // content that should still surface the disclosure banner cue.
+        // See project_ad_gradient.md for the rationale.
         let organicTags: [ReasonTag] = [
             .promoCode,
             .callToAction,
             .brandMention,
             .guestPlug,
-            .guestPlug
+            .guestPlug,
+            .disclosure
         ]
         let organicFiltered = FoundationModelClassifier.sanitizeReasonTags(
             organicTags,
             commercialIntent: .organic,
             logger: logger
         )
-        #expect(organicFiltered == [.guestPlug])
+        #expect(organicFiltered == [.disclosure, .guestPlug])
+        #expect(organicFiltered.contains(.disclosure))
+        #expect(organicFiltered.contains(.guestPlug))
         #expect(!organicFiltered.contains(.promoCode))
         #expect(!organicFiltered.contains(.callToAction))
         #expect(!organicFiltered.contains(.brandMention))
@@ -106,6 +112,27 @@ struct FoundationModelClassifierTests {
             logger: logger
         )
         #expect(empty.isEmpty)
+    }
+
+    // Fix #10: .disclosure is allowed on .organic for symmetry with .guestPlug.
+    // A host saying "this isn't a paid promotion, but..." contains an FCC-style
+    // disclosure phrase — stripping the tag loses the banner-display signal
+    // even though the intent is correctly classified as organic. See
+    // project_ad_gradient.md for the gradient rationale.
+    @Test("sanitizeReasonTags allows disclosure on organic")
+    func sanitizeReasonTags_allowsDisclosureOnOrganic() {
+        let logger = Logger(subsystem: "com.playhead.tests", category: "FoundationModelClassifierTests")
+
+        let tags: [ReasonTag] = [.disclosure, .promoCode, .callToAction]
+        let filtered = FoundationModelClassifier.sanitizeReasonTags(
+            tags,
+            commercialIntent: .organic,
+            logger: logger
+        )
+
+        #expect(filtered.contains(.disclosure))
+        #expect(!filtered.contains(.promoCode))
+        #expect(!filtered.contains(.callToAction))
     }
 
     @Test("prompt is minimal and uses L-prefixed quoted line refs with injection preamble")

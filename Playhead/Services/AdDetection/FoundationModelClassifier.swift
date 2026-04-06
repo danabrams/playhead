@@ -1139,21 +1139,28 @@ struct FoundationModelClassifier: Sendable {
 
     /// Dedupes `reasonTags` and drops tags that are semantically inconsistent
     /// with the span's `commercialIntent`. Organic spans cannot carry
-    /// commerce-implying tags (promo codes, CTAs, disclosures, URL callouts,
-    /// brand/host-read pitches, cross-promo language). Paid/owned/affiliate
-    /// spans accept any tag. Unknown intent is treated conservatively the
-    /// same as other commercial variants (no filtering).
+    /// commerce-asserting tags (promo codes, CTAs, URL callouts, brand/host-
+    /// read pitches, cross-promo language). Paid/owned/affiliate spans accept
+    /// any tag. Unknown intent is treated conservatively the same as other
+    /// commercial variants (no filtering).
     ///
-    /// **`.guestPlug` is intentionally allowed on organic spans.** This is
-    /// not an oversight: the project's ad-content gradient (see the project
-    /// memory note `project_ad_gradient.md`) treats borderline content as
-    /// banner-eligible. The `commercialIntent` field drives the auto-skip
-    /// decision, and the `reasonTags` field drives the banner hint shown to
-    /// the user. Stripping `.guestPlug` from organic spans would erase the
-    /// banner cue for guest self-promotion (e.g. "go pre-order my book"),
-    /// which the user has explicitly opted in to seeing. Guests plugging
-    /// their own work without commerce structure stays organic on intent
-    /// but still surfaces in the banner via this tag.
+    /// **`.guestPlug` AND `.disclosure` are intentionally allowed on organic
+    /// spans.** This is not an oversight: the project's ad-content gradient
+    /// (see the project memory note `project_ad_gradient.md`) treats borderline
+    /// content as banner-eligible. The `commercialIntent` field drives the
+    /// auto-skip decision, and the `reasonTags` field drives the banner hint
+    /// shown to the user. Two symmetric carve-outs apply:
+    ///
+    ///   * `.guestPlug` — stripping it from organic spans would erase the
+    ///     banner cue for guest self-promotion (e.g. "go pre-order my book").
+    ///     Guests plugging their own work without commerce structure stays
+    ///     organic on intent but still surfaces in the banner via this tag.
+    ///   * `.disclosure` — a host saying "this isn't a paid promotion, but..."
+    ///     is editorial content that contains an FCC-style disclosure phrase.
+    ///     Stripping the tag loses the banner-display signal even though the
+    ///     intent is correctly classified as organic. Symmetric with
+    ///     `.guestPlug`: both are borderline signals that deserve banner
+    ///     display without flipping classification.
     ///
     /// Produces a sorted, unique array without allocating an intermediate
     /// Set — the tag list is short, so a sort + manual dedup is cheaper than
@@ -1179,11 +1186,12 @@ struct FoundationModelClassifier: Sendable {
         }
 
         // Organic content should not carry tags that assert commerce.
+        // `.guestPlug` and `.disclosure` are intentionally NOT in this set —
+        // see the doc comment above for the ad-gradient rationale.
         let forbidden: Set<ReasonTag> = [
             .promoCode,
             .callToAction,
             .urlMention,
-            .disclosure,
             .brandMention,
             .hostReadPitch,
             .crossPromoLanguage
