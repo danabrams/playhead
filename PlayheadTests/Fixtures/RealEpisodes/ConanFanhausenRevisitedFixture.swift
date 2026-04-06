@@ -484,7 +484,11 @@ enum ConanFanhausenRevisitedFixture {
                     startTime: start,
                     endTime: end,
                     text: parsed.text,
-                    normalizedText: parsed.text.lowercased(),
+                    // Match production exactly: TranscriptEngineService.normalizeText
+                    // lowercases AND strips non-alphanumerics. Calling the real
+                    // function (instead of mirroring) ensures any future change
+                    // to normalization automatically flows through to this fixture.
+                    normalizedText: TranscriptEngineService.normalizeText(parsed.text),
                     pass: "fast",
                     modelVersion: "fixture-v1",
                     transcriptVersion: nil,

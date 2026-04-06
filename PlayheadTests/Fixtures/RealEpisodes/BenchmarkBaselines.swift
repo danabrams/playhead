@@ -89,6 +89,15 @@ enum DetectionBenchmarkHistory {
     /// At this point: Phase 2 (cue harvesters + evidence catalog) is complete,
     /// but no changes to pre-Phase 2 code (LexicalScanner/ClassifierService) yet,
     /// and Phase 3 (FM scanner) hasn't started.
+    ///
+    /// Corrected 2026-04-06 after discovering a normalization mismatch: the
+    /// fixture was producing `chunk.normalizedText` via `lowercased()` only,
+    /// while production strips all non-alphanumerics. The strong-URL patterns
+    /// (cvs.com / siriusxm.com / teamcoco.com) only matched in the fake
+    /// pipeline. The fixture now calls `TranscriptEngineService.normalizeText`
+    /// directly and the LexicalScanner reads raw chunk.text for those
+    /// dot-bearing URL patterns. The numbers below are the first honest
+    /// real-episode baseline.
     static let phase2Baseline = DetectionBenchmark(
         label: "Phase 2 baseline",
         measuredOn: "2026-04-06",
@@ -97,17 +106,17 @@ enum DetectionBenchmarkHistory {
         totalAdSeconds: 77,
         adWindowCount: 0,
         adWindowRecall: 0.0,
-        adSecondCoverage: 0.026,
-        evidenceCatalogEntries: 7,
+        adSecondCoverage: 0.0,
+        evidenceCatalogEntries: 6,
         evidenceCatalogRecall: 0.50,
-        evidenceCatalogPrecision: 0.571,
-        lexicalCandidateCount: 0,
-        lexicalCandidateRecall: 0.0,
-        weightedRecall: 0.48,
+        evidenceCatalogPrecision: 0.667,
+        lexicalCandidateCount: 3,
+        lexicalCandidateRecall: 0.75,
+        weightedRecall: 0.742,
         perAdSpanCoverage: [
-            "cvs-preroll": 0.02,
+            "cvs-preroll": 0.038,
             "kelly-ripa-1": 0.0,
-            "siriusxm-credits": 0.11,
+            "siriusxm-credits": 0.229,
             "kelly-ripa-2": 0.0,
         ]
     )

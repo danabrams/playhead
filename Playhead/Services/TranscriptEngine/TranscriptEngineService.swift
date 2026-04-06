@@ -530,11 +530,21 @@ actor TranscriptEngineService {
 
     /// Normalize text for FTS indexing. Lowercases, strips punctuation,
     /// collapses whitespace.
-    private func normalizeText(_ text: String) -> String {
+    ///
+    /// Exposed as `internal static` so test fixtures (e.g. real-episode
+    /// benchmark fixtures) can produce `chunk.normalizedText` that matches
+    /// production exactly. Any change to this function automatically
+    /// flows through to the test pipeline. Do not call from app code
+    /// outside this service — use the instance method delegating below.
+    static func normalizeText(_ text: String) -> String {
         text.lowercased()
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { !$0.isEmpty }
             .joined(separator: " ")
+    }
+
+    private func normalizeText(_ text: String) -> String {
+        Self.normalizeText(text)
     }
 
     private func removeEventContinuation(id: UUID) {

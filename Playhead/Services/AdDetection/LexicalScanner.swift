@@ -192,32 +192,40 @@ struct LexicalScanner: Sendable {
 
     /// Scan a single chunk. Useful for streaming hot-path processing
     /// where chunks arrive one at a time.
+    ///
+    /// Most pattern categories scan `chunk.normalizedText` because
+    /// normalization (lowercasing, punctuation stripping, whitespace
+    /// collapsing) makes the regexes simpler and more robust. The strong
+    /// URL patterns are an exception: production normalization strips
+    /// the literal `.` from `cvs.com`, so those patterns are run against
+    /// `chunk.text` (the raw ASR output) instead. See
+    /// `TranscriptEngineService.normalizeText` for the canonical
+    /// normalization rules.
     func scanChunk(_ chunk: TranscriptChunk) -> [LexicalHit] {
-        var text = chunk.normalizedText
-        if text.isEmpty {
+        var normalizedText = chunk.normalizedText
+        if normalizedText.isEmpty {
             // Fall back to raw text if normalizedText is not yet populated.
-            text = chunk.text
-            if text.isEmpty {
+            normalizedText = chunk.text
+            if normalizedText.isEmpty {
                 return []
             }
             logger.warning("normalizedText empty for chunk at \(chunk.startTime, format: .fixed(precision: 1))s, falling back to raw text")
         }
 
-        let nsText = text as NSString
-        let fullRange = NSRange(location: 0, length: nsText.length)
-
         var hits: [LexicalHit] = []
 
-        // Scan built-in patterns.
+        // Scan built-in patterns over normalized text.
+        let normalizedNS = normalizedText as NSString
+        let normalizedRange = NSRange(location: 0, length: normalizedNS.length)
         for (category, patterns) in patternGroups {
             let weight = Self.categoryWeight(category)
             for pattern in patterns {
-                let matches = pattern.matches(in: text, range: fullRange)
+                let matches = pattern.matches(in: normalizedText, range: normalizedRange)
                 for match in matches {
-                    let matchedText = nsText.substring(with: match.range)
+                    let matchedText = normalizedNS.substring(with: match.range)
                     let (startTime, endTime) = interpolateTiming(
                         matchRange: match.range,
-                        textLength: nsText.length,
+                        textLength: normalizedNS.length,
                         chunkStart: chunk.startTime,
                         chunkEnd: chunk.endTime
                     )
@@ -232,38 +240,47 @@ struct LexicalScanner: Sendable {
             }
         }
 
-        // Scan strong URL patterns (literal TLDs like `cvs.com`).
-        // These match written-form URLs that the generic urlCTA patterns miss,
-        // and are given a boosted weight so a single hit is enough to promote
-        // to a candidate via the high-weight bypass.
-        for pattern in strongUrlPatterns {
-            let matches = pattern.matches(in: text, range: fullRange)
-            for match in matches {
-                let matchedText = nsText.substring(with: match.range)
-                let (startTime, endTime) = interpolateTiming(
-                    matchRange: match.range,
-                    textLength: nsText.length,
-                    chunkStart: chunk.startTime,
-                    chunkEnd: chunk.endTime
-                )
-                hits.append(LexicalHit(
-                    category: .urlCTA,
-                    matchedText: matchedText,
-                    startTime: startTime,
-                    endTime: endTime,
-                    weight: Self.strongUrlWeight
-                ))
+        // Scan strong URL patterns (literal TLDs like `cvs.com`) over
+        // the RAW chunk text. The production normalizer strips `.`, which
+        // would prevent these patterns from ever matching the dot-bearing
+        // domain tokens they target. Reading the raw text preserves
+        // `cvs.com`, `siriusxm.com`, `teamcoco.com`, etc, and the
+        // resulting hits are emitted with timing interpolated against
+        // the raw text length and a boosted weight so a single hit
+        // promotes to a candidate via the high-weight bypass.
+        let rawText = chunk.text
+        if !rawText.isEmpty {
+            let rawNS = rawText as NSString
+            let rawRange = NSRange(location: 0, length: rawNS.length)
+            for pattern in strongUrlPatterns {
+                let matches = pattern.matches(in: rawText, range: rawRange)
+                for match in matches {
+                    let matchedText = rawNS.substring(with: match.range)
+                    let (startTime, endTime) = interpolateTiming(
+                        matchRange: match.range,
+                        textLength: rawNS.length,
+                        chunkStart: chunk.startTime,
+                        chunkEnd: chunk.endTime
+                    )
+                    hits.append(LexicalHit(
+                        category: .urlCTA,
+                        matchedText: matchedText,
+                        startTime: startTime,
+                        endTime: endTime,
+                        weight: Self.strongUrlWeight
+                    ))
+                }
             }
         }
 
-        // Scan per-show sponsor patterns (boosted weight).
+        // Scan per-show sponsor patterns (boosted weight) over normalized text.
         for pattern in showSponsorPatterns {
-            let matches = pattern.matches(in: text, range: fullRange)
+            let matches = pattern.matches(in: normalizedText, range: normalizedRange)
             for match in matches {
-                let matchedText = nsText.substring(with: match.range)
+                let matchedText = normalizedNS.substring(with: match.range)
                 let (startTime, endTime) = interpolateTiming(
                     matchRange: match.range,
-                    textLength: nsText.length,
+                    textLength: normalizedNS.length,
                     chunkStart: chunk.startTime,
                     chunkEnd: chunk.endTime
                 )

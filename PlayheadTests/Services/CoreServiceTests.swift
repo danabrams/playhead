@@ -205,9 +205,12 @@ private func makeTranscriptChunk(
     startTime: Double = 0,
     endTime: Double = 10,
     text: String = "this episode is brought to you by acme corp",
+    normalizedText: String? = nil,
     pass: String = "fast"
 ) -> TranscriptChunk {
-    TranscriptChunk(
+    let normalized = normalizedText
+        ?? TranscriptEngineService.normalizeText(text)
+    return TranscriptChunk(
         id: id,
         analysisAssetId: assetId,
         segmentFingerprint: "fp-\(id)",
@@ -215,10 +218,7 @@ private func makeTranscriptChunk(
         startTime: startTime,
         endTime: endTime,
         text: text,
-        normalizedText: text.lowercased()
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty }
-            .joined(separator: " "),
+        normalizedText: normalized,
         pass: pass,
         modelVersion: "apple-speech-v1",
         transcriptVersion: nil,
@@ -618,6 +618,29 @@ struct LexicalScannerPatternTests {
         )
         let hits = scanner.scanChunk(chunk)
         #expect(hits.isEmpty, "Pure content should produce zero ad hits")
+    }
+
+    @Test("Strong URL pattern fires on production-normalized text")
+    func strongUrlPatternFiresOnProductionNormalizedInput() {
+        // Build a chunk the way TranscriptEngineService does: lowercase +
+        // strip non-alphanumerics. This is the critical test — if the
+        // LexicalScanner's URL patterns assume dots survive normalization,
+        // this test fails.
+        let rawText = "Schedule yours today at cvs.com or on the CVS Health app."
+        let normalized = TranscriptEngineService.normalizeText(rawText)
+        let chunk = makeTranscriptChunk(
+            text: rawText,
+            normalizedText: normalized
+        )
+        let scanner = LexicalScanner()
+        let candidates = scanner.scan(chunks: [chunk], analysisAssetId: "a")
+
+        #expect(candidates.count == 1,
+                "Strong URL pattern must fire on cvs.com in production-normalized input")
+        if let candidate = candidates.first {
+            #expect(candidate.evidenceText.lowercased().contains("cvs"),
+                    "Candidate should reference cvs as the matched domain")
+        }
     }
 }
 
