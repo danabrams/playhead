@@ -23,7 +23,7 @@ struct BackfillJobStoreTests {
             appBuild: "123"
         )
         let encodedScanCohort = String(
-            decoding: JSONEncoder().encode(scanCohort),
+            decoding: try JSONEncoder().encode(scanCohort),
             as: UTF8.self
         )
         let job = makeBackfillJob(
