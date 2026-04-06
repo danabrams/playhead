@@ -230,9 +230,11 @@ actor BackfillJobRunner {
                 // rows.
                 await admissionController.finish(jobId: job.jobId)
                 do {
+                    // H-R3-1: include the phase so operators can tell which
+                    // pass was interrupted without cross-referencing logs.
                     try await store.markBackfillJobDeferred(
                         jobId: job.jobId,
-                        reason: "cancelled"
+                        reason: "cancelled-during-\(job.phase.rawValue)"
                     )
                 } catch {
                     logger.error("Failed to mark cancelled job deferred: \(error.localizedDescription, privacy: .public)")
