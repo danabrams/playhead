@@ -602,6 +602,66 @@ struct BackfillJobRunnerTests {
         #expect(uniqueKeys == firstKeys, "second run introduced new logical keys")
     }
 
+    @Test("C-R3-2: scan results from different transcript versions coexist under distinct ids")
+    func scanResultsFromDifferentTranscriptVersionsCoexist() async throws {
+        // C-R3-2: the deterministic scan id was `scan-{assetId}-{pass}-{idx}`,
+        // which omitted the transcriptVersion. The `semantic_scan_results`
+        // PK is `id`; UNIQUE is on `reuseKeyHash`, which DOES include the
+        // transcriptVersion. Two runs with different transcript versions
+        // therefore produced distinct reuseKeyHash values but a colliding
+        // PK — the INSERT OR REPLACE then silently nuked the prior run's
+        // row, defeating H-1's success-protection guard (which only probes
+        // by reuseKeyHash).
+        //
+        // Fix: include the transcriptVersion in the id itself. Two runs of
+        // the same asset under different transcriptVersions must produce
+        // two persisted rows, neither overwriting the other.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ]
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        // First run under transcriptVersion "v1".
+        _ = try await runner.runPendingBackfill(
+            for: makeInputs(transcriptVersion: "tx-runner-v1")
+        )
+        let v1Rows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")
+        #expect(!v1Rows.isEmpty, "v1 run must persist at least one scan row")
+
+        // Force the job row back so the second run actually re-runs the
+        // passA pipeline; the job ids don't depend on transcriptVersion.
+        let jobId = "fm-asset-runner-fullEpisodeScan-0"
+        try await store.checkpointBackfillJob(
+            jobId: jobId,
+            progressCursor: nil,
+            status: .queued
+        )
+
+        // Second run under a new transcriptVersion. Same asset, same window
+        // indices — only the transcriptVersion differs.
+        _ = try await runner.runPendingBackfill(
+            for: makeInputs(transcriptVersion: "tx-runner-v2")
+        )
+        let allRows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")
+
+        // Every v1 row must still exist after the v2 run.
+        let idsAfter = Set(allRows.map(\.id))
+        for v1 in v1Rows {
+            #expect(idsAfter.contains(v1.id),
+                    "v1 row \(v1.id) must survive a v2 re-run (C-R3-2 regression)")
+        }
+
+        // Both transcript versions must be represented in the stored rows.
+        let versions = Set(allRows.map(\.transcriptVersion))
+        #expect(versions.contains("tx-runner-v1"), "v1 rows must be present after v2 run")
+        #expect(versions.contains("tx-runner-v2"), "v2 rows must be present after v2 run")
+    }
+
     @Test("HIGH-1: concurrent runBackfill calls with per-call controllers do not mass-defer each other")
     func concurrentRunBackfillsDoNotMassDeferEachOther() async throws {
         // HIGH-1 regression: the round-2 M-B hoist made the runtime factory

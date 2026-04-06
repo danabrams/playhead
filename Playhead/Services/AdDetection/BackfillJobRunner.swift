@@ -373,12 +373,20 @@ actor BackfillJobRunner {
         return SemanticScanResult(
             // H-3: deterministic id. A random UUID suffix regenerated on
             // every run would leave orphan rows when a prior run crashed
-            // after insert but before completion. The `(assetId, pass,
-            // windowIndex)` triple is the logical row key; combined with
-            // the `UNIQUE(reuseKeyHash)` constraint + H-1's "refusal can't
-            // overwrite success" guard this makes re-runs fully idempotent
-            // at the scan-result row level.
-            id: "scan-\(inputs.analysisAssetId)-\(scanPass)-\(windowOutput.windowIndex)",
+            // after insert but before completion. The `(assetId,
+            // transcriptVersion, pass, windowIndex)` quadruple is the
+            // logical row key; combined with the `UNIQUE(reuseKeyHash)`
+            // constraint + H-1's "refusal can't overwrite success" guard
+            // this makes re-runs fully idempotent at the scan-result row
+            // level.
+            //
+            // C-R3-2: transcriptVersion must be in the id itself. It is
+            // already part of `reuseKeyHash`, so two runs with different
+            // transcript versions produce distinct reuse hashes but would
+            // collide on a transcriptVersion-free PK — INSERT OR REPLACE
+            // then deletes the prior run's row regardless of H-1's
+            // success-protection probe (which keys off reuseKeyHash).
+            id: "scan-\(inputs.analysisAssetId)-\(inputs.transcriptVersion)-\(scanPass)-\(windowOutput.windowIndex)",
             analysisAssetId: inputs.analysisAssetId,
             windowFirstAtomOrdinal: firstAtom,
             windowLastAtomOrdinal: lastAtom,
@@ -418,8 +426,10 @@ actor BackfillJobRunner {
             inputs.segments.first(where: { $0.segmentIndex == span.lastLineRef })?.endTime ?? 0
         } ?? 0
         return SemanticScanResult(
-            // H-3: deterministic id (see makeScanResult for the full note).
-            id: "scan-\(inputs.analysisAssetId)-passB-\(windowOutput.windowIndex)",
+            // H-3: deterministic id (see makeScanResult for the full
+            // note). C-R3-2: transcriptVersion must be included so rows
+            // from different transcript versions cannot collide on the PK.
+            id: "scan-\(inputs.analysisAssetId)-\(inputs.transcriptVersion)-passB-\(windowOutput.windowIndex)",
             analysisAssetId: inputs.analysisAssetId,
             windowFirstAtomOrdinal: firstAtom,
             windowLastAtomOrdinal: lastAtom,
