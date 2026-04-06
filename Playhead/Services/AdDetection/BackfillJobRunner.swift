@@ -110,7 +110,12 @@ actor BackfillJobRunner {
 
         var enqueuedJobs: [BackfillJob] = []
         for (offset, phase) in plan.phases.enumerated() {
-            let jobId = "fm-\(inputs.analysisAssetId)-\(phase.rawValue)-\(offset)"
+            // R4-Fix6: include `inputs.transcriptVersion` in the jobId so a
+            // transcript regeneration produces a fresh row instead of
+            // colliding with the prior `.complete` job under the same id
+            // (which the M-5 idempotency check would skip, defeating the
+            // whole point of reprocessing the new transcript).
+            let jobId = "fm-\(inputs.analysisAssetId)-\(inputs.transcriptVersion)-\(phase.rawValue)-\(offset)"
 
             // M5: idempotent re-invocation. Job ids are deterministic, so a
             // second call would otherwise throw `duplicateJobId`. Check first:

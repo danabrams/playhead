@@ -594,7 +594,7 @@ struct BackfillJobRunnerTests {
         // Seed a failed job matching the deterministic jobId format the
         // runner synthesizes for a cold-start fullEpisodeScan plan.
         let exhausted = BackfillJob(
-            jobId: "fm-asset-runner-fullEpisodeScan-0",
+            jobId: "fm-asset-runner-tx-runner-v1-fullEpisodeScan-0",
             analysisAssetId: "asset-runner",
             podcastId: "podcast-runner",
             phase: .fullEpisodeScan,
@@ -641,7 +641,7 @@ struct BackfillJobRunnerTests {
         try await store.insertAsset(makeAsset())
 
         let failedJob = BackfillJob(
-            jobId: "fm-asset-runner-fullEpisodeScan-0",
+            jobId: "fm-asset-runner-tx-runner-v1-fullEpisodeScan-0",
             analysisAssetId: "asset-runner",
             podcastId: "podcast-runner",
             phase: .fullEpisodeScan,
@@ -747,7 +747,7 @@ struct BackfillJobRunnerTests {
         // phase as `.failed` so the M-5 idempotency probe matches by jobId
         // and re-enqueues the existing terminal row.
         let failedJob = BackfillJob(
-            jobId: "fm-asset-runner-scanHarvesterProposals-0",
+            jobId: "fm-asset-runner-tx-runner-v1-scanHarvesterProposals-0",
             analysisAssetId: "asset-runner",
             podcastId: "podcast-runner",
             phase: .scanHarvesterProposals,
@@ -818,6 +818,47 @@ struct BackfillJobRunnerTests {
         }
     }
 
+    // R4-Fix6: jobId did not include `inputs.transcriptVersion`. After a
+    // transcript regeneration the M-5 idempotency check found the prior
+    // `.complete` job under the same id and skipped FM entirely against
+    // the new transcript. Add transcriptVersion to the jobId tuple so a
+    // version bump produces a fresh row and re-invokes the classifier.
+    @Test("R4-Fix6: a transcriptVersion bump produces a new jobId and reprocesses the asset")
+    func transcriptVersionBumpReprocessesAsset() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ]
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        // First run: v1 transcript. Expect FM invoked, job marked complete.
+        _ = try await runner.runPendingBackfill(
+            for: makeInputs(transcriptVersion: "tx-runner-v1")
+        )
+        let coarseAfterV1 = await fmRuntime.coarseCallCount
+        #expect(coarseAfterV1 >= 1, "v1 must invoke the classifier")
+
+        // Second run: v2 transcript. Without R4-Fix6 the M-5 idempotency
+        // probe finds the prior v1 .complete row at the same jobId and
+        // skips FM entirely. With the fix, the v2 jobId is distinct, so a
+        // new row is inserted and FM runs again.
+        _ = try await runner.runPendingBackfill(
+            for: makeInputs(transcriptVersion: "tx-runner-v2")
+        )
+        let coarseAfterV2 = await fmRuntime.coarseCallCount
+        #expect(coarseAfterV2 > coarseAfterV1,
+                "v2 must invoke the classifier again; v1=\(coarseAfterV1) v2=\(coarseAfterV2)")
+
+        // The store must contain a job whose id encodes "tx-runner-v2".
+        let v2Job = try await store.fetchBackfillJob(byId: "fm-asset-runner-tx-runner-v2-fullEpisodeScan-0")
+        #expect(v2Job != nil, "expected a v2-tagged backfill job row")
+        #expect(v2Job?.status == .complete)
+    }
+
     @Test("H-3: re-run with deterministic inputs produces no duplicate scan rows")
     func rerunProducesNoDuplicateScanRows() async throws {
         // Deterministic fake: same asset, same transcript, two runs in
@@ -849,7 +890,7 @@ struct BackfillJobRunnerTests {
         // combined checkpoint API to force the status back to .queued —
         // direct `markBackfillJobDeferred` can no longer demote a terminal
         // row after the C-R3-1 guard fix.
-        let jobId = "fm-asset-runner-fullEpisodeScan-0"
+        let jobId = "fm-asset-runner-tx-runner-v1-fullEpisodeScan-0"
         try await store.checkpointBackfillJob(
             jobId: jobId,
             progressCursor: nil,
@@ -970,7 +1011,7 @@ struct BackfillJobRunnerTests {
 
         // Force the job row back so the second run actually re-runs the
         // passA pipeline; the job ids don't depend on transcriptVersion.
-        let jobId = "fm-asset-runner-fullEpisodeScan-0"
+        let jobId = "fm-asset-runner-tx-runner-v1-fullEpisodeScan-0"
         try await store.checkpointBackfillJob(
             jobId: jobId,
             progressCursor: nil,
