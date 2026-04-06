@@ -1329,24 +1329,43 @@ struct FoundationModelClassifierTests {
         #expect(output.status == .cancelled || output.status == .success)
     }
 
-    // H14: The static preamble (promptPrefix + injection preamble + L<n>>
-    // line-ref instruction + open fence + close fence) contributes a fixed
-    // overhead to every coarse prompt. Lock it to a specific count under a
-    // line-counting tokenizer so any future preamble growth fails this test
-    // loudly and requires bumping each test contextSize that depends on it.
+    // H14 / L-R3-1: The static preamble (promptPrefix + injection preamble
+    // + L<n>> line-ref instruction + open fence + close fence) contributes
+    // a fixed overhead to every coarse prompt. Lock it to a specific count
+    // so any future preamble growth fails this test loudly and requires
+    // bumping each test contextSize that depends on it.
+    //
+    // Earlier rounds of this test merely compared `preambleTokenCount` to
+    // a hardcoded number using the same runtime that counted it — a
+    // tautology. This revision anchors the expected count in two
+    // independent ways:
+    //   1. structural: split the preamble string by newline and count
+    //      lines directly (no runtime involved);
+    //   2. equivalence: assert that `buildPrompt(for: [])` produces the
+    //      exact same string as `coarsePromptPreamble()` — so an empty
+    //      segment list reduces `buildPrompt` to the static preamble
+    //      verbatim. This catches preamble drift even when the tokenizer
+    //      rule changes.
     @Test("preamble token count is bounded and accounted for")
     func preambleTokenCountIsBoundedAndAccountedFor() async throws {
-        // The coarse preamble has exactly five wrapping lines:
-        // promptPrefix, injectionPreamble, lineRefInstruction,
-        // transcriptOpenFence, transcriptCloseFence.
+        // (1) Structural: the preamble is exactly these five wrapping lines.
         let preamble = FoundationModelClassifier.coarsePromptPreamble()
-        let lineCount = preamble.split(separator: "\n", omittingEmptySubsequences: false).count
-        #expect(lineCount == 5)
+        let preambleLines = preamble.split(separator: "\n", omittingEmptySubsequences: false)
+        #expect(preambleLines.count == 5)
 
-        // Under a per-line tokenizer the preamble counts as 5 tokens. Any
-        // future preamble growth changes this number and fails loudly,
-        // requiring a paired update to the test contextSize bumps that
-        // depend on the preamble overhead.
+        // (2) Equivalence: an empty-segments prompt IS the preamble verbatim.
+        // This is the load-bearing invariant — buildPrompt reuses the same
+        // wrapping lines as coarsePromptPreamble(), so any drift between the
+        // two (e.g. a new header added to buildPrompt but not reflected in
+        // the preamble helper, or vice versa) fails this test.
+        let emptyPrompt = FoundationModelClassifier.buildPrompt(for: [])
+        #expect(emptyPrompt == preamble)
+
+        // (3) Tokenizer contract: under a per-line tokenizer the preamble
+        // counts as exactly `preambleLines.count` tokens. We derive the
+        // expected value from the structural line count above rather than
+        // hardcoding it, so the assertion cannot drift from the structure.
+        let expectedTokens = preambleLines.count
         let recorder = RuntimeRecorder(
             contextSize: 1024,
             coarseSchemaTokens: 0,
@@ -1356,7 +1375,11 @@ struct FoundationModelClassifierTests {
             }
         )
         let tokens = try await FoundationModelClassifier.preambleTokenCount(runtime: recorder.runtime)
-        #expect(tokens == 5)
+        #expect(tokens == expectedTokens)
+        // And independently lock the magic number to 5 so an accidental
+        // preamble expansion (e.g. adding a new instruction line) has to
+        // update this file explicitly.
+        #expect(expectedTokens == 5)
     }
 
     // H10: fallback estimator must be >= bytes/3 (BPE floor) for safety.
