@@ -100,8 +100,8 @@ struct StreamingDownloadResultTests {
 @Suite("StreamingDownload – Threshold")
 struct StreamingDownloadThresholdTests {
 
-    @Test("Default threshold is 2 MB")
+    @Test("Default threshold is 8 MB")
     func defaultThreshold() {
-        #expect(DownloadManager.defaultPlayableThreshold == 2 * 1024 * 1024)
+        #expect(DownloadManager.defaultPlayableThreshold == 8 * 1024 * 1024)
     }
 }

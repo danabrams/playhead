@@ -428,7 +428,9 @@ actor TranscriptEngineService {
                 text: segment.text,
                 normalizedText: normalizeText(segment.text),
                 pass: segment.passType.rawValue,
-                modelVersion: config.modelVersion
+                modelVersion: config.modelVersion,
+                transcriptVersion: nil,
+                atomOrdinal: nil
             )
             chunks.append(chunk)
             chunkCounter += 1

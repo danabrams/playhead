@@ -220,7 +220,9 @@ private func makeTranscriptChunk(
             .filter { !$0.isEmpty }
             .joined(separator: " "),
         pass: pass,
-        modelVersion: "apple-speech-v1"
+        modelVersion: "apple-speech-v1",
+        transcriptVersion: nil,
+        atomOrdinal: nil
     )
 }
 

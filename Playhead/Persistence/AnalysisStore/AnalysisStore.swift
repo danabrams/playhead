@@ -61,6 +61,8 @@ struct TranscriptChunk: Sendable {
     let normalizedText: String
     let pass: String // fast | final
     let modelVersion: String
+    let transcriptVersion: String?   // nil for fast-pass chunks (version computed on final)
+    let atomOrdinal: Int?            // nil for fast-pass chunks
 }
 
 struct AdWindow: Sendable {
@@ -234,6 +236,28 @@ actor AnalysisStore {
 
         try configurePragmas()
         try createTables()
+        try migrateTranscriptChunksPhase1()
+    }
+
+    private func migrateTranscriptChunksPhase1() throws {
+        // Add columns for transcript identity. ALTER TABLE ADD COLUMN fails
+        // if the column already exists — catch and ignore that specific case.
+        try addColumnIfNeeded(table: "transcript_chunks", column: "transcriptVersion", definition: "TEXT")
+        try addColumnIfNeeded(table: "transcript_chunks", column: "atomOrdinal", definition: "INTEGER")
+    }
+
+    private func addColumnIfNeeded(table: String, column: String, definition: String) throws {
+        do {
+            try exec("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)")
+        } catch let error as AnalysisStoreError {
+            // SQLite reports "duplicate column name" when the column already exists.
+            // Only swallow that specific case; re-throw anything else (disk full,
+            // corruption, permissions, etc.).
+            if case .migrationFailed(let msg) = error, msg.contains("duplicate column") {
+                return
+            }
+            throw error
+        }
     }
 
     deinit {
@@ -320,7 +344,9 @@ actor AnalysisStore {
                 text                TEXT NOT NULL,
                 normalizedText      TEXT NOT NULL,
                 pass                TEXT NOT NULL DEFAULT 'fast',
-                modelVersion        TEXT NOT NULL
+                modelVersion        TEXT NOT NULL,
+                transcriptVersion   TEXT,
+                atomOrdinal         INTEGER
             )
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_chunks_asset ON transcript_chunks(analysisAssetId)")
@@ -685,8 +711,8 @@ actor AnalysisStore {
         let sql = """
             INSERT INTO transcript_chunks
             (id, analysisAssetId, segmentFingerprint, chunkIndex, startTime, endTime,
-             text, normalizedText, pass, modelVersion)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             text, normalizedText, pass, modelVersion, transcriptVersion, atomOrdinal)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -700,6 +726,8 @@ actor AnalysisStore {
         bind(stmt, 8, chunk.normalizedText)
         bind(stmt, 9, chunk.pass)
         bind(stmt, 10, chunk.modelVersion)
+        bind(stmt, 11, chunk.transcriptVersion)
+        bind(stmt, 12, chunk.atomOrdinal)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -785,7 +813,9 @@ actor AnalysisStore {
             text: text(stmt, 6),
             normalizedText: text(stmt, 7),
             pass: text(stmt, 8),
-            modelVersion: text(stmt, 9)
+            modelVersion: text(stmt, 9),
+            transcriptVersion: optionalText(stmt, 10),
+            atomOrdinal: optionalInt(stmt, 11)
         )
     }
 
