@@ -261,7 +261,9 @@ enum TranscriptQualityEstimator {
             if longRepeatedCharacterRun(in: lower) {
                 penalty += 0.3
             }
-            if letters.count >= 5 && vowelRatio(in: letters) < 0.2 {
+            // Threshold 0.15 (not 0.2) because legitimate y-vowel English
+            // words like "rhythm" sit at exactly 1/6 ≈ 0.167.
+            if letters.count >= 5 && vowelRatio(in: letters) < 0.15 {
                 penalty += 0.2
             }
             return min(1.0, penalty)
@@ -288,8 +290,11 @@ enum TranscriptQualityEstimator {
     }
 
     private static func vowelRatio(in letters: String) -> Double {
+        // Include 'y' as a vowel so legitimate English words like "rhythm",
+        // "myrrh", and "syzygy" are not flagged as unusual tokens. English
+        // 'y' is consistently a vowel when it is a word's only vowel sound.
         guard !letters.isEmpty else { return 0.0 }
-        let vowelCount = letters.filter { "aeiou".contains($0) }.count
+        let vowelCount = letters.filter { "aeiouy".contains($0) }.count
         return Double(vowelCount) / Double(letters.count)
     }
 }

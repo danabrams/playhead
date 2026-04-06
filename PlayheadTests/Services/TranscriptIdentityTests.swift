@@ -577,6 +577,31 @@ struct TranscriptQualityEstimatorTests {
         #expect(assessment.compositeScore < 0.35)
     }
 
+    @Test("Y-vowel English words score the same as a-vowel English words")
+    func yVowelWordsDoNotTriggerPenalty() {
+        // rhythm, myrrh, syzygy are valid English words whose only vowels are 'y'.
+        // Including 'y' as a vowel should keep them out of the unusual-token bucket
+        // and produce the same wordLengthScore as a structurally-equivalent a-vowel
+        // sentence (matched word lengths so meanScore and stddevScore are identical).
+        // y words: rhythm(6) myrrh(5) syzygy(6) — repeat 4x
+        let yVowel = makeSegment(
+            text: "rhythm myrrh syzygy rhythm myrrh syzygy rhythm myrrh syzygy rhythm myrrh syzygy",
+            duration: 12
+        )
+        // Control: a words with matched lengths: cobalt(6) llama(5) banana(6)
+        let aVowel = makeSegment(
+            text: "cobalt llama banana cobalt llama banana cobalt llama banana cobalt llama banana",
+            duration: 12
+        )
+
+        let yAssessment = TranscriptQualityEstimator.assess(segment: yVowel)
+        let aAssessment = TranscriptQualityEstimator.assess(segment: aVowel)
+
+        // y-vowel words must score at least as high as the a-vowel control.
+        // (If 'y' is excluded from vowels, the y-vowel score would be ~20% lower.)
+        #expect(yAssessment.wordLengthScore >= aAssessment.wordLengthScore - 0.001)
+    }
+
     @Test("OOV-like noise does not score as good")
     func oovLikeNoiseDoesNotScoreAsGood() {
         let clean = makeSegment(
