@@ -32,7 +32,6 @@
 	<string>Playhead uses on-device speech transcription to generate episode transcripts and ad-skip markers.</string>
 	<key>UIBackgroundModes</key>
 	<array>
-		<string>audio</string>
 		<string>processing</string>
 	</array>
 	<key>UILaunchScreen</key>

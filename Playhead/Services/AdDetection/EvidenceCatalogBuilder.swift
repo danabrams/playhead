@@ -1,0 +1,586 @@
+// EvidenceCatalogBuilder.swift
+// Deterministic extraction of commercial evidence entities from transcript atoms.
+//
+// Runs BEFORE Foundation Models — produces an EvidenceCatalog of typed, ref-numbered
+// evidence entries that FM refinement schemas point to via `evidenceRef`. This prevents
+// hallucinated evidence from poisoning the SponsorKnowledgeStore.
+//
+// Complementary to LexicalScanner: LexicalScanner produces merged ad REGIONS;
+// EvidenceCatalogBuilder produces fine-grained evidence ENTITIES with stable refs.
+
+import Foundation
+import OSLog
+
+// MARK: - Evidence types
+
+/// Category of commercial evidence extracted from transcript text.
+enum EvidenceCategory: String, Sendable, CaseIterable, Codable {
+    case url              // URLs, vanity URLs, "dot com slash" patterns
+    case promoCode        // Discount/coupon/promo codes
+    case ctaPhrase        // Calls to action
+    case disclosurePhrase // Sponsorship disclosures
+    case brandSpan        // Brand-like proper noun spans in commercial context
+}
+
+/// A single evidence entry in the catalog.
+struct EvidenceEntry: Sendable {
+    /// Stable integer ref for FM prompts: [E0], [E1], ...
+    let evidenceRef: Int
+    /// What kind of commercial signal this is.
+    let category: EvidenceCategory
+    /// The exact text matched in the transcript atom.
+    let matchedText: String
+    /// Lowercased/trimmed form used for deduplication.
+    let normalizedText: String
+    /// Which atom this came from (atomKey.atomOrdinal).
+    let atomOrdinal: Int
+    /// Time position in episode audio.
+    let startTime: Double
+    /// Time position in episode audio.
+    let endTime: Double
+}
+
+/// The complete evidence catalog for a transcript version.
+struct EvidenceCatalog: Sendable {
+    let analysisAssetId: String
+    let transcriptVersion: String
+    /// Ordered by evidenceRef (0, 1, 2, ...).
+    let entries: [EvidenceEntry]
+
+    /// Render compact evidence refs for FM prompt injection.
+    ///
+    /// Output format:
+    /// ```
+    /// [E0] "betterhelp.com slash podcast" (url, atom 2)
+    /// [E1] "BetterHelp" (brandSpan, atom 1)
+    /// ```
+    func renderForPrompt() -> String {
+        entries.map { entry in
+            "[E\(entry.evidenceRef)] \"\(entry.matchedText)\" (\(entry.category.rawValue), atom \(entry.atomOrdinal))"
+        }.joined(separator: "\n")
+    }
+
+    /// Look up entries by category.
+    func entries(for category: EvidenceCategory) -> [EvidenceEntry] {
+        entries.filter { $0.category == category }
+    }
+}
+
+// MARK: - EvidenceCatalogBuilder
+
+/// Stateless extractor that scans transcript atoms for commercial evidence entities
+/// and produces a deterministically-ordered EvidenceCatalog.
+enum EvidenceCatalogBuilder {
+
+    private static let logger = Logger(subsystem: "com.playhead", category: "EvidenceCatalogBuilder")
+
+    // MARK: - Public API
+
+    /// Build an evidence catalog from transcript atoms.
+    ///
+    /// - Parameters:
+    ///   - atoms: Transcript atoms to scan (need not be pre-sorted).
+    ///   - analysisAssetId: The analysis asset these atoms belong to.
+    ///   - transcriptVersion: The transcript version string for identity.
+    /// - Returns: An EvidenceCatalog with deterministically-ordered entries.
+    static func build(
+        atoms: [TranscriptAtom],
+        analysisAssetId: String,
+        transcriptVersion: String
+    ) -> EvidenceCatalog {
+        let sorted = atoms.sorted { $0.atomKey.atomOrdinal < $1.atomKey.atomOrdinal }
+
+        // Phase 1: Extract anchor evidence (URL, promoCode, disclosure) from all atoms.
+        // These categories establish commercial context.
+        var rawMatches: [RawMatch] = []
+        for atom in sorted {
+            let matches = extractMatches(from: atom, categories: anchorCategories)
+            rawMatches.append(contentsOf: matches)
+        }
+
+        // Phase 2: Compute commercial context window from anchor matches.
+        let commercialAtomOrdinals = commercialContextOrdinals(from: rawMatches, atoms: sorted)
+
+        // Phase 3: Extract context-dependent evidence (CTA, brand spans) only near anchors.
+        // CTAs like "check it out" and "sign up now" are too common in normal speech
+        // to extract globally — gating behind commercial context prevents noise.
+        for atom in sorted {
+            let ctas = extractMatches(from: atom, categories: contextCategories,
+                                      gatedOrdinals: commercialAtomOrdinals)
+            rawMatches.append(contentsOf: ctas)
+            let brands = extractBrandSpans(from: atom, commercialOrdinals: commercialAtomOrdinals)
+            rawMatches.append(contentsOf: brands)
+        }
+
+        // Phase 4: Deduplicate by (normalizedText, category).
+        let deduped = deduplicate(rawMatches)
+
+        // Phase 5: Sort deterministically and assign evidenceRef integers.
+        let entries = assignRefs(deduped)
+
+        logger.info("Built evidence catalog: \(entries.count) entries from \(sorted.count) atoms")
+
+        return EvidenceCatalog(
+            analysisAssetId: analysisAssetId,
+            transcriptVersion: transcriptVersion,
+            entries: entries
+        )
+    }
+
+    // MARK: - Internal types
+
+    /// Intermediate match before dedup and ref assignment.
+    private struct RawMatch {
+        let category: EvidenceCategory
+        let matchedText: String
+        let normalizedText: String
+        let atomOrdinal: Int
+        let startTime: Double
+        let endTime: Double
+        /// Character offset of match within the atom text, for deterministic ordering.
+        let matchOffset: Int
+    }
+
+    // MARK: - Pattern extraction
+
+    /// Categories that establish commercial context (extracted globally).
+    private static let anchorCategories: Set<EvidenceCategory> = [.url, .promoCode, .disclosurePhrase]
+
+    /// Categories that require commercial context to avoid false positives.
+    private static let contextCategories: Set<EvidenceCategory> = [.ctaPhrase]
+
+    /// Extract evidence matches from a single atom for the specified categories.
+    /// If `gatedOrdinals` is provided, only extracts from atoms in that set.
+    private static func extractMatches(
+        from atom: TranscriptAtom,
+        categories: Set<EvidenceCategory>,
+        gatedOrdinals: Set<Int>? = nil
+    ) -> [RawMatch] {
+        if let gated = gatedOrdinals, !gated.contains(atom.atomKey.atomOrdinal) {
+            return []
+        }
+
+        let text = atom.text
+        guard !text.isEmpty else { return [] }
+
+        let nsText = text as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        var matches: [RawMatch] = []
+
+        for (category, patterns) in compiledPatterns where categories.contains(category) {
+            for pattern in patterns {
+                let regexMatches = pattern.matches(in: text, range: fullRange)
+                for match in regexMatches {
+                    let rawMatchedText = nsText.substring(with: match.range)
+                    // For URL matches, strip leading verb context ("visit", "go to", "head to")
+                    // so that "\bvisit \w+\.com" and "\b\w+\.com\b" both normalize to the bare
+                    // domain. This prevents duplicate URL evidence entries on atoms where both
+                    // patterns fire on the same mention.
+                    let matchedText: String
+                    if category == .url {
+                        matchedText = stripURLVerbPrefix(rawMatchedText)
+                    } else {
+                        matchedText = rawMatchedText
+                    }
+                    let normalized = matchedText.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !normalized.isEmpty else { continue }
+
+                    let (startTime, endTime) = interpolateTiming(
+                        matchRange: match.range,
+                        textLength: nsText.length,
+                        atomStart: atom.startTime,
+                        atomEnd: atom.endTime
+                    )
+
+                    matches.append(RawMatch(
+                        category: category,
+                        matchedText: matchedText,
+                        normalizedText: normalized,
+                        atomOrdinal: atom.atomKey.atomOrdinal,
+                        startTime: startTime,
+                        endTime: endTime,
+                        matchOffset: match.range.location
+                    ))
+                }
+            }
+        }
+
+        return matches
+    }
+
+    /// Extract brand-like spans from an atom using case-insensitive strategies.
+    ///
+    /// ASR output is typically lowercase or inconsistently cased, so brand detection
+    /// cannot rely on capitalization. Instead we use structural cues:
+    /// 1. Noun phrases immediately following disclosure patterns ("sponsored by X")
+    /// 2. Domain-name stems from URL patterns ("betterhelp" from "betterhelp dot com")
+    ///
+    /// Only runs on atoms within commercial context (±2 atoms of URL/promo/disclosure).
+    private static func extractBrandSpans(
+        from atom: TranscriptAtom,
+        commercialOrdinals: Set<Int>
+    ) -> [RawMatch] {
+        guard commercialOrdinals.contains(atom.atomKey.atomOrdinal) else { return [] }
+
+        let text = atom.text
+        guard !text.isEmpty else { return [] }
+
+        let nsText = text as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        var matches: [RawMatch] = []
+
+        for pattern in compiledBrandPatterns {
+            let regexMatches = pattern.matches(in: text, range: fullRange)
+            for match in regexMatches {
+                // Use capture group 1 (the brand name), not the full match
+                let brandRange = match.numberOfRanges > 1 ? match.range(at: 1) : match.range
+                guard brandRange.location != NSNotFound else { continue }
+
+                let rawText = nsText.substring(with: brandRange)
+                let trimmed = trimTrailingStopWords(rawText)
+                let normalized = trimmed.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !normalized.isEmpty else { continue }
+                guard normalized.count >= 3 else { continue }
+                guard !commonNonBrandPhrases.contains(normalized) else { continue }
+                let matchedText = trimmed
+
+                let (startTime, endTime) = interpolateTiming(
+                    matchRange: brandRange,
+                    textLength: nsText.length,
+                    atomStart: atom.startTime,
+                    atomEnd: atom.endTime
+                )
+
+                matches.append(RawMatch(
+                    category: .brandSpan,
+                    matchedText: matchedText,
+                    normalizedText: normalized,
+                    atomOrdinal: atom.atomKey.atomOrdinal,
+                    startTime: startTime,
+                    endTime: endTime,
+                    matchOffset: brandRange.location
+                ))
+            }
+        }
+
+        return matches
+    }
+
+    // MARK: - Commercial context
+
+    /// Compute the set of atom ordinals that are within +/-2 of any atom containing
+    /// a URL, promo code, or disclosure match. Brand spans are only extracted from
+    /// atoms in this context window.
+    ///
+    /// Assumes contiguous zero-based ordinals (guaranteed by TranscriptAtomizer).
+    private static func commercialContextOrdinals(
+        from rawMatches: [RawMatch],
+        atoms: [TranscriptAtom]
+    ) -> Set<Int> {
+        let commercialCategories: Set<EvidenceCategory> = [.url, .promoCode, .disclosurePhrase]
+        let anchorOrdinals = Set(
+            rawMatches
+                .filter { commercialCategories.contains($0.category) }
+                .map(\.atomOrdinal)
+        )
+
+        guard !anchorOrdinals.isEmpty else { return [] }
+
+        let maxOrdinal = atoms.last?.atomKey.atomOrdinal ?? 0
+        var contextOrdinals = Set<Int>()
+        for ordinal in anchorOrdinals {
+            for offset in -2...2 {
+                let candidate = ordinal + offset
+                if candidate >= 0, candidate <= maxOrdinal {
+                    contextOrdinals.insert(candidate)
+                }
+            }
+        }
+
+        return contextOrdinals
+    }
+
+    // MARK: - URL normalization
+
+    /// Leading verb-prefix patterns that the URL regexes may capture as context
+    /// (e.g., "visit ", "go to ", "head to "). Stripped at ingestion so that a
+    /// context-match like "visit teamcoco.com" normalizes to the same text as
+    /// the bare-domain pattern "teamcoco.com". Order matters: longer prefixes
+    /// are matched first.
+    private static let urlVerbPrefixes: [String] = [
+        "head to ",
+        "go to ",
+        "visit ",
+        "check out ",
+    ]
+
+    /// Strip a leading verb phrase ("visit ", "go to ", ...) from a URL match.
+    /// Case-insensitive; preserves the casing of the remainder.
+    private static func stripURLVerbPrefix(_ text: String) -> String {
+        let lower = text.lowercased()
+        for prefix in urlVerbPrefixes where lower.hasPrefix(prefix) {
+            return String(text.dropFirst(prefix.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text
+    }
+
+    // MARK: - Deduplication
+
+    /// Deduplicate matches by (normalizedText, category). Keeps the first occurrence
+    /// (lowest atomOrdinal, then lowest matchOffset). Also subsumes:
+    /// 1. Bare-domain URLs when a more specific path URL exists globally
+    ///    (e.g., removes "acme.com" when "acme.com/offer" is present).
+    /// 2. Within a single atom, the LONGER of two URL matches when one contains
+    ///    the other as a substring — the shorter (cleaner) domain is preferred.
+    ///    This complements stripURLVerbPrefix for any context-capturing patterns
+    ///    we may add in the future.
+    private static func deduplicate(_ matches: [RawMatch]) -> [RawMatch] {
+        // Pre-sort to ensure dedup picks the earliest occurrence deterministically.
+        let sorted = matches.sorted { a, b in
+            if a.atomOrdinal != b.atomOrdinal { return a.atomOrdinal < b.atomOrdinal }
+            return a.matchOffset < b.matchOffset
+        }
+
+        // Collect all URL normalized texts (globally) to detect path-URL subsumption.
+        let urlTexts = Set(sorted.filter { $0.category == .url }.map(\.normalizedText))
+
+        // Collect URL normalized texts per atom for in-atom substring subsumption.
+        var urlTextsByAtom: [Int: Set<String>] = [:]
+        for match in sorted where match.category == .url {
+            urlTextsByAtom[match.atomOrdinal, default: []].insert(match.normalizedText)
+        }
+
+        var seen = Set<String>()
+        var result: [RawMatch] = []
+
+        for match in sorted {
+            let key = "\(match.category.rawValue)::\(match.normalizedText)"
+            guard seen.insert(key).inserted else { continue }
+
+            // Subsume bare-domain URL when a longer path URL exists.
+            // e.g., skip "acme.com" when "acme.com/offer" is present.
+            if match.category == .url {
+                let isPathSubsumed = urlTexts.contains { other in
+                    other != match.normalizedText &&
+                    other.hasPrefix(match.normalizedText) &&
+                    (other.dropFirst(match.normalizedText.count).first == "/" ||
+                     other.dropFirst(match.normalizedText.count).first == " ")
+                }
+                if isPathSubsumed { continue }
+
+                // Within the same atom, if another URL match is a strict
+                // suffix of this one (i.e., this match has *prefix* context
+                // like "visit " or "go to " in front of the same domain),
+                // drop this longer match and keep the cleaner one. We only
+                // match suffix (not arbitrary substring) to avoid colliding
+                // with the path-URL subsumption rule above: a path URL like
+                // "acme.com/offer" contains "acme.com" as a prefix, not a
+                // suffix, so this rule will not drop it.
+                let siblings = urlTextsByAtom[match.atomOrdinal] ?? []
+                let isContextSubsumed = siblings.contains { other in
+                    other != match.normalizedText &&
+                    other.count < match.normalizedText.count &&
+                    match.normalizedText.hasSuffix(other)
+                }
+                if isContextSubsumed { continue }
+            }
+
+            result.append(match)
+        }
+
+        return result
+    }
+
+    // MARK: - Ref assignment
+
+    /// Assign stable evidenceRef integers in deterministic order:
+    /// sorted by atomOrdinal, then by category ordinal, then by match offset.
+    private static func assignRefs(_ matches: [RawMatch]) -> [EvidenceEntry] {
+        let categoryOrder = Dictionary(
+            uniqueKeysWithValues: EvidenceCategory.allCases.enumerated().map { ($1, $0) }
+        )
+
+        let sorted = matches.sorted { a, b in
+            if a.atomOrdinal != b.atomOrdinal { return a.atomOrdinal < b.atomOrdinal }
+            let catA = categoryOrder[a.category] ?? 0
+            let catB = categoryOrder[b.category] ?? 0
+            if catA != catB { return catA < catB }
+            return a.matchOffset < b.matchOffset
+        }
+
+        return sorted.enumerated().map { index, match in
+            EvidenceEntry(
+                evidenceRef: index,
+                category: match.category,
+                matchedText: match.matchedText,
+                normalizedText: match.normalizedText,
+                atomOrdinal: match.atomOrdinal,
+                startTime: match.startTime,
+                endTime: match.endTime
+            )
+        }
+    }
+
+    // MARK: - Time interpolation
+
+    /// Estimate timing of a regex match within an atom by linear interpolation
+    /// over character position.
+    private static func interpolateTiming(
+        matchRange: NSRange,
+        textLength: Int,
+        atomStart: Double,
+        atomEnd: Double
+    ) -> (start: Double, end: Double) {
+        guard textLength > 0 else { return (atomStart, atomEnd) }
+
+        let duration = atomEnd - atomStart
+        let startFraction = Double(matchRange.location) / Double(textLength)
+        let endFraction = Double(matchRange.location + matchRange.length) / Double(textLength)
+
+        return (atomStart + duration * startFraction, atomStart + duration * endFraction)
+    }
+
+    // MARK: - Compiled patterns
+
+    /// Compiled patterns grouped by category (excluding brandSpan, which uses separate logic).
+    /// Built once via static let for performance.
+    private static let compiledPatterns: [EvidenceCategory: [NSRegularExpression]] = {
+        var groups: [EvidenceCategory: [NSRegularExpression]] = [:]
+
+        // URLs / vanity URLs
+        groups[.url] = compilePatterns([
+            #"\b\w+\.com\/\w+"#,                     // literal URL: betterhelp.com/podcast
+            #"\b\w+ dot com slash \w+"#,              // spoken: "betterhelp dot com slash podcast"
+            #"\b\w+\.com\b"#,                         // bare domain: betterhelp.com
+            #"\b\w+ dot com\b"#,                      // spoken bare domain: "betterhelp dot com"
+            #"\b(?!dot\b)\w+ com slash \w+"#,          // ASR-normalized: "betterhelp com slash podcast" (excludes "dot com slash ..." false match)
+            #"\bgo to \w+\.com"#,                      // "go to betterhelp.com"
+            #"\bvisit \w+\.com"#,                      // "visit betterhelp.com"
+            #"\bhead to \w+\.com"#,                    // "head to betterhelp.com"
+            #"\b\w+\.co\/\w+"#,                       // short domains: something.co/offer
+            #"\b\w+\.org\/\w+"#,                      // .org URLs
+            #"\b\w+\.io\/\w+"#,                       // .io URLs
+        ])
+
+        // Promo codes — require qualifying prefix to avoid false positives
+        // on generic "code" usage (e.g. "source code repository")
+        groups[.promoCode] = compilePatterns([
+            #"\bpromo code\s+[A-Za-z0-9]+"#,          // "promo code SAVE"
+            #"\bdiscount code\s+[A-Za-z0-9]+"#,       // "discount code THIRTY"
+            #"\bcoupon code\s+[A-Za-z0-9]+"#,          // "coupon code FREE"
+            #"\boffer code\s+[A-Za-z0-9]+"#,           // "offer code COURT"
+            #"\benter code\s+[A-Za-z0-9]+"#,           // "enter code X at checkout"
+            #"\buse code\s+[A-Za-z0-9]+"#,             // "use code SAVE"
+            #"\bcode\s+[A-Za-z0-9]+\s+at checkout"#,  // "code SAVE at checkout"
+        ])
+
+        // CTA phrases
+        groups[.ctaPhrase] = compilePatterns([
+            #"\bget started today\b"#,
+            #"\bsign up now\b"#,
+            #"\bsign up today\b"#,
+            #"\bclick the link\b"#,
+            #"\blink in the description\b"#,
+            #"\blink in the show notes\b"#,
+            #"\btap the link\b"#,
+            #"\bcheck it out\b"#,
+            #"\bhead over to\b"#,
+            #"\bgo check out\b"#,
+            #"\btry it free\b"#,
+            #"\btry it today\b"#,
+            #"\bstart your free trial\b"#,
+            #"\bget your free\b"#,
+            #"\bdon.?t miss out\b"#,
+            #"\bact now\b"#,
+            #"\blimited time\b"#,
+            #"\bexclusive offer\b"#,
+            #"\bspecial offer\b"#,
+        ])
+
+        // Disclosure phrases
+        groups[.disclosurePhrase] = compilePatterns([
+            #"\bbrought to you by\b"#,
+            #"\bsponsored by\b"#,
+            #"\bpartnered with\b"#,
+            #"\bin partnership with\b"#,
+            #"\bthanks to our sponsor\b"#,
+            #"\bthis episode is sponsored\b"#,
+            #"\bthis podcast is brought\b"#,
+            #"\ba word from our sponsor\b"#,
+            #"\bmessage from our sponsor\b"#,
+            #"\bsupported by\b"#,
+            #"\btoday s sponsor\b"#,
+            #"\btoday's sponsor\b"#,
+        ])
+
+        return groups
+    }()
+
+    /// Single words to exclude as entire brand spans.
+    private static let commonNonBrandPhrases: Set<String> = [
+        "our", "the", "this", "their", "your", "my",
+        "our friends", "our friends at", "our partner", "our partners",
+        "our sponsor", "today", "you", "them", "us",
+    ]
+
+    /// Stop words trimmed from the trailing end of brand captures.
+    /// Prevents greedy regex from capturing "hello fresh and they" instead of "hello fresh".
+    private static let brandStopWords: Set<String> = [
+        "and", "or", "but", "for", "the", "a", "an",
+        "to", "at", "in", "on", "with", "from", "of", "by", "as",
+        "they", "we", "it", "is", "are", "was", "were", "has", "have",
+        "that", "this", "will", "can", "so", "if", "do", "did",
+        "just", "really", "very", "also", "then", "now", "here", "there",
+        "about", "like", "make", "visit", "who", "which", "where",
+        "not", "no", "all", "every", "some", "many", "more",
+    ]
+
+    /// Trim trailing stop words from a brand capture.
+    /// "hello fresh and they make" -> "hello fresh"
+    private static func trimTrailingStopWords(_ text: String) -> String {
+        var words = text.split(separator: " ").map(String.init)
+        while let last = words.last, brandStopWords.contains(last.lowercased()) {
+            words.removeLast()
+        }
+        return words.joined(separator: " ")
+    }
+
+    /// Brand extraction patterns — case-insensitive, use capture groups.
+    ///
+    /// ASR output is typically lowercase, so these patterns do not rely on
+    /// capitalization. Instead they extract noun phrases after disclosure
+    /// patterns and domain stems from URL patterns.
+    private static let compiledBrandPatterns: [NSRegularExpression] = compilePatterns([
+        // Noun phrase after "sponsored by" — capture 1-4 words, then trim stop words
+        #"\bsponsored by\s+(?:our\s+friends\s+at\s+)?(\w+(?:\s+\w+){0,3})"#,
+        // Noun phrase after "brought to you by"
+        #"\bbrought to you by\s+(?:our\s+friends\s+at\s+)?(\w+(?:\s+\w+){0,3})"#,
+        // Noun phrase after "partnered with"
+        #"\bpartnered with\s+(\w+(?:\s+\w+){0,3})"#,
+        // Noun phrase after "supported by" — narrower: skip common non-commercial uses
+        #"\bsupported by\s+(?:our\s+friends\s+at\s+)?(\w+(?:\s+\w+){0,3})"#,
+        // "thanks to our sponsor(s) X" — narrowed to require "sponsor" to avoid
+        // false positives from conversational "thanks to our listeners"
+        #"\bthanks to\s+our\s+sponsors?\s+(\w+(?:\s+\w+){0,3})"#,
+        // Domain stem from "X dot com" or "X.com" patterns
+        #"\b(\w+)\s+dot\s+com\b"#,
+        #"\b(\w+)\.com\b"#,
+    ])
+
+    /// Compile pattern strings into NSRegularExpression instances.
+    /// Patterns that fail to compile are logged and skipped.
+    private static func compilePatterns(
+        _ patterns: [String],
+        options: NSRegularExpression.Options = [.caseInsensitive]
+    ) -> [NSRegularExpression] {
+        patterns.compactMap { pattern in
+            do {
+                return try NSRegularExpression(pattern: pattern, options: options)
+            } catch {
+                logger.error("Failed to compile pattern '\(pattern)': \(error.localizedDescription)")
+                return nil
+            }
+        }
+    }
+}
