@@ -397,6 +397,153 @@ struct BackfillJobRunnerTests {
         #expect(row.deferReason?.contains("synthetic classifier failure") == true)
     }
 
+    @Test("C-B: runs do not re-admit jobs that have exhausted the retry budget")
+    func exhaustedRetryBudgetIsNotReAdmitted() async throws {
+        // The factory in PlayheadRuntime allocates a fresh AdmissionController
+        // per invocation, so the controller's in-memory retry budget resets
+        // between runs. The persisted retryCount on the backfill_jobs row is
+        // the only source of truth. When a prior run has left a row in
+        // `.failed` with `retryCount >= AdmissionController.maxRetries`, the
+        // runner must skip it entirely — no re-enqueue, no FM call, no status
+        // change.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        // Seed a failed job matching the deterministic jobId format the
+        // runner synthesizes for a cold-start fullEpisodeScan plan.
+        let exhausted = BackfillJob(
+            jobId: "fm-asset-runner-fullEpisodeScan-0",
+            analysisAssetId: "asset-runner",
+            podcastId: "podcast-runner",
+            phase: .fullEpisodeScan,
+            coveragePolicy: .fullCoverage,
+            priority: 5,
+            progressCursor: nil,
+            retryCount: AdmissionController.maxRetries,
+            deferReason: "prior failure",
+            status: .failed,
+            scanCohortJSON: makeTestScanCohortJSON(),
+            createdAt: Date().timeIntervalSince1970
+        )
+        try await store.insertBackfillJob(exhausted)
+
+        let fmRuntime = TestFMRuntime()
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        let result = try await runner.runPendingBackfill(for: makeInputs())
+
+        #expect(result.admittedJobIds.isEmpty, "exhausted job must not be admitted")
+        #expect(result.deferredJobIds.isEmpty, "exhausted job must not be re-deferred")
+        #expect(result.scanResultIds.isEmpty)
+        #expect(await fmRuntime.coarseCallCount == 0, "FM must not be called")
+        let row = try #require(await store.fetchBackfillJob(byId: exhausted.jobId))
+        #expect(row.status == .failed, "status must remain .failed")
+        #expect(row.retryCount == AdmissionController.maxRetries)
+    }
+
+    @Test("H-1: thermal defer marks ALL planned jobs, not just the first")
+    func thermalDeferMarksAllPlannedJobs() async throws {
+        // Use a planner context that emits the 3-phase targeted plan
+        // (harvester, likely-ad-slots, audit). Previously the runner broke
+        // out of the drain loop after marking only the first queued job as
+        // deferred, leaving the other two stuck in `.queued` forever.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime()
+        let runner = BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(runtime: fmRuntime.runtime),
+            coveragePlanner: CoveragePlanner(),
+            mode: .shadow,
+            capabilitySnapshotProvider: { makeThermalThrottledSnapshot() },
+            batteryLevelProvider: { 1.0 },
+            scanCohortJSON: makeTestScanCohortJSON()
+        )
+
+        let plannerContext = CoveragePlannerContext(
+            observedEpisodeCount: 20,
+            stablePrecision: true,
+            isFirstEpisodeAfterCohortInvalidation: false,
+            recallDegrading: false,
+            sponsorDriftDetected: false,
+            auditMissDetected: false,
+            episodesSinceLastFullRescan: 0,
+            periodicFullRescanIntervalEpisodes: 10
+        )
+        let base = makeInputs()
+        let inputs = BackfillJobRunner.AssetInputs(
+            analysisAssetId: base.analysisAssetId,
+            podcastId: base.podcastId,
+            segments: base.segments,
+            evidenceCatalog: base.evidenceCatalog,
+            transcriptVersion: base.transcriptVersion,
+            plannerContext: plannerContext
+        )
+
+        let result = try await runner.runPendingBackfill(for: inputs)
+
+        #expect(result.admittedJobIds.isEmpty)
+        #expect(result.deferredJobIds.count == 3, "all 3 planned jobs must be marked deferred (got \(result.deferredJobIds.count))")
+
+        for jobId in result.deferredJobIds {
+            let row = try #require(await store.fetchBackfillJob(byId: jobId))
+            #expect(row.status == .deferred, "job \(jobId) must be .deferred, got \(row.status)")
+            #expect(row.deferReason == "thermalThrottled")
+        }
+    }
+
+    @Test("H-3: re-run with deterministic inputs produces no duplicate scan rows")
+    func rerunProducesNoDuplicateScanRows() async throws {
+        // Deterministic fake: same asset, same transcript, two runs in
+        // sequence. The persisted scan_results count must equal the unique
+        // (assetId, scanPass, windowIndex) triples. Before the fix the
+        // runner stamped a random UUID suffix into each row id, so a crash
+        // mid-run could leave an orphan row under a different id.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ]
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        _ = try await runner.runPendingBackfill(for: makeInputs())
+        let firstRows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")
+
+        // Force the job row back to `.queued` so the second run actually
+        // reprocesses it rather than skipping via the `.complete` fast path.
+        // This simulates the orphan-recovery scenario the fix targets: a
+        // prior run wrote scan rows but did not mark the job complete.
+        for jobId in firstRows.map(\.id) {
+            _ = jobId // silence warning; we reuse the variable below
+        }
+        // We need a job row that still allows re-enqueue. Touch the DB by
+        // resetting the job to .queued directly via the deferred path.
+        let jobId = "fm-asset-runner-fullEpisodeScan-0"
+        try await store.markBackfillJobDeferred(jobId: jobId, reason: "forced for test")
+
+        _ = try await runner.runPendingBackfill(for: makeInputs())
+        let secondRows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")
+
+        // Count unique logical keys across all persisted rows.
+        var uniqueKeys = Set<String>()
+        for row in secondRows {
+            uniqueKeys.insert("\(row.analysisAssetId)|\(row.scanPass)|\(row.windowFirstAtomOrdinal)|\(row.windowLastAtomOrdinal)")
+        }
+        #expect(secondRows.count == uniqueKeys.count,
+                "expected no duplicate rows: \(secondRows.count) rows vs \(uniqueKeys.count) unique keys")
+        // And the re-run must not have grown the table beyond the first
+        // run's unique-key count.
+        var firstKeys = Set<String>()
+        for row in firstRows {
+            firstKeys.insert("\(row.analysisAssetId)|\(row.scanPass)|\(row.windowFirstAtomOrdinal)|\(row.windowLastAtomOrdinal)")
+        }
+        #expect(uniqueKeys == firstKeys, "second run introduced new logical keys")
+    }
+
     @Test("enabled mode falls back to shadow behavior (no AdWindow writes)")
     func enabledModeFallsBackToShadow() async throws {
         let store = try await makeTestStore()

@@ -123,6 +123,17 @@ actor BackfillJobRunner {
                 if existing.status == .complete {
                     continue
                 }
+                // C-B: enforce retry budget across runBackfill invocations.
+                // The factory creates a fresh AdmissionController per call, so
+                // the controller's in-memory retry budget is reset every
+                // time. The persisted retryCount is the source of truth — if
+                // it already meets or exceeds maxRetries the job must not be
+                // re-enqueued, otherwise a persistently failing job would
+                // loop forever across runs.
+                if existing.retryCount >= AdmissionController.maxRetries {
+                    logger.warning("FM backfill job exhausted retries: \(existing.jobId, privacy: .public) retries=\(existing.retryCount)")
+                    continue
+                }
                 await admissionController.enqueue(existing)
                 enqueuedJobs.append(existing)
                 continue
@@ -163,10 +174,17 @@ actor BackfillJobRunner {
             )
 
             if let reason = decision.deferReason {
-                // Mark the next queued job as deferred so retries can pick it up.
-                if let next = enqueuedJobs.first(where: {
-                    !admitted.contains($0.jobId) && !deferred.contains($0.jobId)
-                }) {
+                // H-1 orchestration: mark ALL remaining non-admitted,
+                // non-deferred jobs as deferred with the same reason. The
+                // prior implementation only marked the first queued job and
+                // broke out of the drain loop, leaving any other enqueued
+                // jobs stuck in `.queued` forever. A single admission
+                // deferral (thermal, battery, low-power) invalidates every
+                // job in this batch — they will all fail the same gate.
+                for candidate in enqueuedJobs where
+                    !admitted.contains(candidate.jobId)
+                    && !deferred.contains(candidate.jobId)
+                {
                     // C-2 (partial): prefer the split defer API so the
                     // deferReason is never clobbered by a concurrent progress
                     // checkpoint. The terminal `.complete` and `.failed`
@@ -174,12 +192,12 @@ actor BackfillJobRunner {
                     // because the split API has no replacement for them —
                     // tracked in C-2 gap report.
                     try await store.markBackfillJobDeferred(
-                        jobId: next.jobId,
+                        jobId: candidate.jobId,
                         reason: reason.rawValue
                     )
-                    deferred.append(next.jobId)
+                    deferred.append(candidate.jobId)
                 }
-                logger.info("FM backfill deferred: \(reason)")
+                logger.info("FM backfill deferred: \(reason.rawValue, privacy: .public) count=\(deferred.count)")
                 break
             }
 
@@ -204,11 +222,21 @@ actor BackfillJobRunner {
                     )
                 )
             } catch is CancellationError {
+                // H-2: don't let a store error swallow the CancellationError.
+                // The caller's Task contract requires the CancellationError
+                // to propagate; swallowing it in favor of a SQLite exception
+                // would mask cooperative cancellation. We still log the
+                // store failure so operators can diagnose stuck `.running`
+                // rows.
                 await admissionController.finish(jobId: job.jobId)
-                try await store.markBackfillJobDeferred(
-                    jobId: job.jobId,
-                    reason: "cancelled"
-                )
+                do {
+                    try await store.markBackfillJobDeferred(
+                        jobId: job.jobId,
+                        reason: "cancelled"
+                    )
+                } catch {
+                    logger.error("Failed to mark cancelled job deferred: \(error.localizedDescription, privacy: .public)")
+                }
                 throw CancellationError()
             } catch {
                 // C-2: markBackfillJobFailed writes deferReason so operators
@@ -321,7 +349,14 @@ actor BackfillJobRunner {
             $0.segmentIndex == windowOutput.lineRefs.last
         })?.lastAtomOrdinal ?? firstAtom
         return SemanticScanResult(
-            id: "scan-\(inputs.analysisAssetId)-\(scanPass)-\(windowOutput.windowIndex)-\(UUID().uuidString.prefix(8))",
+            // H-3: deterministic id. A random UUID suffix regenerated on
+            // every run would leave orphan rows when a prior run crashed
+            // after insert but before completion. The `(assetId, pass,
+            // windowIndex)` triple is the logical row key; combined with
+            // the `UNIQUE(reuseKeyHash)` constraint + H-1's "refusal can't
+            // overwrite success" guard this makes re-runs fully idempotent
+            // at the scan-result row level.
+            id: "scan-\(inputs.analysisAssetId)-\(scanPass)-\(windowOutput.windowIndex)",
             analysisAssetId: inputs.analysisAssetId,
             windowFirstAtomOrdinal: firstAtom,
             windowLastAtomOrdinal: lastAtom,
@@ -361,7 +396,8 @@ actor BackfillJobRunner {
             inputs.segments.first(where: { $0.segmentIndex == span.lastLineRef })?.endTime ?? 0
         } ?? 0
         return SemanticScanResult(
-            id: "scan-\(inputs.analysisAssetId)-passB-\(windowOutput.windowIndex)-\(UUID().uuidString.prefix(8))",
+            // H-3: deterministic id (see makeScanResult for the full note).
+            id: "scan-\(inputs.analysisAssetId)-passB-\(windowOutput.windowIndex)",
             analysisAssetId: inputs.analysisAssetId,
             windowFirstAtomOrdinal: firstAtom,
             windowLastAtomOrdinal: lastAtom,
