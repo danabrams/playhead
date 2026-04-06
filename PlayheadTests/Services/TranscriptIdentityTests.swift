@@ -56,6 +56,27 @@ private func makeAtom(
     )
 }
 
+private func makeFeatureWindow(
+    assetId: String = "asset-1",
+    startTime: Double,
+    endTime: Double,
+    pauseProbability: Double = 0.1,
+    speakerClusterId: Int?
+) -> FeatureWindow {
+    FeatureWindow(
+        analysisAssetId: assetId,
+        startTime: startTime,
+        endTime: endTime,
+        rms: 0.4,
+        spectralFlux: 0.1,
+        musicProbability: 0.0,
+        pauseProbability: pauseProbability,
+        speakerClusterId: speakerClusterId,
+        jingleHash: nil,
+        featureVersion: 1
+    )
+}
+
 // MARK: - TranscriptAtomizer Tests
 
 @Suite("TranscriptAtomizer")
@@ -208,6 +229,20 @@ struct TranscriptSegmenterTests {
         #expect(segments[1].firstAtomOrdinal == 2)
     }
 
+    @Test("Default pause threshold splits on gaps above 1.5 seconds")
+    func defaultPauseThresholdMatchesBeadSpec() {
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 0, endTime: 4, text: "First part"),
+            makeAtom(ordinal: 1, startTime: 5.6, endTime: 9, text: "Second part after a 1.6 second gap")
+        ]
+
+        let segments = TranscriptSegmenter.segment(atoms: atoms)
+
+        #expect(segments.count == 2)
+        #expect(segments[0].firstAtomOrdinal == 0)
+        #expect(segments[1].firstAtomOrdinal == 1)
+    }
+
     @Test("Single atom produces single segment")
     func singleAtom() {
         let atoms = [makeAtom(ordinal: 0, startTime: 0, endTime: 5)]
@@ -247,6 +282,7 @@ struct TranscriptSegmenterTests {
         // Atom 24 starts at 120.0s, so it triggers the break. First segment = atoms 0-23.
         #expect(segments[0].atoms.count == 24)
         #expect(segments[1].atoms.count == 2)
+        #expect(segments.allSatisfy { $0.duration <= config.maxSegmentDuration })
     }
 
     @Test("Discourse marker triggers break after minor pause")
@@ -302,6 +338,24 @@ struct TranscriptSegmenterTests {
         #expect(segments[1].firstAtomOrdinal == 2)
     }
 
+    @Test("Sentence punctuation does not split when continuation is lowercase")
+    func sentencePunctuationRequiresCapitalization() {
+        let config = TranscriptSegmenter.Config(
+            pauseThreshold: 2.0,
+            maxSegmentDuration: 120.0,
+            minSegmentDuration: 10.0
+        )
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 0, endTime: 8, text: "This is a good topic."),
+            makeAtom(ordinal: 1, startTime: 8, endTime: 11, text: "End of thought."),
+            makeAtom(ordinal: 2, startTime: 11.4, endTime: 20, text: "and this keeps the same thought going."),
+        ]
+
+        let segments = TranscriptSegmenter.segment(atoms: atoms, config: config)
+
+        #expect(segments.count == 1)
+    }
+
     @Test("Segment indices are sequential")
     func sequentialIndices() {
         let atoms = [
@@ -334,6 +388,117 @@ struct TranscriptSegmenterTests {
 
         #expect(segments.count == 1)
     }
+
+    @Test("Speaker change triggers soft break when stable clusters differ")
+    func speakerChangeBreak() {
+        let config = TranscriptSegmenter.Config(
+            pauseThreshold: 2.0,
+            maxSegmentDuration: 120.0,
+            minSegmentDuration: 10.0
+        )
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 0, endTime: 6, text: "we are still talking here"),
+            makeAtom(ordinal: 1, startTime: 6, endTime: 12, text: "same speaker keeps going"),
+            makeAtom(ordinal: 2, startTime: 12, endTime: 18, text: "different voice starts now"),
+        ]
+        let featureWindows = [
+            makeFeatureWindow(startTime: 0, endTime: 4, speakerClusterId: 1),
+            makeFeatureWindow(startTime: 4, endTime: 8, speakerClusterId: 1),
+            makeFeatureWindow(startTime: 8, endTime: 12, speakerClusterId: 1),
+            makeFeatureWindow(startTime: 12, endTime: 15, speakerClusterId: 2),
+            makeFeatureWindow(startTime: 15, endTime: 18, speakerClusterId: 2),
+        ]
+
+        let segments = TranscriptSegmenter.segment(
+            atoms: atoms,
+            featureWindows: featureWindows,
+            config: config
+        )
+
+        #expect(segments.count == 2)
+        #expect(segments[0].startAtomOrdinal == 0)
+        #expect(segments[0].endAtomOrdinal == 1)
+        #expect(segments[1].startAtomOrdinal == 2)
+        #expect(segments[1].boundaryReason == .speakerTurn)
+        #expect(segments[1].boundaryConfidence >= 0.8)
+        #expect(segments[1].segmentType == .speech)
+    }
+
+    @Test("Speaker change respects min segment duration to avoid micro segments")
+    func speakerChangeRespectsMinDuration() {
+        let config = TranscriptSegmenter.Config(
+            pauseThreshold: 2.0,
+            maxSegmentDuration: 120.0,
+            minSegmentDuration: 10.0
+        )
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 0, endTime: 4, text: "short opening"),
+            makeAtom(ordinal: 1, startTime: 4, endTime: 8, text: "new speaker starts"),
+        ]
+        let featureWindows = [
+            makeFeatureWindow(startTime: 0, endTime: 4, speakerClusterId: 1),
+            makeFeatureWindow(startTime: 4, endTime: 8, speakerClusterId: 2),
+        ]
+
+        let segments = TranscriptSegmenter.segment(
+            atoms: atoms,
+            featureWindows: featureWindows,
+            config: config
+        )
+
+        #expect(segments.count == 1)
+        #expect(segments[0].atoms.count == 2)
+    }
+
+    @Test("High pause probability window triggers a hard break without a literal atom gap")
+    func featurePauseProbabilityBreak() {
+        let config = TranscriptSegmenter.Config(
+            pauseThreshold: 2.0,
+            maxSegmentDuration: 120.0,
+            minSegmentDuration: 10.0
+        )
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 0, endTime: 6, text: "first thought continues"),
+            makeAtom(ordinal: 1, startTime: 6, endTime: 12, text: "new topic starts here"),
+            makeAtom(ordinal: 2, startTime: 12, endTime: 18, text: "same topic continues"),
+        ]
+        let featureWindows = [
+            makeFeatureWindow(startTime: 0, endTime: 4, pauseProbability: 0.1, speakerClusterId: 1),
+            makeFeatureWindow(startTime: 4, endTime: 8, pauseProbability: 0.9, speakerClusterId: 1),
+            makeFeatureWindow(startTime: 8, endTime: 12, pauseProbability: 0.1, speakerClusterId: 1),
+            makeFeatureWindow(startTime: 12, endTime: 18, pauseProbability: 0.1, speakerClusterId: 1),
+        ]
+
+        let segments = TranscriptSegmenter.segment(
+            atoms: atoms,
+            featureWindows: featureWindows,
+            config: config
+        )
+
+        #expect(segments.count == 2)
+        #expect(segments[0].startAtomOrdinal == 0)
+        #expect(segments[0].endAtomOrdinal == 0)
+        #expect(segments[1].startAtomOrdinal == 1)
+        #expect(segments[1].endAtomOrdinal == 2)
+        #expect(segments[1].boundaryReason == .pause)
+        #expect(segments[1].boundaryConfidence >= 0.9)
+        #expect(segments[1].segmentType == .speech)
+    }
+
+    @Test("Every atom appears exactly once across emitted segments")
+    func exactAtomCoverage() {
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 0, endTime: 5, text: "intro"),
+            makeAtom(ordinal: 1, startTime: 5, endTime: 10, text: "still intro."),
+            makeAtom(ordinal: 2, startTime: 13, endTime: 18, text: "new section"),
+            makeAtom(ordinal: 3, startTime: 18.6, endTime: 24, text: "Anyway sponsor break"),
+        ]
+
+        let segments = TranscriptSegmenter.segment(atoms: atoms)
+        let flattenedOrdinals = segments.flatMap(\.atoms).map(\.atomKey.atomOrdinal)
+
+        #expect(flattenedOrdinals == atoms.map(\.atomKey.atomOrdinal))
+    }
 }
 
 // MARK: - TranscriptQualityEstimator Tests
@@ -344,7 +509,8 @@ struct TranscriptQualityEstimatorTests {
     private func makeSegment(
         text: String,
         startTime: Double = 0,
-        duration: Double = 30
+        duration: Double = 30,
+        segmentIndex: Int = 0
     ) -> AdTranscriptSegment {
         // Create enough atoms to cover the duration
         let wordsPerAtom = 10
@@ -366,7 +532,7 @@ struct TranscriptQualityEstimatorTests {
             )
         }
 
-        return AdTranscriptSegment(atoms: atoms, segmentIndex: 0)
+        return AdTranscriptSegment(atoms: atoms, segmentIndex: segmentIndex)
     }
 
     @Test("Good quality transcript scores as good with reasonable signals")
@@ -379,6 +545,7 @@ struct TranscriptQualityEstimatorTests {
         let assessment = TranscriptQualityEstimator.assess(segment: segment)
 
         #expect(assessment.quality == .good)
+        #expect(assessment.qualityScore == assessment.compositeScore)
         #expect(assessment.compositeScore >= 0.65)
         #expect(assessment.punctuationScore > 0.3)
         #expect(assessment.tokenDensityScore > 0.5)
@@ -410,20 +577,57 @@ struct TranscriptQualityEstimatorTests {
         #expect(assessment.compositeScore < 0.35)
     }
 
+    @Test("OOV-like noise does not score as good")
+    func oovLikeNoiseDoesNotScoreAsGood() {
+        let clean = makeSegment(
+            text: "This conversation stays coherent and natural with complete sentences and clear transitions between each part of the discussion.",
+            duration: 12
+        )
+        let noisy = makeSegment(
+            text: "brxq9 tzzk4 qlmn8 vvvr rrrr zyxw7 pttt3 kqrx8 blorf99 snnn qrxl5 mmmn.",
+            duration: 12
+        )
+
+        let cleanAssessment = TranscriptQualityEstimator.assess(segment: clean)
+        let noisyAssessment = TranscriptQualityEstimator.assess(segment: noisy)
+
+        #expect(noisyAssessment.quality != .good)
+        #expect(noisyAssessment.qualityScore < cleanAssessment.qualityScore)
+        #expect(noisyAssessment.wordLengthScore < cleanAssessment.wordLengthScore)
+    }
+
+    @Test("Bad region ranks below clean region when density matches")
+    func badRegionRanksBelowCleanRegionWhenDensityMatches() {
+        let clean = makeSegment(
+            text: "We are explaining the topic clearly with normal phrasing and enough punctuation to keep the transcript easy to follow throughout.",
+            duration: 14
+        )
+        let noisy = makeSegment(
+            text: "mrrp qzxv9 blrtt snnn qqqq vvvv tktk4 rxxm zplk9 and uh qrrt mnop7 tsss.",
+            duration: 14
+        )
+
+        let cleanAssessment = TranscriptQualityEstimator.assess(segment: clean)
+        let noisyAssessment = TranscriptQualityEstimator.assess(segment: noisy)
+
+        #expect(noisyAssessment.qualityScore < cleanAssessment.qualityScore)
+        #expect(noisyAssessment.quality != .good)
+        #expect(noisyAssessment.confidenceProxyScore < cleanAssessment.confidenceProxyScore)
+    }
+
     @Test("Batch assess processes all segments with correct indices")
     func batchAssess() {
         let segments = (0..<3).map { i in
-            makeSegment(text: "Segment \(i) has some text. It is fine.", duration: 15)
+            makeSegment(text: "Segment \(i) has some text. It is fine.", duration: 15, segmentIndex: i)
         }
 
         let assessments = TranscriptQualityEstimator.assess(segments: segments)
 
         #expect(assessments.count == 3)
         for (i, assessment) in assessments.enumerated() {
-            #expect(assessment.segmentIndex == 0) // makeSegment always uses index 0
+            #expect(assessment.segmentIndex == i)
             #expect(assessment.compositeScore >= 0.0)
             #expect(assessment.compositeScore <= 1.0)
-            _ = i // suppress unused warning
         }
     }
 

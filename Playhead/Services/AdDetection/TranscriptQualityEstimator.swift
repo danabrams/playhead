@@ -21,14 +21,29 @@ struct TranscriptQualityAssessment: Sendable {
     let tokenDensityScore: Double
     let repetitionScore: Double
     let wordLengthScore: Double
+    let confidenceProxyScore: Double
 
-    /// Composite score (0.0 = worst, 1.0 = best)
+    /// Numeric quality score (0.0 = worst, 1.0 = best) used for finer-grained decisions.
+    let qualityScore: Double
+
+    /// Backward-compatible alias retained for existing callers/tests.
     var compositeScore: Double {
+        qualityScore
+    }
+
+    static func score(
+        punctuationScore: Double,
+        tokenDensityScore: Double,
+        repetitionScore: Double,
+        wordLengthScore: Double,
+        confidenceProxyScore: Double
+    ) -> Double {
         // Weighted combination
-        0.35 * punctuationScore +
+        0.30 * punctuationScore +
         0.25 * tokenDensityScore +
         0.20 * repetitionScore +
-        0.20 * wordLengthScore
+        0.15 * wordLengthScore +
+        0.10 * confidenceProxyScore
     }
 }
 
@@ -57,21 +72,25 @@ enum TranscriptQualityEstimator {
         let tokenDensity = tokenDensityScore(segment)
         let repetition = repetitionScore(text)
         let wordLength = wordLengthDistributionScore(text)
-
-        let assessment = TranscriptQualityAssessment(
-            segmentIndex: segment.segmentIndex,
-            quality: .good, // placeholder, computed below
+        let confidenceProxy = confidenceProxyScore(
             punctuationScore: punctuation,
             tokenDensityScore: tokenDensity,
             repetitionScore: repetition,
             wordLengthScore: wordLength
         )
 
-        let score = assessment.compositeScore
+        let qualityScore = TranscriptQualityAssessment.score(
+            punctuationScore: punctuation,
+            tokenDensityScore: tokenDensity,
+            repetitionScore: repetition,
+            wordLengthScore: wordLength,
+            confidenceProxyScore: confidenceProxy
+        )
+
         let quality: TranscriptQualityLevel
-        if score >= thresholds.goodMinScore {
+        if qualityScore >= thresholds.goodMinScore {
             quality = .good
-        } else if score >= thresholds.degradedMinScore {
+        } else if qualityScore >= thresholds.degradedMinScore {
             quality = .degraded
         } else {
             quality = .unusable
@@ -83,7 +102,9 @@ enum TranscriptQualityEstimator {
             punctuationScore: punctuation,
             tokenDensityScore: tokenDensity,
             repetitionScore: repetition,
-            wordLengthScore: wordLength
+            wordLengthScore: wordLength,
+            confidenceProxyScore: confidenceProxy,
+            qualityScore: qualityScore
         )
     }
 
@@ -152,8 +173,8 @@ enum TranscriptQualityEstimator {
         return max(0.0, 1.0 - repetitionRatio * 3.0)
     }
 
-    /// Word length distribution: real speech has varied word lengths.
-    /// ASR garbage tends toward either very short or uniform lengths.
+    /// Word length distribution plus unusual-token screening. This acts as a
+    /// lightweight OOV proxy when the ASR stack does not expose per-word confidence.
     private static func wordLengthDistributionScore(_ text: String) -> Double {
         let words = text.split(whereSeparator: \.isWhitespace)
         guard words.count >= 5 else { return 0.5 }
@@ -180,6 +201,78 @@ enum TranscriptQualityEstimator {
             stddevScore = max(0.0, 1.0 - (stddev - 4.0) * 0.2)
         }
 
-        return (meanScore + stddevScore) / 2.0
+        let unusualTokenPenalty = unusualTokenPenalty(words: words.map(String.init))
+
+        return max(0.0, min(1.0, ((meanScore + stddevScore) / 2.0) * (1.0 - unusualTokenPenalty)))
+    }
+
+    private static func confidenceProxyScore(
+        punctuationScore: Double,
+        tokenDensityScore: Double,
+        repetitionScore: Double,
+        wordLengthScore: Double
+    ) -> Double {
+        let scores = [punctuationScore, tokenDensityScore, repetitionScore, wordLengthScore]
+        let mean = scores.reduce(0, +) / Double(scores.count)
+        let variance = scores
+            .map { ($0 - mean) * ($0 - mean) }
+            .reduce(0, +) / Double(scores.count)
+
+        // Stable agreement across signals is a useful stand-in when no explicit
+        // ASR confidence stream is available.
+        return max(0.0, min(1.0, mean * (1.0 - variance)))
+    }
+
+    private static func unusualTokenPenalty(words: [String]) -> Double {
+        guard !words.isEmpty else { return 0.0 }
+
+        let penalties = words.map { word -> Double in
+            let lower = word.lowercased()
+            let letters = lower.filter(\.isLetter)
+            let digits = lower.filter(\.isNumber)
+
+            var penalty = 0.0
+            if letters.isEmpty {
+                penalty += 0.4
+            }
+            if !digits.isEmpty && !letters.isEmpty {
+                penalty += 0.2
+            }
+            if lower.count > 18 {
+                penalty += 0.3
+            }
+            if longRepeatedCharacterRun(in: lower) {
+                penalty += 0.3
+            }
+            if letters.count >= 5 && vowelRatio(in: letters) < 0.2 {
+                penalty += 0.2
+            }
+            return min(1.0, penalty)
+        }
+
+        return penalties.reduce(0, +) / Double(penalties.count)
+    }
+
+    private static func longRepeatedCharacterRun(in word: String) -> Bool {
+        var last: Character?
+        var runLength = 0
+        for character in word {
+            if character == last {
+                runLength += 1
+            } else {
+                last = character
+                runLength = 1
+            }
+            if runLength >= 4 {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func vowelRatio(in letters: String) -> Double {
+        guard !letters.isEmpty else { return 0.0 }
+        let vowelCount = letters.filter { "aeiou".contains($0) }.count
+        return Double(vowelCount) / Double(letters.count)
     }
 }

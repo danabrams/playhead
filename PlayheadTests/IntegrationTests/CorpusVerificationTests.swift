@@ -388,6 +388,66 @@ struct CorpusPhase1TranscriptPipelineTests {
             }
         }
     }
+
+    @Test("Quality estimator ranks a noisy middle region below clean episode regions")
+    func qualityEstimatorMixedQualityEpisode() {
+        func makeSegment(index: Int, startTime: Double, duration: Double, text: String) -> AdTranscriptSegment {
+            let words = text.split(whereSeparator: \.isWhitespace)
+            let atomCount = max(1, words.count / 8)
+            let atomDuration = duration / Double(atomCount)
+
+            let atoms = (0..<atomCount).map { atomIndex in
+                let atomStart = startTime + Double(atomIndex) * atomDuration
+                let atomEnd = atomStart + atomDuration
+                let wordSlice = words[
+                    min(atomIndex * 8, words.count)..<min((atomIndex + 1) * 8, words.count)
+                ]
+                return TranscriptAtom(
+                    atomKey: TranscriptAtomKey(
+                        analysisAssetId: "mixed-quality-episode",
+                        transcriptVersion: "mixed-quality-v1",
+                        atomOrdinal: index * 100 + atomIndex
+                    ),
+                    contentHash: "hash-\(index)-\(atomIndex)",
+                    startTime: atomStart,
+                    endTime: atomEnd,
+                    text: wordSlice.joined(separator: " "),
+                    chunkIndex: index * 100 + atomIndex
+                )
+            }
+
+            return AdTranscriptSegment(atoms: atoms, segmentIndex: index)
+        }
+
+        let segments = [
+            makeSegment(
+                index: 0,
+                startTime: 0,
+                duration: 18,
+                text: "Welcome back to the show. Today we are talking through the reporting process in a clear and natural way with complete sentences."
+            ),
+            makeSegment(
+                index: 1,
+                startTime: 18,
+                duration: 18,
+                text: "qrxv9 blorf77 tttt mrrp snnn qzpl4 uh kktx9 vvvv zrrt2 plmn qqqq rxtt."
+            ),
+            makeSegment(
+                index: 2,
+                startTime: 36,
+                duration: 12,
+                text: "After that noisy patch, the discussion returns to normal pacing. The host explains the next point clearly, and every sentence stays easy to follow."
+            )
+        ]
+
+        let assessments = TranscriptQualityEstimator.assess(segments: segments)
+
+        #expect(assessments.count == 3)
+        #expect(assessments[0].quality == .good)
+        #expect(assessments[1].quality != .good)
+        #expect(assessments[1].qualityScore < assessments[0].qualityScore)
+        #expect(assessments[1].qualityScore < assessments[2].qualityScore)
+    }
 }
 
 // MARK: - Suite 2: Corpus – LexicalScanner Coverage
