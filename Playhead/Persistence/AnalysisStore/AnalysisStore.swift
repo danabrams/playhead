@@ -163,7 +163,12 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
     /// C-2: raised when a backfill-job state transition is attempted against
     /// a row whose current status does not permit it (e.g. transitioning a
     /// `.complete` or `.failed` row back into `.running`).
-    case invalidStateTransition(jobId: String, toStatus: String)
+    ///
+    /// Fix #6: `fromStatus` carries the row's prior status at the moment
+    /// the transition was rejected. It is `nil` when no row existed for
+    /// the `jobId`, so callers can distinguish "missing" from "in a
+    /// specific terminal state" without re-querying.
+    case invalidStateTransition(jobId: String, fromStatus: String?, toStatus: String)
     /// H-2: raised when `insertEvidenceEvent` encounters a PRIMARY KEY
     /// collision where the existing row's body (evidenceJSON/createdAt)
     /// differs from the incoming row. The M-4 INSERT OR IGNORE path was
@@ -182,8 +187,8 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
         case .invalidRow(let col): "Unexpected NULL in non-null column \(col)"
         case .invalidEvidenceEvent(let msg): "Invalid evidence event: \(msg)"
         case .invalidScanCohortJSON(let msg): "Invalid scanCohortJSON: \(msg)"
-        case .invalidStateTransition(let id, let to):
-            "Invalid backfill job state transition for \(id) -> \(to)"
+        case .invalidStateTransition(let id, let from, let to):
+            "Invalid backfill job state transition for \(id): \(from ?? "<missing>") -> \(to)"
         case .evidenceEventBodyMismatch(let id):
             "Evidence event id '\(id)' already persisted with a different body"
         }
@@ -1828,6 +1833,7 @@ actor AnalysisStore {
             }
             throw AnalysisStoreError.invalidStateTransition(
                 jobId: jobId,
+                fromStatus: current,
                 toStatus: "deferred"
             )
         }
@@ -1882,6 +1888,7 @@ actor AnalysisStore {
             }
             throw AnalysisStoreError.invalidStateTransition(
                 jobId: jobId,
+                fromStatus: current,
                 toStatus: "running"
             )
         }
@@ -1921,6 +1928,7 @@ actor AnalysisStore {
             }
             throw AnalysisStoreError.invalidStateTransition(
                 jobId: jobId,
+                fromStatus: current,
                 toStatus: "complete"
             )
         }
@@ -1977,6 +1985,7 @@ actor AnalysisStore {
             }
             throw AnalysisStoreError.invalidStateTransition(
                 jobId: jobId,
+                fromStatus: current,
                 toStatus: "failed"
             )
         }

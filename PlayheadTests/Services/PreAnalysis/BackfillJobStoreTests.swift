@@ -747,4 +747,38 @@ struct BackfillJobStoreTests {
         #expect(fetched.jobId == "wal-job")
         #expect(fetched.phase == .scanHarvesterProposals)
     }
+
+    // MARK: - Fix #6: invalidStateTransition carries prior status
+
+    @Test("markBackfillJobRunning on a failed row carries fromStatus='failed'")
+    func markBackfillJobRunning_throwsOnFailedRow_carriesPriorStatus() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(jobId: "prior-failed-job", status: .queued)
+        try await store.insertBackfillJob(job)
+
+        // Move the row into the `.failed` terminal state.
+        try await store.markBackfillJobRunning(jobId: job.jobId)
+        try await store.markBackfillJobFailed(
+            jobId: job.jobId,
+            reason: "boom",
+            retryCount: 1
+        )
+
+        // Trying to re-run the failed row must raise invalidStateTransition
+        // with the job id, the prior `.failed` status, and the requested
+        // target status.
+        do {
+            try await store.markBackfillJobRunning(jobId: job.jobId)
+            Issue.record("expected invalidStateTransition, but no error was thrown")
+        } catch let error as AnalysisStoreError {
+            guard case .invalidStateTransition(let id, let fromStatus, let toStatus) = error else {
+                Issue.record("unexpected error: \(error)")
+                return
+            }
+            #expect(id == job.jobId)
+            #expect(fromStatus == "failed")
+            #expect(toStatus == "running")
+        }
+    }
 }
