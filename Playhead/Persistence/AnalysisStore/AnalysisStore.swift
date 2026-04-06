@@ -452,6 +452,27 @@ actor AnalysisStore {
         try exec("CREATE INDEX IF NOT EXISTS idx_jobs_workkey ON analysis_jobs(workKey)")
         try exec("CREATE INDEX IF NOT EXISTS idx_jobs_episode ON analysis_jobs(episodeId)")
 
+        // backfill_jobs
+        try exec("""
+            CREATE TABLE IF NOT EXISTS backfill_jobs (
+                jobId TEXT PRIMARY KEY,
+                analysisAssetId TEXT NOT NULL,
+                podcastId TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                coveragePolicy TEXT NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 0,
+                progressCursor TEXT,
+                retryCount INTEGER NOT NULL DEFAULT 0,
+                deferReason TEXT,
+                status TEXT NOT NULL DEFAULT 'queued',
+                scanCohortJSON TEXT,
+                decisionCohortJSON TEXT,
+                createdAt REAL NOT NULL
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_backfill_jobs_status_priority ON backfill_jobs(status, priority DESC, createdAt ASC)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_backfill_jobs_asset_phase ON backfill_jobs(analysisAssetId, phase)")
+
         // FTS5 virtual table over transcript_chunks
         try exec("""
             CREATE VIRTUAL TABLE IF NOT EXISTS transcript_chunks_fts USING fts5(
@@ -1476,6 +1497,88 @@ actor AnalysisStore {
         }
     }
 
+    // MARK: - CRUD: backfill_jobs
+
+    func insertBackfillJob(_ job: BackfillJob) throws {
+        let sql = """
+            INSERT OR REPLACE INTO backfill_jobs
+            (jobId, analysisAssetId, podcastId, phase, coveragePolicy, priority,
+             progressCursor, retryCount, deferReason, status, scanCohortJSON,
+             decisionCohortJSON, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, job.jobId)
+        bind(stmt, 2, job.analysisAssetId)
+        bind(stmt, 3, job.podcastId)
+        bind(stmt, 4, job.phase.rawValue)
+        bind(stmt, 5, job.coveragePolicy.rawValue)
+        bind(stmt, 6, job.priority)
+        bind(stmt, 7, try encodeJSONString(job.progressCursor))
+        bind(stmt, 8, job.retryCount)
+        bind(stmt, 9, job.deferReason)
+        bind(stmt, 10, job.status.rawValue)
+        bind(stmt, 11, job.scanCohortJSON)
+        bind(stmt, 12, job.decisionCohortJSON)
+        bind(stmt, 13, job.createdAt)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func fetchBackfillJob(byId jobId: String) throws -> BackfillJob? {
+        let sql = "SELECT * FROM backfill_jobs WHERE jobId = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, jobId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return try readBackfillJob(stmt)
+    }
+
+    func checkpointBackfillJob(
+        jobId: String,
+        progressCursor: BackfillProgressCursor?,
+        status: BackfillJobStatus = .running,
+        retryCount: Int? = nil,
+        deferReason: String? = nil
+    ) throws {
+        let sql = """
+            UPDATE backfill_jobs
+            SET progressCursor = ?, status = ?, retryCount = COALESCE(?, retryCount),
+                deferReason = ?
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, try encodeJSONString(progressCursor))
+        bind(stmt, 2, status.rawValue)
+        bind(stmt, 3, retryCount)
+        bind(stmt, 4, deferReason)
+        bind(stmt, 5, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    @discardableResult
+    func advanceBackfillJobPhase(
+        jobId: String,
+        expecting currentPhase: BackfillJobPhase,
+        to nextPhase: BackfillJobPhase,
+        status: BackfillJobStatus = .queued
+    ) throws -> Bool {
+        let sql = """
+            UPDATE backfill_jobs
+            SET phase = ?, progressCursor = NULL, status = ?, deferReason = NULL
+            WHERE jobId = ? AND phase = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, nextPhase.rawValue)
+        bind(stmt, 2, status.rawValue)
+        bind(stmt, 3, jobId)
+        bind(stmt, 4, currentPhase.rawValue)
+        try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
+    }
+
     private func readJob(_ stmt: OpaquePointer?) -> AnalysisJob {
         AnalysisJob(
             jobId: text(stmt, 0),
@@ -1499,6 +1602,39 @@ actor AnalysisStore {
             lastErrorCode: optionalText(stmt, 18),
             createdAt: sqlite3_column_double(stmt, 19),
             updatedAt: sqlite3_column_double(stmt, 20)
+        )
+    }
+
+    private func readBackfillJob(_ stmt: OpaquePointer?) throws -> BackfillJob {
+        let phaseRaw = text(stmt, 3)
+        guard let phase = BackfillJobPhase(rawValue: phaseRaw) else {
+            throw AnalysisStoreError.queryFailed("Unknown backfill phase '\(phaseRaw)'")
+        }
+
+        let coveragePolicyRaw = text(stmt, 4)
+        guard let coveragePolicy = CoveragePolicy(rawValue: coveragePolicyRaw) else {
+            throw AnalysisStoreError.queryFailed("Unknown coverage policy '\(coveragePolicyRaw)'")
+        }
+
+        let statusRaw = text(stmt, 9)
+        guard let status = BackfillJobStatus(rawValue: statusRaw) else {
+            throw AnalysisStoreError.queryFailed("Unknown backfill status '\(statusRaw)'")
+        }
+
+        return BackfillJob(
+            jobId: text(stmt, 0),
+            analysisAssetId: text(stmt, 1),
+            podcastId: text(stmt, 2),
+            phase: phase,
+            coveragePolicy: coveragePolicy,
+            priority: Int(sqlite3_column_int(stmt, 5)),
+            progressCursor: try decodeJSON(BackfillProgressCursor.self, from: optionalText(stmt, 6)),
+            retryCount: Int(sqlite3_column_int(stmt, 7)),
+            deferReason: optionalText(stmt, 8),
+            status: status,
+            scanCohortJSON: optionalText(stmt, 10),
+            decisionCohortJSON: optionalText(stmt, 11),
+            createdAt: sqlite3_column_double(stmt, 12)
         )
     }
 
@@ -1591,5 +1727,20 @@ actor AnalysisStore {
     private func optionalInt(_ stmt: OpaquePointer?, _ idx: Int32) -> Int? {
         guard sqlite3_column_type(stmt, idx) != SQLITE_NULL else { return nil }
         return Int(sqlite3_column_int(stmt, idx))
+    }
+
+    private func encodeJSONString<T: Encodable>(_ value: T?) throws -> String? {
+        guard let value else { return nil }
+        let data = try JSONEncoder().encode(value)
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func decodeJSON<T: Decodable>(_ type: T.Type, from json: String?) throws -> T? {
+        guard let json else { return nil }
+        do {
+            return try JSONDecoder().decode(T.self, from: Data(json.utf8))
+        } catch {
+            throw AnalysisStoreError.queryFailed("Failed to decode \(T.self): \(error)")
+        }
     }
 }

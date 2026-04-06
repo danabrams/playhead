@@ -112,3 +112,37 @@ func makeAnalysisJob(
         updatedAt: updatedAt
     )
 }
+
+// MARK: - BackfillJob
+
+func makeBackfillJob(
+    jobId: String = UUID().uuidString,
+    analysisAssetId: String = "asset-1",
+    podcastId: String = "podcast-1",
+    phase: BackfillJobPhase = .fullEpisodeScan,
+    coveragePolicy: CoveragePolicy = .fullCoverage,
+    priority: Int = 0,
+    progressCursor: BackfillProgressCursor? = nil,
+    retryCount: Int = 0,
+    deferReason: String? = nil,
+    status: BackfillJobStatus = .queued,
+    scanCohortJSON: String? = nil,
+    decisionCohortJSON: String? = nil,
+    createdAt: Double = Date().timeIntervalSince1970
+) -> BackfillJob {
+    BackfillJob(
+        jobId: jobId,
+        analysisAssetId: analysisAssetId,
+        podcastId: podcastId,
+        phase: phase,
+        coveragePolicy: coveragePolicy,
+        priority: priority,
+        progressCursor: progressCursor,
+        retryCount: retryCount,
+        deferReason: deferReason,
+        status: status,
+        scanCohortJSON: scanCohortJSON,
+        decisionCohortJSON: decisionCohortJSON,
+        createdAt: createdAt
+    )
+}
