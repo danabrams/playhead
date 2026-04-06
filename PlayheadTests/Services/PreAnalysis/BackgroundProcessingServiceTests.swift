@@ -44,8 +44,10 @@ struct BackfillTaskHandlerTests {
         await bps.handleBackfillTask(task)
         try await waitForCompletion(of: task)
 
-        // Coordinator should have been started (thermal is nominal on simulator).
-        #expect(coordinator.startCallCount >= 1)
+        // The handler must invoke the real backfill work method, not the
+        // capability-observer lifecycle method start(). See regression test
+        // backfillInvokesRealWorkMethod for the bug history.
+        #expect(coordinator.runPendingBackfillCallCount >= 1)
         #expect(task.completedSuccess == true)
         // A new backfill should be scheduled.
         let backfillRequests = scheduler.submittedRequests.filter {
@@ -68,16 +70,16 @@ struct BackfillTaskHandlerTests {
         await bps.handleBackfillTask(task)
         try await waitForCompletion(of: task)
 
-        // On simulator (nominal thermal), coordinator.start() IS called.
-        #expect(coordinator.startCallCount >= 1)
+        // On simulator (nominal thermal), the real work method IS called.
+        #expect(coordinator.runPendingBackfillCallCount >= 1)
         #expect(task.completedSuccess == true)
     }
 
     @Test("Backfill expiration cancels work")
     func backfillExpirationCancelsWork() async throws {
         let coordinator = StubAnalysisCoordinator()
-        // Make start() take long enough for expiration to fire.
-        coordinator.startDuration = .seconds(10)
+        // Make runPendingBackfill() take long enough for expiration to fire.
+        coordinator.runPendingBackfillDuration = .seconds(10)
         let (bps, _, _, _) = makeBPS(coordinator: coordinator)
         let task = StubBackgroundTask()
 
@@ -104,6 +106,30 @@ struct BackfillTaskHandlerTests {
         #expect(coordinator.stopCallCount >= 1)
         #expect(task.completedSuccess == false)
     }
+
+    @Test("Backfill handler invokes real work method, not start")
+    func backfillInvokesRealWorkMethod() async throws {
+        // Regression: handleBackfillTask used to call coordinator.start(),
+        // which is a sync lifecycle-init that just spawns the capability
+        // observer and returns. The BGProcessingTask was being marked
+        // successful in microseconds without any backfill work happening,
+        // and iOS reclaimed the granted background time. This test pins
+        // the contract that handleBackfillTask invokes runPendingBackfill.
+        let coordinator = StubAnalysisCoordinator()
+        let (bps, _, _, _) = makeBPS(coordinator: coordinator)
+        let task = StubBackgroundTask()
+
+        await bps.handleBackfillTask(task)
+        try await waitForCompletion(of: task)
+
+        #expect(coordinator.runPendingBackfillCallCount >= 1,
+                "handleBackfillTask must invoke runPendingBackfill, not start()")
+        // start() is the capability-observer lifecycle entry point and must
+        // not be called from the background task handler.
+        #expect(coordinator.startCallCount == 0,
+                "handleBackfillTask must not call start() — that path was the bug")
+        #expect(task.completedSuccess == true)
+    }
 }
 
 // MARK: - Continued Processing Handler
@@ -119,14 +145,14 @@ struct ContinuedProcessingHandlerTests {
         await bps.handleContinuedProcessingTask(task)
         try await waitForCompletion(of: task)
 
-        #expect(coordinator.startCallCount >= 1)
+        #expect(coordinator.runPendingBackfillCallCount >= 1)
         #expect(task.completedSuccess == true)
     }
 
     @Test("Continued processing expiration cancels work")
     func continuedProcessingExpiration() async throws {
         let coordinator = StubAnalysisCoordinator()
-        coordinator.startDuration = .seconds(10)
+        coordinator.runPendingBackfillDuration = .seconds(10)
         let (bps, _, _, _) = makeBPS(coordinator: coordinator)
         let task = StubBackgroundTask()
 

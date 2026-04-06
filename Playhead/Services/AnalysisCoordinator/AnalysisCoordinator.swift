@@ -214,6 +214,63 @@ actor AnalysisCoordinator {
         logger.info("AnalysisCoordinator stopped")
     }
 
+    // MARK: - Background Backfill
+
+    /// Drain any pending pre-analysis work during a BGProcessingTask window.
+    ///
+    /// The actual job execution happens in `AnalysisWorkScheduler`, which runs
+    /// its own loop in the background process. This method exists so the
+    /// background task handler in `BackgroundProcessingService` has a real
+    /// piece of work to await: it polls the analysis_jobs table for queued/
+    /// running jobs and yields the actor between checks, keeping the
+    /// BGProcessingTask alive while the scheduler loop drains the queue.
+    ///
+    /// Returns when no more work is pending, or when `Task.isCancelled`
+    /// becomes true (i.e. iOS expired the background window).
+    func runPendingBackfill() async {
+        logger.info("runPendingBackfill: draining pending analysis jobs")
+
+        // Maximum lifetime cap so we never spin forever inside one BG window
+        // even if the scheduler keeps producing new tier jobs.
+        let deadline = ContinuousClock.now + .seconds(25 * 60)
+        // Poll interval — 1s gives the scheduler loop time to make progress
+        // without burning the actor on tight queries.
+        let pollInterval: Duration = .seconds(1)
+
+        var processedAny = false
+
+        while !Task.isCancelled, ContinuousClock.now < deadline {
+            let queued = (try? await store.fetchJobsByState("queued")) ?? []
+            let running = (try? await store.fetchJobsByState("running")) ?? []
+            let paused = (try? await store.fetchJobsByState("paused")) ?? []
+
+            let pendingCount = queued.count + running.count + paused.count
+
+            if pendingCount == 0 {
+                logger.info("runPendingBackfill: queue drained (processed=\(processedAny))")
+                return
+            }
+
+            processedAny = true
+            logger.debug("runPendingBackfill: \(pendingCount) jobs pending (queued=\(queued.count) running=\(running.count) paused=\(paused.count))")
+
+            // Sleep returns CancellationError when the task is cancelled,
+            // which propagates expiration through the loop guard above.
+            do {
+                try await Task.sleep(for: pollInterval)
+            } catch {
+                logger.info("runPendingBackfill: cancelled by expiration")
+                return
+            }
+        }
+
+        if Task.isCancelled {
+            logger.info("runPendingBackfill: cancelled")
+        } else {
+            logger.info("runPendingBackfill: deadline reached after draining")
+        }
+    }
+
     // MARK: - Playback Event Handling
 
     /// Main entry point: receive a playback event and react.

@@ -52,6 +52,10 @@ extension BGTaskScheduler: BackgroundTaskScheduling {}
 protocol AnalysisCoordinating: Sendable {
     func start() async
     func stop() async
+    /// Drain any pending analysis backfill work for the duration of a
+    /// BGProcessingTask window. Must respect `Task.isCancelled` and return
+    /// promptly on expiration.
+    func runPendingBackfill() async
 }
 
 extension AnalysisCoordinator: AnalysisCoordinating {}
@@ -376,10 +380,18 @@ actor BackgroundProcessingService {
                 return
             }
 
-            // Delegate backfill work to the coordinator.
-            // The coordinator will checkpoint after every feature block and
-            // transcript chunk, so expiration is safe at any point.
-            await self.coordinator.start()
+            // Drive the analysis pipeline to drain pending backfill jobs.
+            // runPendingBackfill polls the analysis_jobs table and yields
+            // between checks, keeping this BGProcessingTask alive while the
+            // AnalysisWorkScheduler loop processes the queue. It returns when
+            // the queue is empty or when the task is cancelled (expiration).
+            //
+            // NOTE: this is the actual work payload — the previous version of
+            // this handler called coordinator.start(), which is a fire-and-
+            // forget capability-observer setup that returned in microseconds
+            // and let iOS reclaim the granted background time without any
+            // analysis happening. See git blame for context.
+            await self.coordinator.runPendingBackfill()
 
             // If the task was cancelled (expiration fired), bail out without
             // marking success. The expiration handler will mark the task
@@ -418,8 +430,10 @@ actor BackgroundProcessingService {
 
         let workTask = Task {
             // Continued processing is for user-initiated work like model
-            // downloads. The coordinator handles checkpoint/resume.
-            await self.coordinator.start()
+            // downloads. We drain the analysis job queue here too — see the
+            // comment in handleBackfillTask for why this calls
+            // runPendingBackfill rather than coordinator.start().
+            await self.coordinator.runPendingBackfill()
 
             // If the task was cancelled (expiration fired), bail out without
             // marking success. The expiration handler will mark the task

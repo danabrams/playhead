@@ -133,8 +133,14 @@ final class StubTaskScheduler: BackgroundTaskScheduling, @unchecked Sendable {
 final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
     var startCallCount = 0
     var stopCallCount = 0
+    var runPendingBackfillCallCount = 0
     /// If set, `start()` will sleep this long to simulate work.
+    /// Retained for tests that exercise the start() lifecycle path.
     var startDuration: Duration?
+    /// If set, `runPendingBackfill()` will sleep this long to simulate work.
+    /// Used by background-task expiration tests to keep the BG task open
+    /// long enough for the expiration handler to fire.
+    var runPendingBackfillDuration: Duration?
 
     func start() async {
         startCallCount += 1
@@ -145,6 +151,13 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
 
     func stop() async {
         stopCallCount += 1
+    }
+
+    func runPendingBackfill() async {
+        runPendingBackfillCallCount += 1
+        if let duration = runPendingBackfillDuration {
+            try? await Task.sleep(for: duration)
+        }
     }
 }
 
