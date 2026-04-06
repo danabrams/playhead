@@ -1998,6 +1998,38 @@ actor AnalysisStore {
 
     func insertSemanticScanResult(_ result: SemanticScanResult) throws {
         try validateScanCohortJSON(result.scanCohortJSON)
+        let reuseKeyHash = Self.semanticScanReuseKeyHash(
+            analysisAssetId: result.analysisAssetId,
+            windowFirstAtomOrdinal: result.windowFirstAtomOrdinal,
+            windowLastAtomOrdinal: result.windowLastAtomOrdinal,
+            scanPass: result.scanPass,
+            transcriptVersion: result.transcriptVersion,
+            scanCohortJSON: result.scanCohortJSON
+        )
+
+        // H-1: a cached `.success` row must never be overwritten by a
+        // subsequent `.refusal` (or other non-success) retry with the same
+        // reuseKeyHash. The previous `INSERT OR REPLACE` silently destroyed
+        // the cached success. Probe the existing row under the actor's
+        // serialization guarantee and bail out early if the incoming row
+        // would demote a cached success.
+        //
+        // Rank: `.success` outranks everything else. Same-rank collisions
+        // fall through to the REPLACE path (last write wins), matching the
+        // existing C5 contract for success-vs-success retries.
+        if result.status != .success {
+            let probe = try prepare("SELECT status FROM semantic_scan_results WHERE reuseKeyHash = ? LIMIT 1")
+            defer { sqlite3_finalize(probe) }
+            bind(probe, 1, reuseKeyHash)
+            if sqlite3_step(probe) == SQLITE_ROW,
+               let existingStatus = optionalText(probe, 0),
+               existingStatus == SemanticScanStatus.success.rawValue {
+                // Silently skip: the cached success is the canonical answer
+                // and a later refusal must not destroy it.
+                return
+            }
+        }
+
         let sql = """
             INSERT OR REPLACE INTO semantic_scan_results
             (id, analysisAssetId, windowFirstAtomOrdinal, windowLastAtomOrdinal,
@@ -2028,14 +2060,7 @@ actor AnalysisStore {
         bind(stmt, 17, result.prewarmHit ? 1 : 0)
         bind(stmt, 18, result.scanCohortJSON)
         bind(stmt, 19, result.transcriptVersion)
-        bind(stmt, 20, Self.semanticScanReuseKeyHash(
-            analysisAssetId: result.analysisAssetId,
-            windowFirstAtomOrdinal: result.windowFirstAtomOrdinal,
-            windowLastAtomOrdinal: result.windowLastAtomOrdinal,
-            scanPass: result.scanPass,
-            transcriptVersion: result.transcriptVersion,
-            scanCohortJSON: result.scanCohortJSON
-        ))
+        bind(stmt, 20, reuseKeyHash)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -2183,38 +2208,62 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
 
         if sqlite3_changes(db) == 0 {
-            // The row was ignored. Distinguish natural-key dedup (silent
-            // success) from a stale PRIMARY KEY collision (loud failure)
-            // by probing whether a row with *this* id exists: if it
-            // doesn't, the ignore was a natural-key dedup and we return
-            // successfully; if it does but was created with different
-            // fields, we throw so the caller learns they reused an id.
-            let probe = try prepare("SELECT 1 FROM evidence_events WHERE id = ? LIMIT 1")
+            // The row was ignored. Two legitimate cases:
+            //   1. Natural-key dedup: another row with the same (asset,
+            //      eventType, sourceType, atomOrdinals, scanCohortJSON,
+            //      evidenceJSON) already exists — silent success.
+            //   2. PRIMARY KEY collision with the *same* body — idempotent,
+            //      silent success.
+            //
+            // H-2: the previous implementation compared only the natural
+            // key (asset, eventType, sourceType, atomOrdinals,
+            // scanCohortJSON) and left `evidenceJSON` / `createdAt` out.
+            // A caller re-inserting the same `id` with a different
+            // evidenceJSON got a silent no-op — the stored body stayed
+            // while the caller believed the insert had landed. Fetch the
+            // full stored body and fail loudly on any mismatch.
+            let probe = try prepare("""
+                SELECT eventType, sourceType, atomOrdinals, evidenceJSON,
+                       scanCohortJSON, createdAt, analysisAssetId
+                FROM evidence_events
+                WHERE id = ?
+                LIMIT 1
+                """)
             defer { sqlite3_finalize(probe) }
             bind(probe, 1, event.id)
+
             if sqlite3_step(probe) == SQLITE_ROW {
-                // An id-collision that wasn't the natural-key match means
-                // the existing row differs in fields the caller couldn't
-                // have controlled. We can't cheaply tell them apart here,
-                // but the existing test contract is: duplicate *id* with a
-                // different body throws. Probe the natural key: if it
-                // matches, the ignore was legitimate dedup.
-                let nk = try prepare("""
-                    SELECT 1 FROM evidence_events
-                    WHERE analysisAssetId = ? AND eventType = ? AND sourceType = ?
-                      AND atomOrdinals = ? AND scanCohortJSON = ?
-                    LIMIT 1
-                    """)
-                defer { sqlite3_finalize(nk) }
-                bind(nk, 1, event.analysisAssetId)
-                bind(nk, 2, event.eventType)
-                bind(nk, 3, event.sourceType.rawValue)
-                bind(nk, 4, event.atomOrdinals)
-                bind(nk, 5, event.scanCohortJSON)
-                if sqlite3_step(nk) != SQLITE_ROW {
-                    throw AnalysisStoreError.insertFailed("evidence_events id '\(event.id)' already in use with different body")
+                // Compare every persisted column against the incoming
+                // event. Any difference = caller reused an id with a
+                // different body, which is never legitimate.
+                let storedEventType = optionalText(probe, 0) ?? ""
+                let storedSourceType = optionalText(probe, 1) ?? ""
+                let storedAtomOrdinals = optionalText(probe, 2) ?? ""
+                let storedEvidenceJSON = optionalText(probe, 3) ?? ""
+                let storedScanCohortJSON = optionalText(probe, 4) ?? ""
+                let storedCreatedAt = sqlite3_column_double(probe, 5)
+                let storedAnalysisAssetId = optionalText(probe, 6) ?? ""
+
+                let bodyMatches =
+                    storedAnalysisAssetId == event.analysisAssetId &&
+                    storedEventType == event.eventType &&
+                    storedSourceType == event.sourceType.rawValue &&
+                    storedAtomOrdinals == event.atomOrdinals &&
+                    storedEvidenceJSON == event.evidenceJSON &&
+                    storedScanCohortJSON == event.scanCohortJSON &&
+                    storedCreatedAt == event.createdAt
+
+                if !bodyMatches {
+                    throw AnalysisStoreError.evidenceEventBodyMismatch(id: event.id)
                 }
+                // Body matches — idempotent re-insert. Fall through silently.
+                return
             }
+
+            // No row with this id. The ignore must be from the natural-key
+            // dedup path: another row with the same (asset, eventType,
+            // sourceType, atomOrdinals, scanCohortJSON) already exists.
+            // That's legitimate dedup; return silently.
         }
     }
 

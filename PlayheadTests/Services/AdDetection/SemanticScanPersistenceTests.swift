@@ -754,6 +754,26 @@ struct SemanticScanPersistenceTests {
         try await store.insertAsset(makePersistenceTestAsset())
 
         let cohort = try makeScanCohortJSON()
+
+        // M-5: the previous version of this test passed a malformed
+        // `badEvent` whose atomOrdinals failed validation *before* the
+        // transaction opened, so it never actually exercised the
+        // BEGIN IMMEDIATE / ROLLBACK path. Rewrite to force a mid-batch
+        // failure: pre-plant a row whose id will collide with the second
+        // event inside the batch, after the scan row and the first event
+        // have already been inserted against an open transaction.
+        let preExisting = EvidenceEvent(
+            id: "ev-collide",
+            analysisAssetId: "asset-1",
+            eventType: "preExisting",
+            sourceType: .catalog,
+            atomOrdinals: "[99]",
+            evidenceJSON: #"{"planted":"before batch"}"#,
+            scanCohortJSON: cohort,
+            createdAt: 1
+        )
+        try await store.insertEvidenceEvent(preExisting)
+
         let result = SemanticScanResult(
             id: "rb-scan",
             analysisAssetId: "asset-1",
@@ -785,27 +805,222 @@ struct SemanticScanPersistenceTests {
             scanCohortJSON: cohort,
             createdAt: 0
         )
-        // Second event has malformed atomOrdinals — the whole batch must
-        // roll back, so neither the scan result nor the first event survive.
-        let badEvent = EvidenceEvent(
-            id: "ev-bad",
+        // Same id as `preExisting` but different body — triggers the H-2
+        // body-mismatch throw mid-batch, forcing ROLLBACK of the
+        // already-inserted `result` and `goodEvent`.
+        let conflictingEvent = EvidenceEvent(
+            id: "ev-collide",
             analysisAssetId: "asset-1",
             eventType: "windowQuoted",
             sourceType: .fm,
-            atomOrdinals: "garbage",
-            evidenceJSON: "{}",
+            atomOrdinals: "[1,2,3]",
+            evidenceJSON: #"{"conflicts":"with planted"}"#,
             scanCohortJSON: cohort,
-            createdAt: 0
+            createdAt: 2
         )
 
         await #expect(throws: AnalysisStoreError.self) {
-            try await store.recordSemanticScanResult(result, evidenceEvents: [goodEvent, badEvent])
+            try await store.recordSemanticScanResult(
+                result,
+                evidenceEvents: [goodEvent, conflictingEvent]
+            )
         }
 
+        // The scan row and `ev-good` must be rolled back. Only the
+        // pre-existing row should remain.
         let scanRows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-1")
         let evRows = try await store.fetchEvidenceEvents(analysisAssetId: "asset-1")
-        #expect(scanRows.isEmpty)
-        #expect(evRows.isEmpty)
+        #expect(scanRows.isEmpty, "scan row must be rolled back")
+        #expect(evRows.count == 1, "only the pre-existing row must survive")
+        #expect(evRows.first?.id == "ev-collide")
+        #expect(evRows.first?.evidenceJSON == #"{"planted":"before batch"}"#)
+    }
+
+    // MARK: - Round-2 review fixes
+
+    @Test("H-1: a refusal retry must not overwrite a cached success at the same reuse key")
+    func refusalMustNotClobberCachedSuccess() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        let cohort = try makeScanCohortJSON()
+        let success = SemanticScanResult(
+            id: "success-row",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 200,
+            windowLastAtomOrdinal: 210,
+            windowStartTime: 2000,
+            windowEndTime: 2100,
+            scanPass: "passA",
+            transcriptQuality: .good,
+            disposition: .containsAd,
+            spansJSON: #"[{"startAtom":201,"endAtom":205}]"#,
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: 128,
+            outputTokenCount: 16,
+            latencyMs: 42,
+            prewarmHit: true,
+            scanCohortJSON: cohort,
+            transcriptVersion: "tx-v1"
+        )
+        // Same reuseKeyHash (same asset/window/pass/transcriptVersion/cohort)
+        // but a `.refusal` status. The H-1 bug silently REPLACEd the success
+        // row with the refusal; the fix must leave the success row intact.
+        let refusal = SemanticScanResult(
+            id: "refusal-row",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 200,
+            windowLastAtomOrdinal: 210,
+            windowStartTime: 2000,
+            windowEndTime: 2100,
+            scanPass: "passA",
+            transcriptQuality: .good,
+            disposition: .abstain,
+            spansJSON: "[]",
+            status: .refusal,
+            attemptCount: 2,
+            errorContext: #"{"reason":"safety"}"#,
+            inputTokenCount: 144,
+            outputTokenCount: nil,
+            latencyMs: 19,
+            prewarmHit: false,
+            scanCohortJSON: cohort,
+            transcriptVersion: "tx-v1"
+        )
+
+        try await store.insertSemanticScanResult(success)
+        try await store.insertSemanticScanResult(refusal)
+
+        let rows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-1")
+        #expect(rows.count == 1, "reuseKey collapses to one row")
+        #expect(rows.first?.status == .success, "success must survive the refusal retry")
+        #expect(rows.first?.id == "success-row")
+        #expect(rows.first?.spansJSON == #"[{"startAtom":201,"endAtom":205}]"#)
+    }
+
+    @Test("H-1: a later success overwrites an earlier refusal at the same reuse key")
+    func successStillOverwritesEarlierRefusal() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        let cohort = try makeScanCohortJSON()
+        let refusal = SemanticScanResult(
+            id: "early-refusal",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 300,
+            windowLastAtomOrdinal: 310,
+            windowStartTime: 3000,
+            windowEndTime: 3100,
+            scanPass: "passA",
+            transcriptQuality: .good,
+            disposition: .abstain,
+            spansJSON: "[]",
+            status: .refusal,
+            attemptCount: 1,
+            errorContext: #"{"reason":"safety"}"#,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: cohort,
+            transcriptVersion: "tx-v1"
+        )
+        let success = SemanticScanResult(
+            id: "later-success",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 300,
+            windowLastAtomOrdinal: 310,
+            windowStartTime: 3000,
+            windowEndTime: 3100,
+            scanPass: "passA",
+            transcriptQuality: .good,
+            disposition: .containsAd,
+            spansJSON: #"[{"startAtom":301,"endAtom":305}]"#,
+            status: .success,
+            attemptCount: 3,
+            errorContext: nil,
+            inputTokenCount: 100,
+            outputTokenCount: 20,
+            latencyMs: 30,
+            prewarmHit: false,
+            scanCohortJSON: cohort,
+            transcriptVersion: "tx-v1"
+        )
+
+        try await store.insertSemanticScanResult(refusal)
+        try await store.insertSemanticScanResult(success)
+
+        let rows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-1")
+        #expect(rows.count == 1)
+        #expect(rows.first?.status == .success)
+        #expect(rows.first?.id == "later-success")
+    }
+
+    @Test("H-2: insertEvidenceEvent throws when the same id reappears with a different body")
+    func evidenceEventMismatchedBodyThrows() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        let cohort = try makeScanCohortJSON()
+        let first = EvidenceEvent(
+            id: "shared-id",
+            analysisAssetId: "asset-1",
+            eventType: "windowQuoted",
+            sourceType: .fm,
+            atomOrdinals: "[10,11]",
+            evidenceJSON: #"{"quote":"original body"}"#,
+            scanCohortJSON: cohort,
+            createdAt: 100
+        )
+        // Same id, same natural key, but different evidenceJSON. The
+        // pre-round-2 code silently kept the original body without
+        // warning the caller. H-2 requires a loud mismatch throw.
+        let mutated = EvidenceEvent(
+            id: "shared-id",
+            analysisAssetId: "asset-1",
+            eventType: "windowQuoted",
+            sourceType: .fm,
+            atomOrdinals: "[10,11]",
+            evidenceJSON: #"{"quote":"mutated body"}"#,
+            scanCohortJSON: cohort,
+            createdAt: 100
+        )
+
+        try await store.insertEvidenceEvent(first)
+        await #expect(throws: AnalysisStoreError.self) {
+            try await store.insertEvidenceEvent(mutated)
+        }
+
+        // The original body must be preserved.
+        let fetched = try await store.fetchEvidenceEvents(analysisAssetId: "asset-1")
+        #expect(fetched.count == 1)
+        #expect(fetched.first?.evidenceJSON == #"{"quote":"original body"}"#)
+    }
+
+    @Test("H-2: insertEvidenceEvent with the identical body at the same id is idempotent")
+    func evidenceEventIdenticalBodyIsIdempotent() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        let cohort = try makeScanCohortJSON()
+        let event = EvidenceEvent(
+            id: "idemp-id",
+            analysisAssetId: "asset-1",
+            eventType: "windowQuoted",
+            sourceType: .fm,
+            atomOrdinals: "[10,11]",
+            evidenceJSON: #"{"quote":"same body"}"#,
+            scanCohortJSON: cohort,
+            createdAt: 100
+        )
+
+        try await store.insertEvidenceEvent(event)
+        try await store.insertEvidenceEvent(event)
+
+        let fetched = try await store.fetchEvidenceEvents(analysisAssetId: "asset-1")
+        #expect(fetched.count == 1)
     }
 
     @Test("FK cascade: deleting an asset removes its semantic scan rows")
