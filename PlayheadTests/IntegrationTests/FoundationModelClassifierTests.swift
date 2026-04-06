@@ -427,6 +427,97 @@ struct FoundationModelClassifierTests {
         #expect(snapshot.respondCalls.isEmpty)
     }
 
+    @Test("refinement ignores fallback anchors that point outside the zoomed window")
+    func refinementRejectsOffWindowFallbackAnchors() async throws {
+        let segments = [
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Visit example.com for the offer."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Use promo code SAVE."),
+            makeSegment(index: 9, startTime: 45, endTime: 50, text: "Visit outside-example.com for a different offer.")
+        ]
+        let evidenceCatalog = EvidenceCatalog(
+            analysisAssetId: "asset-1",
+            transcriptVersion: "transcript-v1",
+            entries: [
+                EvidenceEntry(
+                    evidenceRef: 11,
+                    category: .url,
+                    matchedText: "example.com",
+                    normalizedText: "example.com",
+                    atomOrdinal: 1,
+                    startTime: 5,
+                    endTime: 10
+                ),
+                EvidenceEntry(
+                    evidenceRef: 99,
+                    category: .url,
+                    matchedText: "outside-example.com",
+                    normalizedText: "outside-example.com",
+                    atomOrdinal: 9,
+                    startTime: 45,
+                    endTime: 50
+                )
+            ]
+        )
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 4,
+            lineRefs: [1, 2],
+            focusLineRefs: [1, 2],
+            focusClusters: [[1, 2]],
+            prompt: "Refine ad spans.",
+            promptTokenCount: 8,
+            startTime: 5,
+            endTime: 15,
+            stopReason: .minimumSpan,
+            promptEvidence: [
+                PromptEvidenceEntry(entry: evidenceCatalog.entries[0], lineRef: 1)
+            ]
+        )
+
+        let recorder = RuntimeRecorder(
+            contextSize: 64,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementResponses: [
+                RefinementWindowSchema(
+                    spans: [
+                        SpanRefinementSchema(
+                            commercialIntent: .paid,
+                            ownership: .thirdParty,
+                            firstLineRef: 1,
+                            lastLineRef: 2,
+                            certainty: .strong,
+                            boundaryPrecision: .usable,
+                            evidenceAnchors: [
+                                EvidenceAnchorSchema(
+                                    evidenceRef: nil,
+                                    lineRef: 9,
+                                    kind: .url,
+                                    certainty: .moderate
+                                )
+                            ],
+                            alternativeExplanation: .none,
+                            reasonTags: [.urlMention]
+                        )
+                    ]
+                )
+            ]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: evidenceCatalog
+        )
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 1)
+        #expect(output.windows[0].spans.count == 1)
+        #expect(output.windows[0].spans[0].resolvedEvidenceAnchors.isEmpty)
+    }
+
     @Test("adaptive zoom keeps the Kelly Ripa repeat region when nearby coarse support spans the repeat cluster")
     func kellyRipaRepeatRegression() async throws {
         let segments = buildFixtureSegments()

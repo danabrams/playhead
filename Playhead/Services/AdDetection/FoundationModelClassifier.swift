@@ -837,6 +837,7 @@ struct FoundationModelClassifier: Sendable {
         lineRefLookup: [Int: AdTranscriptSegment],
         evidenceCatalog: EvidenceCatalog
     ) -> [ResolvedEvidenceAnchor] {
+        let validLineRefs = Set(plan.lineRefs)
         anchors.compactMap { anchor in
             if let evidenceRef = anchor.evidenceRef,
                let promptEntry = plan.promptEvidence.first(where: { $0.entry.evidenceRef == evidenceRef }) {
@@ -848,6 +849,9 @@ struct FoundationModelClassifier: Sendable {
                 )
             }
 
+            guard validLineRefs.contains(anchor.lineRef) else {
+                return nil
+            }
             guard let segment = lineRefLookup[anchor.lineRef] else {
                 return nil
             }
