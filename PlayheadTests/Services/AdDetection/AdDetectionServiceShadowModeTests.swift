@@ -54,14 +54,48 @@ struct AdDetectionServiceShadowModeTests {
 
     private func makeService(
         store: AnalysisStore,
-        config: AdDetectionConfig
+        config: AdDetectionConfig,
+        factory: (@Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner)? = nil
     ) -> AdDetectionService {
         AdDetectionService(
             store: store,
             classifier: RuleBasedClassifier(),
             metadataExtractor: FallbackExtractor(),
-            config: config
+            config: config,
+            backfillJobRunnerFactory: factory
         )
+    }
+
+    /// Builds a deterministic `BackfillJobRunnerFactory` that routes FM work
+    /// through `TestFMRuntime` with a canned coarse response. Both the
+    /// shadow and disabled services in test #7 receive the same factory so
+    /// the only observable difference is the `fmBackfillMode` gate in
+    /// `AdDetectionService.runShadowFMPhase`.
+    private func makeDeterministicFactory() -> @Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner {
+        return { store, mode in
+            BackfillJobRunner(
+                store: store,
+                admissionController: AdmissionController(),
+                classifier: FoundationModelClassifier(
+                    runtime: TestFMRuntime(
+                        coarseResponses: [
+                            CoarseScreeningSchema(
+                                disposition: .containsAd,
+                                support: CoarseSupportSchema(
+                                    supportLineRefs: [1],
+                                    certainty: .strong
+                                )
+                            )
+                        ]
+                    ).runtime
+                ),
+                coveragePlanner: CoveragePlanner(),
+                mode: mode,
+                capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+                batteryLevelProvider: { 1.0 },
+                scanCohortJSON: makeTestScanCohortJSON()
+            )
+        }
     }
 
     private func adWindowSignature(_ window: AdWindow) -> String {
@@ -71,10 +105,18 @@ struct AdDetectionServiceShadowModeTests {
 
     @Test("shadow mode produces byte-identical cues to disabled mode")
     func shadowAndDisabledProduceIdenticalAdWindows() async throws {
+        // Test Gap #7 fix: the invariant is meaningful only when the shadow
+        // service ACTUALLY runs the FM pipeline. Previously both services
+        // passed `nil` factory, so "shadow" degraded to "disabled" and the
+        // comparison became vacuous. Now both services receive the same
+        // deterministic factory; the only behavioural difference is the
+        // `config.fmBackfillMode` gate inside `runShadowFMPhase`.
         let chunksA = makeChunks(assetId: "asset-A")
         let chunksB = makeChunks(assetId: "asset-B")
+        let factory = makeDeterministicFactory()
 
-        // Run #1: disabled
+        // Run #1: disabled — factory is wired but the service's shadow gate
+        // short-circuits, so the runner never fires.
         let storeA = try await makeTestStore()
         try await storeA.insertAsset(makeAsset(id: "asset-A"))
         let serviceA = makeService(
@@ -86,7 +128,8 @@ struct AdDetectionServiceShadowModeTests {
                 hotPathLookahead: 90.0,
                 detectorVersion: "detection-v1",
                 fmBackfillMode: .disabled
-            )
+            ),
+            factory: factory
         )
         try await serviceA.runBackfill(
             chunks: chunksA,
@@ -96,7 +139,9 @@ struct AdDetectionServiceShadowModeTests {
         )
         let disabledWindows = try await storeA.fetchAdWindows(assetId: "asset-A")
 
-        // Run #2: shadow
+        // Run #2: shadow — factory fires, runner drives the FM pipeline
+        // through TestFMRuntime and writes semantic_scan_results rows. The
+        // shadow invariant says AdWindows must still be byte-identical.
         let storeB = try await makeTestStore()
         try await storeB.insertAsset(makeAsset(id: "asset-B"))
         let serviceB = makeService(
@@ -108,7 +153,8 @@ struct AdDetectionServiceShadowModeTests {
                 hotPathLookahead: 90.0,
                 detectorVersion: "detection-v1",
                 fmBackfillMode: .shadow
-            )
+            ),
+            factory: factory
         )
         try await serviceB.runBackfill(
             chunks: chunksB,
@@ -123,12 +169,67 @@ struct AdDetectionServiceShadowModeTests {
         let shadowSigs = shadowWindows.map(adWindowSignature).sorted()
         #expect(disabledSigs == shadowSigs, "shadow vs disabled cue divergence: \(shadowSigs) vs \(disabledSigs)")
 
-        // The shadow run is allowed to write semantic scan / evidence rows.
-        // The disabled run must NOT.
+        // The shadow run MUST have written semantic scan rows — otherwise
+        // the "actually ran FM" claim is unsupported.
+        let shadowScans = try await storeB.fetchSemanticScanResults(analysisAssetId: "asset-B")
+        #expect(!shadowScans.isEmpty, "shadow service must have exercised the FM pipeline")
+
+        // The disabled run must NOT have written semantic scan / evidence rows.
         let disabledScans = try await storeA.fetchSemanticScanResults(analysisAssetId: "asset-A")
         let disabledEvents = try await storeA.fetchEvidenceEvents(analysisAssetId: "asset-A")
         #expect(disabledScans.isEmpty)
         #expect(disabledEvents.isEmpty)
+    }
+
+    @Test("M-D: shadow phase short-circuits when canUseFoundationModels is false")
+    func shadowPhaseSkipsWhenFMUnavailable() async throws {
+        // Inject a provider that reports FM is unavailable. The runner
+        // factory should never be invoked; no semantic scan rows should
+        // land in the store even though fmBackfillMode == .shadow.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "asset-md"))
+
+        // Use a factory that would PANIC if invoked, to prove the guard
+        // runs before the factory is touched.
+        nonisolated(unsafe) var factoryCallCount = 0
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: AdDetectionConfig(
+                candidateThreshold: 0.40,
+                confirmationThreshold: 0.70,
+                suppressionThreshold: 0.25,
+                hotPathLookahead: 90.0,
+                detectorVersion: "detection-v1",
+                fmBackfillMode: .shadow
+            ),
+            backfillJobRunnerFactory: { store, mode in
+                factoryCallCount += 1
+                return BackfillJobRunner(
+                    store: store,
+                    admissionController: AdmissionController(),
+                    classifier: FoundationModelClassifier(runtime: TestFMRuntime().runtime),
+                    coveragePlanner: CoveragePlanner(),
+                    mode: mode,
+                    capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+                    batteryLevelProvider: { 1.0 },
+                    scanCohortJSON: makeTestScanCohortJSON()
+                )
+            },
+            canUseFoundationModelsProvider: { false }
+        )
+
+        try await service.runBackfill(
+            chunks: makeChunks(assetId: "asset-md"),
+            analysisAssetId: "asset-md",
+            podcastId: "podcast-md",
+            episodeDuration: 90
+        )
+
+        #expect(factoryCallCount == 0, "factory must not be invoked when FM is unavailable")
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: "asset-md")
+        #expect(scans.isEmpty, "no semantic scan rows should be written")
     }
 
     @Test("shadow mode actually writes semantic_scan_results telemetry")
