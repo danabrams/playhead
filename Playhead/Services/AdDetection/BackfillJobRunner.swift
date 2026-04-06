@@ -115,6 +115,15 @@ actor BackfillJobRunner {
             // colliding with the prior `.complete` job under the same id
             // (which the M-5 idempotency check would skip, defeating the
             // whole point of reprocessing the new transcript).
+            //
+            // HIGH-R5-1 note: this transcriptVersion embedding is defensive
+            // for a Phase 4 re-trigger path that does not yet exist in
+            // production. `AnalysisCoordinator.finalizeBackfill` calls
+            // `runBackfill` exactly once per session and then transitions
+            // to `.complete`, so at HEAD no caller re-invokes this runner
+            // under a new transcriptVersion. Keep the embedding — it costs
+            // nothing and unblocks the Phase 4 re-analysis trigger when
+            // transcripts regenerate without another round of id surgery.
             let jobId = "fm-\(inputs.analysisAssetId)-\(inputs.transcriptVersion)-\(phase.rawValue)-\(offset)"
 
             // M5: idempotent re-invocation. Job ids are deterministic, so a
