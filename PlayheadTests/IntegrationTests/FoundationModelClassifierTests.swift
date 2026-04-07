@@ -2230,24 +2230,27 @@ struct FoundationModelClassifierTests {
 
         // The schema overhead must be strictly larger than the tiny prompt:
         // a 1-line "L0> \"hello\"" prompt is at most a handful of tokens,
-        // but the schema's serialized form (doc strings, enum cases,
-        // nested CoarseSupportSchema) is much heavier.
+        // but even the trimmed schema's serialized form (enum cases,
+        // nested CoarseSupportSchema) is heavier.
         #expect(coarseSchemaTokens > tinyPromptTokens)
 
-        // Document an upper-bound sanity check so a future schema rotation
-        // that explodes the overhead trips here loudly. We do NOT enforce
-        // a tight bound — this is diagnostic, not regression-locking.
+        // bd-34e (post @Guide trim): the coarse schema dropped every
+        // `@Guide` description string and now consists of two structs and
+        // two small enums. Apple's serialized form should comfortably fit
+        // under 1000 tokens. If this trips, something has crept back into
+        // CoarseScreeningSchema (a new field, a re-added doc string, or a
+        // restored nested type) and the bd-34e budget regression is back.
         #expect(
-            coarseSchemaTokens < 4096,
-            "coarseSchemaTokens=\(coarseSchemaTokens) should fit in a single context window"
+            coarseSchemaTokens < 1000,
+            "coarseSchemaTokens=\(coarseSchemaTokens) — trimmed coarse @Generable schema must stay under 1000 tokens; doc strings or new fields likely crept back in"
         )
-        // If we ever get below 200 tokens, the assumption that schema
-        // overhead is the load-bearing factor in the 8×–11× undercount
-        // is wrong and bd-34e needs to look elsewhere (e.g. system
-        // preamble, BOS/EOS framing, transcript-replay accumulation).
+        // Floor: the schema is still non-trivial (two structs, four enum
+        // cases on disposition, three on certainty). If the actual count
+        // falls under ~30 tokens we are probably measuring the wrong
+        // thing or the trim broke the @Generable conformance.
         #expect(
-            coarseSchemaTokens >= 200,
-            "coarseSchemaTokens=\(coarseSchemaTokens) — if schema overhead is small, the 8×–11× undercount must come from somewhere else"
+            coarseSchemaTokens >= 30,
+            "coarseSchemaTokens=\(coarseSchemaTokens) — far below the expected lower bound; check that @Generable conformance survived the trim"
         )
         #else
         return

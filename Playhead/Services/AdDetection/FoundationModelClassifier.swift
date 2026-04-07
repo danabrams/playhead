@@ -7,9 +7,35 @@ import FoundationModels
 
 // MARK: - Coarse screening schema
 
+// bd-34e schema trim:
+//
+// Apple's `LanguageModelSession` charges the serialized `@Generable` schema
+// against the per-call token budget. Every `@Guide` description string,
+// every nested type, and every enum case shows up as fixed overhead on
+// EVERY coarse / refinement call. The on-device benchmark from Phase 3
+// observed ~3700 tokens of fixed overhead per coarse window, which left
+// only ~300–400 tokens for actual transcript content and forced the
+// planner into 2–3-segment windows that cut ads in half.
+//
+// Mitigation: drop every `@Guide` description string from the load-bearing
+// schemas, drop fields the runner does not consume, and strip `@Generable`
+// from helper enums that are no longer schema-visible. The slim
+// `@Generable` types remain the wire shape Apple sees on each call;
+// the rich `RefinedAdSpan` / `FMCoarseWindowOutput` types the runner
+// consumes are derived from them with sensible defaults for the dropped
+// fields.
+//
+// Backward compatibility: a small number of test fixtures outside this
+// module's owned files construct `SpanRefinementSchema` with the legacy
+// `alternativeExplanation` / `reasonTags` keyword arguments. We keep an
+// extension init below that accepts (and silently ignores) those legacy
+// arguments so non-owned tests keep compiling without modification.
 #if canImport(FoundationModels)
-@available(iOS 26.0, *)
-@Generable
+// `TranscriptQuality` is computed deterministically on-device by
+// `TranscriptQualityEstimator` and was never part of `CoarseScreeningSchema`.
+// It used to carry `@Generable` for legacy reasons; dropping the conformance
+// removes ~3 enum cases and the type's framing from any schema Apple
+// happens to discover via reflection.
 enum TranscriptQuality: String, Sendable, Codable, Hashable {
     case good
     case degraded
@@ -36,10 +62,7 @@ enum CertaintyBand: String, Sendable, Codable, Hashable {
 @available(iOS 26.0, *)
 @Generable
 struct CoarseSupportSchema: Sendable, Codable, Hashable {
-    @Guide(description: "Line reference integers from the quoted transcript that directly support the disposition.")
     var supportLineRefs: [Int]
-
-    @Guide(description: "Calibrated certainty band for the support.")
     var certainty: CertaintyBand
 }
 
@@ -53,10 +76,7 @@ struct CoarseSupportSchema: Sendable, Codable, Hashable {
 @available(iOS 26.0, *)
 @Generable
 struct CoarseScreeningSchema: Sendable, Codable, Hashable {
-    @Guide(description: "Coarse ad-screening disposition for the window.")
     var disposition: CoarseDisposition
-
-    @Guide(description: "Optional supporting line references and certainty band. Leave null when abstaining or when no specific support lines apply.")
     var support: CoarseSupportSchema?
 }
 
@@ -88,8 +108,11 @@ enum BoundaryPrecision: String, Sendable, Codable, Hashable {
     case precise
 }
 
-@available(iOS 26.0, *)
-@Generable
+// `AlternativeExplanation` and `ReasonTag` are no longer part of any
+// `@Generable` schema (the FM no longer emits them — the runner does not
+// persist either). They remain as plain Swift enums so `RefinedAdSpan`
+// can default them and `sanitizeReasonTags` can keep its banner-tag
+// filtering helper, but they cost zero schema tokens.
 enum AlternativeExplanation: String, Sendable, Codable, Hashable {
     case none
     case editorialContext
@@ -98,8 +121,6 @@ enum AlternativeExplanation: String, Sendable, Codable, Hashable {
     case unknown
 }
 
-@available(iOS 26.0, *)
-@Generable
 enum ReasonTag: String, Sendable, Codable, Hashable {
     case callToAction
     case urlMention
@@ -140,8 +161,6 @@ struct SpanRefinementSchema: Sendable, Codable, Hashable {
     var certainty: CertaintyBand
     var boundaryPrecision: BoundaryPrecision
     var evidenceAnchors: [EvidenceAnchorSchema]
-    var alternativeExplanation: AlternativeExplanation
-    var reasonTags: [ReasonTag]
 }
 
 @available(iOS 26.0, *)
@@ -243,14 +262,51 @@ struct SpanRefinementSchema: Sendable, Codable, Hashable {
     var certainty: CertaintyBand
     var boundaryPrecision: BoundaryPrecision
     var evidenceAnchors: [EvidenceAnchorSchema]
-    var alternativeExplanation: AlternativeExplanation
-    var reasonTags: [ReasonTag]
 }
 
 struct RefinementWindowSchema: Sendable, Codable, Hashable {
     var spans: [SpanRefinementSchema]
 }
 #endif
+
+// MARK: - Backward-compatible SpanRefinementSchema init
+//
+// bd-34e schema trim: a small number of test fixtures outside this file
+// (most notably `BackfillJobRunnerTests.swift`) construct
+// `SpanRefinementSchema` with the legacy `alternativeExplanation:` and
+// `reasonTags:` keyword arguments. Those fields are no longer part of the
+// `@Generable` schema, but to keep non-owned tests compiling without
+// edits we expose an overload that accepts them and silently ignores
+// them. Production code paths use the slim memberwise init.
+extension SpanRefinementSchema {
+    init(
+        commercialIntent: CommercialIntent,
+        ownership: Ownership,
+        firstLineRef: Int,
+        lastLineRef: Int,
+        certainty: CertaintyBand,
+        boundaryPrecision: BoundaryPrecision,
+        evidenceAnchors: [EvidenceAnchorSchema],
+        alternativeExplanation: AlternativeExplanation,
+        reasonTags: [ReasonTag]
+    ) {
+        // alternativeExplanation and reasonTags are intentionally dropped
+        // from the slim @Generable schema (bd-34e). They are no longer
+        // emitted by the FM nor persisted by the runner; defaulted on
+        // `RefinedAdSpan` instead.
+        _ = alternativeExplanation
+        _ = reasonTags
+        self.init(
+            commercialIntent: commercialIntent,
+            ownership: ownership,
+            firstLineRef: firstLineRef,
+            lastLineRef: lastLineRef,
+            certainty: certainty,
+            boundaryPrecision: boundaryPrecision,
+            evidenceAnchors: evidenceAnchors
+        )
+    }
+}
 
 // MARK: - Output
 
@@ -1512,6 +1568,15 @@ struct FoundationModelClassifier: Sendable {
             // unresolved anchor voids the entire span. This is intentional —
             // we only persist memory writes when EVERY supporting anchor was
             // resolved to a deterministic catalog entry.
+            //
+            // bd-34e schema trim: `alternativeExplanation` and `reasonTags`
+            // are no longer part of the slim `@Generable SpanRefinementSchema`
+            // (they cost ~13 enum cases of fixed schema overhead per call
+            // and the runner does not persist them). They are defaulted to
+            // `.unknown` / `[]` here so downstream consumers that read these
+            // fields keep working. If a future banner pass needs to surface
+            // them again, derive them deterministically from `commercialIntent`
+            // and the resolved evidence kinds rather than asking the FM.
             spans.append(
                 RefinedAdSpan(
                     commercialIntent: span.commercialIntent,
@@ -1525,12 +1590,8 @@ struct FoundationModelClassifier: Sendable {
                     resolvedEvidenceAnchors: resolvedEvidenceAnchors,
                     memoryWriteEligible: !resolvedEvidenceAnchors.isEmpty &&
                         resolvedEvidenceAnchors.allSatisfy(\.memoryWriteEligible),
-                    alternativeExplanation: span.alternativeExplanation,
-                    reasonTags: Self.sanitizeReasonTags(
-                        span.reasonTags,
-                        commercialIntent: span.commercialIntent,
-                        logger: logger
-                    )
+                    alternativeExplanation: .unknown,
+                    reasonTags: []
                 )
             )
         }
