@@ -400,13 +400,13 @@ actor BackfillJobRunner {
                 windowOutput: window,
                 inputs: inputs,
                 scanPass: "passA",
-                status: coarse.status
+                status: .success
             )
             try await store.insertSemanticScanResult(result)
             scanResultIds.append(result.id)
         }
 
-        if !coarse.failedWindowStatuses.isEmpty {
+        if !coarse.failedWindowStatuses.isEmpty || !coarse.windows.isEmpty {
             let coarsePlans = try await classifier.planPassA(segments: inputs.segments)
             let succeededPlanIndices = Set(
                 coarse.windows.compactMap { window in
@@ -415,8 +415,8 @@ actor BackfillJobRunner {
                     })?.windowIndex
                 }
             )
-            let failedPlans = coarsePlans.filter { !succeededPlanIndices.contains($0.windowIndex) }
-            for (plan, status) in zip(failedPlans, coarse.failedWindowStatuses) {
+            let remainingPlans = coarsePlans.filter { !succeededPlanIndices.contains($0.windowIndex) }
+            for (plan, status) in zip(remainingPlans, coarse.failedWindowStatuses) {
                 if let failureResult = makeCoarseFailureScanResult(
                     plan: plan,
                     inputs: inputs,
@@ -427,15 +427,26 @@ actor BackfillJobRunner {
                     scanResultIds.append(failureResult.id)
                 }
             }
+
+            if coarse.status != .success,
+               let blockingPlan = remainingPlans.dropFirst(coarse.failedWindowStatuses.count).first,
+               let failureResult = makeCoarseFailureScanResult(
+                    plan: blockingPlan,
+                    inputs: inputs,
+                    status: coarse.status,
+                    latencyMs: coarse.latencyMillis
+               ) {
+                try await store.insertSemanticScanResult(failureResult)
+                scanResultIds.append(failureResult.id)
+            }
         } else if coarse.status != .success,
-           coarse.windows.isEmpty,
-           let failureResult = makeFailureScanResult(
-                scanPass: "passA",
-                attemptedSegments: inputs.segments,
-                inputs: inputs,
-                status: coarse.status,
-                latencyMs: coarse.latencyMillis
-           ) {
+                  let failureResult = makeFailureScanResult(
+                    scanPass: "passA",
+                    attemptedSegments: inputs.segments,
+                    inputs: inputs,
+                    status: coarse.status,
+                    latencyMs: coarse.latencyMillis
+                  ) {
             try await store.insertSemanticScanResult(failureResult)
             scanResultIds.append(failureResult.id)
         }
@@ -457,7 +468,7 @@ actor BackfillJobRunner {
                     let result = makeRefinementScanResult(
                         windowOutput: window,
                         inputs: inputs,
-                        status: refinement.status
+                        status: .success
                     )
                     let events = makeEvidenceEvents(
                         windowOutput: window,
@@ -476,10 +487,10 @@ actor BackfillJobRunner {
                     evidenceEventIds.append(contentsOf: persistedEventIds)
                 }
 
-                if refinement.status == .success, !refinement.failedWindowStatuses.isEmpty {
+                if !refinement.failedWindowStatuses.isEmpty || !refinement.windows.isEmpty {
                     let succeededWindowIndices = Set(refinement.windows.map(\.windowIndex))
-                    let failedPlans = zoomPlans.filter { !succeededWindowIndices.contains($0.windowIndex) }
-                    for (plan, status) in zip(failedPlans, refinement.failedWindowStatuses) {
+                    let remainingPlans = zoomPlans.filter { !succeededWindowIndices.contains($0.windowIndex) }
+                    for (plan, status) in zip(remainingPlans, refinement.failedWindowStatuses) {
                         if let failureResult = makeRefinementFailureScanResult(
                             plan: plan,
                             inputs: inputs,
@@ -490,10 +501,19 @@ actor BackfillJobRunner {
                             scanResultIds.append(failureResult.id)
                         }
                     }
-                }
 
-                if refinement.status != .success,
-                   refinement.windows.isEmpty {
+                    if refinement.status != .success,
+                       let blockingPlan = remainingPlans.dropFirst(refinement.failedWindowStatuses.count).first,
+                       let failureResult = makeRefinementFailureScanResult(
+                            plan: blockingPlan,
+                            inputs: inputs,
+                            status: refinement.status,
+                            latencyMs: refinement.latencyMillis
+                       ) {
+                        try await store.insertSemanticScanResult(failureResult)
+                        scanResultIds.append(failureResult.id)
+                    }
+                } else if refinement.status != .success {
                     let attemptedLineRefs = Set(zoomPlans.flatMap(\.lineRefs))
                     let attemptedSegments = inputs.segments.filter { attemptedLineRefs.contains($0.segmentIndex) }
                     if let failureResult = makeFailureScanResult(

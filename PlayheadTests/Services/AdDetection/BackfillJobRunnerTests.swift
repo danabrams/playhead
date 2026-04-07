@@ -73,12 +73,13 @@ struct BackfillJobRunnerTests {
         store: AnalysisStore,
         runtime: FoundationModelClassifier.Runtime,
         snapshot: CapabilitySnapshot = makePermissiveCapabilitySnapshot(),
-        mode: FMBackfillMode = .shadow
+        mode: FMBackfillMode = .shadow,
+        classifierConfig: FoundationModelClassifier.Config = .default
     ) -> BackfillJobRunner {
         BackfillJobRunner(
             store: store,
             admissionController: AdmissionController(),
-            classifier: FoundationModelClassifier(runtime: runtime),
+            classifier: FoundationModelClassifier(runtime: runtime, config: classifierConfig),
             coveragePlanner: CoveragePlanner(),
             mode: mode,
             capabilitySnapshotProvider: { snapshot },
@@ -194,6 +195,101 @@ struct BackfillJobRunnerTests {
         let row = try #require(await store.fetchBackfillJob(byId: jobId))
         #expect(row.status == .complete)
         #expect(row.retryCount == 0)
+    }
+
+    @available(iOS 26.0, *)
+    @Test("partial coarse guardrail persists success rows and a blocking failure row")
+    func partialCoarseGuardrailPersistsBlockingFailureRow() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(
+            coarseFailures: [nil, .guardrailViolation],
+            contextSize: 431,
+            coarseSchemaTokenCount: 4,
+            refinementSchemaTokenCount: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8
+            }
+        )
+        let runner = makeRunner(
+            store: store,
+            runtime: fmRuntime.runtime,
+            classifierConfig: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
+        )
+
+        let result = try await runner.runPendingBackfill(for: makeInputs())
+
+        #expect(!result.admittedJobIds.isEmpty)
+        #expect(result.scanResultIds.count == 2)
+        #expect(await fmRuntime.coarseCallCount == 2)
+
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")
+        #expect(scans.count == 2)
+        #expect(scans.filter { $0.scanPass == "passA" && $0.status == .success }.count == 1)
+        #expect(scans.filter { $0.scanPass == "passA" && $0.status == .guardrailViolation }.count == 1)
+
+        let success = try #require(scans.first { $0.scanPass == "passA" && $0.status == .success })
+        #expect(success.disposition == .noAds)
+
+        let failure = try #require(scans.first { $0.scanPass == "passA" && $0.status == .guardrailViolation })
+        #expect(failure.disposition == .abstain)
+        #expect(failure.windowFirstAtomOrdinal > success.windowLastAtomOrdinal)
+    }
+
+    @available(iOS 26.0, *)
+    @Test("partial refinement guardrail persists success rows and a blocking failure row")
+    func partialRefinementGuardrailPersistsBlockingFailureRow() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(supportLineRefs: [0], certainty: .strong)
+                ),
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(supportLineRefs: [1], certainty: .strong)
+                )
+            ],
+            refinementResponses: [
+                RefinementWindowSchema(spans: [])
+            ],
+            refinementFailures: [
+                nil,
+                .guardrailViolation
+            ],
+            contextSize: 431,
+            coarseSchemaTokenCount: 4,
+            refinementSchemaTokenCount: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8
+            }
+        )
+        let runner = makeRunner(
+            store: store,
+            runtime: fmRuntime.runtime,
+            classifierConfig: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
+        )
+
+        let result = try await runner.runPendingBackfill(for: makeInputs())
+
+        #expect(!result.admittedJobIds.isEmpty)
+        #expect(await fmRuntime.refinementCallCount == 2)
+
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")
+        let passAScans = scans.filter { $0.scanPass == "passA" }
+        let passBScans = scans.filter { $0.scanPass == "passB" }
+
+        #expect(passAScans.count == 3)
+        #expect(passAScans.allSatisfy { $0.status == .success })
+        #expect(passBScans.count == 2)
+        #expect(passBScans.filter { $0.status == .success }.count == 1)
+        #expect(passBScans.filter { $0.status == .guardrailViolation }.count == 1)
+
+        let failure = try #require(passBScans.first { $0.status == .guardrailViolation })
+        #expect(failure.disposition == .abstain)
+        #expect(result.scanResultIds.count == scans.count)
     }
 
     @Test("admission throttling defers the job and records the reason")

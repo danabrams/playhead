@@ -21,6 +21,10 @@ actor TestFMRuntime {
     private var refinementFailureQueue: [TestFMRuntimeFailure?]
     private let defaultCoarse: CoarseScreeningSchema
     private let defaultRefinement: RefinementWindowSchema
+    private let contextSizeValue: Int
+    private let coarseSchemaTokenCountValue: Int
+    private let refinementSchemaTokenCountValue: Int
+    private let tokenCountRule: @Sendable (String) -> Int
     private(set) var coarseCallCount = 0
     private(set) var refinementCallCount = 0
 
@@ -29,6 +33,12 @@ actor TestFMRuntime {
         refinementResponses: [RefinementWindowSchema] = [],
         coarseFailures: [TestFMRuntimeFailure?] = [],
         refinementFailures: [TestFMRuntimeFailure?] = [],
+        contextSize: Int = 4_096,
+        coarseSchemaTokenCount: Int = 16,
+        refinementSchemaTokenCount: Int = 32,
+        tokenCountRule: @escaping @Sendable (String) -> Int = { prompt in
+            max(1, prompt.split(whereSeparator: \.isWhitespace).count)
+        },
         defaultCoarse: CoarseScreeningSchema = CoarseScreeningSchema(
             disposition: .noAds,
             support: nil
@@ -39,6 +49,10 @@ actor TestFMRuntime {
         self.refinementQueue = refinementResponses
         self.coarseFailureQueue = coarseFailures
         self.refinementFailureQueue = refinementFailures
+        self.contextSizeValue = contextSize
+        self.coarseSchemaTokenCountValue = coarseSchemaTokenCount
+        self.refinementSchemaTokenCountValue = refinementSchemaTokenCount
+        self.tokenCountRule = tokenCountRule
         self.defaultCoarse = defaultCoarse
         self.defaultRefinement = defaultRefinement
     }
@@ -46,12 +60,12 @@ actor TestFMRuntime {
     nonisolated var runtime: FoundationModelClassifier.Runtime {
         FoundationModelClassifier.Runtime(
             availabilityStatus: { _ in nil },
-            contextSize: { 4_096 },
+            contextSize: { self.contextSizeValue },
             tokenCount: { prompt in
-                max(1, prompt.split(whereSeparator: \.isWhitespace).count)
+                self.tokenCountRule(prompt)
             },
-            coarseSchemaTokenCount: { 16 },
-            refinementSchemaTokenCount: { 32 },
+            coarseSchemaTokenCount: { self.coarseSchemaTokenCountValue },
+            refinementSchemaTokenCount: { self.refinementSchemaTokenCountValue },
             makeSession: {
                 FoundationModelClassifier.Runtime.Session(
                     prewarm: { _ in },
