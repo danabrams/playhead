@@ -29,6 +29,19 @@ final class PlayheadRuntime {
     let analysisWorkScheduler: AnalysisWorkScheduler
     let analysisJobReconciler: AnalysisJobReconciler
 
+    /// bd-fmfb: DEBUG-only sink for `LanguageModelSession.logFeedbackAttachment`
+    /// payloads. Apple's iOS 26.4 on-device safety classifier rejects benign
+    /// podcast advertising; we capture machine-readable feedback so the
+    /// FoundationModels team can fix it. Release builds intentionally leave
+    /// this `nil` — production users should not have feedback attachments
+    /// piling up in their app sandbox, and `FoundationModelClassifier` skips
+    /// the entire capture path when this is `nil`.
+    #if DEBUG
+    let feedbackStore: FoundationModelsFeedbackStore?
+    #else
+    let feedbackStore: FoundationModelsFeedbackStore? = nil
+    #endif
+
     private let isPreviewRuntime: Bool
     private let logger = Logger(subsystem: "com.playhead", category: "Runtime")
 
@@ -116,6 +129,17 @@ final class PlayheadRuntime {
         let capabilitiesServiceForFactory = capabilitiesService
         let batteryProvider = UIDeviceBatteryProvider()
 
+        // bd-fmfb: instantiate the feedback store ONLY in DEBUG. Release
+        // builds get a nil store and `FoundationModelClassifier` short-
+        // circuits the capture path so production users never accumulate
+        // attachment files in the sandbox.
+        #if DEBUG
+        let feedbackStore = FoundationModelsFeedbackStore()
+        self.feedbackStore = feedbackStore
+        #else
+        let feedbackStore: FoundationModelsFeedbackStore? = nil
+        #endif
+
         // HIGH-1: round-2's M-B hoist shared one AdmissionController across
         // every factory invocation. AdDetectionService is actor-reentrant on
         // `await`, so two concurrent `runBackfill` calls would contend on the
@@ -129,11 +153,11 @@ final class PlayheadRuntime {
         // `concurrentRunBackfillsDoNotMassDeferEachOther` in
         // BackfillJobRunnerTests.
         let backfillJobRunnerFactory: @Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner = {
-            [capabilitiesServiceForFactory, batteryProvider] store, mode in
+            [capabilitiesServiceForFactory, batteryProvider, feedbackStore] store, mode in
             BackfillJobRunner(
                 store: store,
                 admissionController: AdmissionController(),
-                classifier: FoundationModelClassifier(),
+                classifier: FoundationModelClassifier(feedbackStore: feedbackStore),
                 coveragePlanner: CoveragePlanner(),
                 mode: mode,
                 capabilitySnapshotProvider: { await capabilitiesServiceForFactory.currentSnapshot },

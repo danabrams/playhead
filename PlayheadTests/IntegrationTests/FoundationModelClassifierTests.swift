@@ -3458,6 +3458,144 @@ struct FoundationModelClassifierTests {
         // covers it. The main contract is: the lineRef ints from the model are
         // honored independently of the transcript content.
     }
+
+    // MARK: - bd-fmfb: feedback store integration
+
+    // bd-fmfb: when a coarse-pass refusal fires AND a feedbackStore is
+    // wired in, the classifier must invoke `Session.logFeedback` and hand
+    // the resulting Data to the store BEFORE the per-window session goes
+    // out of scope. The store should end up with one captured attachment
+    // tagged `coarseRefusal`.
+    @Test("coarse pass refusal invokes feedback store when one is provided")
+    func coarsePassRefusalInvokesFeedbackStoreWhenProvided() async throws {
+        let segments = [
+            makeSegment(index: 0, startTime: 0, endTime: 5, text: "Window zero text.")
+        ]
+        let stubBlob = Data("apple-feedback-attachment-stub-bytes".utf8)
+        let recorder = RuntimeRecorder(
+            contextSize: 1024,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            coarseFailures: [.refusal]
+        )
+        let runtime = wrapRuntimeWithFeedback(recorder.runtime, blob: stubBlob)
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FMFeedback-coarse-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = FoundationModelsFeedbackStore(directory: dir)
+        let classifier = FoundationModelClassifier(
+            runtime: runtime,
+            feedbackStore: store
+        )
+
+        _ = try await classifier.coarsePassA(segments: segments)
+
+        let urls = await store.capturedAttachmentURLs()
+        #expect(urls.count == 1)
+        let url = try #require(urls.first)
+        let written = try Data(contentsOf: url)
+        #expect(written == stubBlob)
+        #expect(url.lastPathComponent.contains("coarse-refusal"))
+    }
+
+    // bd-fmfb: with no feedback store wired in, the classifier must NOT
+    // attempt capture, and the existing graceful-degradation path must
+    // continue to work unchanged. This is the default state in release
+    // builds and in every existing test that doesn't opt in.
+    @Test("coarse pass refusal skips feedback capture when feedbackStore is nil")
+    func coarsePassRefusalSkipsFeedbackStoreWhenNil() async throws {
+        let segments = [
+            makeSegment(index: 0, startTime: 0, endTime: 5, text: "Window zero text."),
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Window one text.")
+        ]
+        // Track whether the runtime's logFeedback closure ever fires.
+        let logFeedbackHits = LockedCounter()
+        let recorder = RuntimeRecorder(
+            contextSize: 431,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8
+            },
+            responses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ],
+            coarseFailures: [
+                .refusal,
+                nil
+            ]
+        )
+        let runtime = wrapRuntimeWithFeedback(
+            recorder.runtime,
+            blob: Data("should-not-be-recorded".utf8),
+            onCall: { logFeedbackHits.increment() }
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: runtime,
+            config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6),
+            feedbackStore: nil
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+
+        // Existing graceful degradation: refusal causes the window to drop
+        // out but the second window still succeeds.
+        #expect(output.status == .success)
+        #expect(output.failedWindowStatuses == [.refusal])
+        #expect(output.windows.count == 1)
+        // The classifier must NOT have called logFeedback when the store
+        // is nil.
+        #expect(logFeedbackHits.value == 0)
+    }
+}
+
+/// bd-fmfb: tiny lock-protected counter for asserting the side effect of
+/// `Runtime.Session.logFeedback` from outside the actor system.
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+}
+
+/// bd-fmfb: wrap a `RuntimeRecorder.runtime` to inject a stubbed
+/// `logFeedback` closure that records calls and returns a fixed `Data`
+/// blob. The other Session closures are forwarded unchanged.
+private func wrapRuntimeWithFeedback(
+    _ base: FoundationModelClassifier.Runtime,
+    blob: Data,
+    onCall: (@Sendable () -> Void)? = nil
+) -> FoundationModelClassifier.Runtime {
+    FoundationModelClassifier.Runtime(
+        availabilityStatus: base.availabilityStatus,
+        contextSize: base.contextSize,
+        tokenCount: base.tokenCount,
+        coarseSchemaTokenCount: base.coarseSchemaTokenCount,
+        refinementSchemaTokenCount: base.refinementSchemaTokenCount,
+        makeSession: {
+            let session = await base.makeSession()
+            return FoundationModelClassifier.Runtime.Session(
+                prewarm: session.prewarm,
+                respondCoarse: session.respondCoarse,
+                respondRefinement: session.respondRefinement,
+                logFeedback: { _, _ in
+                    onCall?()
+                    return blob
+                }
+            )
+        }
+    )
 }
 
 private func makeSegment(

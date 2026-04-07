@@ -516,6 +516,26 @@ struct FoundationModelClassifier: Sendable {
             let prewarm: @Sendable (_ promptPrefix: String) async -> Void
             let respondCoarse: @Sendable (_ prompt: String) async throws -> CoarseScreeningSchema
             let respondRefinement: @Sendable (_ prompt: String) async throws -> RefinementWindowSchema
+            /// bd-fmfb: invoke `LanguageModelSession.logFeedbackAttachment` on
+            /// the underlying session and return the resulting `Data`. The
+            /// closure intentionally returns `Data?` so test runtimes that
+            /// don't model a real session can return `nil` (or a stub blob)
+            /// without faking Apple's API. The default value lets existing
+            /// callers and test fixtures construct a `Session` without
+            /// supplying a feedback hook; capture is silently skipped.
+            let logFeedback: @Sendable (_ desiredOutput: String, _ negative: Bool) async -> Data?
+
+            init(
+                prewarm: @escaping @Sendable (_ promptPrefix: String) async -> Void,
+                respondCoarse: @escaping @Sendable (_ prompt: String) async throws -> CoarseScreeningSchema,
+                respondRefinement: @escaping @Sendable (_ prompt: String) async throws -> RefinementWindowSchema,
+                logFeedback: @escaping @Sendable (_ desiredOutput: String, _ negative: Bool) async -> Data? = { _, _ in nil }
+            ) {
+                self.prewarm = prewarm
+                self.respondCoarse = respondCoarse
+                self.respondRefinement = respondRefinement
+                self.logFeedback = logFeedback
+            }
         }
 
         let availabilityStatus: @Sendable (_ locale: Locale) async -> SemanticScanStatus?
@@ -674,14 +694,25 @@ struct FoundationModelClassifier: Sendable {
     private let runtime: Runtime
     private let config: Config
     private let logger: Logger
+    /// bd-fmfb: optional sink for `LanguageModelSession.logFeedbackAttachment`
+    /// blobs captured when Apple's safety classifier rejects benign podcast
+    /// advertising or the refinement pass fails to decode structured output.
+    /// When `nil` (the default — and the only state in release builds; see
+    /// `PlayheadRuntime`), capture is silently skipped and existing graceful
+    /// degradation continues unchanged. When non-nil, the catch arms call the
+    /// underlying session's `logFeedbackAttachment` BEFORE the session goes
+    /// out of scope so the model state at the moment of refusal is captured.
+    private let feedbackStore: FoundationModelsFeedbackStore?
 
     init(
         runtime: Runtime? = nil,
         config: Config = .default,
+        feedbackStore: FoundationModelsFeedbackStore? = nil,
         logger: Logger = Logger(subsystem: "com.playhead", category: "FoundationModelClassifier")
     ) {
         self.config = config
         self.logger = logger
+        self.feedbackStore = feedbackStore
         self.runtime = runtime ?? Self.liveRuntime(logger: logger, config: config)
         // bd-34e: announce the experiment flag at construction so the
         // on-device benchmark log unambiguously confirms whether the
@@ -1837,6 +1868,18 @@ struct FoundationModelClassifier: Sendable {
                 windowIndex: windowIndex,
                 totalWindows: totalWindows
             )
+            // bd-fmfb: capture an Apple `logFeedbackAttachment` blob for any
+            // refusal so the FoundationModels team has a machine-readable
+            // record of the model state at the moment of refusal. The capture
+            // must happen BEFORE the per-window session goes out of scope —
+            // it's tied to that specific session. No-op when feedbackStore
+            // is nil (release builds).
+            await captureFeedbackForCoarseRefusalIfNeeded(
+                error: error,
+                sessionBox: sessionBox,
+                windowIndex: windowIndex,
+                totalWindows: totalWindows
+            )
             switch status.retryPolicy {
             case .shrinkWindowAndRetryOnce:
                 // bd-34e Fix B v3: when Apple reports the actual token
@@ -2116,6 +2159,17 @@ struct FoundationModelClassifier: Sendable {
                 status: status,
                 retryStage: .initial
             )
+            // bd-fmfb: capture an Apple `logFeedbackAttachment` blob for any
+            // refinement decode failure or refusal. Same rationale as the
+            // coarse-pass call site — must happen before the per-window
+            // session goes out of scope. No-op when feedbackStore is nil.
+            await captureFeedbackForRefinementErrorIfNeeded(
+                status: status,
+                error: error,
+                sessionBox: sessionBox,
+                plan: plan,
+                stage: .initial
+            )
             switch status.retryPolicy {
             case .shrinkWindowAndRetryOnce:
                 guard let retryPlan = await shrunkenRefinementPlanForRetry(
@@ -2135,6 +2189,13 @@ struct FoundationModelClassifier: Sendable {
                         status: retryStatus,
                         retryStage: .shrinkRetry
                     )
+                    await captureFeedbackForRefinementErrorIfNeeded(
+                        status: retryStatus,
+                        error: error,
+                        sessionBox: sessionBox,
+                        plan: retryPlan,
+                        stage: .shrinkRetry
+                    )
                     return .failure(retryStatus)
                 }
             case .backoffAndRetry:
@@ -2149,6 +2210,13 @@ struct FoundationModelClassifier: Sendable {
                         error: error,
                         status: retryStatus,
                         retryStage: .backoffRetry
+                    )
+                    await captureFeedbackForRefinementErrorIfNeeded(
+                        status: retryStatus,
+                        error: error,
+                        sessionBox: sessionBox,
+                        plan: plan,
+                        stage: .backoffRetry
                     )
                     return .failure(retryStatus)
                 }
@@ -2380,6 +2448,75 @@ struct FoundationModelClassifier: Sendable {
 
         Self.coarsePassDiagnosticObserver?(diagnostic)
         #endif
+    }
+
+    /// bd-fmfb: invoke `LanguageModelSession.logFeedbackAttachment` for
+    /// coarse-pass refusals (and only refusals — other failure modes route
+    /// through different feedback contexts). The capture is gated on the
+    /// optional `feedbackStore` so production release builds and existing
+    /// tests with `feedbackStore == nil` see no behavior change. Errors are
+    /// logged inside the store and never thrown.
+    private func captureFeedbackForCoarseRefusalIfNeeded(
+        error: Error,
+        sessionBox: SessionBox,
+        windowIndex: Int,
+        totalWindows: Int
+    ) async {
+        guard let feedbackStore else { return }
+        #if canImport(FoundationModels)
+        guard #available(iOS 26.0, *) else { return }
+        guard let generationError = error as? LanguageModelSession.GenerationError,
+              case .refusal = generationError else {
+            return
+        }
+        let context = "window=\(windowIndex)_of_\(totalWindows)"
+        let data = await sessionBox.logFeedback(
+            desiredOutput: FoundationModelsFeedbackStore.coarseRefusalDesiredOutput,
+            negative: true
+        )
+        guard let data else { return }
+        await feedbackStore.storeAttachment(
+            data,
+            kind: .coarseRefusal,
+            windowContext: context
+        )
+        #endif
+    }
+
+    /// bd-fmfb: invoke `LanguageModelSession.logFeedbackAttachment` for
+    /// refinement-pass decode failures and refusals. Same gating rules as
+    /// the coarse-pass helper.
+    private func captureFeedbackForRefinementErrorIfNeeded(
+        status: SemanticScanStatus,
+        error: Error,
+        sessionBox: SessionBox,
+        plan: RefinementWindowPlan,
+        stage: RefinementDecodeFailureDiagnostic.RetryStage
+    ) async {
+        guard let feedbackStore else { return }
+        let kind: FoundationModelsFeedbackStore.CaptureKind
+        let desiredOutput: String
+        switch status {
+        case .decodingFailure:
+            kind = .refinementDecodeFailure
+            desiredOutput = FoundationModelsFeedbackStore.refinementDecodeFailureDesiredOutput
+        case .refusal:
+            kind = .refinementRefusal
+            desiredOutput = FoundationModelsFeedbackStore.refinementRefusalDesiredOutput
+        default:
+            return
+        }
+        let context = "refineWindow=\(plan.windowIndex)_source=\(plan.sourceWindowIndex)_stage=\(stage.rawValue)"
+        let data = await sessionBox.logFeedback(
+            desiredOutput: desiredOutput,
+            negative: true
+        )
+        guard let data else { return }
+        await feedbackStore.storeAttachment(
+            data,
+            kind: kind,
+            windowContext: context
+        )
     }
 
     /// bd-34e: render the first 200 characters of a coarse-pass prompt with
@@ -2811,6 +2948,13 @@ final actor SessionBox {
     func respondRefinement(_ prompt: String) async throws -> RefinementWindowSchema {
         try await session.respondRefinement(prompt)
     }
+
+    /// bd-fmfb: invoke the underlying session's `logFeedbackAttachment` and
+    /// return the captured `Data`. Returns `nil` for test runtimes that
+    /// don't model a real session.
+    func logFeedback(desiredOutput: String, negative: Bool) async -> Data? {
+        await session.logFeedback(desiredOutput, negative)
+    }
 }
 
 #if canImport(FoundationModels)
@@ -2842,6 +2986,33 @@ final actor LiveSessionActor {
             options: GenerationOptions(maximumResponseTokens: maximumResponseTokens)
         )
         return response.content
+    }
+
+    /// bd-fmfb: invoke `LanguageModelSession.logFeedbackAttachment` on the
+    /// confined session. Apple's API is synchronous, non-throwing, and
+    /// returns a `Foundation.Data` blob (NOT a URL — the framework does not
+    /// write the attachment to disk for us). The caller is responsible for
+    /// persisting the bytes via `FoundationModelsFeedbackStore`.
+    ///
+    /// Availability: `logFeedbackAttachment(sentiment:issues:desiredResponseText:)`
+    /// is available iOS 26.0+ via `@backDeployed(before: iOS 26.1, ...)`.
+    func logFeedback(desiredOutput: String, negative: Bool) -> Data {
+        let issues: [LanguageModelFeedback.Issue]
+        if negative {
+            issues = [
+                LanguageModelFeedback.Issue(
+                    category: .triggeredGuardrailUnexpectedly,
+                    explanation: "Benign podcast advertising content was refused/decode-failed by the on-device classifier; expected a structured ad classification."
+                )
+            ]
+        } else {
+            issues = []
+        }
+        return session.logFeedbackAttachment(
+            sentiment: negative ? .negative : nil,
+            issues: issues,
+            desiredResponseText: desiredOutput
+        )
     }
 }
 #endif
@@ -2935,6 +3106,9 @@ private extension FoundationModelClassifier {
                             prompt,
                             maximumResponseTokens: config.refinementMaximumResponseTokens
                         )
+                    },
+                    logFeedback: { desiredOutput, negative in
+                        await live.logFeedback(desiredOutput: desiredOutput, negative: negative)
                     }
                 )
             }

@@ -33,6 +33,9 @@ struct SettingsView: View {
     /// Active debug export ready to share via ShareLink sheet.
     @State private var debugExport: DebugEpisodeExport?
     @State private var debugExportInProgress = false
+    /// bd-fmfb: cached list of `LanguageModelSession.logFeedbackAttachment`
+    /// payload URLs captured by the feedback store. Refreshed via `.task`.
+    @State private var fmFeedbackAttachmentURLs: [URL] = []
     #endif
 
     /// Injected dependencies — set via environment or passed directly.
@@ -52,6 +55,7 @@ struct SettingsView: View {
                     purchasesSection
                     #if DEBUG
                     debugSection
+                    fmFeedbackSection
                     #endif
                 }
             }
@@ -650,6 +654,77 @@ private extension SettingsView {
         debugExport = await DebugEpisodeExporter.buildLibraryExport(
             store: runtime.analysisStore
         )
+    }
+
+    // MARK: - bd-fmfb: FoundationModels feedback attachments
+
+    /// DEBUG-only: surface `LanguageModelSession.logFeedbackAttachment`
+    /// payloads captured automatically when Apple's iOS 26.4 on-device
+    /// safety classifier rejects benign podcast advertising or the
+    /// refinement pass fails to decode structured output. The user (the
+    /// developer) can share the captured `.feedbackAttachment` files via
+    /// the standard share sheet and attach them to a Feedback Assistant
+    /// report so the FoundationModels team has machine-readable evidence.
+    var fmFeedbackSection: some View {
+        Section {
+            Text("\(fmFeedbackAttachmentURLs.count) attachment\(fmFeedbackAttachmentURLs.count == 1 ? "" : "s") captured")
+                .font(AppTypography.body)
+                .foregroundStyle(AppColors.text)
+                .listRowBackground(AppColors.surface)
+
+            if !fmFeedbackAttachmentURLs.isEmpty {
+                ShareLink(
+                    items: fmFeedbackAttachmentURLs
+                ) {
+                    Label("Share via Feedback Assistant", systemImage: "square.and.arrow.up")
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.accent)
+                }
+                .listRowBackground(AppColors.surface)
+
+                Button(role: .destructive) {
+                    Task { await clearFMFeedback() }
+                } label: {
+                    Label("Clear all", systemImage: "trash")
+                        .font(AppTypography.body)
+                }
+                .listRowBackground(AppColors.surface)
+            }
+
+            Button {
+                Task { await refreshFMFeedback() }
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.accent)
+            }
+            .listRowBackground(AppColors.surface)
+        } header: {
+            sectionHeader("Apple FoundationModels Feedback")
+        } footer: {
+            Text("Captured automatically when the on-device model refuses a classification or fails to produce structured output. Tap Share to attach to a Feedback Assistant report.")
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.metadata)
+        }
+        .task {
+            await refreshFMFeedback()
+        }
+    }
+
+    @MainActor
+    func refreshFMFeedback() async {
+        guard let store = runtime.feedbackStore else {
+            fmFeedbackAttachmentURLs = []
+            return
+        }
+        fmFeedbackAttachmentURLs = await store.capturedAttachmentURLs()
+    }
+
+    @MainActor
+    func clearFMFeedback() async {
+        guard let store = runtime.feedbackStore else { return }
+        await store.clearCapturedAttachments()
+        fmFeedbackAttachmentURLs = []
     }
 }
 #endif
