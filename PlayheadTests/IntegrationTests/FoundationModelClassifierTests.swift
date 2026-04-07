@@ -201,13 +201,13 @@ struct FoundationModelClassifierTests {
         #expect(!segments.isEmpty)
 
         let recorder = RuntimeRecorder(
-            // bd-34e Fix B v2: contextSize bumped from 100 to 142 because
-            // the coarse divisor moved from 2 to 3. New math:
-            //   budget = min((142 - 4 - 6 - 5) / 3, 142 / 3) = min(42, 47) = 42.
+            // bd-34e Fix B v3: contextSize bumped from 142 to 183 because
+            // the coarse divisor moved from 3 to 4. New math:
+            //   budget = min((183 - 4 - 6 - 5) / 4, 183 / 4) = min(42, 45) = 42.
             // Holding the previous test budget (42) intentional: keeps the
             // assertion meaningful and the planner exercising the same
             // window-packing thresholds.
-            contextSize: 142,
+            contextSize: 183,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -238,13 +238,13 @@ struct FoundationModelClassifierTests {
         ]
 
         let recorder = RuntimeRecorder(
-            // bd-34e Fix B v2: contextSize bumped from 86 to 120 for the
-            // ÷3 coarse divisor. New math:
-            //   budget = min((120 - 4 - 6 - 5) / 3, 120 / 3) = min(35, 40) = 35.
+            // bd-34e Fix B v3: contextSize bumped from 120 to 155 for the
+            // ÷4 coarse divisor. New math:
+            //   budget = min((155 - 4 - 6 - 5) / 4, 155 / 4) = min(35, 38) = 35.
             // Preamble wrap = 5 lines; 2-segment prompt = 7*5 = 35 (fits),
             // 3-segment = 8*5 = 40 (does not) — same [[0,1],[2]] window
             // split the test expects.
-            contextSize: 120,
+            contextSize: 155,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -1713,15 +1713,15 @@ struct FoundationModelClassifierTests {
             makeSegment(index: 2, startTime: 10, endTime: 15, text: "Window two text.")
         ]
         let recorder = RuntimeRecorder(
-            // bd-34e Fix B v2: contextSize bumped from 120 to 171 for the
-            // ÷3 coarse divisor. New math:
-            //   budget = min((171 - 4 - 6 - 5) / 3, 171 / 3) = min(52, 57) = 52.
+            // bd-34e Fix B v3: contextSize bumped from 171 to 223 for the
+            // ÷4 coarse divisor. New math:
+            //   budget = min((223 - 4 - 6 - 5) / 4, 223 / 4) = min(52, 55) = 52.
             // Preamble wrap = 5 lines. With tokenCountRule=count*8 a
             // single-segment prompt is 6*8 = 48 tokens (fits) but a
             // two-segment prompt is 7*8 = 56 (does not) — forcing one window
             // per segment so the mid-pass refusal has a second window to
             // fail on.
-            contextSize: 171,
+            contextSize: 223,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -1755,9 +1755,9 @@ struct FoundationModelClassifierTests {
             makeSegment(index: 2, startTime: 10, endTime: 15, text: "Window two.")
         ]
         let recorder = RuntimeRecorder(
-            // bd-34e Fix B v2: contextSize bumped from 100 to 142 for the
-            // ÷3 coarse divisor (matches plannerCoverageOnRealEpisode).
-            contextSize: 142,
+            // bd-34e Fix B v3: contextSize bumped from 142 to 183 for the
+            // ÷4 coarse divisor (matches plannerCoverageOnRealEpisode).
+            contextSize: 183,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -1916,21 +1916,20 @@ struct FoundationModelClassifierTests {
         #endif
     }
 
-    // bd-34e Fix B v2: real-device benchmarks showed the coarse prompt
-    // format tokenizes up to **2.40×** worse than the estimator predicts
-    // (window 3 of the Conan episode estimated 1788, Apple counted 4295).
-    // The coarse divisor moves from 2 to 3 so estimated budgets always
-    // leave a 3× safety factor. Refinement keeps its ÷2 divisor — its
+    // bd-34e Fix B v3: window 4 of the Conan episode estimated 1196 tokens
+    // but Apple counted 4125 (3.45× ratio). The previous ÷3 divisor was
+    // not enough headroom; ÷4 leaves a 4× safety factor against
+    // tokenizer undercount. Refinement keeps its ÷2 divisor — its
     // prompts are smaller and decode-failure work is being investigated
     // independently. These tests pin the math for both divisors.
-    @Test("coarse window budget reserves headroom for 2.4x tokenizer undercount")
+    @Test("coarse window budget reserves headroom for 3.45x tokenizer undercount")
     func windowBudgetReservesHeadroomForTokenizerUndercount() {
         // Real-device coarse parameters: contextSize=4096, responseTokens=96,
         // schema=128, safetyMargin=128. Conservative math:
         //   preMargin = 4096 - 128 - 96 - 128 = 3744
-        //   conservative = 3744 / 3 = 1248
-        //   hardCap = 4096 / 3 = 1365
-        //   result = min(1248, 1365) = 1248
+        //   conservative = 3744 / 4 = 936
+        //   hardCap = 4096 / 4 = 1024
+        //   result = min(936, 1024) = 936
         let coarse = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
             contextSize: 4096,
             schemaTokens: 128,
@@ -1938,8 +1937,8 @@ struct FoundationModelClassifierTests {
             safetyMarginTokens: 128,
             divisor: FoundationModelClassifier.coarseBudgetDivisor
         )
-        #expect(coarse == 1248)
-        #expect(coarse <= 4096 / 3, "hard cap contextSize/3 must bound the coarse ceiling")
+        #expect(coarse == 936)
+        #expect(coarse <= 4096 / 4, "hard cap contextSize/4 must bound the coarse ceiling")
 
         // With a larger safety margin the ceiling only drops further.
         let withFatMargin = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
@@ -1950,11 +1949,11 @@ struct FoundationModelClassifierTests {
             divisor: FoundationModelClassifier.coarseBudgetDivisor
         )
         #expect(withFatMargin <= coarse)
-        #expect(withFatMargin <= 4096 / 3)
+        #expect(withFatMargin <= 4096 / 4)
 
         // The hard cap must clamp pathological inputs where the schema and
         // response tokens are tiny: no matter how big preMargin gets, the
-        // coarse result cannot exceed contextSize / 3.
+        // coarse result cannot exceed contextSize / 4.
         let tinyOverhead = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
             contextSize: 4096,
             schemaTokens: 0,
@@ -1962,7 +1961,7 @@ struct FoundationModelClassifierTests {
             safetyMarginTokens: 0,
             divisor: FoundationModelClassifier.coarseBudgetDivisor
         )
-        #expect(tinyOverhead == 4096 / 3)
+        #expect(tinyOverhead == 4096 / 4)
 
         // Floor: must return at least 1 even when overhead > context.
         let exhausted = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
@@ -1985,12 +1984,13 @@ struct FoundationModelClassifierTests {
         #expect(refinement <= 4096 / 2)
     }
 
-    // bd-34e Fix B v2: pins the exact budget the production coarse path
+    // bd-34e Fix B v3: pins the exact budget the production coarse path
     // returns under real-device defaults so any future regression to
-    // ÷2 (or any larger divisor) trips a focused test instead of an
+    // ÷3 (or any larger divisor) trips a focused test instead of an
     // on-device benchmark failure.
-    @Test("coarse budget is one-third of context size minus overhead")
-    func coarseBudgetIsThirdOfContextSize() {
+    @Test("coarse budget divisor is four")
+    func coarseBudgetDivisorIsFour() {
+        #expect(FoundationModelClassifier.coarseBudgetDivisor == 4)
         let safe = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
             contextSize: 4096,
             schemaTokens: 128,
@@ -1998,19 +1998,24 @@ struct FoundationModelClassifierTests {
             safetyMarginTokens: 128,
             divisor: FoundationModelClassifier.coarseBudgetDivisor
         )
-        // (4096 - 128 - 96 - 128) / 3 = 3744 / 3 = 1248
-        #expect(safe == 1248)
-        // Sanity: under the OLD (÷2) divisor the same inputs would have
-        // returned 1872, which is what overflowed window 3 on real device.
-        let oldHalved = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
+        // (4096 - 128 - 96 - 128) / 4 = 3744 / 4 = 936
+        #expect(safe == 936)
+        // Pin the hard cap separately so a future regression to a smaller
+        // divisor (with overhead pushed down) still trips a focused test.
+        #expect(4096 / FoundationModelClassifier.coarseBudgetDivisor == 1024)
+        #expect(min(936, 1024) == 936)
+        // Sanity: under the OLD (÷3) divisor the same inputs would have
+        // returned 1248, which still left window 4 of the Conan episode
+        // 3.45× over Apple's actual budget on real device.
+        let oldThirded = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
             contextSize: 4096,
             schemaTokens: 128,
             maximumResponseTokens: 96,
             safetyMarginTokens: 128,
-            divisor: 2
+            divisor: 3
         )
-        #expect(oldHalved == 1872)
-        #expect(safe < oldHalved)
+        #expect(oldThirded == 1248)
+        #expect(safe < oldThirded)
     }
 
     // bd-34e Fix B v2: smart-shrink retry parses Apple's reported actual
@@ -2111,11 +2116,225 @@ struct FoundationModelClassifierTests {
         )
     }
 
+    // bd-34e Fix B v3: the smart-shrink retry loop iterates up to
+    // `coarseSmartShrinkMaxIterations` (3) times, recomputing the target
+    // segment count from each attempt's actual token count. When the
+    // shrunken window finally fits, the coarse pass succeeds without
+    // touching the legacy midpoint splitter.
+    @Test("coarse pass smart shrink iterates up to three retries")
+    func coarsePassSmartShrinkIteratesUpToThreeRetries() async throws {
+        let captureBox = CoarsePassDiagnosticCaptureBox()
+        FoundationModelClassifier.coarsePassDiagnosticObserver = { diagnostic in
+            captureBox.append(diagnostic)
+        }
+        defer { FoundationModelClassifier.coarsePassDiagnosticObserver = nil }
+
+        // 16 segments collapsed into a single planner window so the
+        // smart-shrink loop has plenty of room to iterate. Each call
+        // advertises a progressively smaller actual token count so the
+        // loop walks 16 → 4 → 1 → 1 segments and finally succeeds on
+        // iteration 3's retry (the 4th respond call overall).
+        let segments = (0..<16).map { idx in
+            makeSegment(
+                index: idx,
+                startTime: TimeInterval(idx * 5),
+                endTime: TimeInterval(idx * 5 + 5),
+                text: "Window segment number \(idx)."
+            )
+        }
+        let recorder = RuntimeRecorder(
+            contextSize: 4096,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 8 },
+            responses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ],
+            coarseFailures: [
+                .exceededContextWindowWithDebugDescription(
+                    "Content contains 8000 tokens, which exceeds the maximum allowed context size of 4096."
+                ),
+                .exceededContextWindowWithDebugDescription(
+                    "Content contains 6000 tokens, which exceeds the maximum allowed context size of 4096."
+                ),
+                .exceededContextWindowWithDebugDescription(
+                    "Content contains 3000 tokens, which exceeds the maximum allowed context size of 4096."
+                ),
+                nil
+            ]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 4, maximumResponseTokens: 6)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .success)
+        #expect(output.failedWindowStatuses.isEmpty)
+        #expect(
+            snapshot.respondCalls.count == 4,
+            "1 initial call + 3 smart-shrink retries; got \(snapshot.respondCalls.count)"
+        )
+
+        let outcomes = captureBox.snapshot()
+            .filter { $0.kind == .smartShrinkOutcome }
+        let retried = outcomes.filter { $0.smartShrinkOutcome == .retried }
+        let succeeded = outcomes.filter { $0.smartShrinkOutcome == .success }
+        // 4 respond calls = 1 initial throw (not a smart-shrink event) +
+        // 2 retried throws (iterations 1 and 2) + 1 success (iteration 3).
+        #expect(retried.count == 2, "expected 2 retried outcomes, got \(retried.count)")
+        #expect(succeeded.count == 1, "expected 1 success outcome, got \(succeeded.count)")
+        #expect(retried.map(\.smartShrinkIteration) == [1, 2])
+        #expect(succeeded.first?.smartShrinkIteration == 3)
+    }
+
+    // bd-34e Fix B v3: when every smart-shrink retry also throws
+    // `exceededContextWindow`, the loop abandons after 3 iterations.
+    // The window's per-window failure is recorded but the overall pass
+    // still aborts because there is only one window and zero successes.
+    @Test("coarse pass smart shrink abandons after three retries")
+    func coarsePassSmartShrinkAbandonsAfterThreeRetries() async throws {
+        let captureBox = CoarsePassDiagnosticCaptureBox()
+        FoundationModelClassifier.coarsePassDiagnosticObserver = { diagnostic in
+            captureBox.append(diagnostic)
+        }
+        defer { FoundationModelClassifier.coarsePassDiagnosticObserver = nil }
+
+        let segments = (0..<8).map { idx in
+            makeSegment(
+                index: idx,
+                startTime: TimeInterval(idx * 5),
+                endTime: TimeInterval(idx * 5 + 5),
+                text: "Window segment number \(idx)."
+            )
+        }
+        let recorder = RuntimeRecorder(
+            contextSize: 4096,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 8 },
+            coarseFailures: [
+                .exceededContextWindowWithDebugDescription(
+                    "Content contains 9000 tokens, which exceeds the maximum allowed context size of 4096."
+                ),
+                .exceededContextWindowWithDebugDescription(
+                    "Content contains 9000 tokens, which exceeds the maximum allowed context size of 4096."
+                ),
+                .exceededContextWindowWithDebugDescription(
+                    "Content contains 9000 tokens, which exceeds the maximum allowed context size of 4096."
+                ),
+                .exceededContextWindowWithDebugDescription(
+                    "Content contains 9000 tokens, which exceeds the maximum allowed context size of 4096."
+                )
+            ]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 4, maximumResponseTokens: 6)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        // 1 initial + 3 retries = 4 respond calls.
+        #expect(
+            snapshot.respondCalls.count == 4,
+            "expected 4 respond calls (1 initial + 3 retries), got \(snapshot.respondCalls.count)"
+        )
+        // No surviving windows → top-level status falls back to the
+        // last per-window failure, which is .exceededContextWindow.
+        #expect(output.windows.isEmpty)
+        #expect(output.status == .exceededContextWindow)
+        #expect(output.failedWindowStatuses == [.exceededContextWindow])
+
+        let outcomes = captureBox.snapshot()
+            .filter { $0.kind == .smartShrinkOutcome }
+        let abandoned = outcomes.filter { $0.smartShrinkOutcome == .abandoned }
+        #expect(abandoned.count >= 1, "expected at least one abandoned smart_shrink_outcome event")
+    }
+
+    // bd-34e Fix B v3: graceful degradation. A multi-window pass where
+    // window 2 of 4 fails its smart-shrink retries irrecoverably must
+    // still preserve the other 3 windows and report overall .success.
+    @Test("coarse pass continues after a single window failure")
+    func coarsePassContinuesAfterSingleWindowFailure() async throws {
+        let segments = [
+            makeSegment(index: 0, startTime: 0, endTime: 5, text: "Window zero text."),
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Window one text."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Window two text."),
+            makeSegment(index: 3, startTime: 15, endTime: 20, text: "Window three text.")
+        ]
+        // Same shape as `coarsePassReturnsPartialOnMidPassFailure`: a
+        // contextSize tuned so each segment becomes its own window
+        // (1-segment prompt fits, 2-segment prompt does not).
+        let recorder = RuntimeRecorder(
+            contextSize: 223,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8
+            },
+            responses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ],
+            coarseFailures: [
+                nil, // window 1 succeeds
+                .exceededContextWindowWithDebugDescription(
+                    "Content contains 9000 tokens, which exceeds the maximum allowed context size of 223."
+                ),
+                .exceededContextWindowWithDebugDescription(
+                    "Content contains 9000 tokens, which exceeds the maximum allowed context size of 223."
+                ),
+                .exceededContextWindowWithDebugDescription(
+                    "Content contains 9000 tokens, which exceeds the maximum allowed context size of 223."
+                ),
+                .exceededContextWindowWithDebugDescription(
+                    "Content contains 9000 tokens, which exceeds the maximum allowed context size of 223."
+                )
+                // calls 6 and 7 succeed because the queue is empty.
+            ]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        // Sanity-check the planner produced 4 windows.
+        let plans = try await classifier.planPassA(segments: segments)
+        #expect(plans.count == 4)
+
+        // Pass-level status remains success because at least one window
+        // produced output.
+        #expect(output.status == .success)
+        #expect(output.windows.count == 3, "3 windows must survive the pass; got \(output.windows.count)")
+        #expect(output.failedWindowStatuses == [.exceededContextWindow])
+
+        // 1 success + (1 init + 3 retries) for the failing window + 2 successes = 7 calls.
+        #expect(
+            snapshot.respondCalls.count == 7,
+            "expected 7 respond calls (window 2 = 1 initial + 3 retries), got \(snapshot.respondCalls.count)"
+        )
+
+        // Surviving windows must NOT include line ref 1 (the failing window).
+        let survivingLineRefs = output.windows.flatMap(\.lineRefs)
+        #expect(survivingLineRefs.contains(0))
+        #expect(survivingLineRefs.contains(2))
+        #expect(survivingLineRefs.contains(3))
+        #expect(!survivingLineRefs.contains(1))
+    }
+
     @Test("window construction respects the hard cap when per-segment tokens approach the ceiling")
     func windowConstructionRespectsHardCap() async throws {
         // Build enough segments that, under the OLD (unhalved) budget, the
         // planner would try to pack many into a single window. Under the new
-        // ÷3 ceiling + hard cap, no coarse window may exceed contextSize / 3.
+        // ÷4 ceiling + hard cap, no coarse window may exceed contextSize / 4.
         let segments: [AdTranscriptSegment] = (0..<40).map { idx in
             makeSegment(
                 index: idx,
@@ -2132,8 +2351,8 @@ struct FoundationModelClassifierTests {
             tokenCountRule: { prompt in
                 // Coarse undercount of the real shape: multiply line count by
                 // a small per-line constant. Real tokens come from Apple at
-                // ~2.4× this on the live device; we mimic that by asserting
-                // the planner's output stays under contextSize / 3.
+                // ~3.5× this on the live device; we mimic that by asserting
+                // the planner's output stays under contextSize / 4.
                 prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 4
             }
         )
@@ -2144,8 +2363,8 @@ struct FoundationModelClassifierTests {
 
         let plans = try await classifier.planPassA(segments: segments)
         #expect(!plans.isEmpty)
-        // Every window MUST fit under contextSize / 3 — the hard cap that
-        // guarantees a ~2.4× tokenizer undercount still lands inside context.
+        // Every window MUST fit under contextSize / 4 — the hard cap that
+        // guarantees a ~3.5× tokenizer undercount still lands inside context.
         let hardCap = contextSize / FoundationModelClassifier.coarseBudgetDivisor
         for plan in plans {
             #expect(

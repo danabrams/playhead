@@ -279,6 +279,25 @@ struct FMCoarseScanOutput: Sendable, Equatable {
     let windows: [FMCoarseWindowOutput]
     let latencyMillis: Double
     let prewarmHit: Bool
+    /// bd-34e Fix B v3: per-window failure statuses captured when a window
+    /// is abandoned by the smart-shrink retry loop but the rest of the
+    /// pass continues. Empty when every window succeeded or when the
+    /// pass aborted on a non-recoverable failure.
+    let failedWindowStatuses: [SemanticScanStatus]
+
+    init(
+        status: SemanticScanStatus,
+        windows: [FMCoarseWindowOutput],
+        latencyMillis: Double,
+        prewarmHit: Bool,
+        failedWindowStatuses: [SemanticScanStatus] = []
+    ) {
+        self.status = status
+        self.windows = windows
+        self.latencyMillis = latencyMillis
+        self.prewarmHit = prewarmHit
+        self.failedWindowStatuses = failedWindowStatuses
+    }
 }
 
 enum ZoomStopReason: String, Sendable, Codable, Hashable {
@@ -497,6 +516,19 @@ struct FoundationModelClassifier: Sendable {
         enum Kind: String, Sendable {
             case submit
             case error
+            /// bd-34e Fix B v3: emitted before each smart-shrink retry
+            /// attempt with the iteration number, the actual token count
+            /// Apple reported, and the new target segment count.
+            case smartShrinkAttempt
+            /// bd-34e Fix B v3: emitted after each smart-shrink retry
+            /// completes (success, retried again, or abandoned).
+            case smartShrinkOutcome
+        }
+
+        enum SmartShrinkOutcome: String, Sendable {
+            case success
+            case retried
+            case abandoned
         }
 
         let kind: Kind
@@ -511,6 +543,45 @@ struct FoundationModelClassifier: Sendable {
         let errorDescription: String  // empty for `.submit`
         let errorReflect: String      // empty for `.submit`
         let status: SemanticScanStatus? // nil for `.submit`
+        /// bd-34e Fix B v3: smart-shrink retry iteration (1-based) for
+        /// `.smartShrinkAttempt` and `.smartShrinkOutcome` events; nil
+        /// otherwise.
+        let smartShrinkIteration: Int?
+        /// bd-34e Fix B v3: terminal outcome for `.smartShrinkOutcome`;
+        /// nil otherwise.
+        let smartShrinkOutcome: SmartShrinkOutcome?
+
+        init(
+            kind: Kind,
+            windowIndex: Int,
+            totalWindows: Int,
+            firstSegmentIndex: Int?,
+            lastSegmentIndex: Int?,
+            segmentCount: Int,
+            promptTokens: Int,
+            promptCharLength: Int,
+            promptPreview: String,
+            errorDescription: String,
+            errorReflect: String,
+            status: SemanticScanStatus?,
+            smartShrinkIteration: Int? = nil,
+            smartShrinkOutcome: SmartShrinkOutcome? = nil
+        ) {
+            self.kind = kind
+            self.windowIndex = windowIndex
+            self.totalWindows = totalWindows
+            self.firstSegmentIndex = firstSegmentIndex
+            self.lastSegmentIndex = lastSegmentIndex
+            self.segmentCount = segmentCount
+            self.promptTokens = promptTokens
+            self.promptCharLength = promptCharLength
+            self.promptPreview = promptPreview
+            self.errorDescription = errorDescription
+            self.errorReflect = errorReflect
+            self.status = status
+            self.smartShrinkIteration = smartShrinkIteration
+            self.smartShrinkOutcome = smartShrinkOutcome
+        }
     }
 
     /// Internal test hook so unit tests can observe coarse-pass window submit /
@@ -577,6 +648,12 @@ struct FoundationModelClassifier: Sendable {
 
         var windows: [FMCoarseWindowOutput] = []
         windows.reserveCapacity(plans.count)
+        // bd-34e Fix B v3: per-window failures from the smart-shrink retry
+        // loop are recorded here so a single oversized window does not
+        // abort the entire pass. Other failure types (refusal, guardrail,
+        // decoding) still abort to preserve their existing escalation
+        // semantics.
+        var failedWindowStatuses: [SemanticScanStatus] = []
 
         let totalWindows = plans.count
         for (planIndex, plan) in plans.enumerated() {
@@ -588,7 +665,8 @@ struct FoundationModelClassifier: Sendable {
                     status: .cancelled,
                     windows: windows,
                     latencyMillis: Self.latencyMillis(since: start, clock: clock),
-                    prewarmHit: prewarmHit
+                    prewarmHit: prewarmHit,
+                    failedWindowStatuses: failedWindowStatuses
                 )
             }
 
@@ -615,21 +693,59 @@ struct FoundationModelClassifier: Sendable {
                     )
                 }
             case let .failure(status):
-                // C4/H2: Return partial results with non-success top-level status.
+                // bd-34e Fix B v3: a window that exhausts smart-shrink
+                // retries (or otherwise fails with `.exceededContextWindow`)
+                // is recorded as a per-window failure and the pass
+                // continues. This guarantees that one tokenization
+                // outlier in a 10+ window pass cannot kill the other
+                // 9 windows worth of coarse classification.
+                if status == .exceededContextWindow {
+                    failedWindowStatuses.append(status)
+                    logger.error(
+                        """
+                        fm.classifier.coarse_pass_window_abandoned \
+                        window=\(planIndex + 1, privacy: .public) \
+                        totalWindows=\(totalWindows, privacy: .public) \
+                        firstSegmentIndex=\(plan.lineRefs.first ?? -1, privacy: .public) \
+                        lastSegmentIndex=\(plan.lineRefs.last ?? -1, privacy: .public) \
+                        segmentCount=\(plan.lineRefs.count, privacy: .public) \
+                        status=\(status.rawValue, privacy: .public)
+                        """
+                    )
+                    continue
+                }
+                // C4/H2: Other failures (refusal, guardrail, decoding,
+                // cancellation) still abort the pass with partial results.
                 return FMCoarseScanOutput(
                     status: status,
                     windows: windows,
                     latencyMillis: Self.latencyMillis(since: start, clock: clock),
-                    prewarmHit: prewarmHit
+                    prewarmHit: prewarmHit,
+                    failedWindowStatuses: failedWindowStatuses
                 )
             }
         }
 
+        // bd-34e Fix B v3: top-level status remains `.success` whenever at
+        // least one window produced output, even if other windows were
+        // abandoned by the smart-shrink loop. The runner can inspect
+        // `failedWindowStatuses` to surface partial failures in the UI
+        // and persist per-window scan rows. If EVERY window failed we
+        // surface the last failure status so the caller still sees an
+        // unrecoverable error.
+        let topLevelStatus: SemanticScanStatus
+        if windows.isEmpty, let lastFailure = failedWindowStatuses.last {
+            topLevelStatus = lastFailure
+        } else {
+            topLevelStatus = .success
+        }
+
         return FMCoarseScanOutput(
-            status: .success,
+            status: topLevelStatus,
             windows: windows,
             latencyMillis: Self.latencyMillis(since: start, clock: clock),
-            prewarmHit: prewarmHit
+            prewarmHit: prewarmHit,
+            failedWindowStatuses: failedWindowStatuses
         )
     }
 
@@ -1040,15 +1156,24 @@ struct FoundationModelClassifier: Sendable {
     /// independently, so we deliberately do not retune it here.
     static let refinementBudgetDivisor = 2
 
-    /// bd-34e Fix B v2 (coarse): on-device benchmarks showed the
-    /// real-device coarse prompt format tokenizes up to **2.40×** worse
-    /// than the estimator predicts, and the ratio is non-constant across
-    /// windows. Halving was insufficient — window 3 of the Conan episode
-    /// estimated 1788 tokens but Apple counted 4295 (overflow). We now
-    /// divide by 3 to give the coarse prompt a 3× safety factor against
-    /// tokenizer undercount. This produces more, smaller windows but each
-    /// is much more likely to fit Apple's actual budget.
-    static let coarseBudgetDivisor = 3
+    /// bd-34e Fix B v3 (coarse): Fix v2's ÷3 divisor still left window 4
+    /// of the Conan episode 3.45× over Apple's actual budget on real
+    /// device (estimated 1196, counted 4125). The tokenizer undercount
+    /// ratio is non-constant per-window and can spike well above 3×, so
+    /// we move to ÷4 to give the coarse prompt a 4× safety factor. This
+    /// produces ~10–12 small windows per episode but each is much more
+    /// likely to fit Apple's actual budget on the first try, and the
+    /// smart-shrink retry loop (see `coarseResponses`) catches the
+    /// remaining outliers without aborting the whole pass.
+    static let coarseBudgetDivisor = 4
+
+    /// bd-34e Fix B v3: maximum number of smart-shrink retry iterations
+    /// before a single coarse window is abandoned. Each iteration
+    /// re-derives target segment count from the most-recent Apple-reported
+    /// actual token count, so three iterations are usually enough to land
+    /// inside Apple's hidden ceiling even when the per-segment cost varies
+    /// by 2–3× across attempts.
+    static let coarseSmartShrinkMaxIterations = 3
 
     /// Compute the safe ceiling for estimator-counted prompt tokens. The
     /// `divisor` is the safety multiple against tokenizer undercount and
@@ -1481,29 +1606,33 @@ struct FoundationModelClassifier: Sendable {
             )
             switch status.retryPolicy {
             case .shrinkWindowAndRetryOnce:
-                // bd-34e Fix B v2: when Apple reports the actual token
-                // count in the error string, use it to compute a single
+                // bd-34e Fix B v3: when Apple reports the actual token
+                // count in the error string, use it to compute a
                 // smart-shrunken plan that drops just enough segments to
-                // fit the real budget. The smart-shrink branch trades
-                // coverage on the dropped tail for a single retry round
-                // trip — much faster than the legacy midpoint split and
-                // more likely to land inside Apple's hidden ceiling. If
-                // we can't extract a count (older iOS, error string
-                // changed, test scaffolding), fall back to the existing
-                // recursive midpoint split via `shrunkenCoarsePlansForRetry`.
-                if status == .exceededContextWindow,
-                   let smartPlan = await smartShrunkenCoarsePlan(
-                       from: plan,
-                       lineRefLookup: lineRefLookup,
-                       error: error,
-                       windowIndex: windowIndex,
-                       totalWindows: totalWindows
-                   ) {
-                    return await runCoarseRetry(
-                        retryPlans: [smartPlan],
+                // fit a *halved* context window. The smart-shrink loop
+                // now iterates up to `coarseSmartShrinkMaxIterations`
+                // times, recomputing the target segment count from each
+                // attempt's actual token count. If extraction fails
+                // (older iOS, error string changed, test scaffolding),
+                // we fall back to the legacy recursive midpoint split.
+                if status == .exceededContextWindow {
+                    let outcome = await runCoarseSmartShrinkLoop(
+                        initialPlan: plan,
+                        initialError: error,
+                        lineRefLookup: lineRefLookup,
                         sessionBox: sessionBox,
-                        clock: clock
+                        clock: clock,
+                        windowIndex: windowIndex,
+                        totalWindows: totalWindows
                     )
+                    switch outcome {
+                    case .succeeded(let result):
+                        return result
+                    case .abandoned:
+                        return .failure(.exceededContextWindow)
+                    case .extractionFailed:
+                        break // fall through to legacy splitter
+                    }
                 }
                 guard let retryPlans = await shrunkenCoarsePlansForRetry(
                     from: plan,
@@ -1578,6 +1707,165 @@ struct FoundationModelClassifier: Sendable {
         }
 
         return .success(retryOutputs)
+    }
+
+    /// bd-34e Fix B v3: outcome of the smart-shrink retry loop. Allows
+    /// the caller to distinguish "we extracted nothing parseable, fall
+    /// back to the legacy splitter" from "we tried our best and the
+    /// window is genuinely too big — abandon it".
+    private enum SmartShrinkLoopOutcome {
+        case succeeded(CoarseResponseOutcome)
+        case abandoned
+        case extractionFailed
+    }
+
+    /// bd-34e Fix B v3: iterative smart-shrink retry loop. Each iteration
+    /// re-derives `targetSegments` from the most recent
+    /// `exceededContextWindowSize` error's actual token count, then
+    /// retries with a smaller plan. Up to
+    /// `coarseSmartShrinkMaxIterations` iterations are attempted before
+    /// the window is abandoned.
+    private func runCoarseSmartShrinkLoop(
+        initialPlan: CoarsePassWindowPlan,
+        initialError: Error,
+        lineRefLookup: [Int: AdTranscriptSegment],
+        sessionBox: SessionBox,
+        clock: ContinuousClock,
+        windowIndex: Int,
+        totalWindows: Int
+    ) async -> SmartShrinkLoopOutcome {
+        var currentPlan = initialPlan
+        var currentError: Error = initialError
+        var extractedAtLeastOnce = false
+
+        for iteration in 1...Self.coarseSmartShrinkMaxIterations {
+            guard let smartPlan = await smartShrunkenCoarsePlan(
+                from: currentPlan,
+                lineRefLookup: lineRefLookup,
+                error: currentError,
+                windowIndex: windowIndex,
+                totalWindows: totalWindows,
+                iteration: iteration
+            ) else {
+                // Could not extract a token count from the error or the
+                // math says no shrink is possible. If this is the very
+                // first iteration we hand off to the legacy splitter;
+                // otherwise we have made progress already and just stop.
+                if !extractedAtLeastOnce {
+                    return .extractionFailed
+                }
+                reportCoarseSmartShrinkOutcome(
+                    plan: currentPlan,
+                    iteration: iteration,
+                    outcome: .abandoned,
+                    windowIndex: windowIndex,
+                    totalWindows: totalWindows
+                )
+                return .abandoned
+            }
+            extractedAtLeastOnce = true
+
+            let retryStart = clock.now
+            do {
+                let response = try await sessionBox.respondCoarse(smartPlan.prompt)
+                let screening = sanitize(
+                    schema: response,
+                    validLineRefs: Set(smartPlan.lineRefs)
+                )
+                reportCoarseSmartShrinkOutcome(
+                    plan: smartPlan,
+                    iteration: iteration,
+                    outcome: .success,
+                    windowIndex: windowIndex,
+                    totalWindows: totalWindows
+                )
+                return .succeeded(.success([
+                    FMCoarseWindowOutput(
+                        windowIndex: 0,
+                        lineRefs: smartPlan.lineRefs,
+                        startTime: smartPlan.startTime,
+                        endTime: smartPlan.endTime,
+                        transcriptQuality: smartPlan.transcriptQuality,
+                        screening: screening,
+                        latencyMillis: Self.latencyMillis(since: retryStart, clock: clock)
+                    )
+                ]))
+            } catch {
+                let retryStatus = SemanticScanStatus.from(error: error)
+                if retryStatus == .exceededContextWindow {
+                    reportCoarseSmartShrinkOutcome(
+                        plan: smartPlan,
+                        iteration: iteration,
+                        outcome: .retried,
+                        windowIndex: windowIndex,
+                        totalWindows: totalWindows
+                    )
+                    currentPlan = smartPlan
+                    currentError = error
+                    continue
+                }
+                // A non-context-window error during a retry — bail out
+                // and let the catch arm in `coarseResponses` decide how
+                // to surface it. We treat this as "succeeded with a
+                // failure outcome" so the caller propagates it.
+                reportCoarseSmartShrinkOutcome(
+                    plan: smartPlan,
+                    iteration: iteration,
+                    outcome: .abandoned,
+                    windowIndex: windowIndex,
+                    totalWindows: totalWindows
+                )
+                return .succeeded(.failure(retryStatus))
+            }
+        }
+
+        // Iteration limit reached without success.
+        reportCoarseSmartShrinkOutcome(
+            plan: currentPlan,
+            iteration: Self.coarseSmartShrinkMaxIterations,
+            outcome: .abandoned,
+            windowIndex: windowIndex,
+            totalWindows: totalWindows
+        )
+        return .abandoned
+    }
+
+    private func reportCoarseSmartShrinkOutcome(
+        plan: CoarsePassWindowPlan,
+        iteration: Int,
+        outcome: CoarsePassWindowDiagnostic.SmartShrinkOutcome,
+        windowIndex: Int,
+        totalWindows: Int
+    ) {
+        let preview = Self.coarsePromptPreview(plan.prompt)
+        let diagnostic = CoarsePassWindowDiagnostic(
+            kind: .smartShrinkOutcome,
+            windowIndex: windowIndex,
+            totalWindows: totalWindows,
+            firstSegmentIndex: plan.lineRefs.first,
+            lastSegmentIndex: plan.lineRefs.last,
+            segmentCount: plan.lineRefs.count,
+            promptTokens: plan.promptTokenCount,
+            promptCharLength: plan.prompt.count,
+            promptPreview: preview,
+            errorDescription: "",
+            errorReflect: "",
+            status: outcome == .success ? .success : .exceededContextWindow,
+            smartShrinkIteration: iteration,
+            smartShrinkOutcome: outcome
+        )
+        logger.debug(
+            """
+            fm.classifier.coarse_pass_smart_shrink_outcome \
+            window=\(windowIndex, privacy: .public) \
+            totalWindows=\(totalWindows, privacy: .public) \
+            iteration=\(iteration, privacy: .public) \
+            outcome=\(outcome.rawValue, privacy: .public) \
+            segmentCount=\(plan.lineRefs.count, privacy: .public) \
+            promptTokens=\(plan.promptTokenCount, privacy: .public)
+            """
+        )
+        Self.coarsePassDiagnosticObserver?(diagnostic)
     }
 
     private func refinementResponse(
@@ -1853,24 +2141,31 @@ struct FoundationModelClassifier: Sendable {
         )
     }
 
-    /// bd-34e Fix B v2: build a single smart-shrunken coarse plan using
-    /// Apple's reported actual token count. Returns `nil` when we can't
-    /// extract a count, when the math says no shrink is needed, or when
-    /// the smart-shrunken plan would still be empty — letting the caller
-    /// fall back to the legacy recursive midpoint split.
+    /// bd-34e Fix B v3: build a single smart-shrunken coarse plan using
+    /// Apple's reported actual token count. Returns `nil` only when we
+    /// can't extract a count or when the input plan is already empty —
+    /// the iterative caller (`runCoarseSmartShrinkLoop`) handles
+    /// "shrunken plan still failed" by re-invoking with the new error.
+    ///
+    /// Targets `min(absoluteCeiling, contextSize / 2)` instead of the
+    /// full content budget, leaving headroom for per-segment cost
+    /// variance across attempts. Always shrinks the segment count by at
+    /// least one when possible so progress is monotonic across
+    /// iterations.
     private func smartShrunkenCoarsePlan(
         from plan: CoarsePassWindowPlan,
         lineRefLookup: [Int: AdTranscriptSegment],
         error: Error,
         windowIndex: Int,
-        totalWindows: Int
+        totalWindows: Int,
+        iteration: Int
     ) async -> CoarsePassWindowPlan? {
         guard let actualTokens = Self.extractActualTokenCount(from: error) else {
             return nil
         }
 
         let segments = plan.lineRefs.compactMap { lineRefLookup[$0] }
-        guard segments.count == plan.lineRefs.count, segments.count > 1 else {
+        guard segments.count == plan.lineRefs.count, !segments.isEmpty else {
             return nil
         }
 
@@ -1880,18 +2175,23 @@ struct FoundationModelClassifier: Sendable {
         // Compute Apple's real budget using the same overheads the
         // estimator already knows about. We deliberately do NOT apply
         // the bd-34e divisor here — `actualTokens` is already in Apple's
-        // ground-truth units, so we want the unscaled budget.
+        // ground-truth units. bd-34e Fix B v3 caps the target at half
+        // the context window so the retry leaves headroom for
+        // per-segment cost variance from window to window.
         let contextSize = await runtime.contextSize()
         let schemaTokens = (try? await runtime.coarseSchemaTokenCount()) ?? 0
         let responseTokens = config.coarseMaximumResponseTokens
         let safetyMargin = config.safetyMarginTokens
-        let targetTokens = max(1, contextSize - schemaTokens - responseTokens - safetyMargin)
-        let targetSegments = max(1, targetTokens / actualPerSegment)
+        let absoluteCeiling = max(1, contextSize - schemaTokens - responseTokens - safetyMargin)
+        let halvedContext = max(1, contextSize / 2)
+        let targetTokens = min(absoluteCeiling, halvedContext)
+        var targetSegments = max(1, targetTokens / actualPerSegment)
 
-        guard targetSegments < originalSegmentCount else {
-            // Apple says we're over budget but our per-segment math says
-            // a smaller window wouldn't help — bail to the legacy splitter.
-            return nil
+        // Force monotonic progress: if the math says we could keep the
+        // same number of segments, drop one anyway so iteration N+1 is
+        // strictly smaller than iteration N (until we hit 1 segment).
+        if targetSegments >= originalSegmentCount && originalSegmentCount > 1 {
+            targetSegments = originalSegmentCount - 1
         }
 
         let trimmedSegments = Array(segments.prefix(targetSegments))
@@ -1905,6 +2205,7 @@ struct FoundationModelClassifier: Sendable {
             fm.classifier.coarse_pass_smart_shrink \
             window=\(windowIndex, privacy: .public) \
             totalWindows=\(totalWindows, privacy: .public) \
+            iteration=\(iteration, privacy: .public) \
             originalSegments=\(originalSegmentCount, privacy: .public) \
             actualTokens=\(actualTokens, privacy: .public) \
             actualPerSegment=\(actualPerSegment, privacy: .public) \
@@ -1912,6 +2213,24 @@ struct FoundationModelClassifier: Sendable {
             targetSegments=\(targetSegments, privacy: .public)
             """
         )
+
+        let attemptDiagnostic = CoarsePassWindowDiagnostic(
+            kind: .smartShrinkAttempt,
+            windowIndex: windowIndex,
+            totalWindows: totalWindows,
+            firstSegmentIndex: trimmedSegments.first?.segmentIndex,
+            lastSegmentIndex: trimmedSegments.last?.segmentIndex,
+            segmentCount: trimmedSegments.count,
+            promptTokens: trimmedTokenCount,
+            promptCharLength: trimmedPrompt.count,
+            promptPreview: Self.coarsePromptPreview(trimmedPrompt),
+            errorDescription: error.localizedDescription,
+            errorReflect: String(reflecting: error),
+            status: .exceededContextWindow,
+            smartShrinkIteration: iteration,
+            smartShrinkOutcome: nil
+        )
+        Self.coarsePassDiagnosticObserver?(attemptDiagnostic)
 
         return CoarsePassWindowPlan(
             windowIndex: 0,
