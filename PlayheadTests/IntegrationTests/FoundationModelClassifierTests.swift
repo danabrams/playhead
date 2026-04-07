@@ -229,7 +229,7 @@ struct FoundationModelClassifierTests {
         #expect(plans.allSatisfy { isContiguous($0.lineRefs) })
     }
 
-    @Test("coarse pass prewarms once, shares one session across windows, and sanitizes support refs")
+    @Test("coarse pass mints a freshly prewarmed session per window and sanitizes support refs")
     func prewarmAndFreshSessionPerWindow() async throws {
         let segments = [
             makeSegment(index: 0, startTime: 0, endTime: 8, text: "The hosts catch up before the break."),
@@ -280,13 +280,16 @@ struct FoundationModelClassifierTests {
         #expect(output.windows.map(\.lineRefs) == [[0, 1], [2]])
         #expect(output.windows[0].screening.support?.supportLineRefs == [1])
         #expect(output.windows[1].screening.support == nil)
-        // C6: a single prewarmed session is shared across all windows in the pass.
+        // bd-34e Fix B v5: each coarse window now mints and prewarms its
+        // own `LanguageModelSession`. Two windows ⇒ two sessions, each
+        // prewarmed exactly once with the coarse prompt prefix.
         #expect(snapshot.prewarmCalls == [
-            RuntimeRecorder.PrewarmCall(sessionID: 1, promptPrefix: "Classify ad content.")
+            RuntimeRecorder.PrewarmCall(sessionID: 1, promptPrefix: "Classify ad content."),
+            RuntimeRecorder.PrewarmCall(sessionID: 2, promptPrefix: "Classify ad content.")
         ])
         #expect(snapshot.respondCalls.count == 2)
-        #expect(Set(snapshot.respondCalls.map(\.sessionID)) == [1])
-        #expect(snapshot.sessionCount == 1)
+        #expect(Set(snapshot.respondCalls.map(\.sessionID)) == Set([1, 2]))
+        #expect(snapshot.sessionCount == 2)
         // L10: prewarmHit is plumbed honestly when the shared session is used.
         #expect(output.prewarmHit)
     }
@@ -2093,54 +2096,90 @@ struct FoundationModelClassifierTests {
         #expect(safe < oldFourthed)
     }
 
-    // bd-34e Fix B v4: PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW debug flag
-    // experiment switch. When unset, the coarse pass shares one
-    // prewarmed session across all windows (C6). When set, every
-    // coarse window gets a brand-new session via runtime.makeSession().
-    // This is a controlled experiment to test whether session
-    // accumulation is responsible for the 8×–11× tokenizer-undercount
-    // observed on real device. Default behavior (unset) must be
-    // unchanged from production.
-    @Test("PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW flag creates a new session per coarse window")
-    func coarseFreshSessionFlagCreatesNewSessionPerWindow() async throws {
-        // Skip if the flag is set externally — that would invert this
-        // test's default-mode assertion.
-        let alreadySet = ProcessInfo.processInfo.environment["PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW"] != nil
-        guard !alreadySet else { return }
+    // bd-3h2 (2026-04-06): pins the production default
+    // `refinementMaximumResponseTokens`. The on-device run on
+    // iOS 26.4 produced a refinement decode failure where the FM
+    // emitted valid JSON truncated mid-string ("certain" → should
+    // be "certainty") because the previous 192-token cap was too
+    // small for a 2-span response with full evidence anchors.
+    // Empirically a 1-span response uses ~300 tokens, 2-spans
+    // ~600 tokens, 3-spans ~900 tokens. We pin 1024 so any
+    // future regression to a smaller value trips a focused test
+    // instead of an on-device benchmark failure.
+    @Test("refinement maximum response tokens default is one thousand twenty four")
+    func maximumRefinementResponseTokensIsLarge() {
+        #expect(FoundationModelClassifier.Config.default.refinementMaximumResponseTokens == 1024)
+        // Coarse default is unchanged — only refinement bumped.
+        #expect(FoundationModelClassifier.Config.default.coarseMaximumResponseTokens == 96)
+    }
 
+    // bd-3h2 (2026-04-06): the refinement prompt budget shrinks by
+    // exactly the amount the new response-token reservation grows
+    // (the divisor stays at 2). Pinning the math here means future
+    // regressions to a smaller response budget — or an accidental
+    // change to the divisor — trip a focused test rather than
+    // surface as a refinement decode failure on real device.
+    @Test("refinement budget accounts for the larger response reservation")
+    func refinementBudgetAccountsForLargerResponseReservation() {
+        let responseTokens = FoundationModelClassifier.Config.default.refinementMaximumResponseTokens
+        let schemaTokens = 256
+        let marginTokens = 128
+        let contextSize = 4096
+
+        let safe = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
+            contextSize: contextSize,
+            schemaTokens: schemaTokens,
+            maximumResponseTokens: responseTokens,
+            safetyMarginTokens: marginTokens,
+            divisor: FoundationModelClassifier.refinementBudgetDivisor
+        )
+
+        // (4096 - 256 - 1024 - 128) / 2 = 2688 / 2 = 1344
+        // hardCap = 4096 / 2 = 2048
+        // result = min(1344, 2048) = 1344
+        let preMargin = contextSize - schemaTokens - responseTokens - marginTokens
+        let expected = min(preMargin / 2, contextSize / 2)
+        #expect(safe == expected)
+        #expect(safe == 1344)
+
+        // Refinement divisor stays at 2 — only the response token
+        // reservation moved.
+        #expect(FoundationModelClassifier.refinementBudgetDivisor == 2)
+
+        // Sanity: with the OLD 192-token reservation the same inputs
+        // would have returned a strictly larger ceiling, leaving the
+        // model less response headroom. The new value gives the model
+        // ~1.4 KB extra of generation room at the cost of ~416 prompt
+        // tokens — exactly the trade bd-3h2 needs.
+        let oldSafe = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
+            contextSize: contextSize,
+            schemaTokens: schemaTokens,
+            maximumResponseTokens: 192,
+            safetyMarginTokens: marginTokens,
+            divisor: FoundationModelClassifier.refinementBudgetDivisor
+        )
+        #expect(oldSafe > safe)
+        #expect(oldSafe - safe == (1024 - 192) / 2)
+    }
+
+    // bd-34e Fix B v5 (was v4): per-window sessions are now the
+    // production default for the coarse pass. The on-device run on
+    // iOS 26.4 (Conan fixture, 2026-04-06) confirmed that sharing one
+    // `LanguageModelSession` across windows accumulates conversation
+    // history (~4000 tokens after 7 successful exchanges) and pushes
+    // window 8+ over the 4096-token context window with
+    // `exceededContextWindow`. The previous Fix v4 debug-flag
+    // (`PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW`) was the controlled
+    // experiment that proved this; that branch is now the only branch
+    // on the coarse path. Refinement still consults the flag — see
+    // `refinementFreshSessionFlagCreatesNewSessionPerWindow`.
+    @Test("coarse pass uses per-window sessions by default")
+    func coarsePassUsesPerWindowSessionsByDefault() async throws {
         let segments = [
             makeSegment(index: 0, startTime: 0, endTime: 5, text: "Window zero text."),
             makeSegment(index: 1, startTime: 5, endTime: 10, text: "Window one text."),
             makeSegment(index: 2, startTime: 10, endTime: 15, text: "Window two text.")
         ]
-
-        // Default mode: shared session across all windows.
-        do {
-            let recorder = RuntimeRecorder(
-                contextSize: 431,
-                coarseSchemaTokens: 4,
-                refinementSchemaTokens: 8,
-                tokenCountRule: { prompt in
-                    prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8
-                }
-            )
-            let classifier = FoundationModelClassifier(
-                runtime: recorder.runtime,
-                config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
-            )
-            let output = try await classifier.coarsePassA(segments: segments)
-            let snapshot = await recorder.snapshot()
-            #expect(output.status == .success)
-            #expect(output.windows.count == 3)
-            // Production C6 behavior: a SINGLE session is created and shared.
-            #expect(snapshot.sessionCount == 1)
-            #expect(Set(snapshot.respondCalls.map(\.sessionID)) == [1])
-        }
-
-        // Flagged mode: a fresh session per window.
-        #if DEBUG
-        setenv("PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW", "1", 1)
-        defer { unsetenv("PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW") }
 
         let recorder = RuntimeRecorder(
             contextSize: 431,
@@ -2159,18 +2198,17 @@ struct FoundationModelClassifierTests {
 
         #expect(output.status == .success)
         #expect(output.windows.count == 3, "expected 3 windows, got \(output.windows.count)")
-        // Experiment behavior: ONE fresh session per window. 3 windows → 3 sessions.
+        // bd-34e Fix B v5: ONE fresh session per window — 3 windows ⇒
+        // 3 sessions, each prewarmed exactly once with the coarse
+        // prefix and serving exactly its own window's respond call.
         #expect(
             snapshot.sessionCount == 3,
             "expected 3 fresh sessions (one per window), got \(snapshot.sessionCount)"
         )
-        // Each respond call must have come from a distinct session id.
         #expect(Set(snapshot.respondCalls.map(\.sessionID)) == Set([1, 2, 3]))
-        // Every fresh session must have been prewarmed.
         #expect(snapshot.prewarmCalls.count == 3)
         #expect(Set(snapshot.prewarmCalls.map(\.sessionID)) == Set([1, 2, 3]))
         #expect(snapshot.prewarmCalls.allSatisfy { $0.promptPrefix == "Classify ad content." })
-        #endif
     }
 
     // bd-34e Fix B v4: same fresh-session flag must apply to refinement.

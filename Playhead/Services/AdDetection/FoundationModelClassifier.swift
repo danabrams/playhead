@@ -459,10 +459,25 @@ struct FoundationModelClassifier: Sendable {
         let minimumZoomSpanLines: Int
         let maximumRefinementSpansPerWindow: Int
 
+        // bd-3h2 (2026-04-06): On-device run on iOS 26.4 produced a
+        // refinement decode failure with the FM emitting valid JSON
+        // truncated mid-string (the second span's `"certainty"` field
+        // was cut to `"certain`). Apple's `GenerationOptions
+        // .maximumResponseTokens` was set to 192, which is enough for
+        // a 1-span response but not for the 2–3 spans the refinement
+        // schema can return when a coarse window contains multiple
+        // commercial segments. Empirically a 1-span response uses
+        // ~300 tokens, 2-spans ~600 tokens, 3-spans ~900 tokens; we
+        // budget 1024 tokens of response headroom so the model can
+        // emit a complete refinement response with up to ~3 spans plus
+        // their evidence anchors before hitting the cap. The
+        // refinement prompt budget shrinks correspondingly via
+        // `promptBudget(schemaTokens:maximumResponseTokens:divisor:)`,
+        // which already reads this value through `config`.
         static let `default` = Config(
             safetyMarginTokens: 128,
             coarseMaximumResponseTokens: 96,
-            refinementMaximumResponseTokens: 192,
+            refinementMaximumResponseTokens: 1024,
             zoomAmbiguityBudget: 1,
             minimumZoomSpanLines: 2,
             maximumRefinementSpansPerWindow: 2
@@ -717,23 +732,28 @@ struct FoundationModelClassifier: Sendable {
         }
 
         let coarseLineRefLookup = lineRefLookup(for: segments)
-        // bd-34e Fix B v4: when PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW is set
-        // we create a brand-new prewarmed session for every coarse window
-        // instead of sharing one across the pass. The default (production)
-        // path remains the C6 shared-session optimization.
-        let freshSessionPerWindow = Self.freshSessionPerWindowEnabled()
-        let sharedBoxOrNil: SessionBox?
-        if freshSessionPerWindow {
-            logger.debug(
-                "PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW active — creating fresh session per coarse window"
-            )
-            sharedBoxOrNil = nil
-        } else {
-            // C6: Share a single prewarmed session across all windows in this pass.
-            let box = SessionBox(session: await runtime.makeSession())
-            await box.prewarm(Self.promptPrefix)
-            sharedBoxOrNil = box
-        }
+        // bd-34e Fix B v5 (was v4): per-window sessions are now the
+        // production default for the coarse pass. The on-device run on
+        // iOS 26.4 (Conan fixture, 2026-04-06) confirmed that sharing a
+        // single `LanguageModelSession` across windows accumulates
+        // ~4000 tokens of conversation history after 7 successful
+        // exchanges and pushes window 8+ over the 4096-token context
+        // ceiling with `exceededContextWindow`, despite each individual
+        // prompt being well under budget. The cached
+        // `SystemLanguageModel.default` keeps the model assets warm
+        // across sessions — creating a fresh `LanguageModelSession`
+        // per window is cheap and scoped to a single window's context.
+        // Each window's session is prewarmed before its first request,
+        // so the first window still pays the cold-start cost up front
+        // and subsequent windows hit the warm model cache.
+        // The `PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW` debug flag from
+        // Fix v4 (`freshSessionPerWindowEnabled()`) was the controlled
+        // experiment that proved this fix; the per-window-session
+        // branch is now the only branch on the coarse path. The flag
+        // helper is retained because the refinement pass still consults
+        // it (refinement may have an analogous accumulation bug, but
+        // bd-3h2 was masking it; we will revisit refinement separately
+        // once the response-token bump in this commit closes bd-3h2).
         let prewarmHit = true
 
         var windows: [FMCoarseWindowOutput] = []
@@ -760,14 +780,12 @@ struct FoundationModelClassifier: Sendable {
                 )
             }
 
-            let perWindowBox: SessionBox
-            if let shared = sharedBoxOrNil {
-                perWindowBox = shared
-            } else {
-                let fresh = SessionBox(session: await runtime.makeSession())
-                await fresh.prewarm(Self.promptPrefix)
-                perWindowBox = fresh
-            }
+            // bd-34e Fix B v5: every coarse window gets its own freshly
+            // minted, freshly prewarmed `LanguageModelSession`. See the
+            // comment block above the loop for the on-device evidence
+            // that motivated removing the shared-session branch.
+            let perWindowBox = SessionBox(session: await runtime.makeSession())
+            await perWindowBox.prewarm(Self.promptPrefix)
             switch await coarseResponses(
                 for: plan,
                 sessionBox: perWindowBox,
