@@ -1325,4 +1325,116 @@ struct BackfillJobRunnerTests {
         )
         #expect(a == b)
     }
+
+    @Test("bd-1tl: caseName covers every AnalysisStoreError case with a stable token")
+    func caseNameCoversEveryCase() {
+        // bd-1tl: the on-device run reported `AnalysisStoreError error 9`
+        // — Swift's NSError-bridge ordinal — which is unhelpful for triage.
+        // Production telemetry now logs the case name via
+        // `BackfillJobRunner.caseName(of:)`. This test pins every case to
+        // its stable token and exercises every switch arm so a future
+        // case addition fails compilation here (the switch is exhaustive)
+        // before it can ship a "case=unknown" log line.
+        let cases: [(AnalysisStoreError, String)] = [
+            (.openFailed(code: 1, message: "x"), "openFailed"),
+            (.migrationFailed("x"), "migrationFailed"),
+            (.queryFailed("x"), "queryFailed"),
+            (.insertFailed("x"), "insertFailed"),
+            (.notFound, "notFound"),
+            (.duplicateJobId("x"), "duplicateJobId"),
+            (.invalidRow(column: 0), "invalidRow"),
+            (.invalidEvidenceEvent("x"), "invalidEvidenceEvent"),
+            (.invalidScanCohortJSON("x"), "invalidScanCohortJSON"),
+            (.invalidStateTransition(jobId: "j", fromStatus: nil, toStatus: "running"), "invalidStateTransition"),
+            (.evidenceEventBodyMismatch(id: "x"), "evidenceEventBodyMismatch"),
+        ]
+        for (error, expected) in cases {
+            #expect(BackfillJobRunner.caseName(of: error) == expected,
+                    "caseName(\(expected)) returned the wrong token")
+        }
+    }
+
+    @Test("bd-1tl: backfill runner persists results when refinement evidence shares a natural key")
+    func runnerPersistsAcrossEvidenceNaturalKeyCollision() async throws {
+        // bd-1tl: end-to-end repro of the on-device persistence failure.
+        // Two refined spans returned by the FM cover the same line range
+        // (firstLineRef == lastLineRef == 1) but with different bodies
+        // (`commercialIntent`, `certainty`). Both spans flow through
+        // `BackfillJobRunner.makeEvidenceEvents` and produce evidence events
+        // with the same atomOrdinals JSON, the same scanCohortJSON, and
+        // different evidenceJSON. Pre-bd-1tl this aborted the entire
+        // refinement-pass batch with `evidenceEventBodyMismatch` and
+        // persisted ZERO scan rows + ZERO evidence rows. Post-bd-1tl the
+        // natural-key dedup is silent: the scan row commits and the
+        // first-written evidence row survives.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [1],
+                        certainty: .strong
+                    )
+                )
+            ],
+            refinementResponses: [
+                RefinementWindowSchema(spans: [
+                    SpanRefinementSchema(
+                        commercialIntent: .paid,
+                        ownership: .thirdParty,
+                        firstLineRef: 1,
+                        lastLineRef: 1,
+                        certainty: .strong,
+                        boundaryPrecision: .precise,
+                        evidenceAnchors: [
+                            EvidenceAnchorSchema(
+                                evidenceRef: nil,
+                                lineRef: 1,
+                                kind: .ctaPhrase,
+                                certainty: .strong
+                            )
+                        ],
+                        alternativeExplanation: .none,
+                        reasonTags: [.callToAction]
+                    ),
+                    // Second span: same line range, different body. The
+                    // FM is well within its rights to emit overlapping
+                    // refined spans for the same atoms — H3-1's throw
+                    // turned that into a P0 persistence failure.
+                    SpanRefinementSchema(
+                        commercialIntent: .affiliate,
+                        ownership: .thirdParty,
+                        firstLineRef: 1,
+                        lastLineRef: 1,
+                        certainty: .moderate,
+                        boundaryPrecision: .usable,
+                        evidenceAnchors: [
+                            EvidenceAnchorSchema(
+                                evidenceRef: nil,
+                                lineRef: 1,
+                                kind: .ctaPhrase,
+                                certainty: .moderate
+                            )
+                        ],
+                        alternativeExplanation: .none,
+                        reasonTags: [.callToAction]
+                    )
+                ])
+            ]
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        let result = try await runner.runPendingBackfill(for: makeInputs())
+
+        #expect(!result.admittedJobIds.isEmpty)
+        let passB = try await store.fetchSemanticScanResults(
+            analysisAssetId: "asset-runner",
+            scanPass: "passB"
+        )
+        #expect(passB.count >= 1, "passB scan row must persist; pre-fix this was 0")
+        let evidence = try await store.fetchEvidenceEvents(analysisAssetId: "asset-runner")
+        #expect(evidence.count >= 1, "at least one evidence row must persist after natural-key dedup")
+    }
 }

@@ -1087,20 +1087,24 @@ struct SemanticScanPersistenceTests {
         #expect(fetched.first?.evidenceJSON == #"{"quote":"original body"}"#)
     }
 
-    @Test("H3-1: insertEvidenceEvent throws on natural-key collision with a different body")
-    func insertEvidenceEvent_throwsOnNaturalKeyBodyMismatch() async throws {
+    @Test("bd-1tl: insertEvidenceEvent silently dedupes on natural-key collision with a different body")
+    func insertEvidenceEvent_silentDedupOnNaturalKeyBodyDrift() async throws {
+        // bd-1tl: This test pins the relaxed contract that replaces the
+        // earlier H3-1 "throw on natural-key body mismatch" behavior. The
+        // H3-1 throw aborted the entire FM backfill job on the FIRST
+        // collision in a real on-device run (iOS 26.4, 2026-04-07) because
+        // the FM legitimately produces multiple `RefinedAdSpan` entries that
+        // collapse onto the same `(asset, eventType, sourceType,
+        // atomOrdinals, scanCohortJSON)` natural key with different bodies
+        // (different commercialIntent / certainty / lineRefs). The natural
+        // key represents "we already have a row for this logical evidence
+        // event", so the dedup must be silent. Body integrity for true id
+        // reuse is still enforced by `H-2: insertEvidenceEvent throws when
+        // the same id reappears with a different body`.
         let store = try await makeTestStore()
         try await store.insertAsset(makePersistenceTestAsset())
 
         let cohort = try makeScanCohortJSON()
-        // Two events sharing the natural key (asset, eventType, sourceType,
-        // atomOrdinals, scanCohortJSON) but with *different* evidenceJSON.
-        // The first is a legitimate first-write; the second is a bug where
-        // the caller generated a fresh id for the same logical row but with
-        // a mutated body. Pre-H3-1 the INSERT OR IGNORE swallowed the second
-        // row silently and the id-probe saw no row for `evt-B`, so control
-        // fell through to the "natural-key dedup" return and the caller
-        // believed its write had landed.
         let first = EvidenceEvent(
             id: "evt-A",
             analysisAssetId: "asset-1",
@@ -1123,14 +1127,14 @@ struct SemanticScanPersistenceTests {
         )
 
         try await store.insertEvidenceEvent(first)
-        await #expect(throws: AnalysisStoreError.self) {
-            try await store.insertEvidenceEvent(second)
-        }
+        // Must NOT throw — silent natural-key dedup.
+        try await store.insertEvidenceEvent(second)
 
         let fetched = try await store.fetchEvidenceEvents(analysisAssetId: "asset-1")
-        #expect(fetched.count == 1, "mutated body must not have been silently persisted")
-        #expect(fetched.first?.id == "evt-A")
-        #expect(fetched.first?.evidenceJSON == #"{"quote":"original body"}"#)
+        #expect(fetched.count == 1, "natural-key dedup must collapse the two writes onto a single row")
+        #expect(fetched.first?.id == "evt-A", "the first-written row wins; the second is dedup'd silently")
+        #expect(fetched.first?.evidenceJSON == #"{"quote":"original body"}"#,
+                "the existing row's body is preserved on dedup; the second body is discarded")
     }
 
     @Test("H3-1: insertEvidenceEvent is silently idempotent on natural-key collision with matching body")
@@ -1168,6 +1172,84 @@ struct SemanticScanPersistenceTests {
         let fetched = try await store.fetchEvidenceEvents(analysisAssetId: "asset-1")
         #expect(fetched.count == 1, "idempotent natural-key dedup must keep exactly one row")
         #expect(fetched.first?.id == "evt-A")
+    }
+
+    @Test("bd-1tl: recordSemanticScanResult succeeds when two events collapse onto the same natural key")
+    func recordSemanticScanResult_evidenceNaturalKeyCollisionIsTolerated() async throws {
+        // bd-1tl regression. The on-device run on iOS 26.4 (2026-04-07)
+        // failed with `AnalysisStoreError error 9` (evidenceEventBodyMismatch)
+        // because BackfillJobRunner.runJob batched two evidence events into
+        // one `recordSemanticScanResult` call where both events had the same
+        // `(asset, eventType=fm.spanRefinement, sourceType=fm, atomOrdinals,
+        // scanCohortJSON)` natural key (the FM produced two refined spans
+        // covering the same atom range with different bodies). The H3-1
+        // throw aborted the batch transaction and rolled back the scan row
+        // along with both evidence events — net persistence = zero rows.
+        //
+        // After the bd-1tl fix the natural-key dedup is silent: the second
+        // event collapses onto the first, the transaction commits, and the
+        // scan row + the surviving evidence row both land on disk.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        let cohort = try makeScanCohortJSON()
+        let scanResult = SemanticScanResult(
+            id: "scan-bd1tl",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 10,
+            windowLastAtomOrdinal: 11,
+            windowStartTime: 0,
+            windowEndTime: 6,
+            scanPass: "passB",
+            transcriptQuality: .good,
+            disposition: .containsAd,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: 100,
+            prewarmHit: false,
+            scanCohortJSON: cohort,
+            transcriptVersion: "tx-v1"
+        )
+        // Two evidence events with the same atomOrdinals (= same natural
+        // key) but different bodies — exactly the shape the FM produced on
+        // device when it returned two `RefinedAdSpan` entries covering the
+        // same line range with different commercialIntent / certainty.
+        let evtFirst = EvidenceEvent(
+            id: "evt-bd1tl-1",
+            analysisAssetId: "asset-1",
+            eventType: "fm.spanRefinement",
+            sourceType: .fm,
+            atomOrdinals: "[10,11]",
+            evidenceJSON: #"{"commercialIntent":"paid","certainty":"strong"}"#,
+            scanCohortJSON: cohort,
+            createdAt: 100
+        )
+        let evtSecond = EvidenceEvent(
+            id: "evt-bd1tl-2",
+            analysisAssetId: "asset-1",
+            eventType: "fm.spanRefinement",
+            sourceType: .fm,
+            atomOrdinals: "[10,11]",
+            evidenceJSON: #"{"commercialIntent":"affiliate","certainty":"moderate"}"#,
+            scanCohortJSON: cohort,
+            createdAt: 101
+        )
+
+        // Must NOT throw — the natural-key dedup must be silent so the
+        // surrounding transaction commits the scan row + first evidence row.
+        try await store.recordSemanticScanResult(scanResult, evidenceEvents: [evtFirst, evtSecond])
+
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: "asset-1")
+        #expect(scans.count == 1, "scan row must persist despite the natural-key collision in evidence events")
+        #expect(scans.first?.id == "scan-bd1tl")
+
+        let evidence = try await store.fetchEvidenceEvents(analysisAssetId: "asset-1")
+        #expect(evidence.count == 1, "the colliding events must collapse onto a single row")
+        #expect(evidence.first?.id == "evt-bd1tl-1", "first-write wins; second is silently dedup'd")
     }
 
     @Test("H-2: insertEvidenceEvent with the identical body at the same id is idempotent")

@@ -329,7 +329,18 @@ actor BackfillJobRunner {
                         "Failed to mark FM job failed (likely racing terminal transition): \(job.jobId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
                     )
                 }
-                logger.error("FM backfill job \(job.jobId) failed: \(storeError.localizedDescription) (permanent=\(Self.isPermanent(storeError)))")
+                // bd-1tl: Use the enum's `description` (via String(describing:))
+                // and a stable case-name token so on-device Console.app shows
+                // the actual case (e.g. `evidenceEventBodyMismatch`) instead
+                // of the useless bridged "Playhead.AnalysisStoreError error 9"
+                // string from `localizedDescription`. The case name is the
+                // single most-actionable diagnostic for triaging persistence
+                // failures from the field — without it, every device failure
+                // requires reverse-engineering the enum ordinal back to a case.
+                let caseName = Self.caseName(of: storeError)
+                logger.error(
+                    "FM backfill job \(job.jobId, privacy: .public) failed: case=\(caseName, privacy: .public) detail=\(String(describing: storeError), privacy: .public) permanent=\(Self.isPermanent(storeError), privacy: .public)"
+                )
             } catch {
                 // C-2: markBackfillJobFailed writes deferReason so operators
                 // can diagnose the failure without scraping logs. The prior
@@ -349,7 +360,13 @@ actor BackfillJobRunner {
                         "Failed to mark FM job failed (likely racing terminal transition): \(job.jobId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
                     )
                 }
-                logger.error("FM backfill job \(job.jobId) failed: \(error.localizedDescription)")
+                // bd-1tl: see the typed-error arm above for why we prefer
+                // String(describing:) over localizedDescription for on-device
+                // diagnosis. Untyped errors here are typically Swift errors
+                // bridged from FoundationModels or CancellationError.
+                logger.error(
+                    "FM backfill job \(job.jobId, privacy: .public) failed: case=untyped detail=\(String(describing: error), privacy: .public)"
+                )
             }
 
             await admissionController.finish(jobId: job.jobId)
@@ -515,6 +532,27 @@ actor BackfillJobRunner {
     ) -> String {
         let canonical = "asset=\(analysisAssetId)|version=\(transcriptVersion)|phase=\(phase.rawValue)|offset=\(offset)"
         return hashedId(prefix: "fm", canonical: canonical)
+    }
+
+    /// bd-1tl: stable, log-friendly case name for an `AnalysisStoreError`.
+    /// `String(describing:)` on an enum with associated values gives the
+    /// case name plus the payload (e.g. `evidenceEventBodyMismatch(id: "...")`).
+    /// We strip the payload so log scrapers can match on the case name alone
+    /// and so production telemetry rolls up cleanly across distinct payloads.
+    nonisolated static func caseName(of error: AnalysisStoreError) -> String {
+        switch error {
+        case .openFailed: return "openFailed"
+        case .migrationFailed: return "migrationFailed"
+        case .queryFailed: return "queryFailed"
+        case .insertFailed: return "insertFailed"
+        case .notFound: return "notFound"
+        case .duplicateJobId: return "duplicateJobId"
+        case .invalidRow: return "invalidRow"
+        case .invalidEvidenceEvent: return "invalidEvidenceEvent"
+        case .invalidScanCohortJSON: return "invalidScanCohortJSON"
+        case .invalidStateTransition: return "invalidStateTransition"
+        case .evidenceEventBodyMismatch: return "evidenceEventBodyMismatch"
+        }
     }
 
     private static func isPermanent(_ error: AnalysisStoreError) -> Bool {

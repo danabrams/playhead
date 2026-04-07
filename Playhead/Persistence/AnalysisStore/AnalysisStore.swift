@@ -6,6 +6,7 @@
 
 import CryptoKit
 import Foundation
+import OSLog
 import SQLite3
 
 /// SQLite SQLITE_TRANSIENT destructor constant — tells sqlite3_bind_text to
@@ -198,6 +199,10 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 // MARK: - AnalysisStore actor
 
 actor AnalysisStore {
+
+    /// bd-1tl: dedicated logger for store-level diagnostics that should
+    /// reach Console.app on real devices without test scaffolding.
+    private let logger = Logger(subsystem: "com.playhead", category: "AnalysisStore")
 
     /// The raw SQLite handle. Marked `nonisolated(unsafe)` so deinit can close
     /// it without requiring actor isolation (Swift 6 strict concurrency).
@@ -2503,15 +2508,30 @@ actor AnalysisStore {
             // dedup path: another row with the same (asset, eventType,
             // sourceType, atomOrdinals, scanCohortJSON) already exists.
             //
-            // H3-1: before the id-probe fell through we silently assumed
-            // the stored row's body matched the incoming evidenceJSON. A
-            // caller that generated a fresh id for the same logical row
-            // but mutated the body (say, regenerated evidence with a newer
-            // classifier response) would pass through undetected — the
-            // second write vanished into the dedup path while the caller
-            // believed it had landed. Probe the natural key and compare
-            // `evidenceJSON`. On mismatch, fail loudly; on match, it is a
-            // legitimate dedup and we return silently.
+            // bd-1tl: previously (H3-1) this branch threw
+            // `evidenceEventBodyMismatch` whenever the existing row's
+            // `evidenceJSON` differed from the incoming body. The intent was
+            // to surface "caller generated a fresh id for the same logical
+            // row but mutated the body" bugs loudly. In practice the on-
+            // device run on iOS 26.4 (2026-04-07) showed the FM legitimately
+            // produces multiple `RefinedAdSpan` entries pointing at the
+            // SAME `firstAtomOrdinal..lastAtomOrdinal` range across windows
+            // (overlapping zoom plans, same line range refined twice with
+            // different `commercialIntent`/`certainty`). The natural key
+            // collides because `atomOrdinals` is identical, but the bodies
+            // intentionally differ — and the H3-1 throw aborted the entire
+            // backfill job at the FIRST such collision, persisting zero
+            // rows. The whole point of natural-key dedup is to be silent
+            // when the natural key already represents the row.
+            //
+            // The id-based probe above still catches PRIMARY KEY reuse with
+            // a mutated body (the evidenceEventBodyMismatch case), which
+            // remains the correct contract for callers reusing a stable id.
+            // The natural-key path now silently dedupes. We log a warning
+            // when the bodies differ so operators retain visibility — the
+            // case is semantically "two distinct refinements collapse onto
+            // one row" and is worth noticing in telemetry, but it must
+            // never abort persistence.
             let naturalProbe = try prepare("""
                 SELECT id, evidenceJSON
                 FROM evidence_events
@@ -2533,9 +2553,12 @@ actor AnalysisStore {
                 let existingId = optionalText(naturalProbe, 0) ?? ""
                 let existingBody = optionalText(naturalProbe, 1) ?? ""
                 if existingBody != event.evidenceJSON {
-                    throw AnalysisStoreError.evidenceEventBodyMismatch(id: existingId)
+                    logger.warning(
+                        "evidence_events natural-key dedup with body drift: existingId=\(existingId, privacy: .public) incomingId=\(event.id, privacy: .public) eventType=\(event.eventType, privacy: .public) atomOrdinals=\(event.atomOrdinals, privacy: .public)"
+                    )
                 }
-                // Bodies match: legitimate natural-key dedup, silent return.
+                // Body matches OR drifts: either way the natural key already
+                // represents this logical row. Silent dedup.
             }
             // No natural-key row either: extremely defensive fall-through
             // (shouldn't happen if INSERT OR IGNORE reported 0 changes);
