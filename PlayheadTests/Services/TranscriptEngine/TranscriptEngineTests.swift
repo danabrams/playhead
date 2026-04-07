@@ -59,6 +59,25 @@ private func makeSegment(id: Int = 0, passType: TranscriptPassType = .fast) -> T
     )
 }
 
+private func makeTranscriptAsset(
+    id: String,
+    episodeId: String
+) -> AnalysisAsset {
+    AnalysisAsset(
+        id: id,
+        episodeId: episodeId,
+        assetFingerprint: "fp-\(id)",
+        weakFingerprint: nil,
+        sourceURL: "file:///test/\(id).m4a",
+        featureCoverageEndTime: nil,
+        fastTranscriptCoverageEndTime: nil,
+        confirmedAdCoverageEndTime: nil,
+        analysisState: "queued",
+        analysisVersion: 1,
+        capabilitySnapshot: nil
+    )
+}
+
 // MARK: - SpeechService Tests
 
 @Suite("SpeechService – Model Management")
@@ -358,6 +377,89 @@ struct IncrementalShardAppendTests {
         let allIds = recognizer.transcribedShardIds
         #expect(allIds.contains(10), "Shard 10 should have been transcribed after append")
         #expect(allIds.contains(11), "Shard 11 should have been transcribed after append")
+    }
+}
+
+@Suite("TranscriptEngine – Asset Switching")
+struct TranscriptEngineAssetSwitchingTests {
+
+    @Test("startTranscription resets per-asset chunk index on asset switch")
+    func assetSwitchResetsChunkIndex() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeTranscriptAsset(id: "asset-1", episodeId: "ep-1"))
+        try await store.insertAsset(makeTranscriptAsset(id: "asset-2", episodeId: "ep-2"))
+        let recognizer = TrackingRecognizer()
+        let speech = SpeechService(recognizer: recognizer)
+        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        let firstEvents = await engine.events()
+
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, startTime: 0, duration: 30)],
+            analysisAssetId: "asset-1",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+
+        for await event in firstEvents {
+            if case .completed(let assetId) = event, assetId == "asset-1" { break }
+        }
+
+        let secondEvents = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(id: 1, startTime: 0, duration: 30)],
+            analysisAssetId: "asset-2",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+
+        for await event in secondEvents {
+            if case .completed(let assetId) = event, assetId == "asset-2" { break }
+        }
+
+        let asset1Chunks = try await store.fetchTranscriptChunks(assetId: "asset-1")
+        let asset2Chunks = try await store.fetchTranscriptChunks(assetId: "asset-2")
+
+        #expect(asset1Chunks.count == 1)
+        #expect(asset2Chunks.count == 1)
+        #expect(asset1Chunks[0].chunkIndex == 0)
+        #expect(asset2Chunks[0].chunkIndex == 0, "new asset should not inherit chunk index from prior asset")
+    }
+
+    @Test("appendShards ignores stale asset after asset switch")
+    func staleAppendIsDropped() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeTranscriptAsset(id: "asset-1", episodeId: "ep-1"))
+        try await store.insertAsset(makeTranscriptAsset(id: "asset-2", episodeId: "ep-2"))
+        let recognizer = TrackingRecognizer()
+        let speech = SpeechService(recognizer: recognizer)
+        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        let events = await engine.events()
+
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, startTime: 0, duration: 30)],
+            analysisAssetId: "asset-1",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+
+        for await event in events {
+            if case .completed(let assetId) = event, assetId == "asset-1" { break }
+        }
+
+        await engine.appendShards(
+            [makeShard(id: 99, episodeID: "stale-ep", startTime: 300, duration: 30)],
+            analysisAssetId: "asset-2",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+
+        try await Task.sleep(for: .milliseconds(300))
+
+        let allIds = recognizer.transcribedShardIds
+        let asset2Chunks = try await store.fetchTranscriptChunks(assetId: "asset-2")
+
+        #expect(!allIds.contains(99), "stale appended shard should be dropped")
+        #expect(asset2Chunks.isEmpty, "no transcript should be written for stale asset append")
     }
 }
 

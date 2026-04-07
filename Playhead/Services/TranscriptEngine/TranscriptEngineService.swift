@@ -152,6 +152,13 @@ actor TranscriptEngineService {
         // Cancel any existing work — we're starting fresh or reprioritizing.
         activeTask?.cancel()
 
+        // A fresh start should not inherit queued append work from a prior
+        // loop. When the asset changes, also reset the per-asset chunk index.
+        if activeAssetId != analysisAssetId {
+            chunkCounter = 0
+        }
+        appendedShards = []
+
         activeAssetId = analysisAssetId
         latestSnapshot = snapshot
 
@@ -203,7 +210,24 @@ actor TranscriptEngineService {
         analysisAssetId: String,
         snapshot: PlaybackSnapshot
     ) {
+        guard !newShards.isEmpty else { return }
         latestSnapshot = snapshot
+
+        // The transcript engine is single-asset. If a late append arrives for
+        // an asset that is no longer active, drop it instead of mixing old
+        // streaming output into the current session.
+        if let activeAssetId, activeAssetId != analysisAssetId {
+            logger.info(
+                "Dropping \(newShards.count) appended shards for stale asset \(analysisAssetId); active asset is \(activeAssetId)"
+            )
+            return
+        }
+
+        if activeAssetId == nil {
+            activeAssetId = analysisAssetId
+            chunkCounter = 0
+        }
+
         appendedShards.append(contentsOf: newShards)
 
         // If no active loop, start one for the appended shards.

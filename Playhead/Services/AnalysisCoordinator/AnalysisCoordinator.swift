@@ -208,9 +208,9 @@ actor AnalysisCoordinator {
     }
 
     /// Stop all work and clean up.
-    func stop() {
+    func stop() async {
         stopRequested = true
-        cancelPipeline()
+        await cancelPipeline()
         capabilityObserverTask?.cancel()
         capabilityObserverTask = nil
         activeSessionId = nil
@@ -387,7 +387,7 @@ actor AnalysisCoordinator {
 
         case .stopped:
             logger.info("Playback stopped")
-            handleStopped()
+            await handleStopped()
             return nil
         }
     }
@@ -408,7 +408,7 @@ actor AnalysisCoordinator {
         }
 
         // New episode -- stop existing work and start fresh.
-        cancelPipeline()
+        await cancelPipeline()
 
         activeEpisodeId = episodeId
         activePodcastId = podcastId
@@ -536,13 +536,8 @@ actor AnalysisCoordinator {
 
     // MARK: - Stop
 
-    private func handleStopped() {
-        cancelPipeline()
-        Task { await self.transcriptEngine.stop() }
-        Task { await self.activeDecoder?.cleanup() }
-        shardConsumerTask?.cancel()
-        shardConsumerTask = nil
-        activeDecoder = nil
+    private func handleStopped() async {
+        await cancelPipeline()
         activeEpisodeId = nil
         activePodcastId = nil
         activeSessionId = nil
@@ -1028,7 +1023,7 @@ actor AnalysisCoordinator {
 
     // MARK: - Pipeline Control
 
-    private func cancelPipeline() {
+    private func cancelPipeline() async {
         pipelineTask?.cancel()
         pipelineTask = nil
         transcriptEventTask?.cancel()
@@ -1037,6 +1032,11 @@ actor AnalysisCoordinator {
         streamingDecodeTask = nil
         shardConsumerTask?.cancel()
         shardConsumerTask = nil
+        await transcriptEngine.stop()
+        if let decoder = activeDecoder {
+            activeDecoder = nil
+            await decoder.cleanup()
+        }
     }
 
     private func startObservingTranscriptEvents(sessionId: String, assetId: String) {
