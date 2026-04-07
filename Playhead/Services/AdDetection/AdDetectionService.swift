@@ -330,11 +330,15 @@ actor AdDetectionService {
         }
 
         // 7. Update PodcastProfile priors from confirmed results.
-        try await updatePriors(
-            podcastId: podcastId,
-            confirmedWindows: confirmedWindows,
-            episodeDuration: episodeDuration
-        )
+        if podcastId.isEmpty {
+            logger.info("Skipping priors update: missing podcastId for asset \(analysisAssetId)")
+        } else {
+            try await updatePriors(
+                podcastId: podcastId,
+                confirmedWindows: confirmedWindows,
+                episodeDuration: episodeDuration
+            )
+        }
 
         // 8. Update coverage watermark.
         if let maxEnd = confirmedWindows.map(\.endTime).max() {
@@ -350,11 +354,15 @@ actor AdDetectionService {
         // its output never feeds back into AdWindow rows in this phase. The
         // shadow invariant test in PlayheadTests pins this property.
         if config.fmBackfillMode != .disabled {
-            await runShadowFMPhase(
-                chunks: chunks,
-                analysisAssetId: analysisAssetId,
-                podcastId: podcastId
-            )
+            if podcastId.isEmpty {
+                logger.info("Skipping shadow FM phase: missing podcastId for asset \(analysisAssetId)")
+            } else {
+                await runShadowFMPhase(
+                    chunks: chunks,
+                    analysisAssetId: analysisAssetId,
+                    podcastId: podcastId
+                )
+            }
         }
     }
 

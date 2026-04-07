@@ -240,6 +240,54 @@ struct AdDetectionServiceShadowModeTests {
         #expect(scans.isEmpty, "no semantic scan rows should be written")
     }
 
+    @Test("missing podcastId skips priors and shadow telemetry writes")
+    func missingPodcastIdSkipsProfileAndShadowTelemetry() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-missing-podcast"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        nonisolated(unsafe) var factoryCallCount = 0
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: AdDetectionConfig(
+                candidateThreshold: 0.40,
+                confirmationThreshold: 0.70,
+                suppressionThreshold: 0.25,
+                hotPathLookahead: 90.0,
+                detectorVersion: "detection-v1",
+                fmBackfillMode: .shadow
+            ),
+            backfillJobRunnerFactory: { store, mode in
+                factoryCallCount += 1
+                return BackfillJobRunner(
+                    store: store,
+                    admissionController: AdmissionController(),
+                    classifier: FoundationModelClassifier(runtime: TestFMRuntime().runtime),
+                    coveragePlanner: CoveragePlanner(),
+                    mode: mode,
+                    capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+                    batteryLevelProvider: { 1.0 },
+                    scanCohortJSON: makeTestScanCohortJSON()
+                )
+            }
+        )
+
+        try await service.runBackfill(
+            chunks: makeChunks(assetId: assetId),
+            analysisAssetId: assetId,
+            podcastId: "",
+            episodeDuration: 90
+        )
+
+        let profile = try await store.fetchProfile(podcastId: "")
+        #expect(profile == nil, "missing podcast id must not create an empty-key profile")
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+        #expect(scans.isEmpty, "missing podcast id must not start shadow FM telemetry")
+        #expect(factoryCallCount == 0, "shadow FM factory must not be invoked without a podcast id")
+    }
+
     @Test("shadow mode actually writes semantic_scan_results telemetry")
     func shadowModeWritesScanTelemetry() async throws {
         let store = try await makeTestStore()

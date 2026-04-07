@@ -65,6 +65,38 @@ struct SchedulerRegressionTests {
         #expect(fetched?.state == "queued", "Job should remain queued when scheduler never ran")
     }
 
+    @Test("foreground playback blocks deferred pre-analysis work")
+    func testForegroundPlaybackBlocksSchedulerLoop() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        downloads.cachedURLs["ep-queued"] = URL(fileURLWithPath: "/tmp/ep-queued.mp3")
+
+        let job = makeAnalysisJob(
+            jobId: "playback-gated-job",
+            episodeId: "ep-queued",
+            workKey: "fp-playback-gated:1:preAnalysis",
+            sourceFingerprint: "fp-playback-gated",
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        )
+        try await store.insertJob(job)
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        await scheduler.playbackStarted(episodeId: "ep-playing")
+        await scheduler.startSchedulerLoop()
+        defer {
+            Task { await scheduler.stop() }
+        }
+
+        try await Task.sleep(for: .milliseconds(400))
+
+        let gated = try await store.fetchJob(byId: "playback-gated-job")
+        #expect(gated?.state == "queued")
+        #expect(gated?.leaseOwner == nil)
+        #expect(gated?.leaseExpiresAt == nil)
+    }
+
     @Test("episodeDeleted supersedes queued and paused jobs")
     func testEpisodeDeletedSupersedesQueuedAndPaused() async throws {
         let store = try await makeTestStore()

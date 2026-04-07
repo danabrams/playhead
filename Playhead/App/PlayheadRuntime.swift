@@ -432,7 +432,7 @@ final class PlayheadRuntime {
             // Not cached — stream-download and play once enough is buffered.
             logger.info("Episode not cached — streaming download: \(episodeId)")
             audioCacheTask?.cancel()
-            audioCacheTask = Task { [weak self, downloadManager, analysisCoordinator, analysisWorkScheduler] in
+            audioCacheTask = Task { [weak self, downloadManager, analysisCoordinator] in
                 guard let self else { return }
                 do {
                     let result = try await downloadManager.streamingDownload(
@@ -471,6 +471,7 @@ final class PlayheadRuntime {
                         await self.playbackService.load(url: result.fileURL, startPosition: position)
                     }
                     await self.playbackService.play()
+                    await self.analysisWorkScheduler.playbackStarted(episodeId: episodeId)
 
                     // Resolve the analysis asset ID early so pre-materialized
                     // skip cues can be loaded before the download finishes.
@@ -489,7 +490,6 @@ final class PlayheadRuntime {
                     )
                     self.currentAnalysisAssetId = resolvedAssetId
                     if let assetId = resolvedAssetId {
-                        await analysisWorkScheduler.playbackStarted(episodeId: episodeId)
                         await self.skipOrchestrator.beginEpisode(
                             analysisAssetId: assetId,
                             podcastId: podcastId
@@ -519,6 +519,7 @@ final class PlayheadRuntime {
         // Audio is local — play and analyze from the same file.
         await playbackService.load(url: localURL, startPosition: position)
         await playbackService.play()
+        await analysisWorkScheduler.playbackStarted(episodeId: episodeId)
 
         guard let analysisURL = LocalAudioURL(localURL) else { return }
         let resolvedAssetId = await analysisCoordinator.handlePlaybackEvent(
@@ -533,7 +534,6 @@ final class PlayheadRuntime {
         currentAnalysisAssetId = resolvedAssetId
 
         if let assetId = resolvedAssetId {
-            await analysisWorkScheduler.playbackStarted(episodeId: episodeId)
             await skipOrchestrator.beginEpisode(
                 analysisAssetId: assetId,
                 podcastId: podcastId
@@ -545,6 +545,7 @@ final class PlayheadRuntime {
         await requestPlaybackPositionPersistence(.stopped)
         audioCacheTask?.cancel()
         audioCacheTask = nil
+        await analysisWorkScheduler.playbackStopped()
         await backgroundProcessingService.playbackDidStop()
         await analysisCoordinator.handlePlaybackEvent(.stopped)
         await skipOrchestrator.endEpisode()

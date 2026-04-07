@@ -19,6 +19,7 @@ actor AnalysisWorkScheduler {
     private var currentRunningTask: Task<Void, Never>?
     private var currentJobId: String?
     private var currentEpisodeId: String?
+    private var activePlaybackEpisodeId: String?
     private var shouldCancelCurrentJob = false
     private var leaseRenewalTask: Task<Void, any Error>?
     private static let maxAttemptCount = 5
@@ -102,13 +103,23 @@ actor AnalysisWorkScheduler {
     }
 
     /// Notify the scheduler that playback has started for an episode.
-    /// If the currently running job matches, cancel it to avoid contention.
+    /// Cancel any running pre-analysis work while the foreground hot path owns
+    /// the shared analysis pipeline.
     func playbackStarted(episodeId: String) async {
-        if currentEpisodeId == episodeId {
+        activePlaybackEpisodeId = episodeId
+        if currentRunningTask != nil {
             shouldCancelCurrentJob = true
             currentRunningTask?.cancel()
-            logger.info("Playback preempted pre-analysis for episode \(episodeId)")
+            logger.info("Playback preempted pre-analysis while episode \(episodeId) is active")
         }
+        wakeSchedulerLoop()
+    }
+
+    /// Notify the scheduler that foreground playback has stopped, allowing
+    /// queued deferred work to resume.
+    func playbackStopped() {
+        activePlaybackEpisodeId = nil
+        wakeSchedulerLoop()
     }
 
     /// Mark jobs for a deleted episode as superseded.
@@ -173,6 +184,13 @@ actor AnalysisWorkScheduler {
         while !Task.isCancelled {
             guard config.isEnabled else {
                 await sleepOrWake(seconds: 30)
+                continue
+            }
+
+            // Foreground playback owns the shared transcript/backfill pipeline.
+            // Do not start deferred pre-analysis work until playback stops.
+            if activePlaybackEpisodeId != nil {
+                await sleepOrWake(seconds: 5)
                 continue
             }
 
