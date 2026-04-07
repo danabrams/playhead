@@ -1409,7 +1409,13 @@ struct FoundationModelClassifierTests {
         #expect(output.prewarmHit)
     }
 
-    @Test("refinement returns refusal status without retrying when the model refuses the prompt")
+    // bd-3h2 / bd-34e refinement: when EVERY refinement window refuses,
+    // the top-level status degrades to `.refusal` (there are no surviving
+    // windows to promote to `.success`). This single-window fixture also
+    // locks in the "no retry on refusal" contract — refusal is not a
+    // backoff/shrink policy, so the refined single window is abandoned
+    // immediately and the pass surfaces the refusal.
+    @Test("refinement returns refusal status when every window refuses")
     func refinementReturnsRefusalStatusWithoutRetry() async throws {
         let segments = [
             makeSegment(index: 1, startTime: 5, endTime: 10, text: "Talk about the sponsor."),
@@ -1456,6 +1462,11 @@ struct FoundationModelClassifierTests {
 
         #expect(output.status == .refusal)
         #expect(output.windows.isEmpty)
+        // bd-3h2 / bd-34e refinement: even when every window refuses, the
+        // refused window must be recorded in `failedWindowStatuses` so the
+        // runner can persist per-window failure rows mirroring the coarse
+        // path.
+        #expect(output.failedWindowStatuses == [.refusal])
         #expect(snapshot.prewarmCalls == [
             RuntimeRecorder.PrewarmCall(sessionID: 1, promptPrefix: "Refine ad spans.")
         ])
@@ -2878,6 +2889,362 @@ struct FoundationModelClassifierTests {
         #expect(detail.errorDescription == "runtime-failure-refusal")
     }
 
+    // MARK: - bd-3h2 / bd-34e refinement: graceful refusal degradation
+
+    // bd-3h2 / bd-34e refinement: mirror of `coarsePassContinuesAfterSingleWindowRefusal`.
+    // Window 1 of 3 refinement windows refuses (simulating Apple's safety
+    // classifier rejecting specific content topics mid-refinement), and
+    // the pass must continue to windows 2 and 3 instead of aborting the
+    // entire refinement run. This is the exact bug the on-device iPhone
+    // run on 2026-04-06 hit — one refusal aborted a 13-window refinement.
+    @Test("refinement pass continues after a single window refusal")
+    func refinementPassContinuesAfterSingleWindowRefusal() async throws {
+        let captureBox = RefinementRefusalDiagnosticCaptureBox()
+        FoundationModelClassifier.refinementRefusalDiagnosticObserver = { diagnostic in
+            captureBox.append(diagnostic)
+        }
+        defer { FoundationModelClassifier.refinementRefusalDiagnosticObserver = nil }
+
+        let segments = [
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "First sponsor talk."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Visit example.com today."),
+            makeSegment(index: 3, startTime: 15, endTime: 20, text: "Use promo code SAVE."),
+            makeSegment(index: 4, startTime: 20, endTime: 25, text: "Back to the show."),
+            makeSegment(index: 5, startTime: 25, endTime: 30, text: "Another sponsor segment."),
+            makeSegment(index: 6, startTime: 30, endTime: 35, text: "Final word from our sponsor.")
+        ]
+        let zoomPlans = (0..<3).map { idx in
+            RefinementWindowPlan(
+                windowIndex: idx,
+                sourceWindowIndex: idx,
+                lineRefs: [idx * 2 + 1, idx * 2 + 2],
+                focusLineRefs: [idx * 2 + 1, idx * 2 + 2],
+                focusClusters: [[idx * 2 + 1, idx * 2 + 2]],
+                prompt: "Refine ad spans.\nL\(idx * 2 + 1)> \"plan \(idx) line a\"\nL\(idx * 2 + 2)> \"plan \(idx) line b\"",
+                promptTokenCount: 4,
+                startTime: Double(5 + idx * 10),
+                endTime: Double(15 + idx * 10),
+                stopReason: .minimumSpan,
+                promptEvidence: []
+            )
+        }
+        let recorder = RuntimeRecorder(
+            contextSize: 1024,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementResponses: [
+                RefinementWindowSchema(spans: []),
+                RefinementWindowSchema(spans: [])
+            ],
+            refinementFailures: [
+                .refusal, // window 1 refuses
+                nil,      // window 2 succeeds
+                nil       // window 3 succeeds
+            ]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: zoomPlans,
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .success)
+        #expect(
+            output.windows.count == 2,
+            "2 refinement windows must survive the pass; got \(output.windows.count)"
+        )
+        #expect(output.failedWindowStatuses == [.refusal])
+
+        // One refusal (no retry) + 2 successes = 3 respond calls.
+        #expect(
+            snapshot.respondRefinementCalls.count == 3,
+            "expected 3 respond calls (no retry for refusal), got \(snapshot.respondRefinementCalls.count)"
+        )
+
+        // Surviving windows must NOT include the refused windowIndex 0.
+        let survivingIndices = output.windows.map(\.windowIndex)
+        #expect(!survivingIndices.contains(0))
+        #expect(survivingIndices.contains(1))
+        #expect(survivingIndices.contains(2))
+
+        // Diagnostic helper must have been invoked exactly once for the
+        // refused window.
+        let refusalDiagnostics = captureBox.snapshot()
+        #expect(refusalDiagnostics.count == 1)
+        #expect(refusalDiagnostics.first?.windowIndex == 0)
+    }
+
+    // bd-3h2 / bd-34e refinement: graceful degradation across multiple
+    // refusals. Windows 0, 2, 4 of a 6-window refinement pass refuse;
+    // 1, 3, 5 succeed.
+    @Test("refinement pass continues after multiple window refusals")
+    func refinementPassContinuesAfterMultipleWindowRefusals() async throws {
+        let captureBox = RefinementRefusalDiagnosticCaptureBox()
+        FoundationModelClassifier.refinementRefusalDiagnosticObserver = { diagnostic in
+            captureBox.append(diagnostic)
+        }
+        defer { FoundationModelClassifier.refinementRefusalDiagnosticObserver = nil }
+
+        let segments = (1...12).map { idx in
+            makeSegment(
+                index: idx,
+                startTime: TimeInterval(idx * 5),
+                endTime: TimeInterval(idx * 5 + 5),
+                text: "Segment number \(idx)."
+            )
+        }
+        let zoomPlans = (0..<6).map { idx in
+            RefinementWindowPlan(
+                windowIndex: idx,
+                sourceWindowIndex: idx,
+                lineRefs: [idx * 2 + 1, idx * 2 + 2],
+                focusLineRefs: [idx * 2 + 1, idx * 2 + 2],
+                focusClusters: [[idx * 2 + 1, idx * 2 + 2]],
+                prompt: "Refine ad spans.\nL\(idx * 2 + 1)> \"plan \(idx) line a\"\nL\(idx * 2 + 2)> \"plan \(idx) line b\"",
+                promptTokenCount: 4,
+                startTime: Double(5 + idx * 10),
+                endTime: Double(15 + idx * 10),
+                stopReason: .minimumSpan,
+                promptEvidence: []
+            )
+        }
+        let recorder = RuntimeRecorder(
+            contextSize: 1024,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementResponses: [
+                RefinementWindowSchema(spans: []),
+                RefinementWindowSchema(spans: []),
+                RefinementWindowSchema(spans: [])
+            ],
+            refinementFailures: [
+                .refusal, // window 0 refuses
+                nil,      // window 1 succeeds
+                .refusal, // window 2 refuses
+                nil,      // window 3 succeeds
+                .refusal, // window 4 refuses
+                nil       // window 5 succeeds
+            ]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: zoomPlans,
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+
+        #expect(output.status == .success)
+        #expect(output.failedWindowStatuses.count == 3)
+        #expect(output.failedWindowStatuses.allSatisfy { $0 == .refusal })
+
+        #expect(output.windows.count == 3)
+        let survivingIndices = output.windows.map(\.windowIndex)
+        #expect(!survivingIndices.contains(0))
+        #expect(survivingIndices.contains(1))
+        #expect(!survivingIndices.contains(2))
+        #expect(survivingIndices.contains(3))
+        #expect(!survivingIndices.contains(4))
+        #expect(survivingIndices.contains(5))
+
+        let refusalDiagnostics = captureBox.snapshot()
+        #expect(refusalDiagnostics.count == 3)
+        #expect(refusalDiagnostics.map(\.windowIndex) == [0, 2, 4])
+    }
+
+    // bd-3h2 / bd-34e refinement: when EVERY window refuses, there are no
+    // surviving windows to promote to `.success`, so the top-level status
+    // degrades to `.refusal`. The `failedWindowStatuses` array contains
+    // one entry per refused window.
+    @Test("refinement pass returns refusal when every window refuses")
+    func refinementPassReturnsRefusalWhenAllWindowsRefuse() async throws {
+        let segments = (1...6).map { idx in
+            makeSegment(
+                index: idx,
+                startTime: TimeInterval(idx * 5),
+                endTime: TimeInterval(idx * 5 + 5),
+                text: "Segment number \(idx)."
+            )
+        }
+        let zoomPlans = (0..<3).map { idx in
+            RefinementWindowPlan(
+                windowIndex: idx,
+                sourceWindowIndex: idx,
+                lineRefs: [idx * 2 + 1, idx * 2 + 2],
+                focusLineRefs: [idx * 2 + 1, idx * 2 + 2],
+                focusClusters: [[idx * 2 + 1, idx * 2 + 2]],
+                prompt: "Refine ad spans.\nL\(idx * 2 + 1)> \"plan \(idx) line a\"\nL\(idx * 2 + 2)> \"plan \(idx) line b\"",
+                promptTokenCount: 4,
+                startTime: Double(5 + idx * 10),
+                endTime: Double(15 + idx * 10),
+                stopReason: .minimumSpan,
+                promptEvidence: []
+            )
+        }
+        let recorder = RuntimeRecorder(
+            contextSize: 1024,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementFailures: [
+                .refusal,
+                .refusal,
+                .refusal
+            ]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: zoomPlans,
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+
+        #expect(output.status == .refusal)
+        #expect(output.windows.isEmpty)
+        #expect(output.failedWindowStatuses.count == zoomPlans.count)
+        #expect(output.failedWindowStatuses.allSatisfy { $0 == .refusal })
+    }
+
+    // bd-3h2 / bd-34e refinement: the new refusal diagnostic helper must
+    // populate `recordReflect` from `String(reflecting:)` on the `Refusal`
+    // value so the internal `TranscriptRecord` category that tripped the
+    // classifier is visible in Console.app without a new build.
+    @Test("refinement refusal diagnostic emits recordReflect field populated with reflection dump")
+    func refinementRefusalDiagnosticEmitsRecordReflectField() async throws {
+        let captureBox = RefinementRefusalDiagnosticCaptureBox()
+        FoundationModelClassifier.refinementRefusalDiagnosticObserver = { diagnostic in
+            captureBox.append(diagnostic)
+        }
+        defer { FoundationModelClassifier.refinementRefusalDiagnosticObserver = nil }
+
+        let segments = [
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "First sponsor talk."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Visit example.com today.")
+        ]
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 0,
+            lineRefs: [1, 2],
+            focusLineRefs: [1, 2],
+            focusClusters: [[1, 2]],
+            prompt: "Refine ad spans.\nL1> \"First sponsor talk.\"\nL2> \"Visit example.com today.\"",
+            promptTokenCount: 4,
+            startTime: 5,
+            endTime: 15,
+            stopReason: .minimumSpan,
+            promptEvidence: []
+        )
+        let recorder = RuntimeRecorder(
+            contextSize: 1024,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementFailures: [.refusal]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        _ = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+
+        let diagnostics = captureBox.snapshot()
+        let detail = try #require(diagnostics.first)
+        #expect(detail.windowIndex == 0)
+        #expect(detail.sourceWindowIndex == 0)
+        #expect(detail.lineRefCount == 2)
+        // `String(reflecting:)` on Apple's `Refusal` value dumps the
+        // internal `TranscriptRecord`. At minimum the dump must mention
+        // the `Refusal` type name.
+        #expect(detail.recordReflect.contains("Refusal"))
+        #expect(detail.contextDebugDescription == "runtime-failure-refusal")
+        #expect(!detail.recordReflect.isEmpty)
+    }
+
+    // bd-fmfb: when a refinement-pass refusal fires AND a feedbackStore is
+    // wired in, the classifier must invoke `Session.logFeedback` and hand
+    // the resulting Data to the store BEFORE the per-window session goes
+    // out of scope. The store should end up with one captured attachment
+    // tagged `refinementRefusal`. Mirrors
+    // `coarsePassRefusalInvokesFeedbackStoreWhenProvided`.
+    @Test("refinement pass refusal invokes feedback store when one is provided")
+    func refinementRefusalInvokesFeedbackStoreWhenProvided() async throws {
+        let segments = [
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "First sponsor talk."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Visit example.com today.")
+        ]
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 0,
+            lineRefs: [1, 2],
+            focusLineRefs: [1, 2],
+            focusClusters: [[1, 2]],
+            prompt: "Refine ad spans.\nL1> \"First sponsor talk.\"\nL2> \"Visit example.com today.\"",
+            promptTokenCount: 4,
+            startTime: 5,
+            endTime: 15,
+            stopReason: .minimumSpan,
+            promptEvidence: []
+        )
+        let stubBlob = Data("apple-feedback-refinement-refusal-stub".utf8)
+        let recorder = RuntimeRecorder(
+            contextSize: 1024,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementFailures: [.refusal]
+        )
+        let runtime = wrapRuntimeWithFeedback(recorder.runtime, blob: stubBlob)
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FMFeedback-refinement-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = FoundationModelsFeedbackStore(directory: dir)
+        let classifier = FoundationModelClassifier(
+            runtime: runtime,
+            feedbackStore: store
+        )
+
+        _ = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+
+        let urls = await store.capturedAttachmentURLs()
+        #expect(urls.count == 1)
+        let url = try #require(urls.first)
+        let written = try Data(contentsOf: url)
+        #expect(written == stubBlob)
+        #expect(url.lastPathComponent.contains("refinement-refusal"))
+    }
+
     @Test("window construction respects the hard cap when per-segment tokens approach the ceiling")
     func windowConstructionRespectsHardCap() async throws {
         // Build enough segments that, under the OLD (unhalved) budget, the
@@ -3688,6 +4055,26 @@ private final class CoarsePassDiagnosticCaptureBox: @unchecked Sendable {
     }
 
     func snapshot() -> [FoundationModelClassifier.CoarsePassWindowDiagnostic] {
+        lock.lock()
+        defer { lock.unlock() }
+        return items
+    }
+}
+
+/// bd-3h2 / bd-34e refinement: aggregates refinement-pass refusal
+/// diagnostics emitted by
+/// `FoundationModelClassifier.refinementRefusalDiagnosticObserver`.
+private final class RefinementRefusalDiagnosticCaptureBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [FoundationModelClassifier.RefinementPassRefusalDiagnostic] = []
+
+    func append(_ diagnostic: FoundationModelClassifier.RefinementPassRefusalDiagnostic) {
+        lock.lock()
+        defer { lock.unlock() }
+        items.append(diagnostic)
+    }
+
+    func snapshot() -> [FoundationModelClassifier.RefinementPassRefusalDiagnostic] {
         lock.lock()
         defer { lock.unlock() }
         return items

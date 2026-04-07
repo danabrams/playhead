@@ -422,6 +422,26 @@ struct FMRefinementScanOutput: Sendable {
     let windows: [FMRefinementWindowOutput]
     let latencyMillis: Double
     let prewarmHit: Bool
+    /// bd-3h2 / bd-34e refinement: per-window failure statuses captured when
+    /// a window is abandoned by graceful degradation (refusal or shrink
+    /// exhaustion) but the rest of the pass continues. Empty when every
+    /// window succeeded or when the pass aborted on a non-recoverable
+    /// failure. Mirrors `FMCoarseScanOutput.failedWindowStatuses`.
+    let failedWindowStatuses: [SemanticScanStatus]
+
+    init(
+        status: SemanticScanStatus,
+        windows: [FMRefinementWindowOutput],
+        latencyMillis: Double,
+        prewarmHit: Bool,
+        failedWindowStatuses: [SemanticScanStatus] = []
+    ) {
+        self.status = status
+        self.windows = windows
+        self.latencyMillis = latencyMillis
+        self.prewarmHit = prewarmHit
+        self.failedWindowStatuses = failedWindowStatuses
+    }
 }
 
 enum FoundationModelClassifierError: Error, Sendable, LocalizedError {
@@ -596,6 +616,31 @@ struct FoundationModelClassifier: Sendable {
     /// `SemanticScanResult.decodeFailureObserver`. Production builds leave it
     /// nil; invoking it is a no-op.
     nonisolated(unsafe) static var refinementDecodeFailureObserver: (@Sendable (RefinementDecodeFailureDiagnostic) -> Void)?
+
+    /// bd-3h2 / bd-34e refinement: mirror of `CoarsePassWindowDiagnostic`
+    /// `.refusalDetail` events, scoped to the refinement pass. Emitted when a
+    /// refinement-pass window is rejected by Apple's on-device safety
+    /// classifier with `LanguageModelSession.GenerationError.refusal`. The
+    /// `recordReflect` field captures `String(reflecting:)` on the public
+    /// `Refusal` value so the internal `TranscriptRecord` category that
+    /// tripped the classifier is visible in Console.app without a new build.
+    struct RefinementPassRefusalDiagnostic: Sendable {
+        let windowIndex: Int
+        let sourceWindowIndex: Int
+        let firstLineRef: Int?
+        let lastLineRef: Int?
+        let lineRefCount: Int
+        let clusterCount: Int
+        let promptTokenCount: Int
+        let contextDebugDescription: String
+        let recordReflect: String
+        let promptPreview: String
+    }
+
+    /// Internal test hook so unit tests can observe refinement refusal
+    /// diagnostics without scraping `os.Logger`. Mirrors
+    /// `refinementDecodeFailureObserver` in shape and intent.
+    nonisolated(unsafe) static var refinementRefusalDiagnosticObserver: (@Sendable (RefinementPassRefusalDiagnostic) -> Void)?
 
     /// bd-34e diagnostic payload emitted around every coarse-pass window
     /// `respond` call: one event per submission attempt and one event per
@@ -1107,6 +1152,11 @@ struct FoundationModelClassifier: Sendable {
 
         var windows: [FMRefinementWindowOutput] = []
         windows.reserveCapacity(zoomPlans.count)
+        // bd-3h2 / bd-34e refinement: per-window failures that are safe to
+        // tolerate (refusal) are recorded here so a single bad window does
+        // not abort the entire refinement pass. Mirrors the coarse
+        // `failedWindowStatuses` bookkeeping.
+        var failedWindowStatuses: [SemanticScanStatus] = []
 
         for plan in zoomPlans {
             // H9: Cooperative cancellation between windows.
@@ -1117,7 +1167,8 @@ struct FoundationModelClassifier: Sendable {
                     status: .cancelled,
                     windows: windows,
                     latencyMillis: Self.latencyMillis(since: start, clock: clock),
-                    prewarmHit: prewarmHit
+                    prewarmHit: prewarmHit,
+                    failedWindowStatuses: failedWindowStatuses
                 )
             }
 
@@ -1141,12 +1192,41 @@ struct FoundationModelClassifier: Sendable {
                 effectivePlan = plan
                 response = schema
             case let .failure(status):
-                // C4/H2: Return partial results.
+                // bd-3h2 / bd-34e refinement: mirror the coarse
+                // graceful-degradation fix from f8f6cd9. `.refusal` is a
+                // per-window condition — Apple's on-device safety classifier
+                // rejects specific content topics regardless of the rest of
+                // the pass, and the on-device run on iOS 26.4 (Conan
+                // fixture, 2026-04-06) showed a single refusal aborting the
+                // entire refinement pass. Continuing past it preserves the
+                // other windows' refinement coverage. The refusal detail
+                // log, feedback-store capture, and decode-failure diagnostic
+                // all already fired inside `refinementResponse` before the
+                // per-window session went out of scope.
+                if status == .refusal {
+                    failedWindowStatuses.append(status)
+                    logger.error(
+                        """
+                        fm.classifier.refinement_pass_window_abandoned \
+                        window=\(plan.windowIndex, privacy: .public) \
+                        sourceWindow=\(plan.sourceWindowIndex, privacy: .public) \
+                        firstLineRef=\(plan.lineRefs.first ?? -1, privacy: .public) \
+                        lastLineRef=\(plan.lineRefs.last ?? -1, privacy: .public) \
+                        lineRefCount=\(plan.lineRefs.count, privacy: .public) \
+                        status=\(status.rawValue, privacy: .public)
+                        """
+                    )
+                    continue
+                }
+                // C4/H2: Other failures (decoding, guardrail, cancellation,
+                // exceededContextWindow) still abort the pass with partial
+                // results, preserving existing escalation semantics.
                 return FMRefinementScanOutput(
                     status: status,
                     windows: windows,
                     latencyMillis: Self.latencyMillis(since: start, clock: clock),
-                    prewarmHit: prewarmHit
+                    prewarmHit: prewarmHit,
+                    failedWindowStatuses: failedWindowStatuses
                 )
             }
 
@@ -1167,11 +1247,25 @@ struct FoundationModelClassifier: Sendable {
             )
         }
 
+        // bd-3h2 / bd-34e refinement: top-level status remains `.success`
+        // whenever at least one window produced output, even if other
+        // windows were abandoned by the graceful refusal path. If EVERY
+        // window failed we surface the last failure status so the caller
+        // still sees an unrecoverable error. Mirrors the coarse-pass
+        // `topLevelStatus` computation.
+        let topLevelStatus: SemanticScanStatus
+        if windows.isEmpty, let lastFailure = failedWindowStatuses.last {
+            topLevelStatus = lastFailure
+        } else {
+            topLevelStatus = .success
+        }
+
         return FMRefinementScanOutput(
-            status: .success,
+            status: topLevelStatus,
             windows: windows,
             latencyMillis: Self.latencyMillis(since: start, clock: clock),
-            prewarmHit: prewarmHit
+            prewarmHit: prewarmHit,
+            failedWindowStatuses: failedWindowStatuses
         )
     }
 
@@ -2159,6 +2253,14 @@ struct FoundationModelClassifier: Sendable {
                 status: status,
                 retryStage: .initial
             )
+            // bd-3h2 / bd-34e refinement: mirror the coarse refusal detail
+            // log so Apple's on-device safety classifier rejection includes
+            // `String(reflecting:)` on the public `Refusal` value in the
+            // log stream. Emits only when the error is .refusal; no-op
+            // otherwise. Must happen before the per-window session goes
+            // out of scope so the model state at the moment of refusal is
+            // captured.
+            reportRefinementPassRefusalDetailIfNeeded(plan: plan, error: error)
             // bd-fmfb: capture an Apple `logFeedbackAttachment` blob for any
             // refinement decode failure or refusal. Same rationale as the
             // coarse-pass call site — must happen before the per-window
@@ -2189,6 +2291,7 @@ struct FoundationModelClassifier: Sendable {
                         status: retryStatus,
                         retryStage: .shrinkRetry
                     )
+                    reportRefinementPassRefusalDetailIfNeeded(plan: retryPlan, error: error)
                     await captureFeedbackForRefinementErrorIfNeeded(
                         status: retryStatus,
                         error: error,
@@ -2211,6 +2314,7 @@ struct FoundationModelClassifier: Sendable {
                         status: retryStatus,
                         retryStage: .backoffRetry
                     )
+                    reportRefinementPassRefusalDetailIfNeeded(plan: plan, error: error)
                     await captureFeedbackForRefinementErrorIfNeeded(
                         status: retryStatus,
                         error: error,
@@ -2279,6 +2383,63 @@ struct FoundationModelClassifier: Sendable {
         )
 
         Self.refinementDecodeFailureObserver?(diagnostic)
+    }
+
+    /// bd-3h2 / bd-34e refinement: emit a supplementary breadcrumb when a
+    /// refinement-pass catch resolves to an Apple
+    /// `LanguageModelSession.GenerationError.refusal`. Mirrors
+    /// `reportCoarsePassRefusalDetailIfNeeded` — captures a
+    /// `String(reflecting:)` dump of the public `Refusal` value plus the
+    /// `Context.debugDescription`, so the internal `TranscriptRecord`
+    /// category that tripped the on-device safety classifier is visible in
+    /// Console.app without a new build. Logs at `.notice` so production
+    /// users hitting this surface see it without enabling debug filters.
+    /// No-ops for any other error type.
+    private func reportRefinementPassRefusalDetailIfNeeded(
+        plan: RefinementWindowPlan,
+        error: Error
+    ) {
+        #if canImport(FoundationModels)
+        guard #available(iOS 26.0, *) else { return }
+        guard let generationError = error as? LanguageModelSession.GenerationError,
+              case let .refusal(refusal, context) = generationError else {
+            return
+        }
+
+        let refusalReflect = String(reflecting: refusal)
+        let contextDebugDescription = context.debugDescription
+        let preview = Self.coarsePromptPreview(plan.prompt)
+        let diagnostic = RefinementPassRefusalDiagnostic(
+            windowIndex: plan.windowIndex,
+            sourceWindowIndex: plan.sourceWindowIndex,
+            firstLineRef: plan.lineRefs.first,
+            lastLineRef: plan.lineRefs.last,
+            lineRefCount: plan.lineRefs.count,
+            clusterCount: plan.focusClusters.count,
+            promptTokenCount: plan.promptTokenCount,
+            contextDebugDescription: contextDebugDescription,
+            recordReflect: refusalReflect,
+            promptPreview: preview
+        )
+
+        logger.notice(
+            """
+            fm.classifier.refinement_pass_refusal_detail \
+            window=\(plan.windowIndex, privacy: .public) \
+            sourceWindow=\(plan.sourceWindowIndex, privacy: .public) \
+            firstLineRef=\(plan.lineRefs.first ?? -1, privacy: .public) \
+            lastLineRef=\(plan.lineRefs.last ?? -1, privacy: .public) \
+            lineRefCount=\(plan.lineRefs.count, privacy: .public) \
+            clusters=\(plan.focusClusters.count, privacy: .public) \
+            promptTokens=\(plan.promptTokenCount, privacy: .public) \
+            contextDebugDescription=\(contextDebugDescription, privacy: .public) \
+            recordReflect=\(refusalReflect, privacy: .public) \
+            promptPreview=\(preview, privacy: .public)
+            """
+        )
+
+        Self.refinementRefusalDiagnosticObserver?(diagnostic)
+        #endif
     }
 
     /// bd-34e diagnostic: emit a structured breadcrumb on every coarse-pass
