@@ -672,6 +672,24 @@ actor AnalysisStore {
                 shadowRetryPodcastId  TEXT
             )
             """)
+        // bd-3bz on-device hotfix: when a pre-bd-3bz database exists at the
+        // store's path, the `CREATE TABLE IF NOT EXISTS` above is a silent
+        // no-op against the older table shape (no `needs_shadow_retry`
+        // column), and the partial index below would fail with
+        // "no such column: needs_shadow_retry" before the v4 migration ever
+        // runs. Patch the column in defensively here so both fresh and
+        // upgraded databases reach the index creation with the column
+        // present.
+        try addColumnIfNeeded(
+            table: "analysis_sessions",
+            column: "needs_shadow_retry",
+            definition: "INTEGER NOT NULL DEFAULT 0"
+        )
+        try addColumnIfNeeded(
+            table: "analysis_sessions",
+            column: "shadowRetryPodcastId",
+            definition: "TEXT"
+        )
         try exec("CREATE INDEX IF NOT EXISTS idx_sessions_asset ON analysis_sessions(analysisAssetId)")
         try exec("""
             CREATE INDEX IF NOT EXISTS idx_sessions_shadow_retry
