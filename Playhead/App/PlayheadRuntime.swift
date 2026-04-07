@@ -217,7 +217,8 @@ final class PlayheadRuntime {
             store: analysisStore,
             jobRunner: analysisJobRunner,
             capabilitiesService: capabilitiesService,
-            downloadManager: downloadManager
+            downloadManager: downloadManager,
+            batteryProvider: batteryProvider
         )
         self.analysisJobReconciler = AnalysisJobReconciler(
             store: analysisStore,

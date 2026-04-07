@@ -55,8 +55,7 @@ struct AnalysisWorkSchedulerTests {
 
         let now = Date().timeIntervalSince1970
         let nextJob = try await store.fetchNextEligibleJob(
-            isCharging: false,
-            isThermalOk: true,
+            deferredWorkAllowed: true,
             t0ThresholdSec: 90,
             now: now
         )
@@ -64,8 +63,8 @@ struct AnalysisWorkSchedulerTests {
         #expect(nextJob?.priority == 10)
     }
 
-    @Test("charging gates deferred lane (T1+) jobs")
-    func testChargingGatesDeferredLane() async throws {
+    @Test("deferred-work admission gates deferred lane (T1+) jobs")
+    func testDeferredWorkAdmissionGatesDeferredLane() async throws {
         let store = try await makeTestStore()
 
         let t1Job = makeAnalysisJob(
@@ -79,19 +78,17 @@ struct AnalysisWorkSchedulerTests {
 
         let now = Date().timeIntervalSince1970
 
-        // Not charging: deferred job should not be returned
+        // Admission denied: deferred job should not be returned.
         let notCharging = try await store.fetchNextEligibleJob(
-            isCharging: false,
-            isThermalOk: true,
+            deferredWorkAllowed: false,
             t0ThresholdSec: 90,
             now: now
         )
         #expect(notCharging == nil)
 
-        // Charging: deferred job should be returned
+        // Admission granted: deferred job should be returned.
         let charging = try await store.fetchNextEligibleJob(
-            isCharging: true,
-            isThermalOk: true,
+            deferredWorkAllowed: true,
             t0ThresholdSec: 90,
             now: now
         )

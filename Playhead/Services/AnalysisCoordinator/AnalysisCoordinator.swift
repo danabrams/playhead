@@ -650,8 +650,8 @@ actor AnalysisCoordinator {
         // Hot path is ready: skip cues are available for playback.
         // Now move to backfill for final-pass ASR and metadata extraction.
         let capabilities = await capabilitiesService.currentSnapshot
-        if capabilities.shouldThrottleAnalysis {
-            logger.info("Thermal throttle active, deferring backfill")
+        if capabilities.thermalState == .critical {
+            logger.info("Critical thermal active, deferring backfill")
             return
         }
 
@@ -868,10 +868,12 @@ actor AnalysisCoordinator {
     // MARK: - Capability Changes
 
     private func handleCapabilityChange(_ snapshot: CapabilitySnapshot) {
-        if snapshot.shouldThrottleAnalysis {
-            logger.warning("Thermal throttle: pausing analysis pipeline")
+        if snapshot.thermalState == .critical {
+            logger.warning("Critical thermal: pausing analysis pipeline")
             // Don't cancel -- just let the current stage finish and
             // the next stage check will defer.
+        } else if snapshot.thermalState == .serious {
+            logger.warning("Serious thermal: reducing analysis aggressiveness")
         }
     }
 

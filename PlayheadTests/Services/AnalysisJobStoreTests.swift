@@ -48,15 +48,16 @@ struct AnalysisJobStoreTests {
 
         let now = Date().timeIntervalSince1970
         let eligible = try await store.fetchNextEligibleJob(
-            isCharging: false, isThermalOk: false, t0ThresholdSec: 1.0, now: now
+            deferredWorkAllowed: false, t0ThresholdSec: 1.0, now: now
         )
         #expect(eligible != nil)
         #expect(eligible?.jobId == "t0")
     }
 
-    @Test func testFetchNextEligibleJobDeferredRequiresCharging() async throws {
+    @Test func testFetchNextEligibleJobDeferredRequiresAdmission() async throws {
         let store = try await makeTestStore()
-        // A backfill job should only be eligible when charging + thermal ok
+        // Deferred work should only be eligible when the caller's shared
+        // admission-policy gate allows it.
         let job = makeAnalysisJob(
             jobId: "bf1",
             jobType: "backfill",
@@ -67,15 +68,15 @@ struct AnalysisJobStoreTests {
 
         let now = Date().timeIntervalSince1970
 
-        // Not charging => not eligible
+        // Admission denied => not eligible
         let notEligible = try await store.fetchNextEligibleJob(
-            isCharging: false, isThermalOk: true, t0ThresholdSec: 1.0, now: now
+            deferredWorkAllowed: false, t0ThresholdSec: 1.0, now: now
         )
         #expect(notEligible == nil)
 
-        // Charging + thermal ok => eligible
+        // Admission granted => eligible
         let eligible = try await store.fetchNextEligibleJob(
-            isCharging: true, isThermalOk: true, t0ThresholdSec: 1.0, now: now
+            deferredWorkAllowed: true, t0ThresholdSec: 1.0, now: now
         )
         #expect(eligible != nil)
         #expect(eligible?.jobId == "bf1")
@@ -96,7 +97,7 @@ struct AnalysisJobStoreTests {
         try await store.insertJob(high)
 
         let eligible = try await store.fetchNextEligibleJob(
-            isCharging: true, isThermalOk: true, t0ThresholdSec: 1.0, now: now
+            deferredWorkAllowed: true, t0ThresholdSec: 1.0, now: now
         )
         #expect(eligible?.jobId == "high")
     }
@@ -116,13 +117,13 @@ struct AnalysisJobStoreTests {
 
         // Not eligible yet because nextEligibleAt is in the future
         let notYet = try await store.fetchNextEligibleJob(
-            isCharging: true, isThermalOk: true, t0ThresholdSec: 1.0, now: now
+            deferredWorkAllowed: true, t0ThresholdSec: 1.0, now: now
         )
         #expect(notYet == nil)
 
         // Eligible once "now" passes nextEligibleAt
         let later = try await store.fetchNextEligibleJob(
-            isCharging: true, isThermalOk: true, t0ThresholdSec: 1.0, now: future + 1
+            deferredWorkAllowed: true, t0ThresholdSec: 1.0, now: future + 1
         )
         #expect(later?.jobId == "deferred")
     }

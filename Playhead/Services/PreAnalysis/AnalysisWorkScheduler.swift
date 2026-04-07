@@ -1,7 +1,7 @@
 // AnalysisWorkScheduler.swift
 // Eligibility-aware job scheduler for pre-analysis work.
-// Selects the highest-priority eligible job under current device constraints
-// (charging, thermal) and delegates execution to AnalysisJobRunner.
+// Selects the highest-priority eligible job under the shared deferred-work
+// admission policy and delegates execution to AnalysisJobRunner.
 
 import Foundation
 import OSLog
@@ -11,6 +11,7 @@ actor AnalysisWorkScheduler {
     private let jobRunner: AnalysisJobRunner
     private let capabilitiesService: CapabilitiesService
     private let downloadManager: any DownloadProviding
+    private let batteryProvider: any BatteryStateProviding
     private let config: PreAnalysisConfig
     private let logger = Logger(subsystem: "com.playhead", category: "WorkScheduler")
 
@@ -33,12 +34,14 @@ actor AnalysisWorkScheduler {
         jobRunner: AnalysisJobRunner,
         capabilitiesService: CapabilitiesService,
         downloadManager: any DownloadProviding,
+        batteryProvider: any BatteryStateProviding = UIDeviceBatteryProvider(),
         config: PreAnalysisConfig = .load()
     ) {
         self.store = store
         self.jobRunner = jobRunner
         self.capabilitiesService = capabilitiesService
         self.downloadManager = downloadManager
+        self.batteryProvider = batteryProvider
         self.config = config
         var continuation: AsyncStream<Void>.Continuation?
         self.wakeStream = AsyncStream<Void> { continuation = $0 }
@@ -174,11 +177,28 @@ actor AnalysisWorkScheduler {
             }
 
             let snapshot = await capabilitiesService.currentSnapshot
+            let batteryState = await batteryProvider.currentBatteryState()
+            let admissionSnapshot = CapabilitySnapshot(
+                foundationModelsAvailable: snapshot.foundationModelsAvailable,
+                foundationModelsUsable: snapshot.foundationModelsUsable,
+                appleIntelligenceEnabled: snapshot.appleIntelligenceEnabled,
+                foundationModelsLocaleSupported: snapshot.foundationModelsLocaleSupported,
+                thermalState: snapshot.thermalState,
+                isLowPowerMode: snapshot.isLowPowerMode,
+                isCharging: batteryState.isCharging,
+                backgroundProcessingSupported: snapshot.backgroundProcessingSupported,
+                availableDiskSpaceBytes: snapshot.availableDiskSpaceBytes,
+                capturedAt: snapshot.capturedAt
+            )
+            let deferredWorkAllowed =
+                DeviceAdmissionPolicy.evaluate(
+                    snapshot: admissionSnapshot,
+                    batteryLevel: batteryState.level
+                ) == .admit
             let now = Date().timeIntervalSince1970
 
             guard let job = try? await store.fetchNextEligibleJob(
-                isCharging: snapshot.isCharging,
-                isThermalOk: !snapshot.shouldThrottleAnalysis,
+                deferredWorkAllowed: deferredWorkAllowed,
                 t0ThresholdSec: config.defaultT0DepthSeconds,
                 now: now
             ) else {

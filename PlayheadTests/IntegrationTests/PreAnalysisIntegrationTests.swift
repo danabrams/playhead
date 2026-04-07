@@ -56,8 +56,7 @@ struct PreAnalysisIntegrationTests {
         try await store.insertJob(t0)
 
         let next = try await store.fetchNextEligibleJob(
-            isCharging: false,
-            isThermalOk: true,
+            deferredWorkAllowed: false,
             t0ThresholdSec: 90,
             now: Date().timeIntervalSince1970
         )
@@ -330,8 +329,7 @@ struct PreAnalysisIntegrationTests {
 
         // The store layer is unaware of the flag — jobs remain eligible.
         let fetched = try await store.fetchNextEligibleJob(
-            isCharging: false,
-            isThermalOk: true,
+            deferredWorkAllowed: false,
             t0ThresholdSec: 90,
             now: Date().timeIntervalSince1970
         )

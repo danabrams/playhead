@@ -46,15 +46,21 @@ struct AdmissionControllerTests {
         #expect(second.job?.jobId == "low-priority")
     }
 
-    @Test("defers for thermal throttle or low battery, but charging overrides low battery")
+    @Test("defers only critical thermal, allows serious thermal, and charging overrides low battery")
     func testThermalAndBatteryGating() async {
         let controller = AdmissionController()
         await controller.enqueue(makeBackfillJob(jobId: "gated-job", priority: 5))
+        await controller.enqueue(makeBackfillJob(jobId: "serious-job", priority: 4))
 
         let thermalBlocked = await controller.admitNextEligibleJob(
-            snapshot: makeCapabilitySnapshot(thermalState: .serious, isCharging: true),
+            snapshot: makeCapabilitySnapshot(thermalState: .critical, isCharging: true),
             batteryLevel: 0.95
         )
+        let seriousAdmitted = await controller.admitNextEligibleJob(
+            snapshot: makeCapabilitySnapshot(thermalState: .serious, isCharging: false),
+            batteryLevel: 0.95
+        )
+        await controller.finish(jobId: "gated-job")
         let lowBatteryBlocked = await controller.admitNextEligibleJob(
             snapshot: makeCapabilitySnapshot(thermalState: .nominal, isCharging: false),
             batteryLevel: 0.19
@@ -66,9 +72,10 @@ struct AdmissionControllerTests {
 
         #expect(thermalBlocked.job == nil)
         #expect(thermalBlocked.deferReason == .thermalThrottled)
+        #expect(seriousAdmitted.job?.jobId == "gated-job")
         #expect(lowBatteryBlocked.job == nil)
         #expect(lowBatteryBlocked.deferReason == .batteryTooLow)
-        #expect(chargingAdmitted.job?.jobId == "gated-job")
+        #expect(chargingAdmitted.job?.jobId == "serious-job")
     }
 
     // M14: runningJob exposes the whole job, not just the id.

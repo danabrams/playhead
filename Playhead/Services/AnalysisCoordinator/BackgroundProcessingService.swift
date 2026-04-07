@@ -4,7 +4,8 @@
 // Strategy:
 //   - Hot-path: runs in foreground whenever audio is playing. This is the
 //     MVP reliability path -- background work only improves completeness.
-//   - BGProcessingTask: registered for idle/charging backfill of episodes.
+//   - BGProcessingTask: registered for deferred backfill of episodes when the
+//     system grants background time.
 //   - BGContinuedProcessingTask: ONLY for user-initiated long-running work
 //     (e.g., initial model download via AssetProvider).
 //
@@ -322,11 +323,11 @@ actor BackgroundProcessingService {
 
     // MARK: - Background Task Scheduling
 
-    /// Schedule a BGProcessingTask for idle/charging backfill.
+    /// Schedule a BGProcessingTask for deferred backfill.
     func scheduleBackfillIfNeeded() {
         let request = BGProcessingTaskRequest(identifier: BackgroundTaskID.backfillProcessing)
         request.requiresNetworkConnectivity = false
-        request.requiresExternalPower = true
+        request.requiresExternalPower = false
 
         do {
             try taskScheduler.submit(request)
@@ -383,9 +384,18 @@ actor BackgroundProcessingService {
 
         let workTask = Task {
             // Check constraints before starting.
+            await self.updateBatteryState()
             let snapshot = await self.capabilitiesService.currentSnapshot
-            guard !snapshot.shouldThrottleAnalysis else {
-                self.logger.info("Backfill skipped: thermal throttle active")
+            let decision = self.deviceAdmissionDecision(for: snapshot)
+            guard decision == .admit else {
+                let reason: String
+                switch decision {
+                case .admit:
+                    reason = "admit"
+                case .deferred(let deferReason):
+                    reason = deferReason.rawValue
+                }
+                self.logger.info("Backfill skipped: \(reason, privacy: .public)")
                 await self.markComplete(task, success: true)
                 return
             }
@@ -446,7 +456,7 @@ actor BackgroundProcessingService {
     /// This identifier is reserved for user-initiated long-running work such
     /// as the initial Foundation Models asset download (see AssetProvider).
     /// It is intentionally NOT a backfill drain path — `handleBackfillTask`
-    /// already covers idle/charging backfill via `runPendingBackfill`.
+    /// already covers deferred backfill via `runPendingBackfill`.
     ///
     /// Today there is no user-facing continuation work path that actually
     /// enqueues this task from the foreground, and no "model download future"

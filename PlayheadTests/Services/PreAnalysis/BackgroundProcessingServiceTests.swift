@@ -365,8 +365,8 @@ struct ThermalManagementTests {
         #expect(coordinator.stopCallCount >= 1)
     }
 
-    @Test("Serious thermal pauses backfill but not hot-path")
-    func seriousThermalPausesBackfillNotHotPath() async throws {
+    @Test("Serious thermal does not pause all analysis")
+    func seriousThermalDoesNotPauseAllAnalysis() async throws {
         let (bps, coordinator, _, _) = makeBPS()
 
         // Activate hot-path first.
@@ -525,6 +525,9 @@ struct SchedulingTests {
             $0.identifier == BackgroundTaskID.backfillProcessing
         }
         #expect(backfillRequests.count == 1)
+        if let request = backfillRequests.first as? BGProcessingTaskRequest {
+            #expect(request.requiresExternalPower == false)
+        }
     }
 
     @Test("scheduleContinuedProcessing submits request")

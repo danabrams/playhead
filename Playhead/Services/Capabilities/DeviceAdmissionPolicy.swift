@@ -39,8 +39,8 @@ struct DeviceAdmissionPolicy: Sendable {
     ///     Pass `nil` (or a negative value) when the level is unknown; the
     ///     policy treats unknown battery as "not low" so work can proceed.
     ///
-    /// Precedence (preserved from the legacy AdmissionController gate):
-    ///   1. Thermal throttling (`.serious` or `.critical`)
+    /// Precedence:
+    ///   1. Thermal throttling (`.critical`)
     ///   2. Low battery while not charging
     ///   3. Low Power Mode
     ///
@@ -49,7 +49,10 @@ struct DeviceAdmissionPolicy: Sendable {
     /// The consolidated policy is the superset of both gates, so callers
     /// using AdmissionController will now also defer in Low Power Mode.
     static func evaluate(snapshot: CapabilitySnapshot, batteryLevel: Float?) -> Decision {
-        if snapshot.shouldThrottleAnalysis {
+        // Serious thermal still reduces the foreground hot-path aggressiveness,
+        // but it no longer blocks deferred/background work outright. Reserve
+        // full admission denial for critical thermal distress.
+        if snapshot.thermalState == .critical {
             return .deferred(.thermalThrottled)
         }
 

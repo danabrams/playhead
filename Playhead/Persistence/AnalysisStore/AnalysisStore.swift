@@ -1538,14 +1538,14 @@ actor AnalysisStore {
     }
 
     func fetchNextEligibleJob(
-        isCharging: Bool,
-        isThermalOk: Bool,
+        deferredWorkAllowed: Bool,
         t0ThresholdSec: Double,
         now: TimeInterval
     ) throws -> AnalysisJob? {
         // T0 jobs: playback jobs that have zero coverage — always eligible.
-        // Deferred jobs: backfill/preAnalysis require charging + thermal ok
-        // and nextEligibleAt <= now (or NULL).
+        // Deferred jobs: backfill/preAnalysis require the caller's shared
+        // admission-policy gate to allow deferred work and nextEligibleAt <=
+        // now (or NULL).
         let sql = """
             SELECT * FROM analysis_jobs
             WHERE (
@@ -1557,7 +1557,7 @@ actor AnalysisStore {
               AND (
                 (jobType = 'playback' AND featureCoverageSec < ?)
                 OR (
-                  ? = 1 AND ? = 1
+                  ? = 1
                   AND (nextEligibleAt IS NULL OR nextEligibleAt <= ?)
                 )
               )
@@ -1570,9 +1570,8 @@ actor AnalysisStore {
         bind(stmt, 2, now)
         bind(stmt, 3, now)
         bind(stmt, 4, t0ThresholdSec)
-        bind(stmt, 5, isCharging ? 1 : 0)
-        bind(stmt, 6, isThermalOk ? 1 : 0)
-        bind(stmt, 7, now)
+        bind(stmt, 5, deferredWorkAllowed ? 1 : 0)
+        bind(stmt, 6, now)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         return readJob(stmt)
     }

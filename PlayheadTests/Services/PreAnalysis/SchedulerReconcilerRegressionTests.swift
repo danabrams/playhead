@@ -380,8 +380,7 @@ struct StoreRegressionTests {
         try await store.insertJob(job)
 
         let fetched = try await store.fetchNextEligibleJob(
-            isCharging: true,
-            isThermalOk: true,
+            deferredWorkAllowed: true,
             t0ThresholdSec: 90,
             now: Date().timeIntervalSince1970
         )
@@ -580,8 +579,7 @@ struct StoreRegressionTests {
         try await store.insertJob(job)
         let now = Date().timeIntervalSince1970
         let result = try await store.fetchNextEligibleJob(
-            isCharging: true,
-            isThermalOk: true,
+            deferredWorkAllowed: true,
             t0ThresholdSec: 90,
             now: now
         )
