@@ -37,6 +37,36 @@ struct AnalysisSession: Sendable {
     let startedAt: Double
     let updatedAt: Double
     let failureReason: String?
+    /// bd-3bz (Phase 4): flag set when the Foundation Models shadow phase
+    /// bailed on `canUseFoundationModels == false`. A capability observer in
+    /// `PlayheadRuntime` drains sessions with this flag after FM recovers.
+    /// Defaults to `false` so pre-existing rows decode identically.
+    let needsShadowRetry: Bool
+    /// bd-3bz (Phase 4): the podcastId captured at the point the shadow
+    /// phase bailed. Needed to reconstruct the shadow-phase inputs during a
+    /// retry drain without reaching back into the coordinator. `nil` unless
+    /// `needsShadowRetry == true`.
+    let shadowRetryPodcastId: String?
+
+    init(
+        id: String,
+        analysisAssetId: String,
+        state: String,
+        startedAt: Double,
+        updatedAt: Double,
+        failureReason: String?,
+        needsShadowRetry: Bool = false,
+        shadowRetryPodcastId: String? = nil
+    ) {
+        self.id = id
+        self.analysisAssetId = analysisAssetId
+        self.state = state
+        self.startedAt = startedAt
+        self.updatedAt = updatedAt
+        self.failureReason = failureReason
+        self.needsShadowRetry = needsShadowRetry
+        self.shadowRetryPodcastId = shadowRetryPodcastId
+    }
 }
 
 struct FeatureWindow: Sendable {
@@ -200,7 +230,7 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 3
+    nonisolated private static let currentSchemaVersion = 4
 
     /// bd-1tl: dedicated logger for store-level diagnostics that should
     /// reach Console.app on real devices without test scaffolding.
@@ -316,6 +346,7 @@ actor AnalysisStore {
             try writeInitialSchemaVersionIfNeeded()
             try migrateEvidenceEventsNaturalKeyV2IfNeeded()
             try migrateEvidenceEventsTranscriptVersionV3IfNeeded()
+            try migrateAnalysisSessionsShadowRetryV4IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -460,6 +491,39 @@ actor AnalysisStore {
         try setSchemaVersion(3)
     }
 
+    /// bd-3bz (Phase 4): add `needs_shadow_retry` and `shadowRetryPodcastId`
+    /// columns to `analysis_sessions`. The Foundation Models shadow phase
+    /// stamps these when it bails on `canUseFoundationModels == false`; a
+    /// capability observer in `PlayheadRuntime` drains the queue after FM
+    /// recovers (see `runShadowFMPhase` and `retryShadowFMPhaseForSession`).
+    ///
+    /// Idempotent via `columnExists` checks so re-running the migration (or
+    /// opening a schema-v3 DB that was manually upgraded) does not fail.
+    /// NOT retroactively marked — sessions already in `.complete` stay as-is;
+    /// only sessions whose shadow phase bails AFTER the migration set the
+    /// flag.
+    private func migrateAnalysisSessionsShadowRetryV4IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 4 else { return }
+        try addColumnIfNeeded(
+            table: "analysis_sessions",
+            column: "needs_shadow_retry",
+            definition: "INTEGER NOT NULL DEFAULT 0"
+        )
+        try addColumnIfNeeded(
+            table: "analysis_sessions",
+            column: "shadowRetryPodcastId",
+            definition: "TEXT"
+        )
+        // Partial index: cheap lookups for the retry drain. SQLite supports
+        // WHERE clauses on indexes since 3.8.0.
+        try exec("""
+            CREATE INDEX IF NOT EXISTS idx_sessions_shadow_retry
+            ON analysis_sessions(id)
+            WHERE needs_shadow_retry = 1
+            """)
+        try setSchemaVersion(4)
+    }
+
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
     /// is missing (only possible on a corrupted store, since `migrate()` writes
     /// it on first run).
@@ -522,17 +586,27 @@ actor AnalysisStore {
         try exec("CREATE INDEX IF NOT EXISTS idx_assets_episode ON analysis_assets(episodeId)")
 
         // analysis_sessions
+        // bd-3bz (Phase 4): `needs_shadow_retry` + `shadowRetryPodcastId` are
+        // created here for fresh databases. Existing DBs pick them up via
+        // `migrateAnalysisSessionsShadowRetryV4IfNeeded`.
         try exec("""
             CREATE TABLE IF NOT EXISTS analysis_sessions (
-                id               TEXT PRIMARY KEY,
-                analysisAssetId  TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
-                state            TEXT NOT NULL DEFAULT 'queued',
-                startedAt        REAL NOT NULL,
-                updatedAt        REAL NOT NULL,
-                failureReason    TEXT
+                id                    TEXT PRIMARY KEY,
+                analysisAssetId       TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                state                 TEXT NOT NULL DEFAULT 'queued',
+                startedAt             REAL NOT NULL,
+                updatedAt             REAL NOT NULL,
+                failureReason         TEXT,
+                needs_shadow_retry    INTEGER NOT NULL DEFAULT 0,
+                shadowRetryPodcastId  TEXT
             )
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_sessions_asset ON analysis_sessions(analysisAssetId)")
+        try exec("""
+            CREATE INDEX IF NOT EXISTS idx_sessions_shadow_retry
+            ON analysis_sessions(id)
+            WHERE needs_shadow_retry = 1
+            """)
 
         // feature_windows
         try exec("""
@@ -914,8 +988,10 @@ actor AnalysisStore {
 
     func insertSession(_ session: AnalysisSession) throws {
         let sql = """
-            INSERT INTO analysis_sessions (id, analysisAssetId, state, startedAt, updatedAt, failureReason)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO analysis_sessions
+                (id, analysisAssetId, state, startedAt, updatedAt, failureReason,
+                 needs_shadow_retry, shadowRetryPodcastId)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -925,38 +1001,48 @@ actor AnalysisStore {
         bind(stmt, 4, session.startedAt)
         bind(stmt, 5, session.updatedAt)
         bind(stmt, 6, session.failureReason)
+        bind(stmt, 7, session.needsShadowRetry ? 1 : 0)
+        bind(stmt, 8, session.shadowRetryPodcastId)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
     func fetchSession(id: String) throws -> AnalysisSession? {
-        let sql = "SELECT * FROM analysis_sessions WHERE id = ?"
+        let sql = """
+            SELECT id, analysisAssetId, state, startedAt, updatedAt, failureReason,
+                   needs_shadow_retry, shadowRetryPodcastId
+            FROM analysis_sessions WHERE id = ?
+            """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, id)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
-        return AnalysisSession(
-            id: text(stmt, 0),
-            analysisAssetId: text(stmt, 1),
-            state: text(stmt, 2),
-            startedAt: sqlite3_column_double(stmt, 3),
-            updatedAt: sqlite3_column_double(stmt, 4),
-            failureReason: optionalText(stmt, 5)
-        )
+        return readSession(stmt)
     }
 
     func fetchLatestSessionForAsset(assetId: String) throws -> AnalysisSession? {
-        let sql = "SELECT * FROM analysis_sessions WHERE analysisAssetId = ? ORDER BY updatedAt DESC LIMIT 1"
+        let sql = """
+            SELECT id, analysisAssetId, state, startedAt, updatedAt, failureReason,
+                   needs_shadow_retry, shadowRetryPodcastId
+            FROM analysis_sessions WHERE analysisAssetId = ?
+            ORDER BY updatedAt DESC LIMIT 1
+            """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, assetId)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
-        return AnalysisSession(
+        return readSession(stmt)
+    }
+
+    private func readSession(_ stmt: OpaquePointer?) -> AnalysisSession {
+        AnalysisSession(
             id: text(stmt, 0),
             analysisAssetId: text(stmt, 1),
             state: text(stmt, 2),
             startedAt: sqlite3_column_double(stmt, 3),
             updatedAt: sqlite3_column_double(stmt, 4),
-            failureReason: optionalText(stmt, 5)
+            failureReason: optionalText(stmt, 5),
+            needsShadowRetry: sqlite3_column_int(stmt, 6) != 0,
+            shadowRetryPodcastId: optionalText(stmt, 7)
         )
     }
 
@@ -969,6 +1055,64 @@ actor AnalysisStore {
         bind(stmt, 3, failureReason)
         bind(stmt, 4, id)
         try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// bd-3bz (Phase 4): mark a session as needing a Foundation Models shadow
+    /// retry and record the podcastId captured at bail time. Called by
+    /// `AdDetectionService.runShadowFMPhase` when the `canUseFoundationModels`
+    /// guard short-circuits. The `PlayheadRuntime` capability observer drains
+    /// flagged sessions after a 60s-stable-true debounce.
+    func markSessionNeedsShadowRetry(id: String, podcastId: String) throws {
+        let sql = """
+            UPDATE analysis_sessions
+            SET needs_shadow_retry = 1,
+                shadowRetryPodcastId = ?,
+                updatedAt = ?
+            WHERE id = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, podcastId)
+        bind(stmt, 2, Date().timeIntervalSince1970)
+        bind(stmt, 3, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// bd-3bz (Phase 4): clear the shadow-retry flag after a successful
+    /// `retryShadowFMPhaseForSession` drain.
+    func clearSessionShadowRetry(id: String) throws {
+        let sql = """
+            UPDATE analysis_sessions
+            SET needs_shadow_retry = 0,
+                shadowRetryPodcastId = NULL,
+                updatedAt = ?
+            WHERE id = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, Date().timeIntervalSince1970)
+        bind(stmt, 2, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// bd-3bz (Phase 4): fetch all sessions currently flagged for a shadow
+    /// retry. Order is stable (by updatedAt ASC) so drains are deterministic
+    /// in tests.
+    func fetchSessionsNeedingShadowRetry() throws -> [AnalysisSession] {
+        let sql = """
+            SELECT id, analysisAssetId, state, startedAt, updatedAt, failureReason,
+                   needs_shadow_retry, shadowRetryPodcastId
+            FROM analysis_sessions
+            WHERE needs_shadow_retry = 1
+            ORDER BY updatedAt ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        var results: [AnalysisSession] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(readSession(stmt))
+        }
+        return results
     }
 
     func updateFeatureCoverage(id: String, endTime: Double) throws {

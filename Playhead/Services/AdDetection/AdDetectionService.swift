@@ -120,6 +120,12 @@ actor AdDetectionService {
     /// reference to `CapabilitiesService.currentSnapshot`; tests default to
     /// `{ true }` so existing fixtures continue to exercise the shadow path.
     private let canUseFoundationModelsProvider: @Sendable () async -> Bool
+    /// bd-3bz (Phase 4): called from `runShadowFMPhase` when the shadow guard
+    /// bails on `canUseFoundationModels == false`, so the session can be
+    /// flagged for a later retry. Receives `(analysisAssetId, podcastId)` so
+    /// the recipient can locate the right session row. Default no-op keeps
+    /// existing callers (and tests that never flip FM to false) unchanged.
+    private let shadowSkipMarker: @Sendable (_ analysisAssetId: String, _ podcastId: String) async -> Void
 
     // MARK: - Cached State
 
@@ -139,7 +145,8 @@ actor AdDetectionService {
         config: AdDetectionConfig = .default,
         podcastProfile: PodcastProfile? = nil,
         backfillJobRunnerFactory: (@Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner)? = nil,
-        canUseFoundationModelsProvider: @escaping @Sendable () async -> Bool = { true }
+        canUseFoundationModelsProvider: @escaping @Sendable () async -> Bool = { true },
+        shadowSkipMarker: @escaping @Sendable (_ analysisAssetId: String, _ podcastId: String) async -> Void = { _, _ in }
     ) {
         self.store = store
         self.classifier = classifier
@@ -149,6 +156,7 @@ actor AdDetectionService {
         self.showPriors = ShowPriors.from(profile: podcastProfile)
         self.backfillJobRunnerFactory = backfillJobRunnerFactory
         self.canUseFoundationModelsProvider = canUseFoundationModelsProvider
+        self.shadowSkipMarker = shadowSkipMarker
     }
 
     // MARK: - Profile Update
@@ -389,21 +397,17 @@ actor AdDetectionService {
         // are not free — there's no point doing the work only to have the
         // runner's admission controller immediately reject it.
         //
-        // HIGH-2 (known limitation): this gate is one-shot per `runBackfill`
-        // invocation. A transient false (Apple Intelligence still
-        // downloading, thermal probe momentarily failing) permanently skips
-        // FM shadow telemetry for THIS episode pass. Shadow telemetry may
-        // therefore be silently missed during FM-unavailability windows.
-        // This is acceptable for shadow mode because the FM output never
-        // feeds AdWindows; the worst case is a gap in observation data.
-        //
-        // TODO(HIGH-2): add a capability-change observer in PlayheadRuntime
-        // that re-triggers backfill on `canUseFoundationModels` false→true
-        // transitions. Adding that observer creates a new architectural
-        // component and crosses the "no unilateral swaps" line; defer until
-        // explicitly approved.
+        // bd-3bz (Phase 4): this gate used to be one-shot — a transient
+        // false (Apple Intelligence still downloading, thermal probe
+        // momentarily failing, locale flip) permanently dropped shadow
+        // telemetry for the episode. Now we flag the session via
+        // `shadowSkipMarker` before returning, and the capability observer
+        // in `PlayheadRuntime` drains flagged sessions after FM becomes
+        // stably available again (60s debounce). See
+        // `retryShadowFMPhaseForSession` for the re-entrant retry path.
         guard await canUseFoundationModelsProvider() else {
-            logger.debug("Shadow FM phase skipped: canUseFoundationModels=false (HIGH-2: no auto-retry on recovery)")
+            logger.debug("Shadow FM phase skipped: canUseFoundationModels=false (bd-3bz: marking session for retry)")
+            await shadowSkipMarker(analysisAssetId, podcastId)
             return
         }
 
@@ -458,6 +462,100 @@ actor AdDetectionService {
         } catch {
             logger.warning("Shadow FM phase failed (suppressed by invariant): \(error.localizedDescription)")
         }
+    }
+
+    // MARK: - Shadow FM Retry (bd-3bz Phase 4)
+
+    /// bd-3bz (Phase 4): re-entrant retry of the Foundation Models shadow
+    /// phase for a single session that was previously flagged via
+    /// `markSessionNeedsShadowRetry` when the FM capability was unavailable.
+    ///
+    /// This path is intentionally narrow:
+    ///   • It re-reads the persisted transcript chunks for the asset and
+    ///     re-runs ONLY the shadow phase — transcription and coarse
+    ///     detection are left alone (they are far more expensive and did
+    ///     not depend on FM availability).
+    ///   • It must be re-entrant against a session whose transcription and
+    ///     coarse phases already completed: `BackfillJobRunner.jobId`
+    ///     already keys on `transcriptVersion` so duplicate FM jobs are
+    ///     deduped at the store level, not by accident here.
+    ///   • It does not modify `AnalysisCoordinator` state. The session
+    ///     stays in whatever state it was in (typically `.complete`).
+    ///   • If the FM capability has flipped back to `false` before the
+    ///     drain actually runs, the inner guard bails and re-marks the
+    ///     session — the retry queue effectively rolls forward to the
+    ///     next stable-true window.
+    ///   • The session's `needs_shadow_retry` flag is cleared ONLY when
+    ///     the shadow phase runs to completion under a true capability.
+    ///     Failures inside the runner (network, thermal, etc.) leave the
+    ///     flag set so the next capability transition retries again.
+    ///
+    /// Returns `true` if the drain actually executed the shadow phase
+    /// (regardless of runner outcome), `false` if the session was missing,
+    /// not flagged, lacked chunks, or the FM capability guard bailed.
+    @discardableResult
+    func retryShadowFMPhaseForSession(sessionId: String) async -> Bool {
+        guard let session = try? await store.fetchSession(id: sessionId) else {
+            logger.debug("Shadow retry skipped: session \(sessionId) not found")
+            return false
+        }
+        guard session.needsShadowRetry, let podcastId = session.shadowRetryPodcastId else {
+            logger.debug("Shadow retry skipped: session \(sessionId) not flagged")
+            return false
+        }
+
+        let analysisAssetId = session.analysisAssetId
+        let chunks: [TranscriptChunk]
+        do {
+            chunks = try await store.fetchTranscriptChunks(assetId: analysisAssetId)
+        } catch {
+            logger.warning("Shadow retry skipped: failed to fetch chunks for \(analysisAssetId): \(error.localizedDescription)")
+            return false
+        }
+        // Only the final-pass chunks drive the FM shadow phase — they carry
+        // the stable `transcriptVersion` that `BackfillJobRunner.jobId`
+        // consumes for dedupe. Fast-pass chunks are ignored.
+        let finalChunks = chunks.filter { $0.pass == TranscriptPassType.final_.rawValue }
+        guard !finalChunks.isEmpty else {
+            logger.debug("Shadow retry skipped: no final transcript chunks for \(analysisAssetId)")
+            return false
+        }
+
+        // Re-check the capability inline. If it bailed again in the window
+        // between the observer's drain decision and this call, the inner
+        // `runShadowFMPhase` guard will re-mark the session; returning
+        // early here keeps the telemetry clean ("drain skipped" vs "drain
+        // executed + bailed").
+        guard await canUseFoundationModelsProvider() else {
+            logger.debug("Shadow retry bailed: canUseFoundationModels flipped false before drain")
+            // Re-stamp the marker so updatedAt advances (keeps ordering
+            // monotonic for the next drain).
+            await shadowSkipMarker(analysisAssetId, podcastId)
+            return false
+        }
+
+        logger.info("Shadow retry: draining session \(sessionId) asset=\(analysisAssetId)")
+        await runShadowFMPhase(
+            chunks: finalChunks,
+            analysisAssetId: analysisAssetId,
+            podcastId: podcastId
+        )
+        // Clear only if the inner guard didn't re-stamp the session. A
+        // race window exists where capability could have flipped mid-run,
+        // but `runShadowFMPhase` would have re-marked the session via the
+        // skip marker — so we re-read before clearing.
+        do {
+            if let refreshed = try await store.fetchSession(id: sessionId),
+               refreshed.needsShadowRetry,
+               refreshed.updatedAt > session.updatedAt {
+                logger.debug("Shadow retry: session \(sessionId) re-flagged during drain, leaving flag set")
+            } else {
+                try await store.clearSessionShadowRetry(id: sessionId)
+            }
+        } catch {
+            logger.warning("Shadow retry: failed to finalize flag for \(sessionId): \(error.localizedDescription)")
+        }
+        return true
     }
 
     // MARK: - User Behavior Feedback

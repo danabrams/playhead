@@ -66,6 +66,15 @@ final class PlayheadRuntime {
     private var audioCacheTask: Task<Void, Never>?
     /// Retains the progressive resource loader outside PlaybackServiceActor.
     private var activeProgressiveLoader: ProgressiveResourceLoader?
+    /// bd-3bz (Phase 4): observer that watches `canUseFoundationModels` for
+    /// false→true transitions and, after a 60s-stable-true debounce, drains
+    /// any `analysis_sessions` rows flagged with `needs_shadow_retry = 1`.
+    /// Held strongly by the runtime so its observer loop survives until the
+    /// runtime is torn down. Stopped explicitly via `shutdown()`; tests that
+    /// spin up transient runtimes should call that to avoid leaking
+    /// AsyncStream subscriptions across tests.
+    @ObservationIgnored
+    private let shadowRetryObserver: ShadowRetryObserver?
 
     /// True when an episode is actively loaded for playback.
     var isPlayingEpisode: Bool {
@@ -181,6 +190,29 @@ final class PlayheadRuntime {
                 scanCohortJSON: ScanCohort.productionJSON()
             )
         }
+        // bd-3bz (Phase 4): when the shadow phase bails on FM unavailability,
+        // mark the latest session for the asset so the capability observer
+        // can drain it after FM recovers. Failures inside the marker are
+        // swallowed — the shadow phase must never throw. `fetchLatestSessionForAsset`
+        // is the right lookup because `AdDetectionService.runShadowFMPhase`
+        // runs inside `finalizeBackfill`, whose session is the latest row on
+        // that asset by `updatedAt`.
+        let analysisStoreForMarker = analysisStore
+        let shadowSkipMarker: @Sendable (String, String) async -> Void = { assetId, podcastId in
+            do {
+                guard let session = try await analysisStoreForMarker.fetchLatestSessionForAsset(assetId: assetId) else {
+                    return
+                }
+                try await analysisStoreForMarker.markSessionNeedsShadowRetry(
+                    id: session.id,
+                    podcastId: podcastId
+                )
+            } catch {
+                Logger(subsystem: "com.playhead", category: "Runtime")
+                    .warning("bd-3bz: failed to mark session for shadow retry on asset \(assetId): \(error.localizedDescription)")
+            }
+        }
+
         self.adDetectionService = AdDetectionService(
             store: analysisStore,
             metadataExtractor: FallbackExtractor(),
@@ -192,7 +224,8 @@ final class PlayheadRuntime {
             // capability changes (FM became unavailable, AI disabled, etc.).
             canUseFoundationModelsProvider: { [capabilitiesServiceForFactory] in
                 await capabilitiesServiceForFactory.currentSnapshot.canUseFoundationModels
-            }
+            },
+            shadowSkipMarker: shadowSkipMarker
         )
         self.skipOrchestrator = SkipOrchestrator(
             store: analysisStore,
@@ -236,6 +269,22 @@ final class PlayheadRuntime {
             capabilitiesService: capabilitiesService
         )
 
+        // bd-3bz (Phase 4): construct the shadow-retry observer once all
+        // dependencies (capabilitiesService, analysisStore, adDetectionService)
+        // are initialized. The observer is skipped in preview runtimes — the
+        // SwiftUI preview canvas spins up many transient runtimes and we don't
+        // want stray AsyncStream subscriptions piling up there. The observer
+        // task is started below after `super`-style initialization completes.
+        if !isPreviewRuntime {
+            self.shadowRetryObserver = ShadowRetryObserver(
+                capabilities: capabilitiesService,
+                store: analysisStore,
+                drainer: adDetectionService
+            )
+        } else {
+            self.shadowRetryObserver = nil
+        }
+
         // Set error state after all stored properties are initialized.
         if let storeError {
             self.initializationError = storeError
@@ -252,6 +301,13 @@ final class PlayheadRuntime {
         }
 
         Task { await capabilitiesService.startObserving() }
+
+        // bd-3bz (Phase 4): start the shadow-retry observer loop. The actor
+        // owns its own loop Task internally; this fire-and-forget hop just
+        // kicks the loop off the MainActor.
+        if let shadowRetryObserver {
+            Task { await shadowRetryObserver.start() }
+        }
 
         Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService] in
             // Migrate the analysis store before any component queries its tables.

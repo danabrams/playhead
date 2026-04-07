@@ -1348,7 +1348,10 @@ struct SemanticScanPersistenceTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
-        #expect(try await store.schemaVersion() == 3)
+        // bd-3bz (Phase 4) bumped schema_version to 4 by adding the
+        // `needs_shadow_retry` columns to `analysis_sessions`. Migration
+        // chains all v1→v4 steps, so a fresh-from-v1 store still ends up at 4.
+        #expect(try await store.schemaVersion() == 4)
 
         try await store.insertAsset(makePersistenceTestAsset())
 
@@ -1450,7 +1453,8 @@ struct SemanticScanPersistenceTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
-        #expect(try await store.schemaVersion() == 3)
+        // bd-3bz (Phase 4) bumped schema_version to 4. v2→v3→v4 chains.
+        #expect(try await store.schemaVersion() == 4)
 
         try await store.insertAsset(makePersistenceTestAsset())
 
