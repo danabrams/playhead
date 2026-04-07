@@ -1011,13 +1011,15 @@ struct FoundationModelClassifier: Sendable {
     private func promptBudget() async throws -> Int {
         try await promptBudget(
             schemaTokens: runtime.coarseSchemaTokenCount,
-            maximumResponseTokens: config.coarseMaximumResponseTokens
+            maximumResponseTokens: config.coarseMaximumResponseTokens,
+            divisor: Self.coarseBudgetDivisor
         )
     }
 
     private func promptBudget(
         schemaTokens: @escaping @Sendable () async throws -> Int,
-        maximumResponseTokens: Int
+        maximumResponseTokens: Int,
+        divisor: Int = Self.refinementBudgetDivisor
     ) async throws -> Int {
         let contextSize = await runtime.contextSize()
         let schemaTokenCount = try await schemaTokens()
@@ -1025,31 +1027,86 @@ struct FoundationModelClassifier: Sendable {
             contextSize: contextSize,
             schemaTokens: schemaTokenCount,
             maximumResponseTokens: maximumResponseTokens,
-            safetyMarginTokens: config.safetyMarginTokens
+            safetyMarginTokens: config.safetyMarginTokens,
+            divisor: divisor
         )
     }
 
-    /// bd-34e Fix B: the structured `L<n>> "..."` line-ref prompt format
-    /// tokenizes up to ~2.1× worse than the planner's estimator predicts
-    /// (real-device benchmark: estimator said 2202, Apple counted 4614).
-    /// To stop a single window from tipping over `contextSize`, we halve
-    /// the estimator's available headroom (using a conservative divisor
-    /// of 2, not 2.1, for clarity) AND apply a hard `contextSize / 2`
-    /// ceiling as belt-and-suspenders.
-    ///
-    /// The safety-margin recomputation handles the math; the hard cap
-    /// guarantees no single window ever budgets beyond the safe half,
-    /// regardless of what other parameters shrink or grow.
+    /// bd-34e Fix B v1 (refinement, unchanged): the structured
+    /// `L<n>> "..."` line-ref prompt format tokenizes ~2.1× worse than
+    /// the planner's estimator predicts. The refinement path keeps the
+    /// halving compromise it shipped with — its prompts are smaller and
+    /// the refinement decode-failure work (bd-3h2) is being investigated
+    /// independently, so we deliberately do not retune it here.
+    static let refinementBudgetDivisor = 2
+
+    /// bd-34e Fix B v2 (coarse): on-device benchmarks showed the
+    /// real-device coarse prompt format tokenizes up to **2.40×** worse
+    /// than the estimator predicts, and the ratio is non-constant across
+    /// windows. Halving was insufficient — window 3 of the Conan episode
+    /// estimated 1788 tokens but Apple counted 4295 (overflow). We now
+    /// divide by 3 to give the coarse prompt a 3× safety factor against
+    /// tokenizer undercount. This produces more, smaller windows but each
+    /// is much more likely to fit Apple's actual budget.
+    static let coarseBudgetDivisor = 3
+
+    /// Compute the safe ceiling for estimator-counted prompt tokens. The
+    /// `divisor` is the safety multiple against tokenizer undercount and
+    /// also clamps the ceiling via `contextSize / divisor` so that no
+    /// single window ever budgets beyond `1/divisor` of context, even
+    /// under pathological zero-overhead inputs.
     static func maximumEstimatedPromptTokensSafeFor(
         contextSize: Int,
         schemaTokens: Int,
         maximumResponseTokens: Int,
-        safetyMarginTokens: Int
+        safetyMarginTokens: Int,
+        divisor: Int = refinementBudgetDivisor
     ) -> Int {
+        let safeDivisor = max(1, divisor)
         let preMargin = contextSize - schemaTokens - maximumResponseTokens - safetyMarginTokens
-        let halved = preMargin / 2
-        let hardCap = contextSize / 2
-        return max(1, min(halved, hardCap))
+        let conservative = preMargin / safeDivisor
+        let hardCap = contextSize / safeDivisor
+        return max(1, min(conservative, hardCap))
+    }
+
+    /// bd-34e Fix B v2: parse Apple's reported actual token count out of
+    /// a `LanguageModelSession.GenerationError.exceededContextWindowSize`
+    /// error so the smart-shrink retry knows exactly how oversized a
+    /// window was. Apple's error structure is undocumented and the count
+    /// shows up in different places across iOS releases (the localized
+    /// description, the `Context.debugDescription`, the underlying
+    /// errors, the `userInfo` strings), so we cast a wide net and pick
+    /// the first numeric run that looks like a token count.
+    ///
+    /// Examples we have observed in the wild:
+    ///   "Content contains 4295 tokens, which exceeds the maximum allowed context size of 4096."
+    ///   "Provided 4,295 tokens, but the maximum allowed is 4,096."
+    static func extractActualTokenCount(from error: Error) -> Int? {
+        var candidates: [String] = [
+            error.localizedDescription,
+            String(reflecting: error)
+        ]
+        let nsError = error as NSError
+        candidates.append(contentsOf: nsError.userInfo.values.compactMap { $0 as? String })
+        for underlying in nsError.underlyingErrors {
+            candidates.append(underlying.localizedDescription)
+            candidates.append(String(reflecting: underlying))
+        }
+
+        guard let pattern = try? NSRegularExpression(pattern: #"(\d[\d,]*)\s*tokens"#) else {
+            return nil
+        }
+        for candidate in candidates {
+            let nsRange = NSRange(candidate.startIndex..., in: candidate)
+            if let match = pattern.firstMatch(in: candidate, range: nsRange),
+               let numberRange = Range(match.range(at: 1), in: candidate) {
+                let cleaned = candidate[numberRange].replacingOccurrences(of: ",", with: "")
+                if let value = Int(cleaned) {
+                    return value
+                }
+            }
+        }
+        return nil
     }
 
     private func aggregateTranscriptQuality(for segments: [AdTranscriptSegment]) -> TranscriptQuality {
@@ -1424,6 +1481,30 @@ struct FoundationModelClassifier: Sendable {
             )
             switch status.retryPolicy {
             case .shrinkWindowAndRetryOnce:
+                // bd-34e Fix B v2: when Apple reports the actual token
+                // count in the error string, use it to compute a single
+                // smart-shrunken plan that drops just enough segments to
+                // fit the real budget. The smart-shrink branch trades
+                // coverage on the dropped tail for a single retry round
+                // trip — much faster than the legacy midpoint split and
+                // more likely to land inside Apple's hidden ceiling. If
+                // we can't extract a count (older iOS, error string
+                // changed, test scaffolding), fall back to the existing
+                // recursive midpoint split via `shrunkenCoarsePlansForRetry`.
+                if status == .exceededContextWindow,
+                   let smartPlan = await smartShrunkenCoarsePlan(
+                       from: plan,
+                       lineRefLookup: lineRefLookup,
+                       error: error,
+                       windowIndex: windowIndex,
+                       totalWindows: totalWindows
+                   ) {
+                    return await runCoarseRetry(
+                        retryPlans: [smartPlan],
+                        sessionBox: sessionBox,
+                        clock: clock
+                    )
+                }
                 guard let retryPlans = await shrunkenCoarsePlansForRetry(
                     from: plan,
                     lineRefLookup: lineRefLookup
@@ -1769,6 +1850,77 @@ struct FoundationModelClassifier: Sendable {
             endTime: retrySegments.last?.endTime ?? plan.endTime,
             stopReason: .tokenBudget,
             promptEvidence: retryEvidence
+        )
+    }
+
+    /// bd-34e Fix B v2: build a single smart-shrunken coarse plan using
+    /// Apple's reported actual token count. Returns `nil` when we can't
+    /// extract a count, when the math says no shrink is needed, or when
+    /// the smart-shrunken plan would still be empty — letting the caller
+    /// fall back to the legacy recursive midpoint split.
+    private func smartShrunkenCoarsePlan(
+        from plan: CoarsePassWindowPlan,
+        lineRefLookup: [Int: AdTranscriptSegment],
+        error: Error,
+        windowIndex: Int,
+        totalWindows: Int
+    ) async -> CoarsePassWindowPlan? {
+        guard let actualTokens = Self.extractActualTokenCount(from: error) else {
+            return nil
+        }
+
+        let segments = plan.lineRefs.compactMap { lineRefLookup[$0] }
+        guard segments.count == plan.lineRefs.count, segments.count > 1 else {
+            return nil
+        }
+
+        let originalSegmentCount = segments.count
+        let actualPerSegment = max(1, actualTokens / originalSegmentCount)
+
+        // Compute Apple's real budget using the same overheads the
+        // estimator already knows about. We deliberately do NOT apply
+        // the bd-34e divisor here — `actualTokens` is already in Apple's
+        // ground-truth units, so we want the unscaled budget.
+        let contextSize = await runtime.contextSize()
+        let schemaTokens = (try? await runtime.coarseSchemaTokenCount()) ?? 0
+        let responseTokens = config.coarseMaximumResponseTokens
+        let safetyMargin = config.safetyMarginTokens
+        let targetTokens = max(1, contextSize - schemaTokens - responseTokens - safetyMargin)
+        let targetSegments = max(1, targetTokens / actualPerSegment)
+
+        guard targetSegments < originalSegmentCount else {
+            // Apple says we're over budget but our per-segment math says
+            // a smaller window wouldn't help — bail to the legacy splitter.
+            return nil
+        }
+
+        let trimmedSegments = Array(segments.prefix(targetSegments))
+        guard !trimmedSegments.isEmpty else { return nil }
+
+        let trimmedPrompt = Self.buildPrompt(for: trimmedSegments)
+        let trimmedTokenCount = (try? await runtime.tokenCount(trimmedPrompt)) ?? plan.promptTokenCount
+
+        logger.debug(
+            """
+            fm.classifier.coarse_pass_smart_shrink \
+            window=\(windowIndex, privacy: .public) \
+            totalWindows=\(totalWindows, privacy: .public) \
+            originalSegments=\(originalSegmentCount, privacy: .public) \
+            actualTokens=\(actualTokens, privacy: .public) \
+            actualPerSegment=\(actualPerSegment, privacy: .public) \
+            targetTokens=\(targetTokens, privacy: .public) \
+            targetSegments=\(targetSegments, privacy: .public)
+            """
+        )
+
+        return CoarsePassWindowPlan(
+            windowIndex: 0,
+            lineRefs: trimmedSegments.map(\.segmentIndex),
+            prompt: trimmedPrompt,
+            promptTokenCount: trimmedTokenCount,
+            startTime: trimmedSegments.first?.startTime ?? plan.startTime,
+            endTime: trimmedSegments.last?.endTime ?? plan.endTime,
+            transcriptQuality: aggregateTranscriptQuality(for: trimmedSegments)
         )
     }
 
