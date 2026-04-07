@@ -1923,6 +1923,60 @@ struct FoundationModelClassifierTests {
         #endif
     }
 
+    // bd-34e Hypothesis F: PLAYHEAD_FM_PROMPT_VARIANT debug-only flag swaps
+    // the coarse-pass preamble framing between the default classification
+    // wording, an extraction wording, and a neutral question wording. This
+    // is the controlled experiment switch the on-device shadow benchmark
+    // uses to test whether Apple's iOS 26.4 output safety classifier
+    // refuses on the *task framing* ("classify whether this is an ad")
+    // rather than on the content topic itself.
+    @Test("PLAYHEAD_FM_PROMPT_VARIANT switches the coarse preamble shape")
+    func promptVariantFlagSwitchesCoarsePreamble() {
+        // Skip if the test runner already pins the env var to something —
+        // mirrors how dropPreambleFlagCollapsesCoarsePreamble handles
+        // externally-set flags so concurrent runners don't collide.
+        let alreadySet = ProcessInfo.processInfo.environment["PLAYHEAD_FM_PROMPT_VARIANT"] != nil
+        guard !alreadySet else { return }
+
+        // Default mode: classification framing.
+        let defaultPreamble = FoundationModelClassifier.coarsePromptPreamble()
+        #expect(defaultPreamble.contains("Classify whether"))
+        #expect(defaultPreamble.contains("advertising or promotional content"))
+
+        #if DEBUG
+        // extract variant — primary hypothesis F experiment.
+        setenv("PLAYHEAD_FM_PROMPT_VARIANT", "extract", 1)
+        let extractPreamble = FoundationModelClassifier.coarsePromptPreamble()
+        #expect(extractPreamble.contains("List any company names"))
+        #expect(!extractPreamble.contains("Classify whether"))
+        #expect(extractPreamble.contains("<<<TRANSCRIPT>>>"))
+        #expect(extractPreamble.contains("<<<END TRANSCRIPT>>>"))
+        unsetenv("PLAYHEAD_FM_PROMPT_VARIANT")
+
+        // neutral variant — secondary fallback experiment.
+        setenv("PLAYHEAD_FM_PROMPT_VARIANT", "neutral", 1)
+        let neutralPreamble = FoundationModelClassifier.coarsePromptPreamble()
+        #expect(neutralPreamble.contains("What companies"))
+        #expect(!neutralPreamble.contains("Classify whether"))
+        #expect(!neutralPreamble.contains("List any company names"))
+        #expect(neutralPreamble.contains("<<<TRANSCRIPT>>>"))
+        unsetenv("PLAYHEAD_FM_PROMPT_VARIANT")
+
+        // Unknown values fall back to the default classification framing
+        // so a typo can never silently change behavior on-device.
+        setenv("PLAYHEAD_FM_PROMPT_VARIANT", "bogus", 1)
+        let bogusPreamble = FoundationModelClassifier.coarsePromptPreamble()
+        #expect(bogusPreamble == defaultPreamble)
+        unsetenv("PLAYHEAD_FM_PROMPT_VARIANT")
+
+        // Empty string also falls back.
+        setenv("PLAYHEAD_FM_PROMPT_VARIANT", "", 1)
+        let emptyPreamble = FoundationModelClassifier.coarsePromptPreamble()
+        #expect(emptyPreamble == defaultPreamble)
+        unsetenv("PLAYHEAD_FM_PROMPT_VARIANT")
+        #endif
+    }
+
     // bd-34e Fix B v3: window 4 of the Conan episode estimated 1196 tokens
     // but Apple counted 4125 (3.45× ratio). The previous ÷3 divisor was
     // not enough headroom; ÷4 leaves a 4× safety factor against

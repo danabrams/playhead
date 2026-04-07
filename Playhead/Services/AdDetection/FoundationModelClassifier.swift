@@ -668,6 +668,20 @@ struct FoundationModelClassifier: Sendable {
         if !Self.injectionPreambleEnabled() {
             logger.debug("PLAYHEAD_FM_DROP_PREAMBLE active — coarse and refinement preambles disabled")
         }
+        // bd-34e Hypothesis F: announce the prompt-variant flag at construction
+        // so the on-device shadow benchmark log unambiguously confirms which
+        // framing the FM saw for this run.
+        #if DEBUG
+        let variant = Self.coarsePromptVariant()
+        switch variant {
+        case .classification:
+            break
+        case .extract:
+            logger.debug("PLAYHEAD_FM_PROMPT_VARIANT=extract — using extraction-framed prompt")
+        case .neutral:
+            logger.debug("PLAYHEAD_FM_PROMPT_VARIANT=neutral — using neutral-question prompt")
+        }
+        #endif
     }
 
     func coarsePassA(
@@ -1116,6 +1130,49 @@ struct FoundationModelClassifier: Sendable {
     private static let transcriptOpenFence = "<<<TRANSCRIPT>>>"
     private static let transcriptCloseFence = "<<<END TRANSCRIPT>>>"
 
+    // bd-34e Hypothesis F: iOS 26.4's output safety classifier refuses
+    // ("May contain sensitive content") on the first window of real podcast
+    // ad content (CVS pre-roll). The hypothesis is that the *task framing*
+    // ("classify whether this is an ad") is what trips the classifier on
+    // health-adjacent advertisers, not the content itself. These two
+    // alternate preamble texts reframe the task as information extraction
+    // ("list product mentions") and as a neutral question ("what is
+    // mentioned here"), keeping the same line-ref instruction and fence
+    // wrapping. The variant is selected per-run via PLAYHEAD_FM_PROMPT_VARIANT.
+    private static let extractPromptPrefix = "Extract product mentions."
+    private static let extractInjectionPreamble = "List any company names, product names, brand mentions, URLs, promo codes, or sponsorship language found in this podcast transcript window. Return an empty list if none are present."
+    private static let extractLineRefInstruction = "Each transcript line is prefixed with `L<number>>` followed by quoted text. Use the line numbers to cite where each mention appears."
+
+    private static let neutralPromptPrefix = "Identify mentions."
+    private static let neutralInjectionPreamble = "What companies, products, services, or sponsorship language are mentioned in this transcript window? Return a list. Return an empty list if nothing is mentioned."
+    private static let neutralLineRefInstruction = "Each transcript line is prefixed with `L<number>>` followed by quoted text. Cite line numbers for each mention."
+
+    #if DEBUG
+    /// bd-34e Hypothesis F: alternate coarse-pass framings selected via the
+    /// PLAYHEAD_FM_PROMPT_VARIANT debug env var. `classification` is the
+    /// production default; `extract` and `neutral` are the on-device
+    /// experiments that probe whether iOS 26.4's output safety classifier
+    /// refuses on task framing rather than content topic.
+    enum CoarsePromptVariant: String {
+        case classification
+        case extract
+        case neutral
+    }
+
+    static func coarsePromptVariant() -> CoarsePromptVariant {
+        guard let raw = ProcessInfo.processInfo.environment["PLAYHEAD_FM_PROMPT_VARIANT"]?.lowercased(),
+              !raw.isEmpty else {
+            return .classification
+        }
+        return CoarsePromptVariant(rawValue: raw) ?? .classification
+    }
+    #else
+    enum CoarsePromptVariant: String {
+        case classification
+    }
+    static func coarsePromptVariant() -> CoarsePromptVariant { .classification }
+    #endif
+
     /// bd-34e: when this returns false, the H14 injection preamble (the
     /// "untrusted user content" line, the line-ref instruction, and the
     /// `<<<TRANSCRIPT>>>` fences) is dropped from every coarse and refinement
@@ -1173,13 +1230,34 @@ struct FoundationModelClassifier: Sendable {
         // entirely so the on-device benchmark can probe whether Apple's
         // safety classifier trips on this framing.
         guard injectionPreambleEnabled() else { return "" }
+        let parts = coarsePreambleParts(for: coarsePromptVariant())
         return [
-            promptPrefix,
-            injectionPreamble,
-            lineRefInstruction,
+            parts.prefix,
+            parts.preamble,
+            parts.lineRef,
             transcriptOpenFence,
             transcriptCloseFence
         ].joined(separator: "\n")
+    }
+
+    /// bd-34e Hypothesis F: resolve the (prefix, preamble, line-ref) triple
+    /// for a given prompt variant. All three variants share the same five-line
+    /// shape (prefix / framing / line-ref instruction / open fence / close
+    /// fence) so the existing preamble token-count assertions and the
+    /// `buildPrompt(for: [])` equivalence invariant remain intact.
+    static func coarsePreambleParts(
+        for variant: CoarsePromptVariant
+    ) -> (prefix: String, preamble: String, lineRef: String) {
+        switch variant {
+        case .classification:
+            return (promptPrefix, injectionPreamble, lineRefInstruction)
+        #if DEBUG
+        case .extract:
+            return (extractPromptPrefix, extractInjectionPreamble, extractLineRefInstruction)
+        case .neutral:
+            return (neutralPromptPrefix, neutralInjectionPreamble, neutralLineRefInstruction)
+        #endif
+        }
     }
 
     /// H14: Token count of the static coarse-pass preamble (excluding any
@@ -1198,10 +1276,11 @@ struct FoundationModelClassifier: Sendable {
         let preambleActive = injectionPreambleEnabled()
         var lines: [String] = []
         if preambleActive {
+            let parts = coarsePreambleParts(for: coarsePromptVariant())
             lines.append(contentsOf: [
-                promptPrefix,
-                injectionPreamble,
-                lineRefInstruction,
+                parts.prefix,
+                parts.preamble,
+                parts.lineRef,
                 transcriptOpenFence
             ])
         }
