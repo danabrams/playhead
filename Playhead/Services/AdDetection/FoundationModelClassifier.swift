@@ -487,6 +487,38 @@ struct FoundationModelClassifier: Sendable {
     /// nil; invoking it is a no-op.
     nonisolated(unsafe) static var refinementDecodeFailureObserver: (@Sendable (RefinementDecodeFailureDiagnostic) -> Void)?
 
+    /// bd-34e diagnostic payload emitted around every coarse-pass window
+    /// `respond` call: one event per submission attempt and one event per
+    /// catch arm. Captures the prompt metadata an investigator needs to
+    /// triage why Apple's safety classifier flagged a window without rerunning
+    /// the on-device shadow benchmark blind. Mirrors
+    /// `RefinementDecodeFailureDiagnostic` in shape and intent.
+    struct CoarsePassWindowDiagnostic: Sendable {
+        enum Kind: String, Sendable {
+            case submit
+            case error
+        }
+
+        let kind: Kind
+        let windowIndex: Int          // 1-based
+        let totalWindows: Int
+        let firstSegmentIndex: Int?
+        let lastSegmentIndex: Int?
+        let segmentCount: Int
+        let promptTokens: Int
+        let promptCharLength: Int
+        let promptPreview: String     // first 200 chars, newlines escaped to spaces
+        let errorDescription: String  // empty for `.submit`
+        let errorReflect: String      // empty for `.submit`
+        let status: SemanticScanStatus? // nil for `.submit`
+    }
+
+    /// Internal test hook so unit tests can observe coarse-pass window submit /
+    /// error diagnostics without scraping `os.Logger`. Mirrors
+    /// `refinementDecodeFailureObserver`. Production builds leave it nil;
+    /// invoking it is a no-op.
+    nonisolated(unsafe) static var coarsePassDiagnosticObserver: (@Sendable (CoarsePassWindowDiagnostic) -> Void)?
+
     /// Static identifier for the refinement @Generable schema. Used by the
     /// diagnostic payload so future schema rotations are visible in logs.
     static let refinementSchemaName = "RefinementWindowSchema"
@@ -503,6 +535,12 @@ struct FoundationModelClassifier: Sendable {
         self.config = config
         self.logger = logger
         self.runtime = runtime ?? Self.liveRuntime(logger: logger, config: config)
+        // bd-34e: announce the experiment flag at construction so the
+        // on-device benchmark log unambiguously confirms whether the
+        // PLAYHEAD_FM_DROP_PREAMBLE switch took effect for this run.
+        if !Self.injectionPreambleEnabled() {
+            logger.debug("PLAYHEAD_FM_DROP_PREAMBLE active — coarse and refinement preambles disabled")
+        }
     }
 
     func coarsePassA(
@@ -540,7 +578,8 @@ struct FoundationModelClassifier: Sendable {
         var windows: [FMCoarseWindowOutput] = []
         windows.reserveCapacity(plans.count)
 
-        for plan in plans {
+        let totalWindows = plans.count
+        for (planIndex, plan) in plans.enumerated() {
             // H9: Honor cooperative cancellation between windows.
             do {
                 try Task.checkCancellation()
@@ -557,7 +596,9 @@ struct FoundationModelClassifier: Sendable {
                 for: plan,
                 sessionBox: sharedBox,
                 lineRefLookup: coarseLineRefLookup,
-                clock: clock
+                clock: clock,
+                windowIndex: planIndex + 1,
+                totalWindows: totalWindows
             ) {
             case let .success(outputs):
                 for output in outputs {
@@ -853,13 +894,33 @@ struct FoundationModelClassifier: Sendable {
     private static let transcriptOpenFence = "<<<TRANSCRIPT>>>"
     private static let transcriptCloseFence = "<<<END TRANSCRIPT>>>"
 
+    /// bd-34e: when this returns false, the H14 injection preamble (the
+    /// "untrusted user content" line, the line-ref instruction, and the
+    /// `<<<TRANSCRIPT>>>` fences) is dropped from every coarse and refinement
+    /// prompt. This is the controlled experiment switch the on-device shadow
+    /// benchmark uses to test whether Apple's safety classifier trips on the
+    /// preamble framing for long ad-heavy windows. The flag is debug-only —
+    /// release builds always return `true`.
+    static func injectionPreambleEnabled() -> Bool {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["PLAYHEAD_FM_DROP_PREAMBLE"] != nil {
+            return false
+        }
+        #endif
+        return true
+    }
+
     /// H14: The static, transcript-independent preamble of the coarse-pass
     /// prompt — every wrapping line that the planner emits regardless of how
     /// many segments are inside the fences. Used by `preambleTokenCount` and
     /// regression tests so any future preamble growth is loud and accounted
     /// for in budget math.
     static func coarsePromptPreamble() -> String {
-        [
+        // bd-34e: PLAYHEAD_FM_DROP_PREAMBLE collapses the H14 wrapping
+        // entirely so the on-device benchmark can probe whether Apple's
+        // safety classifier trips on this framing.
+        guard injectionPreambleEnabled() else { return "" }
+        return [
             promptPrefix,
             injectionPreamble,
             lineRefInstruction,
@@ -877,16 +938,26 @@ struct FoundationModelClassifier: Sendable {
     }
 
     static func buildPrompt(for segments: [AdTranscriptSegment]) -> String {
-        var lines: [String] = [
-            promptPrefix,
-            injectionPreamble,
-            lineRefInstruction,
-            transcriptOpenFence
-        ]
+        // bd-34e: when the preamble is disabled we drop ALL the wrapping
+        // lines (prefix, injection preamble, line-ref instruction, fences),
+        // so the model sees only the bare `L<n>> "..."` transcript lines.
+        // This is the controlled experiment for hypothesis A.
+        let preambleActive = injectionPreambleEnabled()
+        var lines: [String] = []
+        if preambleActive {
+            lines.append(contentsOf: [
+                promptPrefix,
+                injectionPreamble,
+                lineRefInstruction,
+                transcriptOpenFence
+            ])
+        }
         lines.append(contentsOf: segments.map { segment in
             "L\(segment.segmentIndex)> \"\(escapedLine(segment.text))\""
         })
-        lines.append(transcriptCloseFence)
+        if preambleActive {
+            lines.append(transcriptCloseFence)
+        }
         return lines.joined(separator: "\n")
     }
 
@@ -895,17 +966,26 @@ struct FoundationModelClassifier: Sendable {
         promptEvidence: [PromptEvidenceEntry],
         maximumSpans: Int
     ) -> String {
-        var lines: [String] = [
-            refinementPromptPrefix,
-            injectionPreamble,
-            lineRefInstruction,
-            "Transcript:",
-            transcriptOpenFence
-        ]
+        // bd-34e: same flag as `buildPrompt(for:)` — drop the H14 framing
+        // (prefix, injection preamble, line-ref instruction, fences) when the
+        // experiment switch is set.
+        let preambleActive = injectionPreambleEnabled()
+        var lines: [String] = []
+        if preambleActive {
+            lines.append(contentsOf: [
+                refinementPromptPrefix,
+                injectionPreamble,
+                lineRefInstruction,
+                "Transcript:",
+                transcriptOpenFence
+            ])
+        }
         lines.append(contentsOf: segments.map { segment in
             "L\(segment.segmentIndex)> \"\(escapedLine(segment.text))\""
         })
-        lines.append(transcriptCloseFence)
+        if preambleActive {
+            lines.append(transcriptCloseFence)
+        }
         if !promptEvidence.isEmpty {
             lines.append("Evidence catalog:")
             lines.append(contentsOf: promptEvidence.map { $0.renderForPrompt() })
@@ -1257,9 +1337,20 @@ struct FoundationModelClassifier: Sendable {
         for plan: CoarsePassWindowPlan,
         sessionBox: SessionBox,
         lineRefLookup: [Int: AdTranscriptSegment],
-        clock: ContinuousClock
+        clock: ContinuousClock,
+        windowIndex: Int,
+        totalWindows: Int
     ) async -> CoarseResponseOutcome {
         let windowStart = clock.now
+
+        // bd-34e: log a structured submit breadcrumb before each
+        // `respond` call so we can correlate guardrail blocks with the
+        // exact window context that triggered them.
+        reportCoarsePassWindowSubmitIfNeeded(
+            plan: plan,
+            windowIndex: windowIndex,
+            totalWindows: totalWindows
+        )
 
         // C4/H2/H9: Catch per-window errors, map via SemanticScanStatus, and
         // honor the documented retry policy.
@@ -1282,6 +1373,13 @@ struct FoundationModelClassifier: Sendable {
             ])
         } catch {
             let status = SemanticScanStatus.from(error: error)
+            reportCoarsePassErrorIfNeeded(
+                plan: plan,
+                error: error,
+                status: status,
+                windowIndex: windowIndex,
+                totalWindows: totalWindows
+            )
             switch status.retryPolicy {
             case .shrinkWindowAndRetryOnce:
                 guard let retryPlans = await shrunkenCoarsePlansForRetry(
@@ -1469,6 +1567,134 @@ struct FoundationModelClassifier: Sendable {
         )
 
         Self.refinementDecodeFailureObserver?(diagnostic)
+    }
+
+    /// bd-34e diagnostic: emit a structured breadcrumb on every coarse-pass
+    /// window submission so investigators can correlate the prompt metadata
+    /// (window index, segment span, char/token length, prompt preview) with
+    /// any guardrail block that follows. The breadcrumb logs at `.debug` so
+    /// it stays out of default Console.app filters until investigation turns
+    /// it on. The companion observer hook lets unit tests capture events
+    /// without scraping `os.Logger`.
+    private func reportCoarsePassWindowSubmitIfNeeded(
+        plan: CoarsePassWindowPlan,
+        windowIndex: Int,
+        totalWindows: Int
+    ) {
+        let preview = Self.coarsePromptPreview(plan.prompt)
+        let diagnostic = CoarsePassWindowDiagnostic(
+            kind: .submit,
+            windowIndex: windowIndex,
+            totalWindows: totalWindows,
+            firstSegmentIndex: plan.lineRefs.first,
+            lastSegmentIndex: plan.lineRefs.last,
+            segmentCount: plan.lineRefs.count,
+            promptTokens: plan.promptTokenCount,
+            promptCharLength: plan.prompt.count,
+            promptPreview: preview,
+            errorDescription: "",
+            errorReflect: "",
+            status: nil
+        )
+
+        logger.debug(
+            """
+            fm.classifier.coarse_pass_window_submit \
+            window=\(diagnostic.windowIndex, privacy: .public) \
+            totalWindows=\(diagnostic.totalWindows, privacy: .public) \
+            firstSegmentIndex=\(diagnostic.firstSegmentIndex ?? -1, privacy: .public) \
+            lastSegmentIndex=\(diagnostic.lastSegmentIndex ?? -1, privacy: .public) \
+            segmentCount=\(diagnostic.segmentCount, privacy: .public) \
+            promptTokens=\(diagnostic.promptTokens, privacy: .public) \
+            promptCharLength=\(diagnostic.promptCharLength, privacy: .public) \
+            promptPreview=\(diagnostic.promptPreview, privacy: .public)
+            """
+        )
+
+        Self.coarsePassDiagnosticObserver?(diagnostic)
+    }
+
+    /// bd-34e diagnostic: emit a structured breadcrumb in the catch arm of a
+    /// coarse-pass window submission. Guardrail violations specifically are
+    /// raised to `.error` so they show up in default Console.app filters
+    /// during the on-device shadow benchmark; other error types stay at
+    /// `.debug` to avoid log spam. `String(reflecting:)` surfaces Apple's
+    /// `Context.debugDescription`, which often includes the actual safety
+    /// reason that the localized description hides.
+    private func reportCoarsePassErrorIfNeeded(
+        plan: CoarsePassWindowPlan,
+        error: Error,
+        status: SemanticScanStatus,
+        windowIndex: Int,
+        totalWindows: Int
+    ) {
+        let preview = Self.coarsePromptPreview(plan.prompt)
+        let diagnostic = CoarsePassWindowDiagnostic(
+            kind: .error,
+            windowIndex: windowIndex,
+            totalWindows: totalWindows,
+            firstSegmentIndex: plan.lineRefs.first,
+            lastSegmentIndex: plan.lineRefs.last,
+            segmentCount: plan.lineRefs.count,
+            promptTokens: plan.promptTokenCount,
+            promptCharLength: plan.prompt.count,
+            promptPreview: preview,
+            errorDescription: error.localizedDescription,
+            errorReflect: String(reflecting: error),
+            status: status
+        )
+
+        if status == .guardrailViolation {
+            logger.error(
+                """
+                fm.classifier.coarse_pass_error \
+                window=\(diagnostic.windowIndex, privacy: .public) \
+                totalWindows=\(diagnostic.totalWindows, privacy: .public) \
+                firstSegmentIndex=\(diagnostic.firstSegmentIndex ?? -1, privacy: .public) \
+                lastSegmentIndex=\(diagnostic.lastSegmentIndex ?? -1, privacy: .public) \
+                segmentCount=\(diagnostic.segmentCount, privacy: .public) \
+                promptTokens=\(diagnostic.promptTokens, privacy: .public) \
+                promptCharLength=\(diagnostic.promptCharLength, privacy: .public) \
+                status=\(diagnostic.status?.rawValue ?? "unknown", privacy: .public) \
+                errorDescription=\(diagnostic.errorDescription, privacy: .public) \
+                errorReflect=\(diagnostic.errorReflect, privacy: .public) \
+                promptPreview=\(diagnostic.promptPreview, privacy: .public)
+                """
+            )
+        } else {
+            logger.debug(
+                """
+                fm.classifier.coarse_pass_error \
+                window=\(diagnostic.windowIndex, privacy: .public) \
+                totalWindows=\(diagnostic.totalWindows, privacy: .public) \
+                firstSegmentIndex=\(diagnostic.firstSegmentIndex ?? -1, privacy: .public) \
+                lastSegmentIndex=\(diagnostic.lastSegmentIndex ?? -1, privacy: .public) \
+                segmentCount=\(diagnostic.segmentCount, privacy: .public) \
+                promptTokens=\(diagnostic.promptTokens, privacy: .public) \
+                promptCharLength=\(diagnostic.promptCharLength, privacy: .public) \
+                status=\(diagnostic.status?.rawValue ?? "unknown", privacy: .public) \
+                errorDescription=\(diagnostic.errorDescription, privacy: .public) \
+                errorReflect=\(diagnostic.errorReflect, privacy: .public) \
+                promptPreview=\(diagnostic.promptPreview, privacy: .public)
+                """
+            )
+        }
+
+        Self.coarsePassDiagnosticObserver?(diagnostic)
+    }
+
+    /// bd-34e: render the first 200 characters of a coarse-pass prompt with
+    /// newlines collapsed to spaces, so the structured log line stays
+    /// single-line and grep-friendly.
+    private static func coarsePromptPreview(_ prompt: String) -> String {
+        let limit = 200
+        let prefix = prompt.prefix(limit)
+        var preview = String(prefix)
+        preview = preview
+            .replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        return preview
     }
 
     private func shrunkenRefinementPlanForRetry(

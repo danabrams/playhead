@@ -1489,6 +1489,74 @@ struct FoundationModelClassifierTests {
         #expect(diagnostic.errorDebugDescription.contains("runtime-failure-decodingFailure"))
     }
 
+    // bd-34e diagnostic: when a coarse-pass window submission triggers a
+    // guardrail violation (Apple FM safety classifier), we need a structured
+    // breadcrumb on every submission attempt + a notice-level error event so
+    // investigators can correlate the failing window with its prompt
+    // metadata without rerunning the on-device shadow benchmark blind.
+    @available(iOS 26.0, *)
+    @Test("coarse pass window submission and guardrail violation emit bd-34e diagnostics")
+    func coarsePassWindowGuardrailViolationEmitsDiagnostic() async throws {
+        let segments = (0..<6).map { idx in
+            makeSegment(
+                index: idx,
+                startTime: Double(idx) * 5,
+                endTime: Double(idx + 1) * 5,
+                text: "Segment \(idx) discusses an exciting sponsor offer."
+            )
+        }
+        // contextSize / per-line tokenizer chosen so the planner builds a
+        // single coarse window covering all 6 segments.
+        let recorder = RuntimeRecorder(
+            contextSize: 1024,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 4,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count
+            },
+            coarseFailures: [.guardrailViolation]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let captured = CoarsePassDiagnosticCaptureBox()
+        let previousObserver = FoundationModelClassifier.coarsePassDiagnosticObserver
+        FoundationModelClassifier.coarsePassDiagnosticObserver = { diagnostic in
+            captured.append(diagnostic)
+        }
+        defer {
+            FoundationModelClassifier.coarsePassDiagnosticObserver = previousObserver
+        }
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        #expect(output.status == .guardrailViolation)
+
+        let diagnostics = captured.snapshot()
+        // Expect at least one submit event and one error event for the same window.
+        let submits = diagnostics.filter { $0.kind == .submit }
+        let errors = diagnostics.filter { $0.kind == .error }
+        #expect(submits.count >= 1)
+        #expect(errors.count >= 1)
+
+        let firstSubmit = try #require(submits.first)
+        #expect(firstSubmit.windowIndex == 1)
+        #expect(firstSubmit.totalWindows >= 1)
+        #expect(firstSubmit.firstSegmentIndex == 0)
+        #expect(firstSubmit.lastSegmentIndex == 5)
+        #expect(firstSubmit.segmentCount == 6)
+        #expect(firstSubmit.promptCharLength > 0)
+        #expect(!firstSubmit.promptPreview.isEmpty)
+        // Preview must be one line — newlines escaped to spaces.
+        #expect(!firstSubmit.promptPreview.contains("\n"))
+
+        let firstError = try #require(errors.first)
+        #expect(firstError.windowIndex == 1)
+        #expect(firstError.firstSegmentIndex == 0)
+        #expect(firstError.lastSegmentIndex == 5)
+        #expect(firstError.segmentCount == 6)
+        #expect(firstError.errorReflect.contains("guardrailViolation"))
+        #expect(firstError.errorReflect.contains("runtime-failure-guardrailViolation"))
+    }
+
     @Test("adaptive zoom keeps the Kelly Ripa repeat region when nearby coarse support spans the repeat cluster")
     func kellyRipaRepeatRegression() async throws {
         let segments = buildFixtureSegments()
@@ -1676,8 +1744,22 @@ struct FoundationModelClassifierTests {
     //      rule changes.
     @Test("preamble token count is bounded and accounted for")
     func preambleTokenCountIsBoundedAndAccountedFor() async throws {
-        // (1) Structural: the preamble is exactly these five wrapping lines.
+        // bd-34e: this test runs in two modes depending on whether the
+        // PLAYHEAD_FM_DROP_PREAMBLE env flag is set in the test runner. The
+        // flag is debug-only and lets the on-device shadow benchmark drop the
+        // H14 injection preamble to test whether Apple's safety classifier
+        // trips on it. With the flag set, the preamble must collapse to "".
+        let dropPreamble = ProcessInfo.processInfo.environment["PLAYHEAD_FM_DROP_PREAMBLE"] != nil
         let preamble = FoundationModelClassifier.coarsePromptPreamble()
+        if dropPreamble {
+            #expect(preamble == "")
+            // The flag-aware buildPrompt path also collapses to "" for empty
+            // segments — no wrapping lines remain to spend tokens on.
+            let emptyPrompt = FoundationModelClassifier.buildPrompt(for: [])
+            #expect(emptyPrompt == "")
+            return
+        }
+        // (1) Structural: the preamble is exactly these five wrapping lines.
         let preambleLines = preamble.split(separator: "\n", omittingEmptySubsequences: false)
         #expect(preambleLines.count == 5)
 
@@ -1727,6 +1809,53 @@ struct FoundationModelClassifierTests {
             fallbackEstimate <= utf8Floor * 4,
             "fallback estimator should not drift above 4x the BPE floor for the preamble"
         )
+    }
+
+    // bd-34e: the PLAYHEAD_FM_DROP_PREAMBLE debug flag must collapse the
+    // coarse-pass preamble (and the coarse buildPrompt wrapping lines) to
+    // empty strings when set. This is the controlled experiment switch the
+    // on-device benchmark uses to test hypothesis A — that Apple's safety
+    // classifier trips on the H14 injection-preamble framing.
+    @Test("PLAYHEAD_FM_DROP_PREAMBLE flag collapses the coarse preamble to empty")
+    func dropPreambleFlagCollapsesCoarsePreamble() {
+        // Skip the toggle assertions if the test runner already has the flag
+        // set externally — that mode is exercised by the
+        // preambleTokenCountIsBoundedAndAccountedFor branch.
+        let alreadySet = ProcessInfo.processInfo.environment["PLAYHEAD_FM_DROP_PREAMBLE"] != nil
+        guard !alreadySet else {
+            #expect(FoundationModelClassifier.coarsePromptPreamble() == "")
+            return
+        }
+
+        // Default mode: preamble is the full H14 wrapping.
+        let defaultPreamble = FoundationModelClassifier.coarsePromptPreamble()
+        #expect(!defaultPreamble.isEmpty)
+        #expect(defaultPreamble.contains("untrusted user content"))
+        #expect(defaultPreamble.contains("<<<TRANSCRIPT>>>"))
+
+        // Flip the flag, observe the collapsed value, then clean up so we
+        // never bleed into sibling tests.
+        setenv("PLAYHEAD_FM_DROP_PREAMBLE", "1", 1)
+        defer { unsetenv("PLAYHEAD_FM_DROP_PREAMBLE") }
+
+        #if DEBUG
+        #expect(FoundationModelClassifier.coarsePromptPreamble() == "")
+        #expect(FoundationModelClassifier.buildPrompt(for: []) == "")
+        let oneSeg = [
+            makeSegment(index: 0, startTime: 0, endTime: 1, text: "Hi there.")
+        ]
+        let prompt = FoundationModelClassifier.buildPrompt(for: oneSeg)
+        // No injection preamble or fences should appear under the flag.
+        #expect(!prompt.contains("untrusted user content"))
+        #expect(!prompt.contains("<<<TRANSCRIPT>>>"))
+        #expect(!prompt.contains("<<<END TRANSCRIPT>>>"))
+        // The actual transcript line still survives.
+        #expect(prompt.contains("L0>"))
+        #expect(prompt.contains("Hi there."))
+        #else
+        // In release builds the flag is a no-op.
+        #expect(FoundationModelClassifier.coarsePromptPreamble() == defaultPreamble)
+        #endif
     }
 
     // H10: fallback estimator must be >= bytes/3 (BPE floor) for safety.
@@ -2341,6 +2470,25 @@ private final class DiagnosticCaptureBox: @unchecked Sendable {
     }
 }
 
+/// bd-34e diagnostic capture box: aggregates coarse-pass window submit /
+/// error events emitted by `FoundationModelClassifier.coarsePassDiagnosticObserver`.
+private final class CoarsePassDiagnosticCaptureBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [FoundationModelClassifier.CoarsePassWindowDiagnostic] = []
+
+    func append(_ diagnostic: FoundationModelClassifier.CoarsePassWindowDiagnostic) {
+        lock.lock()
+        defer { lock.unlock() }
+        items.append(diagnostic)
+    }
+
+    func snapshot() -> [FoundationModelClassifier.CoarsePassWindowDiagnostic] {
+        lock.lock()
+        defer { lock.unlock() }
+        return items
+    }
+}
+
 private actor RuntimeRecorder {
     struct PrewarmCall: Sendable, Equatable {
         let sessionID: Int
@@ -2504,6 +2652,7 @@ private enum RuntimeFailure: Sendable {
     case exceededContextWindow
     case refusal
     case decodingFailure
+    case guardrailViolation
 
     var error: Error {
         #if canImport(FoundationModels)
@@ -2519,6 +2668,8 @@ private enum RuntimeFailure: Sendable {
                 return LanguageModelSession.GenerationError.refusal(refusal, context)
             case .decodingFailure:
                 return LanguageModelSession.GenerationError.decodingFailure(context)
+            case .guardrailViolation:
+                return LanguageModelSession.GenerationError.guardrailViolation(context)
             }
         }
         #endif
