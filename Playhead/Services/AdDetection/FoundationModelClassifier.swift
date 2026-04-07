@@ -579,6 +579,12 @@ struct FoundationModelClassifier: Sendable {
             /// bd-34e Fix B v3: emitted after each smart-shrink retry
             /// completes (success, retried again, or abandoned).
             case smartShrinkOutcome
+            /// bd-3h7: emitted alongside `.error` when Apple rejects a
+            /// window with `LanguageModelSession.GenerationError.refusal`.
+            /// Captures a `String(reflecting:)` dump of the public
+            /// `Refusal` value so we can investigate which internal
+            /// `TranscriptRecord` category tripped the classifier.
+            case refusalDetail
         }
 
         enum SmartShrinkOutcome: String, Sendable {
@@ -791,7 +797,13 @@ struct FoundationModelClassifier: Sendable {
                 // continues. This guarantees that one tokenization
                 // outlier in a 10+ window pass cannot kill the other
                 // 9 windows worth of coarse classification.
-                if status == .exceededContextWindow {
+                // bd-34e Fix B v3 + bd-3h7: both `.exceededContextWindow`
+                // (tokenizer undercount) and `.refusal` (Apple's safety
+                // classifier rejecting specific content topics) are
+                // per-window conditions. Continuing past them preserves
+                // the other windows' coarse coverage instead of aborting
+                // the entire pass on the first sensitive window.
+                if status == .exceededContextWindow || status == .refusal {
                     failedWindowStatuses.append(status)
                     logger.error(
                         """
@@ -1815,6 +1827,22 @@ struct FoundationModelClassifier: Sendable {
                 windowIndex: windowIndex,
                 totalWindows: totalWindows
             )
+            // bd-3h7: when Apple's safety classifier rejects this window,
+            // emit a second breadcrumb that captures the `Refusal` value
+            // reflection in full. The public `Refusal` surface only
+            // exposes `transcriptEntries`, `explanation`, and
+            // `explanationStream`, but `String(reflecting:)` dumps the
+            // internal `TranscriptRecord` that Apple's error message
+            // references ("Refusal(record: Refusal.TranscriptRecord)").
+            // Having that in the log lets us investigate WHY specific
+            // podcast windows are refused without reshipping a diagnostic
+            // build.
+            reportCoarsePassRefusalDetailIfNeeded(
+                plan: plan,
+                error: error,
+                windowIndex: windowIndex,
+                totalWindows: totalWindows
+            )
             switch status.retryPolicy {
             case .shrinkWindowAndRetryOnce:
                 // bd-34e Fix B v3: when Apple reports the actual token
@@ -2303,6 +2331,61 @@ struct FoundationModelClassifier: Sendable {
         }
 
         Self.coarsePassDiagnosticObserver?(diagnostic)
+    }
+
+    /// bd-3h7: emit a supplementary breadcrumb when the error is an
+    /// Apple `LanguageModelSession.GenerationError.refusal`. Captures a
+    /// `String(reflecting:)` dump of the public `Refusal` value so the
+    /// internal `TranscriptRecord` category that tripped the on-device
+    /// safety classifier is visible in Console.app without a new build.
+    /// No-ops for any other error type.
+    private func reportCoarsePassRefusalDetailIfNeeded(
+        plan: CoarsePassWindowPlan,
+        error: Error,
+        windowIndex: Int,
+        totalWindows: Int
+    ) {
+        #if canImport(FoundationModels)
+        guard #available(iOS 26.0, *) else { return }
+        guard let generationError = error as? LanguageModelSession.GenerationError,
+              case let .refusal(refusal, context) = generationError else {
+            return
+        }
+
+        let refusalReflect = String(reflecting: refusal)
+        let contextDebugDescription = context.debugDescription
+        let preview = Self.coarsePromptPreview(plan.prompt)
+        let diagnostic = CoarsePassWindowDiagnostic(
+            kind: .refusalDetail,
+            windowIndex: windowIndex,
+            totalWindows: totalWindows,
+            firstSegmentIndex: plan.lineRefs.first,
+            lastSegmentIndex: plan.lineRefs.last,
+            segmentCount: plan.lineRefs.count,
+            promptTokens: plan.promptTokenCount,
+            promptCharLength: plan.prompt.count,
+            promptPreview: preview,
+            errorDescription: contextDebugDescription,
+            errorReflect: refusalReflect,
+            status: .refusal
+        )
+
+        logger.notice(
+            """
+            fm.classifier.coarse_pass_refusal_detail \
+            window=\(windowIndex, privacy: .public) \
+            totalWindows=\(totalWindows, privacy: .public) \
+            firstSegmentIndex=\(plan.lineRefs.first ?? -1, privacy: .public) \
+            lastSegmentIndex=\(plan.lineRefs.last ?? -1, privacy: .public) \
+            segmentCount=\(plan.lineRefs.count, privacy: .public) \
+            contextDebugDescription=\(contextDebugDescription, privacy: .public) \
+            recordReflect=\(refusalReflect, privacy: .public) \
+            promptPreview=\(preview, privacy: .public)
+            """
+        )
+
+        Self.coarsePassDiagnosticObserver?(diagnostic)
+        #endif
     }
 
     /// bd-34e: render the first 200 characters of a coarse-pass prompt with

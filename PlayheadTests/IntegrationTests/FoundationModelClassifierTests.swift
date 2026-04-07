@@ -1726,8 +1726,16 @@ struct FoundationModelClassifierTests {
             // Preamble wrap = 5 lines. With tokenCountRule=count*8 a
             // single-segment prompt is 6*8 = 48 tokens (fits) but a
             // two-segment prompt is 7*8 = 56 (does not) — forcing one window
-            // per segment so the mid-pass refusal has a second window to
+            // per segment so the mid-pass failure has a second window to
             // fail on.
+            //
+            // bd-3h7: this test originally used `.refusal` to exercise the
+            // abort path. Now that refusal is treated as a per-window
+            // graceful-degradation condition alongside
+            // `.exceededContextWindow`, we use `.guardrailViolation`
+            // instead — it still aborts the pass and preserves the
+            // "partial results on mid-pass unrecoverable failure"
+            // contract this test locks in.
             contextSize: 431,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
@@ -1737,8 +1745,8 @@ struct FoundationModelClassifierTests {
             responses: [
                 CoarseScreeningSchema(disposition: .noAds, support: nil)
             ],
-            // First call: nil → succeed. Second call: .refusal → unrecoverable.
-            coarseFailures: [nil, .refusal]
+            // First call: nil → succeed. Second call: .guardrailViolation → unrecoverable.
+            coarseFailures: [nil, .guardrailViolation]
         )
         let classifier = FoundationModelClassifier(
             runtime: recorder.runtime,
@@ -1747,7 +1755,7 @@ struct FoundationModelClassifierTests {
 
         let output = try await classifier.coarsePassA(segments: segments)
 
-        #expect(output.status == .refusal)
+        #expect(output.status == .guardrailViolation)
         // First window MUST be retained even though a later window failed.
         #expect(output.windows.count >= 1)
         #expect(output.windows.first?.lineRefs.contains(0) == true)
@@ -2621,6 +2629,190 @@ struct FoundationModelClassifierTests {
         #expect(survivingLineRefs.contains(2))
         #expect(survivingLineRefs.contains(3))
         #expect(!survivingLineRefs.contains(1))
+    }
+
+    // bd-3h7: graceful degradation for refusal. Window 1 of 3 refuses
+    // (simulating Apple's safety classifier rejecting specific content
+    // topics), and the pass must continue to windows 2 and 3 instead of
+    // aborting the entire run.
+    @Test("coarse pass continues after a single window refusal")
+    func coarsePassContinuesAfterSingleWindowRefusal() async throws {
+        let captureBox = CoarsePassDiagnosticCaptureBox()
+        FoundationModelClassifier.coarsePassDiagnosticObserver = { diagnostic in
+            captureBox.append(diagnostic)
+        }
+        defer { FoundationModelClassifier.coarsePassDiagnosticObserver = nil }
+
+        let segments = [
+            makeSegment(index: 0, startTime: 0, endTime: 5, text: "Window zero text."),
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Window one text."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Window two text.")
+        ]
+        // Same shape as `coarsePassContinuesAfterSingleWindowFailure`: a
+        // contextSize tuned so each segment becomes its own window.
+        let recorder = RuntimeRecorder(
+            contextSize: 431,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8
+            },
+            responses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ],
+            coarseFailures: [
+                .refusal, // window 1 refuses
+                nil,      // window 2 succeeds
+                nil       // window 3 succeeds
+            ]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        // Planner must emit 3 one-segment windows.
+        let plans = try await classifier.planPassA(segments: segments)
+        #expect(plans.count == 3)
+
+        #expect(output.status == .success)
+        #expect(
+            output.windows.count == 2,
+            "2 windows must survive the pass; got \(output.windows.count)"
+        )
+        #expect(output.failedWindowStatuses == [.refusal])
+
+        // One refusal (no retry) + 2 successes = 3 respond calls.
+        #expect(
+            snapshot.respondCalls.count == 3,
+            "expected 3 respond calls (no retry for refusal), got \(snapshot.respondCalls.count)"
+        )
+
+        // Surviving windows must NOT include the refused lineRef (0).
+        let survivingLineRefs = output.windows.flatMap(\.lineRefs)
+        #expect(!survivingLineRefs.contains(0))
+        #expect(survivingLineRefs.contains(1))
+        #expect(survivingLineRefs.contains(2))
+
+        // Diagnostic helper must have been invoked exactly once for the
+        // refused window.
+        let refusalDetails = captureBox.snapshot()
+            .filter { $0.kind == .refusalDetail }
+        #expect(refusalDetails.count == 1)
+        #expect(refusalDetails.first?.windowIndex == 1)
+    }
+
+    // bd-3h7: graceful degradation across multiple refusals. Windows 1,
+    // 3, and 5 of a 6-window pass refuse; 2, 4, 6 succeed.
+    @Test("coarse pass continues after multiple window refusals")
+    func coarsePassContinuesAfterMultipleWindowRefusals() async throws {
+        let captureBox = CoarsePassDiagnosticCaptureBox()
+        FoundationModelClassifier.coarsePassDiagnosticObserver = { diagnostic in
+            captureBox.append(diagnostic)
+        }
+        defer { FoundationModelClassifier.coarsePassDiagnosticObserver = nil }
+
+        let segments = (0..<6).map { idx in
+            makeSegment(
+                index: idx,
+                startTime: TimeInterval(idx * 5),
+                endTime: TimeInterval(idx * 5 + 5),
+                text: "Window segment number \(idx)."
+            )
+        }
+        let recorder = RuntimeRecorder(
+            contextSize: 431,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8
+            },
+            responses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ],
+            coarseFailures: [
+                .refusal, // window 1 refuses
+                nil,      // window 2 succeeds
+                .refusal, // window 3 refuses
+                nil,      // window 4 succeeds
+                .refusal, // window 5 refuses
+                nil       // window 6 succeeds
+            ]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+
+        let plans = try await classifier.planPassA(segments: segments)
+        #expect(plans.count == 6)
+
+        #expect(output.status == .success)
+        #expect(output.failedWindowStatuses.count == 3)
+        #expect(output.failedWindowStatuses.allSatisfy { $0 == .refusal })
+
+        #expect(output.windows.count == 3)
+        let survivingLineRefs = output.windows.flatMap(\.lineRefs)
+        #expect(!survivingLineRefs.contains(0))
+        #expect(survivingLineRefs.contains(1))
+        #expect(!survivingLineRefs.contains(2))
+        #expect(survivingLineRefs.contains(3))
+        #expect(!survivingLineRefs.contains(4))
+        #expect(survivingLineRefs.contains(5))
+
+        let refusalDetails = captureBox.snapshot()
+            .filter { $0.kind == .refusalDetail }
+        #expect(refusalDetails.count == 3)
+        #expect(refusalDetails.map(\.windowIndex) == [1, 3, 5])
+    }
+
+    // bd-3h7: the new diagnostic helper must emit a `.refusalDetail`
+    // event with `errorReflect` populated from `String(reflecting:)` on
+    // the `Refusal` value. Guards against future regressions where we
+    // lose the reflection dump.
+    @Test("refusal diagnostic emits recordReflect field populated with reflection dump")
+    func refusalDiagnosticEmitsRecordReflectField() async throws {
+        let captureBox = CoarsePassDiagnosticCaptureBox()
+        FoundationModelClassifier.coarsePassDiagnosticObserver = { diagnostic in
+            captureBox.append(diagnostic)
+        }
+        defer { FoundationModelClassifier.coarsePassDiagnosticObserver = nil }
+
+        let segments = [
+            makeSegment(index: 0, startTime: 0, endTime: 5, text: "Window zero text.")
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: 1024,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count
+            },
+            coarseFailures: [.refusal]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        _ = try await classifier.coarsePassA(segments: segments)
+
+        let refusalDetails = captureBox.snapshot()
+            .filter { $0.kind == .refusalDetail }
+        let detail = try #require(refusalDetails.first)
+        #expect(detail.windowIndex == 1)
+        #expect(detail.totalWindows == 1)
+        #expect(detail.status == .refusal)
+        // `String(reflecting:)` on Apple's `Refusal` value dumps the
+        // internal `TranscriptRecord`. At minimum the dump must mention
+        // the `Refusal` type name.
+        #expect(detail.errorReflect.contains("Refusal"))
+        #expect(detail.errorDescription == "runtime-failure-refusal")
     }
 
     @Test("window construction respects the hard cap when per-segment tokens approach the ceiling")
