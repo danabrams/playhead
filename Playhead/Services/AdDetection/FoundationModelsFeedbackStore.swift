@@ -161,9 +161,9 @@ actor FoundationModelsFeedbackStore {
     /// Default `desiredOutput` text for refinement-pass refusals.
     static let refinementRefusalDesiredOutput = """
         Should produce a valid RefinementWindowSchema for the refined ad \
-        span. The on-device safety classifier refused the prompt even \
-        though the upstream coarse pass already determined the window \
-        contains routine commercial podcast advertising content.
+        span. The upstream coarse pass selected this window for refinement \
+        because it may contain advertising or promotional content, but the \
+        on-device safety classifier refused the refinement prompt anyway.
         """
 
     // MARK: - Private

@@ -446,6 +446,84 @@ struct SemanticScanPersistenceTests {
         #expect(ids == ["ev-v1", "ev-v2"])
     }
 
+    @Test("H-2: exact same evidence body from different transcript versions must both persist")
+    func evidenceEventsFromDistinctTranscriptVersionsDoNotDedupExactBody() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        let cohort = try makeScanCohortJSON()
+        let scanV1 = SemanticScanResult(
+            id: "scan-tx-v1",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 0,
+            windowLastAtomOrdinal: 9,
+            windowStartTime: 0,
+            windowEndTime: 90,
+            scanPass: "passB",
+            transcriptQuality: .good,
+            disposition: .containsAd,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: cohort,
+            transcriptVersion: "tx-v1"
+        )
+        let scanV2 = SemanticScanResult(
+            id: "scan-tx-v2",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 0,
+            windowLastAtomOrdinal: 9,
+            windowStartTime: 0,
+            windowEndTime: 90,
+            scanPass: "passB",
+            transcriptQuality: .good,
+            disposition: .containsAd,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: cohort,
+            transcriptVersion: "tx-v2"
+        )
+        let body = #"{"run":"same-body"}"#
+        let eventV1 = EvidenceEvent(
+            id: "ev-tx-v1",
+            analysisAssetId: "asset-1",
+            eventType: "fm.spanRefinement",
+            sourceType: .fm,
+            atomOrdinals: "[1,2,3]",
+            evidenceJSON: body,
+            scanCohortJSON: cohort,
+            createdAt: 100
+        )
+        let eventV2 = EvidenceEvent(
+            id: "ev-tx-v2",
+            analysisAssetId: "asset-1",
+            eventType: "fm.spanRefinement",
+            sourceType: .fm,
+            atomOrdinals: "[1,2,3]",
+            evidenceJSON: body,
+            scanCohortJSON: cohort,
+            createdAt: 200
+        )
+
+        try await store.recordSemanticScanResult(scanV1, evidenceEvents: [eventV1])
+        try await store.recordSemanticScanResult(scanV2, evidenceEvents: [eventV2])
+
+        let events = try await store.fetchEvidenceEvents(analysisAssetId: "asset-1")
+        #expect(events.count == 2, "transcript-version churn must not collapse exact-body evidence rows")
+        #expect(Set(events.map(\.id)) == ["ev-tx-v1", "ev-tx-v2"])
+    }
+
     @Test("H-1: canonicalized cohort JSON collapses reuse key across key-order differences")
     func semanticScanResultCollapsesEquivalentCohortsAcrossKeyOrder() async throws {
         let store = try await makeTestStore()
@@ -1270,7 +1348,7 @@ struct SemanticScanPersistenceTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
-        #expect(try await store.schemaVersion() == 2)
+        #expect(try await store.schemaVersion() == 3)
 
         try await store.insertAsset(makePersistenceTestAsset())
 
@@ -1302,6 +1380,150 @@ struct SemanticScanPersistenceTests {
 
         let fetched = try await store.fetchEvidenceEvents(analysisAssetId: "asset-1")
         #expect(fetched.count == 2, "post-migration store must preserve both distinct evidence rows")
+    }
+
+    @Test("playhead-fn0: migrate upgrades v2 evidence_events dedup to include transcriptVersion")
+    func migrateUpgradesV2EvidenceEventsNaturalKeyToIncludeTranscriptVersion() async throws {
+        let dir = try makeTempDir(prefix: "V2EvidenceMigration")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let dbURL = dir.appendingPathComponent("analysis.sqlite")
+        var db: OpaquePointer?
+        #expect(sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+        defer { sqlite3_close_v2(db) }
+
+        try legacyExec("CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)", db: db)
+        try legacyExec("INSERT INTO _meta (key, value) VALUES ('schema_version', '2')", db: db)
+        try legacyExec("""
+            CREATE TABLE analysis_assets (
+                id TEXT PRIMARY KEY,
+                episodeId TEXT NOT NULL,
+                assetFingerprint TEXT NOT NULL,
+                weakFingerprint TEXT,
+                sourceURL TEXT NOT NULL,
+                featureCoverageEndTime REAL,
+                fastTranscriptCoverageEndTime REAL,
+                confirmedAdCoverageEndTime REAL,
+                analysisState TEXT NOT NULL,
+                analysisVersion INTEGER NOT NULL,
+                capabilitySnapshot TEXT
+            )
+            """, db: db)
+        try legacyExec("""
+            CREATE TABLE semantic_scan_results (
+                id TEXT PRIMARY KEY,
+                analysisAssetId TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                windowFirstAtomOrdinal INTEGER NOT NULL,
+                windowLastAtomOrdinal INTEGER NOT NULL,
+                windowStartTime REAL NOT NULL,
+                windowEndTime REAL NOT NULL,
+                scanPass TEXT NOT NULL,
+                transcriptQuality TEXT NOT NULL,
+                disposition TEXT NOT NULL,
+                spansJSON TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attemptCount INTEGER NOT NULL,
+                errorContext TEXT,
+                inputTokenCount INTEGER,
+                outputTokenCount INTEGER,
+                latencyMs REAL,
+                prewarmHit INTEGER NOT NULL,
+                scanCohortJSON TEXT NOT NULL,
+                transcriptVersion TEXT NOT NULL,
+                reuseKeyHash TEXT NOT NULL UNIQUE
+            )
+            """, db: db)
+        try legacyExec("""
+            CREATE TABLE evidence_events (
+                id TEXT PRIMARY KEY,
+                analysisAssetId TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                eventType TEXT NOT NULL,
+                sourceType TEXT NOT NULL,
+                atomOrdinals TEXT NOT NULL,
+                evidenceJSON TEXT NOT NULL,
+                scanCohortJSON TEXT NOT NULL,
+                createdAt REAL NOT NULL,
+                UNIQUE(analysisAssetId, eventType, sourceType, atomOrdinals, evidenceJSON, scanCohortJSON)
+            )
+            """, db: db)
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        #expect(try await store.schemaVersion() == 3)
+
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        let cohort = try makeScanCohortJSON()
+        let scanV1 = SemanticScanResult(
+            id: "scan-v2-upgrade-1",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 0,
+            windowLastAtomOrdinal: 9,
+            windowStartTime: 0,
+            windowEndTime: 90,
+            scanPass: "passB",
+            transcriptQuality: .good,
+            disposition: .containsAd,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: cohort,
+            transcriptVersion: "tx-v1"
+        )
+        let scanV2 = SemanticScanResult(
+            id: "scan-v2-upgrade-2",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 0,
+            windowLastAtomOrdinal: 9,
+            windowStartTime: 0,
+            windowEndTime: 90,
+            scanPass: "passB",
+            transcriptQuality: .good,
+            disposition: .containsAd,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: cohort,
+            transcriptVersion: "tx-v2"
+        )
+        let body = #"{"run":"same-body"}"#
+        let eventV1 = EvidenceEvent(
+            id: "v2-upgrade-ev-1",
+            analysisAssetId: "asset-1",
+            eventType: "fm.spanRefinement",
+            sourceType: .fm,
+            atomOrdinals: "[1,2,3]",
+            evidenceJSON: body,
+            scanCohortJSON: cohort,
+            createdAt: 1
+        )
+        let eventV2 = EvidenceEvent(
+            id: "v2-upgrade-ev-2",
+            analysisAssetId: "asset-1",
+            eventType: "fm.spanRefinement",
+            sourceType: .fm,
+            atomOrdinals: "[1,2,3]",
+            evidenceJSON: body,
+            scanCohortJSON: cohort,
+            createdAt: 2
+        )
+
+        try await store.recordSemanticScanResult(scanV1, evidenceEvents: [eventV1])
+        try await store.recordSemanticScanResult(scanV2, evidenceEvents: [eventV2])
+
+        let fetched = try await store.fetchEvidenceEvents(analysisAssetId: "asset-1")
+        #expect(fetched.count == 2, "v2 stores must migrate so transcript-version-separated evidence can coexist")
     }
 
     @Test("H-2: insertEvidenceEvent with the identical body at the same id is idempotent")

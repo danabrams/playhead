@@ -119,7 +119,6 @@ struct BackfillJobRunnerTests {
         let fmRuntime = TestFMRuntime(
             coarseResponses: [
                 CoarseScreeningSchema(
-                    transcriptQuality: .good,
                     disposition: .containsAd,
                     support: CoarseSupportSchema(
                         supportLineRefs: [1],
@@ -1239,7 +1238,6 @@ struct BackfillJobRunnerTests {
         let fmRuntime = TestFMRuntime(
             coarseResponses: [
                 CoarseScreeningSchema(
-                    transcriptQuality: .good,
                     disposition: .containsAd,
                     support: CoarseSupportSchema(supportLineRefs: [1], certainty: .strong)
                 )

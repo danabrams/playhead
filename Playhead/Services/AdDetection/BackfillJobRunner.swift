@@ -676,7 +676,7 @@ actor BackfillJobRunner {
             windowStartTime: windowOutput.startTime,
             windowEndTime: windowOutput.endTime,
             scanPass: scanPass,
-            transcriptQuality: windowOutput.screening.transcriptQuality,
+            transcriptQuality: windowOutput.transcriptQuality,
             disposition: windowOutput.screening.disposition,
             spansJSON: encodeSupport(windowOutput.screening.support),
             status: status,

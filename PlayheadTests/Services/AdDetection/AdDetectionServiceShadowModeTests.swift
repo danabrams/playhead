@@ -264,7 +264,6 @@ struct AdDetectionServiceShadowModeTests {
                         runtime: TestFMRuntime(
                             coarseResponses: [
                                 CoarseScreeningSchema(
-                                    transcriptQuality: .good,
                                     disposition: .containsAd,
                                     support: CoarseSupportSchema(
                                         supportLineRefs: [1],

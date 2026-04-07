@@ -91,7 +91,6 @@ struct Phase3ShadowReplayHarnessTests {
                         runtime: TestFMRuntime(
                             coarseResponses: [
                                 CoarseScreeningSchema(
-                                    transcriptQuality: .good,
                                     disposition: .containsAd,
                                     support: CoarseSupportSchema(
                                         supportLineRefs: [1, 2],

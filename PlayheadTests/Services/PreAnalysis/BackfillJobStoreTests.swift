@@ -239,7 +239,7 @@ struct BackfillJobStoreTests {
     func testSchemaVersionRecorded() async throws {
         let store = try await makeTestStore()
         let version = try await store.schemaVersion()
-        #expect(version == 2)
+        #expect(version == 3)
     }
 
     @Test("M8: deleting an asset cascades to its backfill_jobs rows")

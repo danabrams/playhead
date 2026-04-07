@@ -30,7 +30,6 @@ actor TestFMRuntime {
         coarseFailures: [TestFMRuntimeFailure?] = [],
         refinementFailures: [TestFMRuntimeFailure?] = [],
         defaultCoarse: CoarseScreeningSchema = CoarseScreeningSchema(
-            transcriptQuality: .good,
             disposition: .noAds,
             support: nil
         ),

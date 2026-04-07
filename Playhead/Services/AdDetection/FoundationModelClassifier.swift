@@ -832,11 +832,11 @@ struct FoundationModelClassifier: Sendable {
 
         var windows: [FMCoarseWindowOutput] = []
         windows.reserveCapacity(plans.count)
-        // bd-34e Fix B v3: per-window failures from the smart-shrink retry
-        // loop are recorded here so a single oversized window does not
-        // abort the entire pass. Other failure types (refusal, guardrail,
-        // decoding) still abort to preserve their existing escalation
-        // semantics.
+        // bd-34e Fix B v3 / R6-Fix1: per-window failures that are safe to
+        // tolerate are recorded here so a single bad window does not abort
+        // the entire pass. A coarse window can now fail independently with
+        // refusal, exceededContextWindow, or decodingFailure while sibling
+        // windows still run and persist.
         var failedWindowStatuses: [SemanticScanStatus] = []
 
         let totalWindows = plans.count
@@ -882,19 +882,11 @@ struct FoundationModelClassifier: Sendable {
                     )
                 }
             case let .failure(status):
-                // bd-34e Fix B v3: a window that exhausts smart-shrink
-                // retries (or otherwise fails with `.exceededContextWindow`)
-                // is recorded as a per-window failure and the pass
-                // continues. This guarantees that one tokenization
-                // outlier in a 10+ window pass cannot kill the other
-                // 9 windows worth of coarse classification.
-                // bd-34e Fix B v3 + bd-3h7: both `.exceededContextWindow`
-                // (tokenizer undercount) and `.refusal` (Apple's safety
-                // classifier rejecting specific content topics) are
-                // per-window conditions. Continuing past them preserves
-                // the other windows' coarse coverage instead of aborting
-                // the entire pass on the first sensitive window.
-                if status == .exceededContextWindow || status == .refusal {
+                // R6-Fix1: coarse decode failures are also per-window
+                // conditions. A single schema-conformance failure should not
+                // poison the rest of the pass any more than a refusal or
+                // exceeded-context outlier would.
+                if status == .exceededContextWindow || status == .refusal || status == .decodingFailure {
                     failedWindowStatuses.append(status)
                     logger.error(
                         """
@@ -909,7 +901,7 @@ struct FoundationModelClassifier: Sendable {
                     )
                     continue
                 }
-                // C4/H2: Other failures (guardrail, decoding, cancellation)
+                // C4/H2: Other failures (guardrail, cancellation)
                 // still abort the pass with partial results.
                 return FMCoarseScanOutput(
                     status: status,
@@ -1148,10 +1140,10 @@ struct FoundationModelClassifier: Sendable {
 
         var windows: [FMRefinementWindowOutput] = []
         windows.reserveCapacity(zoomPlans.count)
-        // bd-3h2 / bd-34e refinement: per-window failures that are safe to
-        // tolerate (refusal) are recorded here so a single bad window does
-        // not abort the entire refinement pass. Mirrors the coarse
-        // `failedWindowStatuses` bookkeeping.
+        // bd-3h2 / R6-Fix1 refinement: per-window failures that are safe to
+        // tolerate (refusal, decodingFailure) are recorded here so a single
+        // bad window does not abort the entire refinement pass. Mirrors the
+        // coarse `failedWindowStatuses` bookkeeping.
         var failedWindowStatuses: [SemanticScanStatus] = []
 
         for plan in zoomPlans {
@@ -1187,18 +1179,11 @@ struct FoundationModelClassifier: Sendable {
                 effectivePlan = plan
                 response = schema
             case let .failure(status):
-                // bd-3h2 / bd-34e refinement: mirror the coarse
-                // graceful-degradation fix from f8f6cd9. `.refusal` is a
-                // per-window condition — Apple's on-device safety classifier
-                // rejects specific content topics regardless of the rest of
-                // the pass, and the on-device run on iOS 26.4 (Conan
-                // fixture, 2026-04-06) showed a single refusal aborting the
-                // entire refinement pass. Continuing past it preserves the
-                // other windows' refinement coverage. The refusal detail
-                // log, feedback-store capture, and decode-failure diagnostic
-                // all already fired inside `refinementResponse` before the
-                // per-window session went out of scope.
-                if status == .refusal {
+                // R6-Fix1: refinement decode failures are also per-window
+                // conditions. The diagnostic and feedback-store hooks have
+                // already fired inside `refinementResponse`, so we can safely
+                // record the failure and continue to sibling windows.
+                if status == .refusal || status == .decodingFailure {
                     failedWindowStatuses.append(status)
                     logger.error(
                         """
@@ -1213,7 +1198,7 @@ struct FoundationModelClassifier: Sendable {
                     )
                     continue
                 }
-                // C4/H2: Other failures (decoding, guardrail, cancellation,
+                // C4/H2: Other failures (guardrail, cancellation,
                 // exceededContextWindow) still abort the pass with partial
                 // results, preserving existing escalation semantics.
                 return FMRefinementScanOutput(
@@ -2720,7 +2705,9 @@ struct FoundationModelClassifier: Sendable {
 
     /// bd-fmfb: invoke `LanguageModelSession.logFeedbackAttachment` for
     /// refinement-pass decode failures and refusals. Same gating rules as
-    /// the coarse-pass helper.
+    /// the coarse-pass helper. Only true refusals are reported as negative
+    /// guardrail events; decode failures still capture an attachment, but
+    /// without the guardrail-specific issue labeling.
     private func captureFeedbackForRefinementErrorIfNeeded(
         status: SemanticScanStatus,
         error: Error,
@@ -2744,7 +2731,7 @@ struct FoundationModelClassifier: Sendable {
         let context = "refineWindow=\(plan.windowIndex)_source=\(plan.sourceWindowIndex)_stage=\(stage.rawValue)"
         let data = await sessionBox.logFeedback(
             desiredOutput: desiredOutput,
-            negative: true
+            negative: status == .refusal
         )
         guard let data else { return }
         await feedbackStore.storeAttachment(

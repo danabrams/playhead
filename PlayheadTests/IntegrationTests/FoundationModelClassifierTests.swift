@@ -1519,8 +1519,6 @@ struct FoundationModelClassifierTests {
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { _ in 1 },
-            // decodingFailure has .simplifySchemaAndRetryOnce policy, which
-            // currently falls through the switch default in refinementResponse.
             // One failure is enough to trip the initial-stage diagnostic.
             refinementFailures: [.decodingFailure]
         )
@@ -1549,6 +1547,7 @@ struct FoundationModelClassifierTests {
 
         #expect(output.status == .decodingFailure)
         #expect(output.windows.isEmpty)
+        #expect(output.failedWindowStatuses == [.decodingFailure])
 
         let diagnostics = captured.snapshot()
         #expect(diagnostics.count == 1)
@@ -2888,6 +2887,40 @@ struct FoundationModelClassifierTests {
         #expect(snapshot.respondCalls.count == 2)
     }
 
+    @Test("coarse pass continues after a single window decoding failure")
+    func coarsePassContinuesAfterSingleWindowDecodingFailure() async throws {
+        let segments = [
+            makeSegment(index: 0, startTime: 0, endTime: 5, text: "Window zero text."),
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Window one text.")
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: 431,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8
+            },
+            responses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ],
+            coarseFailures: [
+                .decodingFailure,
+                nil
+            ]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+
+        #expect(output.status == .success)
+        #expect(output.failedWindowStatuses == [.decodingFailure])
+        #expect(output.windows.count == 1)
+        #expect(output.windows.flatMap(\.lineRefs) == [1])
+    }
+
     // bd-3h7: the new diagnostic helper must emit a `.refusalDetail`
     // event with `errorReflect` populated from `String(reflecting:)` on
     // the `Refusal` value. Guards against future regressions where we
@@ -3020,6 +3053,60 @@ struct FoundationModelClassifierTests {
         let refusalDiagnostics = captureBox.snapshot()
         #expect(refusalDiagnostics.count == 1)
         #expect(refusalDiagnostics.first?.windowIndex == 0)
+    }
+
+    @Test("refinement pass continues after a single window decoding failure")
+    func refinementPassContinuesAfterSingleWindowDecodingFailure() async throws {
+        let segments = [
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "First sponsor talk."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Visit example.com today."),
+            makeSegment(index: 3, startTime: 15, endTime: 20, text: "Use promo code SAVE."),
+            makeSegment(index: 4, startTime: 20, endTime: 25, text: "Back to the show.")
+        ]
+        let zoomPlans = (0..<2).map { idx in
+            RefinementWindowPlan(
+                windowIndex: idx,
+                sourceWindowIndex: idx,
+                lineRefs: [idx * 2 + 1, idx * 2 + 2],
+                focusLineRefs: [idx * 2 + 1, idx * 2 + 2],
+                focusClusters: [[idx * 2 + 1, idx * 2 + 2]],
+                prompt: "Refine ad spans.\nL\(idx * 2 + 1)> \"plan \(idx) line a\"\nL\(idx * 2 + 2)> \"plan \(idx) line b\"",
+                promptTokenCount: 4,
+                startTime: Double(5 + idx * 10),
+                endTime: Double(15 + idx * 10),
+                stopReason: .minimumSpan,
+                promptEvidence: []
+            )
+        }
+        let recorder = RuntimeRecorder(
+            contextSize: 1024,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementResponses: [
+                RefinementWindowSchema(spans: [])
+            ],
+            refinementFailures: [
+                .decodingFailure,
+                nil
+            ]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: zoomPlans,
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+
+        #expect(output.status == .success)
+        #expect(output.failedWindowStatuses == [.decodingFailure])
+        #expect(output.windows.count == 1)
+        #expect(output.windows.map(\.windowIndex) == [1])
     }
 
     // bd-3h2 / bd-34e refinement: graceful degradation across multiple

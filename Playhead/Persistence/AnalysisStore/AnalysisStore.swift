@@ -200,7 +200,7 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 2
+    nonisolated private static let currentSchemaVersion = 3
 
     /// bd-1tl: dedicated logger for store-level diagnostics that should
     /// reach Console.app on real devices without test scaffolding.
@@ -315,6 +315,7 @@ actor AnalysisStore {
             try migrateTranscriptChunksPhase1()
             try writeInitialSchemaVersionIfNeeded()
             try migrateEvidenceEventsNaturalKeyV2IfNeeded()
+            try migrateEvidenceEventsTranscriptVersionV3IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -423,6 +424,40 @@ actor AnalysisStore {
         try exec("ALTER TABLE evidence_events_v2 RENAME TO evidence_events")
         try exec("CREATE INDEX IF NOT EXISTS idx_evidence_events_asset_created ON evidence_events(analysisAssetId, createdAt ASC)")
         try setSchemaVersion(2)
+    }
+
+    private func migrateEvidenceEventsTranscriptVersionV3IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 3 else { return }
+
+        try exec("""
+            CREATE TABLE evidence_events_v3 (
+                id TEXT PRIMARY KEY,
+                analysisAssetId TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                eventType TEXT NOT NULL,
+                sourceType TEXT NOT NULL,
+                atomOrdinals TEXT NOT NULL,
+                evidenceJSON TEXT NOT NULL,
+                scanCohortJSON TEXT NOT NULL,
+                transcriptVersion TEXT NOT NULL DEFAULT '',
+                createdAt REAL NOT NULL,
+                UNIQUE(
+                    analysisAssetId, eventType, sourceType, atomOrdinals,
+                    evidenceJSON, scanCohortJSON, transcriptVersion
+                )
+            )
+            """)
+        try exec("""
+            INSERT OR IGNORE INTO evidence_events_v3
+            (id, analysisAssetId, eventType, sourceType, atomOrdinals,
+             evidenceJSON, scanCohortJSON, transcriptVersion, createdAt)
+            SELECT id, analysisAssetId, eventType, sourceType, atomOrdinals,
+                   evidenceJSON, scanCohortJSON, '', createdAt
+            FROM evidence_events
+            """)
+        try exec("DROP TABLE evidence_events")
+        try exec("ALTER TABLE evidence_events_v3 RENAME TO evidence_events")
+        try exec("CREATE INDEX IF NOT EXISTS idx_evidence_events_asset_created ON evidence_events(analysisAssetId, createdAt ASC)")
+        try setSchemaVersion(3)
     }
 
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
@@ -699,9 +734,11 @@ actor AnalysisStore {
 
         // evidence_events
         // playhead-fn0: UNIQUE on (asset, eventType, sourceType, atomOrdinals,
-        // evidenceJSON, cohort). This preserves distinct FM refinement spans
-        // that cover the same atom range but differ materially in payload while
-        // keeping exact reruns idempotent.
+        // evidenceJSON, cohort, transcriptVersion). This preserves distinct FM
+        // refinement spans that cover the same atom range but differ
+        // materially in payload while also keeping append-only audit across
+        // transcript revisions. Exact reruns of the same transcript version
+        // remain idempotent.
         // Inserts use INSERT OR IGNORE for silent idempotent dedup.
         //
         // H-2: evidence events are intentionally NOT FK-linked to
@@ -710,10 +747,10 @@ actor AnalysisStore {
         // `reuseKeyHash` collision (INSERT OR REPLACE), the historical
         // evidence rows remain for audit purposes. Idempotency of re-runs
         // is handled by the UNIQUE(asset, eventType, sourceType,
-        // atomOrdinals, evidenceJSON, scanCohortJSON) constraint plus
-        // INSERT OR IGNORE: an exact rerun silently dedups, while a new
-        // transcriptVersion, cohort, or materially different FM span
-        // naturally appends.
+        // atomOrdinals, evidenceJSON, scanCohortJSON, transcriptVersion)
+        // constraint plus INSERT OR IGNORE: an exact rerun silently dedups,
+        // while a new transcriptVersion, cohort, or materially different FM
+        // span naturally appends.
         try exec("""
             CREATE TABLE IF NOT EXISTS evidence_events (
                 id TEXT PRIMARY KEY,
@@ -723,8 +760,12 @@ actor AnalysisStore {
                 atomOrdinals TEXT NOT NULL,
                 evidenceJSON TEXT NOT NULL,
                 scanCohortJSON TEXT NOT NULL,
+                transcriptVersion TEXT NOT NULL DEFAULT '',
                 createdAt REAL NOT NULL,
-                UNIQUE(analysisAssetId, eventType, sourceType, atomOrdinals, evidenceJSON, scanCohortJSON)
+                UNIQUE(
+                    analysisAssetId, eventType, sourceType, atomOrdinals,
+                    evidenceJSON, scanCohortJSON, transcriptVersion
+                )
             )
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_evidence_events_asset_created ON evidence_events(analysisAssetId, createdAt ASC)")
@@ -2329,43 +2370,43 @@ actor AnalysisStore {
             try validateScanCohortJSON(event.scanCohortJSON)
         }
 
-        // R4-Fix2: when an incoming non-success row would be silently
-        // dropped by `insertSemanticScanResult`'s H-1 success-protection
-        // probe, the surrounding transaction must NOT commit the evidence
-        // events — otherwise they attach to a phantom scan that the store
-        // never wrote. Probe the same condition here, before BEGIN
-        // IMMEDIATE, and short-circuit so the evidence never enters the
-        // transaction. Same-rank `.success` collisions still fall through
-        // to the existing REPLACE path.
-        if result.status != .success {
-            let reuseKeyHash = Self.semanticScanReuseKeyHash(
-                analysisAssetId: result.analysisAssetId,
-                windowFirstAtomOrdinal: result.windowFirstAtomOrdinal,
-                windowLastAtomOrdinal: result.windowLastAtomOrdinal,
-                scanPass: result.scanPass,
-                transcriptVersion: result.transcriptVersion,
-                scanCohortJSON: result.scanCohortJSON
-            )
-            let probe = try prepare("SELECT status FROM semantic_scan_results WHERE reuseKeyHash = ? LIMIT 1")
-            defer { sqlite3_finalize(probe) }
-            bind(probe, 1, reuseKeyHash)
-            if sqlite3_step(probe) == SQLITE_ROW,
-               let existingStatus = optionalText(probe, 0),
-               existingStatus == SemanticScanStatus.success.rawValue {
-                // Cached success outranks the incoming non-success row.
-                // The scan write will be a no-op; the evidence write must
-                // be skipped entirely so we don't orphan the rows.
-                return []
-            }
-        }
-
         try exec("BEGIN IMMEDIATE")
         do {
+            // R4-Fix2: when an incoming non-success row would be silently
+            // dropped by `insertSemanticScanResult`'s H-1 success-protection
+            // probe, the surrounding transaction must NOT commit the evidence
+            // events — otherwise they attach to a phantom scan that the store
+            // never wrote. Run the same check *inside* BEGIN IMMEDIATE so a
+            // second writer cannot sneak in a cached success between the
+            // preflight and the insert path.
+            if result.status != .success {
+                let reuseKeyHash = Self.semanticScanReuseKeyHash(
+                    analysisAssetId: result.analysisAssetId,
+                    windowFirstAtomOrdinal: result.windowFirstAtomOrdinal,
+                    windowLastAtomOrdinal: result.windowLastAtomOrdinal,
+                    scanPass: result.scanPass,
+                    transcriptVersion: result.transcriptVersion,
+                    scanCohortJSON: result.scanCohortJSON
+                )
+                let probe = try prepare("SELECT status FROM semantic_scan_results WHERE reuseKeyHash = ? LIMIT 1")
+                defer { sqlite3_finalize(probe) }
+                bind(probe, 1, reuseKeyHash)
+                if sqlite3_step(probe) == SQLITE_ROW,
+                   let existingStatus = optionalText(probe, 0),
+                   existingStatus == SemanticScanStatus.success.rawValue {
+                    try exec("COMMIT")
+                    return []
+                }
+            }
+
             var persistedEvidenceEventIds: [String] = []
             var seenEvidenceEventIds: Set<String> = []
             try insertSemanticScanResult(result)
             for event in evidenceEvents {
-                if let persistedId = try insertEvidenceEvent(event),
+                if let persistedId = try insertEvidenceEvent(
+                    event,
+                    transcriptVersion: result.transcriptVersion
+                ),
                    seenEvidenceEventIds.insert(persistedId).inserted {
                     persistedEvidenceEventIds.append(persistedId)
                 }
@@ -2469,18 +2510,22 @@ actor AnalysisStore {
         """
 
     @discardableResult
-    func insertEvidenceEvent(_ event: EvidenceEvent) throws -> String? {
+    func insertEvidenceEvent(
+        _ event: EvidenceEvent,
+        transcriptVersion: String = ""
+    ) throws -> String? {
         try validateAtomOrdinalsJSON(event.atomOrdinals)
         try validateScanCohortJSON(event.scanCohortJSON)
         // playhead-fn0: silent dedup on the exact persisted evidence identity:
         // (asset, eventType, sourceType, atomOrdinals, evidenceJSON,
-        // scanCohortJSON). Distinct FM spans at the same atom range now both
-        // persist when their bodies differ materially.
+        // scanCohortJSON, transcriptVersion). Distinct FM spans at the same
+        // atom range now both persist when their bodies differ materially, and
+        // append-only audit survives transcript-version churn.
         let sql = """
             INSERT OR IGNORE INTO evidence_events
             (id, analysisAssetId, eventType, sourceType, atomOrdinals,
-             evidenceJSON, scanCohortJSON, createdAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             evidenceJSON, scanCohortJSON, transcriptVersion, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -2491,7 +2536,8 @@ actor AnalysisStore {
         bind(stmt, 5, event.atomOrdinals)
         bind(stmt, 6, event.evidenceJSON)
         bind(stmt, 7, event.scanCohortJSON)
-        bind(stmt, 8, event.createdAt)
+        bind(stmt, 8, transcriptVersion)
+        bind(stmt, 9, event.createdAt)
         try step(stmt, expecting: SQLITE_DONE)
         if sqlite3_changes(db) > 0 {
             return event.id
@@ -2503,7 +2549,7 @@ actor AnalysisStore {
         //      persisted body already exists under the 6-column UNIQUE key.
         let probe = try prepare("""
             SELECT eventType, sourceType, atomOrdinals, evidenceJSON,
-                   scanCohortJSON, createdAt, analysisAssetId
+                   scanCohortJSON, transcriptVersion, createdAt, analysisAssetId
             FROM evidence_events
             WHERE id = ?
             LIMIT 1
@@ -2517,8 +2563,9 @@ actor AnalysisStore {
             let storedAtomOrdinals = optionalText(probe, 2) ?? ""
             let storedEvidenceJSON = optionalText(probe, 3) ?? ""
             let storedScanCohortJSON = optionalText(probe, 4) ?? ""
-            _ = sqlite3_column_double(probe, 5)
-            let storedAnalysisAssetId = optionalText(probe, 6) ?? ""
+            let storedTranscriptVersion = optionalText(probe, 5) ?? ""
+            _ = sqlite3_column_double(probe, 6)
+            let storedAnalysisAssetId = optionalText(probe, 7) ?? ""
 
             let bodyMatches =
                 storedAnalysisAssetId == event.analysisAssetId &&
@@ -2526,7 +2573,8 @@ actor AnalysisStore {
                 storedSourceType == event.sourceType.rawValue &&
                 storedAtomOrdinals == event.atomOrdinals &&
                 storedEvidenceJSON == event.evidenceJSON &&
-                storedScanCohortJSON == event.scanCohortJSON
+                storedScanCohortJSON == event.scanCohortJSON &&
+                storedTranscriptVersion == transcriptVersion
 
             if !bodyMatches {
                 throw AnalysisStoreError.evidenceEventBodyMismatch(id: event.id)
@@ -2543,6 +2591,7 @@ actor AnalysisStore {
               AND atomOrdinals = ?
               AND evidenceJSON = ?
               AND scanCohortJSON = ?
+              AND transcriptVersion = ?
             LIMIT 1
             """)
         defer { sqlite3_finalize(naturalProbe) }
@@ -2552,6 +2601,7 @@ actor AnalysisStore {
         bind(naturalProbe, 4, event.atomOrdinals)
         bind(naturalProbe, 5, event.evidenceJSON)
         bind(naturalProbe, 6, event.scanCohortJSON)
+        bind(naturalProbe, 7, transcriptVersion)
 
         if sqlite3_step(naturalProbe) == SQLITE_ROW {
             return optionalText(naturalProbe, 0) ?? event.id
