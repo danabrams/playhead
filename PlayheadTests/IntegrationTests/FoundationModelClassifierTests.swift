@@ -201,13 +201,13 @@ struct FoundationModelClassifierTests {
         #expect(!segments.isEmpty)
 
         let recorder = RuntimeRecorder(
-            // bd-34e Fix B v3: contextSize bumped from 142 to 183 because
-            // the coarse divisor moved from 3 to 4. New math:
-            //   budget = min((183 - 4 - 6 - 5) / 4, 183 / 4) = min(42, 45) = 42.
+            // bd-34e Fix B v4: contextSize bumped from 183 to 351 because
+            // the coarse divisor moved from 4 to 8. New math:
+            //   budget = min((351 - 4 - 6 - 5) / 8, 351 / 8) = min(42, 43) = 42.
             // Holding the previous test budget (42) intentional: keeps the
             // assertion meaningful and the planner exercising the same
             // window-packing thresholds.
-            contextSize: 183,
+            contextSize: 351,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -238,13 +238,13 @@ struct FoundationModelClassifierTests {
         ]
 
         let recorder = RuntimeRecorder(
-            // bd-34e Fix B v3: contextSize bumped from 120 to 155 for the
-            // ÷4 coarse divisor. New math:
-            //   budget = min((155 - 4 - 6 - 5) / 4, 155 / 4) = min(35, 38) = 35.
+            // bd-34e Fix B v4: contextSize bumped from 155 to 295 for the
+            // ÷8 coarse divisor. New math:
+            //   budget = min((295 - 4 - 6 - 5) / 8, 295 / 8) = min(35, 36) = 35.
             // Preamble wrap = 5 lines; 2-segment prompt = 7*5 = 35 (fits),
             // 3-segment = 8*5 = 40 (does not) — same [[0,1],[2]] window
             // split the test expects.
-            contextSize: 155,
+            contextSize: 295,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -331,7 +331,14 @@ struct FoundationModelClassifierTests {
             makeSegment(index: 3, startTime: 15, endTime: 20, text: "Back to the show after the ad.")
         ]
         let recorder = RuntimeRecorder(
-            contextSize: 64,
+            // bd-34e Fix B v4: contextSize bumped from 64 to 96 for the
+            // ÷8 coarse divisor. New math:
+            //   budget = min((96 - 4 - 6 - 4) / 8, 96 / 8) = min(10, 12) = 10.
+            // The constant tokenCountRule returns 8 per call so the planner
+            // packs all 4 segments into one window — same shape the test
+            // exercises (single window throws .exceededContextWindow, the
+            // legacy midpoint splitter retries with [[0,1], [2,3]]).
+            contextSize: 96,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { _ in 8 },
@@ -1713,15 +1720,15 @@ struct FoundationModelClassifierTests {
             makeSegment(index: 2, startTime: 10, endTime: 15, text: "Window two text.")
         ]
         let recorder = RuntimeRecorder(
-            // bd-34e Fix B v3: contextSize bumped from 171 to 223 for the
-            // ÷4 coarse divisor. New math:
-            //   budget = min((223 - 4 - 6 - 5) / 4, 223 / 4) = min(52, 55) = 52.
+            // bd-34e Fix B v4: contextSize bumped from 223 to 431 for the
+            // ÷8 coarse divisor. New math:
+            //   budget = min((431 - 4 - 6 - 5) / 8, 431 / 8) = min(52, 53) = 52.
             // Preamble wrap = 5 lines. With tokenCountRule=count*8 a
             // single-segment prompt is 6*8 = 48 tokens (fits) but a
             // two-segment prompt is 7*8 = 56 (does not) — forcing one window
             // per segment so the mid-pass refusal has a second window to
             // fail on.
-            contextSize: 223,
+            contextSize: 431,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -1755,9 +1762,9 @@ struct FoundationModelClassifierTests {
             makeSegment(index: 2, startTime: 10, endTime: 15, text: "Window two.")
         ]
         let recorder = RuntimeRecorder(
-            // bd-34e Fix B v3: contextSize bumped from 142 to 183 for the
-            // ÷4 coarse divisor (matches plannerCoverageOnRealEpisode).
-            contextSize: 183,
+            // bd-34e Fix B v4: contextSize bumped from 183 to 351 for the
+            // ÷8 coarse divisor (matches plannerCoverageOnRealEpisode).
+            contextSize: 351,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -1922,14 +1929,17 @@ struct FoundationModelClassifierTests {
     // tokenizer undercount. Refinement keeps its ÷2 divisor — its
     // prompts are smaller and decode-failure work is being investigated
     // independently. These tests pin the math for both divisors.
-    @Test("coarse window budget reserves headroom for 3.45x tokenizer undercount")
+    @Test("coarse window budget reserves headroom for 8x+ tokenizer undercount")
     func windowBudgetReservesHeadroomForTokenizerUndercount() {
+        // bd-34e Fix B v4: real-device shadow telemetry showed the actual
+        // tokenizer ratio is 8.3×–10.8× (not the 3.45× we thought), so the
+        // divisor moved from 4 to 8.
         // Real-device coarse parameters: contextSize=4096, responseTokens=96,
         // schema=128, safetyMargin=128. Conservative math:
         //   preMargin = 4096 - 128 - 96 - 128 = 3744
-        //   conservative = 3744 / 4 = 936
-        //   hardCap = 4096 / 4 = 1024
-        //   result = min(936, 1024) = 936
+        //   conservative = 3744 / 8 = 468
+        //   hardCap = 4096 / 8 = 512
+        //   result = min(468, 512) = 468
         let coarse = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
             contextSize: 4096,
             schemaTokens: 128,
@@ -1937,8 +1947,8 @@ struct FoundationModelClassifierTests {
             safetyMarginTokens: 128,
             divisor: FoundationModelClassifier.coarseBudgetDivisor
         )
-        #expect(coarse == 936)
-        #expect(coarse <= 4096 / 4, "hard cap contextSize/4 must bound the coarse ceiling")
+        #expect(coarse == 468)
+        #expect(coarse <= 4096 / 8, "hard cap contextSize/8 must bound the coarse ceiling")
 
         // With a larger safety margin the ceiling only drops further.
         let withFatMargin = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
@@ -1949,11 +1959,11 @@ struct FoundationModelClassifierTests {
             divisor: FoundationModelClassifier.coarseBudgetDivisor
         )
         #expect(withFatMargin <= coarse)
-        #expect(withFatMargin <= 4096 / 4)
+        #expect(withFatMargin <= 4096 / 8)
 
         // The hard cap must clamp pathological inputs where the schema and
         // response tokens are tiny: no matter how big preMargin gets, the
-        // coarse result cannot exceed contextSize / 4.
+        // coarse result cannot exceed contextSize / 8.
         let tinyOverhead = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
             contextSize: 4096,
             schemaTokens: 0,
@@ -1961,7 +1971,7 @@ struct FoundationModelClassifierTests {
             safetyMarginTokens: 0,
             divisor: FoundationModelClassifier.coarseBudgetDivisor
         )
-        #expect(tinyOverhead == 4096 / 4)
+        #expect(tinyOverhead == 4096 / 8)
 
         // Floor: must return at least 1 even when overhead > context.
         let exhausted = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
@@ -1984,13 +1994,15 @@ struct FoundationModelClassifierTests {
         #expect(refinement <= 4096 / 2)
     }
 
-    // bd-34e Fix B v3: pins the exact budget the production coarse path
+    // bd-34e Fix B v4: pins the exact budget the production coarse path
     // returns under real-device defaults so any future regression to
-    // ÷3 (or any larger divisor) trips a focused test instead of an
-    // on-device benchmark failure.
-    @Test("coarse budget divisor is four")
-    func coarseBudgetDivisorIsFour() {
-        #expect(FoundationModelClassifier.coarseBudgetDivisor == 4)
+    // ÷4 (or any larger divisor) trips a focused test instead of an
+    // on-device benchmark failure. The divisor moved from 4 → 8 after
+    // real-device shadow telemetry showed the actual tokenizer ratio is
+    // 8.3×–10.8× (not the 3.45× the previous round was sized for).
+    @Test("coarse budget divisor is eight")
+    func coarseBudgetDivisorIsEight() {
+        #expect(FoundationModelClassifier.coarseBudgetDivisor == 8)
         let safe = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
             contextSize: 4096,
             schemaTokens: 128,
@@ -1998,24 +2010,248 @@ struct FoundationModelClassifierTests {
             safetyMarginTokens: 128,
             divisor: FoundationModelClassifier.coarseBudgetDivisor
         )
-        // (4096 - 128 - 96 - 128) / 4 = 3744 / 4 = 936
-        #expect(safe == 936)
+        // (4096 - 128 - 96 - 128) / 8 = 3744 / 8 = 468
+        #expect(safe == 468)
         // Pin the hard cap separately so a future regression to a smaller
         // divisor (with overhead pushed down) still trips a focused test.
-        #expect(4096 / FoundationModelClassifier.coarseBudgetDivisor == 1024)
-        #expect(min(936, 1024) == 936)
-        // Sanity: under the OLD (÷3) divisor the same inputs would have
-        // returned 1248, which still left window 4 of the Conan episode
-        // 3.45× over Apple's actual budget on real device.
-        let oldThirded = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
+        #expect(4096 / FoundationModelClassifier.coarseBudgetDivisor == 512)
+        #expect(min(468, 512) == 468)
+        // Sanity: under the OLD (÷4) divisor the same inputs would have
+        // returned 936, which still left every Conan-episode window
+        // 8×+ over Apple's actual budget on real device. The new divisor
+        // produces a strictly smaller ceiling.
+        let oldFourthed = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
             contextSize: 4096,
             schemaTokens: 128,
             maximumResponseTokens: 96,
             safetyMarginTokens: 128,
-            divisor: 3
+            divisor: 4
         )
-        #expect(oldThirded == 1248)
-        #expect(safe < oldThirded)
+        #expect(oldFourthed == 936)
+        #expect(safe < oldFourthed)
+    }
+
+    // bd-34e Fix B v4: PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW debug flag
+    // experiment switch. When unset, the coarse pass shares one
+    // prewarmed session across all windows (C6). When set, every
+    // coarse window gets a brand-new session via runtime.makeSession().
+    // This is a controlled experiment to test whether session
+    // accumulation is responsible for the 8×–11× tokenizer-undercount
+    // observed on real device. Default behavior (unset) must be
+    // unchanged from production.
+    @Test("PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW flag creates a new session per coarse window")
+    func coarseFreshSessionFlagCreatesNewSessionPerWindow() async throws {
+        // Skip if the flag is set externally — that would invert this
+        // test's default-mode assertion.
+        let alreadySet = ProcessInfo.processInfo.environment["PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW"] != nil
+        guard !alreadySet else { return }
+
+        let segments = [
+            makeSegment(index: 0, startTime: 0, endTime: 5, text: "Window zero text."),
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Window one text."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Window two text.")
+        ]
+
+        // Default mode: shared session across all windows.
+        do {
+            let recorder = RuntimeRecorder(
+                contextSize: 431,
+                coarseSchemaTokens: 4,
+                refinementSchemaTokens: 8,
+                tokenCountRule: { prompt in
+                    prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8
+                }
+            )
+            let classifier = FoundationModelClassifier(
+                runtime: recorder.runtime,
+                config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
+            )
+            let output = try await classifier.coarsePassA(segments: segments)
+            let snapshot = await recorder.snapshot()
+            #expect(output.status == .success)
+            #expect(output.windows.count == 3)
+            // Production C6 behavior: a SINGLE session is created and shared.
+            #expect(snapshot.sessionCount == 1)
+            #expect(Set(snapshot.respondCalls.map(\.sessionID)) == [1])
+        }
+
+        // Flagged mode: a fresh session per window.
+        #if DEBUG
+        setenv("PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW", "1", 1)
+        defer { unsetenv("PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW") }
+
+        let recorder = RuntimeRecorder(
+            contextSize: 431,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8
+            }
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
+        )
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 3, "expected 3 windows, got \(output.windows.count)")
+        // Experiment behavior: ONE fresh session per window. 3 windows → 3 sessions.
+        #expect(
+            snapshot.sessionCount == 3,
+            "expected 3 fresh sessions (one per window), got \(snapshot.sessionCount)"
+        )
+        // Each respond call must have come from a distinct session id.
+        #expect(Set(snapshot.respondCalls.map(\.sessionID)) == Set([1, 2, 3]))
+        // Every fresh session must have been prewarmed.
+        #expect(snapshot.prewarmCalls.count == 3)
+        #expect(Set(snapshot.prewarmCalls.map(\.sessionID)) == Set([1, 2, 3]))
+        #expect(snapshot.prewarmCalls.allSatisfy { $0.promptPrefix == "Classify ad content." })
+        #endif
+    }
+
+    // bd-34e Fix B v4: same fresh-session flag must apply to refinement.
+    // When set, every refinement window gets a brand-new session.
+    @Test("PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW flag creates a new session per refinement window")
+    func refinementFreshSessionFlagCreatesNewSessionPerWindow() async throws {
+        let alreadySet = ProcessInfo.processInfo.environment["PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW"] != nil
+        guard !alreadySet else { return }
+
+        let segments = [
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "First sponsor talk."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Visit example.com today."),
+            makeSegment(index: 3, startTime: 15, endTime: 20, text: "Use promo code SAVE."),
+            makeSegment(index: 4, startTime: 20, endTime: 25, text: "Back to the show.")
+        ]
+
+        let zoomPlanA = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 0,
+            lineRefs: [1, 2],
+            focusLineRefs: [1, 2],
+            focusClusters: [[1, 2]],
+            prompt: "Refine ad spans.\nL1> \"First sponsor talk.\"\nL2> \"Visit example.com today.\"",
+            promptTokenCount: 4,
+            startTime: 5,
+            endTime: 15,
+            stopReason: .minimumSpan,
+            promptEvidence: []
+        )
+        let zoomPlanB = RefinementWindowPlan(
+            windowIndex: 1,
+            sourceWindowIndex: 1,
+            lineRefs: [3, 4],
+            focusLineRefs: [3, 4],
+            focusClusters: [[3, 4]],
+            prompt: "Refine ad spans.\nL3> \"Use promo code SAVE.\"\nL4> \"Back to the show.\"",
+            promptTokenCount: 4,
+            startTime: 15,
+            endTime: 25,
+            stopReason: .minimumSpan,
+            promptEvidence: []
+        )
+        let evidenceCatalog = EvidenceCatalog(
+            analysisAssetId: "asset-1",
+            transcriptVersion: "transcript-v1",
+            entries: []
+        )
+
+        #if DEBUG
+        setenv("PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW", "1", 1)
+        defer { unsetenv("PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW") }
+
+        let recorder = RuntimeRecorder(
+            contextSize: 1024,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 }
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlanA, zoomPlanB],
+            segments: segments,
+            evidenceCatalog: evidenceCatalog
+        )
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 2)
+        #expect(snapshot.sessionCount == 2, "expected 2 fresh refinement sessions, got \(snapshot.sessionCount)")
+        #expect(Set(snapshot.respondRefinementCalls.map(\.sessionID)) == Set([1, 2]))
+        #expect(snapshot.prewarmCalls.count == 2)
+        #expect(snapshot.prewarmCalls.allSatisfy { $0.promptPrefix == "Refine ad spans." })
+        #endif
+    }
+
+    // bd-34e Fix B v4: empirical schema-overhead probe. The smart-shrink
+    // shadow telemetry from real-device runs showed Apple's actual token
+    // accounting is 8.3×–10.8× higher than `tokenCount(for: prompt)`
+    // reports. The most likely culprit is that the model also serializes
+    // the @Generable response schema (CoarseScreeningSchema doc strings,
+    // nested types, enum cases) into its accounting, but Apple does not
+    // surface a public post-call usage field on `Response<T>`.
+    //
+    // We probe the same schema-aware path the production runtime uses
+    // (`SystemLanguageModel.tokenCount(for: GenerationSchema)` on iOS
+    // 26.4+) and assert that Apple agrees the schema overhead is greater
+    // than the trivial fallback estimate (128). If Apple later exposes a
+    // post-call usage field on `Response<T>`, this test should be
+    // upgraded to compare it against `tokenCount(for: prompt)` directly.
+    //
+    // On iOS 26.0–26.3 (no native tokenCount API), the test is a no-op.
+    // On the simulator without on-device FM, the model will report
+    // `.unavailable` and the test exits cleanly.
+    @available(iOS 26.4, *)
+    @Test("schema-aware coarse token count includes the @Generable overhead Apple sees on call")
+    func schemaTokenCountReflectsGenerableSchemaOverhead() async throws {
+        #if canImport(FoundationModels)
+        let model = SystemLanguageModel.default
+        guard case .available = model.availability else {
+            // Foundation Models not available on this simulator/device —
+            // the empirical assertion only runs where the runtime exists.
+            return
+        }
+        // Even when `availability` reports `.available`, the simulator's
+        // model-catalog assets may be missing, in which case `tokenCount`
+        // fails with an opaque ModelManagerError. Treat any throw as a
+        // "skip on this host" — this test is diagnostic, intended to run
+        // on real device where the FM stack is fully provisioned.
+        let coarseSchemaTokens: Int
+        let tinyPromptTokens: Int
+        do {
+            coarseSchemaTokens = try await model.tokenCount(for: CoarseScreeningSchema.generationSchema)
+            tinyPromptTokens = try await model.tokenCount(for: "L0> \"hello\"")
+        } catch {
+            // Simulator without on-device assets — bail out cleanly.
+            return
+        }
+
+        // The schema overhead must be strictly larger than the tiny prompt:
+        // a 1-line "L0> \"hello\"" prompt is at most a handful of tokens,
+        // but the schema's serialized form (doc strings, enum cases,
+        // nested CoarseSupportSchema) is much heavier.
+        #expect(coarseSchemaTokens > tinyPromptTokens)
+
+        // Document an upper-bound sanity check so a future schema rotation
+        // that explodes the overhead trips here loudly. We do NOT enforce
+        // a tight bound — this is diagnostic, not regression-locking.
+        #expect(
+            coarseSchemaTokens < 4096,
+            "coarseSchemaTokens=\(coarseSchemaTokens) should fit in a single context window"
+        )
+        // If we ever get below 200 tokens, the assumption that schema
+        // overhead is the load-bearing factor in the 8×–11× undercount
+        // is wrong and bd-34e needs to look elsewhere (e.g. system
+        // preamble, BOS/EOS framing, transcript-replay accumulation).
+        #expect(
+            coarseSchemaTokens >= 200,
+            "coarseSchemaTokens=\(coarseSchemaTokens) — if schema overhead is small, the 8×–11× undercount must come from somewhere else"
+        )
+        #else
+        return
+        #endif
     }
 
     // bd-34e Fix B v2: smart-shrink retry parses Apple's reported actual
@@ -2270,7 +2506,7 @@ struct FoundationModelClassifierTests {
         // contextSize tuned so each segment becomes its own window
         // (1-segment prompt fits, 2-segment prompt does not).
         let recorder = RuntimeRecorder(
-            contextSize: 223,
+            contextSize: 431,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -2334,7 +2570,7 @@ struct FoundationModelClassifierTests {
     func windowConstructionRespectsHardCap() async throws {
         // Build enough segments that, under the OLD (unhalved) budget, the
         // planner would try to pack many into a single window. Under the new
-        // ÷4 ceiling + hard cap, no coarse window may exceed contextSize / 4.
+        // ÷8 ceiling + hard cap, no coarse window may exceed contextSize / 8.
         let segments: [AdTranscriptSegment] = (0..<40).map { idx in
             makeSegment(
                 index: idx,
@@ -2351,8 +2587,8 @@ struct FoundationModelClassifierTests {
             tokenCountRule: { prompt in
                 // Coarse undercount of the real shape: multiply line count by
                 // a small per-line constant. Real tokens come from Apple at
-                // ~3.5× this on the live device; we mimic that by asserting
-                // the planner's output stays under contextSize / 4.
+                // ~8×–11× this on the live device; we mimic that by asserting
+                // the planner's output stays under contextSize / 8.
                 prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 4
             }
         )
@@ -2363,8 +2599,8 @@ struct FoundationModelClassifierTests {
 
         let plans = try await classifier.planPassA(segments: segments)
         #expect(!plans.isEmpty)
-        // Every window MUST fit under contextSize / 4 — the hard cap that
-        // guarantees a ~3.5× tokenizer undercount still lands inside context.
+        // Every window MUST fit under contextSize / 8 — the hard cap that
+        // guarantees an 8×+ tokenizer undercount still lands inside context.
         let hardCap = contextSize / FoundationModelClassifier.coarseBudgetDivisor
         for plan in plans {
             #expect(

@@ -641,9 +641,23 @@ struct FoundationModelClassifier: Sendable {
         }
 
         let coarseLineRefLookup = lineRefLookup(for: segments)
-        // C6: Share a single prewarmed session across all windows in this pass.
-        let sharedBox = SessionBox(session: await runtime.makeSession())
-        await sharedBox.prewarm(Self.promptPrefix)
+        // bd-34e Fix B v4: when PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW is set
+        // we create a brand-new prewarmed session for every coarse window
+        // instead of sharing one across the pass. The default (production)
+        // path remains the C6 shared-session optimization.
+        let freshSessionPerWindow = Self.freshSessionPerWindowEnabled()
+        let sharedBoxOrNil: SessionBox?
+        if freshSessionPerWindow {
+            logger.debug(
+                "PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW active — creating fresh session per coarse window"
+            )
+            sharedBoxOrNil = nil
+        } else {
+            // C6: Share a single prewarmed session across all windows in this pass.
+            let box = SessionBox(session: await runtime.makeSession())
+            await box.prewarm(Self.promptPrefix)
+            sharedBoxOrNil = box
+        }
         let prewarmHit = true
 
         var windows: [FMCoarseWindowOutput] = []
@@ -670,9 +684,17 @@ struct FoundationModelClassifier: Sendable {
                 )
             }
 
+            let perWindowBox: SessionBox
+            if let shared = sharedBoxOrNil {
+                perWindowBox = shared
+            } else {
+                let fresh = SessionBox(session: await runtime.makeSession())
+                await fresh.prewarm(Self.promptPrefix)
+                perWindowBox = fresh
+            }
             switch await coarseResponses(
                 for: plan,
-                sessionBox: sharedBox,
+                sessionBox: perWindowBox,
                 lineRefLookup: coarseLineRefLookup,
                 clock: clock,
                 windowIndex: planIndex + 1,
@@ -932,9 +954,22 @@ struct FoundationModelClassifier: Sendable {
         }
 
         let lineRefLookup = lineRefLookup(for: segments)
-        // C6: Share a single prewarmed session across all refinement windows.
-        let sharedBox = SessionBox(session: await runtime.makeSession())
-        await sharedBox.prewarm(Self.refinementPromptPrefix)
+        // bd-34e Fix B v4: same fresh-session-per-window experiment switch
+        // as the coarse pass — when PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW is
+        // set, every refinement window gets its own freshly minted session.
+        let freshSessionPerWindow = Self.freshSessionPerWindowEnabled()
+        let sharedBoxOrNil: SessionBox?
+        if freshSessionPerWindow {
+            logger.debug(
+                "PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW active — creating fresh session per refinement window"
+            )
+            sharedBoxOrNil = nil
+        } else {
+            // C6: Share a single prewarmed session across all refinement windows.
+            let box = SessionBox(session: await runtime.makeSession())
+            await box.prewarm(Self.refinementPromptPrefix)
+            sharedBoxOrNil = box
+        }
         let prewarmHit = true
 
         var windows: [FMRefinementWindowOutput] = []
@@ -954,9 +989,17 @@ struct FoundationModelClassifier: Sendable {
             }
 
             let windowStart = clock.now
+            let perWindowBox: SessionBox
+            if let shared = sharedBoxOrNil {
+                perWindowBox = shared
+            } else {
+                let fresh = SessionBox(session: await runtime.makeSession())
+                await fresh.prewarm(Self.refinementPromptPrefix)
+                perWindowBox = fresh
+            }
             let outcome = await refinementResponse(
                 for: plan,
-                sessionBox: sharedBox,
+                sessionBox: perWindowBox,
                 lineRefLookup: lineRefLookup
             )
 
@@ -1031,6 +1074,30 @@ struct FoundationModelClassifier: Sendable {
         }
         #endif
         return true
+    }
+
+    /// bd-34e Fix B v4: when this returns true, every coarse and refinement
+    /// window gets its own freshly minted `LanguageModelSession` (via
+    /// `runtime.makeSession()`) instead of sharing one across the pass.
+    /// This is the controlled experiment switch the on-device shadow
+    /// benchmark uses to test whether session accumulation is responsible
+    /// for the 8×–11× tokenizer-undercount the smart-shrink data revealed.
+    /// The flag is debug-only — release builds always return `false` and
+    /// the production C6 shared-session behavior is preserved.
+    ///
+    /// Fix v4 hypothesis: shadow telemetry shows actualTokens are STABLE
+    /// within a window's smart-shrink retries (4253 → 4253 → 4253) and
+    /// CONTENT-dependent across windows (window 7 < window 6 even though
+    /// it comes later), which rules out per-call session growth as the
+    /// primary cause. Turning this flag ON should therefore NOT close the
+    /// gap. If it does, the analysis was wrong and accumulation is real.
+    static func freshSessionPerWindowEnabled() -> Bool {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW"] != nil {
+            return true
+        }
+        #endif
+        return false
     }
 
     /// H14: The static, transcript-independent preamble of the coarse-pass
@@ -1156,16 +1223,20 @@ struct FoundationModelClassifier: Sendable {
     /// independently, so we deliberately do not retune it here.
     static let refinementBudgetDivisor = 2
 
-    /// bd-34e Fix B v3 (coarse): Fix v2's ÷3 divisor still left window 4
-    /// of the Conan episode 3.45× over Apple's actual budget on real
-    /// device (estimated 1196, counted 4125). The tokenizer undercount
-    /// ratio is non-constant per-window and can spike well above 3×, so
-    /// we move to ÷4 to give the coarse prompt a 4× safety factor. This
-    /// produces ~10–12 small windows per episode but each is much more
-    /// likely to fit Apple's actual budget on the first try, and the
-    /// smart-shrink retry loop (see `coarseResponses`) catches the
-    /// remaining outliers without aborting the whole pass.
-    static let coarseBudgetDivisor = 4
+    /// bd-34e Fix B v4 (coarse): Fix v3's ÷4 divisor still left every
+    /// Conan-episode coarse window 8.3×–10.8× over Apple's actual budget
+    /// on real device. Real-device shadow telemetry from Phase 3 shows
+    /// the actual tokenizer ratio is much worse than the 3.45× the v3
+    /// round was sized for. Most likely cause: Apple's
+    /// `LanguageModelSession.tokenCount(for:)` only counts the prompt
+    /// content, but the on-call accounting also includes the @Generable
+    /// schema's serialized form (CoarseScreeningSchema doc strings,
+    /// nested types, enum cases) plus an opaque session-state preamble.
+    /// We move from ÷4 to ÷8 to give the coarse prompt an 8× safety
+    /// factor. This produces ~20–25 small windows per episode (slow but
+    /// safe) and the smart-shrink retry loop (see `coarseResponses`)
+    /// catches the remaining outliers without aborting the whole pass.
+    static let coarseBudgetDivisor = 8
 
     /// bd-34e Fix B v3: maximum number of smart-shrink retry iterations
     /// before a single coarse window is abandoned. Each iteration
