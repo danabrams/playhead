@@ -575,10 +575,401 @@ actor BackfillJobRunner {
                         scanResultIds.append(failureResult.id)
                     }
                 }
+
+                // bd-1my: outward-expansion pass.
+                //
+                // For every refinement window whose spans touched the
+                // window's first or last line ref, request a new
+                // refinement window covering N=5 segments outside the
+                // original boundary in the touched direction. Re-refine
+                // and merge the resulting spans (union of lineRefs) back
+                // into the tracked span set. Iterate up to 3 times per
+                // source span or until the cumulative expansion reaches
+                // ±10 segments. Latency budget: zero additional FM cost
+                // unless at least one boundary span exists.
+                //
+                // The expansion code is deliberately scoped to .success
+                // refinement results — partial / failed refinement
+                // outputs already escalated above and we do not want to
+                // pile additional FM calls on a degraded device.
+                if refinement.status == .success && !refinement.windows.isEmpty {
+                    let expansionResults = try await runOutwardExpansion(
+                        baseRefinement: refinement,
+                        inputs: inputs,
+                        jobId: job.jobId
+                    )
+                    scanResultIds.append(contentsOf: expansionResults.scanResultIds)
+                    evidenceEventIds.append(contentsOf: expansionResults.evidenceEventIds)
+                }
             }
         }
 
         return (scanResultIds, evidenceEventIds)
+    }
+
+    // MARK: - bd-1my: outward expansion
+
+    /// Telemetry counter for the simulator-side smoke tests + the on-device
+    /// smoke scheme. Incremented every time `runOutwardExpansion` actually
+    /// dispatches at least one expansion FM call. The on-device test
+    /// asserts this is > 0 after a Conan-fixture run; the no-boundary
+    /// control test asserts it stays 0.
+    private(set) var expansionInvocationCount: Int = 0
+
+    /// Telemetry counter mirrored from the `expansion-truncated` log event.
+    /// Incremented exactly once per source span that hits the truncation
+    /// cutoff (3 iterations OR ±10 segments OR helper returned nil because
+    /// the prompt no longer fits the budget).
+    private(set) var expansionTruncatedCount: Int = 0
+
+    /// Test hook the simulator-side bounded-expansion suite uses to read
+    /// the counter without depending on log scraping.
+    func snapshotExpansionTelemetry() -> (invocations: Int, truncations: Int) {
+        (expansionInvocationCount, expansionTruncatedCount)
+    }
+
+    /// bd-1my: maximum number of expansion iterations per original
+    /// boundary-touching span. After this many extra refinement calls
+    /// the runner accepts whatever the latest refinement returned and
+    /// logs `expansion-truncated` exactly once.
+    static let maxExpansionIterations: Int = 3
+
+    /// bd-1my: maximum cumulative expansion (in segments) per source
+    /// boundary span. Counted as |segments_added_below| +
+    /// |segments_added_above|, so the worst case is ±10 around the
+    /// original window edge.
+    static let maxExpansionSegmentsTotal: Int = 10
+
+    /// bd-1my: number of segments added per expansion iteration in each
+    /// touched direction.
+    static let expansionStepSegments: Int = 5
+
+    private struct ExpansionResults {
+        var scanResultIds: [String] = []
+        var evidenceEventIds: [String] = []
+    }
+
+    /// Drives the outward-expansion loop for one base refinement output.
+    /// See the call site comment in `runJob` for the high-level contract.
+    private func runOutwardExpansion(
+        baseRefinement: FMRefinementScanOutput,
+        inputs: AssetInputs,
+        jobId: String
+    ) async throws -> ExpansionResults {
+        var results = ExpansionResults()
+
+        // Pre-compute the universe of segment indices so we can clamp
+        // expansion candidates to what actually exists. Sorted ascending.
+        let availableLineRefs = inputs.segments
+            .map(\.segmentIndex)
+            .sorted()
+        guard !availableLineRefs.isEmpty else { return results }
+        let firstAvailable = availableLineRefs.first!
+        let lastAvailable = availableLineRefs.last!
+
+        // Each iteration uses a unique (sourceWindowIndex, iteration)
+        // pair so the persisted scan-result rows do not collide.
+        for windowOutput in baseRefinement.windows {
+            let originalLineRefs = windowOutput.lineRefs
+            guard let originalMin = originalLineRefs.min(),
+                  let originalMax = originalLineRefs.max() else {
+                continue
+            }
+
+            // Track every span seen so we can union-merge expansion
+            // results back into the original spans for telemetry.
+            var trackedSpans: [RefinedAdSpan] = windowOutput.spans
+
+            // Per-source-window expansion state. We expand against the
+            // CURRENT window's boundaries — not the original — so the
+            // bound is total cumulative expansion in each direction.
+            var lowerBound = originalMin
+            var upperBound = originalMax
+            var iteration = 0
+            var truncated = false
+
+            // Early exit when no original span touches a boundary.
+            // bd-1my: zero additional FM cost when nothing touches.
+            guard Self.spansTouchBoundary(
+                spans: trackedSpans,
+                windowMin: originalMin,
+                windowMax: originalMax
+            ) else {
+                continue
+            }
+
+            while iteration < Self.maxExpansionIterations {
+                try Task.checkCancellation()
+
+                // Compute current cumulative expansion in each direction.
+                let segmentsBelow = max(0, originalMin - lowerBound)
+                let segmentsAbove = max(0, upperBound - originalMax)
+                if segmentsBelow + segmentsAbove >= Self.maxExpansionSegmentsTotal {
+                    truncated = true
+                    break
+                }
+
+                // Determine which directions still have a touching span
+                // AND have remaining segment budget.
+                var expandLow = false
+                var expandHigh = false
+                for span in trackedSpans {
+                    if span.firstLineRef == lowerBound { expandLow = true }
+                    if span.lastLineRef == upperBound { expandHigh = true }
+                }
+                if !expandLow && !expandHigh {
+                    break // No boundary-touching spans → stop cleanly.
+                }
+
+                // Apply N=5 segments outward in each touched direction,
+                // clamped to (a) episode bounds and (b) remaining
+                // cumulative budget.
+                let remainingBudget = Self.maxExpansionSegmentsTotal - (segmentsBelow + segmentsAbove)
+                var newLower = lowerBound
+                var newUpper = upperBound
+                if expandLow && lowerBound > firstAvailable {
+                    let step = min(Self.expansionStepSegments, remainingBudget, lowerBound - firstAvailable)
+                    if step > 0 {
+                        newLower = lowerBound - step
+                    }
+                }
+                let stillAvailable = Self.maxExpansionSegmentsTotal - (segmentsBelow + (lowerBound - newLower) + segmentsAbove)
+                if expandHigh && upperBound < lastAvailable {
+                    let step = min(Self.expansionStepSegments, stillAvailable, lastAvailable - upperBound)
+                    if step > 0 {
+                        newUpper = upperBound + step
+                    }
+                }
+
+                // Nothing actually expanded (already at episode edges and
+                // no budget left in the other direction either). Treat
+                // as a clean stop, NOT a truncation, because we ran out
+                // of episode rather than blowing the bound.
+                if newLower == lowerBound && newUpper == upperBound {
+                    break
+                }
+
+                // Build the expanded line ref set: every available
+                // segment index inside [newLower, newUpper] inclusive.
+                let expandedLineRefs = availableLineRefs.filter { $0 >= newLower && $0 <= newUpper }
+
+                // Ask the classifier for a fresh refinement plan over
+                // the expanded window.
+                let plan = try await classifier.planExpansionWindow(
+                    windowIndex: 1000 + windowOutput.windowIndex * 100 + iteration,
+                    sourceWindowIndex: windowOutput.sourceWindowIndex,
+                    expandedLineRefs: expandedLineRefs,
+                    segments: inputs.segments,
+                    evidenceCatalog: inputs.evidenceCatalog
+                )
+                guard let plan else {
+                    truncated = true
+                    break
+                }
+
+                expansionInvocationCount += 1
+
+                // Run a single-window refinement pass for the expansion
+                // window.
+                let expansionRefinement = try await classifier.refinePassB(
+                    zoomPlans: [plan],
+                    segments: inputs.segments,
+                    evidenceCatalog: inputs.evidenceCatalog
+                )
+
+                // If the FM blew up on the expansion call we surface a
+                // failure row but stop expanding cleanly — we keep the
+                // base refinement intact, this is purely additive.
+                if expansionRefinement.status != .success || expansionRefinement.windows.isEmpty {
+                    if let failureResult = makeRefinementFailureScanResult(
+                        plan: plan,
+                        inputs: inputs,
+                        status: expansionRefinement.status,
+                        latencyMs: expansionRefinement.latencyMillis
+                    ) {
+                        try await store.insertSemanticScanResult(failureResult)
+                        results.scanResultIds.append(failureResult.id)
+                    }
+                    break
+                }
+
+                // Merge expansion spans into the tracked span set
+                // (union of lineRefs for any overlapping pair).
+                let expandedWindow = expansionRefinement.windows[0]
+                let preMergeSnapshot = trackedSpans
+                trackedSpans = Self.mergeSpans(
+                    existing: trackedSpans,
+                    expansion: expandedWindow.spans
+                )
+
+                // bd-1my: only persist a merged expansion row when the
+                // merge ACTUALLY produced a new or wider span. The
+                // expansion call may legitimately return zero spans
+                // (FM stub queue exhausted, FM declined to widen the
+                // boundary, defaultRefinement is empty) and in that
+                // case the merged set equals the pre-merge snapshot.
+                // Persisting an identical row would emit duplicate
+                // evidence ids that the existing BackfillJobRunner
+                // tests rightfully reject.
+                if Self.spanSetsEquivalent(preMergeSnapshot, trackedSpans) {
+                    // Stop expanding cleanly — no new boundary span to
+                    // chase, no point asking the FM to widen further.
+                    break
+                }
+
+                // Persist the expansion as its own passB scan-result row
+                // and write any new evidence events from the merged span
+                // set. We use a synthetic windowIndex namespace so the
+                // base row's id is not affected.
+                let mergedWindowOutput = FMRefinementWindowOutput(
+                    windowIndex: plan.windowIndex,
+                    sourceWindowIndex: windowOutput.sourceWindowIndex,
+                    lineRefs: expandedLineRefs,
+                    spans: trackedSpans,
+                    latencyMillis: expandedWindow.latencyMillis
+                )
+                let mergedScanResult = makeRefinementScanResult(
+                    windowOutput: mergedWindowOutput,
+                    inputs: inputs,
+                    status: .success
+                )
+                let mergedEvents = makeEvidenceEvents(
+                    windowOutput: mergedWindowOutput,
+                    inputs: inputs,
+                    jobId: jobId
+                )
+                let persistedEventIds = try await store.recordSemanticScanResult(
+                    mergedScanResult,
+                    evidenceEvents: mergedEvents
+                )
+                results.scanResultIds.append(mergedScanResult.id)
+                results.evidenceEventIds.append(contentsOf: persistedEventIds)
+
+                // Advance the boundaries for the next iteration. The
+                // tracked span set already reflects the new (possibly
+                // wider) bounds via the union-merge above.
+                lowerBound = expandedLineRefs.first ?? newLower
+                upperBound = expandedLineRefs.last ?? newUpper
+                iteration += 1
+
+                // If the merged spans no longer touch the new boundary
+                // we are done — the ad has been fully captured.
+                if !Self.spansTouchBoundary(
+                    spans: trackedSpans,
+                    windowMin: lowerBound,
+                    windowMax: upperBound
+                ) {
+                    break
+                }
+            }
+
+            // If we exited because of the iteration cap (vs a clean
+            // boundary-no-longer-touching exit) emit the truncation
+            // telemetry exactly once.
+            if iteration >= Self.maxExpansionIterations || truncated {
+                expansionTruncatedCount += 1
+                logger.info(
+                    """
+                    fm.classifier.expansion-truncated \
+                    sourceWindow=\(windowOutput.sourceWindowIndex, privacy: .public) \
+                    iterations=\(iteration, privacy: .public) \
+                    lowerBound=\(lowerBound, privacy: .public) \
+                    upperBound=\(upperBound, privacy: .public)
+                    """
+                )
+            }
+        }
+
+        return results
+    }
+
+    /// bd-1my: detect whether any of `spans` touches the window's first or
+    /// last line ref. Exposed `internal` so the simulator-side bounded
+    /// expansion tests can hit it directly without booting the runner.
+    static func spansTouchBoundary(
+        spans: [RefinedAdSpan],
+        windowMin: Int,
+        windowMax: Int
+    ) -> Bool {
+        for span in spans {
+            if span.firstLineRef == windowMin { return true }
+            if span.lastLineRef == windowMax { return true }
+        }
+        return false
+    }
+
+    /// bd-1my: union-merge an expansion span set into the tracked span
+    /// set. Two spans "overlap" if their lineRef ranges intersect; the
+    /// merged span keeps the higher-certainty / wider-precision metadata
+    /// from the expansion side, but unions the line refs and atom
+    /// ordinals so the persisted span ALWAYS represents the widest known
+    /// boundary the FM has reported for that ad.
+    ///
+    /// The merge is reflexive (an empty expansion returns `existing`
+    /// unchanged) and idempotent under repeated calls. Spans that do not
+    /// overlap any existing entry are appended; this is the path that
+    /// catches genuinely-different ads found inside the expansion window.
+    static func mergeSpans(
+        existing: [RefinedAdSpan],
+        expansion: [RefinedAdSpan]
+    ) -> [RefinedAdSpan] {
+        var merged = existing
+        for incoming in expansion {
+            if let overlapIndex = merged.firstIndex(where: { spansOverlap($0, incoming) }) {
+                merged[overlapIndex] = unionSpan(merged[overlapIndex], incoming)
+            } else {
+                merged.append(incoming)
+            }
+        }
+        return merged
+    }
+
+    private static func spansOverlap(_ lhs: RefinedAdSpan, _ rhs: RefinedAdSpan) -> Bool {
+        lhs.firstLineRef <= rhs.lastLineRef && rhs.firstLineRef <= lhs.lastLineRef
+    }
+
+    private static func unionSpan(_ lhs: RefinedAdSpan, _ rhs: RefinedAdSpan) -> RefinedAdSpan {
+        let firstLineRef = min(lhs.firstLineRef, rhs.firstLineRef)
+        let lastLineRef = max(lhs.lastLineRef, rhs.lastLineRef)
+        let firstAtomOrdinal = min(lhs.firstAtomOrdinal, rhs.firstAtomOrdinal)
+        let lastAtomOrdinal = max(lhs.lastAtomOrdinal, rhs.lastAtomOrdinal)
+        // Prefer the higher-confidence span's metadata; fall back to lhs.
+        let preferred: RefinedAdSpan = certaintyRank(rhs.certainty) >= certaintyRank(lhs.certainty)
+            ? rhs
+            : lhs
+        return RefinedAdSpan(
+            commercialIntent: preferred.commercialIntent,
+            ownership: preferred.ownership,
+            firstLineRef: firstLineRef,
+            lastLineRef: lastLineRef,
+            firstAtomOrdinal: firstAtomOrdinal,
+            lastAtomOrdinal: lastAtomOrdinal,
+            certainty: preferred.certainty,
+            boundaryPrecision: preferred.boundaryPrecision,
+            resolvedEvidenceAnchors: lhs.resolvedEvidenceAnchors + rhs.resolvedEvidenceAnchors,
+            memoryWriteEligible: lhs.memoryWriteEligible && rhs.memoryWriteEligible,
+            alternativeExplanation: preferred.alternativeExplanation,
+            reasonTags: Array(Set(lhs.reasonTags).union(rhs.reasonTags))
+        )
+    }
+
+    /// bd-1my: span-set equivalence check for the expansion no-op
+    /// short-circuit. Compares the multiset of (firstLineRef,
+    /// lastLineRef) tuples — sufficient because the expansion path
+    /// only ever widens or appends spans, never re-orders or shrinks.
+    static func spanSetsEquivalent(_ lhs: [RefinedAdSpan], _ rhs: [RefinedAdSpan]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        let lhsKeys = Set(lhs.map { "\($0.firstLineRef)-\($0.lastLineRef)" })
+        let rhsKeys = Set(rhs.map { "\($0.firstLineRef)-\($0.lastLineRef)" })
+        return lhsKeys == rhsKeys
+    }
+
+    private static func certaintyRank(_ band: CertaintyBand) -> Int {
+        switch band {
+        case .weak: return 0
+        case .moderate: return 1
+        case .strong: return 2
+        }
     }
 
     // MARK: - Helpers

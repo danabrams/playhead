@@ -63,3 +63,23 @@ targets:
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Playhead.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Playhead"
         BUNDLE_LOADER: "$(TEST_HOST)"
         GENERATE_INFOPLIST_FILE: YES
+schemes:
+  # bd-1my: real-device-only smoke scheme that runs the live FM stack
+  # against the Conan "Fanhausen Revisited" fixture and the synthetic
+  # boundary-expansion controls. Gated on PLAYHEAD_FM_SMOKE=1 so the
+  # tests early-exit when invoked from any other scheme.
+  PlayheadFMSmoke:
+    build:
+      targets:
+        Playhead: [test]
+        PlayheadTests: [test]
+    test:
+      config: Debug
+      targets:
+        - name: PlayheadTests
+          selectedTests:
+            - PlayheadFMSmokeTests
+      environmentVariables:
+        - variable: PLAYHEAD_FM_SMOKE
+          value: "1"
+          isEnabled: true

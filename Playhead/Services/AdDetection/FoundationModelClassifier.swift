@@ -1121,6 +1121,79 @@ struct FoundationModelClassifier: Sendable {
         return plans
     }
 
+    // MARK: - bd-1my: outward expansion plan
+    //
+    // Build a `RefinementWindowPlan` for an arbitrary set of contiguous line
+    // refs supplied by the runner's outward-expansion loop. The runner uses
+    // this when a previous refinement returned a span whose boundaries
+    // touched the original window edges — the bead's design says expand by
+    // N segments outward and re-refine. We deliberately keep this helper
+    // additive (it does NOT touch `planAdaptiveZoom`) so the existing
+    // refinement orchestration is unchanged when no boundary spans exist.
+    //
+    // Returns `nil` if the prompt cannot fit inside the refinement budget
+    // even after focus-only fallback. The runner treats `nil` the same as
+    // `expansion-truncated` (logs once, accepts the prior refinement).
+    func planExpansionWindow(
+        windowIndex: Int,
+        sourceWindowIndex: Int,
+        expandedLineRefs: [Int],
+        segments: [AdTranscriptSegment],
+        evidenceCatalog: EvidenceCatalog
+    ) async throws -> RefinementWindowPlan? {
+        let orderedSegments = orderedSegmentsByLineRef(segments)
+        guard !orderedSegments.isEmpty else { return nil }
+
+        let lineRefLookup = lineRefLookup(for: orderedSegments)
+        let lineRefByAtomOrdinal = lineRefByAtomOrdinal(for: orderedSegments)
+
+        // Filter to existing segments and dedupe / sort. The runner is
+        // responsible for clamping to ±10 segments and to episode bounds,
+        // but we defensively re-clamp here so the helper can never produce
+        // an invalid plan.
+        let availableSet = Set(orderedSegments.map(\.segmentIndex))
+        let orderedLineRefs = Array(Set(expandedLineRefs).intersection(availableSet)).sorted()
+        guard !orderedLineRefs.isEmpty else { return nil }
+
+        let budget = try await promptBudget(
+            schemaTokens: runtime.refinementSchemaTokenCount,
+            maximumResponseTokens: config.refinementMaximumResponseTokens
+        )
+
+        let promptEvidence = promptEvidenceEntries(
+            for: orderedLineRefs,
+            evidenceCatalog: evidenceCatalog,
+            lineRefByAtomOrdinal: lineRefByAtomOrdinal
+        )
+        let prompt = Self.buildRefinementPrompt(
+            for: orderedLineRefs.compactMap { lineRefLookup[$0] },
+            promptEvidence: promptEvidence,
+            maximumSpans: config.maximumRefinementSpansPerWindow
+        )
+        let tokenCount = try await runtime.tokenCount(prompt)
+
+        // bd-1my: if the expansion blew the budget we surrender and let the
+        // runner record an `expansion-truncated` event. We deliberately do
+        // NOT walk a focus-only fallback here — the expansion's whole point
+        // is to widen the lens, so a token-clipped expansion plan would
+        // defeat the purpose.
+        guard tokenCount <= budget else { return nil }
+
+        return RefinementWindowPlan(
+            windowIndex: windowIndex,
+            sourceWindowIndex: sourceWindowIndex,
+            lineRefs: orderedLineRefs,
+            focusLineRefs: orderedLineRefs,
+            focusClusters: [orderedLineRefs],
+            prompt: prompt,
+            promptTokenCount: tokenCount,
+            startTime: orderedLineRefs.compactMap { lineRefLookup[$0]?.startTime }.min() ?? 0,
+            endTime: orderedLineRefs.compactMap { lineRefLookup[$0]?.endTime }.max() ?? 0,
+            stopReason: .minimumSpan,
+            promptEvidence: promptEvidence
+        )
+    }
+
     func refinePassB(
         zoomPlans: [RefinementWindowPlan],
         segments: [AdTranscriptSegment],
