@@ -24,6 +24,7 @@ actor AnalysisJobRunner {
     private let transcriptEngine: TranscriptEngineService
     private let adDetection: AdDetectionProviding
     private let cueMaterializer: SkipCueMaterializer
+    private let thermalStateProvider: @Sendable () -> ProcessInfo.ThermalState
 
     // MARK: - Init
 
@@ -33,7 +34,10 @@ actor AnalysisJobRunner {
         featureService: FeatureExtractionService,
         transcriptEngine: TranscriptEngineService,
         adDetection: AdDetectionProviding,
-        cueMaterializer: SkipCueMaterializer
+        cueMaterializer: SkipCueMaterializer,
+        thermalStateProvider: @escaping @Sendable () -> ProcessInfo.ThermalState = {
+            ProcessInfo.processInfo.thermalState
+        }
     ) {
         self.store = store
         self.audioProvider = audioProvider
@@ -41,6 +45,7 @@ actor AnalysisJobRunner {
         self.transcriptEngine = transcriptEngine
         self.adDetection = adDetection
         self.cueMaterializer = cueMaterializer
+        self.thermalStateProvider = thermalStateProvider
     }
 
     // MARK: - Run
@@ -320,15 +325,16 @@ actor AnalysisJobRunner {
 
     // MARK: - Stop Condition Checks
 
-    /// Check for cancellation and thermal throttling between pipeline stages.
+    /// Check for cancellation and critical thermal distress between pipeline
+    /// stages.
     /// Returns a stop reason if the runner should bail out, nil to continue.
     private func checkStopConditions() -> AnalysisOutcome.StopReason? {
         if Task.isCancelled {
             return .cancelledByPlayback
         }
 
-        let thermalState = ProcessInfo.processInfo.thermalState
-        if thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue {
+        let thermalState = thermalStateProvider()
+        if thermalState == .critical {
             logger.warning("Thermal state \(String(describing: thermalState)) — pausing analysis")
             return .pausedForThermal
         }

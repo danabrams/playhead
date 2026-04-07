@@ -1060,13 +1060,10 @@ struct FoundationModelClassifier: Sendable {
             }
 
             guard !orderedLineRefs.isEmpty else { continue }
-            if tokenCount > budget, let overflowingLineRef = orderedLineRefs.first {
-                throw FoundationModelClassifierError.segmentExceedsTokenBudget(
-                    lineRef: overflowingLineRef,
-                    tokenCount: tokenCount,
-                    budget: budget
-                )
-            }
+            // If even the focus-only prompt still overflows, keep the plan
+            // and let `refinePassB` record a per-window
+            // `.exceededContextWindow` failure instead of aborting the whole
+            // shadow job before persistence can observe the failure.
 
             plans.append(
                 RefinementWindowPlan(
@@ -1096,6 +1093,10 @@ struct FoundationModelClassifier: Sendable {
     ) async throws -> FMRefinementScanOutput {
         let clock = ContinuousClock()
         let start = clock.now
+        let budget = try await promptBudget(
+            schemaTokens: runtime.refinementSchemaTokenCount,
+            maximumResponseTokens: config.refinementMaximumResponseTokens
+        )
 
         if let status = await runtime.availabilityStatus(locale) {
             return FMRefinementScanOutput(
@@ -1136,7 +1137,7 @@ struct FoundationModelClassifier: Sendable {
         // is fresh. The `PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW` debug flag
         // and its helper are gone — the experiment is over and the
         // answer is "always per-window".
-        let prewarmHit = true
+        var prewarmHit = false
 
         var windows: [FMRefinementWindowOutput] = []
         windows.reserveCapacity(zoomPlans.count)
@@ -1160,12 +1161,31 @@ struct FoundationModelClassifier: Sendable {
                 )
             }
 
+            if plan.stopReason == .tokenBudget, plan.promptTokenCount > budget {
+                failedWindowStatuses.append(.exceededContextWindow)
+                logger.error(
+                    """
+                    fm.classifier.refinement_pass_window_abandoned \
+                    window=\(plan.windowIndex, privacy: .public) \
+                    sourceWindow=\(plan.sourceWindowIndex, privacy: .public) \
+                    firstLineRef=\(plan.lineRefs.first ?? -1, privacy: .public) \
+                    lastLineRef=\(plan.lineRefs.last ?? -1, privacy: .public) \
+                    lineRefCount=\(plan.lineRefs.count, privacy: .public) \
+                    status=\(SemanticScanStatus.exceededContextWindow.rawValue, privacy: .public) \
+                    promptTokens=\(plan.promptTokenCount, privacy: .public) \
+                    budget=\(budget, privacy: .public)
+                    """
+                )
+                continue
+            }
+
             let windowStart = clock.now
             // bd-3h2: every refinement window gets its own freshly minted,
             // freshly prewarmed `LanguageModelSession`. See the comment
             // block above the loop for the on-device evidence that
             // motivated removing the shared-session branch.
             let perWindowBox = await makePrewarmedSessionBox(promptPrefix: Self.refinementPromptPrefix)
+            prewarmHit = true
             let outcome = await refinementResponse(
                 for: plan,
                 sessionBox: perWindowBox,

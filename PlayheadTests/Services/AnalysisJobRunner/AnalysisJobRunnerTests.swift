@@ -252,4 +252,75 @@ struct AnalysisJobRunnerTests {
         #expect(outcome.transcriptCoverageSec == 0)
         #expect(outcome.cueCoverageSec == 0)
     }
+
+    @Test("serious thermal does not pause the bounded analysis run")
+    func testSeriousThermalDoesNotPauseRun() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store: store, fastTranscriptCoverageEndTime: 30)
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 1)
+
+        let featureService = FeatureExtractionService(store: store)
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let materializer = SkipCueMaterializer(store: store)
+
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub,
+            cueMaterializer: materializer,
+            thermalStateProvider: { .serious }
+        )
+
+        let outcome = await runner.run(makeTestRequest(desiredCoverageSec: 30))
+
+        if case .pausedForThermal = outcome.stopReason {
+            Issue.record("Serious thermal should no longer pause bounded analysis")
+        }
+    }
+
+    @Test("critical thermal pauses the bounded analysis run")
+    func testCriticalThermalPausesRun() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store: store)
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 1)
+
+        let featureService = FeatureExtractionService(store: store)
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let materializer = SkipCueMaterializer(store: store)
+
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub,
+            cueMaterializer: materializer,
+            thermalStateProvider: { .critical }
+        )
+
+        let outcome = await runner.run(makeTestRequest(desiredCoverageSec: 30))
+
+        if case .pausedForThermal = outcome.stopReason {
+            // expected
+        } else {
+            Issue.record("Expected .pausedForThermal but got \(outcome.stopReason)")
+        }
+    }
 }

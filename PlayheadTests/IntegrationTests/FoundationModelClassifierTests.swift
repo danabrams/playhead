@@ -571,6 +571,83 @@ struct FoundationModelClassifierTests {
         #expect(!zoomPlans[0].prompt.contains("L3> \"The host repeats the offer details.\""))
     }
 
+    @Test("adaptive zoom keeps an over-budget focus window so pass B can record a failure row")
+    func adaptiveZoomRetainsOverBudgetFocusWindow() async throws {
+        let segments = [
+            makeSegment(index: 0, text: "Opening banter before the promotion."),
+            makeSegment(index: 1, text: "The host sets up the offer."),
+            makeSegment(index: 2, text: "Visit example.com for the limited-time deal."),
+            makeSegment(index: 3, text: "The host repeats the offer details."),
+            makeSegment(index: 4, text: "Return to the main conversation.")
+        ]
+        let coarse = FMCoarseScanOutput(
+            status: .success,
+            windows: [
+                FMCoarseWindowOutput(
+                    windowIndex: 0,
+                    lineRefs: [0, 1, 2, 3, 4],
+                    startTime: 0,
+                    endTime: 25,
+                    transcriptQuality: .good,
+                    screening: CoarseScreeningSchema(
+                        disposition: .containsAd,
+                        support: CoarseSupportSchema(
+                            supportLineRefs: [2],
+                            certainty: .strong
+                        )
+                    ),
+                    latencyMillis: 8
+                )
+            ],
+            latencyMillis: 8,
+            prewarmHit: false
+        )
+        let recorder = RuntimeRecorder(
+            // Budget = min((80-8-10-4)/2, 80/2) = 29. The focus-only prompt
+            // still costs 32 tokens, so the planner must preserve the plan
+            // instead of throwing and let pass B persist the failure.
+            contextSize: 80,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 4
+            }
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(
+                safetyMarginTokens: 4,
+                coarseMaximumResponseTokens: 6,
+                refinementMaximumResponseTokens: 10,
+                zoomAmbiguityBudget: 0,
+                minimumZoomSpanLines: 3,
+                maximumRefinementSpansPerWindow: 2
+            )
+        )
+
+        let zoomPlans = try await classifier.planAdaptiveZoom(
+            coarse: coarse,
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+        let budget = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
+            contextSize: 80,
+            schemaTokens: 8,
+            maximumResponseTokens: 10,
+            safetyMarginTokens: 4
+        )
+
+        #expect(zoomPlans.count == 1)
+        #expect(zoomPlans[0].lineRefs == [2])
+        #expect(zoomPlans[0].stopReason == .tokenBudget)
+        #expect(zoomPlans[0].promptTokenCount == 32)
+        #expect(zoomPlans[0].promptTokenCount > budget)
+    }
+
     @Test("refinement runs only on zoomed windows and resolves anchors to deterministic catalog entries")
     func refinementResolvesEvidenceAnchors() async throws {
         let segments = [
@@ -1415,6 +1492,68 @@ struct FoundationModelClassifierTests {
         // refinement window cannot carry conversation state forward.
         #expect(snapshot.sessionCount == 2)
         #expect(output.prewarmHit)
+    }
+
+    @Test("refinement preflight skips plans that already exceed the prompt budget")
+    func refinementPreflightSkipsOverBudgetPlan() async throws {
+        let segments = [
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Visit example.com for the offer.")
+        ]
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 7,
+            lineRefs: [2],
+            focusLineRefs: [2],
+            focusClusters: [[2]],
+            prompt: """
+            Refine ad spans.
+            Transcript:
+            L2> "Visit example.com for the offer."
+            Return up to 2 spans.
+            """,
+            promptTokenCount: 32,
+            startTime: 10,
+            endTime: 15,
+            stopReason: .tokenBudget,
+            promptEvidence: []
+        )
+        let recorder = RuntimeRecorder(
+            // Budget = min((80-8-10-4)/2, 80/2) = 29, so this plan is known
+            // to be too large before any model call is attempted.
+            contextSize: 80,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 }
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(
+                safetyMarginTokens: 4,
+                coarseMaximumResponseTokens: 6,
+                refinementMaximumResponseTokens: 10,
+                zoomAmbiguityBudget: 0,
+                minimumZoomSpanLines: 3,
+                maximumRefinementSpansPerWindow: 2
+            )
+        )
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .exceededContextWindow)
+        #expect(output.windows.isEmpty)
+        #expect(output.failedWindowStatuses == [.exceededContextWindow])
+        #expect(!output.prewarmHit)
+        #expect(snapshot.prewarmCalls.isEmpty)
+        #expect(snapshot.respondRefinementCalls.isEmpty)
     }
 
     // bd-3h2 / bd-34e refinement: when EVERY refinement window refuses,
