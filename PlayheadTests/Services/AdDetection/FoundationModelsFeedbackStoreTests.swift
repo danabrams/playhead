@@ -74,6 +74,67 @@ struct FoundationModelsFeedbackStoreTests {
         }
     }
 
+    @Test("reopened store enumerates attachments that were captured before relaunch")
+    func reopenedStoreEnumeratesCapturedAttachments() async throws {
+        let dir = Self.makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        do {
+            let store = FoundationModelsFeedbackStore(directory: dir)
+            await store.storeAttachment(
+                Data("first".utf8),
+                kind: .coarseRefusal,
+                windowContext: "window=1_of_2"
+            )
+            await store.storeAttachment(
+                Data("second".utf8),
+                kind: .refinementRefusal,
+                windowContext: "refineWindow=2_source=1_stage=initial"
+            )
+            let firstPassURLs = await store.capturedAttachmentURLs()
+            #expect(firstPassURLs.count == 2)
+        }
+
+        let reopened = FoundationModelsFeedbackStore(directory: dir)
+        let urls = await reopened.capturedAttachmentURLs()
+        #expect(urls.count == 2)
+        #expect(urls.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+    }
+
+    @Test("clearCapturedAttachments removes on-disk files even if one was deleted externally")
+    func clearAttachmentsSkipsMissingFiles() async throws {
+        let dir = Self.makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        do {
+            let store = FoundationModelsFeedbackStore(directory: dir)
+            await store.storeAttachment(
+                Data("first".utf8),
+                kind: .coarseRefusal,
+                windowContext: "window=1_of_2"
+            )
+            await store.storeAttachment(
+                Data("second".utf8),
+                kind: .refinementDecodeFailure,
+                windowContext: "refineWindow=2_source=1_stage=initial"
+            )
+        }
+
+        let reopened = FoundationModelsFeedbackStore(directory: dir)
+        let urls = await reopened.capturedAttachmentURLs()
+        #expect(urls.count == 2)
+
+        try FileManager.default.removeItem(at: urls[0])
+
+        await reopened.clearCapturedAttachments()
+
+        let afterURLs = await reopened.capturedAttachmentURLs()
+        #expect(afterURLs.isEmpty)
+        for url in urls {
+            #expect(!FileManager.default.fileExists(atPath: url.path))
+        }
+    }
+
     @Test("empty data is silently skipped and never written to disk")
     func emptyDataIsSkipped() async throws {
         let dir = Self.makeTempDirectory()

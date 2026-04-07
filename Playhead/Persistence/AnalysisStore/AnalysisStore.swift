@@ -200,6 +200,8 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 
 actor AnalysisStore {
 
+    nonisolated private static let currentSchemaVersion = 2
+
     /// bd-1tl: dedicated logger for store-level diagnostics that should
     /// reach Console.app on real devices without test scaffolding.
     private let logger = Logger(subsystem: "com.playhead", category: "AnalysisStore")
@@ -312,6 +314,7 @@ actor AnalysisStore {
             try createTables()
             try migrateTranscriptChunksPhase1()
             try writeInitialSchemaVersionIfNeeded()
+            try migrateEvidenceEventsNaturalKeyV2IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -374,13 +377,52 @@ actor AnalysisStore {
         try exec("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)")
     }
 
-    /// Records `_meta('schema_version', '1')` on first migration. Future
+    /// Records the current schema version on first migration. Future
     /// migrations should read this value, branch on it, and bump it inside the
     /// same transaction as the DDL change.
     private func writeInitialSchemaVersionIfNeeded() throws {
-        let stmt = try prepare("INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '1')")
+        let stmt = try prepare("INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', ?)")
         defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, String(Self.currentSchemaVersion))
         try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    private func setSchemaVersion(_ version: Int) throws {
+        let stmt = try prepare("""
+            INSERT INTO _meta (key, value) VALUES ('schema_version', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, String(version))
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    private func migrateEvidenceEventsNaturalKeyV2IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 2 else { return }
+
+        try exec("""
+            CREATE TABLE evidence_events_v2 (
+                id TEXT PRIMARY KEY,
+                analysisAssetId TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                eventType TEXT NOT NULL,
+                sourceType TEXT NOT NULL,
+                atomOrdinals TEXT NOT NULL,
+                evidenceJSON TEXT NOT NULL,
+                scanCohortJSON TEXT NOT NULL,
+                createdAt REAL NOT NULL,
+                UNIQUE(analysisAssetId, eventType, sourceType, atomOrdinals, evidenceJSON, scanCohortJSON)
+            )
+            """)
+        try exec("""
+            INSERT OR IGNORE INTO evidence_events_v2
+            (id, analysisAssetId, eventType, sourceType, atomOrdinals, evidenceJSON, scanCohortJSON, createdAt)
+            SELECT id, analysisAssetId, eventType, sourceType, atomOrdinals, evidenceJSON, scanCohortJSON, createdAt
+            FROM evidence_events
+            """)
+        try exec("DROP TABLE evidence_events")
+        try exec("ALTER TABLE evidence_events_v2 RENAME TO evidence_events")
+        try exec("CREATE INDEX IF NOT EXISTS idx_evidence_events_asset_created ON evidence_events(analysisAssetId, createdAt ASC)")
+        try setSchemaVersion(2)
     }
 
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
@@ -656,7 +698,10 @@ actor AnalysisStore {
         // The asset_pass index above is sufficient for diagnostic listings.
 
         // evidence_events
-        // H11: UNIQUE on (asset, eventType, sourceType, atomOrdinals, cohort).
+        // playhead-fn0: UNIQUE on (asset, eventType, sourceType, atomOrdinals,
+        // evidenceJSON, cohort). This preserves distinct FM refinement spans
+        // that cover the same atom range but differ materially in payload while
+        // keeping exact reruns idempotent.
         // Inserts use INSERT OR IGNORE for silent idempotent dedup.
         //
         // H-2: evidence events are intentionally NOT FK-linked to
@@ -665,9 +710,10 @@ actor AnalysisStore {
         // `reuseKeyHash` collision (INSERT OR REPLACE), the historical
         // evidence rows remain for audit purposes. Idempotency of re-runs
         // is handled by the UNIQUE(asset, eventType, sourceType,
-        // atomOrdinals, scanCohortJSON) constraint plus INSERT OR IGNORE:
-        // a second run with the same cohort silently dedups, while a new
-        // transcriptVersion or cohort naturally appends.
+        // atomOrdinals, evidenceJSON, scanCohortJSON) constraint plus
+        // INSERT OR IGNORE: an exact rerun silently dedups, while a new
+        // transcriptVersion, cohort, or materially different FM span
+        // naturally appends.
         try exec("""
             CREATE TABLE IF NOT EXISTS evidence_events (
                 id TEXT PRIMARY KEY,
@@ -678,7 +724,7 @@ actor AnalysisStore {
                 evidenceJSON TEXT NOT NULL,
                 scanCohortJSON TEXT NOT NULL,
                 createdAt REAL NOT NULL,
-                UNIQUE(analysisAssetId, eventType, sourceType, atomOrdinals, scanCohortJSON)
+                UNIQUE(analysisAssetId, eventType, sourceType, atomOrdinals, evidenceJSON, scanCohortJSON)
             )
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_evidence_events_asset_created ON evidence_events(analysisAssetId, createdAt ASC)")
@@ -2272,10 +2318,11 @@ actor AnalysisStore {
 
     /// M2: atomic Pass-B write. Wraps a scan result and its evidence events in
     /// a single `BEGIN IMMEDIATE … COMMIT`. Any thrown error rolls back.
+    @discardableResult
     func recordSemanticScanResult(
         _ result: SemanticScanResult,
         evidenceEvents: [EvidenceEvent]
-    ) throws {
+    ) throws -> [String] {
         try validateScanCohortJSON(result.scanCohortJSON)
         for event in evidenceEvents {
             try validateAtomOrdinalsJSON(event.atomOrdinals)
@@ -2308,17 +2355,23 @@ actor AnalysisStore {
                 // Cached success outranks the incoming non-success row.
                 // The scan write will be a no-op; the evidence write must
                 // be skipped entirely so we don't orphan the rows.
-                return
+                return []
             }
         }
 
         try exec("BEGIN IMMEDIATE")
         do {
+            var persistedEvidenceEventIds: [String] = []
+            var seenEvidenceEventIds: Set<String> = []
             try insertSemanticScanResult(result)
             for event in evidenceEvents {
-                try insertEvidenceEvent(event)
+                if let persistedId = try insertEvidenceEvent(event),
+                   seenEvidenceEventIds.insert(persistedId).inserted {
+                    persistedEvidenceEventIds.append(persistedId)
+                }
             }
             try exec("COMMIT")
+            return persistedEvidenceEventIds
         } catch {
             try? exec("ROLLBACK")
             throw error
@@ -2415,17 +2468,14 @@ actor AnalysisStore {
         atomOrdinals, evidenceJSON, scanCohortJSON, createdAt
         """
 
-    func insertEvidenceEvent(_ event: EvidenceEvent) throws {
+    @discardableResult
+    func insertEvidenceEvent(_ event: EvidenceEvent) throws -> String? {
         try validateAtomOrdinalsJSON(event.atomOrdinals)
         try validateScanCohortJSON(event.scanCohortJSON)
-        // H11/M-4: silent dedup on (asset, eventType, sourceType,
-        // atomOrdinals, scanCohortJSON) via `INSERT OR IGNORE`. The old
-        // implementation did a pre-check SELECT followed by a plain INSERT
-        // — correct under the actor's serialization guarantee but wasteful
-        // and footgun-y if ever lifted out of an actor. The PRIMARY KEY
-        // collision on `id` is handled by a separate probe below so
-        // callers that pass a stale UUID for *new* evidence still get a
-        // loud failure rather than silent overwrite.
+        // playhead-fn0: silent dedup on the exact persisted evidence identity:
+        // (asset, eventType, sourceType, atomOrdinals, evidenceJSON,
+        // scanCohortJSON). Distinct FM spans at the same atom range now both
+        // persist when their bodies differ materially.
         let sql = """
             INSERT OR IGNORE INTO evidence_events
             (id, analysisAssetId, eventType, sourceType, atomOrdinals,
@@ -2443,127 +2493,74 @@ actor AnalysisStore {
         bind(stmt, 7, event.scanCohortJSON)
         bind(stmt, 8, event.createdAt)
         try step(stmt, expecting: SQLITE_DONE)
-
-        if sqlite3_changes(db) == 0 {
-            // The row was ignored. Two legitimate cases:
-            //   1. Natural-key dedup: another row with the same (asset,
-            //      eventType, sourceType, atomOrdinals, scanCohortJSON,
-            //      evidenceJSON) already exists — silent success.
-            //   2. PRIMARY KEY collision with the *same* body — idempotent,
-            //      silent success.
-            //
-            // H-2: the previous implementation compared only the natural
-            // key (asset, eventType, sourceType, atomOrdinals,
-            // scanCohortJSON) and left `evidenceJSON` / `createdAt` out.
-            // A caller re-inserting the same `id` with a different
-            // evidenceJSON got a silent no-op — the stored body stayed
-            // while the caller believed the insert had landed. Fetch the
-            // full stored body and fail loudly on any mismatch.
-            let probe = try prepare("""
-                SELECT eventType, sourceType, atomOrdinals, evidenceJSON,
-                       scanCohortJSON, createdAt, analysisAssetId
-                FROM evidence_events
-                WHERE id = ?
-                LIMIT 1
-                """)
-            defer { sqlite3_finalize(probe) }
-            bind(probe, 1, event.id)
-
-            if sqlite3_step(probe) == SQLITE_ROW {
-                // Compare every persisted column against the incoming
-                // event. Any difference = caller reused an id with a
-                // different body, which is never legitimate.
-                let storedEventType = optionalText(probe, 0) ?? ""
-                let storedSourceType = optionalText(probe, 1) ?? ""
-                let storedAtomOrdinals = optionalText(probe, 2) ?? ""
-                let storedEvidenceJSON = optionalText(probe, 3) ?? ""
-                let storedScanCohortJSON = optionalText(probe, 4) ?? ""
-                // Fix #7: `createdAt` is metadata, not part of the logical
-                // identity of an evidence event. Float-equality on
-                // `timeIntervalSince1970` is fragile across retry calls
-                // that regenerate `Date()` (sub-microsecond drift between
-                // `CFAbsoluteTimeGetCurrent` → `Date()` → `Double` can
-                // fail `==`). The stored value is still fetched here for
-                // potential logging/debugging but is deliberately
-                // excluded from the body-match comparison.
-                _ = sqlite3_column_double(probe, 5)
-                let storedAnalysisAssetId = optionalText(probe, 6) ?? ""
-
-                let bodyMatches =
-                    storedAnalysisAssetId == event.analysisAssetId &&
-                    storedEventType == event.eventType &&
-                    storedSourceType == event.sourceType.rawValue &&
-                    storedAtomOrdinals == event.atomOrdinals &&
-                    storedEvidenceJSON == event.evidenceJSON &&
-                    storedScanCohortJSON == event.scanCohortJSON
-
-                if !bodyMatches {
-                    throw AnalysisStoreError.evidenceEventBodyMismatch(id: event.id)
-                }
-                // Body matches — idempotent re-insert. Fall through silently.
-                return
-            }
-
-            // No row with this id. The ignore must be from the natural-key
-            // dedup path: another row with the same (asset, eventType,
-            // sourceType, atomOrdinals, scanCohortJSON) already exists.
-            //
-            // bd-1tl: previously (H3-1) this branch threw
-            // `evidenceEventBodyMismatch` whenever the existing row's
-            // `evidenceJSON` differed from the incoming body. The intent was
-            // to surface "caller generated a fresh id for the same logical
-            // row but mutated the body" bugs loudly. In practice the on-
-            // device run on iOS 26.4 (2026-04-07) showed the FM legitimately
-            // produces multiple `RefinedAdSpan` entries pointing at the
-            // SAME `firstAtomOrdinal..lastAtomOrdinal` range across windows
-            // (overlapping zoom plans, same line range refined twice with
-            // different `commercialIntent`/`certainty`). The natural key
-            // collides because `atomOrdinals` is identical, but the bodies
-            // intentionally differ — and the H3-1 throw aborted the entire
-            // backfill job at the FIRST such collision, persisting zero
-            // rows. The whole point of natural-key dedup is to be silent
-            // when the natural key already represents the row.
-            //
-            // The id-based probe above still catches PRIMARY KEY reuse with
-            // a mutated body (the evidenceEventBodyMismatch case), which
-            // remains the correct contract for callers reusing a stable id.
-            // The natural-key path now silently dedupes. We log a warning
-            // when the bodies differ so operators retain visibility — the
-            // case is semantically "two distinct refinements collapse onto
-            // one row" and is worth noticing in telemetry, but it must
-            // never abort persistence.
-            let naturalProbe = try prepare("""
-                SELECT id, evidenceJSON
-                FROM evidence_events
-                WHERE analysisAssetId = ?
-                  AND eventType = ?
-                  AND sourceType = ?
-                  AND atomOrdinals = ?
-                  AND scanCohortJSON = ?
-                LIMIT 1
-                """)
-            defer { sqlite3_finalize(naturalProbe) }
-            bind(naturalProbe, 1, event.analysisAssetId)
-            bind(naturalProbe, 2, event.eventType)
-            bind(naturalProbe, 3, event.sourceType.rawValue)
-            bind(naturalProbe, 4, event.atomOrdinals)
-            bind(naturalProbe, 5, event.scanCohortJSON)
-
-            if sqlite3_step(naturalProbe) == SQLITE_ROW {
-                let existingId = optionalText(naturalProbe, 0) ?? ""
-                let existingBody = optionalText(naturalProbe, 1) ?? ""
-                if existingBody != event.evidenceJSON {
-                    logger.warning(
-                        "evidence_events natural-key dedup with body drift: existingId=\(existingId, privacy: .public) incomingId=\(event.id, privacy: .public) eventType=\(event.eventType, privacy: .public) atomOrdinals=\(event.atomOrdinals, privacy: .public)"
-                    )
-                }
-                // Body matches OR drifts: either way the natural key already
-                // represents this logical row. Silent dedup.
-            }
-            // No natural-key row either: extremely defensive fall-through
-            // (shouldn't happen if INSERT OR IGNORE reported 0 changes);
-            // return silently to preserve legacy behavior.
+        if sqlite3_changes(db) > 0 {
+            return event.id
         }
+
+        // The row was ignored. Two legitimate cases remain:
+        //   1. PRIMARY KEY collision with the *same* body — idempotent.
+        //   2. Exact natural-key dedup where another row with the same
+        //      persisted body already exists under the 6-column UNIQUE key.
+        let probe = try prepare("""
+            SELECT eventType, sourceType, atomOrdinals, evidenceJSON,
+                   scanCohortJSON, createdAt, analysisAssetId
+            FROM evidence_events
+            WHERE id = ?
+            LIMIT 1
+            """)
+        defer { sqlite3_finalize(probe) }
+        bind(probe, 1, event.id)
+
+        if sqlite3_step(probe) == SQLITE_ROW {
+            let storedEventType = optionalText(probe, 0) ?? ""
+            let storedSourceType = optionalText(probe, 1) ?? ""
+            let storedAtomOrdinals = optionalText(probe, 2) ?? ""
+            let storedEvidenceJSON = optionalText(probe, 3) ?? ""
+            let storedScanCohortJSON = optionalText(probe, 4) ?? ""
+            _ = sqlite3_column_double(probe, 5)
+            let storedAnalysisAssetId = optionalText(probe, 6) ?? ""
+
+            let bodyMatches =
+                storedAnalysisAssetId == event.analysisAssetId &&
+                storedEventType == event.eventType &&
+                storedSourceType == event.sourceType.rawValue &&
+                storedAtomOrdinals == event.atomOrdinals &&
+                storedEvidenceJSON == event.evidenceJSON &&
+                storedScanCohortJSON == event.scanCohortJSON
+
+            if !bodyMatches {
+                throw AnalysisStoreError.evidenceEventBodyMismatch(id: event.id)
+            }
+            return event.id
+        }
+
+        let naturalProbe = try prepare("""
+            SELECT id
+            FROM evidence_events
+            WHERE analysisAssetId = ?
+              AND eventType = ?
+              AND sourceType = ?
+              AND atomOrdinals = ?
+              AND evidenceJSON = ?
+              AND scanCohortJSON = ?
+            LIMIT 1
+            """)
+        defer { sqlite3_finalize(naturalProbe) }
+        bind(naturalProbe, 1, event.analysisAssetId)
+        bind(naturalProbe, 2, event.eventType)
+        bind(naturalProbe, 3, event.sourceType.rawValue)
+        bind(naturalProbe, 4, event.atomOrdinals)
+        bind(naturalProbe, 5, event.evidenceJSON)
+        bind(naturalProbe, 6, event.scanCohortJSON)
+
+        if sqlite3_step(naturalProbe) == SQLITE_ROW {
+            return optionalText(naturalProbe, 0) ?? event.id
+        }
+
+        logger.error(
+            "evidence_events insert ignored without matching stored row: id=\(event.id, privacy: .public) eventType=\(event.eventType, privacy: .public)"
+        )
+        return nil
     }
 
     func fetchEvidenceEvents(analysisAssetId: String) throws -> [EvidenceEvent] {

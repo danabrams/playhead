@@ -114,17 +114,22 @@ actor FoundationModelsFeedbackStore {
 
     /// Returns all captured attachment file URLs in chronological order.
     func capturedAttachmentURLs() -> [URL] {
-        capturedURLs
+        refreshCapturedURLsFromDisk()
+        return capturedURLs
     }
 
     /// Removes captured attachments from disk and from the in-memory list.
     /// Errors are reported per-file via the logger but otherwise swallowed —
     /// the in-memory list is always cleared so the UI never gets stuck.
     func clearCapturedAttachments() {
+        refreshCapturedURLsFromDisk()
         for url in capturedURLs {
             do {
                 try fileManager.removeItem(at: url)
             } catch {
+                if let cocoaError = error as? CocoaError, cocoaError.code == .fileNoSuchFile {
+                    continue
+                }
                 logger.error(
                     "fm.feedback.clear_failed path=\(url.path, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
                 )
@@ -172,6 +177,42 @@ actor FoundationModelsFeedbackStore {
             )
         }
         didEnsureDirectory = true
+    }
+
+    /// Rebuild the in-memory URL cache from the on-disk attachments.
+    /// The directory is the source of truth so a new store instance after
+    /// relaunch can enumerate attachments captured by a previous process.
+    private func refreshCapturedURLsFromDisk() {
+        do {
+            guard fileManager.fileExists(atPath: directory.path) else {
+                capturedURLs = []
+                return
+            }
+            let urls = try fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )
+            let filtered = urls.filter { url in
+                guard url.lastPathComponent.hasSuffix(".feedbackAttachment") else { return false }
+                let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
+                return values?.isRegularFile ?? false
+            }
+            capturedURLs = filtered.sorted { lhs, rhs in
+                let lhsDate = try? lhs.resourceValues(forKeys: [.creationDateKey]).creationDate
+                let rhsDate = try? rhs.resourceValues(forKeys: [.creationDateKey]).creationDate
+                switch (lhsDate, rhsDate) {
+                case let (lhsDate?, rhsDate?) where lhsDate != rhsDate:
+                    return lhsDate < rhsDate
+                default:
+                    return lhs.lastPathComponent < rhs.lastPathComponent
+                }
+            }
+        } catch {
+            logger.error(
+                "fm.feedback.refresh_failed path=\(self.directory.path, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+            )
+        }
     }
 
     private func makeFilename(kind: CaptureKind, windowContext: String) -> String {

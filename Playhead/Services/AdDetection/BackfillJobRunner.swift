@@ -406,7 +406,28 @@ actor BackfillJobRunner {
             scanResultIds.append(result.id)
         }
 
-        if coarse.status != .success,
+        if !coarse.failedWindowStatuses.isEmpty {
+            let coarsePlans = try await classifier.planPassA(segments: inputs.segments)
+            let succeededPlanIndices = Set(
+                coarse.windows.compactMap { window in
+                    coarsePlans.first(where: { plan in
+                        Set(window.lineRefs).isSubset(of: Set(plan.lineRefs))
+                    })?.windowIndex
+                }
+            )
+            let failedPlans = coarsePlans.filter { !succeededPlanIndices.contains($0.windowIndex) }
+            for (plan, status) in zip(failedPlans, coarse.failedWindowStatuses) {
+                if let failureResult = makeCoarseFailureScanResult(
+                    plan: plan,
+                    inputs: inputs,
+                    status: status,
+                    latencyMs: coarse.latencyMillis
+                ) {
+                    try await store.insertSemanticScanResult(failureResult)
+                    scanResultIds.append(failureResult.id)
+                }
+            }
+        } else if coarse.status != .success,
            coarse.windows.isEmpty,
            let failureResult = makeFailureScanResult(
                 scanPass: "passA",
@@ -447,9 +468,28 @@ actor BackfillJobRunner {
                     // written atomically. The store's batch API wraps both in
                     // `BEGIN IMMEDIATE … COMMIT` with rollback on failure, so
                     // a crash mid-write cannot leave orphan scan rows.
-                    try await store.recordSemanticScanResult(result, evidenceEvents: events)
+                    let persistedEventIds = try await store.recordSemanticScanResult(
+                        result,
+                        evidenceEvents: events
+                    )
                     scanResultIds.append(result.id)
-                    evidenceEventIds.append(contentsOf: events.map(\.id))
+                    evidenceEventIds.append(contentsOf: persistedEventIds)
+                }
+
+                if refinement.status == .success, !refinement.failedWindowStatuses.isEmpty {
+                    let succeededWindowIndices = Set(refinement.windows.map(\.windowIndex))
+                    let failedPlans = zoomPlans.filter { !succeededWindowIndices.contains($0.windowIndex) }
+                    for (plan, status) in zip(failedPlans, refinement.failedWindowStatuses) {
+                        if let failureResult = makeRefinementFailureScanResult(
+                            plan: plan,
+                            inputs: inputs,
+                            status: status,
+                            latencyMs: refinement.latencyMillis
+                        ) {
+                            try await store.insertSemanticScanResult(failureResult)
+                            scanResultIds.append(failureResult.id)
+                        }
+                    }
                 }
 
                 if refinement.status != .success,
@@ -516,10 +556,27 @@ actor BackfillJobRunner {
     nonisolated static func makeFailureScanResultIdForTesting(
         assetId: String,
         transcriptVersion: String,
-        pass: String
+        pass: String,
+        windowKey: String? = nil
     ) -> String {
-        let canonical = "asset=\(assetId)|version=\(transcriptVersion)|pass=\(pass)|kind=failure"
+        let kind = windowKey.map { "failure|\($0)" } ?? "failure"
+        let canonical = "asset=\(assetId)|version=\(transcriptVersion)|pass=\(pass)|kind=\(kind)"
         return hashedId(prefix: "scan", canonical: canonical)
+    }
+
+    nonisolated private static func makeEvidenceEventId(
+        assetId: String,
+        transcriptVersion: String,
+        eventType: String,
+        sourceType: EvidenceSourceType,
+        atomOrdinals: String,
+        evidenceJSON: String,
+        scanCohortJSON: String
+    ) -> String {
+        let canonical =
+            "asset=\(assetId)|version=\(transcriptVersion)|event=\(eventType)|source=\(sourceType.rawValue)|" +
+            "ordinals=\(atomOrdinals)|evidence=\(evidenceJSON)|cohort=\(scanCohortJSON)"
+        return hashedId(prefix: "evt", canonical: canonical)
     }
 
     /// R7-Fix11: stable id for backfill jobs. Mirrors the scan-result
@@ -687,7 +744,8 @@ actor BackfillJobRunner {
         attemptedSegments: [AdTranscriptSegment],
         inputs: AssetInputs,
         status: SemanticScanStatus,
-        latencyMs: Double
+        latencyMs: Double,
+        windowKey: String? = nil
     ) -> SemanticScanResult? {
         guard let range = attemptedRange(for: attemptedSegments) else {
             return nil
@@ -696,7 +754,8 @@ actor BackfillJobRunner {
             id: Self.makeFailureScanResultIdForTesting(
                 assetId: inputs.analysisAssetId,
                 transcriptVersion: inputs.transcriptVersion,
-                pass: scanPass
+                pass: scanPass,
+                windowKey: windowKey
             ),
             analysisAssetId: inputs.analysisAssetId,
             windowFirstAtomOrdinal: range.firstAtomOrdinal,
@@ -716,6 +775,40 @@ actor BackfillJobRunner {
             prewarmHit: false,
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion
+        )
+    }
+
+    private func makeRefinementFailureScanResult(
+        plan: RefinementWindowPlan,
+        inputs: AssetInputs,
+        status: SemanticScanStatus,
+        latencyMs: Double
+    ) -> SemanticScanResult? {
+        let attemptedSegments = inputs.segments.filter { plan.lineRefs.contains($0.segmentIndex) }
+        return makeFailureScanResult(
+            scanPass: "passB",
+            attemptedSegments: attemptedSegments,
+            inputs: inputs,
+            status: status,
+            latencyMs: latencyMs,
+            windowKey: "window=\(plan.windowIndex)"
+        )
+    }
+
+    private func makeCoarseFailureScanResult(
+        plan: CoarsePassWindowPlan,
+        inputs: AssetInputs,
+        status: SemanticScanStatus,
+        latencyMs: Double
+    ) -> SemanticScanResult? {
+        let attemptedSegments = inputs.segments.filter { plan.lineRefs.contains($0.segmentIndex) }
+        return makeFailureScanResult(
+            scanPass: "passA",
+            attemptedSegments: attemptedSegments,
+            inputs: inputs,
+            status: status,
+            latencyMs: latencyMs,
+            windowKey: "window=\(plan.windowIndex)"
         )
     }
 
@@ -756,7 +849,8 @@ actor BackfillJobRunner {
         jobId: String
     ) -> [EvidenceEvent] {
         var events: [EvidenceEvent] = []
-        for (spanOffset, span) in windowOutput.spans.enumerated() {
+        var seenEventIds = Set<String>()
+        for span in windowOutput.spans {
             // Store validator `validateAtomOrdinalsJSON` requires a JSON array of
             // integers. Previously we wrote the comma-joined form ("1,2,3") which
             // the validator rejected, causing every refinement-pass evidence
@@ -780,11 +874,25 @@ actor BackfillJobRunner {
                 // decision without recomputing it.
                 memoryWriteEligible: span.memoryWriteEligible
             )
-            let evidenceJSON = (try? JSONEncoder().encode(payload))
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let evidenceJSON = (try? encoder.encode(payload))
                 .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            let eventId = Self.makeEvidenceEventId(
+                assetId: inputs.analysisAssetId,
+                transcriptVersion: inputs.transcriptVersion,
+                eventType: "fm.spanRefinement",
+                sourceType: .fm,
+                atomOrdinals: atomOrdinals,
+                evidenceJSON: evidenceJSON,
+                scanCohortJSON: scanCohortJSON
+            )
+            guard seenEventIds.insert(eventId).inserted else {
+                continue
+            }
             events.append(
                 EvidenceEvent(
-                    id: "evt-\(jobId)-\(windowOutput.windowIndex)-\(spanOffset)-\(UUID().uuidString.prefix(8))",
+                    id: eventId,
                     analysisAssetId: inputs.analysisAssetId,
                     eventType: "fm.spanRefinement",
                     sourceType: .fm,

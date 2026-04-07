@@ -858,8 +858,7 @@ struct FoundationModelClassifier: Sendable {
             // minted, freshly prewarmed `LanguageModelSession`. See the
             // comment block above the loop for the on-device evidence
             // that motivated removing the shared-session branch.
-            let perWindowBox = SessionBox(session: await runtime.makeSession())
-            await perWindowBox.prewarm(Self.promptPrefix)
+            let perWindowBox = await makePrewarmedSessionBox(promptPrefix: Self.promptPrefix)
             switch await coarseResponses(
                 for: plan,
                 sessionBox: perWindowBox,
@@ -910,8 +909,8 @@ struct FoundationModelClassifier: Sendable {
                     )
                     continue
                 }
-                // C4/H2: Other failures (refusal, guardrail, decoding,
-                // cancellation) still abort the pass with partial results.
+                // C4/H2: Other failures (guardrail, decoding, cancellation)
+                // still abort the pass with partial results.
                 return FMCoarseScanOutput(
                     status: status,
                     windows: windows,
@@ -924,17 +923,14 @@ struct FoundationModelClassifier: Sendable {
 
         // bd-34e Fix B v3: top-level status remains `.success` whenever at
         // least one window produced output, even if other windows were
-        // abandoned by the smart-shrink loop. The runner can inspect
-        // `failedWindowStatuses` to surface partial failures in the UI
-        // and persist per-window scan rows. If EVERY window failed we
-        // surface the last failure status so the caller still sees an
-        // unrecoverable error.
-        let topLevelStatus: SemanticScanStatus
-        if windows.isEmpty, let lastFailure = failedWindowStatuses.last {
-            topLevelStatus = lastFailure
-        } else {
-            topLevelStatus = .success
-        }
+        // abandoned by the graceful path. If EVERY window failed we
+        // preserve the homogeneous graceful status (`.refusal` or
+        // `.exceededContextWindow`) only when *every* failed window
+        // matches; mixed graceful failures collapse to `.failedTransient`
+        // so the result is deterministic and order-independent.
+        let topLevelStatus = windows.isEmpty
+            ? Self.aggregateGracefulFailureStatus(failedWindowStatuses)
+            : .success
 
         return FMCoarseScanOutput(
             status: topLevelStatus,
@@ -1177,8 +1173,7 @@ struct FoundationModelClassifier: Sendable {
             // freshly prewarmed `LanguageModelSession`. See the comment
             // block above the loop for the on-device evidence that
             // motivated removing the shared-session branch.
-            let perWindowBox = SessionBox(session: await runtime.makeSession())
-            await perWindowBox.prewarm(Self.refinementPromptPrefix)
+            let perWindowBox = await makePrewarmedSessionBox(promptPrefix: Self.refinementPromptPrefix)
             let outcome = await refinementResponse(
                 for: plan,
                 sessionBox: perWindowBox,
@@ -1250,15 +1245,12 @@ struct FoundationModelClassifier: Sendable {
         // bd-3h2 / bd-34e refinement: top-level status remains `.success`
         // whenever at least one window produced output, even if other
         // windows were abandoned by the graceful refusal path. If EVERY
-        // window failed we surface the last failure status so the caller
-        // still sees an unrecoverable error. Mirrors the coarse-pass
-        // `topLevelStatus` computation.
-        let topLevelStatus: SemanticScanStatus
-        if windows.isEmpty, let lastFailure = failedWindowStatuses.last {
-            topLevelStatus = lastFailure
-        } else {
-            topLevelStatus = .success
-        }
+        // window failed we preserve the refusal status only when every
+        // failed window was a refusal; mixed graceful failures collapse
+        // to `.failedTransient` just like the coarse pass.
+        let topLevelStatus = windows.isEmpty
+            ? Self.aggregateGracefulFailureStatus(failedWindowStatuses)
+            : .success
 
         return FMRefinementScanOutput(
             status: topLevelStatus,
@@ -1267,6 +1259,22 @@ struct FoundationModelClassifier: Sendable {
             prewarmHit: prewarmHit,
             failedWindowStatuses: failedWindowStatuses
         )
+    }
+
+    private func makePrewarmedSessionBox(promptPrefix: String) async -> SessionBox {
+        let sessionBox = SessionBox(session: await runtime.makeSession())
+        await sessionBox.prewarm(promptPrefix)
+        return sessionBox
+    }
+
+    private static func aggregateGracefulFailureStatus(
+        _ failedWindowStatuses: [SemanticScanStatus]
+    ) -> SemanticScanStatus {
+        guard let first = failedWindowStatuses.first else { return .success }
+        if failedWindowStatuses.dropFirst().allSatisfy({ $0 == first }) {
+            return first
+        }
+        return .failedTransient
     }
 
     // H14: Lines are prefixed `L<n>>` (not `<n>:`) so the model cannot be
@@ -1990,7 +1998,6 @@ struct FoundationModelClassifier: Sendable {
                         initialPlan: plan,
                         initialError: error,
                         lineRefLookup: lineRefLookup,
-                        sessionBox: sessionBox,
                         clock: clock,
                         windowIndex: windowIndex,
                         totalWindows: totalWindows
@@ -2012,14 +2019,18 @@ struct FoundationModelClassifier: Sendable {
                 }
                 return await runCoarseRetry(
                     retryPlans: retryPlans,
-                    sessionBox: sessionBox,
-                    clock: clock
+                    clock: clock,
+                    windowIndex: windowIndex,
+                    totalWindows: totalWindows
                 )
             case .backoffAndRetry:
-                // Single backoff retry on the same plan.
+                // Single backoff retry on a fresh session so the retry
+                // cannot inherit any conversation state from the failed
+                // attempt.
                 try? await Task.sleep(nanoseconds: 50_000_000)
+                let retrySessionBox = await makePrewarmedSessionBox(promptPrefix: Self.promptPrefix)
                 do {
-                    let response = try await sessionBox.respondCoarse(plan.prompt)
+                    let response = try await retrySessionBox.respondCoarse(plan.prompt)
                     let screening = sanitize(
                         schema: response,
                         validLineRefs: Set(plan.lineRefs)
@@ -2036,7 +2047,27 @@ struct FoundationModelClassifier: Sendable {
                         )
                     ])
                 } catch {
-                    return .failure(SemanticScanStatus.from(error: error))
+                    let retryStatus = SemanticScanStatus.from(error: error)
+                    reportCoarsePassErrorIfNeeded(
+                        plan: plan,
+                        error: error,
+                        status: retryStatus,
+                        windowIndex: windowIndex,
+                        totalWindows: totalWindows
+                    )
+                    reportCoarsePassRefusalDetailIfNeeded(
+                        plan: plan,
+                        error: error,
+                        windowIndex: windowIndex,
+                        totalWindows: totalWindows
+                    )
+                    await captureFeedbackForCoarseRefusalIfNeeded(
+                        error: error,
+                        sessionBox: retrySessionBox,
+                        windowIndex: windowIndex,
+                        totalWindows: totalWindows
+                    )
+                    return .failure(retryStatus)
                 }
             default:
                 return .failure(status)
@@ -2046,16 +2077,18 @@ struct FoundationModelClassifier: Sendable {
 
     private func runCoarseRetry(
         retryPlans: [CoarsePassWindowPlan],
-        sessionBox: SessionBox,
-        clock: ContinuousClock
+        clock: ContinuousClock,
+        windowIndex: Int,
+        totalWindows: Int
     ) async -> CoarseResponseOutcome {
         var retryOutputs: [FMCoarseWindowOutput] = []
         retryOutputs.reserveCapacity(retryPlans.count)
 
         for retryPlan in retryPlans {
             let retryStart = clock.now
+            let retrySessionBox = await makePrewarmedSessionBox(promptPrefix: Self.promptPrefix)
             do {
-                let response = try await sessionBox.respondCoarse(retryPlan.prompt)
+                let response = try await retrySessionBox.respondCoarse(retryPlan.prompt)
                 let screening = sanitize(
                     schema: response,
                     validLineRefs: Set(retryPlan.lineRefs)
@@ -2072,7 +2105,27 @@ struct FoundationModelClassifier: Sendable {
                     )
                 )
             } catch {
-                return .failure(SemanticScanStatus.from(error: error))
+                let retryStatus = SemanticScanStatus.from(error: error)
+                reportCoarsePassErrorIfNeeded(
+                    plan: retryPlan,
+                    error: error,
+                    status: retryStatus,
+                    windowIndex: windowIndex,
+                    totalWindows: totalWindows
+                )
+                reportCoarsePassRefusalDetailIfNeeded(
+                    plan: retryPlan,
+                    error: error,
+                    windowIndex: windowIndex,
+                    totalWindows: totalWindows
+                )
+                await captureFeedbackForCoarseRefusalIfNeeded(
+                    error: error,
+                    sessionBox: retrySessionBox,
+                    windowIndex: windowIndex,
+                    totalWindows: totalWindows
+                )
+                return .failure(retryStatus)
             }
         }
 
@@ -2099,7 +2152,6 @@ struct FoundationModelClassifier: Sendable {
         initialPlan: CoarsePassWindowPlan,
         initialError: Error,
         lineRefLookup: [Int: AdTranscriptSegment],
-        sessionBox: SessionBox,
         clock: ContinuousClock,
         windowIndex: Int,
         totalWindows: Int
@@ -2136,8 +2188,9 @@ struct FoundationModelClassifier: Sendable {
             extractedAtLeastOnce = true
 
             let retryStart = clock.now
+            let retrySessionBox = await makePrewarmedSessionBox(promptPrefix: Self.promptPrefix)
             do {
-                let response = try await sessionBox.respondCoarse(smartPlan.prompt)
+                let response = try await retrySessionBox.respondCoarse(smartPlan.prompt)
                 let screening = sanitize(
                     schema: response,
                     validLineRefs: Set(smartPlan.lineRefs)
@@ -2178,6 +2231,25 @@ struct FoundationModelClassifier: Sendable {
                 // and let the catch arm in `coarseResponses` decide how
                 // to surface it. We treat this as "succeeded with a
                 // failure outcome" so the caller propagates it.
+                reportCoarsePassErrorIfNeeded(
+                    plan: smartPlan,
+                    error: error,
+                    status: retryStatus,
+                    windowIndex: windowIndex,
+                    totalWindows: totalWindows
+                )
+                reportCoarsePassRefusalDetailIfNeeded(
+                    plan: smartPlan,
+                    error: error,
+                    windowIndex: windowIndex,
+                    totalWindows: totalWindows
+                )
+                await captureFeedbackForCoarseRefusalIfNeeded(
+                    error: error,
+                    sessionBox: retrySessionBox,
+                    windowIndex: windowIndex,
+                    totalWindows: totalWindows
+                )
                 reportCoarseSmartShrinkOutcome(
                     plan: smartPlan,
                     iteration: iteration,
@@ -2280,8 +2352,9 @@ struct FoundationModelClassifier: Sendable {
                 ) else {
                     return .failure(status)
                 }
+                let retrySessionBox = await makePrewarmedSessionBox(promptPrefix: Self.refinementPromptPrefix)
                 do {
-                    let response = try await sessionBox.respondRefinement(retryPlan.prompt)
+                    let response = try await retrySessionBox.respondRefinement(retryPlan.prompt)
                     return .success(plan: retryPlan, schema: response)
                 } catch {
                     let retryStatus = SemanticScanStatus.from(error: error)
@@ -2295,7 +2368,7 @@ struct FoundationModelClassifier: Sendable {
                     await captureFeedbackForRefinementErrorIfNeeded(
                         status: retryStatus,
                         error: error,
-                        sessionBox: sessionBox,
+                        sessionBox: retrySessionBox,
                         plan: retryPlan,
                         stage: .shrinkRetry
                     )
@@ -2303,8 +2376,9 @@ struct FoundationModelClassifier: Sendable {
                 }
             case .backoffAndRetry:
                 try? await Task.sleep(nanoseconds: 50_000_000)
+                let retrySessionBox = await makePrewarmedSessionBox(promptPrefix: Self.refinementPromptPrefix)
                 do {
-                    let response = try await sessionBox.respondRefinement(plan.prompt)
+                    let response = try await retrySessionBox.respondRefinement(plan.prompt)
                     return .success(plan: plan, schema: response)
                 } catch {
                     let retryStatus = SemanticScanStatus.from(error: error)
@@ -2318,7 +2392,7 @@ struct FoundationModelClassifier: Sendable {
                     await captureFeedbackForRefinementErrorIfNeeded(
                         status: retryStatus,
                         error: error,
-                        sessionBox: sessionBox,
+                        sessionBox: retrySessionBox,
                         plan: plan,
                         stage: .backoffRetry
                     )

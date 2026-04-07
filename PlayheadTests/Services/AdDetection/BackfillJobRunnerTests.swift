@@ -264,6 +264,7 @@ struct BackfillJobRunnerTests {
         let evidence = try await store.fetchEvidenceEvents(analysisAssetId: "asset-runner")
         #expect(!evidence.isEmpty, "refinement pass must persist evidence_events rows")
         #expect(result.evidenceEventIds.count == evidence.count)
+        #expect(Set(result.evidenceEventIds) == Set(evidence.map(\.id)))
         // Every persisted row's atomOrdinals must be a JSON array parseable as [Int].
         for event in evidence {
             let data = Data(event.atomOrdinals.utf8)
@@ -1362,11 +1363,10 @@ struct BackfillJobRunnerTests {
         // (`commercialIntent`, `certainty`). Both spans flow through
         // `BackfillJobRunner.makeEvidenceEvents` and produce evidence events
         // with the same atomOrdinals JSON, the same scanCohortJSON, and
-        // different evidenceJSON. Pre-bd-1tl this aborted the entire
-        // refinement-pass batch with `evidenceEventBodyMismatch` and
-        // persisted ZERO scan rows + ZERO evidence rows. Post-bd-1tl the
-        // natural-key dedup is silent: the scan row commits and the
-        // first-written evidence row survives.
+        // different evidenceJSON. Pre-playhead-fn0 this aborted the entire
+        // refinement-pass batch or silently collapsed the second span.
+        // Post-fix the scan row commits and BOTH distinct evidence rows
+        // survive.
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
         let fmRuntime = TestFMRuntime(
@@ -1435,6 +1435,212 @@ struct BackfillJobRunnerTests {
         )
         #expect(passB.count >= 1, "passB scan row must persist; pre-fix this was 0")
         let evidence = try await store.fetchEvidenceEvents(analysisAssetId: "asset-runner")
-        #expect(evidence.count >= 1, "at least one evidence row must persist after natural-key dedup")
+        #expect(evidence.count == 2, "distinct same-range evidence rows must both persist")
+        #expect(result.evidenceEventIds.count == 2)
+        #expect(Set(result.evidenceEventIds) == Set(evidence.map(\.id)))
+    }
+
+    @Test("playhead-fn0: partial refinement refusals persist failure rows alongside surviving success rows")
+    func partialRefinementRefusalsPersistFailureRows() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        let segments = makeFMSegments(
+            analysisAssetId: "asset-runner",
+            transcriptVersion: "tx-runner-v1",
+            lines: [
+                (0, 8, "The hosts catch up before the break."),
+                (8, 16, "This episode is brought to you by ExampleCo."),
+                (16, 24, "Use code SAVE for twenty percent off.")
+            ]
+        )
+        let inputs = BackfillJobRunner.AssetInputs(
+            analysisAssetId: "asset-runner",
+            podcastId: "podcast-runner",
+            segments: segments,
+            evidenceCatalog: EvidenceCatalogBuilder.build(
+                atoms: segments.flatMap(\.atoms),
+                analysisAssetId: "asset-runner",
+                transcriptVersion: "tx-runner-v1"
+            ),
+            transcriptVersion: "tx-runner-v1",
+            plannerContext: CoveragePlannerContext(
+                observedEpisodeCount: 0,
+                stablePrecision: false,
+                isFirstEpisodeAfterCohortInvalidation: false,
+                recallDegrading: false,
+                sponsorDriftDetected: false,
+                auditMissDetected: false,
+                episodesSinceLastFullRescan: 0,
+                periodicFullRescanIntervalEpisodes: 10
+            )
+        )
+
+        let runtime = WindowedTestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [1],
+                        certainty: .strong
+                    )
+                ),
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [2],
+                        certainty: .strong
+                    )
+                )
+            ],
+            refinementResponses: [
+                RefinementWindowSchema(spans: [])
+            ],
+            refinementFailures: [
+                .refusal,
+                nil
+            ]
+        ).runtime
+
+        let runner = BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(
+                runtime: runtime,
+                config: .init(
+                    safetyMarginTokens: 5,
+                    coarseMaximumResponseTokens: 6,
+                    refinementMaximumResponseTokens: 16
+                )
+            ),
+            coveragePlanner: CoveragePlanner(),
+            mode: .shadow,
+            capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+            batteryLevelProvider: { 1.0 },
+            scanCohortJSON: makeTestScanCohortJSON()
+        )
+
+        let result = try await runner.runPendingBackfill(for: inputs)
+
+        let passB = try await store.fetchSemanticScanResults(
+            analysisAssetId: "asset-runner",
+            scanPass: "passB"
+        )
+        #expect(passB.count == 2, "expected one surviving success row and one persisted refusal row")
+        #expect(passB.contains { $0.status == .success })
+        #expect(passB.contains { $0.status == .refusal && $0.disposition == .abstain })
+        #expect(result.scanResultIds.count >= 3, "passA rows plus both passB outcomes should be reported")
+    }
+
+    @Test("partial coarse refusals persist failure rows alongside surviving success rows")
+    func partialCoarseRefusalsPersistFailureRows() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        let runtime = WindowedTestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .noAds,
+                    support: nil
+                )
+            ],
+            coarseFailures: [
+                .refusal,
+                nil
+            ]
+        ).runtime
+
+        let runner = BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(
+                runtime: runtime,
+                config: .init(
+                    safetyMarginTokens: 5,
+                    coarseMaximumResponseTokens: 6,
+                    refinementMaximumResponseTokens: 16
+                )
+            ),
+            coveragePlanner: CoveragePlanner(),
+            mode: .shadow,
+            capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+            batteryLevelProvider: { 1.0 },
+            scanCohortJSON: makeTestScanCohortJSON()
+        )
+
+        let result = try await runner.runPendingBackfill(for: makeInputs())
+
+        let passA = try await store.fetchSemanticScanResults(
+            analysisAssetId: "asset-runner",
+            scanPass: "passA"
+        )
+        #expect(passA.count == 2, "expected one surviving success row and one persisted refusal row")
+        #expect(passA.contains { $0.status == .success })
+        #expect(passA.contains { $0.status == .refusal && $0.disposition == .abstain })
+        #expect(result.scanResultIds.count >= 2)
+    }
+}
+
+private actor WindowedTestFMRuntime {
+    private var coarseQueue: [CoarseScreeningSchema]
+    private var refinementQueue: [RefinementWindowSchema]
+    private var coarseFailureQueue: [TestFMRuntimeFailure?]
+    private var refinementFailureQueue: [TestFMRuntimeFailure?]
+
+    init(
+        coarseResponses: [CoarseScreeningSchema] = [],
+        refinementResponses: [RefinementWindowSchema] = [],
+        coarseFailures: [TestFMRuntimeFailure?] = [],
+        refinementFailures: [TestFMRuntimeFailure?] = []
+    ) {
+        self.coarseQueue = coarseResponses
+        self.refinementQueue = refinementResponses
+        self.coarseFailureQueue = coarseFailures
+        self.refinementFailureQueue = refinementFailures
+    }
+
+    nonisolated var runtime: FoundationModelClassifier.Runtime {
+        FoundationModelClassifier.Runtime(
+            availabilityStatus: { _ in nil },
+            contextSize: { 295 },
+            tokenCount: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 5
+            },
+            coarseSchemaTokenCount: { 4 },
+            refinementSchemaTokenCount: { 8 },
+            makeSession: {
+                FoundationModelClassifier.Runtime.Session(
+                    prewarm: { _ in },
+                    respondCoarse: { _ in try await self.nextCoarse() },
+                    respondRefinement: { _ in try await self.nextRefinement() }
+                )
+            }
+        )
+    }
+
+    private func nextCoarse() throws -> CoarseScreeningSchema {
+        if !coarseFailureQueue.isEmpty {
+            let failure = coarseFailureQueue.removeFirst()
+            if let failure {
+                throw failure.error
+            }
+        }
+        if coarseQueue.isEmpty {
+            return CoarseScreeningSchema(disposition: .noAds, support: nil)
+        }
+        return coarseQueue.removeFirst()
+    }
+
+    private func nextRefinement() throws -> RefinementWindowSchema {
+        if !refinementFailureQueue.isEmpty {
+            let failure = refinementFailureQueue.removeFirst()
+            if let failure {
+                throw failure.error
+            }
+        }
+        if refinementQueue.isEmpty {
+            return RefinementWindowSchema(spans: [])
+        }
+        return refinementQueue.removeFirst()
     }
 }
