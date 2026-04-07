@@ -454,6 +454,43 @@ struct FoundationModelClassifier: Sendable {
     private static let fallbackCoarseSchemaTokenEstimate = 128
     private static let fallbackRefinementSchemaTokenEstimate = 256
 
+    /// Diagnostic payload emitted when the refinement pass catches a
+    /// `SemanticScanStatus.decodingFailure` from the Foundation Models session.
+    /// Captures every cheap-to-grab field that could narrow down bd-3h2 (the
+    /// 50% refinement decode failure rate seen on real devices) without
+    /// requiring another on-device benchmark run to reproduce.
+    struct RefinementDecodeFailureDiagnostic: Sendable {
+        let windowIndex: Int
+        let sourceWindowIndex: Int
+        let firstLineRef: Int?
+        let lastLineRef: Int?
+        let lineRefCount: Int
+        let focusClusterCount: Int
+        let promptTokenCount: Int
+        let schemaName: String
+        let stopReason: ZoomStopReason
+        let status: SemanticScanStatus
+        let errorDescription: String
+        let errorDebugDescription: String
+        let retryStage: RetryStage
+
+        enum RetryStage: String, Sendable {
+            case initial
+            case shrinkRetry
+            case backoffRetry
+        }
+    }
+
+    /// Internal test hook so unit tests can observe refinement decode-failure
+    /// diagnostics without scraping `os.Logger`. Mirrors the pattern used by
+    /// `SemanticScanResult.decodeFailureObserver`. Production builds leave it
+    /// nil; invoking it is a no-op.
+    nonisolated(unsafe) static var refinementDecodeFailureObserver: (@Sendable (RefinementDecodeFailureDiagnostic) -> Void)?
+
+    /// Static identifier for the refinement @Generable schema. Used by the
+    /// diagnostic payload so future schema rotations are visible in logs.
+    static let refinementSchemaName = "RefinementWindowSchema"
+
     private let runtime: Runtime
     private let config: Config
     private let logger: Logger
@@ -1331,6 +1368,12 @@ struct FoundationModelClassifier: Sendable {
             return .success(plan: plan, schema: try await sessionBox.respondRefinement(plan.prompt))
         } catch {
             let status = SemanticScanStatus.from(error: error)
+            reportRefinementDecodeFailureIfNeeded(
+                plan: plan,
+                error: error,
+                status: status,
+                retryStage: .initial
+            )
             switch status.retryPolicy {
             case .shrinkWindowAndRetryOnce:
                 guard let retryPlan = await shrunkenRefinementPlanForRetry(
@@ -1343,7 +1386,14 @@ struct FoundationModelClassifier: Sendable {
                     let response = try await sessionBox.respondRefinement(retryPlan.prompt)
                     return .success(plan: retryPlan, schema: response)
                 } catch {
-                    return .failure(SemanticScanStatus.from(error: error))
+                    let retryStatus = SemanticScanStatus.from(error: error)
+                    reportRefinementDecodeFailureIfNeeded(
+                        plan: retryPlan,
+                        error: error,
+                        status: retryStatus,
+                        retryStage: .shrinkRetry
+                    )
+                    return .failure(retryStatus)
                 }
             case .backoffAndRetry:
                 try? await Task.sleep(nanoseconds: 50_000_000)
@@ -1351,12 +1401,74 @@ struct FoundationModelClassifier: Sendable {
                     let response = try await sessionBox.respondRefinement(plan.prompt)
                     return .success(plan: plan, schema: response)
                 } catch {
-                    return .failure(SemanticScanStatus.from(error: error))
+                    let retryStatus = SemanticScanStatus.from(error: error)
+                    reportRefinementDecodeFailureIfNeeded(
+                        plan: plan,
+                        error: error,
+                        status: retryStatus,
+                        retryStage: .backoffRetry
+                    )
+                    return .failure(retryStatus)
                 }
             default:
                 return .failure(status)
             }
         }
+    }
+
+    /// bd-3h2 diagnostic: when a refinement window resolves to
+    /// `SemanticScanStatus.decodingFailure`, emit a structured breadcrumb
+    /// (logger + test observer hook) so the root cause can be investigated
+    /// without having to rerun the on-device benchmark blind. This is
+    /// operational telemetry for a shadow-mode feature, so it logs at
+    /// `.debug` level — loud enough to turn on during investigation, quiet
+    /// enough not to pollute the default stream. All catchable refinement
+    /// paths (initial, shrink retry, backoff retry) route through here so
+    /// every decode failure leaves enough context in the log to triage
+    /// without re-running.
+    private func reportRefinementDecodeFailureIfNeeded(
+        plan: RefinementWindowPlan,
+        error: Error,
+        status: SemanticScanStatus,
+        retryStage: RefinementDecodeFailureDiagnostic.RetryStage
+    ) {
+        guard status == .decodingFailure else { return }
+
+        let diagnostic = RefinementDecodeFailureDiagnostic(
+            windowIndex: plan.windowIndex,
+            sourceWindowIndex: plan.sourceWindowIndex,
+            firstLineRef: plan.lineRefs.first,
+            lastLineRef: plan.lineRefs.last,
+            lineRefCount: plan.lineRefs.count,
+            focusClusterCount: plan.focusClusters.count,
+            promptTokenCount: plan.promptTokenCount,
+            schemaName: Self.refinementSchemaName,
+            stopReason: plan.stopReason,
+            status: status,
+            errorDescription: error.localizedDescription,
+            errorDebugDescription: String(reflecting: error),
+            retryStage: retryStage
+        )
+
+        logger.debug(
+            """
+            fm.classifier.refinement_decode_failure \
+            stage=\(diagnostic.retryStage.rawValue, privacy: .public) \
+            window=\(diagnostic.windowIndex, privacy: .public) \
+            sourceWindow=\(diagnostic.sourceWindowIndex, privacy: .public) \
+            lineRefs=[\(diagnostic.firstLineRef ?? -1, privacy: .public)..\(diagnostic.lastLineRef ?? -1, privacy: .public)] \
+            lineRefCount=\(diagnostic.lineRefCount, privacy: .public) \
+            clusters=\(diagnostic.focusClusterCount, privacy: .public) \
+            promptTokens=\(diagnostic.promptTokenCount, privacy: .public) \
+            schema=\(diagnostic.schemaName, privacy: .public) \
+            stopReason=\(String(describing: diagnostic.stopReason), privacy: .public) \
+            status=\(diagnostic.status.rawValue, privacy: .public) \
+            error=\(diagnostic.errorDescription, privacy: .public) \
+            debug=\(diagnostic.errorDebugDescription, privacy: .public)
+            """
+        )
+
+        Self.refinementDecodeFailureObserver?(diagnostic)
     }
 
     private func shrunkenRefinementPlanForRetry(

@@ -1404,6 +1404,91 @@ struct FoundationModelClassifierTests {
         #expect(snapshot.sessionCount == 1)
     }
 
+    // bd-3h2 diagnostic: refinement decode failures must leave enough
+    // breadcrumbs in the log/test observer to investigate without re-running
+    // the real-device benchmark. The observer hook lets this test run
+    // deterministically without scraping os.Logger output.
+    @available(iOS 26.0, *)
+    @Test("refinement decode failure emits bd-3h2 diagnostic to the observer hook")
+    func refinementDecodeFailureEmitsDiagnostic() async throws {
+        let segments = [
+            makeSegment(index: 7, startTime: 5, endTime: 10, text: "Talk about the sponsor."),
+            makeSegment(index: 8, startTime: 10, endTime: 15, text: "Visit example.com for details.")
+        ]
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 3,
+            sourceWindowIndex: 2,
+            lineRefs: [7, 8],
+            focusLineRefs: [7, 8],
+            focusClusters: [[7, 8]],
+            prompt: """
+            Refine ad spans.
+            Transcript:
+            7: "Talk about the sponsor."
+            8: "Visit example.com for details."
+            Return up to 2 spans.
+            """,
+            promptTokenCount: 42,
+            startTime: 5,
+            endTime: 15,
+            stopReason: .minimumSpan,
+            promptEvidence: []
+        )
+        let recorder = RuntimeRecorder(
+            contextSize: 64,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            // decodingFailure has .simplifySchemaAndRetryOnce policy, which
+            // currently falls through the switch default in refinementResponse.
+            // One failure is enough to trip the initial-stage diagnostic.
+            refinementFailures: [.decodingFailure]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        // Capture observer invocations. The observer is a static hook, so we
+        // restore it in defer to avoid bleeding into sibling tests.
+        let captured = DiagnosticCaptureBox()
+        let previousObserver = FoundationModelClassifier.refinementDecodeFailureObserver
+        FoundationModelClassifier.refinementDecodeFailureObserver = { diagnostic in
+            captured.append(diagnostic)
+        }
+        defer {
+            FoundationModelClassifier.refinementDecodeFailureObserver = previousObserver
+        }
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+
+        #expect(output.status == .decodingFailure)
+        #expect(output.windows.isEmpty)
+
+        let diagnostics = captured.snapshot()
+        #expect(diagnostics.count == 1)
+        let diagnostic = try #require(diagnostics.first)
+        #expect(diagnostic.status == .decodingFailure)
+        #expect(diagnostic.windowIndex == 3)
+        #expect(diagnostic.sourceWindowIndex == 2)
+        #expect(diagnostic.firstLineRef == 7)
+        #expect(diagnostic.lastLineRef == 8)
+        #expect(diagnostic.lineRefCount == 2)
+        #expect(diagnostic.focusClusterCount == 1)
+        #expect(diagnostic.promptTokenCount == 42)
+        #expect(diagnostic.schemaName == FoundationModelClassifier.refinementSchemaName)
+        #expect(diagnostic.retryStage == .initial)
+        // The error's Context debugDescription should survive through
+        // String(reflecting:) so investigators can correlate logs with the
+        // exact call site that threw.
+        #expect(diagnostic.errorDebugDescription.contains("runtime-failure-decodingFailure"))
+    }
+
     @Test("adaptive zoom keeps the Kelly Ripa repeat region when nearby coarse support spans the repeat cluster")
     func kellyRipaRepeatRegression() async throws {
         let segments = buildFixtureSegments()
@@ -2236,6 +2321,26 @@ private func isContiguous(_ values: [Int]) -> Bool {
     }
 }
 
+/// Lock-guarded collector used by the bd-3h2 diagnostic observer test.
+/// The observer closure is `@Sendable` and may be invoked from arbitrary
+/// isolation contexts, so we can't use plain mutable state.
+private final class DiagnosticCaptureBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [FoundationModelClassifier.RefinementDecodeFailureDiagnostic] = []
+
+    func append(_ diagnostic: FoundationModelClassifier.RefinementDecodeFailureDiagnostic) {
+        lock.lock()
+        defer { lock.unlock() }
+        items.append(diagnostic)
+    }
+
+    func snapshot() -> [FoundationModelClassifier.RefinementDecodeFailureDiagnostic] {
+        lock.lock()
+        defer { lock.unlock() }
+        return items
+    }
+}
+
 private actor RuntimeRecorder {
     struct PrewarmCall: Sendable, Equatable {
         let sessionID: Int
@@ -2398,17 +2503,22 @@ private actor RuntimeRecorder {
 private enum RuntimeFailure: Sendable {
     case exceededContextWindow
     case refusal
+    case decodingFailure
 
     var error: Error {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *) {
-            let context = LanguageModelSession.GenerationError.Context(debugDescription: "runtime-failure")
+            let context = LanguageModelSession.GenerationError.Context(
+                debugDescription: "runtime-failure-\(self)"
+            )
             switch self {
             case .exceededContextWindow:
                 return LanguageModelSession.GenerationError.exceededContextWindowSize(context)
             case .refusal:
                 let refusal = LanguageModelSession.GenerationError.Refusal(transcriptEntries: [])
                 return LanguageModelSession.GenerationError.refusal(refusal, context)
+            case .decodingFailure:
+                return LanguageModelSession.GenerationError.decodingFailure(context)
             }
         }
         #endif
