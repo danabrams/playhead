@@ -227,6 +227,26 @@ final class PlayheadRuntime {
                     .fault("Analysis store migration failed — pre-analysis pipeline disabled: \(error)")
                 return  // Don't start the pipeline if tables don't exist
             }
+
+            // bd-200: prune scan rows under stale cohort hashes (locale change,
+            // app upgrade, prompt/schema/plan/normalization revs). Best-effort —
+            // failures are logged but don't block app launch. Must run AFTER
+            // migrate() succeeds but BEFORE any production code reads the store,
+            // and must use the SAME ScanCohort.productionJSON() value the
+            // BackfillJobRunner factory uses so the reuse-cache invariant holds.
+            do {
+                let pruned = try await analysisStore.pruneOrphanedScansForCurrentCohort(
+                    currentScanCohortJSON: ScanCohort.productionJSON()
+                )
+                if pruned > 0 {
+                    Logger(subsystem: "com.playhead", category: "Runtime")
+                        .info("Pruned \(pruned, privacy: .public) orphan scan/evidence rows under prior cohorts")
+                }
+            } catch {
+                Logger(subsystem: "com.playhead", category: "Runtime")
+                    .warning("Cohort orphan prune failed: \(error.localizedDescription, privacy: .public)")
+            }
+
             await downloadManager.setAnalysisWorkScheduler(analysisWorkScheduler)
             await backgroundProcessingService.setPreAnalysisServices(
                 scheduler: analysisWorkScheduler,
