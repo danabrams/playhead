@@ -290,7 +290,8 @@ struct FoundationModelClassifierTests {
         #expect(snapshot.respondCalls.count == 2)
         #expect(Set(snapshot.respondCalls.map(\.sessionID)) == Set([1, 2]))
         #expect(snapshot.sessionCount == 2)
-        // L10: prewarmHit is plumbed honestly when the shared session is used.
+        // L10: prewarmHit remains true when each per-window session is
+        // prewarmed before its first request.
         #expect(output.prewarmHit)
     }
 
@@ -371,17 +372,19 @@ struct FoundationModelClassifierTests {
         #expect(output.status == .success)
         #expect(output.windows.map(\.lineRefs) == [[0, 1], [2, 3]])
         #expect(snapshot.prewarmCalls == [
-            RuntimeRecorder.PrewarmCall(sessionID: 1, promptPrefix: "Classify ad content.")
+            RuntimeRecorder.PrewarmCall(sessionID: 1, promptPrefix: "Classify ad content."),
+            RuntimeRecorder.PrewarmCall(sessionID: 2, promptPrefix: "Classify ad content."),
+            RuntimeRecorder.PrewarmCall(sessionID: 3, promptPrefix: "Classify ad content.")
         ])
         #expect(snapshot.respondCalls.count == 3)
+        #expect(Set(snapshot.respondCalls.map(\.sessionID)) == Set([1, 2, 3]))
         #expect(snapshot.respondCalls[0].prompt.contains("L0> \"Hosts banter before the break.\""))
         #expect(snapshot.respondCalls[0].prompt.contains("L3> \"Back to the show after the ad.\""))
         #expect(snapshot.respondCalls[1].prompt.contains("L1> \"Visit example.com for the offer.\""))
         #expect(!snapshot.respondCalls[1].prompt.contains("L2> \"Use promo code SAVE today.\""))
         #expect(snapshot.respondCalls[2].prompt.contains("L2> \"Use promo code SAVE today.\""))
         #expect(!snapshot.respondCalls[2].prompt.contains("L1> \"Visit example.com for the offer.\""))
-        // C6: shared session — single sessionCount across the pass.
-        #expect(snapshot.sessionCount == 1)
+        #expect(snapshot.sessionCount == 3)
     }
 
     @Test("adaptive zoom narrows positive windows and injects deterministic evidence refs")
@@ -1403,9 +1406,14 @@ struct FoundationModelClassifierTests {
         #expect(snapshot.respondRefinementCalls[1].prompt.contains("L2> \"Visit example.com for the offer.\""))
         #expect(snapshot.respondRefinementCalls[1].prompt.contains("L3> \"Use promo code SAVE today.\""))
         #expect(!snapshot.respondRefinementCalls[1].prompt.contains("L4> \"Back to the show after the ad.\""))
-        // bd-3h2: per-window sessions — a single zoom plan means exactly
-        // one minted session (the retry stays on the same per-window box).
-        #expect(snapshot.sessionCount == 1)
+        #expect(snapshot.prewarmCalls == [
+            RuntimeRecorder.PrewarmCall(sessionID: 1, promptPrefix: "Refine ad spans."),
+            RuntimeRecorder.PrewarmCall(sessionID: 2, promptPrefix: "Refine ad spans.")
+        ])
+        #expect(Set(snapshot.respondRefinementCalls.map(\.sessionID)) == Set([1, 2]))
+        // Retry attempts mint a fresh prewarmed session so a failed
+        // refinement window cannot carry conversation state forward.
+        #expect(snapshot.sessionCount == 2)
         #expect(output.prewarmHit)
     }
 
@@ -2848,6 +2856,38 @@ struct FoundationModelClassifierTests {
         #expect(refusalDetails.map(\.windowIndex) == [1, 3, 5])
     }
 
+    @Test("coarse pass collapses mixed graceful all-fail statuses to failedTransient")
+    func coarsePassCollapsesMixedGracefulAllFailStatuses() async throws {
+        let segments = [
+            makeSegment(index: 0, startTime: 0, endTime: 5, text: "Health-adjacent sponsor copy."),
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Second window that overruns the budget.")
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: 431,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8
+            },
+            coarseFailures: [
+                .refusal,
+                .exceededContextWindow
+            ]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .failedTransient)
+        #expect(output.windows.isEmpty)
+        #expect(output.failedWindowStatuses == [.refusal, .exceededContextWindow])
+        #expect(snapshot.respondCalls.count == 2)
+    }
+
     // bd-3h7: the new diagnostic helper must emit a `.refusalDetail`
     // event with `errorReflect` populated from `String(reflecting:)` on
     // the `Refusal` value. Guards against future regressions where we
@@ -3857,6 +3897,59 @@ struct FoundationModelClassifierTests {
         )
 
         _ = try await classifier.coarsePassA(segments: segments)
+
+        let urls = await store.capturedAttachmentURLs()
+        #expect(urls.count == 1)
+        let url = try #require(urls.first)
+        let written = try Data(contentsOf: url)
+        #expect(written == stubBlob)
+        #expect(url.lastPathComponent.contains("coarse-refusal"))
+    }
+
+    @Test("coarse retry refusal invokes feedback store when one is provided")
+    func coarseRetryRefusalInvokesFeedbackStoreWhenProvided() async throws {
+        let segments = [
+            makeSegment(index: 0, startTime: 0, endTime: 5, text: "Hosts banter before the break."),
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Visit example.com for the offer."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Use promo code SAVE today."),
+            makeSegment(index: 3, startTime: 15, endTime: 20, text: "Back to the show after the ad.")
+        ]
+        let logFeedbackHits = LockedCounter()
+        let stubBlob = Data("apple-feedback-retry-refusal-stub".utf8)
+        let recorder = RuntimeRecorder(
+            contextSize: 96,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 8 },
+            coarseFailures: [
+                .exceededContextWindow,
+                .refusal
+            ]
+        )
+        let runtime = wrapRuntimeWithFeedback(
+            recorder.runtime,
+            blob: stubBlob,
+            onCall: { logFeedbackHits.increment() }
+        )
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FMFeedback-coarse-retry-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = FoundationModelsFeedbackStore(directory: dir)
+        let classifier = FoundationModelClassifier(
+            runtime: runtime,
+            config: .init(safetyMarginTokens: 4, maximumResponseTokens: 6),
+            feedbackStore: store
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .refusal)
+        #expect(output.windows.isEmpty)
+        #expect(output.failedWindowStatuses == [.refusal])
+        #expect(logFeedbackHits.value == 1)
+        #expect(snapshot.sessionCount == 2)
+        #expect(Set(snapshot.respondCalls.map(\.sessionID)) == Set([1, 2]))
 
         let urls = await store.capturedAttachmentURLs()
         #expect(urls.count == 1)
