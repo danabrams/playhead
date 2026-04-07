@@ -2965,6 +2965,57 @@ struct FoundationModelClassifierTests {
         #expect(refusalDetails.first?.windowIndex == 1)
     }
 
+    @Test("coarse pass continues after a single window rate limit")
+    func coarsePassContinuesAfterSingleWindowRateLimit() async throws {
+        let segments = [
+            makeSegment(index: 0, startTime: 0, endTime: 5, text: "Window zero text."),
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Window one text."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Window two text.")
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: 431,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8
+            },
+            responses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ],
+            coarseFailures: [
+                .rateLimited,
+                .rateLimited,
+                nil,
+                nil
+            ]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        let plans = try await classifier.planPassA(segments: segments)
+        #expect(plans.count == 3)
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 2)
+        #expect(output.failedWindowStatuses == [.rateLimited])
+
+        #expect(
+            snapshot.respondCalls.count == 4,
+            "expected 4 respond calls (initial + retry for the rate-limited window, then 2 successes), got \(snapshot.respondCalls.count)"
+        )
+
+        let survivingLineRefs = output.windows.flatMap(\.lineRefs)
+        #expect(!survivingLineRefs.contains(0))
+        #expect(survivingLineRefs.contains(1))
+        #expect(survivingLineRefs.contains(2))
+    }
+
     // bd-3h7: graceful degradation across multiple refusals. Windows 1,
     // 3, and 5 of a 6-window pass refuse; 2, 4, 6 succeed.
     @Test("coarse pass continues after multiple window refusals")
@@ -3231,6 +3282,66 @@ struct FoundationModelClassifierTests {
         let refusalDiagnostics = captureBox.snapshot()
         #expect(refusalDiagnostics.count == 1)
         #expect(refusalDiagnostics.first?.windowIndex == 0)
+    }
+
+    @Test("refinement pass continues after a single window rate limit")
+    func refinementPassContinuesAfterSingleWindowRateLimit() async throws {
+        let segments = [
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "First sponsor talk."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Visit example.com today."),
+            makeSegment(index: 3, startTime: 15, endTime: 20, text: "Use promo code SAVE."),
+            makeSegment(index: 4, startTime: 20, endTime: 25, text: "Back to the show.")
+        ]
+        let zoomPlans = (0..<2).map { idx in
+            RefinementWindowPlan(
+                windowIndex: idx,
+                sourceWindowIndex: idx,
+                lineRefs: [idx * 2 + 1, idx * 2 + 2],
+                focusLineRefs: [idx * 2 + 1, idx * 2 + 2],
+                focusClusters: [[idx * 2 + 1, idx * 2 + 2]],
+                prompt: "Refine ad spans.\nL\(idx * 2 + 1)> \"plan \(idx) line a\"\nL\(idx * 2 + 2)> \"plan \(idx) line b\"",
+                promptTokenCount: 4,
+                startTime: Double(5 + idx * 10),
+                endTime: Double(15 + idx * 10),
+                stopReason: .minimumSpan,
+                promptEvidence: []
+            )
+        }
+        let recorder = RuntimeRecorder(
+            contextSize: 1024,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementResponses: [
+                RefinementWindowSchema(spans: [])
+            ],
+            refinementFailures: [
+                .rateLimited,
+                .rateLimited,
+                nil
+            ]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: zoomPlans,
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .success)
+        #expect(output.failedWindowStatuses == [.rateLimited])
+        #expect(output.windows.count == 1)
+        #expect(output.windows.map(\.windowIndex) == [1])
+        #expect(
+            snapshot.respondRefinementCalls.count == 3,
+            "expected 3 refinement calls (initial + retry for the rate-limited window, then 1 success), got \(snapshot.respondRefinementCalls.count)"
+        )
     }
 
     @Test("refinement pass continues after a single window decoding failure")
@@ -4604,6 +4715,7 @@ private enum RuntimeFailure: Sendable {
     case refusal
     case decodingFailure
     case guardrailViolation
+    case rateLimited
 
     private var defaultDebugDescription: String {
         switch self {
@@ -4617,6 +4729,8 @@ private enum RuntimeFailure: Sendable {
             return "runtime-failure-decodingFailure"
         case .guardrailViolation:
             return "runtime-failure-guardrailViolation"
+        case .rateLimited:
+            return "runtime-failure-rateLimited"
         }
     }
 
@@ -4636,6 +4750,8 @@ private enum RuntimeFailure: Sendable {
                 return LanguageModelSession.GenerationError.decodingFailure(context)
             case .guardrailViolation:
                 return LanguageModelSession.GenerationError.guardrailViolation(context)
+            case .rateLimited:
+                return LanguageModelSession.GenerationError.rateLimited(context)
             }
         }
         #endif

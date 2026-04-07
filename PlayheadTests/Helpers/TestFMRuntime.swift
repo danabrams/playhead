@@ -95,6 +95,7 @@ enum TestFMRuntimeFailure: Sendable {
     case exceededContextWindow
     case refusal
     case guardrailViolation
+    case rateLimited
 
     var error: Error {
         #if canImport(FoundationModels)
@@ -108,6 +109,8 @@ enum TestFMRuntimeFailure: Sendable {
                 return LanguageModelSession.GenerationError.refusal(refusal, context)
             case .guardrailViolation:
                 return LanguageModelSession.GenerationError.guardrailViolation(context)
+            case .rateLimited:
+                return LanguageModelSession.GenerationError.rateLimited(context)
             }
         }
         #endif

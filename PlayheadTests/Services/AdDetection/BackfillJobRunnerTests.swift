@@ -168,6 +168,34 @@ struct BackfillJobRunnerTests {
         #expect(evidence.isEmpty)
     }
 
+    @available(iOS 26.0, *)
+    @Test("coarse rate limits degrade to passA failure rows without failing the FM job")
+    func coarseRateLimitsPersistFailureRowsWithoutFailingJob() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(coarseFailures: [.rateLimited, .rateLimited])
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        let result = try await runner.runPendingBackfill(for: makeInputs())
+
+        #expect(!result.admittedJobIds.isEmpty)
+        #expect(result.deferredJobIds.isEmpty)
+        #expect(result.scanResultIds.count == 1)
+        #expect(await fmRuntime.coarseCallCount == 2, "runner should make the initial coarse request and one backoff retry")
+
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")
+        #expect(scans.count == 1)
+        let failure = try #require(scans.first)
+        #expect(failure.scanPass == "passA")
+        #expect(failure.status == .rateLimited)
+        #expect(failure.disposition == .abstain)
+
+        let jobId = try #require(result.admittedJobIds.first)
+        let row = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(row.status == .complete)
+        #expect(row.retryCount == 0)
+    }
+
     @Test("admission throttling defers the job and records the reason")
     func thermalThrottleIsDeferred() async throws {
         let store = try await makeTestStore()

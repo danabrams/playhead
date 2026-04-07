@@ -836,8 +836,8 @@ struct FoundationModelClassifier: Sendable {
         // bd-34e Fix B v3 / R6-Fix1: per-window failures that are safe to
         // tolerate are recorded here so a single bad window does not abort
         // the entire pass. A coarse window can now fail independently with
-        // refusal, exceededContextWindow, or decodingFailure while sibling
-        // windows still run and persist.
+        // refusal, exceededContextWindow, decodingFailure, or rateLimited
+        // while sibling windows still run and persist.
         var failedWindowStatuses: [SemanticScanStatus] = []
 
         let totalWindows = plans.count
@@ -901,11 +901,12 @@ struct FoundationModelClassifier: Sendable {
                     )
                 }
             case let .failure(status):
-                // R6-Fix1: coarse decode failures are also per-window
-                // conditions. A single schema-conformance failure should not
-                // poison the rest of the pass any more than a refusal or
-                // exceeded-context outlier would.
-                if status == .exceededContextWindow || status == .refusal || status == .decodingFailure {
+                // R6-Fix1 / bd-ih3: coarse per-window failures that can be
+                // safely tolerated without losing the entire scan. A single
+                // schema-conformance failure, refusal, context overflow, or
+                // exhausted rate-limit retry should not poison the rest of
+                // the pass.
+                if status == .exceededContextWindow || status == .refusal || status == .decodingFailure || status == .rateLimited {
                     failedWindowStatuses.append(status)
                     logger.error(
                         """
@@ -1177,9 +1178,9 @@ struct FoundationModelClassifier: Sendable {
         var windows: [FMRefinementWindowOutput] = []
         windows.reserveCapacity(zoomPlans.count)
         // bd-3h2 / R6-Fix1 refinement: per-window failures that are safe to
-        // tolerate (refusal, decodingFailure) are recorded here so a single
-        // bad window does not abort the entire refinement pass. Mirrors the
-        // coarse `failedWindowStatuses` bookkeeping.
+        // tolerate (refusal, decodingFailure, rateLimited) are recorded here
+        // so a single bad window does not abort the entire refinement pass.
+        // Mirrors the coarse `failedWindowStatuses` bookkeeping.
         var failedWindowStatuses: [SemanticScanStatus] = []
 
         for plan in zoomPlans {
@@ -1234,11 +1235,12 @@ struct FoundationModelClassifier: Sendable {
                 effectivePlan = plan
                 response = schema
             case let .failure(status):
-                // R6-Fix1: refinement decode failures are also per-window
-                // conditions. The diagnostic and feedback-store hooks have
-                // already fired inside `refinementResponse`, so we can safely
-                // record the failure and continue to sibling windows.
-                if status == .refusal || status == .decodingFailure {
+                // R6-Fix1 / bd-ih3: refinement per-window failures that can
+                // be tolerated without aborting the entire pass. The
+                // diagnostic and feedback-store hooks have already fired
+                // inside `refinementResponse`, so we can safely record the
+                // failure and continue to sibling windows.
+                if status == .refusal || status == .decodingFailure || status == .rateLimited {
                     failedWindowStatuses.append(status)
                     logger.error(
                         """
