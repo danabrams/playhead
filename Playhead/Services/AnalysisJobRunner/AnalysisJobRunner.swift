@@ -123,6 +123,7 @@ actor AnalysisJobRunner {
 
         let transcriptSignpost = PreAnalysisInstrumentation.beginStage("transcription")
         let snapshot = PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: false)
+        let existingChunkCount = (try? await store.fetchTranscriptChunks(assetId: assetId).count) ?? 0
 
         // Fire-and-forget: startTranscription kicks off work internally.
         await transcriptEngine.startTranscription(
@@ -211,27 +212,39 @@ actor AnalysisJobRunner {
                 stopReason: .failed("fetchChunks: \(error)")
             )
         }
+        let wroteNewChunks = chunks.count > existingChunkCount
+        let existingWindowsBeforeDetection = (try? await store.fetchAdWindows(assetId: assetId)) ?? []
+        let existingCandidateWindows = existingWindowsBeforeDetection.filter {
+            $0.decisionState == AdDecisionState.candidate.rawValue
+        }
 
         let episodeDuration = allShards.map { $0.startTime + $0.duration }.max() ?? 0
 
         // Hot path detection.
         var adWindows: [AdWindow] = []
-        do {
-            adWindows = try await adDetection.runHotPath(
-                chunks: chunks,
-                analysisAssetId: assetId,
-                episodeDuration: episodeDuration
+        let skippedHotPath = !wroteNewChunks && !existingWindowsBeforeDetection.isEmpty
+        if skippedHotPath {
+            logger.info(
+                "Skipping hot path for asset \(assetId): transcription produced no new chunks and \(existingWindowsBeforeDetection.count) windows already exist"
             )
-        } catch {
-            PreAnalysisInstrumentation.endStage(detectionSignpost)
-            logger.error("Hot-path detection failed for job \(request.jobId): \(error)")
-            return makeOutcome(
-                assetId: assetId,
-                request: request,
-                featureCoverageSec: featureCoverage,
-                transcriptCoverageSec: transcriptCoverage,
-                stopReason: .failed("hotPath: \(error)")
-            )
+        } else {
+            do {
+                adWindows = try await adDetection.runHotPath(
+                    chunks: chunks,
+                    analysisAssetId: assetId,
+                    episodeDuration: episodeDuration
+                )
+            } catch {
+                PreAnalysisInstrumentation.endStage(detectionSignpost)
+                logger.error("Hot-path detection failed for job \(request.jobId): \(error)")
+                return makeOutcome(
+                    assetId: assetId,
+                    request: request,
+                    featureCoverageSec: featureCoverage,
+                    transcriptCoverageSec: transcriptCoverage,
+                    stopReason: .failed("hotPath: \(error)")
+                )
+            }
         }
 
         if let earlyStop = checkStopConditions() {
@@ -246,31 +259,39 @@ actor AnalysisJobRunner {
         }
 
         // Backfill detection.
-        do {
-            try await adDetection.runBackfill(
-                chunks: chunks,
-                analysisAssetId: assetId,
-                podcastId: request.podcastId,
-                episodeDuration: episodeDuration
-            )
-        } catch {
-            PreAnalysisInstrumentation.endStage(detectionSignpost)
-            logger.error("Backfill detection failed for job \(request.jobId): \(error)")
-            return makeOutcome(
-                assetId: assetId,
-                request: request,
-                featureCoverageSec: featureCoverage,
-                transcriptCoverageSec: transcriptCoverage,
-                stopReason: .failed("backfill: \(error)")
-            )
-        }
-
-        // Reload windows after backfill may have updated/added them.
         let finalWindows: [AdWindow]
-        do {
-            finalWindows = try await store.fetchAdWindows(assetId: assetId)
-        } catch {
-            finalWindows = adWindows
+        let skippedBackfill = skippedHotPath && existingCandidateWindows.isEmpty
+        if skippedBackfill {
+            logger.info(
+                "Skipping backfill for asset \(assetId): transcription produced no new chunks and there are no candidate windows to resolve"
+            )
+            finalWindows = existingWindowsBeforeDetection
+        } else {
+            do {
+                try await adDetection.runBackfill(
+                    chunks: chunks,
+                    analysisAssetId: assetId,
+                    podcastId: request.podcastId,
+                    episodeDuration: episodeDuration
+                )
+            } catch {
+                PreAnalysisInstrumentation.endStage(detectionSignpost)
+                logger.error("Backfill detection failed for job \(request.jobId): \(error)")
+                return makeOutcome(
+                    assetId: assetId,
+                    request: request,
+                    featureCoverageSec: featureCoverage,
+                    transcriptCoverageSec: transcriptCoverage,
+                    stopReason: .failed("backfill: \(error)")
+                )
+            }
+
+            // Reload windows after backfill may have updated/added them.
+            do {
+                finalWindows = try await store.fetchAdWindows(assetId: assetId)
+            } catch {
+                finalWindows = adWindows
+            }
         }
 
         PreAnalysisInstrumentation.endStage(detectionSignpost)

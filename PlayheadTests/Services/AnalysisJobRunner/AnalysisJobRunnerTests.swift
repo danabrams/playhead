@@ -1,6 +1,7 @@
 // AnalysisJobRunnerTests.swift
 // Tests for the bounded-range analysis engine.
 
+import CryptoKit
 import Foundation
 import Testing
 @testable import Playhead
@@ -41,6 +42,60 @@ private func makeShards(count: Int, shardDuration: Double = 30) -> [AnalysisShar
             duration: shardDuration
         )
     }
+}
+
+private func makeTranscriptSegment(
+    text: String = "hello",
+    startTime: TimeInterval = 0,
+    endTime: TimeInterval = 0.5,
+    id: Int = 0,
+    passType: TranscriptPassType = .fast
+) -> TranscriptSegment {
+    let word = TranscriptWord(text: text, startTime: startTime, endTime: endTime, confidence: 0.95)
+    return TranscriptSegment(
+        id: id,
+        words: [word],
+        text: text,
+        startTime: startTime,
+        endTime: endTime,
+        avgConfidence: 0.95,
+        passType: passType
+    )
+}
+
+private func makeSegmentFingerprint(
+    text: String,
+    startTime: TimeInterval,
+    endTime: TimeInterval
+) -> String {
+    let input = "\(text)|\(startTime)|\(endTime)"
+    let digest = SHA256.hash(data: Data(input.utf8))
+    return digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+}
+
+private func makeTranscriptChunk(
+    from segment: TranscriptSegment,
+    analysisAssetId: String = "test-asset",
+    chunkIndex: Int = 0
+) -> TranscriptChunk {
+    TranscriptChunk(
+        id: UUID().uuidString,
+        analysisAssetId: analysisAssetId,
+        segmentFingerprint: makeSegmentFingerprint(
+            text: segment.text,
+            startTime: segment.startTime,
+            endTime: segment.endTime
+        ),
+        chunkIndex: chunkIndex,
+        startTime: segment.startTime,
+        endTime: segment.endTime,
+        text: segment.text,
+        normalizedText: TranscriptEngineService.normalizeText(segment.text),
+        pass: segment.passType.rawValue,
+        modelVersion: "apple-speech-v1",
+        transcriptVersion: nil,
+        atomOrdinal: nil
+    )
 }
 
 /// Seed the store with a minimal AnalysisAsset row so fetches succeed.
@@ -321,6 +376,179 @@ struct AnalysisJobRunnerTests {
             // expected
         } else {
             Issue.record("Expected .pausedForThermal but got \(outcome.stopReason)")
+        }
+    }
+
+    @Test("duplicate transcript pass skips hot path and backfill when windows are already resolved")
+    func testDuplicateTranscriptPassSkipsResolvedDetectionWork() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store: store, fastTranscriptCoverageEndTime: 30)
+
+        let segment = makeTranscriptSegment()
+        try await store.insertTranscriptChunks([makeTranscriptChunk(from: segment)])
+        try await store.insertAdWindow(
+            AdWindow(
+                id: "resolved-window",
+                analysisAssetId: "test-asset",
+                startTime: 5,
+                endTime: 20,
+                confidence: 0.4,
+                boundaryState: AdBoundaryState.lexical.rawValue,
+                decisionState: AdDecisionState.suppressed.rawValue,
+                detectorVersion: "test-v1",
+                advertiser: nil,
+                product: nil,
+                adDescription: nil,
+                evidenceText: nil,
+                evidenceStartTime: nil,
+                metadataSource: "none",
+                metadataConfidence: nil,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false
+            )
+        )
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 1)
+
+        let featureService = FeatureExtractionService(store: store)
+        let recognizer = MockSpeechRecognizer()
+        recognizer.transcribeResult = [segment]
+        let speechService = SpeechService(recognizer: recognizer)
+        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let materializer = SkipCueMaterializer(store: store)
+
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub,
+            cueMaterializer: materializer
+        )
+
+        let outcome = await runner.run(makeTestRequest(desiredCoverageSec: 30, outputPolicy: .writeWindowsOnly))
+
+        #expect(adStub.hotPathCallCount == 0)
+        #expect(adStub.backfillCallCount == 0)
+        if case .reachedTarget = outcome.stopReason {
+            // expected
+        } else {
+            Issue.record("Expected .reachedTarget but got \(outcome.stopReason)")
+        }
+    }
+
+    @Test("duplicate transcript pass still runs backfill when candidate windows remain")
+    func testDuplicateTranscriptPassStillRunsBackfillForCandidates() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store: store, fastTranscriptCoverageEndTime: 30)
+
+        let segment = makeTranscriptSegment()
+        try await store.insertTranscriptChunks([makeTranscriptChunk(from: segment)])
+        try await store.insertAdWindow(
+            AdWindow(
+                id: "candidate-window",
+                analysisAssetId: "test-asset",
+                startTime: 5,
+                endTime: 20,
+                confidence: 0.8,
+                boundaryState: AdBoundaryState.lexical.rawValue,
+                decisionState: AdDecisionState.candidate.rawValue,
+                detectorVersion: "test-v1",
+                advertiser: nil,
+                product: nil,
+                adDescription: nil,
+                evidenceText: nil,
+                evidenceStartTime: nil,
+                metadataSource: "none",
+                metadataConfidence: nil,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false
+            )
+        )
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 1)
+
+        let featureService = FeatureExtractionService(store: store)
+        let recognizer = MockSpeechRecognizer()
+        recognizer.transcribeResult = [segment]
+        let speechService = SpeechService(recognizer: recognizer)
+        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let materializer = SkipCueMaterializer(store: store)
+
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub,
+            cueMaterializer: materializer
+        )
+
+        let outcome = await runner.run(makeTestRequest(desiredCoverageSec: 30, outputPolicy: .writeWindowsOnly))
+
+        #expect(adStub.hotPathCallCount == 0)
+        #expect(adStub.backfillCallCount == 1)
+        if case .reachedTarget = outcome.stopReason {
+            // expected
+        } else {
+            Issue.record("Expected .reachedTarget but got \(outcome.stopReason)")
+        }
+    }
+
+    @Test("duplicate transcript pass still runs hot path when no windows exist")
+    func testDuplicateTranscriptPassStillRunsHotPathWithoutWindows() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store: store, fastTranscriptCoverageEndTime: 30)
+
+        let segment = makeTranscriptSegment()
+        try await store.insertTranscriptChunks([makeTranscriptChunk(from: segment)])
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 1)
+
+        let featureService = FeatureExtractionService(store: store)
+        let recognizer = MockSpeechRecognizer()
+        recognizer.transcribeResult = [segment]
+        let speechService = SpeechService(recognizer: recognizer)
+        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let materializer = SkipCueMaterializer(store: store)
+
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub,
+            cueMaterializer: materializer
+        )
+
+        let outcome = await runner.run(makeTestRequest(desiredCoverageSec: 30, outputPolicy: .writeWindowsOnly))
+
+        #expect(adStub.hotPathCallCount == 1)
+        #expect(adStub.backfillCallCount == 1)
+        if case .reachedTarget = outcome.stopReason {
+            // expected
+        } else {
+            Issue.record("Expected .reachedTarget but got \(outcome.stopReason)")
         }
     }
 }
