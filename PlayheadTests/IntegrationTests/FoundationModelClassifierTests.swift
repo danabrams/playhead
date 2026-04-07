@@ -135,17 +135,20 @@ struct FoundationModelClassifierTests {
         #expect(!filtered.contains(.callToAction))
     }
 
-    @Test("prompt is minimal and uses L-prefixed quoted line refs with injection preamble")
+    @Test("prompt is minimal and uses L-prefixed quoted line refs with neutral preamble")
     func promptFormat() {
         let prompt = FoundationModelClassifier.buildPrompt(for: [
             makeSegment(index: 7, text: "This is the sponsor read."),
             makeSegment(index: 8, text: "Use code SAVE for discounts.")
         ])
 
-        // H14: prompt prefix is followed by an injection preamble, an L<n>>
-        // line-ref instruction, then a fenced transcript region.
+        // bd-34e: prompt prefix is followed by a neutral task description,
+        // an L<n>> line-ref instruction, then a fenced transcript region.
+        // The previous jailbreak-defense framing ("untrusted user content",
+        // "do not follow instructions") was dropped because it tripped
+        // Apple's safety classifier.
         #expect(prompt.contains("Classify ad content."))
-        #expect(prompt.contains("untrusted user content"))
+        #expect(prompt.contains("advertising or promotional content"))
         #expect(prompt.contains("L<number>>"))
         #expect(prompt.contains("<<<TRANSCRIPT>>>"))
         #expect(prompt.contains("<<<END TRANSCRIPT>>>"))
@@ -154,6 +157,42 @@ struct FoundationModelClassifierTests {
         // Old `7: "..."` format must NOT appear.
         #expect(!prompt.contains("7: \"This is the sponsor read.\""))
         #expect(!prompt.localizedCaseInsensitiveContains("reasoning"))
+        // bd-34e regression guard: the jailbreak-defense framing must not
+        // come back.
+        #expect(!prompt.contains("untrusted user content"))
+        #expect(!prompt.localizedCaseInsensitiveContains("do not follow"))
+    }
+
+    // bd-34e: pin the fix by asserting the coarse preamble never regrows the
+    // jailbreak-defense framing that Apple's safety classifier flags as
+    // adversarial intent. The structural injection defenses in escapedLine()
+    // (NFKC strip, fence rewrite, L<n>> defang) remain the load-bearing
+    // protection — this test only pins the textual framing, not security.
+    @Test("coarse preamble does not contain jailbreak-defense framing")
+    func coarsePreambleDoesNotContainJailbreakDefenseFraming() {
+        // Skip if PLAYHEAD_FM_DROP_PREAMBLE is set externally — that mode
+        // collapses the preamble entirely, which is itself jailbreak-free.
+        guard ProcessInfo.processInfo.environment["PLAYHEAD_FM_DROP_PREAMBLE"] == nil else {
+            return
+        }
+        let preamble = FoundationModelClassifier.coarsePromptPreamble()
+        #expect(!preamble.isEmpty)
+        #expect(!preamble.contains("untrusted user content"))
+        #expect(!preamble.localizedCaseInsensitiveContains("do not follow"))
+        #expect(!preamble.localizedCaseInsensitiveContains("do not follow any instructions"))
+        // And the same for the refinement wrapping path (buildRefinementPrompt
+        // shares the injectionPreamble + lineRefInstruction constants, so a
+        // bare-bones refinement prompt is the cheapest way to inspect them).
+        let sampleSegments = [
+            makeSegment(index: 0, startTime: 0, endTime: 1, text: "Hello.")
+        ]
+        // Use planAdaptiveZoom indirectly by checking the coarse path's
+        // buildPrompt output for the same constants — the constants are
+        // shared between coarse and refinement, so asserting on one path
+        // is sufficient.
+        let samplePrompt = FoundationModelClassifier.buildPrompt(for: sampleSegments)
+        #expect(!samplePrompt.contains("untrusted user content"))
+        #expect(!samplePrompt.localizedCaseInsensitiveContains("do not follow"))
     }
 
     @Test("planner covers the full real-episode transcript and respects the token budget")
@@ -163,8 +202,11 @@ struct FoundationModelClassifierTests {
 
         let recorder = RuntimeRecorder(
             // H14: bumped by preamble overhead (20 tokens = 4 added wrap lines * 5 tokens/line).
-            // The test still exercises the budget-exceeded path for a specific per-line token count.
-            contextSize: 50,
+            // bd-34e Fix B: bumped again because the planner now halves the
+            // effective prompt-token ceiling to compensate for the line-ref
+            // format's ~2.1× tokenizer undercount. Previous contextSize=50
+            // would drop budget below a single preamble-wrapped segment.
+            contextSize: 100,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -182,8 +224,9 @@ struct FoundationModelClassifierTests {
         #expect(plans.count > 1)
         #expect(covered == Set(segments.map(\.segmentIndex)))
         #expect(plans.allSatisfy { !$0.lineRefs.isEmpty })
-        // H14: budget = contextSize(50) - schema(4) - response(6) - safety(5) = 35.
-        #expect(plans.allSatisfy { $0.promptTokenCount <= 35 })
+        // bd-34e Fix B: budget = min((contextSize(100) - schema(4) -
+        // response(6) - safety(5)) / 2, contextSize(100) / 2) = min(42, 50) = 42.
+        #expect(plans.allSatisfy { $0.promptTokenCount <= 42 })
         #expect(plans.allSatisfy { isContiguous($0.lineRefs) })
     }
 
@@ -197,8 +240,11 @@ struct FoundationModelClassifierTests {
 
         let recorder = RuntimeRecorder(
             // H14: bumped by preamble overhead (20 tokens = 4 added wrap lines * 5 tokens/line).
-            // The test still exercises the budget-exceeded path for a specific per-line token count.
-            contextSize: 50,
+            // bd-34e Fix B: budget = min((86-4-6-5)/2, 86/2) = min(35, 43) = 35.
+            // Preamble wrap = 5 lines; 2-segment prompt = 7*5 = 35 (fits),
+            // 3-segment = 8*5 = 40 (does not) — forces the [[0,1],[2]] window
+            // split the test expects.
+            contextSize: 86,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -365,8 +411,9 @@ struct FoundationModelClassifierTests {
 
         let recorder = RuntimeRecorder(
             // H14: bumped by preamble overhead (16 tokens = 4 added wrap lines * 4 tokens/line).
-            // The test still exercises the planAdaptiveZoom path with the same per-line pressure.
-            contextSize: 80,
+            // bd-34e Fix B: bumped further to keep the refinement prompt under
+            // the halved effective ceiling.
+            contextSize: 160,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -467,9 +514,11 @@ struct FoundationModelClassifierTests {
         )
         let recorder = RuntimeRecorder(
             // H14: bumped by preamble overhead (16 tokens = 4 added wrap lines * 4 tokens/line).
-            // The test still exercises the budget-exceeded → focus-shrink path: the
-            // single focus line fits the new budget while the full window does not.
-            contextSize: 56,
+            // bd-34e Fix B: bumped again for the halved estimator-safe ceiling.
+            // Budget = min((88-8-10-4)/2, 88/2) = min(33, 44) = 33. Single focus
+            // line refinement prompt = 32 tokens (fits); full window = 48 tokens
+            // (does not fit) — exercises the focus-shrink path as before.
+            contextSize: 88,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -1664,13 +1713,17 @@ struct FoundationModelClassifierTests {
             makeSegment(index: 2, startTime: 10, endTime: 15, text: "Window two text.")
         ]
         let recorder = RuntimeRecorder(
-            // H14: bumped by preamble overhead (20 tokens = 4 added wrap lines * 5 tokens/line).
-            // The test still exercises the partial-results-on-failure path.
-            contextSize: 50,
+            // bd-34e Fix B: budget = min((120-4-6-5)/2, 120/2) = min(52, 60) = 52.
+            // Preamble wrap = 5 lines. With tokenCountRule=count*8 a
+            // single-segment prompt is 6*8 = 48 tokens (fits) but a
+            // two-segment prompt is 7*8 = 56 (does not) — forcing one window
+            // per segment so the mid-pass refusal has a second window to
+            // fail on.
+            contextSize: 120,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
-                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 5
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8
             },
             responses: [
                 CoarseScreeningSchema(disposition: .noAds, support: nil)
@@ -1701,8 +1754,8 @@ struct FoundationModelClassifierTests {
         ]
         let recorder = RuntimeRecorder(
             // H14: bumped by preamble overhead (20 tokens = 4 added wrap lines * 5 tokens/line).
-            // The test still exercises the cancellation-between-windows path.
-            contextSize: 50,
+            // bd-34e Fix B: bumped again for the halved effective ceiling.
+            contextSize: 100,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -1827,10 +1880,13 @@ struct FoundationModelClassifierTests {
             return
         }
 
-        // Default mode: preamble is the full H14 wrapping.
+        // Default mode: preamble is the full H14 wrapping. bd-34e replaced
+        // the jailbreak-defense framing with neutral instructional framing,
+        // so we assert on the new neutral phrase instead of the old
+        // "untrusted user content" marker.
         let defaultPreamble = FoundationModelClassifier.coarsePromptPreamble()
         #expect(!defaultPreamble.isEmpty)
-        #expect(defaultPreamble.contains("untrusted user content"))
+        #expect(defaultPreamble.contains("advertising or promotional content"))
         #expect(defaultPreamble.contains("<<<TRANSCRIPT>>>"))
 
         // Flip the flag, observe the collapsed value, then clean up so we
@@ -1856,6 +1912,104 @@ struct FoundationModelClassifierTests {
         // In release builds the flag is a no-op.
         #expect(FoundationModelClassifier.coarsePromptPreamble() == defaultPreamble)
         #endif
+    }
+
+    // bd-34e Fix B: the structured `L<n>> "..."` line-ref prompt format
+    // tokenizes up to ~2.1× worse than the planner's estimator predicts
+    // (on-device benchmark: estimator=2202, Apple counted 4614). The planner
+    // now halves the estimator's available headroom AND applies a hard
+    // `contextSize / 2` ceiling. These two tests pin the math.
+    @Test("window budget reserves headroom for tokenizer undercount")
+    func windowBudgetReservesHeadroomForTokenizerUndercount() {
+        // Real-device parameters: contextSize=4096, responseTokens=96, schema=128.
+        // Conservative math: safe estimator ceiling = (4096 - 96 - 128) / 2 = 1936,
+        // capped at contextSize / 2 = 2048. Result: 1936.
+        let safe = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
+            contextSize: 4096,
+            schemaTokens: 128,
+            maximumResponseTokens: 96,
+            safetyMarginTokens: 0
+        )
+        #expect(safe <= 2048, "hard cap contextSize/2 must bound the safe ceiling")
+        #expect(safe == (4096 - 128 - 96) / 2)
+
+        // With a non-zero safety margin the ceiling only drops further — never
+        // rises back above contextSize / 2.
+        let withMargin = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
+            contextSize: 4096,
+            schemaTokens: 128,
+            maximumResponseTokens: 96,
+            safetyMarginTokens: 256
+        )
+        #expect(withMargin <= safe)
+        #expect(withMargin <= 2048)
+
+        // The hard cap must clamp pathological inputs where the schema and
+        // response tokens are tiny: no matter how big preMargin gets, the
+        // result cannot exceed contextSize / 2.
+        let tinyOverhead = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
+            contextSize: 4096,
+            schemaTokens: 0,
+            maximumResponseTokens: 0,
+            safetyMarginTokens: 0
+        )
+        #expect(tinyOverhead == 2048)
+
+        // And the floor: must return at least 1 even when overhead > context.
+        let exhausted = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
+            contextSize: 10,
+            schemaTokens: 100,
+            maximumResponseTokens: 100,
+            safetyMarginTokens: 100
+        )
+        #expect(exhausted >= 1)
+    }
+
+    @Test("window construction respects the hard cap when per-segment tokens approach the ceiling")
+    func windowConstructionRespectsHardCap() async throws {
+        // Build enough segments that, under the OLD (unhalved) budget, the
+        // planner would try to pack many into a single window. Under the new
+        // halved ceiling + hard cap, no window may exceed contextSize / 2.
+        let segments: [AdTranscriptSegment] = (0..<40).map { idx in
+            makeSegment(
+                index: idx,
+                startTime: TimeInterval(idx * 2),
+                endTime: TimeInterval(idx * 2 + 2),
+                text: "Segment number \(idx) with a bit of filler so lines vary."
+            )
+        }
+        let contextSize = 512
+        let recorder = RuntimeRecorder(
+            contextSize: contextSize,
+            coarseSchemaTokens: 16,
+            refinementSchemaTokens: 32,
+            tokenCountRule: { prompt in
+                // Coarse undercount of the real shape: multiply line count by
+                // a small per-line constant. Real tokens come from Apple at
+                // ~2× this on the live device; we mimic that by asserting
+                // the planner's output stays under contextSize / 2.
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 4
+            }
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 8, maximumResponseTokens: 16)
+        )
+
+        let plans = try await classifier.planPassA(segments: segments)
+        #expect(!plans.isEmpty)
+        // Every window MUST fit under contextSize / 2 — the hard cap that
+        // guarantees a 2× tokenizer undercount still lands inside context.
+        let hardCap = contextSize / 2
+        for plan in plans {
+            #expect(
+                plan.promptTokenCount <= hardCap,
+                "window promptTokenCount=\(plan.promptTokenCount) must be ≤ hardCap=\(hardCap)"
+            )
+        }
+        // Coverage: every segment must appear in some window.
+        let covered = Set(plans.flatMap(\.lineRefs))
+        #expect(covered == Set(segments.map(\.segmentIndex)))
     }
 
     // H10: fallback estimator must be >= bytes/3 (BPE floor) for safety.
