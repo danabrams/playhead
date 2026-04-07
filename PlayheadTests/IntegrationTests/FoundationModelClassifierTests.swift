@@ -1403,7 +1403,8 @@ struct FoundationModelClassifierTests {
         #expect(snapshot.respondRefinementCalls[1].prompt.contains("L2> \"Visit example.com for the offer.\""))
         #expect(snapshot.respondRefinementCalls[1].prompt.contains("L3> \"Use promo code SAVE today.\""))
         #expect(!snapshot.respondRefinementCalls[1].prompt.contains("L4> \"Back to the show after the ad.\""))
-        // C6: refinement also shares a single session across windows.
+        // bd-3h2: per-window sessions — a single zoom plan means exactly
+        // one minted session (the retry stays on the same per-window box).
         #expect(snapshot.sessionCount == 1)
         #expect(output.prewarmHit)
     }
@@ -1459,7 +1460,8 @@ struct FoundationModelClassifierTests {
             RuntimeRecorder.PrewarmCall(sessionID: 1, promptPrefix: "Refine ad spans.")
         ])
         #expect(snapshot.respondRefinementCalls.count == 1)
-        // C6: shared session — only one is created per pass.
+        // bd-3h2: per-window sessions — a single zoom plan means exactly
+        // one minted session.
         #expect(snapshot.sessionCount == 1)
     }
 
@@ -2211,18 +2213,26 @@ struct FoundationModelClassifierTests {
         #expect(snapshot.prewarmCalls.allSatisfy { $0.promptPrefix == "Classify ad content." })
     }
 
-    // bd-34e Fix B v4: same fresh-session flag must apply to refinement.
-    // When set, every refinement window gets a brand-new session.
-    @Test("PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW flag creates a new session per refinement window")
-    func refinementFreshSessionFlagCreatesNewSessionPerWindow() async throws {
-        let alreadySet = ProcessInfo.processInfo.environment["PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW"] != nil
-        guard !alreadySet else { return }
-
+    // bd-3h2: per-window sessions are now the production default for the
+    // refinement pass — mirroring the bd-34e Fix B v5 coarse fix in
+    // 73a28ae. The on-device run on iOS 26.4 (Conan fixture, 2026-04-06)
+    // showed refinement hitting `exceededContextWindow` with a 33s
+    // smart-shrink retry storm after the coarse per-window fix landed.
+    // The refinement path was still sharing a single `LanguageModelSession`
+    // across zoom plans, accumulating the same conversation history that
+    // killed coarse. With per-window sessions unconditional, 3 zoom plans
+    // must mint 3 fresh sessions, each prewarmed once with the refinement
+    // prompt prefix. The `PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW` debug
+    // flag is gone — there is no flagged-vs-default mode to A/B anymore.
+    @Test("refinement pass uses per-window sessions by default")
+    func refinePassUsesPerWindowSessionsByDefault() async throws {
         let segments = [
             makeSegment(index: 1, startTime: 5, endTime: 10, text: "First sponsor talk."),
             makeSegment(index: 2, startTime: 10, endTime: 15, text: "Visit example.com today."),
             makeSegment(index: 3, startTime: 15, endTime: 20, text: "Use promo code SAVE."),
-            makeSegment(index: 4, startTime: 20, endTime: 25, text: "Back to the show.")
+            makeSegment(index: 4, startTime: 20, endTime: 25, text: "Back to the show."),
+            makeSegment(index: 5, startTime: 25, endTime: 30, text: "Another sponsor segment."),
+            makeSegment(index: 6, startTime: 30, endTime: 35, text: "Final word from our sponsor.")
         ]
 
         let zoomPlanA = RefinementWindowPlan(
@@ -2251,15 +2261,24 @@ struct FoundationModelClassifierTests {
             stopReason: .minimumSpan,
             promptEvidence: []
         )
+        let zoomPlanC = RefinementWindowPlan(
+            windowIndex: 2,
+            sourceWindowIndex: 2,
+            lineRefs: [5, 6],
+            focusLineRefs: [5, 6],
+            focusClusters: [[5, 6]],
+            prompt: "Refine ad spans.\nL5> \"Another sponsor segment.\"\nL6> \"Final word from our sponsor.\"",
+            promptTokenCount: 4,
+            startTime: 25,
+            endTime: 35,
+            stopReason: .minimumSpan,
+            promptEvidence: []
+        )
         let evidenceCatalog = EvidenceCatalog(
             analysisAssetId: "asset-1",
             transcriptVersion: "transcript-v1",
             entries: []
         )
-
-        #if DEBUG
-        setenv("PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW", "1", 1)
-        defer { unsetenv("PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW") }
 
         let recorder = RuntimeRecorder(
             contextSize: 1024,
@@ -2270,19 +2289,25 @@ struct FoundationModelClassifierTests {
         let classifier = FoundationModelClassifier(runtime: recorder.runtime)
 
         let output = try await classifier.refinePassB(
-            zoomPlans: [zoomPlanA, zoomPlanB],
+            zoomPlans: [zoomPlanA, zoomPlanB, zoomPlanC],
             segments: segments,
             evidenceCatalog: evidenceCatalog
         )
         let snapshot = await recorder.snapshot()
 
         #expect(output.status == .success)
-        #expect(output.windows.count == 2)
-        #expect(snapshot.sessionCount == 2, "expected 2 fresh refinement sessions, got \(snapshot.sessionCount)")
-        #expect(Set(snapshot.respondRefinementCalls.map(\.sessionID)) == Set([1, 2]))
-        #expect(snapshot.prewarmCalls.count == 2)
+        #expect(output.windows.count == 3)
+        // bd-3h2: ONE fresh session per refinement window — 3 zoom plans ⇒
+        // 3 sessions, each prewarmed exactly once with the refinement
+        // prefix and serving exactly its own window's respond call.
+        #expect(
+            snapshot.sessionCount == 3,
+            "expected 3 fresh refinement sessions (one per window), got \(snapshot.sessionCount)"
+        )
+        #expect(Set(snapshot.respondRefinementCalls.map(\.sessionID)) == Set([1, 2, 3]))
+        #expect(snapshot.prewarmCalls.count == 3)
+        #expect(Set(snapshot.prewarmCalls.map(\.sessionID)) == Set([1, 2, 3]))
         #expect(snapshot.prewarmCalls.allSatisfy { $0.promptPrefix == "Refine ad spans." })
-        #endif
     }
 
     // bd-34e Fix B v4: empirical schema-overhead probe. The smart-shrink

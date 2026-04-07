@@ -747,13 +747,11 @@ struct FoundationModelClassifier: Sendable {
         // so the first window still pays the cold-start cost up front
         // and subsequent windows hit the warm model cache.
         // The `PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW` debug flag from
-        // Fix v4 (`freshSessionPerWindowEnabled()`) was the controlled
-        // experiment that proved this fix; the per-window-session
-        // branch is now the only branch on the coarse path. The flag
-        // helper is retained because the refinement pass still consults
-        // it (refinement may have an analogous accumulation bug, but
-        // bd-3h2 was masking it; we will revisit refinement separately
-        // once the response-token bump in this commit closes bd-3h2).
+        // Fix v4 was the controlled experiment that proved this fix;
+        // the per-window-session branch is now the only branch on the
+        // coarse path. bd-3h2 (this commit's sibling) ports the same
+        // fix to the refinement pass, so the flag helper has been
+        // removed entirely.
         let prewarmHit = true
 
         var windows: [FMCoarseWindowOutput] = []
@@ -1054,22 +1052,26 @@ struct FoundationModelClassifier: Sendable {
         }
 
         let lineRefLookup = lineRefLookup(for: segments)
-        // bd-34e Fix B v4: same fresh-session-per-window experiment switch
-        // as the coarse pass — when PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW is
-        // set, every refinement window gets its own freshly minted session.
-        let freshSessionPerWindow = Self.freshSessionPerWindowEnabled()
-        let sharedBoxOrNil: SessionBox?
-        if freshSessionPerWindow {
-            logger.debug(
-                "PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW active — creating fresh session per refinement window"
-            )
-            sharedBoxOrNil = nil
-        } else {
-            // C6: Share a single prewarmed session across all refinement windows.
-            let box = SessionBox(session: await runtime.makeSession())
-            await box.prewarm(Self.refinementPromptPrefix)
-            sharedBoxOrNil = box
-        }
+        // bd-3h2: per-window sessions are now the production default for
+        // the refinement pass — mirroring the bd-34e Fix B v5 coarse fix
+        // in 73a28ae. The on-device run on iOS 26.4 (Conan fixture,
+        // 2026-04-06) showed that after the coarse per-window fix landed,
+        // the refinement path still hit `exceededContextWindow` with a
+        // ~33s smart-shrink retry storm because it was sharing a single
+        // `LanguageModelSession` across zoom plans. Each successful
+        // refinement exchange accumulates ~600+ tokens of conversation
+        // history (the 1024-token response budget from 73a28ae makes the
+        // accumulation faster, not slower) and the 4096-token context
+        // window fills after a handful of windows, exactly as the coarse
+        // path did before the per-window fix.
+        //
+        // Each refinement window now mints its own `LanguageModelSession`
+        // via `runtime.makeSession()` and prewarms it before its first
+        // request. The cached `SystemLanguageModel.default` keeps the
+        // model assets warm across sessions; only the per-window context
+        // is fresh. The `PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW` debug flag
+        // and its helper are gone — the experiment is over and the
+        // answer is "always per-window".
         let prewarmHit = true
 
         var windows: [FMRefinementWindowOutput] = []
@@ -1089,14 +1091,12 @@ struct FoundationModelClassifier: Sendable {
             }
 
             let windowStart = clock.now
-            let perWindowBox: SessionBox
-            if let shared = sharedBoxOrNil {
-                perWindowBox = shared
-            } else {
-                let fresh = SessionBox(session: await runtime.makeSession())
-                await fresh.prewarm(Self.refinementPromptPrefix)
-                perWindowBox = fresh
-            }
+            // bd-3h2: every refinement window gets its own freshly minted,
+            // freshly prewarmed `LanguageModelSession`. See the comment
+            // block above the loop for the on-device evidence that
+            // motivated removing the shared-session branch.
+            let perWindowBox = SessionBox(session: await runtime.makeSession())
+            await perWindowBox.prewarm(Self.refinementPromptPrefix)
             let outcome = await refinementResponse(
                 for: plan,
                 sessionBox: perWindowBox,
@@ -1219,31 +1219,7 @@ struct FoundationModelClassifier: Sendable {
         return true
     }
 
-    /// bd-34e Fix B v4: when this returns true, every coarse and refinement
-    /// window gets its own freshly minted `LanguageModelSession` (via
-    /// `runtime.makeSession()`) instead of sharing one across the pass.
-    /// This is the controlled experiment switch the on-device shadow
-    /// benchmark uses to test whether session accumulation is responsible
-    /// for the 8×–11× tokenizer-undercount the smart-shrink data revealed.
-    /// The flag is debug-only — release builds always return `false` and
-    /// the production C6 shared-session behavior is preserved.
-    ///
-    /// Fix v4 hypothesis: shadow telemetry shows actualTokens are STABLE
-    /// within a window's smart-shrink retries (4253 → 4253 → 4253) and
-    /// CONTENT-dependent across windows (window 7 < window 6 even though
-    /// it comes later), which rules out per-call session growth as the
-    /// primary cause. Turning this flag ON should therefore NOT close the
-    /// gap. If it does, the analysis was wrong and accumulation is real.
-    static func freshSessionPerWindowEnabled() -> Bool {
-        #if DEBUG
-        if ProcessInfo.processInfo.environment["PLAYHEAD_FM_FRESH_SESSION_PER_WINDOW"] != nil {
-            return true
-        }
-        #endif
-        return false
-    }
-
-    /// H14: The static, transcript-independent preamble of the coarse-pass
+/// H14: The static, transcript-independent preamble of the coarse-pass
     /// prompt — every wrapping line that the planner emits regardless of how
     /// many segments are inside the fences. Used by `preambleTokenCount` and
     /// regression tests so any future preamble growth is loud and accounted
