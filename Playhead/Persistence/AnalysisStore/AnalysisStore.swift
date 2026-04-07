@@ -144,6 +144,26 @@ struct PodcastProfile: Sendable {
     let recentFalseSkipSignals: Int
 }
 
+/// bd-m8k: Per-podcast CoveragePlanner state. Sibling row to
+/// `PodcastProfile`; persisted in the `podcast_planner_state` table that the
+/// v4 migration creates. Rows are upserted lazily on first observation, never
+/// backfilled. `precisionSamples` is the most-recent-up-to-3 ring of full-
+/// rescan precision measurements (oldest first); the cached
+/// `stablePrecisionFlag` reflects the result of evaluating both the episode-
+/// count floor and the precision threshold against this ring at the moment
+/// of the last write.
+struct PodcastPlannerState: Sendable, Equatable {
+    let podcastId: String
+    let observedEpisodeCount: Int
+    let episodesSinceLastFullRescan: Int
+    let stablePrecisionFlag: Bool
+    let lastFullRescanAt: Double?
+    /// Most recent up to `AnalysisStore.plannerPrecisionRingSize` full-rescan
+    /// precision samples. Oldest first; new samples are appended and the
+    /// oldest dropped on overflow.
+    let precisionSamples: [Double]
+}
+
 struct PreviewBudget: Sendable {
     let canonicalEpisodeKey: String
     let consumedAnalysisSeconds: Double
@@ -231,6 +251,22 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 actor AnalysisStore {
 
     nonisolated private static let currentSchemaVersion = 4
+
+    /// bd-m8k: Maximum number of recent full-rescan precision samples retained
+    /// for the `stable_precision_flag` ring. Must match the column count in
+    /// `podcast_planner_state` and the push/shift logic in
+    /// `recordFullRescanComplete`.
+    nonisolated static let plannerPrecisionRingSize = 3
+
+    /// bd-m8k: Minimum per-sample precision required for
+    /// `stable_precision_flag` to flip true. All samples in the ring must
+    /// clear this threshold.
+    nonisolated static let plannerPrecisionThreshold: Double = 0.85
+
+    /// bd-m8k: Minimum `observed_episode_count` before
+    /// `stable_precision_flag` is permitted to be true. Mirrors
+    /// `CoveragePlanner.defaultColdStartEpisodeThreshold`.
+    nonisolated static let plannerStableObservedEpisodeFloor = 5
 
     /// bd-1tl: dedicated logger for store-level diagnostics that should
     /// reach Console.app on real devices without test scaffolding.
@@ -347,6 +383,7 @@ actor AnalysisStore {
             try migrateEvidenceEventsNaturalKeyV2IfNeeded()
             try migrateEvidenceEventsTranscriptVersionV3IfNeeded()
             try migrateAnalysisSessionsShadowRetryV4IfNeeded()
+            try migratePodcastPlannerStateV4IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -520,6 +557,40 @@ actor AnalysisStore {
             CREATE INDEX IF NOT EXISTS idx_sessions_shadow_retry
             ON analysis_sessions(id)
             WHERE needs_shadow_retry = 1
+            """)
+        try setSchemaVersion(4)
+    }
+
+    /// bd-m8k: v4 creates `podcast_planner_state` for per-podcast
+    /// CoveragePlanner state (observed episode count, episodes since last
+    /// full rescan, precision ring, cached stable-precision flag). The table
+    /// is created empty — we do NOT backfill rows for existing podcasts.
+    /// Rows are upserted lazily the first time a podcast is observed.
+    ///
+    /// Idempotent: `CREATE TABLE IF NOT EXISTS` is a no-op when the table
+    /// already exists (e.g. on a fresh DB that picked up the baseline DDL in
+    /// `createTables()` before this migration ran). Guarded by the schema
+    /// version so an upgraded DB still executes the DDL once and then never
+    /// again.
+    ///
+    /// Coexists with `migrateAnalysisSessionsShadowRetryV4IfNeeded` (bd-3bz):
+    /// both run during the v3→v4 step, both touch independent tables, both
+    /// call setSchemaVersion(4) at the end (idempotent).
+    private func migratePodcastPlannerStateV4IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 4 else { return }
+
+        try exec("""
+            CREATE TABLE IF NOT EXISTS podcast_planner_state (
+                podcastId                       TEXT PRIMARY KEY,
+                observedEpisodeCount            INTEGER NOT NULL DEFAULT 0,
+                episodesSinceLastFullRescan     INTEGER NOT NULL DEFAULT 0,
+                stablePrecisionFlag             INTEGER NOT NULL DEFAULT 0,
+                lastFullRescanAt                REAL,
+                precisionSample1                REAL,
+                precisionSample2                REAL,
+                precisionSample3                REAL,
+                precisionSampleCount            INTEGER NOT NULL DEFAULT 0
+            )
             """)
         try setSchemaVersion(4)
     }
@@ -843,6 +914,27 @@ actor AnalysisStore {
             )
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_evidence_events_asset_created ON evidence_events(analysisAssetId, createdAt ASC)")
+
+        // bd-m8k: podcast_planner_state — per-podcast CoveragePlanner state
+        // (observed episode count, episodes since last full rescan, precision
+        // ring, cached stable-precision flag). Sibling table to
+        // `podcast_profiles`; NOT backfilled on migration. Rows are created
+        // lazily on first access. The precision ring stores the most recent
+        // `plannerPrecisionRingSize` (3) full-rescan precision samples; the
+        // flag is recomputed on every state mutation.
+        try exec("""
+            CREATE TABLE IF NOT EXISTS podcast_planner_state (
+                podcastId                       TEXT PRIMARY KEY,
+                observedEpisodeCount            INTEGER NOT NULL DEFAULT 0,
+                episodesSinceLastFullRescan     INTEGER NOT NULL DEFAULT 0,
+                stablePrecisionFlag             INTEGER NOT NULL DEFAULT 0,
+                lastFullRescanAt                REAL,
+                precisionSample1                REAL,
+                precisionSample2                REAL,
+                precisionSample3                REAL,
+                precisionSampleCount            INTEGER NOT NULL DEFAULT 0
+            )
+            """)
 
         // FTS5 virtual table over transcript_chunks
         try exec("""
@@ -1597,6 +1689,221 @@ actor AnalysisStore {
         )
     }
 
+    // MARK: - CRUD: podcast_planner_state (bd-m8k)
+
+    /// bd-m8k: Returns the persisted `PodcastPlannerState` for `podcastId`, or
+    /// `nil` if no row has been created for this podcast yet. Callers should
+    /// treat `nil` as the conservative cold-start default
+    /// (`observedEpisodeCount = 0`, `stablePrecisionFlag = false`,
+    /// `episodesSinceLastFullRescan = 0`) — the migration deliberately leaves
+    /// the table empty and rows are created lazily on first observation.
+    func fetchPodcastPlannerState(podcastId: String) throws -> PodcastPlannerState? {
+        let sql = """
+            SELECT podcastId,
+                   observedEpisodeCount,
+                   episodesSinceLastFullRescan,
+                   stablePrecisionFlag,
+                   lastFullRescanAt,
+                   precisionSample1,
+                   precisionSample2,
+                   precisionSample3,
+                   precisionSampleCount
+            FROM podcast_planner_state
+            WHERE podcastId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, podcastId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+
+        let sampleCount = max(0, min(
+            Self.plannerPrecisionRingSize,
+            Int(sqlite3_column_int(stmt, 8))
+        ))
+        // Samples are stored oldest → newest in columns 5/6/7. We hand back
+        // exactly `sampleCount` doubles so callers cannot accidentally treat
+        // a NULL slot as a real measurement.
+        var samples: [Double] = []
+        samples.reserveCapacity(sampleCount)
+        for offset in 0..<sampleCount {
+            if let value = optionalDouble(stmt, Int32(5 + offset)) {
+                samples.append(value)
+            }
+        }
+
+        return PodcastPlannerState(
+            podcastId: text(stmt, 0),
+            observedEpisodeCount: Int(sqlite3_column_int(stmt, 1)),
+            episodesSinceLastFullRescan: Int(sqlite3_column_int(stmt, 2)),
+            stablePrecisionFlag: sqlite3_column_int(stmt, 3) != 0,
+            lastFullRescanAt: optionalDouble(stmt, 4),
+            precisionSamples: samples
+        )
+    }
+
+    /// bd-m8k: Records that a backfill pass for `podcastId` has just completed
+    /// and returns the updated state.
+    ///
+    /// **Lazy creation:** if no row exists for `podcastId`, one is inserted at
+    /// cold-start defaults before the bookkeeping below is applied. This is
+    /// the only path that materializes a row — there is no migration backfill
+    /// and no separate `upsert` API.
+    ///
+    /// **Bookkeeping rules** (per the bd-m8k design field):
+    /// - `observedEpisodeCount` is incremented by 1 on every call.
+    /// - `wasFullRescan == true`: `episodesSinceLastFullRescan` resets to 0,
+    ///   `lastFullRescanAt` is updated, and (when `fullRescanPrecisionSample`
+    ///   is non-nil) the sample is appended to the precision ring with the
+    ///   oldest entry dropped if the ring is already full.
+    /// - `wasFullRescan == false`: `episodesSinceLastFullRescan` is
+    ///   incremented; the precision ring is left untouched. A precision
+    ///   sample passed alongside a non-full-rescan call is ignored (the
+    ///   targeted-with-audit pass cannot measure precision against itself).
+    /// - `stablePrecisionFlag` is recomputed from the post-update state on
+    ///   every call: it is true iff
+    ///   `observedEpisodeCount >= plannerStableObservedEpisodeFloor` AND the
+    ///   ring is full (`plannerPrecisionRingSize` samples) AND every sample
+    ///   in the ring is `>= plannerPrecisionThreshold`. If any condition
+    ///   fails the flag is forced false, even if a previous write set it to
+    ///   true (the ring shrinks back to false on regression).
+    @discardableResult
+    func recordPodcastEpisodeObservation(
+        podcastId: String,
+        wasFullRescan: Bool,
+        fullRescanPrecisionSample: Double? = nil,
+        now: Double
+    ) throws -> PodcastPlannerState {
+        // Wrap the read-modify-write in a transaction so a concurrent
+        // observation for the same podcast cannot interleave a stale read
+        // with our write. SQLite's busy_timeout already serializes writers,
+        // but BEGIN IMMEDIATE upgrades the lock immediately so two callers
+        // hitting the same row see SQLITE_BUSY rather than racing on the
+        // counter.
+        try exec("BEGIN IMMEDIATE")
+        do {
+            let prior = try fetchPodcastPlannerState(podcastId: podcastId)
+            let priorSamples = prior?.precisionSamples ?? []
+
+            let newObservedCount = (prior?.observedEpisodeCount ?? 0) + 1
+            let newEpisodesSince: Int
+            let newLastFullRescanAt: Double?
+            var newSamples = priorSamples
+
+            if wasFullRescan {
+                newEpisodesSince = 0
+                newLastFullRescanAt = now
+                if let sample = fullRescanPrecisionSample {
+                    newSamples.append(sample)
+                    while newSamples.count > Self.plannerPrecisionRingSize {
+                        newSamples.removeFirst()
+                    }
+                }
+            } else {
+                newEpisodesSince = (prior?.episodesSinceLastFullRescan ?? 0) + 1
+                newLastFullRescanAt = prior?.lastFullRescanAt
+                // Intentionally do NOT touch the precision ring on
+                // non-full-rescan observations — see doc comment above.
+            }
+
+            let stableFlag = Self.computePlannerStableFlag(
+                observedEpisodeCount: newObservedCount,
+                samples: newSamples
+            )
+
+            try writePodcastPlannerStateRow(
+                podcastId: podcastId,
+                observedEpisodeCount: newObservedCount,
+                episodesSinceLastFullRescan: newEpisodesSince,
+                stablePrecisionFlag: stableFlag,
+                lastFullRescanAt: newLastFullRescanAt,
+                samples: newSamples
+            )
+
+            try exec("COMMIT")
+
+            return PodcastPlannerState(
+                podcastId: podcastId,
+                observedEpisodeCount: newObservedCount,
+                episodesSinceLastFullRescan: newEpisodesSince,
+                stablePrecisionFlag: stableFlag,
+                lastFullRescanAt: newLastFullRescanAt,
+                precisionSamples: newSamples
+            )
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// bd-m8k: pure helper exposed for tests. Computes the stable-precision
+    /// flag from a post-update `(observedEpisodeCount, samples)` tuple. The
+    /// flag is true iff:
+    /// 1. `observedEpisodeCount >= plannerStableObservedEpisodeFloor` (5), AND
+    /// 2. The precision ring contains exactly `plannerPrecisionRingSize` (3)
+    ///    samples, AND
+    /// 3. Every sample is `>= plannerPrecisionThreshold` (0.85).
+    ///
+    /// The "exactly 3 samples" requirement is deliberate: a freshly
+    /// observed podcast with one stellar precision sample must not flip the
+    /// flag — we want at least three full-rescan precision measurements
+    /// before trusting the targeted-with-audit branch.
+    nonisolated static func computePlannerStableFlag(
+        observedEpisodeCount: Int,
+        samples: [Double]
+    ) -> Bool {
+        guard observedEpisodeCount >= plannerStableObservedEpisodeFloor else { return false }
+        guard samples.count >= plannerPrecisionRingSize else { return false }
+        return samples.allSatisfy { $0 >= plannerPrecisionThreshold }
+    }
+
+    private func writePodcastPlannerStateRow(
+        podcastId: String,
+        observedEpisodeCount: Int,
+        episodesSinceLastFullRescan: Int,
+        stablePrecisionFlag: Bool,
+        lastFullRescanAt: Double?,
+        samples: [Double]
+    ) throws {
+        // Pad the samples array out to the fixed-width ring slots so we can
+        // unconditionally bind 3 columns regardless of how many samples we
+        // have in hand.
+        var ring: [Double?] = Array(repeating: nil, count: Self.plannerPrecisionRingSize)
+        for (idx, value) in samples.enumerated()
+        where idx < Self.plannerPrecisionRingSize {
+            ring[idx] = value
+        }
+
+        let sql = """
+            INSERT INTO podcast_planner_state
+            (podcastId, observedEpisodeCount, episodesSinceLastFullRescan,
+             stablePrecisionFlag, lastFullRescanAt,
+             precisionSample1, precisionSample2, precisionSample3,
+             precisionSampleCount)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(podcastId) DO UPDATE SET
+                observedEpisodeCount        = excluded.observedEpisodeCount,
+                episodesSinceLastFullRescan = excluded.episodesSinceLastFullRescan,
+                stablePrecisionFlag         = excluded.stablePrecisionFlag,
+                lastFullRescanAt            = excluded.lastFullRescanAt,
+                precisionSample1            = excluded.precisionSample1,
+                precisionSample2            = excluded.precisionSample2,
+                precisionSample3            = excluded.precisionSample3,
+                precisionSampleCount        = excluded.precisionSampleCount
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, podcastId)
+        bind(stmt, 2, observedEpisodeCount)
+        bind(stmt, 3, episodesSinceLastFullRescan)
+        bind(stmt, 4, stablePrecisionFlag ? 1 : 0)
+        bind(stmt, 5, lastFullRescanAt)
+        bind(stmt, 6, ring[0])
+        bind(stmt, 7, ring[1])
+        bind(stmt, 8, ring[2])
+        bind(stmt, 9, samples.count)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
     // MARK: - CRUD: preview_budgets
 
     func upsertBudget(_ budget: PreviewBudget) throws {
@@ -2250,6 +2557,18 @@ actor AnalysisStore {
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         return optionalText(stmt, 0)
     }
+
+    #if DEBUG
+    /// bd-m8k test-only helper: drop the `podcast_planner_state` table from
+    /// under the live connection so the next `migrate()` against this path
+    /// has to recreate it. Used by the "DROP TABLE / re-migrate cycle is
+    /// clean" regression test. Production code must never call this — the
+    /// table is the planner's source of truth, and dropping it would erase
+    /// every show's observed-episode counter and precision ring.
+    func dropPodcastPlannerStateForTesting() throws {
+        try exec("DROP TABLE IF EXISTS podcast_planner_state")
+    }
+    #endif
 
     #if DEBUG
     /// Test-only: force a backfill row to a specific state without running

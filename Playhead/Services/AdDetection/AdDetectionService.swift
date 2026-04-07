@@ -424,27 +424,38 @@ actor AdDetectionService {
             analysisAssetId: analysisAssetId,
             transcriptVersion: version.transcriptVersion
         )
-        // R4-Fix8 / HIGH-3: production planner context is hardwired to
-        // cold-start values. CoveragePlanner's `targetedWithAudit` branch
-        // requires `observedEpisodeCount >= coldStartEpisodeThreshold`
-        // and `stablePrecision == true`, so with these inputs the planner
-        // always returns `[.fullEpisodeScan]`. This is intentional for
-        // Phase 3 shadow mode (no user-facing impact) — the targeted
-        // branch is unreachable until Phase 4 wires real per-show planner
-        // state through `AnalysisStore` (new columns for
-        // `observedEpisodeCount`, `episodesSinceLastFullRescan`, etc).
-        // Per CLAUDE.md "no unilateral architectural changes", we do not
-        // touch the persistence schema in this round.
-        // TODO(phase-4): wire real planner state from AnalysisStore so the
-        // targeted-with-audit branch becomes reachable in production.
+        // bd-m8k: read the real per-podcast planner state from AnalysisStore
+        // instead of hardwiring cold-start values. The legacy hardwire
+        // pinned `observedEpisodeCount = 0` and `stablePrecision = false`,
+        // which made `CoveragePlanner.shouldUseFullCoverage` always true and
+        // left the targeted-with-audit branch permanently unreachable.
+        //
+        // Lazy semantics: a missing row means we have never observed this
+        // podcast, so we fall back to the conservative cold-start defaults.
+        // The runner's `recordPodcastEpisodeObservation` call site (also
+        // bd-m8k) is what eventually materializes the row and accumulates
+        // the observed-episode count + precision ring that lets the flag
+        // flip true.
+        //
+        // Failure mode: a fetch error here must NEVER block the shadow
+        // pass — the whole point of shadow mode is that it cannot affect
+        // user-visible behavior. We log and fall through to the cold-start
+        // defaults so the runner still runs against `fullCoverage`.
+        let plannerState: PodcastPlannerState?
+        do {
+            plannerState = try await store.fetchPodcastPlannerState(podcastId: podcastId)
+        } catch {
+            logger.warning("bd-m8k: planner state fetch failed (defaulting to cold start): \(error.localizedDescription)")
+            plannerState = nil
+        }
         let plannerContext = CoveragePlannerContext(
-            observedEpisodeCount: 0,
-            stablePrecision: false,
+            observedEpisodeCount: plannerState?.observedEpisodeCount ?? 0,
+            stablePrecision: plannerState?.stablePrecisionFlag ?? false,
             isFirstEpisodeAfterCohortInvalidation: false,
             recallDegrading: false,
             sponsorDriftDetected: false,
             auditMissDetected: false,
-            episodesSinceLastFullRescan: 0,
+            episodesSinceLastFullRescan: plannerState?.episodesSinceLastFullRescan ?? 0,
             periodicFullRescanIntervalEpisodes: 10
         )
         let inputs = BackfillJobRunner.AssetInputs(

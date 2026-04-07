@@ -372,6 +372,54 @@ actor BackfillJobRunner {
             await admissionController.finish(jobId: job.jobId)
         }
 
+        // bd-m8k: this call site is the persisted equivalent of
+        // `CoveragePlanner.reset(context:)` — it advances `observedEpisodeCount`,
+        // zeros `episodesSinceLastFullRescan` when the plan ran a full rescan
+        // (otherwise increments it), updates `lastFullRescanAt`, and
+        // recomputes `stablePrecisionFlag`. The planner's `reset(context:)`
+        // is a pure function that returns a new in-memory context with no
+        // persistence side effect, so the read-side
+        // `AdDetectionService.runShadowFMPhase` rebuilds a fresh
+        // `CoveragePlannerContext` from the persisted row on the next
+        // episode pass instead of holding an in-memory reset value.
+        //
+        // Record one episode observation per asset run, but only if we
+        // actually admitted at least one job. A run that was deferred
+        // wholesale (thermal, battery, low-power) never touched the
+        // transcript and must not bump the counter — otherwise an episode
+        // played on a hot device would silently advance the planner toward
+        // `targetedWithAudit` without the planner having seen any FM
+        // evidence for it.
+        //
+        // `wasFullRescan` reflects the planned policy, NOT the per-job
+        // outcome. `fullCoverage` and `periodicFullRescan` both run a single
+        // `.fullEpisodeScan` phase that observes the full episode; the
+        // planner contract treats both as full rescans for the purposes of
+        // resetting `episodesSinceLastFullRescan`.
+        //
+        // `fullRescanPrecisionSample` is intentionally `nil`: the runner
+        // does not yet have a side-effect-free targeted-window predictor to
+        // dry-run against the full-rescan output. Until that ships, the
+        // ring stays empty in production and `stablePrecisionFlag` cannot
+        // flip true on its own — which is the conservative default the
+        // bd-m8k design field calls for. Tests drive the precision ring by
+        // calling `recordPodcastEpisodeObservation` directly.
+        if !admitted.isEmpty {
+            let wasFullRescan = (plan.policy == .fullCoverage || plan.policy == .periodicFullRescan)
+            do {
+                _ = try await store.recordPodcastEpisodeObservation(
+                    podcastId: inputs.podcastId,
+                    wasFullRescan: wasFullRescan,
+                    fullRescanPrecisionSample: nil,
+                    now: clock().timeIntervalSince1970
+                )
+            } catch {
+                logger.warning(
+                    "bd-m8k: planner-state observation failed (suppressed): podcast=\(inputs.podcastId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+
         return RunResult(
             admittedJobIds: admitted,
             scanResultIds: scanResultIds,

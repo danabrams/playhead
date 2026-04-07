@@ -239,9 +239,9 @@ struct BackfillJobStoreTests {
     func testSchemaVersionRecorded() async throws {
         let store = try await makeTestStore()
         let version = try await store.schemaVersion()
-        // bd-3bz (Phase 4) bumped schema_version to 4 by adding the
-        // `needs_shadow_retry` / `shadowRetryPodcastId` columns to
-        // `analysis_sessions`.
+        // Phase 4 bumped schema_version to 4: bd-3bz adds the
+        // needs_shadow_retry / shadowRetryPodcastId columns to
+        // analysis_sessions; bd-m8k adds the podcast_planner_state table.
         #expect(version == 4)
     }
 
