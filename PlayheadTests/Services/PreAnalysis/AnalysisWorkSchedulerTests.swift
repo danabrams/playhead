@@ -10,6 +10,69 @@ import Testing
 @Suite("AnalysisWorkScheduler — Store-level behavior")
 struct AnalysisWorkSchedulerTests {
 
+    @Test("coverage-insufficient retry requires incremental transcript or cue progress")
+    func testCoverageInsufficientRetryRequiresProgress() {
+        let job = makeAnalysisJob(
+            desiredCoverageSec: 90,
+            featureCoverageSec: 0,
+            transcriptCoverageSec: 0,
+            cueCoverageSec: 0
+        )
+        let outcome = AnalysisOutcome(
+            assetId: "asset-1",
+            requestedCoverageSec: 90,
+            featureCoverageSec: 90,
+            transcriptCoverageSec: 90,
+            cueCoverageSec: 0,
+            newCueCount: 0,
+            stopReason: .reachedTarget
+        )
+
+        #expect(AnalysisWorkScheduler.shouldRetryCoverageInsufficient(job: job, outcome: outcome))
+    }
+
+    @Test("coverage-insufficient retry stops when a reachedTarget pass makes no progress")
+    func testCoverageInsufficientRetryStopsWithoutProgress() {
+        let job = makeAnalysisJob(
+            desiredCoverageSec: 90,
+            featureCoverageSec: 90,
+            transcriptCoverageSec: 90,
+            cueCoverageSec: 0
+        )
+        let outcome = AnalysisOutcome(
+            assetId: "asset-1",
+            requestedCoverageSec: 90,
+            featureCoverageSec: 90,
+            transcriptCoverageSec: 90,
+            cueCoverageSec: 0,
+            newCueCount: 0,
+            stopReason: .reachedTarget
+        )
+
+        #expect(!AnalysisWorkScheduler.shouldRetryCoverageInsufficient(job: job, outcome: outcome))
+    }
+
+    @Test("coverage-insufficient retry keeps running when new cues were created")
+    func testCoverageInsufficientRetryTreatsNewCuesAsProgress() {
+        let job = makeAnalysisJob(
+            desiredCoverageSec: 90,
+            featureCoverageSec: 90,
+            transcriptCoverageSec: 90,
+            cueCoverageSec: 0
+        )
+        let outcome = AnalysisOutcome(
+            assetId: "asset-1",
+            requestedCoverageSec: 90,
+            featureCoverageSec: 90,
+            transcriptCoverageSec: 90,
+            cueCoverageSec: 0,
+            newCueCount: 1,
+            stopReason: .reachedTarget
+        )
+
+        #expect(AnalysisWorkScheduler.shouldRetryCoverageInsufficient(job: job, outcome: outcome))
+    }
+
     @Test("enqueue creates a job with correct fields")
     func testEnqueueCreatesJob() async throws {
         let store = try await makeTestStore()

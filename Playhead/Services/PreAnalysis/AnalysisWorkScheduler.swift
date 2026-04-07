@@ -7,6 +7,7 @@ import Foundation
 import OSLog
 
 actor AnalysisWorkScheduler {
+    private static let coverageProgressEpsilon = 0.001
     private let store: AnalysisStore
     private let jobRunner: AnalysisJobRunner
     private let capabilitiesService: CapabilitiesService
@@ -445,17 +446,26 @@ actor AnalysisWorkScheduler {
                 // Re-queue, but with a guard against infinite loops for short episodes
                 // or episodes that can never reach the desired coverage.
                 do {
-                    try await store.incrementAttemptCount(jobId: job.jobId)
-                    let updatedJob = try await store.fetchJob(byId: job.jobId)
-                    if (updatedJob?.attemptCount ?? 0) >= Self.maxAttemptCount {
+                    if !Self.shouldRetryCoverageInsufficient(job: job, outcome: outcome) {
                         try await store.updateJobState(
                             jobId: job.jobId,
                             state: "complete",
-                            lastErrorCode: "maxAttemptsReached:coverageInsufficient"
+                            lastErrorCode: "coverageInsufficient:noProgress"
                         )
-                        logger.info("Job \(job.jobId) marked complete after max attempts (coverage insufficient)")
+                        logger.info("Job \(job.jobId) marked complete after no-progress pass (coverage insufficient)")
                     } else {
-                        try await store.updateJobState(jobId: job.jobId, state: "queued")
+                        try await store.incrementAttemptCount(jobId: job.jobId)
+                        let updatedJob = try await store.fetchJob(byId: job.jobId)
+                        if (updatedJob?.attemptCount ?? 0) >= Self.maxAttemptCount {
+                            try await store.updateJobState(
+                                jobId: job.jobId,
+                                state: "complete",
+                                lastErrorCode: "maxAttemptsReached:coverageInsufficient"
+                            )
+                            logger.info("Job \(job.jobId) marked complete after max attempts (coverage insufficient)")
+                        } else {
+                            try await store.updateJobState(jobId: job.jobId, state: "queued")
+                        }
                     }
                 } catch {
                     logger.error("Failed to update job state: \(error)")
@@ -613,5 +623,15 @@ actor AnalysisWorkScheduler {
         try await store.insertAsset(asset)
         try await store.updateJobAnalysisAssetId(jobId: job.jobId, analysisAssetId: assetId)
         return assetId
+    }
+
+    static func shouldRetryCoverageInsufficient(job: AnalysisJob, outcome: AnalysisOutcome) -> Bool {
+        let epsilon = coverageProgressEpsilon
+        let featureAdvanced = outcome.featureCoverageSec > job.featureCoverageSec + epsilon
+        let transcriptAdvanced = outcome.transcriptCoverageSec > job.transcriptCoverageSec + epsilon
+        let cueAdvanced = outcome.cueCoverageSec > job.cueCoverageSec + epsilon
+        let cuesCreated = outcome.newCueCount > 0
+
+        return featureAdvanced || transcriptAdvanced || cueAdvanced || cuesCreated
     }
 }
