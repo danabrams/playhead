@@ -326,6 +326,85 @@ struct BoundarySpanExpansionTests {
         #expect(merged[0].resolvedEvidenceAnchors.count == 2)
     }
 
+    // MARK: - Failure 3 fix: trim-fallback when full expansion overflows budget
+
+    @Test("expansion trims the added segments when the full plan overflows the refinement budget")
+    func expansionTrimsOnBudgetOverflow() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeExpansionAsset(id: "asset-expansion-trim"))
+
+        // Scenario: 40-segment fixture, support=[15], base plan [15..19]
+        // returns a boundary span that triggers expansion. Context size
+        // is deliberately tight: the base 5-segment refinement window
+        // fits (prompt ~= 5 lines × 8 words ≈ 40 tokens + preamble
+        // ≈ 200 tokens); the full 10-segment expansion to [10..19]
+        // would push prompt past the refinement budget (≈ 400+ tokens),
+        // but the trim fallback drops the added lowerAdd from 5 to 1
+        // and retries with [14..19] which DOES fit.
+        //
+        // Before the Failure 3 fix this case recorded
+        // `expansion-truncated iterations=0` and bumped the
+        // truncations counter without ever issuing an expansion call.
+        // After the fix the trim helper walks down the step and
+        // successfully submits a smaller expansion plan.
+        // Differentiated token rule: coarse prompts stay cheap, but
+        // refinement prompts (identified by the "Evidence catalog:"
+        // marker `buildRefinementPrompt` always emits) charge a
+        // large per-line cost. With contextSize=65536 the coarse
+        // budget is ~8160 and the refinement budget is ~32176. We
+        // tune the refinement per-line cost so that:
+        //   base refinement (5 lines) ≤ 32176 (fits)
+        //   full ±5 expansion (10 lines) > 32176 (overflows)
+        //   trimmed +1/+0 (6 lines) ≤ 32176 (fits on fallback)
+        // Coarse prompt stays well under the coarse budget regardless
+        // of segment count because it has no `Evidence catalog:`
+        // marker and therefore hits the cheap branch.
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(supportLineRefs: [10], certainty: .strong)
+                )
+            ],
+            refinementResponses: [
+                makeBoundarySpanSchema(firstLineRef: 10, lastLineRef: 11),
+                makeInteriorSpanSchema(firstLineRef: 10, lastLineRef: 12),
+            ],
+            contextSize: 65_536,
+            tokenCountRule: { prompt in
+                let dataLines = prompt.split(separator: "\n").filter { line in
+                    line.hasPrefix("L") && line.contains(">")
+                }.count
+                if prompt.contains("Evidence catalog:") {
+                    // Refinement prompt: 5000 tokens per transcript line.
+                    // 5 lines = 25050, 6 = 30050, 7 = 35050, 10 = 50050.
+                    return 50 + dataLines * 5_000
+                }
+                // Coarse prompt: default cheap rule.
+                return max(1, prompt.split(whereSeparator: \.isWhitespace).count)
+            }
+        )
+        let runner = makeExpansionRunner(
+            store: store,
+            runtime: fmRuntime.runtime
+        )
+
+        _ = try await runner.runPendingBackfill(
+            for: makeExpansionInputs(id: "asset-expansion-trim", segmentCount: 20)
+        )
+
+        let telemetry = await runner.snapshotExpansionTelemetry()
+        // The key invariant: expansion must have DONE work, not
+        // surrendered at iterations=0 with a truncation bump.
+        // We don't pin invocations exactly because the trim walk
+        // may loop several iterations depending on how the FM stubs
+        // respond, but at least one real expansion call must land.
+        #expect(
+            telemetry.invocations >= 1,
+            "trim fallback must eventually submit an expansion plan instead of giving up at iterations=0"
+        )
+    }
+
     @Test("expansion truncates after the cumulative-segments cap when boundary spans recur")
     func pathologicalExpansionTruncates() async throws {
         let store = try await makeTestStore()

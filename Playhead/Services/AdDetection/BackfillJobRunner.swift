@@ -749,18 +749,34 @@ actor BackfillJobRunner {
                     break
                 }
 
-                // Build the expanded line ref set: every available
-                // segment index inside [newLower, newUpper] inclusive.
-                let expandedLineRefs = availableLineRefs.filter { $0 >= newLower && $0 <= newUpper }
-
                 // Ask the classifier for a fresh refinement plan over
-                // the expanded window.
-                let plan = try await classifier.planExpansionWindow(
+                // the expanded window. bd-1my Failure 3 fix: on real
+                // episodes the expansion lineRefs can push the prompt
+                // just past the refinement token budget (larger window =
+                // more transcript + more evidence entries than a typical
+                // `planAdaptiveZoom` window ever emits). Rather than
+                // surrendering the entire iteration at `iteration=0`, we
+                // progressively trim the NEWLY-added edges — from the
+                // widest step down to ±1 — while always keeping the
+                // original span's lineRefs intact. The inner-most
+                // candidate is the original [originalMin, originalMax]
+                // window, which by construction fit the refinement
+                // budget on the base pass, so the fallback sequence is
+                // guaranteed to terminate.
+                //
+                // This mirrors how bd-34e's Fix B v3 handled coarse
+                // budget pressure (iterative shrink, not one-shot).
+                let lowerAdded = lowerBound - newLower
+                let upperAdded = newUpper - upperBound
+                let plan = try await planExpansionWithTrim(
                     windowIndex: 1000 + windowOutput.windowIndex * 100 + iteration,
                     sourceWindowIndex: windowOutput.sourceWindowIndex,
-                    expandedLineRefs: expandedLineRefs,
-                    segments: inputs.segments,
-                    evidenceCatalog: inputs.evidenceCatalog
+                    keepLowerBound: lowerBound,
+                    keepUpperBound: upperBound,
+                    lowerAdded: lowerAdded,
+                    upperAdded: upperAdded,
+                    availableLineRefs: availableLineRefs,
+                    inputs: inputs
                 )
                 guard let plan else {
                     truncated = true
@@ -821,10 +837,16 @@ actor BackfillJobRunner {
                 // and write any new evidence events from the merged span
                 // set. We use a synthetic windowIndex namespace so the
                 // base row's id is not affected.
+                // bd-1my Failure 3 fix: `plan.lineRefs` reflects the
+                // actually-submitted (possibly trimmed) expansion plan,
+                // not the caller's original request. Persist the trimmed
+                // window so downstream recall analysis matches what the
+                // FM was asked about.
+                let acceptedLineRefs = plan.lineRefs
                 let mergedWindowOutput = FMRefinementWindowOutput(
                     windowIndex: plan.windowIndex,
                     sourceWindowIndex: windowOutput.sourceWindowIndex,
-                    lineRefs: expandedLineRefs,
+                    lineRefs: acceptedLineRefs,
                     spans: trackedSpans,
                     latencyMillis: expandedWindow.latencyMillis
                 )
@@ -848,8 +870,8 @@ actor BackfillJobRunner {
                 // Advance the boundaries for the next iteration. The
                 // tracked span set already reflects the new (possibly
                 // wider) bounds via the union-merge above.
-                lowerBound = expandedLineRefs.first ?? newLower
-                upperBound = expandedLineRefs.last ?? newUpper
+                lowerBound = acceptedLineRefs.first ?? newLower
+                upperBound = acceptedLineRefs.last ?? newUpper
 
                 // If the merged spans no longer touch the new boundary
                 // we are done — the ad has been fully captured.
@@ -889,6 +911,93 @@ actor BackfillJobRunner {
         }
 
         return results
+    }
+
+    /// bd-1my Failure 3 fix: call `planExpansionWindow` with progressively
+    /// smaller trims on the newly-added edges when the full expanded plan
+    /// overflows the refinement token budget.
+    ///
+    /// The trim schedule walks from the originally requested expansion
+    /// step down to a minimum of one added segment on the larger side,
+    /// then to a minimum of one added segment on the other side, and
+    /// finally — as a safety net — returns nil. The original span's
+    /// lineRefs are ALWAYS preserved in the plan because the base pass
+    /// already proved that window fit; the only uncertainty is how many
+    /// NEW segments we can afford to add alongside it.
+    ///
+    /// This keeps expansion productive on real episodes where the default
+    /// `±5` step happens to push a specific window just past the budget,
+    /// instead of surrendering the iteration at `iteration=0` with no work
+    /// done and a `truncations` telemetry bump.
+    private func planExpansionWithTrim(
+        windowIndex: Int,
+        sourceWindowIndex: Int,
+        keepLowerBound: Int,
+        keepUpperBound: Int,
+        lowerAdded: Int,
+        upperAdded: Int,
+        availableLineRefs: [Int],
+        inputs: AssetInputs
+    ) async throws -> RefinementWindowPlan? {
+        // Build candidate (lowerAdded, upperAdded) pairs in descending
+        // order of total coverage, always keeping the original span.
+        // We never overshoot the caller's request and we never drop
+        // below zero on either side.
+        var candidates: [(Int, Int)] = []
+        var seen = Set<String>()
+        func addCandidate(_ lo: Int, _ hi: Int) {
+            let clampedLo = max(0, min(lowerAdded, lo))
+            let clampedHi = max(0, min(upperAdded, hi))
+            let key = "\(clampedLo)-\(clampedHi)"
+            if seen.insert(key).inserted {
+                candidates.append((clampedLo, clampedHi))
+            }
+        }
+        addCandidate(lowerAdded, upperAdded)
+        // Halve, then quarter, then step down to 1 on each side.
+        let halfLo = lowerAdded / 2
+        let halfHi = upperAdded / 2
+        addCandidate(halfLo, halfHi)
+        addCandidate(halfLo, 0)
+        addCandidate(0, halfHi)
+        addCandidate(min(lowerAdded, 1), min(upperAdded, 1))
+        addCandidate(min(lowerAdded, 1), 0)
+        addCandidate(0, min(upperAdded, 1))
+
+        for (lo, hi) in candidates {
+            // (0, 0) = no expansion at all; trying the same window as
+            // last iteration cannot produce new spans, so skip.
+            if lo == 0 && hi == 0 { continue }
+            let candidateLower = keepLowerBound - lo
+            let candidateUpper = keepUpperBound + hi
+            let candidateLineRefs = availableLineRefs.filter {
+                $0 >= candidateLower && $0 <= candidateUpper
+            }
+            if candidateLineRefs.isEmpty { continue }
+            let plan = try await classifier.planExpansionWindow(
+                windowIndex: windowIndex,
+                sourceWindowIndex: sourceWindowIndex,
+                expandedLineRefs: candidateLineRefs,
+                segments: inputs.segments,
+                evidenceCatalog: inputs.evidenceCatalog
+            )
+            if let plan {
+                if lo < lowerAdded || hi < upperAdded {
+                    logger.info(
+                        """
+                        fm.classifier.expansion-trimmed \
+                        sourceWindow=\(sourceWindowIndex, privacy: .public) \
+                        requestedLowerAdd=\(lowerAdded, privacy: .public) \
+                        requestedUpperAdd=\(upperAdded, privacy: .public) \
+                        acceptedLowerAdd=\(lo, privacy: .public) \
+                        acceptedUpperAdd=\(hi, privacy: .public)
+                        """
+                    )
+                }
+                return plan
+            }
+        }
+        return nil
     }
 
     /// bd-1my: detect whether any of `spans` touches the window's first or

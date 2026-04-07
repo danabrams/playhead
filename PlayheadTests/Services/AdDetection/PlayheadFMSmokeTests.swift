@@ -265,16 +265,40 @@ final class PlayheadFMSmokeTests: XCTestCase {
     private func makeShortSyntheticInputs() -> BackfillJobRunner.AssetInputs {
         let assetId = "smoke-no-boundary"
         let transcriptVersion = "smoke-no-boundary-v1"
+        // bd-1my Failure 1 fix: the original 6-line fixture put the ad
+        // at lineRefs 0..2, which meant ANY refinement window picked by
+        // `planAdaptiveZoom` was forced to begin at lineRef 0 (the only
+        // available segment below). Once the FM returned a span whose
+        // firstLineRef equaled the refinement window's first lineRef,
+        // `spansTouchBoundary` reported a boundary touch and the
+        // expansion loop legitimately tried to widen above (since the
+        // refinement window was narrower than the episode). That fired
+        // one expansion invocation even though the ad was supposed to
+        // be "fully interior".
+        //
+        // The fix pads both sides of the ad with non-ad narrative so the
+        // adaptive zoom window can sit strictly inside the episode with
+        // interior buffer on BOTH sides. The ad itself now lives at
+        // lineRefs 3..5 and the episode has 10 segments total; a typical
+        // refinement window around [3..5] with the default minimum-span
+        // widening will NOT include segment 0 or segment 9, so any
+        // returned span that matches the ad interior will have firstLineRef
+        // > windowMin and lastLineRef < windowMax — no boundary touch, no
+        // expansion.
         let segments = makeFMSegments(
             analysisAssetId: assetId,
             transcriptVersion: transcriptVersion,
             lines: [
-                (0, 8, "Welcome to the show, today's episode is sponsored by ExampleCorp."),
-                (8, 16, "Use code SHOW for 20 percent off at example.com slash show."),
-                (16, 24, "Visit ExampleCorp dot com today to learn more."),
-                (24, 32, "And we are back from the break."),
-                (32, 40, "Our guest tells a story about hiking trips."),
-                (40, 48, "We close with a joke about lake fishing."),
+                (0, 8, "Welcome to the show, today our guest Ana talks about hiking the Pacific Crest Trail."),
+                (8, 16, "We start with how she prepared her backpack and which boots worked best."),
+                (16, 24, "She also mentions the coldest night she spent on the trail near Mount Whitney."),
+                (24, 32, "Today's episode is sponsored by ExampleCorp."),
+                (32, 40, "Use code SHOW for 20 percent off at example.com slash show."),
+                (40, 48, "Visit ExampleCorp dot com today to learn more."),
+                (48, 56, "And we are back from the break."),
+                (56, 64, "Ana tells a story about lake fishing at dawn."),
+                (64, 72, "We wrap up with book recommendations for trail reading."),
+                (72, 80, "Thanks for listening, see you next week."),
             ]
         )
         let catalog = EvidenceCatalogBuilder.build(
@@ -304,11 +328,22 @@ final class PlayheadFMSmokeTests: XCTestCase {
     private func makePathologicalSyntheticInputs() -> BackfillJobRunner.AssetInputs {
         let assetId = "smoke-pathological"
         let transcriptVersion = "smoke-pathological-v1"
-        // 30 contiguous lines of repetitive sponsor copy. Designed so
-        // any reasonable refinement window will return spans that touch
-        // both window boundaries — the model has no non-ad content to
-        // anchor an interior boundary on.
-        let lines: [(start: Double, end: Double, text: String)] = (0..<30).map { idx in
+        // bd-1my Failure 2 fix: the original 30-line fixture was long
+        // enough that the coarse planner split it into MULTIPLE coarse
+        // windows and/or the adaptive zoom produced multiple refinement
+        // source windows, each of which independently tripped the
+        // expansion truncation path. The on-device run logged four
+        // `expansion-truncated` events (iterations=2 each, segment-cap
+        // hit) while the assertion expected exactly one per source
+        // span on this "single-ad" fixture.
+        //
+        // The fix shrinks the fixture to 12 lines (short enough that
+        // the coarse planner produces a single window and the refinement
+        // planner produces a single source window under the default
+        // config) while keeping the content uniformly sponsor-like so
+        // expansion keeps chasing boundary spans until it hits the
+        // cumulative-segments cap exactly once.
+        let lines: [(start: Double, end: Double, text: String)] = (0..<12).map { idx in
             let start = Double(idx) * 6.0
             return (
                 start,
