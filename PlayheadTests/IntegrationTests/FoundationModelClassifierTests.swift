@@ -2851,6 +2851,45 @@ struct FoundationModelClassifierTests {
         #expect(!survivingLineRefs.contains(1))
     }
 
+    @Test("coarse pass degrades a single oversized segment to exceededContextWindow instead of throwing")
+    func coarsePassDegradesSingleOversizedSegment() async throws {
+        let segments = [
+            makeSegment(
+                index: 52,
+                startTime: 120,
+                endTime: 150,
+                text: String(repeating: "Oversized transcript segment. ", count: 40)
+            )
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: 3_688,
+            coarseSchemaTokens: 16,
+            refinementSchemaTokens: 32,
+            tokenCountRule: { prompt in
+                if prompt.contains("L52>") {
+                    return 512
+                }
+                return prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 4
+            }
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 8, maximumResponseTokens: 16)
+        )
+
+        let plans = try await classifier.planPassA(segments: segments)
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(plans.count == 1)
+        #expect(plans[0].lineRefs == [52])
+        #expect(plans[0].promptTokenCount == 512)
+        #expect(output.status == .exceededContextWindow)
+        #expect(output.windows.isEmpty)
+        #expect(output.failedWindowStatuses == [.exceededContextWindow])
+        #expect(snapshot.respondCalls.isEmpty)
+    }
+
     // bd-3h7: graceful degradation for refusal. Window 1 of 3 refuses
     // (simulating Apple's safety classifier rejecting specific content
     // topics), and the pass must continue to windows 2 and 3 instead of

@@ -6,6 +6,14 @@ import Foundation
 import OSLog
 import UIKit
 
+enum PlaybackPositionPersistenceTrigger: String, Sendable {
+    case periodic
+    case paused
+    case seek
+    case stopped
+    case background
+}
+
 @MainActor
 @Observable
 final class PlayheadRuntime {
@@ -44,6 +52,8 @@ final class PlayheadRuntime {
 
     private let isPreviewRuntime: Bool
     private let logger = Logger(subsystem: "com.playhead", category: "Runtime")
+    @ObservationIgnored
+    private var playbackPositionPersistenceHandler: (@MainActor (PlaybackPositionPersistenceTrigger) async -> Void)?
 
     private(set) var currentEpisodeId: String?
     private(set) var currentPodcastId: String?
@@ -358,13 +368,26 @@ final class PlayheadRuntime {
     }
 
     /// Capture and expose the current playback position for persistence.
-    /// Called from scene phase handling to save state on backgrounding.
+    /// Called from playback and scene handlers to save state opportunistically.
     /// Returns the position in seconds, or nil if nothing is playing.
     func capturePlaybackPosition() async -> (episodeId: String, position: TimeInterval)? {
         guard let episodeId = currentEpisodeId else { return nil }
         let snapshot = await playbackService.snapshot()
-        logger.info("Captured playback position for backgrounding: \(snapshot.currentTime)s")
+        logger.info("Captured playback position: \(snapshot.currentTime)s")
         return (episodeId, snapshot.currentTime)
+    }
+
+    func setPlaybackPositionPersistenceHandler(
+        _ handler: @escaping @MainActor (PlaybackPositionPersistenceTrigger) async -> Void
+    ) {
+        playbackPositionPersistenceHandler = handler
+    }
+
+    private func requestPlaybackPositionPersistence(
+        _ trigger: PlaybackPositionPersistenceTrigger
+    ) async {
+        guard let handler = playbackPositionPersistenceHandler else { return }
+        await handler(trigger)
     }
 
     func playEpisode(_ episode: Episode) async {
@@ -519,6 +542,7 @@ final class PlayheadRuntime {
     }
 
     func stopPlayback() async {
+        await requestPlaybackPositionPersistence(.stopped)
         audioCacheTask?.cancel()
         audioCacheTask = nil
         await backgroundProcessingService.playbackDidStop()
@@ -549,6 +573,7 @@ final class PlayheadRuntime {
             let snapshot = await playbackService.snapshot()
             await playbackService.pause()
             await analysisCoordinator.handlePlaybackEvent(.paused(time: snapshot.currentTime))
+            await requestPlaybackPositionPersistence(.paused)
         } else {
             let snapshot = await playbackService.snapshot()
             await playbackService.play()
@@ -586,6 +611,7 @@ final class PlayheadRuntime {
         await analysisCoordinator.handlePlaybackEvent(
             .scrubbed(to: seconds, rate: snapshot.playbackSpeed)
         )
+        await requestPlaybackPositionPersistence(.seek)
     }
 
     func setSpeed(_ speed: Float) async {

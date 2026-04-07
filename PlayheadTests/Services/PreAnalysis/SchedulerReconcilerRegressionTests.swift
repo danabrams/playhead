@@ -641,6 +641,41 @@ struct SchedulerBugFixRegressionTests {
                     "Job in state '\(state)' should be superseded after episodeDeleted, got '\(fetched?.state ?? "nil")'")
         }
     }
+
+    @Test("scheduler resolves a real analysis asset for jobs that start with nil analysisAssetId")
+    func testSchedulerResolvesRealAssetIdForNilJobAssetId() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let localURL = URL(fileURLWithPath: "/tmp/preanalysis-fk-regression.mp3")
+        downloads.cachedURLs["ep-fk-regression"] = localURL
+
+        let job = makeAnalysisJob(
+            jobId: "fk-regression-job",
+            jobType: "preAnalysis",
+            episodeId: "ep-fk-regression",
+            analysisAssetId: nil,
+            workKey: "fp-fk-regression:1:preAnalysis",
+            sourceFingerprint: "fp-fk-regression",
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        )
+        try await store.insertJob(job)
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        await scheduler.startSchedulerLoop()
+        try await Task.sleep(for: .milliseconds(400))
+        await scheduler.stop()
+
+        let updatedJob = try #require(await store.fetchJob(byId: "fk-regression-job"))
+        let analysisAssetId = try #require(updatedJob.analysisAssetId)
+        #expect(analysisAssetId != "ep-fk-regression")
+
+        let asset = try #require(await store.fetchAsset(id: analysisAssetId))
+        #expect(asset.episodeId == "ep-fk-regression")
+        #expect(asset.assetFingerprint == "fp-fk-regression")
+        #expect(asset.sourceURL == localURL.absoluteString)
+    }
 }
 
 // MARK: - Reconciler Bug-Fix Regression Tests

@@ -9,6 +9,8 @@ struct PlayheadApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     private static let logger = Logger(subsystem: "com.playhead", category: "App")
+    private static let playbackPositionSaveInterval: TimeInterval = 15
+    private static let playbackPositionMeaningfulDelta: TimeInterval = 0.5
 
     init() {
         // Attempt to create the SwiftData container. On failure, delete the
@@ -46,24 +48,63 @@ struct PlayheadApp: App {
         WindowGroup {
             RootView()
                 .environment(runtime)
+                .task {
+                    runtime.setPlaybackPositionPersistenceHandler { trigger in
+                        await Self.persistPlaybackPosition(
+                            runtime: runtime,
+                            modelContainer: modelContainer,
+                            trigger: trigger
+                        )
+                    }
+                }
+                .task {
+                    let stateStream = await runtime.playbackService.observeStates()
+                    var lastStatus: PlaybackState.Status = .idle
+                    var lastPeriodicCheckpoint: TimeInterval?
+
+                    for await state in stateStream {
+                        switch state.status {
+                        case .playing:
+                            if lastStatus != .playing ||
+                                (lastPeriodicCheckpoint != nil && state.currentTime < (lastPeriodicCheckpoint ?? 0)) {
+                                lastPeriodicCheckpoint = state.currentTime
+                            }
+
+                            if let checkpoint = lastPeriodicCheckpoint,
+                               state.currentTime - checkpoint >= Self.playbackPositionSaveInterval {
+                                await Self.persistPlaybackPosition(
+                                    runtime: runtime,
+                                    modelContainer: modelContainer,
+                                    trigger: .periodic
+                                )
+                                lastPeriodicCheckpoint = state.currentTime
+                            }
+
+                        case .paused:
+                            lastPeriodicCheckpoint = state.currentTime
+
+                        case .idle:
+                            lastPeriodicCheckpoint = nil
+
+                        default:
+                            break
+                        }
+
+                        lastStatus = state.status
+                    }
+                }
         }
         .modelContainer(modelContainer)
         .onChange(of: scenePhase) { oldPhase, newPhase in
             switch newPhase {
             case .background:
                 Self.logger.info("Scene phase: background — persisting playback position")
-                Task { @MainActor in
-                    guard let captured = await runtime.capturePlaybackPosition() else { return }
-                    let context = modelContainer.mainContext
-                    let episodeId = captured.episodeId
-                    let descriptor = FetchDescriptor<Episode>(
-                        predicate: #Predicate { $0.canonicalEpisodeKey == episodeId }
+                Task {
+                    await Self.persistPlaybackPosition(
+                        runtime: runtime,
+                        modelContainer: modelContainer,
+                        trigger: .background
                     )
-                    if let episode = try? context.fetch(descriptor).first {
-                        episode.playbackPosition = captured.position
-                        try? context.save()
-                        Self.logger.info("Saved position \(captured.position)s for episode \(episodeId)")
-                    }
                 }
             case .active:
                 Self.logger.info("Scene phase: active")
@@ -84,6 +125,44 @@ struct PlayheadApp: App {
         for ext in extensions {
             let url = appSupport.appendingPathComponent("\(storeName).\(ext)")
             try? fm.removeItem(at: url)
+        }
+    }
+
+    @MainActor
+    private static func persistPlaybackPosition(
+        runtime: PlayheadRuntime,
+        modelContainer: ModelContainer,
+        trigger: PlaybackPositionPersistenceTrigger
+    ) async {
+        guard let captured = await runtime.capturePlaybackPosition() else { return }
+
+        let context = modelContainer.mainContext
+        let episodeId = captured.episodeId
+        let descriptor = FetchDescriptor<Episode>(
+            predicate: #Predicate { $0.canonicalEpisodeKey == episodeId }
+        )
+
+        guard let episode = try? context.fetch(descriptor).first else {
+            logger.warning(
+                "Playback position persistence skipped: episode \(episodeId) not found for trigger \(trigger.rawValue)"
+            )
+            return
+        }
+
+        guard abs(episode.playbackPosition - captured.position) >= playbackPositionMeaningfulDelta else {
+            return
+        }
+
+        episode.playbackPosition = captured.position
+        do {
+            try context.save()
+            logger.info(
+                "Saved position \(captured.position)s for episode \(episodeId), trigger=\(trigger.rawValue)"
+            )
+        } catch {
+            logger.error(
+                "Failed to save position \(captured.position)s for episode \(episodeId), trigger=\(trigger.rawValue): \(error)"
+            )
         }
     }
 }

@@ -1614,6 +1614,20 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    func updateJobAnalysisAssetId(jobId: String, analysisAssetId: String) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET analysisAssetId = ?, updatedAt = ?
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        bind(stmt, 2, Date().timeIntervalSince1970)
+        bind(stmt, 3, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
     func acquireLease(jobId: String, owner: String, expiresAt: Double) throws -> Bool {
         let sql = """
             UPDATE analysis_jobs

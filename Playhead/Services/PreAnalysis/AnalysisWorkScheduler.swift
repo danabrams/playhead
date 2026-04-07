@@ -291,7 +291,25 @@ actor AnalysisWorkScheduler {
         }
 
         // Build request and run.
-        let assetId = job.analysisAssetId ?? job.episodeId
+        let assetId: String
+        do {
+            assetId = try await resolveAnalysisAssetId(for: job, localAudioURL: localAudioURL)
+        } catch {
+            logger.error("Failed to resolve analysis asset for job \(job.jobId): \(error)")
+            do {
+                let backoff = min(pow(2.0, Double(job.attemptCount + 1)) * 60, 3600)
+                try await store.updateJobState(
+                    jobId: job.jobId,
+                    state: "failed",
+                    nextEligibleAt: Date().timeIntervalSince1970 + backoff,
+                    lastErrorCode: "assetResolution: \(error)"
+                )
+            } catch {
+                logger.error("Failed to update job state after asset resolution error: \(error)")
+            }
+            try? await store.releaseLease(jobId: job.jobId)
+            return
+        }
         let request = AnalysisRangeRequest(
             jobId: job.jobId,
             episodeId: job.episodeId,
@@ -377,7 +395,7 @@ actor AnalysisWorkScheduler {
                         jobType: "preAnalysis",
                         episodeId: job.episodeId,
                         podcastId: job.podcastId,
-                        analysisAssetId: job.analysisAssetId,
+                        analysisAssetId: assetId,
                         workKey: tierWorkKey,
                         sourceFingerprint: job.sourceFingerprint,
                         downloadId: job.downloadId,
@@ -536,5 +554,46 @@ actor AnalysisWorkScheduler {
             return tier
         }
         return nil
+    }
+
+    private func resolveAnalysisAssetId(
+        for job: AnalysisJob,
+        localAudioURL: LocalAudioURL
+    ) async throws -> String {
+        if let analysisAssetId = job.analysisAssetId {
+            return analysisAssetId
+        }
+
+        if let existing = try await store.fetchAssetByEpisodeId(job.episodeId) {
+            try await store.updateJobAnalysisAssetId(jobId: job.jobId, analysisAssetId: existing.id)
+            return existing.id
+        }
+
+        let capabilityJSON: String?
+        do {
+            let snapshot = await capabilitiesService.currentSnapshot
+            let data = try JSONEncoder().encode(snapshot)
+            capabilityJSON = String(data: data, encoding: .utf8)
+        } catch {
+            capabilityJSON = nil
+        }
+
+        let assetId = UUID().uuidString
+        let asset = AnalysisAsset(
+            id: assetId,
+            episodeId: job.episodeId,
+            assetFingerprint: job.sourceFingerprint,
+            weakFingerprint: nil,
+            sourceURL: localAudioURL.absoluteString,
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "queued",
+            analysisVersion: PreAnalysisConfig.analysisVersion,
+            capabilitySnapshot: capabilityJSON
+        )
+        try await store.insertAsset(asset)
+        try await store.updateJobAnalysisAssetId(jobId: job.jobId, analysisAssetId: assetId)
+        return assetId
     }
 }

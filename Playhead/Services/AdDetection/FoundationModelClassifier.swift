@@ -797,7 +797,8 @@ struct FoundationModelClassifier: Sendable {
             )
         }
 
-        let plans = try await planPassA(segments: segments)
+        let budget = try await promptBudget()
+        let plans = try await planPassA(segments: segments, budget: budget)
         guard !plans.isEmpty else {
             return FMCoarseScanOutput(
                 status: .success,
@@ -841,6 +842,24 @@ struct FoundationModelClassifier: Sendable {
 
         let totalWindows = plans.count
         for (planIndex, plan) in plans.enumerated() {
+            if plan.promptTokenCount > budget {
+                failedWindowStatuses.append(.exceededContextWindow)
+                logger.error(
+                    """
+                    fm.classifier.coarse_pass_window_abandoned \
+                    window=\(planIndex + 1, privacy: .public) \
+                    totalWindows=\(totalWindows, privacy: .public) \
+                    firstSegmentIndex=\(plan.lineRefs.first ?? -1, privacy: .public) \
+                    lastSegmentIndex=\(plan.lineRefs.last ?? -1, privacy: .public) \
+                    segmentCount=\(plan.lineRefs.count, privacy: .public) \
+                    status=\(SemanticScanStatus.exceededContextWindow.rawValue, privacy: .public) \
+                    tokenCount=\(plan.promptTokenCount, privacy: .public) \
+                    budget=\(budget, privacy: .public)
+                    """
+                )
+                continue
+            }
+
             // H9: Honor cooperative cancellation between windows.
             do {
                 try Task.checkCancellation()
@@ -933,7 +952,10 @@ struct FoundationModelClassifier: Sendable {
         )
     }
 
-    func planPassA(segments: [AdTranscriptSegment]) async throws -> [CoarsePassWindowPlan] {
+    func planPassA(
+        segments: [AdTranscriptSegment],
+        budget explicitBudget: Int? = nil
+    ) async throws -> [CoarsePassWindowPlan] {
         let ordered = segments.sorted { lhs, rhs in
             if lhs.segmentIndex == rhs.segmentIndex {
                 return lhs.startTime < rhs.startTime
@@ -942,7 +964,12 @@ struct FoundationModelClassifier: Sendable {
         }
         guard !ordered.isEmpty else { return [] }
 
-        let budget = try await promptBudget()
+        let budget: Int
+        if let explicitBudget {
+            budget = explicitBudget
+        } else {
+            budget = try await promptBudget()
+        }
         var plans: [CoarsePassWindowPlan] = []
         plans.reserveCapacity(ordered.count)
 
@@ -954,11 +981,19 @@ struct FoundationModelClassifier: Sendable {
             var bestTokens = try await runtime.tokenCount(bestPrompt)
 
             if bestTokens > budget {
-                throw FoundationModelClassifierError.segmentExceedsTokenBudget(
-                    lineRef: firstSegment.segmentIndex,
-                    tokenCount: bestTokens,
-                    budget: budget
+                plans.append(
+                    CoarsePassWindowPlan(
+                        windowIndex: plans.count,
+                        lineRefs: [firstSegment.segmentIndex],
+                        prompt: bestPrompt,
+                        promptTokenCount: bestTokens,
+                        startTime: firstSegment.startTime,
+                        endTime: firstSegment.endTime,
+                        transcriptQuality: aggregateTranscriptQuality(for: [firstSegment])
+                    )
                 )
+                lowerBound += 1
+                continue
             }
 
             var probe = lowerBound + 1
