@@ -12,6 +12,45 @@ import Foundation
 import Testing
 @testable import Playhead
 
+// MARK: - Helpers
+
+/// Drain the given state stream until a state matching `predicate` is observed
+/// or a timeout fires. Returns the list of observed statuses. This replaces
+/// fragile `Task.sleep(...)` + `snapshot()` polling, which races with the
+/// actor's notification handler.
+/// Wraps an AsyncStream drain in a bounded wall-clock deadline. Polls the
+/// drain task with short sleep slices so we never wait indefinitely on a
+/// stream that never yields another value (which would otherwise hang).
+private func awaitStatus(
+    in stream: AsyncStream<PlaybackState>,
+    matching predicate: @Sendable @escaping (PlaybackState.Status) -> Bool,
+    timeoutNanos: UInt64 = 2_000_000_000
+) async -> [PlaybackState.Status] {
+    // Convert the stream into an async iterator we can poll inside a deadline.
+    let box = ObservedBox()
+    let drain = Task {
+        for await state in stream {
+            await box.append(state.status)
+            if predicate(state.status) { return }
+        }
+    }
+    let deadline = ContinuousClock.now.advanced(by: .nanoseconds(Int(timeoutNanos)))
+    while ContinuousClock.now < deadline {
+        if await box.matches(predicate) { break }
+        try? await Task.sleep(nanoseconds: 5_000_000)
+    }
+    drain.cancel()
+    return await box.statuses
+}
+
+private actor ObservedBox {
+    var statuses: [PlaybackState.Status] = []
+    func append(_ status: PlaybackState.Status) { statuses.append(status) }
+    func matches(_ predicate: (PlaybackState.Status) -> Bool) -> Bool {
+        statuses.contains(where: predicate)
+    }
+}
+
 // MARK: - Interruption Handling
 
 @Suite("PlaybackService – Audio Session Interruptions")
@@ -49,13 +88,12 @@ struct InterruptionHandlingTests {
             )
         }
 
-        // Give the async notification sequence time to deliver.
-        try await Task.sleep(for: .milliseconds(100))
-
-        // Verify the service transitioned to paused.
-        let snapshot = await service.snapshot()
-        #expect(snapshot.status == .paused,
-                "Service should pause on interruption began")
+        // Drain the state stream until we observe the pause transition.
+        // This replaces a 100ms sleep that races with the actor's async
+        // notification handler on slow/contended simulators.
+        let observed = await awaitStatus(in: stream) { $0 == .paused }
+        #expect(observed.contains(.paused),
+                "Service should pause on interruption began; observed: \(observed)")
     }
 
     @Test("Interruption ended with shouldResume resumes playback")
@@ -102,6 +140,10 @@ struct InterruptionHandlingTests {
             playbackSpeed: 1.0
         ))
 
+        // Subscribe to state changes BEFORE posting the notification so we
+        // never miss the pause transition the handler will emit.
+        let stream = await service.observeStates()
+
         // Post route change (headphones unplugged) on main queue.
         await MainActor.run {
             NotificationCenter.default.post(
@@ -113,11 +155,12 @@ struct InterruptionHandlingTests {
             )
         }
 
-        try await Task.sleep(for: .milliseconds(100))
-
-        let snapshot = await service.snapshot()
-        #expect(snapshot.status == .paused,
-                "Service should pause when headphones disconnect")
+        // Drain the state stream until we observe the pause transition.
+        // This replaces a 100ms sleep that races with the actor's async
+        // notification handler on slow/contended simulators.
+        let observed = await awaitStatus(in: stream) { $0 == .paused }
+        #expect(observed.contains(.paused),
+                "Service should pause when headphones disconnect; observed: \(observed)")
     }
 
     /// Rapid-fire notifications simulating the storm that Siri causes.
