@@ -698,6 +698,10 @@ struct FoundationModelClassifierTests {
         )
 
         let recorder = RuntimeRecorder(
+            // Budget = min((64-8-10-4)/2, 64/2) = 21, comfortably above the
+            // plan's promptTokenCount of 12 so the refinement preflight added
+            // in 8e220b6 ("avoid aborting analysis on serious thermal and FM
+            // token outliers") does not abandon the window before the FM call.
             contextSize: 64,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
@@ -756,7 +760,17 @@ struct FoundationModelClassifierTests {
                 )
             ]
         )
-        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(
+                safetyMarginTokens: 4,
+                coarseMaximumResponseTokens: 6,
+                refinementMaximumResponseTokens: 10,
+                zoomAmbiguityBudget: 0,
+                minimumZoomSpanLines: 2,
+                maximumRefinementSpansPerWindow: 2
+            )
+        )
 
         let output = try await classifier.refinePassB(
             zoomPlans: [zoomPlan],
