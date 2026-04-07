@@ -850,10 +850,16 @@ actor BackfillJobRunner {
                 // wider) bounds via the union-merge above.
                 lowerBound = expandedLineRefs.first ?? newLower
                 upperBound = expandedLineRefs.last ?? newUpper
-                iteration += 1
 
                 // If the merged spans no longer touch the new boundary
                 // we are done — the ad has been fully captured.
+                //
+                // NOTE: the `iteration += 1` increment MUST sit AFTER
+                // this clean-exit break. Incrementing before the check
+                // causes a false truncation-telemetry positive when
+                // the third iteration does real work and then exits
+                // cleanly: the post-loop guard `iteration >= max` would
+                // trip even though we broke out via the boundary check.
                 if !Self.spansTouchBoundary(
                     spans: trackedSpans,
                     windowMin: lowerBound,
@@ -861,6 +867,8 @@ actor BackfillJobRunner {
                 ) {
                     break
                 }
+
+                iteration += 1
             }
 
             // If we exited because of the iteration cap (vs a clean
@@ -946,22 +954,86 @@ actor BackfillJobRunner {
             lastAtomOrdinal: lastAtomOrdinal,
             certainty: preferred.certainty,
             boundaryPrecision: preferred.boundaryPrecision,
-            resolvedEvidenceAnchors: lhs.resolvedEvidenceAnchors + rhs.resolvedEvidenceAnchors,
+            // bd-1my M3: dedupe anchors by identity key. Straight
+            // concatenation accumulates duplicates across repeated
+            // union passes (the same anchor keeps re-appending every
+            // expansion iteration). Dedupe preserves the first-seen
+            // copy of each anchor so the resulting span's anchor set
+            // remains bounded regardless of iteration count.
+            resolvedEvidenceAnchors: Self.dedupAnchors(
+                lhs.resolvedEvidenceAnchors + rhs.resolvedEvidenceAnchors
+            ),
             memoryWriteEligible: lhs.memoryWriteEligible && rhs.memoryWriteEligible,
             alternativeExplanation: preferred.alternativeExplanation,
             reasonTags: Array(Set(lhs.reasonTags).union(rhs.reasonTags))
         )
     }
 
-    /// bd-1my: span-set equivalence check for the expansion no-op
-    /// short-circuit. Compares the multiset of (firstLineRef,
-    /// lastLineRef) tuples — sufficient because the expansion path
-    /// only ever widens or appends spans, never re-orders or shrinks.
+    /// bd-1my M2/M3: identity key for a resolved evidence anchor. Two
+    /// anchors collapse to the same grounding iff this key matches.
+    /// The tuple covers the fields that uniquely identify a grounding
+    /// in this codebase:
+    ///   - the catalog `evidenceRef` (nil when the FM emitted a raw
+    ///     `lineRef` with no catalog entry),
+    ///   - the `lineRef` the anchor is pinned to,
+    ///   - the `kind` (EvidenceCategory rawValue),
+    ///   - the resolution source (evidenceRef vs. lineRef fallback).
+    /// Certainty and `memoryWriteEligible` are NOT part of identity —
+    /// an upgraded certainty for the same (ref, line, kind) should
+    /// still collapse to one anchor on dedupe.
+    private static func anchorIdentityKey(_ anchor: ResolvedEvidenceAnchor) -> String {
+        let ref = anchor.entry?.evidenceRef.description ?? "nil"
+        return "\(ref)|\(anchor.lineRef)|\(anchor.kind.rawValue)|\(anchor.resolutionSource.rawValue)"
+    }
+
+    /// bd-1my M3: dedupe a concatenated anchor list by identity key,
+    /// preserving input order and the first-seen copy of each anchor.
+    private static func dedupAnchors(_ anchors: [ResolvedEvidenceAnchor]) -> [ResolvedEvidenceAnchor] {
+        var seen = Set<String>()
+        var result: [ResolvedEvidenceAnchor] = []
+        result.reserveCapacity(anchors.count)
+        for anchor in anchors {
+            if seen.insert(anchorIdentityKey(anchor)).inserted {
+                result.append(anchor)
+            }
+        }
+        return result
+    }
+
+    /// bd-1my M2: span-set equivalence check for the expansion no-op
+    /// short-circuit. Compares `(firstLineRef, lastLineRef)` tuples
+    /// AND the anchor identity set per span. The previous version
+    /// compared only line refs, which silently dropped anchor upgrades
+    /// on the merge short-circuit: if the FM re-confirmed a span with
+    /// the same bounds but richer evidence anchors, `unionSpan` merged
+    /// the new anchors into the tracked span yet `spanSetsEquivalent`
+    /// returned true, causing the loop to break WITHOUT persisting a
+    /// scan-result row carrying the new grounding. Comparing anchor
+    /// identity sets forces the short-circuit to yield only on true
+    /// no-op merges.
     static func spanSetsEquivalent(_ lhs: [RefinedAdSpan], _ rhs: [RefinedAdSpan]) -> Bool {
         guard lhs.count == rhs.count else { return false }
-        let lhsKeys = Set(lhs.map { "\($0.firstLineRef)-\($0.lastLineRef)" })
-        let rhsKeys = Set(rhs.map { "\($0.firstLineRef)-\($0.lastLineRef)" })
-        return lhsKeys == rhsKeys
+        // Sort by (firstLineRef, lastLineRef) so comparison is
+        // order-insensitive. Ties on line refs are rare in practice
+        // (mergeSpans unions overlapping ranges) but the expansion
+        // path never re-orders or shrinks, so ties stay deterministic.
+        let lhsSorted = lhs.sorted {
+            ($0.firstLineRef, $0.lastLineRef) < ($1.firstLineRef, $1.lastLineRef)
+        }
+        let rhsSorted = rhs.sorted {
+            ($0.firstLineRef, $0.lastLineRef) < ($1.firstLineRef, $1.lastLineRef)
+        }
+        for (a, b) in zip(lhsSorted, rhsSorted) {
+            if a.firstLineRef != b.firstLineRef || a.lastLineRef != b.lastLineRef {
+                return false
+            }
+            let aAnchorKeys = Set(a.resolvedEvidenceAnchors.map(anchorIdentityKey))
+            let bAnchorKeys = Set(b.resolvedEvidenceAnchors.map(anchorIdentityKey))
+            if aAnchorKeys != bAnchorKeys {
+                return false
+            }
+        }
+        return true
     }
 
     private static func certaintyRank(_ band: CertaintyBand) -> Int {

@@ -169,6 +169,152 @@ struct BoundarySpanExpansionTests {
 
     // MARK: - (b) Pathological truncation via runner
 
+    // MARK: - M1: clean-exit truncation telemetry regression
+
+    @Test("clean 2-iteration convergence does NOT emit expansion-truncated telemetry")
+    func cleanMultiIterationConvergenceDoesNotFireTruncation() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeExpansionAsset(id: "asset-clean-converge"))
+
+        // Wide fixture: 40 segments, support=[15]. Base plan [15..19].
+        //
+        // Reply 1 (base): [15..16] — touches base windowMin=15.
+        //   Expansion adds 5 below → new plan [10..19], segmentsBelow=5.
+        // Reply 2: [10..11] — touches new windowMin=10.
+        //   Expansion adds 5 below → new plan [5..19], segmentsBelow=10.
+        // Reply 3: [8..9] — fully interior of [5..19]. Boundary check
+        //   cleanly exits the loop. The post-loop truncation guard must
+        //   NOT fire: iteration was only incremented twice (once per
+        //   successful expansion call), so `iteration < maxExpansionIterations`
+        //   after my M1 fix. The pre-fix code incremented `iteration`
+        //   BEFORE the boundary check, which could over-count and fire
+        //   truncation telemetry as a false positive on clean exits.
+        //
+        // This test codifies the invariant that `iteration` only counts
+        // real expansion work, not the final clean-exit pass.
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(supportLineRefs: [15], certainty: .strong)
+                )
+            ],
+            refinementResponses: [
+                makeBoundarySpanSchema(firstLineRef: 15, lastLineRef: 16),
+                makeBoundarySpanSchema(firstLineRef: 10, lastLineRef: 11),
+                makeInteriorSpanSchema(firstLineRef: 8, lastLineRef: 9),
+            ],
+            contextSize: 65_536
+        )
+        let runner = makeExpansionRunner(
+            store: store,
+            runtime: fmRuntime.runtime
+        )
+
+        _ = try await runner.runPendingBackfill(
+            for: makeExpansionInputs(id: "asset-clean-converge", segmentCount: 40)
+        )
+
+        let telemetry = await runner.snapshotExpansionTelemetry()
+        #expect(
+            telemetry.truncations == 0,
+            "clean boundary-exit convergence must NEVER emit expansion-truncated telemetry"
+        )
+        #expect(telemetry.invocations >= 1, "expansion must fire at least once")
+    }
+
+    // MARK: - M2: spanSetsEquivalent anchor-sensitivity
+
+    @Test("spanSetsEquivalent treats same line refs + different anchors as distinct")
+    func spanSetsEquivalentDetectsAnchorUpgrade() {
+        let original = makeRefinedSpan(
+            firstLineRef: 5,
+            lastLineRef: 9,
+            anchors: []
+        )
+        let upgraded = makeRefinedSpan(
+            firstLineRef: 5,
+            lastLineRef: 9,
+            anchors: [makeResolvedAnchor(lineRef: 5, evidenceRef: 42)]
+        )
+
+        // Old implementation would return true (line refs equal) and the
+        // expansion loop would short-circuit, dropping the new anchor on
+        // the floor. The fix must return false so the merged span gets
+        // persisted with its richer grounding.
+        #expect(!BackfillJobRunner.spanSetsEquivalent([original], [upgraded]))
+        #expect(!BackfillJobRunner.spanSetsEquivalent([upgraded], [original]))
+    }
+
+    @Test("spanSetsEquivalent still returns true for identical span sets")
+    func spanSetsEquivalentHandlesTrueNoOps() {
+        let anchor = makeResolvedAnchor(lineRef: 5, evidenceRef: 42)
+        let a = makeRefinedSpan(firstLineRef: 5, lastLineRef: 9, anchors: [anchor])
+        let b = makeRefinedSpan(firstLineRef: 5, lastLineRef: 9, anchors: [anchor])
+        #expect(BackfillJobRunner.spanSetsEquivalent([a], [b]))
+    }
+
+    @Test("spanSetsEquivalent is order-insensitive across spans")
+    func spanSetsEquivalentIsOrderInsensitive() {
+        let s1 = makeRefinedSpan(firstLineRef: 5, lastLineRef: 9, anchors: [])
+        let s2 = makeRefinedSpan(firstLineRef: 12, lastLineRef: 14, anchors: [])
+        #expect(BackfillJobRunner.spanSetsEquivalent([s1, s2], [s2, s1]))
+    }
+
+    // MARK: - M3: unionSpan anchor dedup
+
+    @Test("mergeSpans does not duplicate anchors when unioning the same span twice")
+    func mergeSpansDedupesAnchorsAcrossRepeatedUnion() {
+        let anchor = makeResolvedAnchor(lineRef: 5, evidenceRef: 42)
+        let original = makeRefinedSpan(
+            firstLineRef: 5,
+            lastLineRef: 8,
+            anchors: [anchor]
+        )
+        let expansion = makeRefinedSpan(
+            firstLineRef: 5,
+            lastLineRef: 8,
+            anchors: [anchor]
+        )
+
+        let onceMerged = BackfillJobRunner.mergeSpans(
+            existing: [original],
+            expansion: [expansion]
+        )
+        #expect(onceMerged.count == 1)
+        #expect(
+            onceMerged[0].resolvedEvidenceAnchors.count == 1,
+            "identical anchor must not accumulate across union passes"
+        )
+
+        // And repeated unions still don't grow the anchor list.
+        let twiceMerged = BackfillJobRunner.mergeSpans(
+            existing: onceMerged,
+            expansion: [expansion]
+        )
+        #expect(twiceMerged[0].resolvedEvidenceAnchors.count == 1)
+    }
+
+    @Test("mergeSpans preserves distinct anchors when unioning a genuinely richer span")
+    func mergeSpansKeepsDistinctAnchorsOnMergedUpgrade() {
+        let firstAnchor = makeResolvedAnchor(lineRef: 5, evidenceRef: 42)
+        let secondAnchor = makeResolvedAnchor(lineRef: 6, evidenceRef: 43)
+        let original = makeRefinedSpan(
+            firstLineRef: 5,
+            lastLineRef: 8,
+            anchors: [firstAnchor]
+        )
+        let expansion = makeRefinedSpan(
+            firstLineRef: 5,
+            lastLineRef: 8,
+            anchors: [firstAnchor, secondAnchor]
+        )
+
+        let merged = BackfillJobRunner.mergeSpans(existing: [original], expansion: [expansion])
+        #expect(merged.count == 1)
+        #expect(merged[0].resolvedEvidenceAnchors.count == 2)
+    }
+
     @Test("expansion truncates after the cumulative-segments cap when boundary spans recur")
     func pathologicalExpansionTruncates() async throws {
         let store = try await makeTestStore()
@@ -221,7 +367,8 @@ struct BoundarySpanExpansionTests {
 private func makeRefinedSpan(
     firstLineRef: Int,
     lastLineRef: Int,
-    certainty: CertaintyBand = .moderate
+    certainty: CertaintyBand = .moderate,
+    anchors: [ResolvedEvidenceAnchor] = []
 ) -> RefinedAdSpan {
     RefinedAdSpan(
         commercialIntent: .paid,
@@ -232,10 +379,37 @@ private func makeRefinedSpan(
         lastAtomOrdinal: lastLineRef,
         certainty: certainty,
         boundaryPrecision: .usable,
-        resolvedEvidenceAnchors: [],
+        resolvedEvidenceAnchors: anchors,
         memoryWriteEligible: false,
         alternativeExplanation: .none,
         reasonTags: []
+    )
+}
+
+/// Build a synthetic ResolvedEvidenceAnchor with a fully-populated
+/// EvidenceEntry so the anchor identity key captures the evidenceRef.
+private func makeResolvedAnchor(
+    lineRef: Int,
+    evidenceRef: Int,
+    kind: EvidenceCategory = .brandSpan,
+    source: CommercialEvidenceResolutionSource = .evidenceRef
+) -> ResolvedEvidenceAnchor {
+    let entry = EvidenceEntry(
+        evidenceRef: evidenceRef,
+        category: kind,
+        matchedText: "brand-\(evidenceRef)",
+        normalizedText: "brand-\(evidenceRef)",
+        atomOrdinal: lineRef,
+        startTime: Double(lineRef),
+        endTime: Double(lineRef) + 1.0
+    )
+    return ResolvedEvidenceAnchor(
+        entry: entry,
+        lineRef: lineRef,
+        kind: kind,
+        certainty: .strong,
+        resolutionSource: source,
+        memoryWriteEligible: true
     )
 }
 
