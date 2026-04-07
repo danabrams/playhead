@@ -192,6 +192,17 @@ struct BoundarySpanExpansionTests {
         //
         // This test codifies the invariant that `iteration` only counts
         // real expansion work, not the final clean-exit pass.
+        //
+        // NOTE (round-2 reviewer): under the CURRENT static constants
+        // (maxExpansionIterations=3, maxExpansionSegmentsTotal=10,
+        // expansionStepSegments=5) the budget cap fires before any
+        // realistic fixture can reach a true 3-pass clean exit, so this
+        // test passes against both the pre-fix and post-fix code today.
+        // Its forward-looking value is to lock the invariant in place
+        // against future constant changes — if maxExpansionIterations
+        // is ever raised or expansionStepSegments lowered, the M1 bug
+        // would activate and this test (extended for the new bound)
+        // would catch it.
         let fmRuntime = TestFMRuntime(
             coarseResponses: [
                 CoarseScreeningSchema(
