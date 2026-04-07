@@ -1000,8 +1000,8 @@ struct BackfillJobRunnerTests {
         for jobId in firstRows.map(\.id) {
             _ = jobId // silence warning; we reuse the variable below
         }
-        // We need a job row that still allows re-enqueue. Use the deprecated
-        // combined checkpoint API to force the status back to .queued —
+        // We need a job row that still allows re-enqueue. Use the
+        // DEBUG-only force helper to drop the status back to .queued —
         // direct `markBackfillJobDeferred` can no longer demote a terminal
         // row after the C-R3-1 guard fix.
         let jobId = BackfillJobRunner.makeJobIdForTesting(
@@ -1010,10 +1010,10 @@ struct BackfillJobRunnerTests {
             phase: .fullEpisodeScan,
             offset: 0
         )
-        try await store.checkpointBackfillJob(
+        try await store.forceBackfillJobStateForTesting(
             jobId: jobId,
-            progressCursor: nil,
-            status: .queued
+            status: .queued,
+            progressCursor: nil
         )
 
         _ = try await runner.runPendingBackfill(for: makeInputs())
@@ -1136,10 +1136,10 @@ struct BackfillJobRunnerTests {
             phase: .fullEpisodeScan,
             offset: 0
         )
-        try await store.checkpointBackfillJob(
+        try await store.forceBackfillJobStateForTesting(
             jobId: jobId,
-            progressCursor: nil,
-            status: .queued
+            status: .queued,
+            progressCursor: nil
         )
 
         // Second run under a new transcriptVersion. Same asset, same window

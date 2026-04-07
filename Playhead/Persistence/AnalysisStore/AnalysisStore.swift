@@ -2002,50 +2002,43 @@ actor AnalysisStore {
         return optionalText(stmt, 0)
     }
 
-    /// Legacy combined API. Now thin shim that delegates to the split methods.
-    /// Production code should call `checkpointBackfillJobProgress`,
-    /// `markBackfillJobDeferred`, `markBackfillJobRunning`,
-    /// `markBackfillJobComplete`, or `markBackfillJobFailed` directly.
-    @available(*, deprecated, message: "Use markBackfillJobRunning/Complete/Failed/Deferred or checkpointBackfillJobProgress")
-    func checkpointBackfillJob(
+    #if DEBUG
+    /// Test-only: force a backfill row to a specific state without running
+    /// the lifecycle guards. Used by tests that need to set up a pre-existing
+    /// row in a specific configuration before exercising the runner (e.g.
+    /// demoting a terminal row back to `.queued` to simulate an orphan
+    /// recovery scenario). Production code MUST NOT call this — use
+    /// `markBackfillJobRunning/Complete/Failed/Deferred` or
+    /// `checkpointBackfillJobProgress` instead.
+    ///
+    /// `progressCursor` is written unconditionally: passing `nil` clears the
+    /// column to NULL. `retryCount` and `deferReason` use COALESCE so nil
+    /// leaves the existing row values untouched.
+    func forceBackfillJobStateForTesting(
         jobId: String,
+        status: BackfillJobStatus,
         progressCursor: BackfillProgressCursor?,
-        status: BackfillJobStatus = .running,
         retryCount: Int? = nil,
         deferReason: String? = nil
     ) throws {
-        // Update only the running-status case to avoid clobbering deferReason.
-        let sql: String
-        if status == .deferred, let deferReason {
-            sql = """
-                UPDATE backfill_jobs
-                SET progressCursor = ?, status = 'deferred',
-                    retryCount = COALESCE(?, retryCount), deferReason = ?
-                WHERE jobId = ?
-                """
-            let stmt = try prepare(sql)
-            defer { sqlite3_finalize(stmt) }
-            bind(stmt, 1, try encodeJSONString(progressCursor))
-            bind(stmt, 2, retryCount)
-            bind(stmt, 3, deferReason)
-            bind(stmt, 4, jobId)
-            try step(stmt, expecting: SQLITE_DONE)
-        } else {
-            sql = """
-                UPDATE backfill_jobs
-                SET progressCursor = ?, status = ?,
-                    retryCount = COALESCE(?, retryCount)
-                WHERE jobId = ?
-                """
-            let stmt = try prepare(sql)
-            defer { sqlite3_finalize(stmt) }
-            bind(stmt, 1, try encodeJSONString(progressCursor))
-            bind(stmt, 2, status.rawValue)
-            bind(stmt, 3, retryCount)
-            bind(stmt, 4, jobId)
-            try step(stmt, expecting: SQLITE_DONE)
-        }
+        let sql = """
+            UPDATE backfill_jobs
+            SET status = ?,
+                progressCursor = ?,
+                retryCount = COALESCE(?, retryCount),
+                deferReason = COALESCE(?, deferReason)
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, status.rawValue)
+        bind(stmt, 2, try encodeJSONString(progressCursor))
+        bind(stmt, 3, retryCount)
+        bind(stmt, 4, deferReason)
+        bind(stmt, 5, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
     }
+    #endif
 
     @discardableResult
     func advanceBackfillJobPhase(

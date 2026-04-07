@@ -75,13 +75,13 @@ struct BackfillJobStoreTests {
         )
 
         try await store.insertBackfillJob(job)
-        try await store.checkpointBackfillJob(
+        try await store.forceBackfillJobStateForTesting(
             jobId: job.jobId,
+            status: .running,
             progressCursor: BackfillProgressCursor(
                 processedUnitCount: 2,
                 lastProcessedUpperBoundSec: 90
-            ),
-            status: .running
+            )
         )
 
         let reopened = try await AnalysisStore.open(directory: dir)
