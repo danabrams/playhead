@@ -821,6 +821,34 @@ struct FoundationModelClassifier: Sendable {
         segments: [AdTranscriptSegment],
         locale: Locale = .current
     ) async throws -> FMCoarseScanOutput {
+        try await coarsePassA(
+            segments: segments,
+            locale: locale,
+            sensitiveRouter: nil,
+            permissiveClassifier: nil
+        )
+    }
+
+    /// bd-1en Phase 1: dispatching overload that routes sensitive
+    /// windows (pharma / medical / mental-health / regulated tests)
+    /// through `PermissiveAdClassifier` instead of the
+    /// `@Generable`-based coarse path. Windows that the router
+    /// classifies as `.normal` continue to use the existing
+    /// `LiveSessionActor` + `CoarseScreeningSchema` path with no
+    /// behavioral change.
+    ///
+    /// When BOTH `sensitiveRouter` and `permissiveClassifier` are
+    /// provided AND the router has rules loaded, sensitive windows
+    /// short-circuit the FM call entirely (no wasted refusal). When
+    /// either is nil or the router is the noop, behavior is byte-
+    /// identical to the original `coarsePassA`.
+    @available(iOS 26.0, *)
+    func coarsePassA(
+        segments: [AdTranscriptSegment],
+        locale: Locale = .current,
+        sensitiveRouter: SensitiveWindowRouter?,
+        permissiveClassifier: PermissiveAdClassifier?
+    ) async throws -> FMCoarseScanOutput {
         let clock = ContinuousClock()
         let start = clock.now
 
@@ -843,6 +871,25 @@ struct FoundationModelClassifier: Sendable {
                 prewarmHit: false
             )
         }
+
+        // bd-1en Phase 1: build a (segmentIndex → segment) lookup so
+        // each plan's `lineRefs` can be reflated back into the
+        // original `AdTranscriptSegment` objects. The permissive
+        // classifier needs the segment text (not just line refs) to
+        // build its own prompt.
+        //
+        // Use `uniquingKeysWith` instead of `uniqueKeysWithValues` so
+        // duplicate segment indices (which the existing test
+        // `coarse pass tolerates duplicate segmentIndex without
+        // crashing` deliberately exercises) collapse to first-write-wins
+        // rather than crashing the actor. Same pattern as the existing
+        // `lineRefLookup(for:)` helper around line 3398.
+        let segmentByIndex: [Int: AdTranscriptSegment] = Dictionary(
+            segments.map { ($0.segmentIndex, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let permissiveDispatchEnabled =
+            sensitiveRouter?.hasRules == true && permissiveClassifier != nil
 
         let coarseLineRefLookup = lineRefLookup(for: segments)
         // bd-34e Fix B v5 (was v4): per-window sessions are now the
@@ -907,6 +954,48 @@ struct FoundationModelClassifier: Sendable {
                     prewarmHit: prewarmHit,
                     failedWindowStatuses: failedWindowStatuses
                 )
+            }
+
+            // bd-1en Phase 1: route sensitive windows (pharma /
+            // medical / mental-health / regulated tests) through the
+            // permissive `SystemLanguageModel` path *before* we pay
+            // for an FM call we know would refuse. The router and
+            // classifier are both opt-in — when either is nil the
+            // dispatch flag stays false and we fall through to the
+            // existing `@Generable` path unchanged.
+            if permissiveDispatchEnabled {
+                let windowSegments = plan.lineRefs.compactMap { segmentByIndex[$0] }
+                if let router = sensitiveRouter,
+                   let permissive = permissiveClassifier,
+                   router.route(window: windowSegments) == .sensitive {
+                    let permissiveStart = clock.now
+                    let screening = await permissive.classify(window: windowSegments)
+                    let permissiveLatency = Self.latencyMillis(since: permissiveStart, clock: clock)
+                    windows.append(
+                        FMCoarseWindowOutput(
+                            windowIndex: windows.count,
+                            lineRefs: plan.lineRefs,
+                            startTime: plan.startTime,
+                            endTime: plan.endTime,
+                            transcriptQuality: plan.transcriptQuality,
+                            screening: screening,
+                            latencyMillis: permissiveLatency
+                        )
+                    )
+                    logger.debug(
+                        """
+                        fm.classifier.coarse_pass_window_permissive_route \
+                        window=\(planIndex + 1, privacy: .public) \
+                        totalWindows=\(totalWindows, privacy: .public) \
+                        firstSegmentIndex=\(plan.lineRefs.first ?? -1, privacy: .public) \
+                        lastSegmentIndex=\(plan.lineRefs.last ?? -1, privacy: .public) \
+                        segmentCount=\(plan.lineRefs.count, privacy: .public) \
+                        disposition=\(screening.disposition.rawValue, privacy: .public) \
+                        latencyMillis=\(permissiveLatency, privacy: .public)
+                        """
+                    )
+                    continue
+                }
             }
 
             // bd-34e Fix B v5: every coarse window gets its own freshly

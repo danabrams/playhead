@@ -150,4 +150,52 @@ public struct PromptRedactor: Sendable {
     public var isActive: Bool {
         !dictionary.categories.isEmpty
     }
+
+    // MARK: - bd-1en Phase 1 routing accessors
+    //
+    // The dictionary loaded for the (now-deprecated) text-redaction path is
+    // ALSO the right vocabulary for the bd-1en Phase 1 routing layer:
+    // sensitive windows are the ones whose text contains a *trigger*
+    // category match (vaccine vocabulary, pharma drug brands, mental-health
+    // services, regulated medical tests). Disease names are intentionally
+    // NOT triggers — they're cooccurrent in the dictionary, so they only
+    // mask when they share a line with a trigger word, and on their own
+    // they don't refuse the safety classifier (R2 in the probe matrix).
+    //
+    // SensitiveWindowRouter uses these accessors to decide whether a
+    // window goes through the @Generable path or the
+    // SystemLanguageModel(guardrails: .permissiveContentTransformations)
+    // path. Adding accessors here (rather than re-parsing the JSON in
+    // the router) keeps the dictionary the single source of truth.
+
+    /// All trigger-category rules flattened into a single array. Each rule
+    /// preserves its `pattern` and `isRegex` flag so the router can apply
+    /// the same word-boundary regex matching the redactor uses internally.
+    public func allTriggerRules() -> [RedactionRule] {
+        dictionary.categories
+            .filter { $0.category == "trigger" }
+            .flatMap(\.patterns)
+    }
+
+    /// Word-boundary substring search using the same matching semantics as
+    /// `applyCategory` (case-insensitive, regex or literal based on the
+    /// rule's `isRegex` flag, with `\b` boundaries unless the pattern's
+    /// edge characters are non-word). Exposed as a static helper so the
+    /// router can call it without owning a `PromptRedactor` instance.
+    public static func ruleMatches(_ rule: RedactionRule, in text: String) -> Bool {
+        let bodyPattern: String
+        if rule.isRegex {
+            bodyPattern = rule.pattern
+        } else {
+            bodyPattern = NSRegularExpression.escapedPattern(for: rule.pattern)
+        }
+        let leftBoundary = bodyPattern.first.map(isWordChar) ?? false ? "\\b" : ""
+        let rightBoundary = bodyPattern.last.map(isWordChar) ?? false ? "\\b" : ""
+        let pattern = leftBoundary + bodyPattern + rightBoundary
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return false
+        }
+        let range = NSRange(text.startIndex..., in: text)
+        return regex.firstMatch(in: text, options: [], range: range) != nil
+    }
 }

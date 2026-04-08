@@ -1342,4 +1342,73 @@ final class PlayheadFMSmokeTests: XCTestCase {
         let preview = String(token.prefix(80))
         return ("PARSE-FAILED", "raw=\(preview)")
     }
+
+    // MARK: - bd-1en Phase 1: PermissiveAdClassifier end-to-end
+
+    /// On-device sanity check for the production `PermissiveAdClassifier`
+    /// actor. Constructs the classifier, feeds it a synthetic CVS pre-roll
+    /// window, and asserts the result is `.containsAd` with line refs
+    /// drawn from the actual segment indices. The point of this test is
+    /// to verify the production prompt + parser pair (which is stricter
+    /// than the validation matrix's prompt + parser pair) still recovers
+    /// the canonical refused-ad case.
+    func testPermissiveAdClassifierEndToEnd() async throws {
+        guard #available(iOS 26.0, *) else {
+            throw XCTSkip("PermissiveAdClassifier requires iOS 26.0+")
+        }
+        #if !canImport(FoundationModels)
+        throw XCTSkip("FoundationModels framework not available in this build configuration")
+        #else
+
+        let classifier = PermissiveAdClassifier()
+        let segments: [AdTranscriptSegment] = [
+            makeSmokeSegment(index: 0, text: "Get a flu shot at any CVS Pharmacy this fall."),
+            makeSmokeSegment(index: 1, text: "Schedule online or just walk in — most insurance accepted."),
+            makeSmokeSegment(index: 2, text: "CVS dot com slash flu to find your nearest location."),
+        ]
+        let result = await classifier.classify(window: segments)
+
+        // The synthetic CVS pre-roll is the canonical pharma refusal
+        // case in the bd-1en probe matrix. Through the permissive path
+        // the model should classify it as containing an ad. We accept
+        // `.uncertain` as a soft pass too — the production prompt is
+        // strict and the validation matrix saw 3/124 cross-promo
+        // borderline cases land on uncertain — but we explicitly
+        // disallow `.noAds`, which would mean the permissive path
+        // missed an obvious ad.
+        XCTAssertTrue(
+            result.disposition == .containsAd || result.disposition == .uncertain,
+            "expected containsAd (or uncertain) on the synthetic CVS pre-roll, got \(result.disposition)"
+        )
+        if result.disposition == .containsAd {
+            let support = try XCTUnwrap(result.support)
+            let validRefs: Set<Int> = [0, 1, 2]
+            XCTAssertFalse(support.supportLineRefs.isEmpty)
+            XCTAssertTrue(
+                support.supportLineRefs.allSatisfy { validRefs.contains($0) },
+                "permissive classifier returned out-of-window line refs: \(support.supportLineRefs)"
+            )
+        }
+        #endif
+    }
+
+    private func makeSmokeSegment(index: Int, text: String) -> AdTranscriptSegment {
+        AdTranscriptSegment(
+            atoms: [
+                TranscriptAtom(
+                    atomKey: TranscriptAtomKey(
+                        analysisAssetId: "asset-permissive-smoke",
+                        transcriptVersion: "transcript-v1",
+                        atomOrdinal: index
+                    ),
+                    contentHash: "hash-\(index)",
+                    startTime: Double(index),
+                    endTime: Double(index) + 1,
+                    text: text,
+                    chunkIndex: index
+                )
+            ],
+            segmentIndex: index
+        )
+    }
 }

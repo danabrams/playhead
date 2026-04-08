@@ -66,6 +66,38 @@ actor BackfillJobRunner {
     private let clock: @Sendable () -> Date
     private let logger = Logger(subsystem: "com.playhead", category: "BackfillJobRunner")
 
+    /// bd-1en Phase 1: optional router that decides whether each
+    /// coarse-pass window contains trigger vocabulary that should be
+    /// dispatched through the permissive `SystemLanguageModel` path
+    /// instead of the default `@Generable` path. Nil means "always
+    /// route normal" — production behavior is byte-identical to the
+    /// pre-bd-1en path when both this and `permissiveClassifier` are
+    /// nil.
+    private let sensitiveRouter: SensitiveWindowRouter?
+    /// bd-1en Phase 1: optional permissive classifier used to handle
+    /// sensitive windows. Sendable across actor boundaries because
+    /// `PermissiveAdClassifier` is itself an actor.
+    private let permissiveClassifierBox: PermissiveClassifierBox?
+
+    /// Sendable wrapper around the gated `PermissiveAdClassifier` actor.
+    /// `PermissiveAdClassifier` is `@available(iOS 26.0, *)` so storing
+    /// it directly on the runner would force the entire runner to be
+    /// gated. The box hides the availability gate behind a non-gated
+    /// reference; the runner only unwraps it from inside the iOS 26
+    /// dispatch branch in `runJob`.
+    struct PermissiveClassifierBox: @unchecked Sendable {
+        let backing: AnyObject
+        @available(iOS 26.0, *)
+        var classifier: PermissiveAdClassifier {
+            // swiftlint:disable:next force_cast
+            backing as! PermissiveAdClassifier
+        }
+        @available(iOS 26.0, *)
+        init(_ classifier: PermissiveAdClassifier) {
+            self.backing = classifier
+        }
+    }
+
     init(
         store: AnalysisStore,
         admissionController: AdmissionController,
@@ -75,7 +107,9 @@ actor BackfillJobRunner {
         capabilitySnapshotProvider: @escaping @Sendable () async -> CapabilitySnapshot,
         batteryLevelProvider: @escaping @Sendable () async -> Float,
         scanCohortJSON: String,
-        clock: @escaping @Sendable () -> Date = { Date() }
+        clock: @escaping @Sendable () -> Date = { Date() },
+        sensitiveRouter: SensitiveWindowRouter? = nil,
+        permissiveClassifier: PermissiveClassifierBox? = nil
     ) {
         self.store = store
         self.admissionController = admissionController
@@ -86,6 +120,8 @@ actor BackfillJobRunner {
         self.batteryLevelProvider = batteryLevelProvider
         self.scanCohortJSON = scanCohortJSON
         self.clock = clock
+        self.sensitiveRouter = sensitiveRouter
+        self.permissiveClassifierBox = permissiveClassifier
     }
 
     // MARK: - Entry Point
@@ -440,7 +476,24 @@ actor BackfillJobRunner {
         var scanResultIds: [String] = []
         var evidenceEventIds: [String] = []
 
-        let coarse = try await classifier.coarsePassA(segments: inputs.segments)
+        // bd-1en Phase 1: dispatch sensitive windows (pharma /
+        // medical / mental-health / regulated tests) through the
+        // permissive `SystemLanguageModel` path. The router and
+        // classifier are both opt-in — when either is nil we call the
+        // legacy single-arg overload, which is byte-identical to the
+        // pre-bd-1en path.
+        let coarse: FMCoarseScanOutput
+        if #available(iOS 26.0, *),
+           let router = sensitiveRouter,
+           let classifierBox = permissiveClassifierBox {
+            coarse = try await classifier.coarsePassA(
+                segments: inputs.segments,
+                sensitiveRouter: router,
+                permissiveClassifier: classifierBox.classifier
+            )
+        } else {
+            coarse = try await classifier.coarsePassA(segments: inputs.segments)
+        }
 
         for window in coarse.windows {
             try Task.checkCancellation()

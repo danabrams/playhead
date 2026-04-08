@@ -171,8 +171,26 @@ final class PlayheadRuntime {
         // no-mass-defer invariant is pinned by
         // `concurrentRunBackfillsDoNotMassDeferEachOther` in
         // BackfillJobRunnerTests.
+        // bd-1en Phase 1: build the sensitive-window router and the
+        // permissive-path classifier once and capture them in the
+        // factory closure. Both are opt-in: if `RedactionRules.json`
+        // fails to load the router falls back to `.noop` and dispatch
+        // is a no-op (production behavior is byte-identical to the
+        // pre-bd-1en path). The permissive classifier is constructed
+        // only on iOS 26+ since `SystemLanguageModel(guardrails:)` is
+        // gated.
+        let bd1enRedactor = PromptRedactor.loadDefault()
+        let bd1enRouter: SensitiveWindowRouter = bd1enRedactor.map { SensitiveWindowRouter(redactor: $0) }
+            ?? .noop
+        let bd1enPermissiveBox: BackfillJobRunner.PermissiveClassifierBox? = {
+            if #available(iOS 26.0, *) {
+                return BackfillJobRunner.PermissiveClassifierBox(PermissiveAdClassifier())
+            }
+            return nil
+        }()
+
         let backfillJobRunnerFactory: @Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner = {
-            [capabilitiesServiceForFactory, batteryProvider, feedbackStore] store, mode in
+            [capabilitiesServiceForFactory, batteryProvider, feedbackStore, bd1enRouter, bd1enPermissiveBox] store, mode in
             BackfillJobRunner(
                 store: store,
                 admissionController: AdmissionController(),
@@ -187,7 +205,9 @@ final class PlayheadRuntime {
                 // leaving reuse-cache lookups keyed off stale values. The
                 // per-call cost is microseconds (a handful of string fields
                 // JSON-encoded with sorted keys) and buys cohort freshness.
-                scanCohortJSON: ScanCohort.productionJSON()
+                scanCohortJSON: ScanCohort.productionJSON(),
+                sensitiveRouter: bd1enRouter,
+                permissiveClassifier: bd1enPermissiveBox
             )
         }
         // bd-3bz (Phase 4): when the shadow phase bails on FM unavailability,
