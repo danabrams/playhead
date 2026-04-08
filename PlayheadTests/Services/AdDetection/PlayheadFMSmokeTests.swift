@@ -209,7 +209,22 @@ final class PlayheadFMSmokeTests: XCTestCase {
     // MARK: - Live runner construction
 
     private func makeLiveSmokeRunner(store: AnalysisStore) -> BackfillJobRunner {
-        BackfillJobRunner(
+        // bd-1en Phase 1: wire the SensitiveWindowRouter + PermissiveAdClassifier
+        // through the smoke runner so the permissive dispatch fires on
+        // the Conan CVS pre-roll. Without this, the smoke test bypasses
+        // PlayheadRuntime's wiring and falls back to the legacy single-
+        // arg coarsePassA — which is what the previous Conan run hit
+        // (recall stuck at 2/4 because no `permissive_route` events
+        // ever fired despite the architecture being in place).
+        let redactor = PromptRedactor.loadDefault() ?? .noop
+        let router = SensitiveWindowRouter(redactor: redactor)
+        let permissiveClassifierBox: BackfillJobRunner.PermissiveClassifierBox?
+        if #available(iOS 26.0, *) {
+            permissiveClassifierBox = BackfillJobRunner.PermissiveClassifierBox(PermissiveAdClassifier())
+        } else {
+            permissiveClassifierBox = nil
+        }
+        return BackfillJobRunner(
             store: store,
             admissionController: AdmissionController(),
             // No `runtime:` argument ⇒ FoundationModelClassifier uses its
@@ -219,7 +234,9 @@ final class PlayheadFMSmokeTests: XCTestCase {
             mode: .shadow,
             capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
             batteryLevelProvider: { 1.0 },
-            scanCohortJSON: makeTestScanCohortJSON(promptLabel: "fm-smoke")
+            scanCohortJSON: makeTestScanCohortJSON(promptLabel: "fm-smoke"),
+            sensitiveRouter: router,
+            permissiveClassifier: permissiveClassifierBox
         )
     }
 
