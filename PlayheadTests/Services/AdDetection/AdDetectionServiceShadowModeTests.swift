@@ -501,25 +501,13 @@ struct AdDetectionServiceShadowModeTests {
         let fullEpisodeJob = try await store.fetchBackfillJob(byId: fullEpisodeJobId)
         #expect(fullEpisodeJob == nil)
 
-        // Cycle 2 Rev3-M6 / Cycle 4 B4: prove that the HARVESTER and
-        // LEXICAL narrowing phases each produced a passA row whose
-        // atom-ordinal span is strictly smaller than the full episode
-        // span. The legacy assertion only checked "at least one row was
-        // a strict subset", which was trivially satisfied by the
-        // `scanRandomAuditWindows` phase (auditWindowSampleRate=0.12 →
-        // ~3-4 segments out of 30 is ALWAYS a strict subset), so the
-        // rail never actually exercised the harvester / lexical
-        // narrowing paths.
-        //
-        // We can't cheaply attribute a persisted passA row to its
-        // originating phase (no phase discriminator is stored on the
-        // row; reuseScope is hash-only input). Instead, count the
-        // strict-subset rows: audit always contributes one, so any
-        // value >= 2 proves that harvester and/or lexical also
-        // narrowed. A count of 1 means only audit narrowed and both
-        // heavy-lifting phases regressed to full-episode coverage —
-        // the exact condition the cycle-3 reviewer flagged this rail
-        // could not detect.
+        // Cycle 6 B6 Rev3-M6: now that BackfillJobRunner persists the
+        // originating phase into `semantic_scan_results.phase`, filter
+        // rows by phase and assert that BOTH harvester AND lexical
+        // narrowing phases produced at least one row that is a strict
+        // subset of the full episode. The legacy `>= 2` assertion would
+        // pass even if only audit + one of the heavy-lifting phases
+        // narrowed — this is the condition the cycle-5 reviewer flagged.
         let (allAtoms, _) = TranscriptAtomizer.atomize(
             chunks: makeEpisodeChunks(targetedAssetId),
             analysisAssetId: targetedAssetId,
@@ -529,12 +517,29 @@ struct AdDetectionServiceShadowModeTests {
         let firstOrdinal = allAtoms.first?.atomKey.atomOrdinal ?? 0
         let lastOrdinal = allAtoms.last?.atomKey.atomOrdinal ?? 0
         let episodeAtomCount = lastOrdinal - firstOrdinal
-        let narrowedRowCount = passA.filter { row in
+        func isStrictSubset(_ row: SemanticScanResult) -> Bool {
             (row.windowLastAtomOrdinal - row.windowFirstAtomOrdinal) < episodeAtomCount
-        }.count
+        }
+
+        let harvesterRows = passA.filter { $0.phase == BackfillJobPhase.scanHarvesterProposals.rawValue }
+        let lexicalRows = passA.filter { $0.phase == BackfillJobPhase.scanLikelyAdSlots.rawValue }
+        let auditRows = passA.filter { $0.phase == BackfillJobPhase.scanRandomAuditWindows.rawValue }
+
+        #expect(!harvesterRows.isEmpty, "harvester phase must persist at least one passA row")
+        #expect(!lexicalRows.isEmpty, "lexical phase must persist at least one passA row")
+        #expect(!auditRows.isEmpty, "audit phase must persist at least one passA row")
+
         #expect(
-            narrowedRowCount >= 2,
-            "Cycle 4 B4 Rev3-M6: at least 2 targeted passA rows must be strict subsets of the full episode (audit always is, so harvester AND/OR lexical must also narrow). Got \(narrowedRowCount) narrowed of \(passA.count)."
+            harvesterRows.contains(where: isStrictSubset),
+            "Cycle 6 B6 Rev3-M6: HARVESTER phase must produce a strict-subset row (\(harvesterRows.count) rows, none narrowed)"
+        )
+        #expect(
+            lexicalRows.contains(where: isStrictSubset),
+            "Cycle 6 B6 Rev3-M6: LEXICAL phase must produce a strict-subset row (\(lexicalRows.count) rows, none narrowed)"
+        )
+        #expect(
+            auditRows.contains(where: isStrictSubset),
+            "Cycle 6 B6 Rev3-M6: AUDIT phase must produce a strict-subset row (\(auditRows.count) rows, none narrowed)"
         )
     }
 }

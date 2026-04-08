@@ -413,6 +413,21 @@ actor AnalysisStore {
             try migrateEvidenceEventsTranscriptVersionV3IfNeeded()
             try migrateAnalysisSessionsShadowRetryV4IfNeeded()
             try migratePodcastPlannerStateV4IfNeeded()
+            // Cycle 6 B6 Rev3-M6: `migrateEvidenceEventsTranscriptVersionV3IfNeeded`
+            // runs a DROP + CREATE TABLE cycle on `evidence_events` that does NOT
+            // preserve the `phase` column. Re-apply it here after every migration
+            // step so a pre-phase DB climbing the migration ladder still ends up
+            // with the column present. Idempotent via PRAGMA table_info check.
+            try addColumnIfNeeded(
+                table: "evidence_events",
+                column: "phase",
+                definition: "TEXT NOT NULL DEFAULT 'shadow'"
+            )
+            try addColumnIfNeeded(
+                table: "semantic_scan_results",
+                column: "phase",
+                definition: "TEXT NOT NULL DEFAULT 'shadow'"
+            )
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -935,10 +950,21 @@ actor AnalysisStore {
                 scanCohortJSON TEXT NOT NULL,
                 transcriptVersion TEXT NOT NULL,
                 reuseKeyHash TEXT NOT NULL,
+                phase TEXT NOT NULL DEFAULT 'shadow',
                 UNIQUE(reuseKeyHash)
             )
             """)
+        // Cycle 6 B6 Rev3-M6: make sure upgraded DBs that already carry the
+        // base `semantic_scan_results` shape pick up the `phase` column before
+        // the first bind path runs. `addColumnIfNeeded` is a no-op on fresh
+        // DBs where `CREATE TABLE` above already defines the column.
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "phase",
+            definition: "TEXT NOT NULL DEFAULT 'shadow'"
+        )
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_pass ON semantic_scan_results(analysisAssetId, scanPass)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_phase ON semantic_scan_results(analysisAssetId, phase)")
         // M1/L3: dropped `idx_semantic_scan_results_reuse` and
         // `idx_semantic_scan_results_reuse_cohort` — neither is used by the
         // primary reuse query (which now hits the UNIQUE(reuseKeyHash) index).
@@ -974,12 +1000,21 @@ actor AnalysisStore {
                 scanCohortJSON TEXT NOT NULL,
                 transcriptVersion TEXT NOT NULL DEFAULT '',
                 createdAt REAL NOT NULL,
+                phase TEXT NOT NULL DEFAULT 'shadow',
                 UNIQUE(
                     analysisAssetId, eventType, sourceType, atomOrdinals,
                     evidenceJSON, scanCohortJSON, transcriptVersion
                 )
             )
             """)
+        // Cycle 6 B6 Rev3-M6: `addColumnIfNeeded` after the V2/V3 evidence_events
+        // rebuilds restores the column for DBs whose `evidence_events` table was
+        // rebuilt by an earlier migration that did not know about `phase`.
+        try addColumnIfNeeded(
+            table: "evidence_events",
+            column: "phase",
+            definition: "TEXT NOT NULL DEFAULT 'shadow'"
+        )
         try exec("CREATE INDEX IF NOT EXISTS idx_evidence_events_asset_created ON evidence_events(analysisAssetId, createdAt ASC)")
 
         // bd-m8k: podcast_planner_state — per-podcast CoveragePlanner state
@@ -1937,7 +1972,7 @@ actor AnalysisStore {
                 podcastId: podcastId,
                 observedEpisodeCount: newObservedCount,
                 episodesSinceLastFullRescan: newEpisodesSince,
-                stablePrecisionFlag: stableFlag,
+                stableRecallFlag: stableFlag,
                 lastFullRescanAt: newLastFullRescanAt,
                 samples: newSamples,
                 episodesObservedWithoutSampleCount: newEpisodesObservedWithoutSample,
@@ -1989,7 +2024,10 @@ actor AnalysisStore {
         podcastId: String,
         observedEpisodeCount: Int,
         episodesSinceLastFullRescan: Int,
-        stablePrecisionFlag: Bool,
+        // Cycle 6 B6 L: parameter name follows the "recall" semantic the
+        // cycle-4 rename pass established. The underlying SQLite column is
+        // still `stablePrecisionFlag` for backwards compatibility.
+        stableRecallFlag: Bool,
         lastFullRescanAt: Double?,
         samples: [Double],
         episodesObservedWithoutSampleCount: Int,
@@ -2031,7 +2069,7 @@ actor AnalysisStore {
         bind(stmt, 1, podcastId)
         bind(stmt, 2, observedEpisodeCount)
         bind(stmt, 3, episodesSinceLastFullRescan)
-        bind(stmt, 4, stablePrecisionFlag ? 1 : 0)
+        bind(stmt, 4, stableRecallFlag ? 1 : 0)
         bind(stmt, 5, lastFullRescanAt)
         bind(stmt, 6, ring[0])
         bind(stmt, 7, ring[1])
@@ -2844,7 +2882,7 @@ actor AnalysisStore {
         windowStartTime, windowEndTime, scanPass, transcriptQuality,
         disposition, spansJSON, status, attemptCount, errorContext,
         inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
-        scanCohortJSON, transcriptVersion, reuseKeyHash
+        scanCohortJSON, transcriptVersion, reuseKeyHash, phase
         """
 
     /// H-1: canonicalize a `scanCohortJSON` before hashing so two
@@ -2954,8 +2992,8 @@ actor AnalysisStore {
              windowStartTime, windowEndTime, scanPass, transcriptQuality,
              disposition, spansJSON, status, attemptCount, errorContext,
              inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
-             scanCohortJSON, transcriptVersion, reuseKeyHash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             scanCohortJSON, transcriptVersion, reuseKeyHash, phase)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -2979,6 +3017,7 @@ actor AnalysisStore {
         bind(stmt, 18, result.scanCohortJSON)
         bind(stmt, 19, result.transcriptVersion)
         bind(stmt, 20, reuseKeyHash)
+        bind(stmt, 21, result.phase)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -3131,10 +3170,11 @@ actor AnalysisStore {
 
     /// Canonical column order for `evidence_events` readers:
     /// 0 id, 1 analysisAssetId, 2 eventType, 3 sourceType,
-    /// 4 atomOrdinals, 5 evidenceJSON, 6 scanCohortJSON, 7 createdAt.
+    /// 4 atomOrdinals, 5 evidenceJSON, 6 scanCohortJSON, 7 createdAt,
+    /// 8 phase.
     private static let evidenceEventColumns = """
         id, analysisAssetId, eventType, sourceType,
-        atomOrdinals, evidenceJSON, scanCohortJSON, createdAt
+        atomOrdinals, evidenceJSON, scanCohortJSON, createdAt, phase
         """
 
     @discardableResult
@@ -3152,8 +3192,8 @@ actor AnalysisStore {
         let sql = """
             INSERT OR IGNORE INTO evidence_events
             (id, analysisAssetId, eventType, sourceType, atomOrdinals,
-             evidenceJSON, scanCohortJSON, transcriptVersion, createdAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             evidenceJSON, scanCohortJSON, transcriptVersion, createdAt, phase)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -3166,6 +3206,7 @@ actor AnalysisStore {
         bind(stmt, 7, event.scanCohortJSON)
         bind(stmt, 8, transcriptVersion)
         bind(stmt, 9, event.createdAt)
+        bind(stmt, 10, event.phase)
         try step(stmt, expecting: SQLITE_DONE)
         if sqlite3_changes(db) > 0 {
             return event.id
@@ -3352,7 +3393,9 @@ actor AnalysisStore {
             latencyMs: optionalDouble(stmt, 15),
             prewarmHit: sqlite3_column_int(stmt, 16) != 0,
             scanCohortJSON: try requireText(stmt, 17),
-            transcriptVersion: try requireText(stmt, 18)
+            transcriptVersion: try requireText(stmt, 18),
+            // column 19 = reuseKeyHash (not persisted back onto the struct)
+            phase: optionalText(stmt, 20) ?? "shadow"
         )
     }
 
@@ -3370,7 +3413,8 @@ actor AnalysisStore {
             atomOrdinals: try requireText(stmt, 4),
             evidenceJSON: try requireText(stmt, 5),
             scanCohortJSON: try requireText(stmt, 6),
-            createdAt: sqlite3_column_double(stmt, 7)
+            createdAt: sqlite3_column_double(stmt, 7),
+            phase: optionalText(stmt, 8) ?? "shadow"
         )
     }
 

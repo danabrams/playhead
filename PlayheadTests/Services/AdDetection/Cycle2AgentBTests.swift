@@ -132,6 +132,18 @@ struct Cycle2AgentBTests {
         // Ad-free fullCoverage run bumped it to 1.
         #expect(afterFirst.observedWithoutSample == 1)
 
+        // Cycle 6 B6 L: directly seed `narrowingPhasesEmptyThisRun`
+        // between runs so the reset at the top of `runPendingBackfill`
+        // is exercised end-to-end. We do this via a real run that
+        // flows through the narrower, then observe a non-empty set,
+        // then run again and assert the set is back to empty.
+        await runner.forceSeedPhasesEmptyThisRunForTesting([.scanHarvesterProposals])
+        let seeded = await runner.snapshotNarrowingTelemetry()
+        #expect(
+            seeded.phasesEmptyThisRun == [.scanHarvesterProposals],
+            "seed prerequisite: phasesEmptyThisRun should contain the single seeded phase"
+        )
+
         _ = try await runner.runPendingBackfill(for: makeRev1L4Inputs(assetId: assetIdB))
         let afterSecond = await runner.snapshotNarrowingTelemetry()
         // Per-run counters MUST have been cleared on entry to the second
@@ -143,6 +155,14 @@ struct Cycle2AgentBTests {
         #expect(afterSecond.emptyByPhase.isEmpty)
         #expect(afterSecond.allPhasesEmpty == 0)
         #expect(afterSecond.observedWithoutSample == 1)
+        // Cycle 6 B6 L: `narrowingPhasesEmptyThisRun` MUST also reset.
+        // Pre-Cycle 4 B4 the reset line existed only for the other
+        // counters; this rail makes the Cycle 4 B4 reset at
+        // BackfillJobRunner.swift:162 a real assertion.
+        #expect(
+            afterSecond.phasesEmptyThisRun.isEmpty,
+            "narrowingPhasesEmptyThisRun must reset on runPendingBackfill entry"
+        )
     }
 
     // MARK: - Cycle 4 B4 M: persisted per-podcast counters
@@ -298,6 +318,104 @@ struct Cycle2AgentBTests {
         )
         let state = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
         #expect(state.narrowingAllPhasesEmptyEpisodeCount == preCount + 1)
+    }
+
+    // MARK: - Cycle 6 B6 M: runner-level rail for targetedAllPhasesEmpty
+
+    @Test("Cycle 6 B6 M: runner targetedWithAudit run with all phases empty bumps persisted counter via runner rollup")
+    func targetedAllPhasesEmptyBumpsPersistedCounterThroughRunner() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-cy6-runner-targeted-empty"
+        let assetId = "asset-cy6-runner-targeted-empty"
+        try await store.insertAsset(makeRev1L4Asset(id: assetId))
+
+        // Seed planner state so the planner selects targetedWithAudit on
+        // the next observation: 5-episode floor + 3 passing recall samples
+        // land stableRecall = true.
+        for tick in 1...5 {
+            _ = try await store.recordPodcastEpisodeObservation(
+                podcastId: podcastId,
+                wasFullRescan: true,
+                fullRescanPrecisionSample: 0.95,
+                now: Double(tick)
+            )
+        }
+        let seeded = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+        #expect(seeded.stableRecallFlag, "prerequisite: planner must be in stable-recall state")
+        let preCount = seeded.narrowingAllPhasesEmptyEpisodeCount
+
+        // Drive a real BackfillJobRunner. TestFMRuntime doesn't matter —
+        // `forceNarrowingEmptyForTesting` short-circuits all three
+        // targeted phases before they dispatch any FM call.
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [CoarseScreeningSchema(disposition: .noAds, support: nil)]
+        )
+        let runner = BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(runtime: fmRuntime.runtime),
+            coveragePlanner: CoveragePlanner(),
+            mode: .shadow,
+            capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+            batteryLevelProvider: { 1.0 },
+            scanCohortJSON: makeTestScanCohortJSON()
+        )
+        await runner.setForceNarrowingEmptyForTesting(true)
+
+        // Build AssetInputs whose plannerContext forces the planner into
+        // targetedWithAudit (observedEpisodeCount >= 5, stableRecall = true).
+        let lines: [(start: Double, end: Double, text: String)] = (0..<30).map { idx in
+            let start = Double(idx) * 15.0
+            return (start, start + 10.0, "Editorial line \(idx) for synthetic transcript.")
+        }
+        let segments = makeFMSegments(
+            analysisAssetId: assetId,
+            transcriptVersion: "tx-\(assetId)-v1",
+            lines: lines
+        )
+        let evidenceCatalog = EvidenceCatalogBuilder.build(
+            atoms: segments.flatMap(\.atoms),
+            analysisAssetId: assetId,
+            transcriptVersion: "tx-\(assetId)-v1"
+        )
+        let plannerContext = CoveragePlannerContext(
+            observedEpisodeCount: 6,
+            stableRecall: true,
+            isFirstEpisodeAfterCohortInvalidation: false,
+            recallDegrading: false,
+            sponsorDriftDetected: false,
+            auditMissDetected: false,
+            episodesSinceLastFullRescan: 0,
+            periodicFullRescanIntervalEpisodes: 10
+        )
+        let inputs = BackfillJobRunner.AssetInputs(
+            analysisAssetId: assetId,
+            podcastId: podcastId,
+            segments: segments,
+            evidenceCatalog: evidenceCatalog,
+            transcriptVersion: "tx-\(assetId)-v1",
+            plannerContext: plannerContext
+        )
+
+        _ = try await runner.runPendingBackfill(for: inputs)
+
+        // The runner-side rollup at BackfillJobRunner.swift:555-564 MUST
+        // have observed that every non-fullEpisodeScan phase in the plan
+        // appeared in `narrowingPhasesEmptyThisRun` and therefore bumped
+        // both the per-run and the persisted counters. This is the path
+        // that the store-only cycle-4 test bypassed.
+        let snapshot = await runner.snapshotNarrowingTelemetry()
+        #expect(snapshot.allPhasesEmpty == 1, "runner must have bumped per-run all-phases-empty counter exactly once")
+
+        let afterState = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+        #expect(
+            afterState.narrowingAllPhasesEmptyEpisodeCount == preCount + 1,
+            "runner-side rollup must have persisted the all-phases-empty bump (pre=\(preCount), post=\(afterState.narrowingAllPhasesEmptyEpisodeCount))"
+        )
+        #expect(
+            afterState.episodesObservedWithoutSampleCount == 0,
+            "all-phases-empty run must not also bump the ad-free counter"
+        )
     }
 
     // MARK: - Helpers

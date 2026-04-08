@@ -634,6 +634,7 @@ actor BackfillJobRunner {
                 windowOutput: window,
                 inputs: inputs,
                 jobId: job.jobId,
+                jobPhase: job.phase,
                 scanPass: "passA",
                 status: .success
             )
@@ -663,6 +664,7 @@ actor BackfillJobRunner {
                             plan: plan,
                             inputs: inputs,
                             jobId: job.jobId,
+                            jobPhase: job.phase,
                             status: status,
                             latencyMs: coarse.latencyMillis
                         ) {
@@ -677,6 +679,7 @@ actor BackfillJobRunner {
                             plan: blockingPlan,
                             inputs: inputs,
                             jobId: job.jobId,
+                            jobPhase: job.phase,
                             status: coarse.status,
                             latencyMs: coarse.latencyMillis
                        ) {
@@ -689,6 +692,7 @@ actor BackfillJobRunner {
                     attemptedSegments: inputs.segments,
                     inputs: inputs,
                     jobId: job.jobId,
+                    jobPhase: job.phase,
                     status: coarse.status,
                     latencyMs: coarse.latencyMillis
                   ) {
@@ -713,6 +717,7 @@ actor BackfillJobRunner {
                         windowOutput: window,
                         inputs: inputs,
                         jobId: job.jobId,
+                        jobPhase: job.phase,
                         status: .success
                     )
                     for span in window.spans {
@@ -721,7 +726,8 @@ actor BackfillJobRunner {
                     let events = makeEvidenceEvents(
                         windowOutput: window,
                         inputs: inputs,
-                        jobId: job.jobId
+                        jobId: job.jobId,
+                        jobPhase: job.phase
                     )
                     // C-3: Pass-B scan row and its evidence events must be
                     // written atomically. The store's batch API wraps both in
@@ -743,6 +749,7 @@ actor BackfillJobRunner {
                             plan: plan,
                             inputs: inputs,
                             jobId: job.jobId,
+                            jobPhase: job.phase,
                             status: status,
                             latencyMs: refinement.latencyMillis
                         ) {
@@ -757,6 +764,7 @@ actor BackfillJobRunner {
                             plan: blockingPlan,
                             inputs: inputs,
                             jobId: job.jobId,
+                            jobPhase: job.phase,
                             status: refinement.status,
                             latencyMs: refinement.latencyMillis
                        ) {
@@ -771,6 +779,7 @@ actor BackfillJobRunner {
                         attemptedSegments: attemptedSegments,
                         inputs: inputs,
                         jobId: job.jobId,
+                        jobPhase: job.phase,
                         status: refinement.status,
                         latencyMs: refinement.latencyMillis
                     ) {
@@ -799,7 +808,8 @@ actor BackfillJobRunner {
                     let expansionResults = try await runOutwardExpansion(
                         baseRefinement: refinement,
                         inputs: inputs,
-                        jobId: job.jobId
+                        jobId: job.jobId,
+                        jobPhase: job.phase
                     )
                     scanResultIds.append(contentsOf: expansionResults.scanResultIds)
                     evidenceEventIds.append(contentsOf: expansionResults.evidenceEventIds)
@@ -883,7 +893,8 @@ actor BackfillJobRunner {
     private func runOutwardExpansion(
         baseRefinement: FMRefinementScanOutput,
         inputs: AssetInputs,
-        jobId: String
+        jobId: String,
+        jobPhase: BackfillJobPhase
     ) async throws -> ExpansionResults {
         var results = ExpansionResults()
 
@@ -1030,6 +1041,7 @@ actor BackfillJobRunner {
                         plan: plan,
                         inputs: inputs,
                         jobId: jobId,
+                        jobPhase: jobPhase,
                         status: expansionRefinement.status,
                         latencyMs: expansionRefinement.latencyMillis
                     ) {
@@ -1084,12 +1096,14 @@ actor BackfillJobRunner {
                     windowOutput: mergedWindowOutput,
                     inputs: inputs,
                     jobId: jobId,
+                    jobPhase: jobPhase,
                     status: .success
                 )
                 let mergedEvents = makeEvidenceEvents(
                     windowOutput: mergedWindowOutput,
                     inputs: inputs,
-                    jobId: jobId
+                    jobId: jobId,
+                    jobPhase: jobPhase
                 )
                 let persistedEventIds = try await store.recordSemanticScanResult(
                     mergedScanResult,
@@ -1540,6 +1554,19 @@ actor BackfillJobRunner {
         guard plan.policy == .targetedWithAudit, job.phase != .fullEpisodeScan else {
             return rootInputs
         }
+        #if DEBUG
+        // Cycle 6 B6 M: test-only path that forces every non-fullEpisodeScan
+        // phase to record `wasEmpty`. Used by `targetedAllPhasesEmpty…`
+        // runner-level rails to exercise the rollup at the bottom of
+        // `runPendingBackfill` (the live path cannot drive audit empty
+        // under a natural fixture). Gated behind DEBUG so release builds
+        // never see the short-circuit.
+        if forceNarrowingEmptyForTesting {
+            narrowingEmptyByPhase[job.phase, default: 0] += 1
+            narrowingPhasesEmptyThisRun.insert(job.phase)
+            return nil
+        }
+        #endif
         let result = TargetedWindowNarrower.narrow(
             phase: job.phase,
             inputs: TargetedWindowNarrower.Inputs(
@@ -1620,17 +1647,42 @@ actor BackfillJobRunner {
     /// `narrowingAllPhasesEmptyEpisodeCount` on the planner state row.
     private(set) var narrowingPhasesEmptyThisRun: Set<BackfillJobPhase> = []
 
+    #if DEBUG
+    /// Cycle 6 B6 L: test-only hook to seed `narrowingPhasesEmptyThisRun`
+    /// between two `runPendingBackfill` calls so the reset rail at the
+    /// top of `runPendingBackfill` can be asserted directly. Not exposed
+    /// in release builds.
+    func forceSeedPhasesEmptyThisRunForTesting(_ phases: Set<BackfillJobPhase>) {
+        narrowingPhasesEmptyThisRun = phases
+    }
+
+    /// Cycle 6 B6 M: test-only flag that forces every non-fullEpisodeScan
+    /// phase's narrowing call to record `wasEmpty`. Exercised by the
+    /// runner-level rail `targetedAllPhasesEmptyBumpsPersistedCounter…Runner`
+    /// to drive the rollup at the bottom of `runPendingBackfill`. The
+    /// live path cannot produce audit-empty under any natural fixture
+    /// (auditSegments always returns at least one segment), so a test
+    /// hook is the only way to rail the runner-side rollup.
+    var forceNarrowingEmptyForTesting: Bool = false
+
+    func setForceNarrowingEmptyForTesting(_ enabled: Bool) {
+        forceNarrowingEmptyForTesting = enabled
+    }
+    #endif
+
     func snapshotNarrowingTelemetry() -> (
         abortedByPhase: [BackfillJobPhase: Int],
         emptyByPhase: [BackfillJobPhase: Int],
         allPhasesEmpty: Int,
-        observedWithoutSample: Int
+        observedWithoutSample: Int,
+        phasesEmptyThisRun: Set<BackfillJobPhase>
     ) {
         (
             narrowingAbortedByPhase,
             narrowingEmptyByPhase,
             narrowingAllPhasesEmptyCount,
-            episodesObservedWithoutSample
+            episodesObservedWithoutSample,
+            narrowingPhasesEmptyThisRun
         )
     }
 
@@ -1638,6 +1690,7 @@ actor BackfillJobRunner {
         windowOutput: FMCoarseWindowOutput,
         inputs: AssetInputs,
         jobId: String,
+        jobPhase: BackfillJobPhase,
         scanPass: String,
         status: SemanticScanStatus
     ) -> SemanticScanResult {
@@ -1688,7 +1741,8 @@ actor BackfillJobRunner {
             prewarmHit: false,
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
-            reuseScope: jobId
+            reuseScope: jobId,
+            phase: jobPhase.rawValue
         )
     }
 
@@ -1696,6 +1750,7 @@ actor BackfillJobRunner {
         windowOutput: FMRefinementWindowOutput,
         inputs: AssetInputs,
         jobId: String,
+        jobPhase: BackfillJobPhase,
         status: SemanticScanStatus
     ) -> SemanticScanResult {
         let firstAtom = inputs.segments.first(where: {
@@ -1739,7 +1794,8 @@ actor BackfillJobRunner {
             prewarmHit: false,
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
-            reuseScope: jobId
+            reuseScope: jobId,
+            phase: jobPhase.rawValue
         )
     }
 
@@ -1748,6 +1804,7 @@ actor BackfillJobRunner {
         attemptedSegments: [AdTranscriptSegment],
         inputs: AssetInputs,
         jobId: String,
+        jobPhase: BackfillJobPhase,
         status: SemanticScanStatus,
         latencyMs: Double,
         windowKey: String? = nil
@@ -1781,7 +1838,8 @@ actor BackfillJobRunner {
             prewarmHit: false,
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
-            reuseScope: jobId
+            reuseScope: jobId,
+            phase: jobPhase.rawValue
         )
     }
 
@@ -1789,6 +1847,7 @@ actor BackfillJobRunner {
         plan: RefinementWindowPlan,
         inputs: AssetInputs,
         jobId: String,
+        jobPhase: BackfillJobPhase,
         status: SemanticScanStatus,
         latencyMs: Double
     ) -> SemanticScanResult? {
@@ -1798,6 +1857,7 @@ actor BackfillJobRunner {
             attemptedSegments: attemptedSegments,
             inputs: inputs,
             jobId: jobId,
+            jobPhase: jobPhase,
             status: status,
             latencyMs: latencyMs,
             windowKey: "window=\(plan.windowIndex)"
@@ -1808,6 +1868,7 @@ actor BackfillJobRunner {
         plan: CoarsePassWindowPlan,
         inputs: AssetInputs,
         jobId: String,
+        jobPhase: BackfillJobPhase,
         status: SemanticScanStatus,
         latencyMs: Double
     ) -> SemanticScanResult? {
@@ -1817,6 +1878,7 @@ actor BackfillJobRunner {
             attemptedSegments: attemptedSegments,
             inputs: inputs,
             jobId: jobId,
+            jobPhase: jobPhase,
             status: status,
             latencyMs: latencyMs,
             windowKey: "window=\(plan.windowIndex)"
@@ -1857,7 +1919,8 @@ actor BackfillJobRunner {
     private func makeEvidenceEvents(
         windowOutput: FMRefinementWindowOutput,
         inputs: AssetInputs,
-        jobId: String
+        jobId: String,
+        jobPhase: BackfillJobPhase
     ) -> [EvidenceEvent] {
         var events: [EvidenceEvent] = []
         var seenEventIds = Set<String>()
@@ -1923,7 +1986,8 @@ actor BackfillJobRunner {
                     atomOrdinals: atomOrdinals,
                     evidenceJSON: evidenceJSON,
                     scanCohortJSON: scanCohortJSON,
-                    createdAt: clock().timeIntervalSince1970
+                    createdAt: clock().timeIntervalSince1970,
+                    phase: jobPhase.rawValue
                 )
             )
         }
