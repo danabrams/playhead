@@ -173,6 +173,21 @@ struct PodcastPlannerState: Sendable, Equatable {
     /// Cycle 2 C4: stored across `precisionSample1..3` columns; semantically
     /// recall. See type-level doc.
     let recallSamples: [Double]
+    /// Cycle 4 B4: per-podcast running total of episodes observed that
+    /// produced no recall sample (ad-free full rescans). Persisted on
+    /// `podcast_planner_state` so the counter accrues across
+    /// `BackfillJobRunner` instances and across process restarts — the
+    /// runner-level counter of the same name is per-run only and was
+    /// therefore always 0 or 1 when read. Legacy rows that predate this
+    /// column decode as 0.
+    let episodesObservedWithoutSampleCount: Int
+    /// Cycle 4 B4: per-podcast running total of episodes where every
+    /// non-fullEpisodeScan narrowing phase returned `wasEmpty == true`.
+    /// Increments fire on BOTH full rescans and live targeted-with-audit
+    /// runs, so the counter captures the cross-phase empty signal that
+    /// individual `narrowing.empty.{phase}` cannot. Legacy rows decode
+    /// as 0.
+    let narrowingAllPhasesEmptyEpisodeCount: Int
 }
 
 struct PreviewBudget: Sendable {
@@ -591,19 +606,39 @@ actor AnalysisStore {
     /// both run during the v3→v4 step, both touch independent tables, both
     /// call setSchemaVersion(4) at the end (idempotent).
     private func migratePodcastPlannerStateV4IfNeeded() throws {
+        // Cycle 4 B4: two new columns were added in place to the v4 schema
+        // (`episodesObservedWithoutSampleCount`,
+        // `narrowingAllPhasesEmptyEpisodeCount`). Run the column-add checks
+        // unconditionally — on a fresh DB `createTables()` already put them
+        // there and `addColumnIfNeeded` is a no-op; on a pre-Cycle-4 v4 DB
+        // these ALTERs bring the table up to the new shape. Legacy rows
+        // default-decode to 0 thanks to the `DEFAULT 0` on both columns.
+        try addColumnIfNeeded(
+            table: "podcast_planner_state",
+            column: "episodesObservedWithoutSampleCount",
+            definition: "INTEGER NOT NULL DEFAULT 0"
+        )
+        try addColumnIfNeeded(
+            table: "podcast_planner_state",
+            column: "narrowingAllPhasesEmptyEpisodeCount",
+            definition: "INTEGER NOT NULL DEFAULT 0"
+        )
+
         guard (try schemaVersion() ?? 1) < 4 else { return }
 
         try exec("""
             CREATE TABLE IF NOT EXISTS podcast_planner_state (
-                podcastId                       TEXT PRIMARY KEY,
-                observedEpisodeCount            INTEGER NOT NULL DEFAULT 0,
-                episodesSinceLastFullRescan     INTEGER NOT NULL DEFAULT 0,
-                stablePrecisionFlag             INTEGER NOT NULL DEFAULT 0,
-                lastFullRescanAt                REAL,
-                precisionSample1                REAL,
-                precisionSample2                REAL,
-                precisionSample3                REAL,
-                precisionSampleCount            INTEGER NOT NULL DEFAULT 0
+                podcastId                                 TEXT PRIMARY KEY,
+                observedEpisodeCount                      INTEGER NOT NULL DEFAULT 0,
+                episodesSinceLastFullRescan               INTEGER NOT NULL DEFAULT 0,
+                stablePrecisionFlag                       INTEGER NOT NULL DEFAULT 0,
+                lastFullRescanAt                          REAL,
+                precisionSample1                          REAL,
+                precisionSample2                          REAL,
+                precisionSample3                          REAL,
+                precisionSampleCount                      INTEGER NOT NULL DEFAULT 0,
+                episodesObservedWithoutSampleCount        INTEGER NOT NULL DEFAULT 0,
+                narrowingAllPhasesEmptyEpisodeCount       INTEGER NOT NULL DEFAULT 0
             )
             """)
         try setSchemaVersion(4)
@@ -948,23 +983,29 @@ actor AnalysisStore {
         try exec("CREATE INDEX IF NOT EXISTS idx_evidence_events_asset_created ON evidence_events(analysisAssetId, createdAt ASC)")
 
         // bd-m8k: podcast_planner_state — per-podcast CoveragePlanner state
-        // (observed episode count, episodes since last full rescan, precision
-        // ring, cached stable-precision flag). Sibling table to
+        // (observed episode count, episodes since last full rescan, recall
+        // ring, cached stable-recall flag). Sibling table to
         // `podcast_profiles`; NOT backfilled on migration. Rows are created
-        // lazily on first access. The precision ring stores the most recent
-        // `plannerPrecisionRingSize` (3) full-rescan precision samples; the
-        // flag is recomputed on every state mutation.
+        // lazily on first access. The recall ring stores the most recent
+        // `plannerRecallRingSize` (3) full-rescan recall samples; the
+        // flag is recomputed on every state mutation. Cycle 4 B4: two new
+        // columns — `episodesObservedWithoutSampleCount` and
+        // `narrowingAllPhasesEmptyEpisodeCount` — persist per-podcast
+        // signals that previously lived only on the runner actor and were
+        // therefore reset per `runPendingBackfill` call.
         try exec("""
             CREATE TABLE IF NOT EXISTS podcast_planner_state (
-                podcastId                       TEXT PRIMARY KEY,
-                observedEpisodeCount            INTEGER NOT NULL DEFAULT 0,
-                episodesSinceLastFullRescan     INTEGER NOT NULL DEFAULT 0,
-                stablePrecisionFlag             INTEGER NOT NULL DEFAULT 0,
-                lastFullRescanAt                REAL,
-                precisionSample1                REAL,
-                precisionSample2                REAL,
-                precisionSample3                REAL,
-                precisionSampleCount            INTEGER NOT NULL DEFAULT 0
+                podcastId                                 TEXT PRIMARY KEY,
+                observedEpisodeCount                      INTEGER NOT NULL DEFAULT 0,
+                episodesSinceLastFullRescan               INTEGER NOT NULL DEFAULT 0,
+                stablePrecisionFlag                       INTEGER NOT NULL DEFAULT 0,
+                lastFullRescanAt                          REAL,
+                precisionSample1                          REAL,
+                precisionSample2                          REAL,
+                precisionSample3                          REAL,
+                precisionSampleCount                      INTEGER NOT NULL DEFAULT 0,
+                episodesObservedWithoutSampleCount        INTEGER NOT NULL DEFAULT 0,
+                narrowingAllPhasesEmptyEpisodeCount       INTEGER NOT NULL DEFAULT 0
             )
             """)
 
@@ -1731,6 +1772,7 @@ actor AnalysisStore {
     /// the table empty and rows are created lazily on first observation.
     func fetchPodcastPlannerState(podcastId: String) throws -> PodcastPlannerState? {
         // historical: stored as "precision*"; semantically recall
+        // Cycle 4 B4: two new persisted counters appended at the end.
         let sql = """
             SELECT podcastId,
                    observedEpisodeCount,
@@ -1740,7 +1782,9 @@ actor AnalysisStore {
                    precisionSample1,
                    precisionSample2,
                    precisionSample3,
-                   precisionSampleCount
+                   precisionSampleCount,
+                   episodesObservedWithoutSampleCount,
+                   narrowingAllPhasesEmptyEpisodeCount
             FROM podcast_planner_state
             WHERE podcastId = ?
             """
@@ -1773,6 +1817,12 @@ actor AnalysisStore {
             }
         }
 
+        // Cycle 4 B4: columns 9/10 are the Cycle-4 additions. Legacy rows
+        // default-decode to 0 thanks to `DEFAULT 0` on both columns —
+        // SQLite hands back the column default for NULL-absent reads.
+        let episodesObservedWithoutSampleCount = Int(sqlite3_column_int(stmt, 9))
+        let narrowingAllPhasesEmptyEpisodeCount = Int(sqlite3_column_int(stmt, 10))
+
         return PodcastPlannerState(
             podcastId: text(stmt, 0),
             observedEpisodeCount: Int(sqlite3_column_int(stmt, 1)),
@@ -1781,7 +1831,9 @@ actor AnalysisStore {
             stableRecallFlag: sqlite3_column_int(stmt, 3) != 0,
             lastFullRescanAt: optionalDouble(stmt, 4),
             // historical: stored as "precisionSamples"; semantically recall
-            recallSamples: samples
+            recallSamples: samples,
+            episodesObservedWithoutSampleCount: episodesObservedWithoutSampleCount,
+            narrowingAllPhasesEmptyEpisodeCount: narrowingAllPhasesEmptyEpisodeCount
         )
     }
 
@@ -1797,24 +1849,35 @@ actor AnalysisStore {
     /// - `observedEpisodeCount` is incremented by 1 on every call.
     /// - `wasFullRescan == true`: `episodesSinceLastFullRescan` resets to 0,
     ///   `lastFullRescanAt` is updated, and (when `fullRescanPrecisionSample`
-    ///   is non-nil) the sample is appended to the precision ring with the
+    ///   is non-nil) the sample is appended to the recall ring with the
     ///   oldest entry dropped if the ring is already full.
     /// - `wasFullRescan == false`: `episodesSinceLastFullRescan` is
-    ///   incremented; the precision ring is left untouched. A precision
+    ///   incremented; the recall ring is left untouched. A recall
     ///   sample passed alongside a non-full-rescan call is ignored (the
-    ///   targeted-with-audit pass cannot measure precision against itself).
-    /// - `stablePrecisionFlag` is recomputed from the post-update state on
+    ///   targeted-with-audit pass cannot measure recall against itself).
+    /// - `stableRecallFlag` is recomputed from the post-update state on
     ///   every call: it is true iff
     ///   `observedEpisodeCount >= plannerStableObservedEpisodeFloor` AND the
-    ///   ring is full (`plannerPrecisionRingSize` samples) AND every sample
-    ///   in the ring is `>= plannerPrecisionThreshold`. If any condition
+    ///   ring is full (`plannerRecallRingSize` samples) AND every sample
+    ///   in the ring is `>= plannerRecallThreshold`. If any condition
     ///   fails the flag is forced false, even if a previous write set it to
     ///   true (the ring shrinks back to false on regression).
+    /// - Cycle 4 B4: `incrementEpisodesObservedWithoutSample` and
+    ///   `incrementNarrowingAllPhasesEmpty` are independent per-podcast
+    ///   counters. When true, the persisted counters are read-modify-written
+    ///   under the same transaction as the rest of the bookkeeping. Both
+    ///   flags are orthogonal — an ad-free full rescan passes
+    ///   `incrementEpisodesObservedWithoutSample = true` and an all-phases-
+    ///   empty targeted run passes `incrementNarrowingAllPhasesEmpty = true`.
+    ///   A full rescan can pass both (ad-free episode where narrowing was
+    ///   also empty).
     @discardableResult
     func recordPodcastEpisodeObservation(
         podcastId: String,
         wasFullRescan: Bool,
         fullRescanPrecisionSample: Double? = nil,
+        incrementEpisodesObservedWithoutSample: Bool = false,
+        incrementNarrowingAllPhasesEmpty: Bool = false,
         now: Double
     ) throws -> PodcastPlannerState {
         // Wrap the read-modify-write in a transaction so a concurrent
@@ -1859,13 +1922,26 @@ actor AnalysisStore {
                 samples: newSamples
             )
 
+            // Cycle 4 B4: per-podcast counters. Read prior value (0 for
+            // missing rows via the struct default above) and bump under
+            // the same BEGIN IMMEDIATE that guards the rest of the
+            // bookkeeping.
+            let newEpisodesObservedWithoutSample =
+                (prior?.episodesObservedWithoutSampleCount ?? 0)
+                + (incrementEpisodesObservedWithoutSample ? 1 : 0)
+            let newNarrowingAllPhasesEmptyEpisodes =
+                (prior?.narrowingAllPhasesEmptyEpisodeCount ?? 0)
+                + (incrementNarrowingAllPhasesEmpty ? 1 : 0)
+
             try writePodcastPlannerStateRow(
                 podcastId: podcastId,
                 observedEpisodeCount: newObservedCount,
                 episodesSinceLastFullRescan: newEpisodesSince,
                 stablePrecisionFlag: stableFlag,
                 lastFullRescanAt: newLastFullRescanAt,
-                samples: newSamples
+                samples: newSamples,
+                episodesObservedWithoutSampleCount: newEpisodesObservedWithoutSample,
+                narrowingAllPhasesEmptyEpisodeCount: newNarrowingAllPhasesEmptyEpisodes
             )
 
             try exec("COMMIT")
@@ -1878,7 +1954,9 @@ actor AnalysisStore {
                 stableRecallFlag: stableFlag,
                 lastFullRescanAt: newLastFullRescanAt,
                 // historical: stored as "precisionSamples"; semantically recall
-                recallSamples: newSamples
+                recallSamples: newSamples,
+                episodesObservedWithoutSampleCount: newEpisodesObservedWithoutSample,
+                narrowingAllPhasesEmptyEpisodeCount: newNarrowingAllPhasesEmptyEpisodes
             )
         } catch {
             try? exec("ROLLBACK")
@@ -1886,17 +1964,17 @@ actor AnalysisStore {
         }
     }
 
-    /// bd-m8k: pure helper exposed for tests. Computes the stable-precision
+    /// bd-m8k: pure helper exposed for tests. Computes the stable-recall
     /// flag from a post-update `(observedEpisodeCount, samples)` tuple. The
     /// flag is true iff:
     /// 1. `observedEpisodeCount >= plannerStableObservedEpisodeFloor` (5), AND
-    /// 2. The precision ring contains exactly `plannerPrecisionRingSize` (3)
+    /// 2. The recall ring contains exactly `plannerRecallRingSize` (3)
     ///    samples, AND
-    /// 3. Every sample is `>= plannerPrecisionThreshold` (0.85).
+    /// 3. Every sample is `>= plannerRecallThreshold` (0.85).
     ///
     /// The "exactly 3 samples" requirement is deliberate: a freshly
-    /// observed podcast with one stellar precision sample must not flip the
-    /// flag — we want at least three full-rescan precision measurements
+    /// observed podcast with one stellar recall sample must not flip the
+    /// flag — we want at least three full-rescan recall measurements
     /// before trusting the targeted-with-audit branch.
     nonisolated static func computePlannerStableFlag(
         observedEpisodeCount: Int,
@@ -1913,7 +1991,9 @@ actor AnalysisStore {
         episodesSinceLastFullRescan: Int,
         stablePrecisionFlag: Bool,
         lastFullRescanAt: Double?,
-        samples: [Double]
+        samples: [Double],
+        episodesObservedWithoutSampleCount: Int,
+        narrowingAllPhasesEmptyEpisodeCount: Int
     ) throws {
         // Pad the samples array out to the fixed-width ring slots so we can
         // unconditionally bind 3 columns regardless of how many samples we
@@ -1924,22 +2004,27 @@ actor AnalysisStore {
             ring[idx] = value
         }
 
+        // Cycle 4 B4: two new persisted counters appended.
         let sql = """
             INSERT INTO podcast_planner_state
             (podcastId, observedEpisodeCount, episodesSinceLastFullRescan,
              stablePrecisionFlag, lastFullRescanAt,
              precisionSample1, precisionSample2, precisionSample3,
-             precisionSampleCount)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             precisionSampleCount,
+             episodesObservedWithoutSampleCount,
+             narrowingAllPhasesEmptyEpisodeCount)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(podcastId) DO UPDATE SET
-                observedEpisodeCount        = excluded.observedEpisodeCount,
-                episodesSinceLastFullRescan = excluded.episodesSinceLastFullRescan,
-                stablePrecisionFlag         = excluded.stablePrecisionFlag,
-                lastFullRescanAt            = excluded.lastFullRescanAt,
-                precisionSample1            = excluded.precisionSample1,
-                precisionSample2            = excluded.precisionSample2,
-                precisionSample3            = excluded.precisionSample3,
-                precisionSampleCount        = excluded.precisionSampleCount
+                observedEpisodeCount                = excluded.observedEpisodeCount,
+                episodesSinceLastFullRescan         = excluded.episodesSinceLastFullRescan,
+                stablePrecisionFlag                 = excluded.stablePrecisionFlag,
+                lastFullRescanAt                    = excluded.lastFullRescanAt,
+                precisionSample1                    = excluded.precisionSample1,
+                precisionSample2                    = excluded.precisionSample2,
+                precisionSample3                    = excluded.precisionSample3,
+                precisionSampleCount                = excluded.precisionSampleCount,
+                episodesObservedWithoutSampleCount  = excluded.episodesObservedWithoutSampleCount,
+                narrowingAllPhasesEmptyEpisodeCount = excluded.narrowingAllPhasesEmptyEpisodeCount
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -1952,6 +2037,8 @@ actor AnalysisStore {
         bind(stmt, 7, ring[1])
         bind(stmt, 8, ring[2])
         bind(stmt, 9, samples.count)
+        bind(stmt, 10, episodesObservedWithoutSampleCount)
+        bind(stmt, 11, narrowingAllPhasesEmptyEpisodeCount)
         try step(stmt, expecting: SQLITE_DONE)
     }
 

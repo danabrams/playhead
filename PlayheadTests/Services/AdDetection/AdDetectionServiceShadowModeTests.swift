@@ -392,13 +392,25 @@ struct AdDetectionServiceShadowModeTests {
         )
 
         func makeEpisodeChunks(_ assetId: String) -> [TranscriptChunk] {
-            // Cycle 2 C5/Rev3-M6: 30-line fixture so the per-anchor
-            // narrowing model produces a strict subset (anchors land at
-            // lines 14/15, narrowed envelope ~[9..20] = 12 segments,
-            // strictly less than the 30-segment full episode). The
-            // legacy 8-line fixture was too small for the new model: a
-            // single anchor with default padding=5 already covers the
-            // full episode and the Rev3-M6 narrowing rail can't fire.
+            // Cycle 2 C5 / Cycle 4 B4 Rev3-M6: 30-line fixture so the
+            // per-anchor narrowing model produces a strict subset
+            // (anchors land at lines 14/15, narrowed envelope ~[9..20]
+            // = 12 segments, strictly less than the 30-segment full
+            // episode). The legacy 8-line fixture was too small for the
+            // new model: a single anchor with default padding=5 already
+            // covers the full episode and the Rev3-M6 narrowing rail
+            // can't fire.
+            //
+            // Cycle 4 B4: the chunks MUST include time gaps between
+            // adjacent pieces so `TranscriptSegmenter` splits them
+            // into distinct segments rather than collapsing everything
+            // into a handful of big segments. The segmenter's default
+            // pause threshold is 1.5s — use a 5s gap per chunk to
+            // clear it comfortably. Without this, 30 chunks collapse
+            // into 2-3 segments and the per-anchor narrowing envelope
+            // (padding=5 in segment index space) covers the entire
+            // episode, making the harvester / lexical phase rows look
+            // like full-rescan rows and silently defeating Rev3-M6.
             var lines: [String] = []
             for idx in 0..<30 {
                 switch idx {
@@ -411,13 +423,18 @@ struct AdDetectionServiceShadowModeTests {
                 }
             }
             return lines.enumerated().map { index, text in
-                TranscriptChunk(
+                // 10s of content + 5s pause per chunk. The 5s gap
+                // exceeds the segmenter's default 1.5s pause threshold
+                // and forces a hard break between every chunk.
+                let chunkStart = Double(index) * 15.0
+                let chunkEnd = chunkStart + 10.0
+                return TranscriptChunk(
                     id: "\(assetId)-chunk-\(index)",
                     analysisAssetId: assetId,
                     segmentFingerprint: "\(assetId)-fp-\(index)",
                     chunkIndex: index,
-                    startTime: Double(index) * 10,
-                    endTime: Double(index + 1) * 10,
+                    startTime: chunkStart,
+                    endTime: chunkEnd,
                     text: text,
                     normalizedText: text.lowercased(),
                     pass: "final",
@@ -484,13 +501,25 @@ struct AdDetectionServiceShadowModeTests {
         let fullEpisodeJob = try await store.fetchBackfillJob(byId: fullEpisodeJobId)
         #expect(fullEpisodeJob == nil)
 
-        // Cycle 2 Rev3-M6: prove at least one targeted phase row was
-        // actually narrowed — i.e. the persisted scan window's
-        // atom-ordinal span is strictly smaller than the full episode's
-        // atom-ordinal span. The legacy assertion only checked that 3
-        // passA rows existed, which would also pass if the runner had
-        // quietly fallen back to full-episode coverage on every targeted
-        // phase.
+        // Cycle 2 Rev3-M6 / Cycle 4 B4: prove that the HARVESTER and
+        // LEXICAL narrowing phases each produced a passA row whose
+        // atom-ordinal span is strictly smaller than the full episode
+        // span. The legacy assertion only checked "at least one row was
+        // a strict subset", which was trivially satisfied by the
+        // `scanRandomAuditWindows` phase (auditWindowSampleRate=0.12 →
+        // ~3-4 segments out of 30 is ALWAYS a strict subset), so the
+        // rail never actually exercised the harvester / lexical
+        // narrowing paths.
+        //
+        // We can't cheaply attribute a persisted passA row to its
+        // originating phase (no phase discriminator is stored on the
+        // row; reuseScope is hash-only input). Instead, count the
+        // strict-subset rows: audit always contributes one, so any
+        // value >= 2 proves that harvester and/or lexical also
+        // narrowed. A count of 1 means only audit narrowed and both
+        // heavy-lifting phases regressed to full-episode coverage —
+        // the exact condition the cycle-3 reviewer flagged this rail
+        // could not detect.
         let (allAtoms, _) = TranscriptAtomizer.atomize(
             chunks: makeEpisodeChunks(targetedAssetId),
             analysisAssetId: targetedAssetId,
@@ -500,9 +529,12 @@ struct AdDetectionServiceShadowModeTests {
         let firstOrdinal = allAtoms.first?.atomKey.atomOrdinal ?? 0
         let lastOrdinal = allAtoms.last?.atomKey.atomOrdinal ?? 0
         let episodeAtomCount = lastOrdinal - firstOrdinal
-        let narrowedRowExists = passA.contains { row in
+        let narrowedRowCount = passA.filter { row in
             (row.windowLastAtomOrdinal - row.windowFirstAtomOrdinal) < episodeAtomCount
-        }
-        #expect(narrowedRowExists, "Cycle 2 Rev3-M6: at least one targeted phase row must be a strict subset of the full episode")
+        }.count
+        #expect(
+            narrowedRowCount >= 2,
+            "Cycle 4 B4 Rev3-M6: at least 2 targeted passA rows must be strict subsets of the full episode (audit always is, so harvester AND/OR lexical must also narrow). Got \(narrowedRowCount) narrowed of \(passA.count)."
+        )
     }
 }

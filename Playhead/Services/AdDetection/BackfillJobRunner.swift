@@ -155,6 +155,11 @@ actor BackfillJobRunner {
         narrowingEmptyByPhase = [:]
         narrowingAllPhasesEmptyCount = 0
         episodesObservedWithoutSample = 0
+        // Cycle 4 B4: per-run set of non-fullEpisodeScan phases that
+        // returned `wasEmpty == true`. Used below to increment the
+        // persisted `narrowingAllPhasesEmptyEpisodeCount` on live
+        // targetedWithAudit runs where every phase narrows to nothing.
+        narrowingPhasesEmptyThisRun = []
 
         let plan = coveragePlanner.plan(for: inputs.plannerContext)
         let now = clock().timeIntervalSince1970
@@ -490,6 +495,13 @@ actor BackfillJobRunner {
             // planner toward fullCoverage on a transcript that the
             // narrower simply couldn't index.
             let recallSample: Double?
+            // Cycle 4 B4: per-podcast persisted counters. These accrue
+            // across runs on the planner state row so operators can
+            // read "this show has had N ad-free episodes total" instead
+            // of the per-run 0/1 signal the runner-level counters used
+            // to give.
+            var incrementEpisodesObservedWithoutSample = false
+            var incrementNarrowingAllPhasesEmpty = false
             if wasFullRescan {
                 if fullRescanDetectedAdLineRefs.isEmpty {
                     // Cycle 2 C4: ad-free episode. Nil sample (do NOT
@@ -497,6 +509,7 @@ actor BackfillJobRunner {
                     // distinguish "ad-free" from "ad-bearing but
                     // narrower failed to predict it".
                     episodesObservedWithoutSample += 1
+                    incrementEpisodesObservedWithoutSample = true
                     recallSample = nil
                 } else {
                     let narrowerInputs = TargetedWindowNarrower.Inputs(
@@ -516,6 +529,7 @@ actor BackfillJobRunner {
                     let nonEmptyPhases = phaseResults.filter { !$0.wasEmpty }
                     if nonEmptyPhases.isEmpty {
                         narrowingAllPhasesEmptyCount += 1
+                        incrementNarrowingAllPhasesEmpty = true
                         recallSample = nil
                     } else {
                         let predicted = TargetedWindowNarrower.predictedTargetedLineRefs(
@@ -529,6 +543,25 @@ actor BackfillJobRunner {
                 }
             } else {
                 recallSample = nil
+                // Cycle 4 B4 M: live targetedWithAudit path. Previously
+                // the cross-phase "all phases narrowed empty" signal was
+                // lost on exactly the path that needs it most — per-phase
+                // `narrowing.empty.{phase}` fire but nothing rolls up.
+                // Read the per-run set populated by `narrowedInputs`
+                // and compare it against the non-fullEpisodeScan phases
+                // the planner asked us to run. If every such phase went
+                // empty this run, bump BOTH the per-run and per-podcast
+                // counters.
+                if plan.policy == .targetedWithAudit {
+                    let targetedPhases = Set(
+                        plan.phases.filter { $0 != .fullEpisodeScan }
+                    )
+                    if !targetedPhases.isEmpty,
+                       targetedPhases.isSubset(of: narrowingPhasesEmptyThisRun) {
+                        narrowingAllPhasesEmptyCount += 1
+                        incrementNarrowingAllPhasesEmpty = true
+                    }
+                }
             }
             do {
                 _ = try await store.recordPodcastEpisodeObservation(
@@ -536,6 +569,8 @@ actor BackfillJobRunner {
                     wasFullRescan: wasFullRescan,
                     // historical: stored as "precision"; semantically recall
                     fullRescanPrecisionSample: recallSample,
+                    incrementEpisodesObservedWithoutSample: incrementEpisodesObservedWithoutSample,
+                    incrementNarrowingAllPhasesEmpty: incrementNarrowingAllPhasesEmpty,
                     now: clock().timeIntervalSince1970
                 )
             } catch {
@@ -1522,6 +1557,8 @@ actor BackfillJobRunner {
             // Counter is bumped by phase name so cross-show patterns are
             // visible (e.g. "harvester is consistently empty on this show").
             narrowingEmptyByPhase[job.phase, default: 0] += 1
+            // Cycle 4 B4: track per-run for the all-phases-empty rollup.
+            narrowingPhasesEmptyThisRun.insert(job.phase)
             return nil
         }
         if result.aborted {
@@ -1532,10 +1569,22 @@ actor BackfillJobRunner {
             narrowingAbortedByPhase[job.phase, default: 0] += 1
             return rootInputs
         }
+        // Cycle 4 L3: `narrowedSegments` cannot be nil on this path.
+        // `wasEmpty` and `aborted` both return early above, so a fall-through
+        // means the narrower produced a concrete segment list. Force-unwrap
+        // with a precondition so a future regression (e.g. a fourth
+        // terminal state slipping into `TargetedWindowNarrower.Result`)
+        // turns into a loud trap instead of a silent full-episode fallback
+        // that masks the bug.
+        guard let narrowedSegments = result.narrowedSegments else {
+            preconditionFailure(
+                "TargetedWindowNarrower returned neither wasEmpty, aborted, nor narrowedSegments for phase=\(job.phase.rawValue)"
+            )
+        }
         return AssetInputs(
             analysisAssetId: rootInputs.analysisAssetId,
             podcastId: rootInputs.podcastId,
-            segments: result.narrowedSegments ?? rootInputs.segments,
+            segments: narrowedSegments,
             evidenceCatalog: rootInputs.evidenceCatalog,
             transcriptVersion: rootInputs.transcriptVersion,
             plannerContext: rootInputs.plannerContext
@@ -1562,6 +1611,14 @@ actor BackfillJobRunner {
     /// do NOT advance the planner ring — see the recall-sample call
     /// site for the policy.
     private(set) var episodesObservedWithoutSample: Int = 0
+    /// Cycle 4 B4: per-run set of non-fullEpisodeScan phases for which
+    /// `TargetedWindowNarrower.narrow` returned `wasEmpty = true` during
+    /// THIS invocation of `runPendingBackfill`. Populated lazily by
+    /// `narrowedInputs`. Reset on entry to `runPendingBackfill` alongside
+    /// the other per-run counters. Consumed once at the bottom of the
+    /// run to decide whether to bump the persisted
+    /// `narrowingAllPhasesEmptyEpisodeCount` on the planner state row.
+    private(set) var narrowingPhasesEmptyThisRun: Set<BackfillJobPhase> = []
 
     func snapshotNarrowingTelemetry() -> (
         abortedByPhase: [BackfillJobPhase: Int],

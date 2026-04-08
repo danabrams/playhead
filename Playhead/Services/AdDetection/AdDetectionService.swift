@@ -452,7 +452,7 @@ actor AdDetectionService {
         // podcast, so we fall back to the conservative cold-start defaults.
         // The runner's `recordPodcastEpisodeObservation` call site (also
         // bd-m8k) materializes the row, advances observed-episode counters,
-        // and persists full-rescan precision samples derived from the shared
+        // and persists full-rescan recall samples derived from the shared
         // targeted-window narrowing helper.
         //
         // Failure mode: a fetch error here must NEVER block the shadow
