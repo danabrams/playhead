@@ -7,7 +7,13 @@ import Testing
 import FoundationModels
 #endif
 
-@Suite("Foundation Model Classifier — Pass A/B")
+// Cycle 2 Agent A: pin this suite to serial execution so the
+// shared static `coarsePassDiagnosticObserver` /
+// `refinementRefusalDiagnosticObserver` test hooks cannot race
+// across parallel test runs. Adding the new Cycle2FixesTests suite
+// shifted Swift Testing's parallel scheduling enough to surface a
+// pre-existing race that was masked by the previous test count.
+@Suite("Foundation Model Classifier — Pass A/B", .serialized)
 struct FoundationModelClassifierTests {
 
     @Test("coarse screening schema round-trips with certainty bands")
