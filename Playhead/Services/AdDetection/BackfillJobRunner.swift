@@ -1587,6 +1587,18 @@ actor BackfillJobRunner {
             let ordinals = Array(span.firstAtomOrdinal...span.lastAtomOrdinal)
             let atomOrdinals = (try? JSONEncoder().encode(ordinals))
                 .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+            // bd-3vm: expose per-anchor identity tuples so analytics and
+            // debugging can attribute the span's evidence from the
+            // persisted row alone, without re-running the resolver.
+            let encodedAnchors = span.resolvedEvidenceAnchors.map { anchor in
+                EncodedAnchor(
+                    evidenceRef: anchor.entry?.evidenceRef,
+                    lineRef: anchor.lineRef,
+                    kind: anchor.kind.rawValue,
+                    resolutionSource: anchor.resolutionSource.rawValue,
+                    certainty: anchor.certainty.rawValue
+                )
+            }
             let payload = EvidencePayload(
                 commercialIntent: span.commercialIntent.rawValue,
                 ownership: span.ownership.rawValue,
@@ -1600,7 +1612,8 @@ actor BackfillJobRunner {
                 // Phase 8 sponsor-memory writer reading
                 // `evidence_events.evidenceJSON` can honor the eligibility
                 // decision without recomputing it.
-                memoryWriteEligible: span.memoryWriteEligible
+                memoryWriteEligible: span.memoryWriteEligible,
+                anchors: encodedAnchors
             )
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
@@ -1641,42 +1654,129 @@ actor BackfillJobRunner {
     }
 
     private func encodeRefinedSpans(_ spans: [RefinedAdSpan]) -> String {
-        struct Encodable: Codable {
-            let firstLineRef: Int
-            let lastLineRef: Int
-            let commercialIntent: String
-            let ownership: String
-            let certainty: String
-        }
-        let payload = spans.map {
-            Encodable(
-                firstLineRef: $0.firstLineRef,
-                lastLineRef: $0.lastLineRef,
-                commercialIntent: $0.commercialIntent.rawValue,
-                ownership: $0.ownership.rawValue,
-                certainty: $0.certainty.rawValue
+        Self.encodeRefinedSpansForTesting(spans)
+    }
+
+    // MARK: - bd-3vm: anchor encoding
+
+    /// bd-3vm: compact per-anchor identity tuple persisted alongside each
+    /// refined span. Mirrors `BackfillJobRunner.anchorIdentityKey` (which
+    /// is `evidenceRef|lineRef|kind|resolutionSource`) plus certainty so
+    /// downstream consumers can attribute the anchor without re-running
+    /// the resolver.
+    ///
+    /// Optional/defaulted everywhere so legacy rows persisted before
+    /// bd-3vm decode cleanly.
+    struct EncodedAnchor: Codable, Equatable {
+        let evidenceRef: Int?
+        let lineRef: Int
+        let kind: String
+        let resolutionSource: String
+        let certainty: String
+    }
+
+    /// bd-3vm: serialized form of a `RefinedAdSpan` written to
+    /// `semantic_scan_results.spansJSON`. The `anchors` field is optional
+    /// so legacy rows (which omitted it entirely) decode without throwing.
+    struct EncodedRefinedSpan: Codable, Equatable {
+        let firstLineRef: Int
+        let lastLineRef: Int
+        let commercialIntent: String
+        let ownership: String
+        let certainty: String
+        /// bd-3vm: per-anchor identity tuples. Nil on legacy rows; empty
+        /// array on post-bd-3vm rows whose span carried no anchors.
+        let anchors: [EncodedAnchor]?
+    }
+
+    /// bd-3vm: shared encoder. Exposed `internal static` so tests can
+    /// round-trip without booting an actor and without going through the
+    /// full backfill pipeline.
+    static func encodeRefinedSpansForTesting(_ spans: [RefinedAdSpan]) -> String {
+        let payload = spans.map { span -> EncodedRefinedSpan in
+            let anchors = span.resolvedEvidenceAnchors.map { anchor in
+                EncodedAnchor(
+                    evidenceRef: anchor.entry?.evidenceRef,
+                    lineRef: anchor.lineRef,
+                    kind: anchor.kind.rawValue,
+                    resolutionSource: anchor.resolutionSource.rawValue,
+                    certainty: anchor.certainty.rawValue
+                )
+            }
+            return EncodedRefinedSpan(
+                firstLineRef: span.firstLineRef,
+                lastLineRef: span.lastLineRef,
+                commercialIntent: span.commercialIntent.rawValue,
+                ownership: span.ownership.rawValue,
+                certainty: span.certainty.rawValue,
+                anchors: anchors
             )
         }
-        let data = (try? JSONEncoder().encode(payload)) ?? Data("[]".utf8)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = (try? encoder.encode(payload)) ?? Data("[]".utf8)
         return String(data: data, encoding: .utf8) ?? "[]"
+    }
+
+    /// bd-3vm: decoder counterpart. Used by tests; not used in production
+    /// (no production consumer reads spansJSON yet — bd-38j will be the
+    /// first).
+    static func decodeRefinedSpansForTesting(_ json: String) throws -> [EncodedRefinedSpan] {
+        let data = Data(json.utf8)
+        return try JSONDecoder().decode([EncodedRefinedSpan].self, from: data)
+    }
+
+    /// bd-3vm: decoder for `EvidencePayload`. Tests only.
+    static func decodeEvidencePayloadForTesting(_ json: String) throws -> EvidencePayload {
+        let data = Data(json.utf8)
+        return try JSONDecoder().decode(EvidencePayload.self, from: data)
     }
 }
 
 // MARK: - Evidence payload
 
-private struct EvidencePayload: Codable {
-    let commercialIntent: String
-    let ownership: String
-    let certainty: String
-    let boundaryPrecision: String
-    let firstLineRef: Int
-    let lastLineRef: Int
-    let jobId: String
-    /// R4-Fix4: persisted span-level eligibility for sponsor-memory writes.
-    /// `true` only when every resolved evidence anchor passed the
-    /// span-range containment check AND resolved via `.evidenceRef` (the
-    /// C8 contract). Phase 8 sponsor-memory writers must gate on this.
-    let memoryWriteEligible: Bool
+extension BackfillJobRunner {
+    /// Internal so the bd-3vm round-trip test can decode persisted rows.
+    struct EvidencePayload: Codable, Equatable {
+        let commercialIntent: String
+        let ownership: String
+        let certainty: String
+        let boundaryPrecision: String
+        let firstLineRef: Int
+        let lastLineRef: Int
+        let jobId: String
+        /// R4-Fix4: persisted span-level eligibility for sponsor-memory writes.
+        /// `true` only when every resolved evidence anchor passed the
+        /// span-range containment check AND resolved via `.evidenceRef` (the
+        /// C8 contract). Phase 8 sponsor-memory writers must gate on this.
+        let memoryWriteEligible: Bool
+        /// bd-3vm: per-anchor identity tuples for the span's resolved
+        /// evidence anchors. Optional so legacy evidence_events rows
+        /// (written before bd-3vm) decode cleanly with `anchors == nil`.
+        let anchors: [EncodedAnchor]?
+
+        init(
+            commercialIntent: String,
+            ownership: String,
+            certainty: String,
+            boundaryPrecision: String,
+            firstLineRef: Int,
+            lastLineRef: Int,
+            jobId: String,
+            memoryWriteEligible: Bool,
+            anchors: [EncodedAnchor]?
+        ) {
+            self.commercialIntent = commercialIntent
+            self.ownership = ownership
+            self.certainty = certainty
+            self.boundaryPrecision = boundaryPrecision
+            self.firstLineRef = firstLineRef
+            self.lastLineRef = lastLineRef
+            self.jobId = jobId
+            self.memoryWriteEligible = memoryWriteEligible
+            self.anchors = anchors
+        }
+    }
 }
 
 private struct AttemptedRange {

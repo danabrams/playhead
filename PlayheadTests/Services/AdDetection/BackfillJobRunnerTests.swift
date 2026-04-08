@@ -1701,6 +1701,213 @@ struct BackfillJobRunnerTests {
         #expect(passA.contains { $0.status == .refusal && $0.disposition == .abstain })
         #expect(result.scanResultIds.count >= 2)
     }
+
+    // MARK: - bd-3vm: anchor encoding in spansJSON / EvidencePayload
+
+    /// bd-3vm: round-trip an encoded refined span with anchors. The encoder
+    /// must persist per-anchor identity tuples matching
+    /// `BackfillJobRunner.anchorIdentityKey` (evidenceRef, lineRef, kind,
+    /// resolutionSource) plus certainty, so downstream analytics and
+    /// debugging can observe exactly which anchors justified a span.
+    @Test("bd-3vm: encodeRefinedSpans round-trips anchor identity tuples")
+    func encodeRefinedSpansRoundTripsAnchorIdentity() throws {
+        let entry = EvidenceEntry(
+            evidenceRef: 7,
+            category: .url,
+            matchedText: "example.com",
+            normalizedText: "example.com",
+            atomOrdinal: 3,
+            startTime: 12,
+            endTime: 15
+        )
+        let anchor1 = ResolvedEvidenceAnchor(
+            entry: entry,
+            lineRef: 3,
+            kind: .url,
+            certainty: .strong,
+            resolutionSource: .evidenceRef,
+            memoryWriteEligible: true
+        )
+        let anchor2 = ResolvedEvidenceAnchor(
+            entry: nil,
+            lineRef: 4,
+            kind: .ctaPhrase,
+            certainty: .moderate,
+            resolutionSource: .lineRefFallback,
+            memoryWriteEligible: false
+        )
+        let span = RefinedAdSpan(
+            commercialIntent: .paid,
+            ownership: .thirdParty,
+            firstLineRef: 3,
+            lastLineRef: 4,
+            firstAtomOrdinal: 3,
+            lastAtomOrdinal: 4,
+            certainty: .strong,
+            boundaryPrecision: .precise,
+            resolvedEvidenceAnchors: [anchor1, anchor2],
+            memoryWriteEligible: false,
+            alternativeExplanation: .none,
+            reasonTags: [.promoCode]
+        )
+
+        let json = BackfillJobRunner.encodeRefinedSpansForTesting([span])
+        let decoded = try BackfillJobRunner.decodeRefinedSpansForTesting(json)
+
+        #expect(decoded.count == 1)
+        let encodedSpan = try #require(decoded.first)
+        #expect(encodedSpan.firstLineRef == 3)
+        #expect(encodedSpan.lastLineRef == 4)
+        #expect(encodedSpan.commercialIntent == "paid")
+        #expect(encodedSpan.ownership == "thirdParty")
+        #expect(encodedSpan.certainty == "strong")
+
+        let anchors = try #require(encodedSpan.anchors)
+        #expect(anchors.count == 2)
+
+        let first = anchors[0]
+        #expect(first.evidenceRef == 7)
+        #expect(first.lineRef == 3)
+        #expect(first.kind == "url")
+        #expect(first.resolutionSource == "evidenceRef")
+        #expect(first.certainty == "strong")
+
+        let second = anchors[1]
+        #expect(second.evidenceRef == nil)
+        #expect(second.lineRef == 4)
+        #expect(second.kind == "ctaPhrase")
+        #expect(second.resolutionSource == "lineRefFallback")
+        #expect(second.certainty == "moderate")
+    }
+
+    /// bd-3vm: rows persisted before this change lack the `anchors` field.
+    /// The decoder must parse them without throwing, with anchors == nil.
+    @Test("bd-3vm: decodeRefinedSpans accepts legacy JSON without anchors")
+    func decodeRefinedSpansAcceptsLegacyJSONWithoutAnchors() throws {
+        let legacy = #"""
+        [{"firstLineRef":10,"lastLineRef":12,"commercialIntent":"paid","ownership":"thirdParty","certainty":"moderate"}]
+        """#
+        let decoded = try BackfillJobRunner.decodeRefinedSpansForTesting(legacy)
+        #expect(decoded.count == 1)
+        let span = try #require(decoded.first)
+        #expect(span.firstLineRef == 10)
+        #expect(span.lastLineRef == 12)
+        #expect(span.commercialIntent == "paid")
+        #expect(span.ownership == "thirdParty")
+        #expect(span.certainty == "moderate")
+        #expect(span.anchors == nil,
+                "legacy rows have no anchors field; decoder must produce nil")
+    }
+
+    /// bd-3vm: same back-compat, but for EvidencePayload. Pre-change
+    /// evidence_events rows never encoded an `anchors` field.
+    @Test("bd-3vm: EvidencePayload decodes legacy JSON without anchors")
+    func evidencePayloadDecodesLegacyJSONWithoutAnchors() throws {
+        let legacy = #"""
+        {"commercialIntent":"paid","ownership":"thirdParty","certainty":"strong","boundaryPrecision":"precise","firstLineRef":1,"lastLineRef":2,"jobId":"job-42","memoryWriteEligible":true}
+        """#
+        let payload = try BackfillJobRunner.decodeEvidencePayloadForTesting(legacy)
+        #expect(payload.commercialIntent == "paid")
+        #expect(payload.jobId == "job-42")
+        #expect(payload.memoryWriteEligible == true)
+        #expect(payload.anchors == nil)
+    }
+
+    /// bd-3vm: end-to-end. A refinement pass with a catalog-backed anchor
+    /// must produce a persisted passB row whose spansJSON carries the
+    /// anchor identity tuple. This is the observability path bd-1my's
+    /// anchor-upgrade merge fix unblocked.
+    @Test("bd-3vm: persisted spansJSON encodes anchor identity tuple")
+    func persistedSpansJSONEncodesAnchorIdentityTuple() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        let inputs = makeInputs()
+        let entry = try #require(inputs.evidenceCatalog.entries.first,
+                                 "test fixture must yield at least one catalog entry")
+        let anchorKind: EvidenceAnchorKind
+        switch entry.category {
+        case .url: anchorKind = .url
+        case .promoCode: anchorKind = .promoCode
+        case .ctaPhrase: anchorKind = .ctaPhrase
+        case .disclosurePhrase: anchorKind = .disclosurePhrase
+        case .brandSpan: anchorKind = .brandSpan
+        }
+
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [entry.atomOrdinal],
+                        certainty: .strong
+                    )
+                )
+            ],
+            refinementResponses: [
+                RefinementWindowSchema(spans: [
+                    SpanRefinementSchema(
+                        commercialIntent: .paid,
+                        ownership: .thirdParty,
+                        firstLineRef: entry.atomOrdinal,
+                        lastLineRef: entry.atomOrdinal,
+                        certainty: .strong,
+                        boundaryPrecision: .precise,
+                        evidenceAnchors: [
+                            EvidenceAnchorSchema(
+                                evidenceRef: entry.evidenceRef,
+                                lineRef: entry.atomOrdinal,
+                                kind: anchorKind,
+                                certainty: .strong
+                            )
+                        ],
+                        alternativeExplanation: .none,
+                        reasonTags: [.promoCode]
+                    )
+                ])
+            ]
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        _ = try await runner.runPendingBackfill(for: inputs)
+
+        let passB = try await store.fetchSemanticScanResults(
+            analysisAssetId: "asset-runner",
+            scanPass: "passB"
+        )
+        let successRows = passB.filter { $0.status == .success && $0.disposition == .containsAd }
+        #expect(!successRows.isEmpty, "expected at least one containsAd passB row")
+        let row = try #require(successRows.first)
+        let decoded = try BackfillJobRunner.decodeRefinedSpansForTesting(row.spansJSON)
+        #expect(!decoded.isEmpty, "spansJSON must contain at least one encoded span")
+        let encodedSpan = try #require(decoded.first)
+        let anchors = try #require(encodedSpan.anchors,
+                                    "spansJSON must encode anchors field after bd-3vm")
+        #expect(!anchors.isEmpty, "encoded span must carry at least one anchor")
+        let firstAnchor = try #require(anchors.first)
+        #expect(firstAnchor.evidenceRef == entry.evidenceRef)
+        #expect(firstAnchor.lineRef == entry.atomOrdinal)
+        #expect(firstAnchor.kind == anchorKind.rawValue)
+        #expect(firstAnchor.resolutionSource == "evidenceRef")
+        #expect(firstAnchor.certainty == "strong")
+
+        // And the same anchor identity must reach evidence_events.evidenceJSON
+        // (the EvidencePayload path).
+        let evidence = try await store.fetchEvidenceEvents(analysisAssetId: "asset-runner")
+        let refinementRows = evidence.filter { $0.eventType == "fm.spanRefinement" }
+        #expect(!refinementRows.isEmpty)
+        let evRow = try #require(refinementRows.first)
+        let payload = try BackfillJobRunner.decodeEvidencePayloadForTesting(evRow.evidenceJSON)
+        let payloadAnchors = try #require(payload.anchors,
+                                           "EvidencePayload must encode anchors field after bd-3vm")
+        #expect(!payloadAnchors.isEmpty)
+        let payloadAnchor = try #require(payloadAnchors.first)
+        #expect(payloadAnchor.evidenceRef == entry.evidenceRef)
+        #expect(payloadAnchor.lineRef == entry.atomOrdinal)
+        #expect(payloadAnchor.kind == anchorKind.rawValue)
+        #expect(payloadAnchor.resolutionSource == "evidenceRef")
+        #expect(payloadAnchor.certainty == "strong")
+    }
 }
 
 private actor WindowedTestFMRuntime {
