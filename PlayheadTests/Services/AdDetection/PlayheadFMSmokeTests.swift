@@ -210,7 +210,7 @@ final class PlayheadFMSmokeTests: XCTestCase {
         // arg coarsePassA — which is what the previous Conan run hit
         // (recall stuck at 2/4 because no `permissive_route` events
         // ever fired despite the architecture being in place).
-        let redactor = PromptRedactor.loadDefault() ?? .noop
+        let redactor = (try? PromptRedactor.loadDefault()) ?? .noop
         let router = SensitiveWindowRouter(redactor: redactor)
         let permissiveClassifierBox: BackfillJobRunner.PermissiveClassifierBox?
         if #available(iOS 26.0, *) {
@@ -1377,7 +1377,7 @@ final class PlayheadFMSmokeTests: XCTestCase {
             makeSmokeSegment(index: 1, text: "Schedule online or just walk in — most insurance accepted."),
             makeSmokeSegment(index: 2, text: "CVS dot com slash flu to find your nearest location."),
         ]
-        let result = await classifier.classify(window: segments)
+        let result = try await classifier.classify(window: segments)
 
         // The synthetic CVS pre-roll is the canonical pharma refusal
         // case in the bd-1en probe matrix. Through the permissive path

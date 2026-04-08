@@ -176,17 +176,33 @@ final class PlayheadRuntime {
         // no-mass-defer invariant is pinned by
         // `concurrentRunBackfillsDoNotMassDeferEachOther` in
         // BackfillJobRunnerTests.
-        // bd-1en Phase 1: build the sensitive-window router and the
-        // permissive-path classifier once and capture them in the
-        // factory closure. Both are opt-in: if `RedactionRules.json`
-        // fails to load the router falls back to `.noop` and dispatch
-        // is a no-op (production behavior is byte-identical to the
-        // pre-bd-1en path). The permissive classifier is constructed
-        // only on iOS 26+ since `SystemLanguageModel(guardrails:)` is
-        // gated.
-        let bd1enRedactor = PromptRedactor.loadDefault()
-        let bd1enRouter: SensitiveWindowRouter = bd1enRedactor.map { SensitiveWindowRouter(redactor: $0) }
-            ?? .noop
+        // bd-1en Phase 1 + Cycle 2 C1/H9: build the sensitive-window
+        // router AND the production redactor up front so:
+        //
+        //   - The router and the redactor share the same compiled
+        //     RedactionRules.json (single source of truth for trigger
+        //     vocabulary).
+        //   - FoundationModelClassifier is constructed with the redactor
+        //     non-noop in production. The standard `@Generable` coarse
+        //     and refinement prompts are redacted before submission;
+        //     router-to-permissive bypasses are NOT also redacted (no
+        //     double-mitigation — the permissive guardrails are the
+        //     only relaxation needed once the router fires).
+        //   - Missing/malformed/invalid-pattern manifests fail loud at
+        //     startup with a precondition message that names the cause
+        //     instead of silently degrading to a noop redactor.
+        //
+        // The permissive classifier is constructed only on iOS 26+ since
+        // `SystemLanguageModel(guardrails:)` is gated.
+        let bd1enRedactor: PromptRedactor
+        do {
+            bd1enRedactor = try PromptRedactor.loadDefault()
+        } catch let failure as PromptRedactor.LoadFailure {
+            preconditionFailure("PromptRedactor.loadDefault failed: \(failure)")
+        } catch {
+            preconditionFailure("PromptRedactor.loadDefault failed with unknown error: \(error)")
+        }
+        let bd1enRouter = SensitiveWindowRouter(redactor: bd1enRedactor)
         let bd1enPermissiveBox: BackfillJobRunner.PermissiveClassifierBox? = {
             if #available(iOS 26.0, *) {
                 return BackfillJobRunner.PermissiveClassifierBox(PermissiveAdClassifier())
@@ -195,11 +211,16 @@ final class PlayheadRuntime {
         }()
 
         let backfillJobRunnerFactory: @Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner = {
-            [capabilitiesServiceForFactory, batteryProvider, feedbackStore, bd1enRouter, bd1enPermissiveBox] store, mode in
+            [capabilitiesServiceForFactory, batteryProvider, feedbackStore, bd1enRouter, bd1enPermissiveBox, bd1enRedactor] store, mode in
             BackfillJobRunner(
                 store: store,
                 admissionController: AdmissionController(),
-                classifier: FoundationModelClassifier(feedbackStore: feedbackStore),
+                // Cycle 2 C1: the standard @Generable path gets the
+                // production redactor. The permissive bypass branch
+                // inside dispatch does NOT call into this redactor —
+                // it sends the original window text to the permissive
+                // model unmasked.
+                classifier: FoundationModelClassifier(feedbackStore: feedbackStore, redactor: bd1enRedactor),
                 coveragePlanner: CoveragePlanner(),
                 mode: mode,
                 capabilitySnapshotProvider: { await capabilitiesServiceForFactory.currentSnapshot },

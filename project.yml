@@ -83,9 +83,7 @@ schemes:
         - variable: PLAYHEAD_FM_SMOKE
           value: "1"
           isEnabled: true
-        # bd-1en: enable the PromptRedactor on the on-device smoke scheme
-        # so dabrams doesn't have to set it manually each run. The default
-        # production behavior is unchanged (env var unset → noop redactor).
-        - variable: PLAYHEAD_FM_REDACT
-          value: "1"
-          isEnabled: true
+        # Cycle 2 Rev4-L4: PLAYHEAD_FM_REDACT removed. C1 wires the
+        # PromptRedactor unconditionally through PlayheadRuntime, so
+        # the env var is moot — production now always loads the
+        # bundled RedactionRules.json or fails loud at startup.

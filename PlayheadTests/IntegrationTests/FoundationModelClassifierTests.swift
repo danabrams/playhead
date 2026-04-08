@@ -751,7 +751,7 @@ struct FoundationModelClassifierTests {
                             firstLineRef: 1,
                             lastLineRef: 5,
                             certainty: .weak,
-                            boundaryPrecision: .rough,
+                            boundaryPrecision: .usable,
                             evidenceAnchors: [],
                             alternativeExplanation: .unknown,
                             reasonTags: [.hostReadPitch]
@@ -1253,7 +1253,7 @@ struct FoundationModelClassifierTests {
                             firstLineRef: 1,
                             lastLineRef: 17,
                             certainty: .strong,
-                            boundaryPrecision: .rough,
+                            boundaryPrecision: .usable,
                             evidenceAnchors: [
                                 EvidenceAnchorSchema(evidenceRef: 10, lineRef: 1, kind: .url, certainty: .strong),
                                 EvidenceAnchorSchema(evidenceRef: 11, lineRef: 1, kind: .url, certainty: .strong),
@@ -1349,7 +1349,7 @@ struct FoundationModelClassifierTests {
                             firstLineRef: 1,
                             lastLineRef: 17,
                             certainty: .strong,
-                            boundaryPrecision: .rough,
+                            boundaryPrecision: .usable,
                             evidenceAnchors: [
                                 duplicateAnchor,
                                 duplicateAnchor,

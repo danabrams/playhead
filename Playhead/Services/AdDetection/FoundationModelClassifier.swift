@@ -103,7 +103,11 @@ enum Ownership: String, Sendable, Codable, Hashable {
 @available(iOS 26.0, *)
 @Generable
 enum BoundaryPrecision: String, Sendable, Codable, Hashable {
-    case rough
+    // Cycle 2 H5: `.rough` removed. The only previous emitter was the
+    // permissive classifier's full-window parser-failure fallback,
+    // which now throws PermissiveClassificationError.failed(reason:
+    // .permissiveDecodingFailure) so the runner re-queues the window
+    // instead of widening it to a misleadingly-precise full-window span.
     case usable
     case precise
 }
@@ -215,7 +219,7 @@ enum Ownership: String, Sendable, Codable, Hashable {
 }
 
 enum BoundaryPrecision: String, Sendable, Codable, Hashable {
-    case rough
+    // Cycle 2 H5: `.rough` removed (see iOS 26+ branch for rationale).
     case usable
     case precise
 }
@@ -341,18 +345,56 @@ struct FMCoarseScanOutput: Sendable, Equatable {
     /// pass aborted on a non-recoverable failure.
     let failedWindowStatuses: [SemanticScanStatus]
 
+    /// Cycle 2 C2: per-reason counts of permissive bypass failures
+    /// observed during this pass. Always a subset of
+    /// `failedWindowStatuses` — a permissive refusal increments the
+    /// counter AND appends a `.refusal` SemanticScanStatus to the
+    /// failed-window list. The runner aggregates these into its
+    /// run-completion telemetry log.
+    let permissiveFailureCounts: PermissiveFailureCounts
+
     init(
         status: SemanticScanStatus,
         windows: [FMCoarseWindowOutput],
         latencyMillis: Double,
         prewarmHit: Bool,
-        failedWindowStatuses: [SemanticScanStatus] = []
+        failedWindowStatuses: [SemanticScanStatus] = [],
+        permissiveFailureCounts: PermissiveFailureCounts = .zero
     ) {
         self.status = status
         self.windows = windows
         self.latencyMillis = latencyMillis
         self.prewarmHit = prewarmHit
         self.failedWindowStatuses = failedWindowStatuses
+        self.permissiveFailureCounts = permissiveFailureCounts
+    }
+}
+
+/// Cycle 2 C2: per-reason permissive bypass failure tally returned
+/// alongside scan output so the runner can roll up its run-completion
+/// counters without re-deriving the breakdown from
+/// `failedWindowStatuses`.
+struct PermissiveFailureCounts: Sendable, Equatable {
+    var refusal: Int
+    var decodingFailure: Int
+    var contextOverflow: Int
+
+    static let zero = PermissiveFailureCounts(refusal: 0, decodingFailure: 0, contextOverflow: 0)
+
+    static func + (lhs: PermissiveFailureCounts, rhs: PermissiveFailureCounts) -> PermissiveFailureCounts {
+        PermissiveFailureCounts(
+            refusal: lhs.refusal + rhs.refusal,
+            decodingFailure: lhs.decodingFailure + rhs.decodingFailure,
+            contextOverflow: lhs.contextOverflow + rhs.contextOverflow
+        )
+    }
+
+    mutating func increment(reason: PermissiveClassificationError.Reason) {
+        switch reason {
+        case .permissiveRefusal: refusal += 1
+        case .permissiveDecodingFailure: decodingFailure += 1
+        case .permissiveContextOverflow: contextOverflow += 1
+        }
     }
 }
 
@@ -366,8 +408,16 @@ struct PromptEvidenceEntry: Sendable {
     let entry: EvidenceEntry
     let lineRef: Int
 
-    func renderForPrompt() -> String {
-        "[E\(entry.evidenceRef)] \"\(entry.matchedText)\" (\(entry.category.rawValue), line \(lineRef))"
+    /// Cycle 2 C3: render the entry into the rendered refinement
+    /// prompt body, optionally piping `entry.matchedText` through the
+    /// PromptRedactor first. The default-argument noop preserves
+    /// existing call sites that don't have a redactor handy (tests,
+    /// etc.); the production refinement-prompt builder always passes
+    /// the live redactor so trigger words like `Trulicity` are masked
+    /// to `[DRUG]` before they ever reach Apple's safety classifier.
+    func renderForPrompt(redactor: PromptRedactor = .noop) -> String {
+        let masked = redactor.redact(line: entry.matchedText)
+        return "[E\(entry.evidenceRef)] \"\(masked)\" (\(entry.category.rawValue), line \(lineRef))"
     }
 }
 
@@ -407,6 +457,48 @@ struct RefinedAdSpan: Sendable {
     let memoryWriteEligible: Bool
     let alternativeExplanation: AlternativeExplanation
     let reasonTags: [ReasonTag]
+    /// Cycle 2 H4: marks spans whose `commercialIntent`, `ownership`,
+    /// and `alternativeExplanation` were NOT actually inferred by the
+    /// FM but were defaulted by the permissive bypass path. The
+    /// permissive parser only emits line ref pairs and the runner
+    /// hardcodes those three classification dimensions to constants.
+    /// Persisted alongside spansJSON / EvidencePayload so that any
+    /// downstream consumer that depends on those fields (most
+    /// importantly the future Phase 8 sponsor-memory writer) can
+    /// distinguish "FM said `.paid/.thirdParty/.unknown`" from
+    /// "permissive bypass defaulted these because the @Generable schema
+    /// was unavailable for this window".
+    let ownershipInferenceWasSuppressed: Bool
+
+    init(
+        commercialIntent: CommercialIntent,
+        ownership: Ownership,
+        firstLineRef: Int,
+        lastLineRef: Int,
+        firstAtomOrdinal: Int,
+        lastAtomOrdinal: Int,
+        certainty: CertaintyBand,
+        boundaryPrecision: BoundaryPrecision,
+        resolvedEvidenceAnchors: [ResolvedEvidenceAnchor],
+        memoryWriteEligible: Bool,
+        alternativeExplanation: AlternativeExplanation,
+        reasonTags: [ReasonTag],
+        ownershipInferenceWasSuppressed: Bool = false
+    ) {
+        self.commercialIntent = commercialIntent
+        self.ownership = ownership
+        self.firstLineRef = firstLineRef
+        self.lastLineRef = lastLineRef
+        self.firstAtomOrdinal = firstAtomOrdinal
+        self.lastAtomOrdinal = lastAtomOrdinal
+        self.certainty = certainty
+        self.boundaryPrecision = boundaryPrecision
+        self.resolvedEvidenceAnchors = resolvedEvidenceAnchors
+        self.memoryWriteEligible = memoryWriteEligible
+        self.alternativeExplanation = alternativeExplanation
+        self.reasonTags = reasonTags
+        self.ownershipInferenceWasSuppressed = ownershipInferenceWasSuppressed
+    }
 }
 
 struct FMRefinementWindowOutput: Sendable {
@@ -429,14 +521,29 @@ struct FMRefinementScanOutput: Sendable {
     /// failure. Mirrors `FMCoarseScanOutput.failedWindowStatuses`.
     let failedWindowStatuses: [SemanticScanStatus]
 
+    /// Cycle 2 C2: per-reason permissive bypass failure tally for the
+    /// refinement pass. See `FMCoarseScanOutput.permissiveFailureCounts`.
+    let permissiveFailureCounts: PermissiveFailureCounts
+
+    /// Cycle 2 Rev2-M5/Rev3-M1: number of windows where coarse and
+    /// refine routed asymmetrically (coarse normal but refine
+    /// sensitive, or vice versa). Surfaced on the refinement output
+    /// because that's the pass with full visibility into both routing
+    /// decisions.
+    let asymmetricWindowCount: Int
+
     init(
         status: SemanticScanStatus,
         windows: [FMRefinementWindowOutput],
         latencyMillis: Double,
         prewarmHit: Bool,
-        failedWindowStatuses: [SemanticScanStatus] = []
+        failedWindowStatuses: [SemanticScanStatus] = [],
+        permissiveFailureCounts: PermissiveFailureCounts = .zero,
+        asymmetricWindowCount: Int = 0
     ) {
         self.status = status
+        self.permissiveFailureCounts = permissiveFailureCounts
+        self.asymmetricWindowCount = asymmetricWindowCount
         self.windows = windows
         self.latencyMillis = latencyMillis
         self.prewarmHit = prewarmHit
@@ -768,7 +875,12 @@ struct FoundationModelClassifier: Sendable {
         if let redactor {
             self.redactor = redactor
         } else if Self.redactionEnabled() {
-            self.redactor = PromptRedactor.loadDefault() ?? .noop
+            // Best-effort load with fallback to noop. Production wiring
+            // goes through PlayheadRuntime which uses the precondition
+            // path; this branch is only used by FoundationModelClassifier
+            // call sites that construct the classifier directly with the
+            // PLAYHEAD_FM_REDACT env var set (legacy debug paths).
+            self.redactor = (try? PromptRedactor.loadDefault()) ?? .noop
         } else {
             self.redactor = .noop
         }
@@ -922,6 +1034,8 @@ struct FoundationModelClassifier: Sendable {
         // refusal, exceededContextWindow, decodingFailure, or rateLimited
         // while sibling windows still run and persist.
         var failedWindowStatuses: [SemanticScanStatus] = []
+        // Cycle 2 C2: per-reason permissive failure tally for this pass.
+        var permissiveCounts = PermissiveFailureCounts.zero
 
         let totalWindows = plans.count
         for (planIndex, plan) in plans.enumerated() {
@@ -952,7 +1066,8 @@ struct FoundationModelClassifier: Sendable {
                     windows: windows,
                     latencyMillis: Self.latencyMillis(since: start, clock: clock),
                     prewarmHit: prewarmHit,
-                    failedWindowStatuses: failedWindowStatuses
+                    failedWindowStatuses: failedWindowStatuses,
+                    permissiveFailureCounts: permissiveCounts
                 )
             }
 
@@ -969,31 +1084,69 @@ struct FoundationModelClassifier: Sendable {
                    let permissive = permissiveClassifier,
                    router.route(window: windowSegments) == .sensitive {
                     let permissiveStart = clock.now
-                    let screening = await permissive.classify(window: windowSegments)
-                    let permissiveLatency = Self.latencyMillis(since: permissiveStart, clock: clock)
-                    windows.append(
-                        FMCoarseWindowOutput(
-                            windowIndex: windows.count,
-                            lineRefs: plan.lineRefs,
-                            startTime: plan.startTime,
-                            endTime: plan.endTime,
-                            transcriptQuality: plan.transcriptQuality,
-                            screening: screening,
-                            latencyMillis: permissiveLatency
+                    do {
+                        let screening = try await permissive.classify(window: windowSegments)
+                        let permissiveLatency = Self.latencyMillis(since: permissiveStart, clock: clock)
+                        windows.append(
+                            FMCoarseWindowOutput(
+                                windowIndex: windows.count,
+                                lineRefs: plan.lineRefs,
+                                startTime: plan.startTime,
+                                endTime: plan.endTime,
+                                transcriptQuality: plan.transcriptQuality,
+                                screening: screening,
+                                latencyMillis: permissiveLatency
+                            )
                         )
-                    )
-                    logger.debug(
-                        """
-                        fm.classifier.coarse_pass_window_permissive_route \
-                        window=\(planIndex + 1, privacy: .public) \
-                        totalWindows=\(totalWindows, privacy: .public) \
-                        firstSegmentIndex=\(plan.lineRefs.first ?? -1, privacy: .public) \
-                        lastSegmentIndex=\(plan.lineRefs.last ?? -1, privacy: .public) \
-                        segmentCount=\(plan.lineRefs.count, privacy: .public) \
-                        disposition=\(screening.disposition.rawValue, privacy: .public) \
-                        latencyMillis=\(permissiveLatency, privacy: .public)
-                        """
-                    )
+                        logger.debug(
+                            """
+                            fm.classifier.coarse_pass_window_permissive_route \
+                            window=\(planIndex + 1, privacy: .public) \
+                            totalWindows=\(totalWindows, privacy: .public) \
+                            firstSegmentIndex=\(plan.lineRefs.first ?? -1, privacy: .public) \
+                            lastSegmentIndex=\(plan.lineRefs.last ?? -1, privacy: .public) \
+                            segmentCount=\(plan.lineRefs.count, privacy: .public) \
+                            disposition=\(screening.disposition.rawValue, privacy: .public) \
+                            latencyMillis=\(permissiveLatency, privacy: .public)
+                            """
+                        )
+                    } catch let error as PermissiveClassificationError {
+                        // Cycle 2 C2: route permissive failure into the
+                        // failed-window status list with a status that
+                        // mirrors the parser-derived reason. The runner
+                        // (BackfillJobRunner) reads `permissiveFailureCounts`
+                        // off the returned scan output and rolls up its
+                        // run-completion telemetry.
+                        //
+                        // Permissive refusal does NOT trigger a same-pass
+                        // standard retry — the router already proved this
+                        // window would refuse the @Generable path. The
+                        // shadow retry observer (Agent C) will pick the
+                        // window up next capability transition.
+                        let status = Self.permissiveStatus(for: error.reason)
+                        failedWindowStatuses.append(status)
+                        permissiveCounts.increment(reason: error.reason)
+                        logger.error(
+                            """
+                            fm.classifier.coarse_pass_window_permissive_failed \
+                            window=\(planIndex + 1, privacy: .public) \
+                            totalWindows=\(totalWindows, privacy: .public) \
+                            reason=\(error.reason.rawValue, privacy: .public) \
+                            status=\(status.rawValue, privacy: .public)
+                            """
+                        )
+                    } catch {
+                        // Should not happen — PermissiveAdClassifier
+                        // converts every underlying error to a
+                        // PermissiveClassificationError before throwing.
+                        // Defensive: fall back to refusal so the runner
+                        // surfaces the failed window in telemetry.
+                        failedWindowStatuses.append(.refusal)
+                        permissiveCounts.increment(reason: .permissiveRefusal)
+                        logger.error(
+                            "fm.classifier.coarse_pass_window_permissive_unexpected window=\(planIndex + 1, privacy: .public) error=\(String(describing: error), privacy: .private)"
+                        )
+                    }
                     continue
                 }
             }
@@ -1053,7 +1206,8 @@ struct FoundationModelClassifier: Sendable {
                     windows: windows,
                     latencyMillis: Self.latencyMillis(since: start, clock: clock),
                     prewarmHit: prewarmHit,
-                    failedWindowStatuses: failedWindowStatuses
+                    failedWindowStatuses: failedWindowStatuses,
+                    permissiveFailureCounts: permissiveCounts
                 )
             }
         }
@@ -1074,7 +1228,8 @@ struct FoundationModelClassifier: Sendable {
             windows: windows,
             latencyMillis: Self.latencyMillis(since: start, clock: clock),
             prewarmHit: prewarmHit,
-            failedWindowStatuses: failedWindowStatuses
+            failedWindowStatuses: failedWindowStatuses,
+            permissiveFailureCounts: permissiveCounts
         )
     }
 
@@ -1408,6 +1563,11 @@ struct FoundationModelClassifier: Sendable {
         // so a single bad window does not abort the entire refinement pass.
         // Mirrors the coarse `failedWindowStatuses` bookkeeping.
         var failedWindowStatuses: [SemanticScanStatus] = []
+        // Cycle 2 C2: per-reason permissive bypass tally for the
+        // refinement pass.
+        var permissiveCounts = PermissiveFailureCounts.zero
+        // Cycle 2 Rev2-M5/Rev3-M1: asymmetric-routing detection counter.
+        var asymmetricWindowCount = 0
 
         let permissiveDispatchEnabled =
             sensitiveRouter?.hasRules == true && permissiveClassifier != nil
@@ -1456,40 +1616,100 @@ struct FoundationModelClassifier: Sendable {
                let router = sensitiveRouter,
                let permissive = permissiveClassifier {
                 let windowSegments = plan.lineRefs.compactMap { lineRefLookup[$0] }
-                if router.routeText(plan.prompt) == .sensitive {
-                    let permissiveResult = await permissive.refine(window: windowSegments)
-                    let permissiveSpans = permissiveResult.refinedSpans(
-                        for: plan,
-                        lineRefLookup: lineRefLookup
-                    )
-                    let permissiveLatency = Self.latencyMillis(since: windowStart, clock: clock)
+                // Cycle 2 Rev2-M5/Rev3-M1: detect asymmetric routing.
+                // The coarse pass routes on the raw segment text; the
+                // refinement pass routes on the literal `plan.prompt`
+                // (which embeds the evidence catalog snippet too). When
+                // these disagree the routing vocabulary is missing a
+                // surface — bump the asymmetric counter so the on-device
+                // smoke run surfaces it without having to scrape OSLog.
+                let coarseSegmentRoute = router.route(window: windowSegments)
+                let refinePromptRoute = router.routeText(plan.prompt)
+                if coarseSegmentRoute != refinePromptRoute {
+                    asymmetricWindowCount += 1
                     logger.debug(
                         """
-                        fm.classifier.refinement_pass_window_permissive_route \
+                        fm.classifier.routing.asymmetric_window \
                         window=\(plan.windowIndex, privacy: .public) \
-                        sourceWindow=\(plan.sourceWindowIndex, privacy: .public) \
-                        firstLineRef=\(plan.lineRefs.first ?? -1, privacy: .public) \
-                        lastLineRef=\(plan.lineRefs.last ?? -1, privacy: .public) \
-                        lineRefCount=\(plan.lineRefs.count, privacy: .public) \
-                        result=\(permissiveResult.description, privacy: .public) \
-                        spans=\(permissiveSpans.count, privacy: .public) \
-                        latencyMillis=\(permissiveLatency, privacy: .public)
+                        coarseSegmentRoute=\(String(describing: coarseSegmentRoute), privacy: .public) \
+                        refinePromptRoute=\(String(describing: refinePromptRoute), privacy: .public)
                         """
                     )
-                    if permissiveSpans.isEmpty {
-                        // `.noAd` from the focused refinement — drop the
-                        // window cleanly. Do not record as a failure.
-                        continue
-                    }
-                    windows.append(
-                        FMRefinementWindowOutput(
-                            windowIndex: plan.windowIndex,
-                            sourceWindowIndex: plan.sourceWindowIndex,
-                            lineRefs: plan.lineRefs,
-                            spans: permissiveSpans,
-                            latencyMillis: permissiveLatency
+                }
+                if refinePromptRoute == .sensitive {
+                    do {
+                        // Cycle 2 H3: plumb plan.focusLineRefs /
+                        // focusClusters / config.maximumRefinementSpansPerWindow
+                        // through to the permissive classifier so the
+                        // permissive path produces the same focus-aware,
+                        // bounded output as the standard refinement path.
+                        let permissiveResult = try await permissive.refine(
+                            window: windowSegments,
+                            focusLineRefs: plan.focusLineRefs,
+                            focusClusters: plan.focusClusters,
+                            maximumSpans: config.maximumRefinementSpansPerWindow
                         )
-                    )
+                        let permissiveSpans = permissiveResult.refinedSpans(
+                            for: plan,
+                            lineRefLookup: lineRefLookup
+                        )
+                        let permissiveLatency = Self.latencyMillis(since: windowStart, clock: clock)
+                        logger.debug(
+                            """
+                            fm.classifier.refinement_pass_window_permissive_route \
+                            window=\(plan.windowIndex, privacy: .public) \
+                            sourceWindow=\(plan.sourceWindowIndex, privacy: .public) \
+                            firstLineRef=\(plan.lineRefs.first ?? -1, privacy: .public) \
+                            lastLineRef=\(plan.lineRefs.last ?? -1, privacy: .public) \
+                            lineRefCount=\(plan.lineRefs.count, privacy: .public) \
+                            result=\(permissiveResult.description, privacy: .public) \
+                            spans=\(permissiveSpans.count, privacy: .public) \
+                            latencyMillis=\(permissiveLatency, privacy: .public)
+                            """
+                        )
+                        if permissiveSpans.isEmpty {
+                            // `.noAd` from the focused refinement — drop
+                            // the window cleanly. Do not record as a
+                            // failure.
+                            continue
+                        }
+                        windows.append(
+                            FMRefinementWindowOutput(
+                                windowIndex: plan.windowIndex,
+                                sourceWindowIndex: plan.sourceWindowIndex,
+                                lineRefs: plan.lineRefs,
+                                spans: permissiveSpans,
+                                latencyMillis: permissiveLatency
+                            )
+                        )
+                    } catch let error as PermissiveClassificationError {
+                        // Cycle 2 C2/H5: route permissive refinement
+                        // failures into the runner's
+                        // failedWindowStatuses path. Permissive refusal
+                        // does NOT trigger a same-pass standard retry
+                        // because the router already proved this window
+                        // would refuse the @Generable path. The shadow
+                        // retry observer (Agent C) will pick the window
+                        // up next capability transition.
+                        let status = Self.permissiveStatus(for: error.reason)
+                        failedWindowStatuses.append(status)
+                        permissiveCounts.increment(reason: error.reason)
+                        logger.error(
+                            """
+                            fm.classifier.refinement_pass_window_permissive_failed \
+                            window=\(plan.windowIndex, privacy: .public) \
+                            sourceWindow=\(plan.sourceWindowIndex, privacy: .public) \
+                            reason=\(error.reason.rawValue, privacy: .public) \
+                            status=\(status.rawValue, privacy: .public)
+                            """
+                        )
+                    } catch {
+                        failedWindowStatuses.append(.refusal)
+                        permissiveCounts.increment(reason: .permissiveRefusal)
+                        logger.error(
+                            "fm.classifier.refinement_pass_window_permissive_unexpected window=\(plan.windowIndex, privacy: .public) error=\(String(describing: error), privacy: .private)"
+                        )
+                    }
                     continue
                 }
             }
@@ -1541,7 +1761,9 @@ struct FoundationModelClassifier: Sendable {
                     windows: windows,
                     latencyMillis: Self.latencyMillis(since: start, clock: clock),
                     prewarmHit: prewarmHit,
-                    failedWindowStatuses: failedWindowStatuses
+                    failedWindowStatuses: failedWindowStatuses,
+                    permissiveFailureCounts: permissiveCounts,
+                    asymmetricWindowCount: asymmetricWindowCount
                 )
             }
 
@@ -1577,7 +1799,9 @@ struct FoundationModelClassifier: Sendable {
             windows: windows,
             latencyMillis: Self.latencyMillis(since: start, clock: clock),
             prewarmHit: prewarmHit,
-            failedWindowStatuses: failedWindowStatuses
+            failedWindowStatuses: failedWindowStatuses,
+            permissiveFailureCounts: permissiveCounts,
+            asymmetricWindowCount: asymmetricWindowCount
         )
     }
 
@@ -1585,6 +1809,24 @@ struct FoundationModelClassifier: Sendable {
         let sessionBox = SessionBox(session: await runtime.makeSession())
         await sessionBox.prewarm(promptPrefix)
         return sessionBox
+    }
+
+    /// Cycle 2 C2: map a `PermissiveClassificationError.Reason` to the
+    /// matching `SemanticScanStatus` slot the runner already understands.
+    /// All three reasons collapse onto existing failed-window statuses
+    /// — refusal/decoding/exceededContextWindow — so the
+    /// `failedWindowStatuses` array remains a homogeneous list of
+    /// `SemanticScanStatus` values and the per-reason counter logic is
+    /// purely additional telemetry rather than a new persistence row.
+    static func permissiveStatus(for reason: PermissiveClassificationError.Reason) -> SemanticScanStatus {
+        switch reason {
+        case .permissiveRefusal:
+            return .refusal
+        case .permissiveDecodingFailure:
+            return .decodingFailure
+        case .permissiveContextOverflow:
+            return .exceededContextWindow
+        }
     }
 
     private static func aggregateGracefulFailureStatus(
@@ -1870,7 +2112,15 @@ struct FoundationModelClassifier: Sendable {
         }
         if !promptEvidence.isEmpty {
             lines.append("Evidence catalog:")
-            lines.append(contentsOf: promptEvidence.map { $0.renderForPrompt() })
+            // Cycle 2 C3: pipe each entry's matchedText through the
+            // production redactor so trigger words inside the catalog
+            // (e.g. `Trulicity`) are masked before submission. The
+            // catalog is the most likely surface to embed pharma
+            // vocabulary on otherwise-benign refinement windows (the
+            // Kelly Ripa #1 mystery), and the iOS expert specifically
+            // called out hidden schema/instruction surface as the
+            // failure mode.
+            lines.append(contentsOf: promptEvidence.map { $0.renderForPrompt(redactor: redactor) })
         }
         lines.append("Return up to \(maximumSpans) spans.")
         return lines.joined(separator: "\n")

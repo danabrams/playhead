@@ -59,20 +59,28 @@ struct SensitiveWindowRouter: Sendable {
         case sensitive
     }
 
-    private let triggerRules: [PromptRedactor.RedactionRule]
+    private let compiledTriggerRules: [PromptRedactor.CompiledRule]
 
     /// Construct a router from a `PromptRedactor`. The router pulls the
-    /// trigger-category rules out of the dictionary the redactor already
-    /// loaded, so the routing vocabulary stays in lockstep with the
-    /// shared `RedactionRules.json` dictionary.
+    /// pre-compiled trigger-category rules out of the redactor so it
+    /// reuses the load-time NSRegularExpression instances instead of
+    /// recompiling on every check (Cycle 2 H8).
     init(redactor: PromptRedactor) {
-        self.triggerRules = redactor.allTriggerRules()
+        self.compiledTriggerRules = redactor.allCompiledTriggerRulesForRouting()
     }
 
     /// Direct-rules constructor used by tests that build a router from a
     /// hand-crafted rule list (and by the noop fallback below).
     init(triggerRules: [PromptRedactor.RedactionRule]) {
-        self.triggerRules = triggerRules
+        // Best-effort compile for legacy / test rule lists. Patterns
+        // that fail to compile are silently dropped here — production
+        // routing always goes through `init(redactor:)`, which inherits
+        // the load-time precondition from `PromptRedactor.loadDefault`.
+        self.compiledTriggerRules = triggerRules.compactMap { rule in
+            (try? PromptRedactor.compile(rule: rule)).map { regex in
+                PromptRedactor.CompiledRule(rule: rule, regex: regex)
+            }
+        }
     }
 
     /// Router that always returns `.normal` — used as the fallback when
@@ -81,12 +89,12 @@ struct SensitiveWindowRouter: Sendable {
     static let noop = SensitiveWindowRouter(triggerRules: [])
 
     /// True when the router has at least one trigger rule loaded.
-    var hasRules: Bool { !triggerRules.isEmpty }
+    var hasRules: Bool { !compiledTriggerRules.isEmpty }
 
     /// Classify a window of segments. Returns `.sensitive` as soon as
     /// any rule matches any segment in the window; otherwise `.normal`.
     func route(window segments: [AdTranscriptSegment]) -> Route {
-        guard !triggerRules.isEmpty else { return .normal }
+        guard !compiledTriggerRules.isEmpty else { return .normal }
         for segment in segments {
             if matchesAnyTrigger(in: segment.text) {
                 return .sensitive
@@ -100,13 +108,13 @@ struct SensitiveWindowRouter: Sendable {
     /// fixtures, and by the integration path when the caller already has
     /// a flattened transcript window string.
     func routeText(_ text: String) -> Route {
-        guard !triggerRules.isEmpty else { return .normal }
+        guard !compiledTriggerRules.isEmpty else { return .normal }
         return matchesAnyTrigger(in: text) ? .sensitive : .normal
     }
 
     private func matchesAnyTrigger(in text: String) -> Bool {
-        for rule in triggerRules {
-            if PromptRedactor.ruleMatches(rule, in: text) {
+        for compiled in compiledTriggerRules {
+            if PromptRedactor.ruleMatches(compiled, in: text) {
                 return true
             }
         }
