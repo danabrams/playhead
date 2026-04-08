@@ -195,3 +195,84 @@ Any of:
 Your original recommendation was the right call. The permissive guardrails + plain `String` output + per-call sessions + greedy sampling architecture is now load-bearing in our production path and recovers every pharma probe we've thrown at it. Phase 1 (coarse) and Phase 2 (refinement) both ship behind a router that's wired through `PlayheadRuntime` so the dispatch is byte-identical to the legacy path when the router is `.noop`. The integration was clean and the unit-test footprint is small.
 
 Thank you again for the architectural pointer — this unblocked weeks of redactor whack-a-mole.
+
+---
+
+## Expert response (2026-04-08)
+
+The expert's diagnosis: **the router is checking less text than Apple's guardrails are checking.**
+
+`router.routeText(plan.prompt)` only inspects the visible rendered prompt. Apple's guardrails inspect the *full augmented input*, which on the guided-generation path includes:
+
+- session instructions
+- framework-injected schema text (Foundation Models automatically includes details about the `Generable` type in the prompt unless `includeSchemaInPrompt: false`)
+- guide descriptions (effectively another form of prompting per Apple's docs)
+- any tool descriptions / outputs
+
+So the negative router result is **not** strong evidence the guardrail "should not" have fired — it only proves our visible prompt lacks our current trigger lexicon. The hidden schema/instruction surface is the most plausible source of the extra signal tipping the classifier over the line.
+
+There is no documented Apple "celebrity cross-promo" category. Public categories are broader prohibited domains (regulated healthcare, legal/financial/employment/criminal-justice, social scoring, biometric inference). A Kelly-specific documented category is unlikely.
+
+There is also recent evidence of benign false positives in the wild — Apple developer forum threads on "Tailwind", "JFK/KJFK", "frunk", "Lock Pride". An Apple staff designer in one of those threads says guardrails are classifier systems and prompt/rule attempts often won't suppress them; the suggestion is to file feedback or switch to a more lenient guardrail setting.
+
+### The experiment that should answer this fastest
+
+Run the failing Kelly refinement again, changing only:
+
+1. Use the guided-generation overload with **`includeSchemaInPrompt: false`**.
+2. Remove our manual schema preamble.
+3. Add **one concrete example** of the desired output format in instructions.
+
+Apple documents `includeSchemaInPrompt` specifically for cases where the model already knows the expected response format because a full example is provided. If the refusal disappears, the hidden schema text was the extra surface tipping the default guardrails.
+
+Minimal shape:
+
+```swift
+let session = LanguageModelSession(
+    instructions: Instructions {
+        "You are a transcript span extractor. Return only ad-span line ranges."
+        """
+        Example output:
+        {"spans":[{"firstLineRef":4,"lastLineRef":5}]}
+        """
+    }
+)
+
+do {
+    let response = try await session.respond(
+        to: prompt,
+        generating: RefinementWindowSchema.self,
+        includeSchemaInPrompt: false,
+        options: GenerationOptions(sampling: .greedy)
+    )
+} catch LanguageModelSession.GenerationError.refusal(let refusal, let context) {
+    let explanation = try? await refusal.explanation
+    logger.error("Refusal: \(context.debugDescription)")
+    logger.error("Explanation: \(explanation?.content ?? "<none>")")
+}
+```
+
+Note `refusal.explanation` returns a model-generated `Response<String>` — better diagnostic surface than `contextDebugDescription` alone.
+
+### Direct answers to the open questions
+
+1. **Celebrity-cross-promo category?** No documented Apple category found.
+2. **Hidden cross-session state?** Apple documents transcript/history as living on `LanguageModelSession`. No documentation for cross-session conversation accumulation. Less likely than hidden schema/instruction input.
+3. **Better diagnostics than `contextDebugDescription`?** Yes — `refusal.explanation`. No public API for rule IDs or classifier-category labels on `TranscriptRecord`.
+4. **Preflight / dry-run "would this refuse?" API?** None documented. The supported path is: call, catch `.refusal`, inspect `refusal.explanation`.
+5. **Feedback Assistant on this exact case?** Yes. Apple explicitly asks for Foundation Models bug reports to include a language-model feedback attachment generated via `logFeedbackAttachment(sentiment:issues:desiredOutput:)` and a sysdiagnose. File with the exact Kelly prompt, OS build, device, both the failing default-path call and the succeeding permissive-path call, and the result of the `includeSchemaInPrompt: false` A/B test.
+
+### Production recommendation
+
+If `includeSchemaInPrompt: false` + one-shot example fixes Kelly: keep guided generation for refinement, strip the schema preamble, rely on the example.
+
+If it does **not** fix Kelly: stop trying to extend the routing dictionary. Apple staff explicitly says guardrails usually cannot be suppressed by extra prompts/rules, and permissive mode is the supported escape hatch. Either:
+
+1. Make all refinement use the permissive string path, or
+2. At minimum, **automatically retry any default-path refinement refusal through the permissive string path, regardless of vocabulary**.
+
+This avoids chasing undocumented classifier boundaries with lexicons.
+
+### Expert's bottom line
+
+> The second mystery is not really "Why does Kelly Ripa trigger a hidden celebrity classifier?" It is "Why are you still treating `plan.prompt` as the full guarded input on guided generation?" Once you account for the framework-added schema/instruction surface, the behavior stops being mysterious and starts looking like a false positive on the augmented prompt.
