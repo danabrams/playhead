@@ -2146,6 +2146,33 @@ struct FoundationModelClassifierTests {
         #expect(neutralPreamble.contains("<<<TRANSCRIPT>>>"))
         unsetenv("PLAYHEAD_FM_PROMPT_VARIANT")
 
+        // bd-1en: taxonomy variant — third experiment for residual
+        // refusal cases. Frames the task as descriptive labeling with a
+        // small fixed vocabulary, avoiding any classification /
+        // extraction / identification verbs and any commerce-loaded
+        // nouns ("advertising", "promotional", "company", "product",
+        // "promo code", "sponsorship language", etc).
+        setenv("PLAYHEAD_FM_PROMPT_VARIANT", "taxonomy", 1)
+        let taxonomyPreamble = FoundationModelClassifier.coarsePromptPreamble()
+        #expect(taxonomyPreamble.contains("sponsor-read"))
+        #expect(taxonomyPreamble.contains("host-content"))
+        #expect(taxonomyPreamble.contains("transition"))
+        #expect(taxonomyPreamble.contains("Tag transcript segments"))
+        #expect(taxonomyPreamble.contains("<<<TRANSCRIPT>>>"))
+        #expect(taxonomyPreamble.contains("<<<END TRANSCRIPT>>>"))
+        // Forbidden phrases the taxonomy variant deliberately avoids —
+        // the load-bearing assertion that the new variant differs from
+        // the existing variants in the dimensions bd-1en cares about.
+        #expect(!taxonomyPreamble.contains("Classify whether"))
+        #expect(!taxonomyPreamble.contains("advertising or promotional content"))
+        #expect(!taxonomyPreamble.contains("List any company names"))
+        #expect(!taxonomyPreamble.contains("Extract"))
+        #expect(!taxonomyPreamble.contains("Identify"))
+        #expect(!taxonomyPreamble.contains("promo codes"))
+        // Differential vs. the default variant.
+        #expect(taxonomyPreamble != defaultPreamble)
+        unsetenv("PLAYHEAD_FM_PROMPT_VARIANT")
+
         // Unknown values fall back to the default classification framing
         // so a typo can never silently change behavior on-device.
         setenv("PLAYHEAD_FM_PROMPT_VARIANT", "bogus", 1)
@@ -2158,6 +2185,182 @@ struct FoundationModelClassifierTests {
         let emptyPreamble = FoundationModelClassifier.coarsePromptPreamble()
         #expect(emptyPreamble == defaultPreamble)
         unsetenv("PLAYHEAD_FM_PROMPT_VARIANT")
+
+        // bd-1en regression: confirm bd-34e's existing extract variant
+        // STILL works and is unchanged by the taxonomy addition. After
+        // unsetting all overrides above we re-set extract one more time
+        // to confirm the round-trip is repeatable and produces the same
+        // text the bd-34e test asserted.
+        setenv("PLAYHEAD_FM_PROMPT_VARIANT", "extract", 1)
+        let extractAgain = FoundationModelClassifier.coarsePromptPreamble()
+        #expect(extractAgain == extractPreamble)
+        #expect(extractAgain.contains("Extract product mentions"))
+        unsetenv("PLAYHEAD_FM_PROMPT_VARIANT")
+        #endif
+    }
+
+    // bd-1en: the taxonomy variant must also rewrite the REFINEMENT
+    // prompt — bd-1en's device evidence shows windows 2 (Kelly Ripa
+    // cross-promo, no health content) and 7 also refused on the
+    // refinement pass. bd-34e's earlier `extract`/`neutral` variants
+    // never wired into refinement, so refinement always saw the
+    // classification framing. The taxonomy variant fixes that.
+    //
+    // This test exercises the prompt-construction layer (no FM call) for
+    // each variant and asserts:
+    //   1) classification refinement preamble is unchanged (bd-34e
+    //      regression guarantee).
+    //   2) extract/neutral refinement still falls through to
+    //      classification framing (their existing on-device behavior).
+    //   3) taxonomy refinement uses the taxonomy framing (the new
+    //      behavior).
+    //
+    // Uses `refinementPreambleParts(for:)` directly so the test does NOT
+    // depend on env-var state and runs deterministically alongside the
+    // other prompt-variant tests.
+    @Test("bd-1en taxonomy variant rewrites the refinement preamble too")
+    func taxonomyVariantWiresIntoRefinementPreamble() {
+        let classificationParts = FoundationModelClassifier.refinementPreambleParts(for: .classification)
+        #expect(classificationParts.prefix == "Refine ad spans.")
+        #expect(classificationParts.preamble.contains("advertising or promotional content"))
+
+        #if DEBUG
+        // bd-34e regression: extract and neutral still use the
+        // classification refinement preamble (bd-34e never wired them
+        // into refinement; this test pins the existing behavior so a
+        // future change is loud).
+        let extractParts = FoundationModelClassifier.refinementPreambleParts(for: .extract)
+        #expect(extractParts.prefix == classificationParts.prefix)
+        #expect(extractParts.preamble == classificationParts.preamble)
+        #expect(extractParts.lineRef == classificationParts.lineRef)
+
+        let neutralParts = FoundationModelClassifier.refinementPreambleParts(for: .neutral)
+        #expect(neutralParts.prefix == classificationParts.prefix)
+        #expect(neutralParts.preamble == classificationParts.preamble)
+        #expect(neutralParts.lineRef == classificationParts.lineRef)
+
+        // bd-1en: taxonomy is the FIRST variant to also rewire
+        // refinement.  The refinement preamble shares the same vocabulary
+        // as the coarse taxonomy preamble so a single env-var flip
+        // changes both passes.
+        let taxonomyParts = FoundationModelClassifier.refinementPreambleParts(for: .taxonomy)
+        #expect(taxonomyParts.prefix == "Tag transcript segments.")
+        #expect(taxonomyParts.preamble.contains("sponsor-read"))
+        #expect(taxonomyParts.preamble.contains("host-content"))
+        #expect(taxonomyParts.preamble.contains("transition"))
+        // Forbidden phrases — same exclusion list as coarse.
+        #expect(!taxonomyParts.preamble.contains("advertising or promotional content"))
+        #expect(!taxonomyParts.preamble.contains("Refine ad spans"))
+        // Differential vs. the classification refinement framing.
+        #expect(taxonomyParts.preamble != classificationParts.preamble)
+        #expect(taxonomyParts.prefix != classificationParts.prefix)
+        #endif
+    }
+
+    // bd-1en: golden / structural test for the taxonomy coarse preamble.
+    // Locks the exact 5-line shape AND the exact strings, so any future
+    // edit to the taxonomy variant has to update this test explicitly
+    // (the user wanted "excellent testing" and explicitly listed a
+    // snapshot test for the new variant).
+    //
+    // Also re-asserts the load-bearing five-line preamble invariant
+    // (`preambleTokenCountIsBoundedAndAccountedFor`) for the new variant
+    // so a typo that adds an extra newline to one of the taxonomy
+    // strings fails this test before it can break the budget math.
+    @Test("bd-1en taxonomy preamble matches its 5-line golden shape")
+    func taxonomyPreambleGoldenShape() {
+        #if DEBUG
+        let alreadySet = ProcessInfo.processInfo.environment["PLAYHEAD_FM_PROMPT_VARIANT"] != nil
+        guard !alreadySet else { return }
+
+        setenv("PLAYHEAD_FM_PROMPT_VARIANT", "taxonomy", 1)
+        defer { unsetenv("PLAYHEAD_FM_PROMPT_VARIANT") }
+
+        let preamble = FoundationModelClassifier.coarsePromptPreamble()
+        let lines = preamble.split(separator: "\n", omittingEmptySubsequences: false)
+        // Five-line invariant — must match every other variant so the
+        // shared budget math, schema-token math, and
+        // `preambleTokenCountIsBoundedAndAccountedFor` invariant hold.
+        #expect(lines.count == 5)
+
+        // Exact strings — golden snapshot. Any future edit to the
+        // taxonomy variant must update these literal expectations.
+        #expect(lines[0] == "Tag transcript segments.")
+        #expect(lines[1] == "Each line below belongs to one of these segment categories: sponsor-read, host-content, transition. Tag each line with its category.")
+        #expect(lines[2] == "Each transcript line is prefixed with `L<number>>` followed by quoted text. Use the line numbers when you reference which line belongs to which category.")
+        #expect(lines[3] == "<<<TRANSCRIPT>>>")
+        #expect(lines[4] == "<<<END TRANSCRIPT>>>")
+
+        // Equivalence: an empty-segments coarse prompt IS the preamble
+        // verbatim under the taxonomy variant — same invariant as the
+        // classification variant in `preambleTokenCountIsBoundedAndAccountedFor`.
+        let emptyPrompt = FoundationModelClassifier.buildPrompt(for: [])
+        #expect(emptyPrompt == preamble)
+        #endif
+    }
+
+    // bd-1en: round-trip test that exercises the FULL coarse-pass code
+    // path under the taxonomy variant against a stubbed runtime, so we
+    // prove the prompt change does NOT break downstream parsing or the
+    // CoarseScreeningSchema decode path. The runtime returns a
+    // canned coarse window result; the test asserts the classifier
+    // surfaces the same window list it would surface under any other
+    // variant. This is the user-requested "round-trip with stubbed FM"
+    // test layer.
+    @Test("bd-1en taxonomy variant round-trips through coarse pass with stubbed FM")
+    func taxonomyVariantRoundTripsCoarsePass() async throws {
+        #if DEBUG
+        let alreadySet = ProcessInfo.processInfo.environment["PLAYHEAD_FM_PROMPT_VARIANT"] != nil
+        guard !alreadySet else { return }
+
+        setenv("PLAYHEAD_FM_PROMPT_VARIANT", "taxonomy", 1)
+        defer { unsetenv("PLAYHEAD_FM_PROMPT_VARIANT") }
+
+        let segments = [
+            makeSegment(index: 0, startTime: 0, endTime: 5, text: "First sponsor line."),
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Second sponsor line.")
+        ]
+        let recorder = RuntimeRecorder(
+            // Same context-size used by the bd-34e variant tests so this
+            // shares their budget math.
+            contextSize: 351,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 5
+            }
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+
+        // Status is success (or at worst .success-ish — the stub never
+        // refuses) and the parsed CoarseScreeningSchema downstream still
+        // gives us at least one window. The point of this test is to
+        // prove the new prompt SHAPE does not break the parsing layer,
+        // NOT to assert FM behavior — the recorder runtime doesn't
+        // model semantic refusal.
+        #expect(output.status == .success)
+        #expect(output.windows.count >= 1)
+
+        // The recorded prompt MUST contain the taxonomy framing (proving
+        // the variant actually flowed all the way down to the runtime
+        // call) and MUST NOT contain the classification or extract
+        // framing.
+        let snapshot = await recorder.snapshot()
+        #expect(!snapshot.respondCalls.isEmpty)
+        let firstPrompt = snapshot.respondCalls[0].prompt
+        #expect(firstPrompt.contains("Tag transcript segments"))
+        #expect(firstPrompt.contains("sponsor-read"))
+        #expect(!firstPrompt.contains("Classify whether"))
+        #expect(!firstPrompt.contains("Extract product mentions"))
+        // The transcript content survives the prompt build.
+        #expect(firstPrompt.contains("First sponsor line."))
+        #expect(firstPrompt.contains("L0>"))
+        #expect(firstPrompt.contains("L1>"))
         #endif
     }
 

@@ -777,6 +777,10 @@ struct FoundationModelClassifier: Sendable {
             logger.debug("PLAYHEAD_FM_PROMPT_VARIANT=extract — using extraction-framed prompt")
         case .neutral:
             logger.debug("PLAYHEAD_FM_PROMPT_VARIANT=neutral — using neutral-question prompt")
+        case .taxonomy:
+            // bd-1en: descriptive labeling framing for the residual
+            // health-adjacent + benign-content refusal cases.
+            logger.debug("PLAYHEAD_FM_PROMPT_VARIANT=taxonomy — using descriptive labeling prompt (coarse + refinement)")
         }
         #endif
     }
@@ -1425,16 +1429,54 @@ struct FoundationModelClassifier: Sendable {
     private static let neutralInjectionPreamble = "What companies, products, services, or sponsorship language are mentioned in this transcript window? Return a list. Return an empty list if nothing is mentioned."
     private static let neutralLineRefInstruction = "Each transcript line is prefixed with `L<number>>` followed by quoted text. Cite line numbers for each mention."
 
+    // bd-1en: third coarse-prompt variant for the FM safety classifier on
+    // health-adjacent ad content. Real-device evidence (commit 446cc81 +
+    // 2f9b959) shows that on the Conan "Fanhausen Revisited" fixture the
+    // CVS pre-roll (window 1, lineRefs 0-1, vaccine + pharmacy copy)
+    // refuses on the coarse pass with status=refusal and
+    // contextDebugDescription="May contain sensitive content". Windows 2
+    // (Kelly Ripa cross-promo, lineRefs 4-5) and 7 (lineRefs 19-20) also
+    // refuse on the refinement pass with the same message — even though
+    // those windows contain NO health content. That rules out a
+    // pure-content trigger and points back at the task framing.
+    //
+    // bd-34e's `classification` (default) framing still says
+    // "Classify whether... contains advertising or promotional content".
+    // The `extract` and `neutral` variants soften but still use loaded
+    // verbs ("Extract", "List", "Identify", "What...are mentioned") and
+    // commerce-loaded nouns ("company names", "product names", "promo
+    // codes", "sponsorship language"). The `taxonomy` variant strips both
+    // — it frames the task as a descriptive labeling exercise with a
+    // small fixed vocabulary ("sponsor-read", "host-content",
+    // "transition") and no imperative verbs that pattern-match to
+    // adversarial-extraction prompts.
+    //
+    // Per CLAUDE.md the new variant is wired behind PLAYHEAD_FM_PROMPT_VARIANT
+    // and is NOT the production default until the user approves it. The
+    // refinement preamble is variant-aware too (refinement also refused
+    // on real-device, see windows 2/7 above) so a single env-var flip
+    // changes both passes for the on-device experiment.
+    private static let taxonomyPromptPrefix = "Tag transcript segments."
+    private static let taxonomyInjectionPreamble = "Each line below belongs to one of these segment categories: sponsor-read, host-content, transition. Tag each line with its category."
+    private static let taxonomyLineRefInstruction = "Each transcript line is prefixed with `L<number>>` followed by quoted text. Use the line numbers when you reference which line belongs to which category."
+
+    private static let taxonomyRefinementPromptPrefix = "Tag transcript segments."
+    private static let taxonomyRefinementInjectionPreamble = "Each line below belongs to one of these segment categories: sponsor-read, host-content, transition. Group consecutive lines that share the same category and report the line ranges for each sponsor-read group."
+
     #if DEBUG
-    /// bd-34e Hypothesis F: alternate coarse-pass framings selected via the
-    /// PLAYHEAD_FM_PROMPT_VARIANT debug env var. `classification` is the
-    /// production default; `extract` and `neutral` are the on-device
-    /// experiments that probe whether iOS 26.4's output safety classifier
-    /// refuses on task framing rather than content topic.
+    /// bd-34e Hypothesis F + bd-1en: alternate coarse-pass framings selected
+    /// via the PLAYHEAD_FM_PROMPT_VARIANT debug env var. `classification`
+    /// is the production default; `extract` and `neutral` are bd-34e's
+    /// on-device experiments; `taxonomy` is bd-1en's third variant for
+    /// the residual health-adjacent + benign-content refusal cases that
+    /// the first two variants did not solve. All variants share the same
+    /// five-line preamble shape so the existing
+    /// `preambleTokenCountIsBoundedAndAccountedFor` invariant holds.
     enum CoarsePromptVariant: String {
         case classification
         case extract
         case neutral
+        case taxonomy
     }
 
     static func coarsePromptVariant() -> CoarsePromptVariant {
@@ -1510,7 +1552,39 @@ struct FoundationModelClassifier: Sendable {
             return (extractPromptPrefix, extractInjectionPreamble, extractLineRefInstruction)
         case .neutral:
             return (neutralPromptPrefix, neutralInjectionPreamble, neutralLineRefInstruction)
+        case .taxonomy:
+            // bd-1en: descriptive labeling framing, no imperative verbs and
+            // no commerce-loaded nouns. Reuses the bd-34e neutral line-ref
+            // instruction shape so the five-line preamble invariant holds.
+            return (taxonomyPromptPrefix, taxonomyInjectionPreamble, taxonomyLineRefInstruction)
         #endif
+        }
+    }
+
+    /// bd-1en: refinement-pass parts for each variant. Refinement uses a
+    /// slightly different prefix verb than coarse for `classification`
+    /// (`refinementPromptPrefix == "Refine ad spans."`) but reuses the
+    /// same `injectionPreamble` and `lineRefInstruction`. The taxonomy
+    /// variant rewords the refinement framing to match the coarse-pass
+    /// taxonomy framing so a single env-var flip changes BOTH passes
+    /// (the bd-1en device evidence shows refinement also refusing on
+    /// windows 2 and 7). Other variants currently fall through to the
+    /// classification refinement preamble (bd-34e never wired
+    /// `extract`/`neutral` into refinement either).
+    static func refinementPreambleParts(
+        for variant: CoarsePromptVariant
+    ) -> (prefix: String, preamble: String, lineRef: String) {
+        switch variant {
+        #if DEBUG
+        case .taxonomy:
+            return (
+                taxonomyRefinementPromptPrefix,
+                taxonomyRefinementInjectionPreamble,
+                taxonomyLineRefInstruction
+            )
+        #endif
+        default:
+            return (refinementPromptPrefix, injectionPreamble, lineRefInstruction)
         }
     }
 
@@ -1558,10 +1632,17 @@ struct FoundationModelClassifier: Sendable {
         let preambleActive = injectionPreambleEnabled()
         var lines: [String] = []
         if preambleActive {
+            // bd-1en: refinement preamble is now variant-aware so the
+            // taxonomy variant changes BOTH coarse and refinement framing
+            // with one env-var flip. The default branch returns the same
+            // (refinementPromptPrefix, injectionPreamble, lineRefInstruction)
+            // triple as before, so behavior is unchanged for the
+            // production `classification` variant.
+            let parts = refinementPreambleParts(for: coarsePromptVariant())
             lines.append(contentsOf: [
-                refinementPromptPrefix,
-                injectionPreamble,
-                lineRefInstruction,
+                parts.prefix,
+                parts.preamble,
+                parts.lineRef,
                 "Transcript:",
                 transcriptOpenFence
             ])
