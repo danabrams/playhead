@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "schemaVersion": 1,
+  "categories": [
+    {
+      "id": "vaccine-vocabulary",
+      "description": "Words Apple's FM safety classifier flags as vaccine/immunization advice",
+      "patterns": [
+        { "pattern": "vaccines?", "regex": true },
+        { "pattern": "vaccinat(ions|ion|ing|ed|es|e)", "regex": true },
+        { "pattern": "immuni[sz]ation", "regex": true },
+        { "pattern": "immuni[sz]e", "regex": true },
+        { "pattern": "inoculation", "regex": false },
+        { "pattern": "booster shot", "regex": false },
+        { "pattern": "boosters?", "regex": true },
+        { "pattern": "flu shot", "regex": false },
+        { "pattern": "covid shot", "regex": false },
+        { "pattern": "the jab", "regex": false }
+      ],
+      "placeholder": "[PRODUCT]",
+      "category": "trigger"
+    },
+    {
+      "id": "disease-names-cooccurrent",
+      "description": "Disease names — only redacted when co-occurring with a trigger word in the same line",
+      "patterns": [
+        { "pattern": "shingles", "regex": false },
+        { "pattern": "RSV", "regex": false },
+        { "pattern": "pneumococcal pneumonia", "regex": false },
+        { "pattern": "pneumococcal", "regex": false },
+        { "pattern": "pneumonia", "regex": false },
+        { "pattern": "COVID-19", "regex": false },
+        { "pattern": "COVID", "regex": false },
+        { "pattern": "coronavirus", "regex": false },
+        { "pattern": "influenza", "regex": false }
+      ],
+      "placeholder": "[CONDITION]",
+      "category": "cooccurrent",
+      "cooccurrentWith": ["vaccine-vocabulary", "pharma-drug-brands"]
+    },
+    {
+      "id": "pharma-drug-brands",
+      "description": "Pharmaceutical drug brand names that trigger refusal regardless of context",
+      "patterns": [
+        { "pattern": "Trulicity", "regex": false },
+        { "pattern": "Ozempic", "regex": false },
+        { "pattern": "Rinvoq", "regex": false },
+        { "pattern": "Wegovy", "regex": false },
+        { "pattern": "Mounjaro", "regex": false },
+        { "pattern": "Pfizer", "regex": false },
+        { "pattern": "Moderna", "regex": false },
+        { "pattern": "AstraZeneca", "regex": false },
+        { "pattern": "Johnson & Johnson", "regex": false }
+      ],
+      "placeholder": "[DRUG]",
+      "category": "trigger"
+    },
+    {
+      "id": "mental-health-services",
+      "description": "Online therapy / mental health services that trigger refusal",
+      "patterns": [
+        { "pattern": "BetterHelp", "regex": false },
+        { "pattern": "licensed therapists?", "regex": true },
+        { "pattern": "online therapy", "regex": false },
+        { "pattern": "talk to a therapist", "regex": false }
+      ],
+      "placeholder": "[SERVICE]",
+      "category": "trigger"
+    },
+    {
+      "id": "regulated-medical-tests",
+      "description": "Specific medical tests Apple's classifier flags",
+      "patterns": [
+        { "pattern": "skin cancer screening", "regex": false },
+        { "pattern": "cholesterol test", "regex": false },
+        { "pattern": "COVID-19 test", "regex": false },
+        { "pattern": "COVID test", "regex": false }
+      ],
+      "placeholder": "[TEST]",
+      "category": "trigger"
+    }
+  ]
+}

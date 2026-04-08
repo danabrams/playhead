@@ -748,16 +748,30 @@ struct FoundationModelClassifier: Sendable {
     /// underlying session's `logFeedbackAttachment` BEFORE the session goes
     /// out of scope so the model state at the moment of refusal is captured.
     private let feedbackStore: FoundationModelsFeedbackStore?
+    /// bd-1en: optional deterministic redactor that strips trigger
+    /// vocabulary (vaccine words, pharma brands, etc.) from per-segment
+    /// text BEFORE it lands in coarse / refinement prompts. Gated on
+    /// the `PLAYHEAD_FM_REDACT=1` env var. Default is `.noop` so the
+    /// production prompt path is byte-identical until the flag is set.
+    private let redactor: PromptRedactor
 
     init(
         runtime: Runtime? = nil,
         config: Config = .default,
         feedbackStore: FoundationModelsFeedbackStore? = nil,
+        redactor: PromptRedactor? = nil,
         logger: Logger = Logger(subsystem: "com.playhead", category: "FoundationModelClassifier")
     ) {
         self.config = config
         self.logger = logger
         self.feedbackStore = feedbackStore
+        if let redactor {
+            self.redactor = redactor
+        } else if Self.redactionEnabled() {
+            self.redactor = PromptRedactor.loadDefault() ?? .noop
+        } else {
+            self.redactor = .noop
+        }
         self.runtime = runtime ?? Self.liveRuntime(logger: logger, config: config)
         // bd-34e: announce the experiment flag at construction so the
         // on-device benchmark log unambiguously confirms whether the
@@ -782,7 +796,25 @@ struct FoundationModelClassifier: Sendable {
             // health-adjacent + benign-content refusal cases.
             logger.debug("PLAYHEAD_FM_PROMPT_VARIANT=taxonomy — using descriptive labeling prompt (coarse + refinement)")
         }
+        // bd-1en (redactor): announce whether per-segment text redaction
+        // is active for this run. The redactor and the prompt-variant
+        // mechanism are independent and compose freely.
+        if self.redactor.isActive {
+            logger.debug("PLAYHEAD_FM_REDACT=1 — prompt redactor active (loaded RedactionRules.json)")
+        }
         #endif
+    }
+
+    /// bd-1en: gate switch for the per-segment prompt redactor. When the
+    /// `PLAYHEAD_FM_REDACT` env var is set to "1" / "true" / "yes",
+    /// `init` will load the bundled `RedactionRules.json` dictionary; in
+    /// every other configuration the classifier uses the no-op redactor
+    /// and the production prompt bytes are unchanged.
+    static func redactionEnabled() -> Bool {
+        guard let raw = ProcessInfo.processInfo.environment["PLAYHEAD_FM_REDACT"]?.lowercased() else {
+            return false
+        }
+        return raw == "1" || raw == "true" || raw == "yes"
     }
 
     func coarsePassA(
@@ -982,7 +1014,7 @@ struct FoundationModelClassifier: Sendable {
         while lowerBound < ordered.count {
             let firstSegment = ordered[lowerBound]
             var upperBound = lowerBound
-            var bestPrompt = Self.buildPrompt(for: [firstSegment])
+            var bestPrompt = Self.buildPrompt(for: [firstSegment], redactor: redactor)
             var bestTokens = try await runtime.tokenCount(bestPrompt)
 
             if bestTokens > budget {
@@ -1004,7 +1036,7 @@ struct FoundationModelClassifier: Sendable {
             var probe = lowerBound + 1
             while probe < ordered.count {
                 let candidate = Array(ordered[lowerBound...probe])
-                let prompt = Self.buildPrompt(for: candidate)
+                let prompt = Self.buildPrompt(for: candidate, redactor: redactor)
                 let tokenCount = try await runtime.tokenCount(prompt)
                 guard tokenCount <= budget else { break }
                 upperBound = probe
@@ -1077,7 +1109,8 @@ struct FoundationModelClassifier: Sendable {
             var prompt = Self.buildRefinementPrompt(
                 for: orderedLineRefs.compactMap { lineRefLookup[$0] },
                 promptEvidence: promptEvidence,
-                maximumSpans: config.maximumRefinementSpansPerWindow
+                maximumSpans: config.maximumRefinementSpansPerWindow,
+                redactor: redactor
             )
             var tokenCount = try await runtime.tokenCount(prompt)
 
@@ -1094,7 +1127,8 @@ struct FoundationModelClassifier: Sendable {
                 prompt = Self.buildRefinementPrompt(
                     for: orderedLineRefs.compactMap { lineRefLookup[$0] },
                     promptEvidence: promptEvidence,
-                    maximumSpans: config.maximumRefinementSpansPerWindow
+                    maximumSpans: config.maximumRefinementSpansPerWindow,
+                    redactor: redactor
                 )
                 tokenCount = try await runtime.tokenCount(prompt)
             }
@@ -1172,7 +1206,8 @@ struct FoundationModelClassifier: Sendable {
         let prompt = Self.buildRefinementPrompt(
             for: orderedLineRefs.compactMap { lineRefLookup[$0] },
             promptEvidence: promptEvidence,
-            maximumSpans: config.maximumRefinementSpansPerWindow
+            maximumSpans: config.maximumRefinementSpansPerWindow,
+            redactor: redactor
         )
         let tokenCount = try await runtime.tokenCount(prompt)
 
@@ -1596,7 +1631,10 @@ struct FoundationModelClassifier: Sendable {
         try await runtime.tokenCount(coarsePromptPreamble())
     }
 
-    static func buildPrompt(for segments: [AdTranscriptSegment]) -> String {
+    static func buildPrompt(
+        for segments: [AdTranscriptSegment],
+        redactor: PromptRedactor = .noop
+    ) -> String {
         // bd-34e: when the preamble is disabled we drop ALL the wrapping
         // lines (prefix, injection preamble, line-ref instruction, fences),
         // so the model sees only the bare `L<n>> "..."` transcript lines.
@@ -1612,8 +1650,14 @@ struct FoundationModelClassifier: Sendable {
                 transcriptOpenFence
             ])
         }
+        // bd-1en: redact each segment's visible text BEFORE escaping. The
+        // line-ref number (`L<n>>`) is preserved so the FM's response
+        // still maps back to the original segment indices and downstream
+        // code (`spansTouchBoundary`, evidence resolution, persistence)
+        // sees the original `segments` array unchanged.
         lines.append(contentsOf: segments.map { segment in
-            "L\(segment.segmentIndex)> \"\(escapedLine(segment.text))\""
+            let redacted = redactor.redact(line: segment.text)
+            return "L\(segment.segmentIndex)> \"\(escapedLine(redacted))\""
         })
         if preambleActive {
             lines.append(transcriptCloseFence)
@@ -1624,7 +1668,8 @@ struct FoundationModelClassifier: Sendable {
     private static func buildRefinementPrompt(
         for segments: [AdTranscriptSegment],
         promptEvidence: [PromptEvidenceEntry],
-        maximumSpans: Int
+        maximumSpans: Int,
+        redactor: PromptRedactor = .noop
     ) -> String {
         // bd-34e: same flag as `buildPrompt(for:)` — drop the H14 framing
         // (prefix, injection preamble, line-ref instruction, fences) when the
@@ -1647,8 +1692,12 @@ struct FoundationModelClassifier: Sendable {
                 transcriptOpenFence
             ])
         }
+        // bd-1en: see `buildPrompt(for:redactor:)` — redaction is applied
+        // to the visible segment text only; the L<n>> prefix is preserved
+        // so the runner's downstream lineRef → segment mapping is intact.
         lines.append(contentsOf: segments.map { segment in
-            "L\(segment.segmentIndex)> \"\(escapedLine(segment.text))\""
+            let redacted = redactor.redact(line: segment.text)
+            return "L\(segment.segmentIndex)> \"\(escapedLine(redacted))\""
         })
         if preambleActive {
             lines.append(transcriptCloseFence)
@@ -2980,7 +3029,8 @@ struct FoundationModelClassifier: Sendable {
         let retryPrompt = Self.buildRefinementPrompt(
             for: retrySegments,
             promptEvidence: retryEvidence,
-            maximumSpans: config.maximumRefinementSpansPerWindow
+            maximumSpans: config.maximumRefinementSpansPerWindow,
+            redactor: redactor
         )
         let retryTokenCount = (try? await runtime.tokenCount(retryPrompt)) ?? plan.promptTokenCount
 
@@ -3055,7 +3105,7 @@ struct FoundationModelClassifier: Sendable {
         let trimmedSegments = Array(segments.prefix(targetSegments))
         guard !trimmedSegments.isEmpty else { return nil }
 
-        let trimmedPrompt = Self.buildPrompt(for: trimmedSegments)
+        let trimmedPrompt = Self.buildPrompt(for: trimmedSegments, redactor: redactor)
         let trimmedTokenCount = (try? await runtime.tokenCount(trimmedPrompt)) ?? plan.promptTokenCount
 
         logger.debug(
@@ -3125,7 +3175,7 @@ struct FoundationModelClassifier: Sendable {
         retryPlans.reserveCapacity(chunks.count)
 
         for chunk in chunks {
-            let prompt = Self.buildPrompt(for: chunk)
+            let prompt = Self.buildPrompt(for: chunk, redactor: redactor)
             let promptTokenCount = (try? await runtime.tokenCount(prompt)) ?? plan.promptTokenCount
             if promptTokenCount > budget {
                 if chunk.count <= 1 {
