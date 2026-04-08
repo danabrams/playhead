@@ -13,6 +13,16 @@ private let semanticScanLogger = Logger(
     category: "SemanticScanResult"
 )
 
+/// Rev3-M5: discriminator for `semantic_scan_results.phase` and
+/// `evidence_events.phase`. Phase 3 shadow rows and Phase 5 targeted rows
+/// are otherwise indistinguishable in those tables (only differ by
+/// `reuseKeyHash`); the explicit phase tag lets queries filter without
+/// reverse-engineering the hash inputs.
+enum SemanticScanPhase: String, Sendable, Hashable, CaseIterable {
+    case shadow
+    case targeted
+}
+
 struct SemanticScanResult: Sendable, Equatable {
     let id: String
     let analysisAssetId: String
@@ -37,6 +47,10 @@ struct SemanticScanResult: Sendable, Equatable {
     /// logically distinct jobs/phases that share the same window bounds do
     /// not collapse each other. Nil preserves legacy reuse semantics.
     let reuseScope: String?
+    /// Rev3-M5: phase discriminator persisted as a real column. Defaults
+    /// to `.shadow` so existing call sites stay byte-identical without
+    /// edits. Targeted-narrowed rows opt-in by passing `.targeted`.
+    let phase: SemanticScanPhase
 
     init(
         id: String,
@@ -58,7 +72,8 @@ struct SemanticScanResult: Sendable, Equatable {
         prewarmHit: Bool,
         scanCohortJSON: String,
         transcriptVersion: String,
-        reuseScope: String? = nil
+        reuseScope: String? = nil,
+        phase: SemanticScanPhase = .shadow
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -80,6 +95,7 @@ struct SemanticScanResult: Sendable, Equatable {
         self.scanCohortJSON = scanCohortJSON
         self.transcriptVersion = transcriptVersion
         self.reuseScope = reuseScope
+        self.phase = phase
     }
 
     func isReusable(
@@ -144,4 +160,29 @@ struct EvidenceEvent: Sendable, Equatable {
     let evidenceJSON: String
     let scanCohortJSON: String
     let createdAt: Double
+    /// Rev3-M5: phase discriminator persisted as a real column. Defaults
+    /// to `.shadow` so existing call sites stay byte-identical.
+    let phase: SemanticScanPhase
+
+    init(
+        id: String,
+        analysisAssetId: String,
+        eventType: String,
+        sourceType: EvidenceSourceType,
+        atomOrdinals: String,
+        evidenceJSON: String,
+        scanCohortJSON: String,
+        createdAt: Double,
+        phase: SemanticScanPhase = .shadow
+    ) {
+        self.id = id
+        self.analysisAssetId = analysisAssetId
+        self.eventType = eventType
+        self.sourceType = sourceType
+        self.atomOrdinals = atomOrdinals
+        self.evidenceJSON = evidenceJSON
+        self.scanCohortJSON = scanCohortJSON
+        self.createdAt = createdAt
+        self.phase = phase
+    }
 }

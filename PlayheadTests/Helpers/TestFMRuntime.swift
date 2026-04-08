@@ -112,8 +112,20 @@ actor TestFMRuntime {
         return refinementQueue.removeFirst()
     }
 
+    /// Rev4-L2: exposed for adversarial-input regression tests.
+    nonisolated static func submittedLineRefsForTesting(from prompt: String) -> [Int] {
+        submittedLineRefs(from: prompt)
+    }
+
     nonisolated private static func submittedLineRefs(from prompt: String) -> [Int] {
-        guard let regex = try? NSRegularExpression(pattern: #"L(\d+)>"#) else {
+        // Rev4-L2: tightened from `L(\d+)>` to require either a
+        // non-letter character before the `L` or the start of input.
+        // The previous pattern matched things like `XYL12>` (a token
+        // ending in `L` followed by digits and `>`) and reported `12`
+        // as a submitted line ref, polluting the submission record. The
+        // capture group on the digits is now group 1; the prefix is a
+        // non-capturing assertion.
+        guard let regex = try? NSRegularExpression(pattern: #"(?:^|[^A-Za-z])L(\d+)>"#) else {
             return []
         }
         let nsPrompt = prompt as NSString
@@ -127,6 +139,21 @@ actor TestFMRuntime {
             refs.append(ref)
         }
         return refs.sorted()
+    }
+
+    /// Rev4-L3: reset accumulated state between scoped runtime invocations.
+    /// `withTestRuntime` calls this on its way out so the prompt arrays
+    /// don't grow unbounded across long test runs that share a
+    /// `TestFMRuntime` instance via a `let` capture.
+    func reset() {
+        coarseQueue.removeAll(keepingCapacity: false)
+        refinementQueue.removeAll(keepingCapacity: false)
+        coarseFailureQueue.removeAll(keepingCapacity: false)
+        refinementFailureQueue.removeAll(keepingCapacity: false)
+        coarsePrompts.removeAll(keepingCapacity: false)
+        refinementPrompts.removeAll(keepingCapacity: false)
+        coarseCallCount = 0
+        refinementCallCount = 0
     }
 }
 

@@ -68,7 +68,7 @@ final class PlayheadRuntime {
     private var activeProgressiveLoader: ProgressiveResourceLoader?
     /// bd-3bz (Phase 4): observer that watches `canUseFoundationModels` for
     /// false→true transitions and, after a 60s-stable-true debounce, drains
-    /// any `analysis_sessions` rows flagged with `needs_shadow_retry = 1`.
+    /// any `analysis_sessions` rows flagged with `needsShadowRetry = 1`.
     /// Held strongly by the runtime so its observer loop survives until the
     /// runtime is torn down. Stopped explicitly via `shutdown()`; tests that
     /// spin up transient runtimes should call that to avoid leaking
@@ -215,26 +215,36 @@ final class PlayheadRuntime {
                 permissiveClassifier: bd1enPermissiveBox
             )
         }
-        // bd-3bz (Phase 4): when the shadow phase bails on FM unavailability,
-        // mark the latest session for the asset so the capability observer
-        // can drain it after FM recovers. Failures inside the marker are
-        // swallowed — the shadow phase must never throw. `fetchLatestSessionForAsset`
-        // is the right lookup because `AdDetectionService.runShadowFMPhase`
-        // runs inside `finalizeBackfill`, whose session is the latest row on
-        // that asset by `updatedAt`.
+        // bd-3bz (Phase 4) / H7 (cycle 2): when the shadow phase bails on
+        // FM unavailability, mark the explicit session id supplied by the
+        // shadow phase. The marker no longer does an asset→session lookup
+        // (see H7 in AdDetectionService.runShadowFMPhase): the session id
+        // is captured at the START of the shadow phase to fix a race
+        // window where concurrent reprocessing on the same asset could
+        // create a newer session and the marker would tag the wrong row.
+        //
+        // H2 (cycle 2): after marking, immediately wake the shadow retry
+        // observer. Without this, a session flagged while capability is
+        // already stable-true would never re-drain — the observer's
+        // capability stream only fires on transitions, not on flags.
+        // The observer is constructed below (after AdDetectionService,
+        // since the observer depends on the service as its drainer), so
+        // we capture a Sendable holder here and populate it once the
+        // observer exists. The closure reads through the holder lazily.
         let analysisStoreForMarker = analysisStore
-        let shadowSkipMarker: @Sendable (String, String) async -> Void = { assetId, podcastId in
+        let observerHolder = ShadowRetryObserverHolder()
+        let shadowSkipMarker: @Sendable (String, String) async -> Void = { sessionId, podcastId in
             do {
-                guard let session = try await analysisStoreForMarker.fetchLatestSessionForAsset(assetId: assetId) else {
-                    return
-                }
                 try await analysisStoreForMarker.markSessionNeedsShadowRetry(
-                    id: session.id,
+                    id: sessionId,
                     podcastId: podcastId
                 )
+                if let observer = observerHolder.observer {
+                    await observer.wake()
+                }
             } catch {
                 Logger(subsystem: "com.playhead", category: "Runtime")
-                    .warning("bd-3bz: failed to mark session for shadow retry on asset \(assetId): \(error.localizedDescription)")
+                    .warning("bd-3bz: failed to mark session \(sessionId) for shadow retry: \(error.localizedDescription)")
             }
         }
 
@@ -301,11 +311,16 @@ final class PlayheadRuntime {
         // want stray AsyncStream subscriptions piling up there. The observer
         // task is started below after `super`-style initialization completes.
         if !isPreviewRuntime {
-            self.shadowRetryObserver = ShadowRetryObserver(
+            let observer = ShadowRetryObserver(
                 capabilities: capabilitiesService,
                 store: analysisStore,
                 drainer: adDetectionService
             )
+            self.shadowRetryObserver = observer
+            // H2: publish the observer through the holder captured by the
+            // shadow-skip marker closure so subsequent marker invocations
+            // can wake() the observer.
+            observerHolder.observer = observer
         } else {
             self.shadowRetryObserver = nil
         }
@@ -450,11 +465,16 @@ final class PlayheadRuntime {
     }
 
     deinit {
+        // C7b: previously this `deinit` spawned `Task { await observer.stop() }`
+        // to chase the async observer teardown. That was racy: the spawned
+        // task could outlive the runtime by an unbounded amount, and a new
+        // PlayheadRuntime construction back-to-back could find a stale
+        // observer task still draining the wake stream from the prior
+        // instance. Calling `shutdown()` is now mandatory (`withTestRuntime`
+        // enforces this in tests). The `deinit` only does the synchronous
+        // safety nets — cancelling the startup task and the drain timer —
+        // and leaves the observer loop teardown to `shutdown()`.
         shadowRetryObserverStartupTask?.cancel()
-        let observer = shadowRetryObserver
-        Task {
-            await observer?.stop()
-        }
     }
 
     /// Stops long-lived runtime observers and cancels any pending startup
@@ -732,4 +752,15 @@ final class PlayheadRuntime {
         )
     }
 
+}
+
+/// Sendable holder for the lazily-initialized `ShadowRetryObserver`. The
+/// shadow-skip-marker closure (built before the observer is constructed)
+/// captures this holder and reads through it at call time. The observer
+/// reference is set exactly once during runtime init and then never
+/// mutated, so the unchecked Sendable conformance is sound: every read
+/// happens after the single write, ordered by the synchronous init
+/// sequence on the MainActor.
+private final class ShadowRetryObserverHolder: @unchecked Sendable {
+    var observer: ShadowRetryObserver?
 }
