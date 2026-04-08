@@ -28,7 +28,7 @@ struct PodcastPlannerStateTests {
     ) -> CoveragePlannerContext {
         CoveragePlannerContext(
             observedEpisodeCount: state?.observedEpisodeCount ?? 0,
-            stablePrecision: state?.stablePrecisionFlag ?? false,
+            stableRecall: state?.stableRecallFlag ?? false,
             isFirstEpisodeAfterCohortInvalidation: false,
             recallDegrading: false,
             sponsorDriftDetected: false,
@@ -82,10 +82,10 @@ struct PodcastPlannerStateTests {
         #expect(written.episodesSinceLastFullRescan == 1)
     }
 
-    // MARK: - Acceptance #4: 5 episodes + precision both required
+    // MARK: - Acceptance #4: 5 episodes + recall both required
 
-    @Test("5 episodes alone do NOT flip stable_precision_flag without precision evidence")
-    func fiveEpisodesWithoutPrecisionStaysFullCoverage() async throws {
+    @Test("5 episodes alone do NOT flip stable_recall_flag without recall evidence")
+    func fiveEpisodesWithoutRecallStaysFullCoverage() async throws {
         let store = try await makeTestStore()
         let podcastId = "podcast-no-precision"
         let planner = CoveragePlanner()
@@ -103,15 +103,15 @@ struct PodcastPlannerStateTests {
         let state = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
 
         #expect(state.observedEpisodeCount == 5)
-        #expect(state.stablePrecisionFlag == false)
-        #expect(state.precisionSamples.isEmpty)
+        #expect(state.stableRecallFlag == false)
+        #expect(state.recallSamples.isEmpty)
 
         let plan = planner.plan(for: contextFromState(state))
         #expect(plan.policy == .fullCoverage)
     }
 
-    @Test("5 episodes + 3 precision samples >= 0.85 flips to targetedWithAudit")
-    func fiveEpisodesPlusPrecisionFlipsToTargeted() async throws {
+    @Test("5 episodes + 3 recall samples >= 0.85 flips to targetedWithAudit")
+    func fiveEpisodesPlusRecallFlipsToTargeted() async throws {
         let store = try await makeTestStore()
         let podcastId = "podcast-flips"
         let planner = CoveragePlanner()
@@ -131,9 +131,9 @@ struct PodcastPlannerStateTests {
         let state = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
 
         #expect(state.observedEpisodeCount == 5)
-        #expect(state.stablePrecisionFlag == true)
+        #expect(state.stableRecallFlag == true)
         // Ring keeps the most recent 3 samples, oldest first.
-        #expect(state.precisionSamples == [0.93, 0.90, 0.92])
+        #expect(state.recallSamples == [0.93, 0.90, 0.92])
         // Full rescans must have reset the counter on every call.
         #expect(state.episodesSinceLastFullRescan == 0)
 
@@ -144,7 +144,7 @@ struct PodcastPlannerStateTests {
         // the cold-start guard.
         let bumpedContext = CoveragePlannerContext(
             observedEpisodeCount: state.observedEpisodeCount,
-            stablePrecision: state.stablePrecisionFlag,
+            stableRecall: state.stableRecallFlag,
             isFirstEpisodeAfterCohortInvalidation: false,
             recallDegrading: false,
             sponsorDriftDetected: false,
@@ -156,10 +156,10 @@ struct PodcastPlannerStateTests {
         #expect(plan.policy == .targetedWithAudit)
     }
 
-    // MARK: - Acceptance #6: precision-fail keeps flag false at >= 5 episodes
+    // MARK: - Acceptance #6: recall-fail keeps flag false at >= 5 episodes
 
-    @Test("stable_precision_flag stays false when any sample is below 0.85")
-    func precisionFailureKeepsFlagFalse() async throws {
+    @Test("stable_recall_flag stays false when any sample is below 0.85")
+    func recallFailureKeepsFlagFalse() async throws {
         let store = try await makeTestStore()
         let podcastId = "podcast-bad-precision"
         let planner = CoveragePlanner()
@@ -214,8 +214,8 @@ struct PodcastPlannerStateTests {
         }
         let stickyState = try #require(await store.fetchPodcastPlannerState(podcastId: stickyId))
         #expect(stickyState.observedEpisodeCount == 5)
-        #expect(stickyState.precisionSamples == [0.92, 0.93, 0.50])
-        #expect(stickyState.stablePrecisionFlag == false)
+        #expect(stickyState.recallSamples == [0.92, 0.93, 0.50])
+        #expect(stickyState.stableRecallFlag == false)
 
         let plan = planner.plan(for: contextFromState(stickyState))
         #expect(plan.policy == .fullCoverage)
@@ -225,7 +225,7 @@ struct PodcastPlannerStateTests {
         // produce targetedWithAudit even with elevated episodesSinceLastFullRescan.
         let elevated = CoveragePlannerContext(
             observedEpisodeCount: stickyState.observedEpisodeCount,
-            stablePrecision: stickyState.stablePrecisionFlag,
+            stableRecall: stickyState.stableRecallFlag,
             isFirstEpisodeAfterCohortInvalidation: false,
             recallDegrading: false,
             sponsorDriftDetected: false,
@@ -238,7 +238,7 @@ struct PodcastPlannerStateTests {
 
     // MARK: - Acceptance #5: 10 episodes since last full rescan triggers periodic
 
-    @Test("10 episodes since last full rescan triggers periodicFullRescan regardless of stable_precision_flag")
+    @Test("10 episodes since last full rescan triggers periodicFullRescan regardless of stable_recall_flag")
     func tenEpisodesSinceFullRescanTriggersPeriodic() async throws {
         let store = try await makeTestStore()
         let podcastId = "podcast-periodic"
@@ -257,12 +257,12 @@ struct PodcastPlannerStateTests {
             )
         }
         let stable = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
-        #expect(stable.stablePrecisionFlag == true)
+        #expect(stable.stableRecallFlag == true)
         #expect(stable.episodesSinceLastFullRescan == 0)
 
         // Now record 10 non-full-rescan observations. After the 10th, the
         // counter must be 10 and the planner must return periodicFullRescan
-        // even though stablePrecisionFlag is still true.
+        // even though stableRecallFlag is still true.
         for tick in 6...15 {
             _ = try await store.recordPodcastEpisodeObservation(
                 podcastId: podcastId,
@@ -273,7 +273,7 @@ struct PodcastPlannerStateTests {
         let drifted = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
         #expect(drifted.observedEpisodeCount == 15)
         #expect(drifted.episodesSinceLastFullRescan == 10)
-        #expect(drifted.stablePrecisionFlag == true)
+        #expect(drifted.stableRecallFlag == true)
 
         let plan = planner.plan(for: contextFromState(drifted, periodicFullRescanIntervalEpisodes: 10))
         #expect(plan.policy == .periodicFullRescan)
@@ -289,7 +289,7 @@ struct PodcastPlannerStateTests {
         )
         let resumed = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
         #expect(resumed.episodesSinceLastFullRescan == 0)
-        #expect(resumed.stablePrecisionFlag == true)
+        #expect(resumed.stableRecallFlag == true)
         let plan2 = planner.plan(for: contextFromState(resumed, periodicFullRescanIntervalEpisodes: 10))
         #expect(plan2.policy == .targetedWithAudit)
     }

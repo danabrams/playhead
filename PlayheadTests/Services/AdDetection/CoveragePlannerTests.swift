@@ -7,7 +7,7 @@ import Testing
 
 private func makeCoveragePlannerContext(
     observedEpisodeCount: Int = 6,
-    stablePrecision: Bool = true,
+    stableRecall: Bool = true,
     isFirstEpisodeAfterCohortInvalidation: Bool = false,
     recallDegrading: Bool = false,
     sponsorDriftDetected: Bool = false,
@@ -17,7 +17,7 @@ private func makeCoveragePlannerContext(
 ) -> CoveragePlannerContext {
     CoveragePlannerContext(
         observedEpisodeCount: observedEpisodeCount,
-        stablePrecision: stablePrecision,
+        stableRecall: stableRecall,
         isFirstEpisodeAfterCohortInvalidation: isFirstEpisodeAfterCohortInvalidation,
         recallDegrading: recallDegrading,
         sponsorDriftDetected: sponsorDriftDetected,
@@ -53,7 +53,7 @@ struct CoveragePlannerTests {
         let planner = CoveragePlanner()
         let plan = planner.plan(for: makeCoveragePlannerContext(
             observedEpisodeCount: 8,
-            stablePrecision: true,
+            stableRecall: true,
             episodesSinceLastFullRescan: 3
         ))
 
@@ -214,7 +214,7 @@ struct CoveragePlannerTests {
         // never fire. Stable precision routes to targetedWithAudit.
         let plan = planner.plan(for: makeCoveragePlannerContext(
             observedEpisodeCount: 0,
-            stablePrecision: true,
+            stableRecall: true,
             episodesSinceLastFullRescan: 1
         ))
         #expect(plan.policy == .targetedWithAudit)

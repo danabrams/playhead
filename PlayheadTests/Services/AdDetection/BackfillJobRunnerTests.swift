@@ -51,7 +51,7 @@ struct BackfillJobRunnerTests {
         )
         let plannerContext = CoveragePlannerContext(
             observedEpisodeCount: 0,
-            stablePrecision: false,
+            stableRecall: false,
             isFirstEpisodeAfterCohortInvalidation: false,
             recallDegrading: false,
             sponsorDriftDetected: false,
@@ -190,7 +190,7 @@ struct BackfillJobRunnerTests {
         let runner = makeRunner(store: store, runtime: runtime.runtime)
         let targetedContext = CoveragePlannerContext(
             observedEpisodeCount: 20,
-            stablePrecision: true,
+            stableRecall: true,
             isFirstEpisodeAfterCohortInvalidation: false,
             recallDegrading: false,
             sponsorDriftDetected: false,
@@ -264,7 +264,7 @@ struct BackfillJobRunnerTests {
             let state = try await store.fetchPodcastPlannerState(podcastId: podcastId)
             let context = CoveragePlannerContext(
                 observedEpisodeCount: state?.observedEpisodeCount ?? 0,
-                stablePrecision: state?.stablePrecisionFlag ?? false,
+                stableRecall: state?.stableRecallFlag ?? false,
                 isFirstEpisodeAfterCohortInvalidation: false,
                 recallDegrading: false,
                 sponsorDriftDetected: false,
@@ -284,12 +284,12 @@ struct BackfillJobRunnerTests {
 
         let finalState = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
         #expect(finalState.observedEpisodeCount == 5)
-        #expect(!finalState.precisionSamples.isEmpty, "live full-rescan path should persist precision samples")
-        #expect(finalState.stablePrecisionFlag, "stable precision should flip true once sample and episode thresholds are met")
+        #expect(!finalState.recallSamples.isEmpty, "live full-rescan path should persist precision samples")
+        #expect(finalState.stableRecallFlag, "stable precision should flip true once sample and episode thresholds are met")
 
         let plannerContext = CoveragePlannerContext(
             observedEpisodeCount: finalState.observedEpisodeCount,
-            stablePrecision: finalState.stablePrecisionFlag,
+            stableRecall: finalState.stableRecallFlag,
             isFirstEpisodeAfterCohortInvalidation: false,
             recallDegrading: false,
             sponsorDriftDetected: false,
@@ -1079,7 +1079,7 @@ struct BackfillJobRunnerTests {
 
         let plannerContext = CoveragePlannerContext(
             observedEpisodeCount: 20,
-            stablePrecision: true,
+            stableRecall: true,
             isFirstEpisodeAfterCohortInvalidation: false,
             recallDegrading: false,
             sponsorDriftDetected: false,
@@ -1163,7 +1163,7 @@ struct BackfillJobRunnerTests {
 
         let plannerContext = CoveragePlannerContext(
             observedEpisodeCount: 20,
-            stablePrecision: true,
+            stableRecall: true,
             isFirstEpisodeAfterCohortInvalidation: false,
             recallDegrading: false,
             sponsorDriftDetected: false,
@@ -1744,7 +1744,7 @@ struct BackfillJobRunnerTests {
             transcriptVersion: "tx-runner-v1",
             plannerContext: CoveragePlannerContext(
                 observedEpisodeCount: 0,
-                stablePrecision: false,
+                stableRecall: false,
                 isFirstEpisodeAfterCohortInvalidation: false,
                 recallDegrading: false,
                 sponsorDriftDetected: false,

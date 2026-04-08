@@ -442,9 +442,11 @@ actor AdDetectionService {
         )
         // bd-m8k: read the real per-podcast planner state from AnalysisStore
         // instead of hardwiring cold-start values. The legacy hardwire
-        // pinned `observedEpisodeCount = 0` and `stablePrecision = false`,
+        // pinned `observedEpisodeCount = 0` and `stableRecall = false`,
         // which made `CoveragePlanner.shouldUseFullCoverage` always true and
         // left the targeted-with-audit branch permanently unreachable.
+        // Cycle 2 C4: the field was historically named `stablePrecision`;
+        // it is semantically a stable-recall flag.
         //
         // Lazy semantics: a missing row means we have never observed this
         // podcast, so we fall back to the conservative cold-start defaults.
@@ -466,7 +468,8 @@ actor AdDetectionService {
         }
         let plannerContext = CoveragePlannerContext(
             observedEpisodeCount: plannerState?.observedEpisodeCount ?? 0,
-            stablePrecision: plannerState?.stablePrecisionFlag ?? false,
+            // historical: stored as "stablePrecisionFlag"; semantically recall
+            stableRecall: plannerState?.stableRecallFlag ?? false,
             isFirstEpisodeAfterCohortInvalidation: false,
             recallDegrading: false,
             sponsorDriftDetected: false,

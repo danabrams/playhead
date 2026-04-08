@@ -429,7 +429,7 @@ struct AdDetectionServiceShadowModeTests {
 
         let plannerState = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
         #expect(plannerState.observedEpisodeCount == 6)
-        #expect(plannerState.stablePrecisionFlag)
+        #expect(plannerState.stableRecallFlag)
 
         let targetedAssetId = "asset-live-targeted-6"
         let passA = try await store.fetchSemanticScanResults(

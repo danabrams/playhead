@@ -147,21 +147,32 @@ struct PodcastProfile: Sendable {
 /// bd-m8k: Per-podcast CoveragePlanner state. Sibling row to
 /// `PodcastProfile`; persisted in the `podcast_planner_state` table that the
 /// v4 migration creates. Rows are upserted lazily on first observation, never
-/// backfilled. `precisionSamples` is the most-recent-up-to-3 ring of full-
-/// rescan precision measurements (oldest first); the cached
-/// `stablePrecisionFlag` reflects the result of evaluating both the episode-
-/// count floor and the precision threshold against this ring at the moment
+/// backfilled. `recallSamples` is the most-recent-up-to-3 ring of full-
+/// rescan **recall** measurements (oldest first); the cached
+/// `stableRecallFlag` reflects the result of evaluating both the episode-
+/// count floor and the recall threshold against this ring at the moment
 /// of the last write.
+///
+/// Cycle 2 C4: the metric was historically misnamed "precision" — it is
+/// actually recall (covered / actual ad line refs). The struct fields use
+/// the corrected name; the persisted SQLite columns and JSON keys keep the
+/// legacy `precision*` names so existing v4 rows decode without a
+/// migration. Each storage boundary is annotated with
+/// `// historical: stored as "precision"; semantically recall`.
 struct PodcastPlannerState: Sendable, Equatable {
     let podcastId: String
     let observedEpisodeCount: Int
     let episodesSinceLastFullRescan: Int
-    let stablePrecisionFlag: Bool
+    /// Cycle 2 C4: stored as `stablePrecisionFlag` in SQLite; semantically
+    /// the stable-recall flag. See type-level doc.
+    let stableRecallFlag: Bool
     let lastFullRescanAt: Double?
-    /// Most recent up to `AnalysisStore.plannerPrecisionRingSize` full-rescan
-    /// precision samples. Oldest first; new samples are appended and the
+    /// Most recent up to `AnalysisStore.plannerRecallRingSize` full-rescan
+    /// recall samples. Oldest first; new samples are appended and the
     /// oldest dropped on overflow.
-    let precisionSamples: [Double]
+    /// Cycle 2 C4: stored across `precisionSample1..3` columns; semantically
+    /// recall. See type-level doc.
+    let recallSamples: [Double]
 }
 
 struct PreviewBudget: Sendable {
@@ -252,16 +263,19 @@ actor AnalysisStore {
 
     nonisolated private static let currentSchemaVersion = 4
 
-    /// bd-m8k: Maximum number of recent full-rescan precision samples retained
-    /// for the `stable_precision_flag` ring. Must match the column count in
-    /// `podcast_planner_state` and the push/shift logic in
-    /// `recordFullRescanComplete`.
-    nonisolated static let plannerPrecisionRingSize = 3
+    /// bd-m8k / Cycle 2 C4: Maximum number of recent full-rescan **recall**
+    /// samples retained for the `stable_recall_flag` ring. Must match the
+    /// column count in `podcast_planner_state` and the push/shift logic in
+    /// `recordPodcastEpisodeObservation`. The persisted columns are still
+    /// named `precisionSample{1,2,3}` / `precisionSampleCount`; the
+    /// in-memory rename is code-only.
+    nonisolated static let plannerRecallRingSize = 3
 
-    /// bd-m8k: Minimum per-sample precision required for
-    /// `stable_precision_flag` to flip true. All samples in the ring must
-    /// clear this threshold.
-    nonisolated static let plannerPrecisionThreshold: Double = 0.85
+    /// bd-m8k / Cycle 2 C4: Minimum per-sample recall required for
+    /// `stable_recall_flag` to flip true. All samples in the ring must
+    /// clear this threshold. The persisted column is still named
+    /// `stablePrecisionFlag`; semantically recall.
+    nonisolated static let plannerRecallThreshold: Double = 0.85
 
     /// bd-m8k: Minimum `observed_episode_count` before
     /// `stable_precision_flag` is permitted to be true. Mirrors
@@ -1716,6 +1730,7 @@ actor AnalysisStore {
     /// `episodesSinceLastFullRescan = 0`) — the migration deliberately leaves
     /// the table empty and rows are created lazily on first observation.
     func fetchPodcastPlannerState(podcastId: String) throws -> PodcastPlannerState? {
+        // historical: stored as "precision*"; semantically recall
         let sql = """
             SELECT podcastId,
                    observedEpisodeCount,
@@ -1734,10 +1749,19 @@ actor AnalysisStore {
         bind(stmt, 1, podcastId)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
 
-        let sampleCount = max(0, min(
-            Self.plannerPrecisionRingSize,
-            Int(sqlite3_column_int(stmt, 8))
-        ))
+        // Cycle 2 Rev4-M3: clamp the persisted sample count into the valid
+        // range and log loudly when the clamp fires. A row that has
+        // `precisionSampleCount` outside `[0, plannerRecallRingSize]` is
+        // either a bug, a manual SQL edit, or a corrupted file — either way
+        // operators should see it in Console.app instead of the store
+        // silently rounding past it.
+        let rawSampleCount = Int(sqlite3_column_int(stmt, 8))
+        let sampleCount = max(0, min(Self.plannerRecallRingSize, rawSampleCount))
+        if rawSampleCount != sampleCount {
+            logger.error(
+                "podcast_planner_state.precisionSampleCount=\(rawSampleCount, privacy: .public) out of range [0, \(Self.plannerRecallRingSize, privacy: .public)] for podcast=\(podcastId, privacy: .public); clamped to \(sampleCount, privacy: .public)"
+            )
+        }
         // Samples are stored oldest → newest in columns 5/6/7. We hand back
         // exactly `sampleCount` doubles so callers cannot accidentally treat
         // a NULL slot as a real measurement.
@@ -1753,9 +1777,11 @@ actor AnalysisStore {
             podcastId: text(stmt, 0),
             observedEpisodeCount: Int(sqlite3_column_int(stmt, 1)),
             episodesSinceLastFullRescan: Int(sqlite3_column_int(stmt, 2)),
-            stablePrecisionFlag: sqlite3_column_int(stmt, 3) != 0,
+            // historical: stored as "stablePrecisionFlag"; semantically recall
+            stableRecallFlag: sqlite3_column_int(stmt, 3) != 0,
             lastFullRescanAt: optionalDouble(stmt, 4),
-            precisionSamples: samples
+            // historical: stored as "precisionSamples"; semantically recall
+            recallSamples: samples
         )
     }
 
@@ -1800,7 +1826,8 @@ actor AnalysisStore {
         try exec("BEGIN IMMEDIATE")
         do {
             let prior = try fetchPodcastPlannerState(podcastId: podcastId)
-            let priorSamples = prior?.precisionSamples ?? []
+            // historical: stored as "precision*"; semantically recall
+            let priorSamples = prior?.recallSamples ?? []
 
             let newObservedCount = (prior?.observedEpisodeCount ?? 0) + 1
             let newEpisodesSince: Int
@@ -1810,16 +1837,20 @@ actor AnalysisStore {
             if wasFullRescan {
                 newEpisodesSince = 0
                 newLastFullRescanAt = now
+                // Cycle 2 C4: parameter is named `fullRescanPrecisionSample`
+                // for legacy compatibility but the value semantically is a
+                // recall sample. Ad-free episodes pass nil and the ring is
+                // intentionally NOT advanced (no fake 1.0).
                 if let sample = fullRescanPrecisionSample {
                     newSamples.append(sample)
-                    while newSamples.count > Self.plannerPrecisionRingSize {
+                    while newSamples.count > Self.plannerRecallRingSize {
                         newSamples.removeFirst()
                     }
                 }
             } else {
                 newEpisodesSince = (prior?.episodesSinceLastFullRescan ?? 0) + 1
                 newLastFullRescanAt = prior?.lastFullRescanAt
-                // Intentionally do NOT touch the precision ring on
+                // Intentionally do NOT touch the recall ring on
                 // non-full-rescan observations — see doc comment above.
             }
 
@@ -1843,9 +1874,11 @@ actor AnalysisStore {
                 podcastId: podcastId,
                 observedEpisodeCount: newObservedCount,
                 episodesSinceLastFullRescan: newEpisodesSince,
-                stablePrecisionFlag: stableFlag,
+                // historical: stored as "stablePrecisionFlag"; semantically recall
+                stableRecallFlag: stableFlag,
                 lastFullRescanAt: newLastFullRescanAt,
-                precisionSamples: newSamples
+                // historical: stored as "precisionSamples"; semantically recall
+                recallSamples: newSamples
             )
         } catch {
             try? exec("ROLLBACK")
@@ -1870,8 +1903,8 @@ actor AnalysisStore {
         samples: [Double]
     ) -> Bool {
         guard observedEpisodeCount >= plannerStableObservedEpisodeFloor else { return false }
-        guard samples.count >= plannerPrecisionRingSize else { return false }
-        return samples.allSatisfy { $0 >= plannerPrecisionThreshold }
+        guard samples.count >= plannerRecallRingSize else { return false }
+        return samples.allSatisfy { $0 >= plannerRecallThreshold }
     }
 
     private func writePodcastPlannerStateRow(
@@ -1885,9 +1918,9 @@ actor AnalysisStore {
         // Pad the samples array out to the fixed-width ring slots so we can
         // unconditionally bind 3 columns regardless of how many samples we
         // have in hand.
-        var ring: [Double?] = Array(repeating: nil, count: Self.plannerPrecisionRingSize)
+        var ring: [Double?] = Array(repeating: nil, count: Self.plannerRecallRingSize)
         for (idx, value) in samples.enumerated()
-        where idx < Self.plannerPrecisionRingSize {
+        where idx < Self.plannerRecallRingSize {
             ring[idx] = value
         }
 

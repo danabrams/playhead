@@ -142,6 +142,20 @@ actor BackfillJobRunner {
             )
         }
 
+        // Cycle 2 Rev1-L4: counters that scope to a single
+        // `runPendingBackfill` invocation must be reset on entry. The
+        // prior implementation accumulated `expansionInvocationCount` and
+        // `expansionTruncatedCount` across calls on the same actor,
+        // which made test ordering visible to assertions and made
+        // production telemetry depend on actor lifetime. Reset all
+        // per-run counters here so each call has a clean slate.
+        expansionInvocationCount = 0
+        expansionTruncatedCount = 0
+        narrowingAbortedByPhase = [:]
+        narrowingEmptyByPhase = [:]
+        narrowingAllPhasesEmptyCount = 0
+        episodesObservedWithoutSample = 0
+
         let plan = coveragePlanner.plan(for: inputs.plannerContext)
         let now = clock().timeIntervalSince1970
 
@@ -294,11 +308,26 @@ actor BackfillJobRunner {
                 // row's audit trail is not lost when it resumes.
                 try await store.markBackfillJobRunning(jobId: job.jobId)
 
-                let jobInputs = narrowedInputs(
+                // Cycle 2 H13: `narrowedInputs` returns nil when the
+                // phase produced no anchors and we should skip dispatching
+                // FM work entirely. Mark the job complete with an empty
+                // progress cursor so the M5 idempotency path skips it on
+                // re-invocation.
+                guard let jobInputs = narrowedInputs(
                     for: job,
                     plan: plan,
                     rootInputs: inputs
-                )
+                ) else {
+                    try await store.markBackfillJobComplete(
+                        jobId: job.jobId,
+                        progressCursor: BackfillProgressCursor(
+                            processedUnitCount: 0,
+                            lastProcessedUpperBoundSec: nil
+                        )
+                    )
+                    await admissionController.finish(jobId: job.jobId)
+                    continue
+                }
                 let (resultIds, eventIds, detectedAdLineRefs) = try await runJob(job, inputs: jobInputs)
                 scanResultIds.append(contentsOf: resultIds)
                 evidenceEventIds.append(contentsOf: eventIds)
@@ -444,33 +473,69 @@ actor BackfillJobRunner {
         //
         if !admitted.isEmpty {
             let wasFullRescan = (plan.policy == .fullCoverage || plan.policy == .periodicFullRescan)
-            let precisionSample: Double?
+            // Cycle 2 C4: this sample is **recall**, not precision —
+            // the metric was historically misnamed. Formula:
+            //   covered = |predictedTargetedLineRefs ∩ actualAdLineRefs|
+            //   recall  = covered / |actualAdLineRefs|
+            // Persistence keeps the legacy `precision*` column / JSON
+            // names; the rename is code-only. The store API still
+            // accepts `fullRescanPrecisionSample` (historical name)
+            // and the column-side comments document the alias.
+            //
+            // Cycle 2 H13: when EVERY non-fullEpisodeScan phase narrows
+            // to empty, we record `episodesObservedWithoutSample` and
+            // do NOT advance the recall ring even if there were detected
+            // ad line refs — the targeted phases would never have
+            // covered them so emitting a 0-recall sample would push the
+            // planner toward fullCoverage on a transcript that the
+            // narrower simply couldn't index.
+            let recallSample: Double?
             if wasFullRescan {
-                // Conservative contract: no detected-ad signal means no
-                // precision sample for this episode (nil), so ad-free or
-                // unresolved episodes do not bias the stability ring.
-                let predicted = TargetedWindowNarrower.predictedTargetedLineRefs(
-                    inputs: TargetedWindowNarrower.Inputs(
+                if fullRescanDetectedAdLineRefs.isEmpty {
+                    // Cycle 2 C4: ad-free episode. Nil sample (do NOT
+                    // fake 1.0). Bump the dedicated counter so we can
+                    // distinguish "ad-free" from "ad-bearing but
+                    // narrower failed to predict it".
+                    episodesObservedWithoutSample += 1
+                    recallSample = nil
+                } else {
+                    let narrowerInputs = TargetedWindowNarrower.Inputs(
                         analysisAssetId: inputs.analysisAssetId,
                         podcastId: inputs.podcastId,
                         transcriptVersion: inputs.transcriptVersion,
                         segments: inputs.segments,
                         evidenceCatalog: inputs.evidenceCatalog,
-                        auditWindowSampleRate: coveragePlanner.auditWindowSampleRate
+                        auditWindowSampleRate: coveragePlanner.auditWindowSampleRate,
+                        episodesSinceLastFullRescan: inputs.plannerContext.episodesSinceLastFullRescan
                     )
-                )
-                precisionSample = TargetedWindowNarrower.precisionSample(
-                    predictedTargetedLineRefs: predicted,
-                    actualAdLineRefs: fullRescanDetectedAdLineRefs
-                )
+                    // Cycle 2 H13: if every non-fullEpisodeScan phase
+                    // came back empty, contribute no recall sample.
+                    let phaseResults = BackfillJobPhase.allCases
+                        .filter { $0 != .fullEpisodeScan }
+                        .map { TargetedWindowNarrower.narrow(phase: $0, inputs: narrowerInputs) }
+                    let nonEmptyPhases = phaseResults.filter { !$0.wasEmpty }
+                    if nonEmptyPhases.isEmpty {
+                        narrowingAllPhasesEmptyCount += 1
+                        recallSample = nil
+                    } else {
+                        let predicted = TargetedWindowNarrower.predictedTargetedLineRefs(
+                            inputs: narrowerInputs
+                        )
+                        recallSample = TargetedWindowNarrower.recallSample(
+                            predictedTargetedLineRefs: predicted,
+                            actualAdLineRefs: fullRescanDetectedAdLineRefs
+                        )
+                    }
+                }
             } else {
-                precisionSample = nil
+                recallSample = nil
             }
             do {
                 _ = try await store.recordPodcastEpisodeObservation(
                     podcastId: inputs.podcastId,
                     wasFullRescan: wasFullRescan,
-                    fullRescanPrecisionSample: precisionSample,
+                    // historical: stored as "precision"; semantically recall
+                    fullRescanPrecisionSample: recallSample,
                     now: clock().timeIntervalSince1970
                 )
             } catch {
@@ -1409,15 +1474,38 @@ actor BackfillJobRunner {
         }
     }
 
+    /// Cycle 2 Rev1-M4: this guard intentionally short-circuits whenever
+    /// the plan is anything OTHER than `.targetedWithAudit` and whenever
+    /// the phase is `.fullEpisodeScan`. The contract:
+    ///
+    /// - `.fullCoverage` / `.periodicFullRescan` plans only contain a
+    ///   single `.fullEpisodeScan` phase, which by definition runs
+    ///   against the entire transcript and must NOT be narrowed.
+    /// - `.targetedWithAudit` runs all three targeted phases — narrowing
+    ///   applies to each one individually.
+    ///
+    /// Any future targeted variant (e.g. a hypothetical `.targetedAdsOnly`
+    /// without audit, or a `.targetedWithDriftCheck` policy) will hit
+    /// this guard, fall through, and run unnarrowed against the full
+    /// transcript. That's a safe default — over-scanning costs FM tokens
+    /// but never produces incorrect output. The trade-off is intentional:
+    /// when a new targeted policy lands, the runner author MUST add it to
+    /// this guard explicitly so the narrowing semantics are an opt-in
+    /// design decision rather than an accidental inheritance.
+    ///
+    /// Cycle 2 C5/H13: returns `nil` when narrowing skipped the phase
+    /// entirely (wasEmpty). The caller must NOT dispatch FM work on a
+    /// nil result and must NOT contribute to the recall sample numerator
+    /// for that phase.
     private func narrowedInputs(
         for job: BackfillJob,
         plan: CoveragePlan,
         rootInputs: AssetInputs
-    ) -> AssetInputs {
+    ) -> AssetInputs? {
         guard plan.policy == .targetedWithAudit, job.phase != .fullEpisodeScan else {
             return rootInputs
         }
-        let narrowed = TargetedWindowNarrower.narrow(
+        let result = TargetedWindowNarrower.narrow(
             phase: job.phase,
             inputs: TargetedWindowNarrower.Inputs(
                 analysisAssetId: rootInputs.analysisAssetId,
@@ -1425,16 +1513,67 @@ actor BackfillJobRunner {
                 transcriptVersion: rootInputs.transcriptVersion,
                 segments: rootInputs.segments,
                 evidenceCatalog: rootInputs.evidenceCatalog,
-                auditWindowSampleRate: plan.auditWindowSampleRate ?? coveragePlanner.auditWindowSampleRate
+                auditWindowSampleRate: plan.auditWindowSampleRate ?? coveragePlanner.auditWindowSampleRate,
+                episodesSinceLastFullRescan: rootInputs.plannerContext.episodesSinceLastFullRescan
             )
         )
+        if result.wasEmpty {
+            // Cycle 2 H13: empty phase. Skip without dispatching FM work.
+            // Counter is bumped by phase name so cross-show patterns are
+            // visible (e.g. "harvester is consistently empty on this show").
+            narrowingEmptyByPhase[job.phase, default: 0] += 1
+            return nil
+        }
+        if result.aborted {
+            // Cycle 2 C5: per-anchor windows merged to more than the cap.
+            // Fall back to the full segment list (root inputs) so we still
+            // get coverage; bump the abort counter exactly once for this
+            // phase invocation.
+            narrowingAbortedByPhase[job.phase, default: 0] += 1
+            return rootInputs
+        }
         return AssetInputs(
             analysisAssetId: rootInputs.analysisAssetId,
             podcastId: rootInputs.podcastId,
-            segments: narrowed,
+            segments: result.narrowedSegments ?? rootInputs.segments,
             evidenceCatalog: rootInputs.evidenceCatalog,
             transcriptVersion: rootInputs.transcriptVersion,
             plannerContext: rootInputs.plannerContext
+        )
+    }
+
+    // MARK: - Cycle 2 narrowing telemetry (C5 + H13)
+
+    /// Cycle 2 C5: per-phase counter incremented when the merged
+    /// per-anchor windows exceed `NarrowingConfig.maxNarrowedSegmentsPerPhase`
+    /// and the runner falls back to root inputs for that phase.
+    private(set) var narrowingAbortedByPhase: [BackfillJobPhase: Int] = [:]
+    /// Cycle 2 H13: per-phase counter incremented when narrowing returned
+    /// `wasEmpty` and the phase was skipped entirely (no FM dispatch, no
+    /// contribution to the recall sample).
+    private(set) var narrowingEmptyByPhase: [BackfillJobPhase: Int] = [:]
+    /// Cycle 2 H13: counter incremented when EVERY non-fullEpisodeScan
+    /// phase for the episode came back empty. Distinct from per-phase
+    /// `narrowingEmptyByPhase` so operators can distinguish "harvester
+    /// always empty" from "this whole episode produced nothing".
+    private(set) var narrowingAllPhasesEmptyCount: Int = 0
+    /// Cycle 2 C4: counter incremented on every full-rescan run that
+    /// produced an ad-free episode (empty `actualAdLineRefs`). Such runs
+    /// do NOT advance the planner ring — see the recall-sample call
+    /// site for the policy.
+    private(set) var episodesObservedWithoutSample: Int = 0
+
+    func snapshotNarrowingTelemetry() -> (
+        abortedByPhase: [BackfillJobPhase: Int],
+        emptyByPhase: [BackfillJobPhase: Int],
+        allPhasesEmpty: Int,
+        observedWithoutSample: Int
+    ) {
+        (
+            narrowingAbortedByPhase,
+            narrowingEmptyByPhase,
+            narrowingAllPhasesEmptyCount,
+            episodesObservedWithoutSample
         )
     }
 

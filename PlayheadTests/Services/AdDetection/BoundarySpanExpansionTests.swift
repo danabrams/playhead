@@ -596,7 +596,7 @@ private func makeExpansionInputs(
     )
     let plannerContext = CoveragePlannerContext(
         observedEpisodeCount: 0,
-        stablePrecision: false,
+        stableRecall: false,
         isFirstEpisodeAfterCohortInvalidation: false,
         recallDegrading: false,
         sponsorDriftDetected: false,
