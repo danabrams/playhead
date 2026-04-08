@@ -69,6 +69,41 @@ struct BackfillJobRunnerTests {
         )
     }
 
+    private func makeTargetedInputs(
+        assetId: String = "asset-targeted",
+        podcastId: String = "podcast-targeted",
+        transcriptVersion: String = "tx-targeted-v1",
+        plannerContext: CoveragePlannerContext
+    ) -> BackfillJobRunner.AssetInputs {
+        let segments = makeFMSegments(
+            analysisAssetId: assetId,
+            transcriptVersion: transcriptVersion,
+            lines: [
+                (0, 10, "Welcome back to the show and today's interview."),
+                (10, 20, "Before we continue, this episode is brought to you by ExampleCo."),
+                (20, 30, "Visit example.com slash deal and use promo code PLAYHEAD."),
+                (30, 40, "Now back to the conversation with our guest."),
+                (40, 50, "We discuss the roadmap and next release milestones."),
+                (50, 60, "The panel shares lessons learned from production incidents."),
+                (60, 70, "Audience questions focus on reliability and performance."),
+                (70, 80, "Thanks for listening and see you next week.")
+            ]
+        )
+        let evidenceCatalog = EvidenceCatalogBuilder.build(
+            atoms: segments.flatMap(\.atoms),
+            analysisAssetId: assetId,
+            transcriptVersion: transcriptVersion
+        )
+        return BackfillJobRunner.AssetInputs(
+            analysisAssetId: assetId,
+            podcastId: podcastId,
+            segments: segments,
+            evidenceCatalog: evidenceCatalog,
+            transcriptVersion: transcriptVersion,
+            plannerContext: plannerContext
+        )
+    }
+
     private func makeRunner(
         store: AnalysisStore,
         runtime: FoundationModelClassifier.Runtime,
@@ -143,6 +178,114 @@ struct BackfillJobRunnerTests {
         // Shadow mode never inserts AdWindows -- that path is owned by lexical.
         let windows = try await store.fetchAdWindows(assetId: "asset-runner")
         #expect(windows.isEmpty)
+    }
+
+    @Test("playhead-nlh: targeted phases persist distinct passA rows on narrowed subsets")
+    func targetedPhasesRunOnNarrowedSubsets() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-targeted-narrow"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let runtime = TestFMRuntime()
+        let runner = makeRunner(store: store, runtime: runtime.runtime)
+        let targetedContext = CoveragePlannerContext(
+            observedEpisodeCount: 20,
+            stablePrecision: true,
+            isFirstEpisodeAfterCohortInvalidation: false,
+            recallDegrading: false,
+            sponsorDriftDetected: false,
+            auditMissDetected: false,
+            episodesSinceLastFullRescan: 1,
+            periodicFullRescanIntervalEpisodes: 10
+        )
+        let inputs = makeTargetedInputs(
+            assetId: assetId,
+            podcastId: "podcast-targeted-narrow",
+            transcriptVersion: "tx-targeted-narrow-v1",
+            plannerContext: targetedContext
+        )
+
+        let result = try await runner.runPendingBackfill(for: inputs)
+
+        #expect(result.admittedJobIds.count == 3, "targetedWithAudit should admit one job per targeted phase")
+        let passA = try await store.fetchSemanticScanResults(
+            analysisAssetId: assetId,
+            scanPass: "passA"
+        )
+        #expect(passA.count == 3, "targeted phases must persist distinct passA rows (no cross-phase row collisions)")
+
+        let fullFirst = try #require(inputs.segments.first?.firstAtomOrdinal)
+        let fullLast = try #require(inputs.segments.last?.lastAtomOrdinal)
+        let fullWidth = fullLast - fullFirst
+
+        for row in passA {
+            #expect(row.windowFirstAtomOrdinal >= fullFirst)
+            #expect(row.windowLastAtomOrdinal <= fullLast)
+            #expect(
+                row.windowLastAtomOrdinal - row.windowFirstAtomOrdinal < fullWidth,
+                "targeted phase should scan a strict subset, got full-episode range \(row.windowFirstAtomOrdinal)-\(row.windowLastAtomOrdinal)"
+            )
+        }
+    }
+
+    @Test("playhead-nlh: full-rescan path records non-nil precision samples and unlocks targetedWithAudit")
+    func fullRescanPersistsPrecisionSamplesAndUnlocksTargetedCoverage() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-planner-live"
+        let coarseResponses = (0..<5).map { _ in
+            CoarseScreeningSchema(
+                disposition: .containsAd,
+                support: CoarseSupportSchema(
+                    supportLineRefs: [2],
+                    certainty: .strong
+                )
+            )
+        }
+        let runtime = TestFMRuntime(coarseResponses: coarseResponses)
+        let runner = makeRunner(store: store, runtime: runtime.runtime)
+
+        for episode in 1...5 {
+            let assetId = "asset-planner-live-\(episode)"
+            try await store.insertAsset(makeAsset(id: assetId))
+
+            let state = try await store.fetchPodcastPlannerState(podcastId: podcastId)
+            let context = CoveragePlannerContext(
+                observedEpisodeCount: state?.observedEpisodeCount ?? 0,
+                stablePrecision: state?.stablePrecisionFlag ?? false,
+                isFirstEpisodeAfterCohortInvalidation: false,
+                recallDegrading: false,
+                sponsorDriftDetected: false,
+                auditMissDetected: false,
+                episodesSinceLastFullRescan: state?.episodesSinceLastFullRescan ?? 0,
+                periodicFullRescanIntervalEpisodes: 10
+            )
+
+            let inputs = makeTargetedInputs(
+                assetId: assetId,
+                podcastId: podcastId,
+                transcriptVersion: "tx-planner-live-v\(episode)",
+                plannerContext: context
+            )
+            _ = try await runner.runPendingBackfill(for: inputs)
+        }
+
+        let finalState = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+        #expect(finalState.observedEpisodeCount == 5)
+        #expect(!finalState.precisionSamples.isEmpty, "live full-rescan path should persist precision samples")
+        #expect(finalState.stablePrecisionFlag, "stable precision should flip true once sample and episode thresholds are met")
+
+        let plannerContext = CoveragePlannerContext(
+            observedEpisodeCount: finalState.observedEpisodeCount,
+            stablePrecision: finalState.stablePrecisionFlag,
+            isFirstEpisodeAfterCohortInvalidation: false,
+            recallDegrading: false,
+            sponsorDriftDetected: false,
+            auditMissDetected: false,
+            episodesSinceLastFullRescan: finalState.episodesSinceLastFullRescan,
+            periodicFullRescanIntervalEpisodes: 10
+        )
+        let plan = CoveragePlanner().plan(for: plannerContext)
+        #expect(plan.policy == .targetedWithAudit)
     }
 
     @available(iOS 26.0, *)

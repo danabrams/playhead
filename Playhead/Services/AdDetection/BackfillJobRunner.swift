@@ -225,6 +225,7 @@ actor BackfillJobRunner {
         var deferred: [String] = []
         var scanResultIds: [String] = []
         var evidenceEventIds: [String] = []
+        var fullRescanDetectedAdLineRefs = Set<Int>()
 
         // Drain the queue. AdmissionController is serial; one job at a time.
         for _ in enqueuedJobs {
@@ -293,15 +294,23 @@ actor BackfillJobRunner {
                 // row's audit trail is not lost when it resumes.
                 try await store.markBackfillJobRunning(jobId: job.jobId)
 
-                let (resultIds, eventIds) = try await runJob(job, inputs: inputs)
+                let jobInputs = narrowedInputs(
+                    for: job,
+                    plan: plan,
+                    rootInputs: inputs
+                )
+                let (resultIds, eventIds, detectedAdLineRefs) = try await runJob(job, inputs: jobInputs)
                 scanResultIds.append(contentsOf: resultIds)
                 evidenceEventIds.append(contentsOf: eventIds)
+                if job.phase == .fullEpisodeScan {
+                    fullRescanDetectedAdLineRefs.formUnion(detectedAdLineRefs)
+                }
 
                 try await store.markBackfillJobComplete(
                     jobId: job.jobId,
                     progressCursor: BackfillProgressCursor(
                         processedUnitCount: 1,
-                        lastProcessedUpperBoundSec: inputs.segments.last?.endTime
+                        lastProcessedUpperBoundSec: jobInputs.segments.last?.endTime
                     )
                 )
             } catch is CancellationError {
@@ -433,20 +442,35 @@ actor BackfillJobRunner {
         // planner contract treats both as full rescans for the purposes of
         // resetting `episodesSinceLastFullRescan`.
         //
-        // `fullRescanPrecisionSample` is intentionally `nil`: the runner
-        // does not yet have a side-effect-free targeted-window predictor to
-        // dry-run against the full-rescan output. Until that ships, the
-        // ring stays empty in production and `stablePrecisionFlag` cannot
-        // flip true on its own — which is the conservative default the
-        // bd-m8k design field calls for. Tests drive the precision ring by
-        // calling `recordPodcastEpisodeObservation` directly.
         if !admitted.isEmpty {
             let wasFullRescan = (plan.policy == .fullCoverage || plan.policy == .periodicFullRescan)
+            let precisionSample: Double?
+            if wasFullRescan {
+                // Conservative contract: no detected-ad signal means no
+                // precision sample for this episode (nil), so ad-free or
+                // unresolved episodes do not bias the stability ring.
+                let predicted = TargetedWindowNarrower.predictedTargetedLineRefs(
+                    inputs: TargetedWindowNarrower.Inputs(
+                        analysisAssetId: inputs.analysisAssetId,
+                        podcastId: inputs.podcastId,
+                        transcriptVersion: inputs.transcriptVersion,
+                        segments: inputs.segments,
+                        evidenceCatalog: inputs.evidenceCatalog,
+                        auditWindowSampleRate: coveragePlanner.auditWindowSampleRate
+                    )
+                )
+                precisionSample = TargetedWindowNarrower.precisionSample(
+                    predictedTargetedLineRefs: predicted,
+                    actualAdLineRefs: fullRescanDetectedAdLineRefs
+                )
+            } else {
+                precisionSample = nil
+            }
             do {
                 _ = try await store.recordPodcastEpisodeObservation(
                     podcastId: inputs.podcastId,
                     wasFullRescan: wasFullRescan,
-                    fullRescanPrecisionSample: nil,
+                    fullRescanPrecisionSample: precisionSample,
                     now: clock().timeIntervalSince1970
                 )
             } catch {
@@ -472,9 +496,18 @@ actor BackfillJobRunner {
     private func runJob(
         _ job: BackfillJob,
         inputs: AssetInputs
-    ) async throws -> (scanResultIds: [String], evidenceEventIds: [String]) {
+    ) async throws -> (
+        scanResultIds: [String],
+        evidenceEventIds: [String],
+        detectedAdLineRefs: Set<Int>
+    ) {
         var scanResultIds: [String] = []
         var evidenceEventIds: [String] = []
+        var detectedAdLineRefs = Set<Int>()
+
+        guard !inputs.segments.isEmpty else {
+            return (scanResultIds, evidenceEventIds, detectedAdLineRefs)
+        }
 
         // bd-1en Phase 1: dispatch sensitive windows (pharma /
         // medical / mental-health / regulated tests) through the
@@ -500,11 +533,19 @@ actor BackfillJobRunner {
             let result = makeScanResult(
                 windowOutput: window,
                 inputs: inputs,
+                jobId: job.jobId,
                 scanPass: "passA",
                 status: .success
             )
             try await store.insertSemanticScanResult(result)
             scanResultIds.append(result.id)
+            if window.screening.disposition == .containsAd {
+                if let support = window.screening.support?.supportLineRefs, !support.isEmpty {
+                    detectedAdLineRefs.formUnion(support)
+                } else {
+                    detectedAdLineRefs.formUnion(window.lineRefs)
+                }
+            }
         }
 
         if !coarse.failedWindowStatuses.isEmpty || !coarse.windows.isEmpty {
@@ -518,12 +559,13 @@ actor BackfillJobRunner {
             )
             let remainingPlans = coarsePlans.filter { !succeededPlanIndices.contains($0.windowIndex) }
             for (plan, status) in zip(remainingPlans, coarse.failedWindowStatuses) {
-                if let failureResult = makeCoarseFailureScanResult(
-                    plan: plan,
-                    inputs: inputs,
-                    status: status,
-                    latencyMs: coarse.latencyMillis
-                ) {
+                        if let failureResult = makeCoarseFailureScanResult(
+                            plan: plan,
+                            inputs: inputs,
+                            jobId: job.jobId,
+                            status: status,
+                            latencyMs: coarse.latencyMillis
+                        ) {
                     try await store.insertSemanticScanResult(failureResult)
                     scanResultIds.append(failureResult.id)
                 }
@@ -531,12 +573,13 @@ actor BackfillJobRunner {
 
             if coarse.status != .success,
                let blockingPlan = remainingPlans.dropFirst(coarse.failedWindowStatuses.count).first,
-               let failureResult = makeCoarseFailureScanResult(
-                    plan: blockingPlan,
-                    inputs: inputs,
-                    status: coarse.status,
-                    latencyMs: coarse.latencyMillis
-               ) {
+                       let failureResult = makeCoarseFailureScanResult(
+                            plan: blockingPlan,
+                            inputs: inputs,
+                            jobId: job.jobId,
+                            status: coarse.status,
+                            latencyMs: coarse.latencyMillis
+                       ) {
                 try await store.insertSemanticScanResult(failureResult)
                 scanResultIds.append(failureResult.id)
             }
@@ -545,6 +588,7 @@ actor BackfillJobRunner {
                     scanPass: "passA",
                     attemptedSegments: inputs.segments,
                     inputs: inputs,
+                    jobId: job.jobId,
                     status: coarse.status,
                     latencyMs: coarse.latencyMillis
                   ) {
@@ -568,8 +612,12 @@ actor BackfillJobRunner {
                     let result = makeRefinementScanResult(
                         windowOutput: window,
                         inputs: inputs,
+                        jobId: job.jobId,
                         status: .success
                     )
+                    for span in window.spans {
+                        detectedAdLineRefs.formUnion(span.firstLineRef...span.lastLineRef)
+                    }
                     let events = makeEvidenceEvents(
                         windowOutput: window,
                         inputs: inputs,
@@ -594,6 +642,7 @@ actor BackfillJobRunner {
                         if let failureResult = makeRefinementFailureScanResult(
                             plan: plan,
                             inputs: inputs,
+                            jobId: job.jobId,
                             status: status,
                             latencyMs: refinement.latencyMillis
                         ) {
@@ -607,6 +656,7 @@ actor BackfillJobRunner {
                        let failureResult = makeRefinementFailureScanResult(
                             plan: blockingPlan,
                             inputs: inputs,
+                            jobId: job.jobId,
                             status: refinement.status,
                             latencyMs: refinement.latencyMillis
                        ) {
@@ -620,6 +670,7 @@ actor BackfillJobRunner {
                         scanPass: "passB",
                         attemptedSegments: attemptedSegments,
                         inputs: inputs,
+                        jobId: job.jobId,
                         status: refinement.status,
                         latencyMs: refinement.latencyMillis
                     ) {
@@ -656,7 +707,7 @@ actor BackfillJobRunner {
             }
         }
 
-        return (scanResultIds, evidenceEventIds)
+        return (scanResultIds, evidenceEventIds, detectedAdLineRefs)
     }
 
     // MARK: - bd-1my: outward expansion
@@ -878,6 +929,7 @@ actor BackfillJobRunner {
                     if let failureResult = makeRefinementFailureScanResult(
                         plan: plan,
                         inputs: inputs,
+                        jobId: jobId,
                         status: expansionRefinement.status,
                         latencyMs: expansionRefinement.latencyMillis
                     ) {
@@ -931,6 +983,7 @@ actor BackfillJobRunner {
                 let mergedScanResult = makeRefinementScanResult(
                     windowOutput: mergedWindowOutput,
                     inputs: inputs,
+                    jobId: jobId,
                     status: .success
                 )
                 let mergedEvents = makeEvidenceEvents(
@@ -1262,9 +1315,10 @@ actor BackfillJobRunner {
         assetId: String,
         transcriptVersion: String,
         pass: String,
-        windowIndex: Int
+        windowIndex: Int,
+        jobKey: String? = nil
     ) -> String {
-        let canonical = "asset=\(assetId)|version=\(transcriptVersion)|pass=\(pass)|window=\(windowIndex)"
+        let canonical = "asset=\(assetId)|version=\(transcriptVersion)|pass=\(pass)|window=\(windowIndex)|job=\(jobKey ?? "default")"
         return hashedId(prefix: "scan", canonical: canonical)
     }
 
@@ -1275,10 +1329,11 @@ actor BackfillJobRunner {
         assetId: String,
         transcriptVersion: String,
         pass: String,
-        windowKey: String? = nil
+        windowKey: String? = nil,
+        jobKey: String? = nil
     ) -> String {
         let kind = windowKey.map { "failure|\($0)" } ?? "failure"
-        let canonical = "asset=\(assetId)|version=\(transcriptVersion)|pass=\(pass)|kind=\(kind)"
+        let canonical = "asset=\(assetId)|version=\(transcriptVersion)|pass=\(pass)|kind=\(kind)|job=\(jobKey ?? "default")"
         return hashedId(prefix: "scan", canonical: canonical)
     }
 
@@ -1354,9 +1409,39 @@ actor BackfillJobRunner {
         }
     }
 
+    private func narrowedInputs(
+        for job: BackfillJob,
+        plan: CoveragePlan,
+        rootInputs: AssetInputs
+    ) -> AssetInputs {
+        guard plan.policy == .targetedWithAudit, job.phase != .fullEpisodeScan else {
+            return rootInputs
+        }
+        let narrowed = TargetedWindowNarrower.narrow(
+            phase: job.phase,
+            inputs: TargetedWindowNarrower.Inputs(
+                analysisAssetId: rootInputs.analysisAssetId,
+                podcastId: rootInputs.podcastId,
+                transcriptVersion: rootInputs.transcriptVersion,
+                segments: rootInputs.segments,
+                evidenceCatalog: rootInputs.evidenceCatalog,
+                auditWindowSampleRate: plan.auditWindowSampleRate ?? coveragePlanner.auditWindowSampleRate
+            )
+        )
+        return AssetInputs(
+            analysisAssetId: rootInputs.analysisAssetId,
+            podcastId: rootInputs.podcastId,
+            segments: narrowed,
+            evidenceCatalog: rootInputs.evidenceCatalog,
+            transcriptVersion: rootInputs.transcriptVersion,
+            plannerContext: rootInputs.plannerContext
+        )
+    }
+
     private func makeScanResult(
         windowOutput: FMCoarseWindowOutput,
         inputs: AssetInputs,
+        jobId: String,
         scanPass: String,
         status: SemanticScanStatus
     ) -> SemanticScanResult {
@@ -1386,7 +1471,8 @@ actor BackfillJobRunner {
                 assetId: inputs.analysisAssetId,
                 transcriptVersion: inputs.transcriptVersion,
                 pass: scanPass,
-                windowIndex: windowOutput.windowIndex
+                windowIndex: windowOutput.windowIndex,
+                jobKey: jobId
             ),
             analysisAssetId: inputs.analysisAssetId,
             windowFirstAtomOrdinal: firstAtom,
@@ -1412,6 +1498,7 @@ actor BackfillJobRunner {
     private func makeRefinementScanResult(
         windowOutput: FMRefinementWindowOutput,
         inputs: AssetInputs,
+        jobId: String,
         status: SemanticScanStatus
     ) -> SemanticScanResult {
         let firstAtom = inputs.segments.first(where: {
@@ -1434,7 +1521,8 @@ actor BackfillJobRunner {
                 assetId: inputs.analysisAssetId,
                 transcriptVersion: inputs.transcriptVersion,
                 pass: "passB",
-                windowIndex: windowOutput.windowIndex
+                windowIndex: windowOutput.windowIndex,
+                jobKey: jobId
             ),
             analysisAssetId: inputs.analysisAssetId,
             windowFirstAtomOrdinal: firstAtom,
@@ -1461,6 +1549,7 @@ actor BackfillJobRunner {
         scanPass: String,
         attemptedSegments: [AdTranscriptSegment],
         inputs: AssetInputs,
+        jobId: String,
         status: SemanticScanStatus,
         latencyMs: Double,
         windowKey: String? = nil
@@ -1473,7 +1562,8 @@ actor BackfillJobRunner {
                 assetId: inputs.analysisAssetId,
                 transcriptVersion: inputs.transcriptVersion,
                 pass: scanPass,
-                windowKey: windowKey
+                windowKey: windowKey,
+                jobKey: jobId
             ),
             analysisAssetId: inputs.analysisAssetId,
             windowFirstAtomOrdinal: range.firstAtomOrdinal,
@@ -1499,6 +1589,7 @@ actor BackfillJobRunner {
     private func makeRefinementFailureScanResult(
         plan: RefinementWindowPlan,
         inputs: AssetInputs,
+        jobId: String,
         status: SemanticScanStatus,
         latencyMs: Double
     ) -> SemanticScanResult? {
@@ -1507,6 +1598,7 @@ actor BackfillJobRunner {
             scanPass: "passB",
             attemptedSegments: attemptedSegments,
             inputs: inputs,
+            jobId: jobId,
             status: status,
             latencyMs: latencyMs,
             windowKey: "window=\(plan.windowIndex)"
@@ -1516,6 +1608,7 @@ actor BackfillJobRunner {
     private func makeCoarseFailureScanResult(
         plan: CoarsePassWindowPlan,
         inputs: AssetInputs,
+        jobId: String,
         status: SemanticScanStatus,
         latencyMs: Double
     ) -> SemanticScanResult? {
@@ -1524,6 +1617,7 @@ actor BackfillJobRunner {
             scanPass: "passA",
             attemptedSegments: attemptedSegments,
             inputs: inputs,
+            jobId: jobId,
             status: status,
             latencyMs: latencyMs,
             windowKey: "window=\(plan.windowIndex)"
