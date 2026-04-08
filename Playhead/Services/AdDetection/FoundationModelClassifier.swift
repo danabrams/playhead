@@ -1148,9 +1148,14 @@ struct FoundationModelClassifier: Sendable {
                         // Should not happen — PermissiveAdClassifier
                         // converts every underlying error to a
                         // PermissiveClassificationError before throwing.
-                        // Defensive: fall back to refusal so the runner
-                        // surfaces the failed window in telemetry.
-                        failedWindowStatuses.append(.refusal)
+                        // Defensive: fall back to .permissiveRefusal so
+                        // the persisted row status and the in-memory
+                        // per-reason counter agree. Cycle 5 caught a
+                        // prior version appending `.refusal` (standard
+                        // path status) while bumping the permissive
+                        // counter, leaving the two sources of telemetry
+                        // in disagreement.
+                        failedWindowStatuses.append(.permissiveRefusal)
                         permissiveCounts.increment(reason: .permissiveRefusal)
                         logger.error(
                             "fm.classifier.coarse_pass_window_permissive_unexpected window=\(planIndex + 1, privacy: .public) error=\(String(describing: error), privacy: .private)"
@@ -1713,7 +1718,12 @@ struct FoundationModelClassifier: Sendable {
                             """
                         )
                     } catch {
-                        failedWindowStatuses.append(.refusal)
+                        // Cycle 6: persisted status and in-memory
+                        // counter must agree on the permissive path
+                        // even in the defensive "should not happen"
+                        // arm. See matching comment on the coarse
+                        // defensive arm.
+                        failedWindowStatuses.append(.permissiveRefusal)
                         permissiveCounts.increment(reason: .permissiveRefusal)
                         logger.error(
                             "fm.classifier.refinement_pass_window_permissive_unexpected window=\(plan.windowIndex, privacy: .public) error=\(String(describing: error), privacy: .private)"

@@ -250,11 +250,27 @@ struct Cycle4PermissiveEndToEndTests {
     // MARK: - H-3: counter reset between runs
 
     @available(iOS 26.0, *)
-    @Test("Cycle 4 H-3: runPendingBackfill resets permissive counters between runs")
+    @Test("Cycle 4/6 H-3: runPendingBackfill resets permissive counters between runs")
     func counterResetBetweenRuns() async throws {
+        // Cycle 5 finding: the previous version of this test called
+        // `runPendingBackfill` twice on the SAME asset. The second
+        // call saw the jobId as terminal and dispatched nothing,
+        // so the assertion `secondRunCount < firstRunCount * 2` was
+        // satisfied whether or not the reset block was present
+        // (0 < 2N both holds and `N < 2N` also holds). Bogus rail.
+        //
+        // Cycle 6 fix: use a DIFFERENT asset on the second call so
+        // the runner actually re-drives the permissive failure path
+        // and accumulates per-reason counts. With the reset present,
+        // `secondRunCount == firstRunCount`. Without it, the first
+        // run's counts carry over so `secondRunCount == 2 *
+        // firstRunCount`. The `==` assertion discriminates both
+        // directions.
         let store = try await makeTestStore()
-        let assetId = "asset-cycle4-reset"
-        try await store.insertAsset(makeAsset(id: assetId))
+        let assetIdA = "asset-cycle4-reset-a"
+        let assetIdB = "asset-cycle4-reset-b"
+        try await store.insertAsset(makeAsset(id: assetIdA))
+        try await store.insertAsset(makeAsset(id: assetIdB))
 
         let permissive = PermissiveAdClassifier()
         await permissive.installFaultInjectionForTesting { _ in
@@ -269,26 +285,94 @@ struct Cycle4PermissiveEndToEndTests {
             router: makeTriggerRouter()
         )
 
-        let inputs = makeTriggeringInputs(assetId: assetId)
-        _ = try await runner.runPendingBackfill(for: inputs)
+        let inputsA = makeTriggeringInputs(assetId: assetIdA)
+        _ = try await runner.runPendingBackfill(for: inputsA)
         let firstRunCount = await runner.snapshotPermissiveTelemetry().refusal
-        #expect(firstRunCount >= 1)
+        #expect(firstRunCount >= 1, "first run should accumulate at least one permissive refusal")
 
-        // Second invocation on the same actor instance. The second
-        // run's counter MUST NOT accumulate on top of the first.
-        _ = try await runner.runPendingBackfill(for: inputs)
+        // Second invocation on a fresh asset — same runner instance.
+        // With the reset block the counter starts at 0 and accumulates
+        // the second asset's refusals; without it, the first run's
+        // counts carry over before new refusals pile on top.
+        let inputsB = makeTriggeringInputs(assetId: assetIdB)
+        _ = try await runner.runPendingBackfill(for: inputsB)
         let secondRunCount = await runner.snapshotPermissiveTelemetry().refusal
 
-        // The second call re-drives the same jobId (which is
-        // already terminal from the first run) so it admits and
-        // dispatches nothing — the counter should be 0 after reset.
-        // Crucially: it must NOT be `firstRunCount * 2`.
         #expect(
-            secondRunCount < firstRunCount * 2,
-            "counter accumulated across runs: first=\(firstRunCount) second=\(secondRunCount)"
+            secondRunCount == firstRunCount,
+            "runPendingBackfill must reset permissive counters per run: first=\(firstRunCount) second=\(secondRunCount) (expected equal; non-equal means either the reset is missing, in which case second==2*first, or fixture refusals diverged between assets)"
+        )
+    }
+
+    // MARK: - Cycle 6: defensive catch-all status/counter agreement
+
+    /// Exercises the "should not happen" defensive catch-all in
+    /// `FoundationModelClassifier.coarsePassA`'s permissive arm. When
+    /// `PermissiveAdClassifier.classify` throws a non-
+    /// `PermissiveClassificationError`, the prior version appended
+    /// `.refusal` (standard-path status) to `failedWindowStatuses`
+    /// while bumping `permissiveCounts.refusal`, leaving the persisted
+    /// row and the in-memory counter disagreeing on which category the
+    /// failure belonged to.
+    ///
+    /// Cycle 6 fix: the defensive arm now appends `.permissiveRefusal`.
+    /// This test injects a `TestUnexpectedError` (a vanilla
+    /// `Error`, not a `PermissiveClassificationError`) via the new
+    /// `arbitraryFaultInjectionForTesting` hook and asserts the
+    /// persisted semantic-scan row carries `.permissiveRefusal`.
+    @available(iOS 26.0, *)
+    @Test("Cycle 6: defensive catch-all persists .permissiveRefusal (not .refusal) to match the counter")
+    func defensiveCatchAllUsesPermissiveRefusalStatus() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-cycle6-defensive"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let permissive = PermissiveAdClassifier()
+        // Install the arbitrary-error hook so classify/refine throw a
+        // non-PermissiveClassificationError and the
+        // FoundationModelClassifier defensive arm fires.
+        await permissive.installArbitraryFaultInjectionForTesting { _ in
+            TestUnexpectedError()
+        }
+        let runner = makeRunner(
+            store: store,
+            permissiveClassifier: permissive,
+            router: makeTriggerRouter()
+        )
+
+        let inputs = makeTriggeringInputs(assetId: assetId)
+        _ = try await runner.runPendingBackfill(for: inputs)
+
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+        let permissiveRefusalRows = scans.filter { $0.status == .permissiveRefusal }
+        let standardRefusalRows = scans.filter { $0.status == .refusal }
+
+        #expect(
+            !permissiveRefusalRows.isEmpty,
+            "defensive catch-all must persist .permissiveRefusal; got statuses=\(scans.map(\.status.rawValue))"
+        )
+        #expect(
+            standardRefusalRows.isEmpty,
+            "defensive catch-all must NOT append .refusal (standard-path status); got \(standardRefusalRows.count) .refusal rows alongside the permissive path"
+        )
+
+        // In-memory per-reason counter must agree with the persisted
+        // status. If the counter says `refusal >= 1` but the row is
+        // `.refusal` instead of `.permissiveRefusal`, telemetry
+        // sources are out of sync.
+        let snapshot = await runner.snapshotPermissiveTelemetry()
+        #expect(
+            snapshot.refusal >= 1,
+            "defensive catch-all must bump permissiveCounts.refusal; got snapshot=\(snapshot)"
         )
     }
 }
+
+/// Cycle 6: an opaque `Error` used only to exercise the
+/// `FoundationModelClassifier` permissive defensive catch-all arms.
+/// Deliberately not a `PermissiveClassificationError` so the catch
+/// ladder falls through to `catch { ... }`.
+private struct TestUnexpectedError: Error {}
 
 // MARK: - M-1: CancellationError propagation
 
@@ -464,41 +548,56 @@ struct Cycle4SmartShrinkTests {
 
 // MARK: - M-5: PlayheadRuntime-constructed classifier has non-noop redactor
 
-@Suite("Cycle 4 M-5: redactor wiring regression rail")
+@Suite("Cycle 4/6 M-5: redactor wiring regression rail")
 struct Cycle4RedactorWiringTests {
-    @Test("FoundationModelClassifier default path has a non-noop redactor when PLAYHEAD_FM_REDACT=1 manifest loads")
-    func defaultClassifierReceivesNonNoopRedactorWhenFlagSet() throws {
-        // Load the production manifest directly and hand it to the
-        // classifier, mirroring what PlayheadRuntime does (it calls
-        // `PromptRedactor.loadDefault()` and passes the result into
-        // `FoundationModelClassifier(redactor:)`). If a future
-        // refactor swaps in `.noop` by mistake this test will fail
-        // because the test-accessor exposes the actual injected
-        // instance.
+    // Cycle 5 finding: the previous rail constructed
+    // `FoundationModelClassifier` directly with a freshly-loaded
+    // production redactor, which did NOT exercise PlayheadRuntime's
+    // wiring at all. A regression that swapped `.noop` into
+    // PlayheadRuntime's classifier-construction site would have left
+    // that test green. Cycle 6 fix: route BOTH the production site
+    // and the test through `PlayheadRuntime.makeFoundationModelClassifier`
+    // so a single factory is the source of truth for the wiring.
+
+    @Test("Cycle 6 M-5: runtime factory produces a classifier whose redactor is active (positive rail)")
+    func runtimeFactoryProducesActiveRedactor() throws {
+        // Positive rail: feed the factory the same redactor
+        // `PlayheadRuntime.init` loads (via `PromptRedactor.loadDefault()`)
+        // and assert the returned classifier exposes the same active
+        // redactor. If someone changes the factory body to ignore
+        // the `redactor` parameter or substitute `.noop`, this rail
+        // fails at the `isActive` assertion.
         let redactor = try PromptRedactor.loadDefault()
         #expect(redactor.isActive, "production RedactionRules.json should load a non-empty redactor")
-        let classifier = FoundationModelClassifier(redactor: redactor)
+
+        let classifier = PlayheadRuntime.makeFoundationModelClassifier(
+            redactor: redactor,
+            feedbackStore: nil
+        )
         #if DEBUG
         #expect(
             classifier.redactorForTesting.isActive,
-            "FoundationModelClassifier must retain the non-noop redactor passed into its init"
+            "PlayheadRuntime.makeFoundationModelClassifier(redactor: <active>) must retain the non-noop redactor"
         )
         #endif
     }
 
-    @Test("FoundationModelClassifier with no redactor argument defaults to .noop (and the regression rail distinguishes that)")
-    func defaultClassifierWithoutRedactorFallsBackToNoop() {
-        // This is the NEGATIVE rail: if someone constructs the
-        // classifier without passing a redactor (and
-        // PLAYHEAD_FM_REDACT is not set), the redactor is .noop. The
-        // test proves the accessor actually reflects the injected
-        // instance by showing a DIFFERENT outcome from the positive
-        // rail above.
-        let classifier = FoundationModelClassifier()
+    @Test("Cycle 6 M-5: runtime factory with .noop produces an inactive redactor (negative rail)")
+    func runtimeFactoryWithNoopProducesNoopRedactor() {
+        // Negative rail: calling the factory with `.noop` must return
+        // a classifier whose `redactorForTesting.isActive == false`.
+        // This proves the positive rail's `isActive == true`
+        // assertion actually discriminates between the two cases —
+        // without this, a buggy accessor that always returned `true`
+        // would still pass the positive rail.
+        let classifier = PlayheadRuntime.makeFoundationModelClassifier(
+            redactor: .noop,
+            feedbackStore: nil
+        )
         #if DEBUG
         #expect(
             !classifier.redactorForTesting.isActive,
-            "default-arg FoundationModelClassifier should use the noop redactor"
+            "PlayheadRuntime.makeFoundationModelClassifier(redactor: .noop) must expose an inactive redactor"
         )
         #endif
     }

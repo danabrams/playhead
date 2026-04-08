@@ -220,7 +220,14 @@ final class PlayheadRuntime {
                 // inside dispatch does NOT call into this redactor —
                 // it sends the original window text to the permissive
                 // model unmasked.
-                classifier: FoundationModelClassifier(feedbackStore: feedbackStore, redactor: bd1enRedactor),
+                // Cycle 6 M-5: route through the shared factory so the
+                // regression rail in Cycle4RedactorWiringTests pins the
+                // wiring — any future change that passes `.noop` here
+                // fails an automated test.
+                classifier: PlayheadRuntime.makeFoundationModelClassifier(
+                    redactor: bd1enRedactor,
+                    feedbackStore: feedbackStore
+                ),
                 coveragePlanner: CoveragePlanner(),
                 mode: mode,
                 capabilitySnapshotProvider: { await capabilitiesServiceForFactory.currentSnapshot },
@@ -476,6 +483,38 @@ final class PlayheadRuntime {
         Task {
             await observer?.stop()
         }
+    }
+
+    // MARK: - FM classifier factory (Cycle 6 M-5 regression rail)
+
+    /// Cycle 6 M-5: single factory that both the production
+    /// `backfillJobRunnerFactory` closure AND unit tests call, so a
+    /// regression that swaps in `.noop` on the production construction
+    /// site fails an automated test instead of shipping silently.
+    ///
+    /// The factory is deliberately thin — it only forwards arguments
+    /// into `FoundationModelClassifier.init`. Keeping it pure makes the
+    /// regression rail meaningful: a test can hand it a real redactor
+    /// and assert the returned classifier exposes that exact redactor
+    /// via `redactorForTesting`. If the body is ever changed to ignore
+    /// the incoming `redactor` parameter (or substitute `.noop`),
+    /// `runtimeFactoryProducesActiveRedactor` fails at the assertion
+    /// site; the negative rail
+    /// `runtimeFactoryWithNoopProducesNoopRedactor` proves that the
+    /// assertion actually discriminates between active and inactive
+    /// redactors.
+    ///
+    /// `nonisolated` so tests (which are not on MainActor by default)
+    /// can invoke it without hopping onto the main actor just to
+    /// construct a classifier.
+    nonisolated static func makeFoundationModelClassifier(
+        redactor: PromptRedactor,
+        feedbackStore: FoundationModelsFeedbackStore? = nil
+    ) -> FoundationModelClassifier {
+        FoundationModelClassifier(
+            feedbackStore: feedbackStore,
+            redactor: redactor
+        )
     }
 
     /// Stops long-lived runtime observers and cancels any pending startup

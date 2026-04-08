@@ -643,6 +643,18 @@ actor PermissiveAdClassifier {
     /// The closure receives the reason "classify" or "refine" so tests
     /// can distinguish which path was invoked on a single mock.
     var faultInjectionForTesting: ((_ path: String) -> PermissiveClassificationError?)?
+
+    /// Cycle 6: second-channel fault injection that throws an arbitrary
+    /// `Error` (not a `PermissiveClassificationError`). Needed by the
+    /// defensive "should not happen" catch-all arms in
+    /// `FoundationModelClassifier` — those arms only fire when the
+    /// permissive classifier throws something OTHER than
+    /// `PermissiveClassificationError`. The regular hook can't produce
+    /// that case because its signature only yields
+    /// `PermissiveClassificationError?`. This second hook runs AFTER
+    /// the regular hook (so the existing rail tests keep their exact
+    /// injection path) but BEFORE the real FoundationModels call.
+    var arbitraryFaultInjectionForTesting: ((_ path: String) -> Error?)?
     #endif
 
     init(logger: Logger = Logger(subsystem: "com.playhead", category: "PermissiveAdClassifier")) {
@@ -661,6 +673,16 @@ actor PermissiveAdClassifier {
         _ closure: ((_ path: String) -> PermissiveClassificationError?)?
     ) {
         self.faultInjectionForTesting = closure
+    }
+
+    /// Cycle 6 companion to `installFaultInjectionForTesting` that lets
+    /// tests throw a non-`PermissiveClassificationError` from
+    /// `classify` / `refine` in order to exercise the defensive
+    /// catch-all arms in `FoundationModelClassifier`.
+    func installArbitraryFaultInjectionForTesting(
+        _ closure: ((_ path: String) -> Error?)?
+    ) {
+        self.arbitraryFaultInjectionForTesting = closure
     }
     #endif
 
@@ -687,6 +709,9 @@ actor PermissiveAdClassifier {
         #if DEBUG
         if let fault = faultInjectionForTesting?("classify") {
             throw fault
+        }
+        if let arbitraryFault = arbitraryFaultInjectionForTesting?("classify") {
+            throw arbitraryFault
         }
         #endif
 
@@ -782,6 +807,9 @@ actor PermissiveAdClassifier {
         #if DEBUG
         if let fault = faultInjectionForTesting?("refine") {
             throw fault
+        }
+        if let arbitraryFault = arbitraryFaultInjectionForTesting?("refine") {
+            throw arbitraryFault
         }
         #endif
 
