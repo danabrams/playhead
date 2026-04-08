@@ -55,14 +55,55 @@ public struct PromptRedactor: Sendable {
     /// Redact a single line of text. Trigger categories are always
     /// applied; cooccurrent categories only apply if a trigger from
     /// `cooccurrentWith` matched in this line.
+    ///
+    /// **NOTE:** for multi-line windows (e.g. multi-segment FM prompts),
+    /// prefer `redact(lines:)` so cooccurrent categories can fire on a
+    /// line whose trigger word lives in a sibling line within the same
+    /// window. The single-line variant restricts cooccurrence to local
+    /// matches and over-restricts on real Conan transcripts where the
+    /// vaccine trigger and disease names are split across segments.
     public func redact(line: String) -> String {
-        // Two-pass: first apply all trigger categories. Track which
-        // ones matched in this line. Then apply cooccurrent categories
-        // only when their `cooccurrentWith` set intersects the matched
-        // trigger set.
+        let (afterTriggers, matched) = applyTriggerCategories(to: line)
+        return applyCooccurrentCategories(to: afterTriggers, withTriggers: matched)
+    }
+
+    /// bd-1en v2 (round 5): redact a window's worth of lines with
+    /// **window-wide cooccurrence**. Trigger categories are applied per
+    /// line; cooccurrent categories then fire on EVERY line whenever ANY
+    /// line in the batch fired a matching trigger. This is the load-bearing
+    /// fix for the Conan CVS pre-roll, where the `vaccines` trigger lives
+    /// on `L0` while the disease enumeration lives on `L1` — per-line
+    /// processing leaves the diseases unmasked because the trigger isn't
+    /// on the same line, so the FM safety classifier still sees the
+    /// pharma-marketing gestalt and refuses (or, after redaction, the FM
+    /// classifies as `noAds` because too much of the structural ad signal
+    /// was kept).
+    ///
+    /// The `noop` redactor returns the input array unchanged.
+    ///
+    /// Order is preserved: `redact(lines:)[i]` corresponds to `lines[i]`.
+    public func redact(lines: [String]) -> [String] {
+        // Pass 1: apply triggers per line, collect global trigger set.
+        var triggered: [String] = []
+        triggered.reserveCapacity(lines.count)
+        var globalTriggers: Set<String> = []
+        for line in lines {
+            let (afterTriggers, matched) = applyTriggerCategories(to: line)
+            triggered.append(afterTriggers)
+            globalTriggers.formUnion(matched)
+        }
+        // Pass 2: apply cooccurrent categories with the GLOBAL trigger
+        // set, not the per-line set.
+        return triggered.map { line in
+            applyCooccurrentCategories(to: line, withTriggers: globalTriggers)
+        }
+    }
+
+    /// Apply only the trigger categories to a line, returning the
+    /// redacted text and the set of trigger category IDs that matched.
+    private func applyTriggerCategories(to line: String) -> (String, Set<String>) {
         var result = line
         var matchedTriggerCategories: Set<String> = []
-
         for category in dictionary.categories where category.category == "trigger" {
             let (newResult, didMatch) = applyCategory(category, to: result)
             result = newResult
@@ -70,16 +111,24 @@ public struct PromptRedactor: Sendable {
                 matchedTriggerCategories.insert(category.id)
             }
         }
+        return (result, matchedTriggerCategories)
+    }
 
+    /// Apply cooccurrent categories to a line, gating each category on
+    /// whether its `cooccurrentWith` set intersects the supplied trigger
+    /// set. Caller controls the scope of the trigger set: pass per-line
+    /// triggers for `redact(line:)` semantics, or the union across a
+    /// window for `redact(lines:)` semantics.
+    private func applyCooccurrentCategories(to line: String, withTriggers triggers: Set<String>) -> String {
+        var result = line
         for category in dictionary.categories where category.category == "cooccurrent" {
-            guard let triggers = category.cooccurrentWith,
-                  !Set(triggers).intersection(matchedTriggerCategories).isEmpty else {
+            guard let triggerIDs = category.cooccurrentWith,
+                  !Set(triggerIDs).intersection(triggers).isEmpty else {
                 continue
             }
             let (newResult, _) = applyCategory(category, to: result)
             result = newResult
         }
-
         return result
     }
 

@@ -367,7 +367,17 @@ struct PromptEvidenceEntry: Sendable {
     let lineRef: Int
 
     func renderForPrompt() -> String {
-        "[E\(entry.evidenceRef)] \"\(entry.matchedText)\" (\(entry.category.rawValue), line \(lineRef))"
+        renderForPrompt(redactedMatchedText: entry.matchedText)
+    }
+
+    /// bd-1en v2: render with an externally-redacted `matchedText` so the
+    /// redactor (driven by window-wide cooccurrence in
+    /// `buildRefinementPrompt`) can mask pharma content in catalog
+    /// entries before they're embedded in the FM prompt. The structural
+    /// metadata (`evidenceRef`, `category`, `lineRef`) is unchanged so
+    /// downstream anchor-resolution / persistence still works.
+    func renderForPrompt(redactedMatchedText: String) -> String {
+        "[E\(entry.evidenceRef)] \"\(redactedMatchedText)\" (\(entry.category.rawValue), line \(lineRef))"
     }
 }
 
@@ -1650,15 +1660,24 @@ struct FoundationModelClassifier: Sendable {
                 transcriptOpenFence
             ])
         }
-        // bd-1en: redact each segment's visible text BEFORE escaping. The
-        // line-ref number (`L<n>>`) is preserved so the FM's response
+        // bd-1en v2: redact ALL segment texts in one batch so the
+        // window-wide cooccurrence rule fires correctly across multi-
+        // segment windows. The Conan CVS pre-roll has the `vaccines`
+        // trigger on `L0` and the disease enumeration on `L1`; per-line
+        // redaction (the v1 path) left the diseases on L1 unmasked because
+        // the local trigger never fired on L1. The lines-batch path
+        // collects triggers across all lines and applies cooccurrent
+        // redactions globally.
+        //
+        // The line-ref number (`L<n>>`) is preserved so the FM's response
         // still maps back to the original segment indices and downstream
         // code (`spansTouchBoundary`, evidence resolution, persistence)
         // sees the original `segments` array unchanged.
-        lines.append(contentsOf: segments.map { segment in
-            let redacted = redactor.redact(line: segment.text)
-            return "L\(segment.segmentIndex)> \"\(escapedLine(redacted))\""
-        })
+        let segmentTexts = segments.map(\.text)
+        let redactedSegmentTexts = redactor.redact(lines: segmentTexts)
+        for (segment, redacted) in zip(segments, redactedSegmentTexts) {
+            lines.append("L\(segment.segmentIndex)> \"\(escapedLine(redacted))\"")
+        }
         if preambleActive {
             lines.append(transcriptCloseFence)
         }
@@ -1692,19 +1711,37 @@ struct FoundationModelClassifier: Sendable {
                 transcriptOpenFence
             ])
         }
-        // bd-1en: see `buildPrompt(for:redactor:)` — redaction is applied
-        // to the visible segment text only; the L<n>> prefix is preserved
-        // so the runner's downstream lineRef → segment mapping is intact.
-        lines.append(contentsOf: segments.map { segment in
-            let redacted = redactor.redact(line: segment.text)
-            return "L\(segment.segmentIndex)> \"\(escapedLine(redacted))\""
-        })
+        // bd-1en v2: redact segments AND evidence catalog entries in ONE
+        // batch so the window-wide cooccurrence rule fires across BOTH
+        // surfaces. This is the load-bearing fix for the Kelly Ripa #1
+        // refinement refusal — the production refinement window for
+        // benign Kelly Ripa cross-promo content was including catalog
+        // entries pulled from the CVS pre-roll's atoms elsewhere in the
+        // episode (vaccines, shingles, brand mentions). The redactor's
+        // v1 path only saw the segment text and missed the catalog
+        // entries' visible content, so the safety classifier saw raw
+        // pharma text in the catalog and refused. By batching segments +
+        // catalog entry texts together and using window-wide
+        // cooccurrence, a vaccine trigger in EITHER surface masks the
+        // diseases in BOTH.
+        let segmentTexts = segments.map(\.text)
+        let evidenceTexts = promptEvidence.map(\.entry.matchedText)
+        let combined = segmentTexts + evidenceTexts
+        let redactedCombined = redactor.redact(lines: combined)
+        let redactedSegmentTexts = Array(redactedCombined.prefix(segmentTexts.count))
+        let redactedEvidenceTexts = Array(redactedCombined.suffix(evidenceTexts.count))
+
+        for (segment, redacted) in zip(segments, redactedSegmentTexts) {
+            lines.append("L\(segment.segmentIndex)> \"\(escapedLine(redacted))\"")
+        }
         if preambleActive {
             lines.append(transcriptCloseFence)
         }
         if !promptEvidence.isEmpty {
             lines.append("Evidence catalog:")
-            lines.append(contentsOf: promptEvidence.map { $0.renderForPrompt() })
+            for (promptEntry, redactedText) in zip(promptEvidence, redactedEvidenceTexts) {
+                lines.append(promptEntry.renderForPrompt(redactedMatchedText: redactedText))
+            }
         }
         lines.append("Return up to \(maximumSpans) spans.")
         return lines.joined(separator: "\n")
