@@ -632,12 +632,37 @@ actor PermissiveAdClassifier {
 
     private let logger: Logger
 
+    #if DEBUG
+    /// Cycle 4 H-2 / M-3: test-only fault injection. When set, the
+    /// classify / refine methods short-circuit and throw the returned
+    /// `PermissiveClassificationError` BEFORE touching the real
+    /// `SystemLanguageModel`. Nil in production. The hook is confined
+    /// to DEBUG so the production code path is byte-identical to the
+    /// pre-hook build.
+    ///
+    /// The closure receives the reason "classify" or "refine" so tests
+    /// can distinguish which path was invoked on a single mock.
+    var faultInjectionForTesting: ((_ path: String) -> PermissiveClassificationError?)?
+    #endif
+
     init(logger: Logger = Logger(subsystem: "com.playhead", category: "PermissiveAdClassifier")) {
         self.logger = logger
         #if canImport(FoundationModels)
         self.model = SystemLanguageModel(guardrails: .permissiveContentTransformations)
         #endif
     }
+
+    #if DEBUG
+    /// Cycle 4 H-2: install a fault-injection closure. Tests call this
+    /// before the runner dispatches so `classify`/`refine` throw the
+    /// desired `PermissiveClassificationError` variant without booting
+    /// the real FoundationModels session.
+    func installFaultInjectionForTesting(
+        _ closure: ((_ path: String) -> PermissiveClassificationError?)?
+    ) {
+        self.faultInjectionForTesting = closure
+    }
+    #endif
 
     /// Classify a window of transcript segments through the permissive
     /// path. The result type matches the existing `coarsePassA`
@@ -659,24 +684,36 @@ actor PermissiveAdClassifier {
     func classify(window segments: [AdTranscriptSegment]) async throws -> CoarseScreeningSchema {
         let lineRefs = segments.map(\.segmentIndex)
 
+        #if DEBUG
+        if let fault = faultInjectionForTesting?("classify") {
+            throw fault
+        }
+        #endif
+
         #if canImport(FoundationModels)
         do {
             let prompt = PermissiveAdGrammar.buildPrompt(for: segments)
             let raw = try await respond(to: prompt)
             return try PermissiveAdGrammar.parseClassify(raw, validLineRefs: lineRefs)
+        } catch is CancellationError {
+            // Cycle 4 M-1: cooperative cancellation must propagate
+            // untouched. The prior catch-all below would have mapped
+            // this to `.permissiveDecodingFailure`, which is incorrect
+            // — a cancelled task is not a model failure.
+            throw CancellationError()
         } catch let error as LanguageModelSession.GenerationError {
             // Cycle 2 C2 + H6: route the documented failure cases
             // through `PermissiveClassificationError` so the runner can
             // surface them in `failedWindowStatuses`.
             switch error {
             case .refusal:
-                logger.debug("permissive_classifier_refused window=\(lineRefs.count, privacy: .public) segments")
+                logger.debug("permissive_classifier_refused window=\(lineRefs.count, privacy: .public) segments error=\(String(describing: error), privacy: .private)")
                 throw PermissiveClassificationError.failed(
                     reason: .permissiveRefusal,
                     underlyingDescription: String(describing: error)
                 )
             case .decodingFailure:
-                logger.debug("permissive_classifier_decoding_failure window=\(lineRefs.count, privacy: .public) segments")
+                logger.debug("permissive_classifier_decoding_failure window=\(lineRefs.count, privacy: .public) segments error=\(String(describing: error), privacy: .private)")
                 throw PermissiveClassificationError.failed(
                     reason: .permissiveDecodingFailure,
                     underlyingDescription: String(describing: error)
@@ -690,7 +727,7 @@ actor PermissiveAdClassifier {
                     initialError: error
                 )
             default:
-                logger.debug("permissive_classifier_generation_error window=\(lineRefs.count, privacy: .public) segments error=\(String(describing: error), privacy: .public)")
+                logger.debug("permissive_classifier_generation_error window=\(lineRefs.count, privacy: .public) segments error=\(String(describing: error), privacy: .private)")
                 throw PermissiveClassificationError.failed(
                     reason: .permissiveDecodingFailure,
                     underlyingDescription: String(describing: error)
@@ -742,6 +779,12 @@ actor PermissiveAdClassifier {
     ) async throws -> PermissiveRefinementResult {
         let lineRefs = segments.map(\.segmentIndex)
 
+        #if DEBUG
+        if let fault = faultInjectionForTesting?("refine") {
+            throw fault
+        }
+        #endif
+
         #if canImport(FoundationModels)
         do {
             let prompt = PermissiveAdGrammar.buildRefinementPrompt(
@@ -757,28 +800,31 @@ actor PermissiveAdClassifier {
                 focusLineRefs: focusLineRefs,
                 maximumSpans: maximumSpans
             )
+        } catch is CancellationError {
+            // Cycle 4 M-1: propagate cooperative cancellation untouched.
+            throw CancellationError()
         } catch let error as LanguageModelSession.GenerationError {
             switch error {
             case .refusal:
-                logger.debug("permissive_refinement_refused window=\(lineRefs.count, privacy: .public) segments")
+                logger.debug("permissive_refinement_refused window=\(lineRefs.count, privacy: .public) segments error=\(String(describing: error), privacy: .private)")
                 throw PermissiveClassificationError.failed(
                     reason: .permissiveRefusal,
                     underlyingDescription: String(describing: error)
                 )
             case .decodingFailure:
-                logger.debug("permissive_refinement_decoding_failure window=\(lineRefs.count, privacy: .public) segments")
+                logger.debug("permissive_refinement_decoding_failure window=\(lineRefs.count, privacy: .public) segments error=\(String(describing: error), privacy: .private)")
                 throw PermissiveClassificationError.failed(
                     reason: .permissiveDecodingFailure,
                     underlyingDescription: String(describing: error)
                 )
             case .exceededContextWindowSize:
-                logger.debug("permissive_refinement_exceeded_context_window window=\(lineRefs.count, privacy: .public) segments")
+                logger.debug("permissive_refinement_exceeded_context_window window=\(lineRefs.count, privacy: .public) segments error=\(String(describing: error), privacy: .private)")
                 throw PermissiveClassificationError.failed(
                     reason: .permissiveContextOverflow,
                     underlyingDescription: String(describing: error)
                 )
             default:
-                logger.debug("permissive_refinement_generation_error window=\(lineRefs.count, privacy: .public) segments error=\(String(describing: error), privacy: .public)")
+                logger.debug("permissive_refinement_generation_error window=\(lineRefs.count, privacy: .public) segments error=\(String(describing: error), privacy: .private)")
                 throw PermissiveClassificationError.failed(
                     reason: .permissiveDecodingFailure,
                     underlyingDescription: String(describing: error)
@@ -830,29 +876,67 @@ actor PermissiveAdClassifier {
         initialSegments: [AdTranscriptSegment],
         initialError: LanguageModelSession.GenerationError
     ) async throws -> CoarseScreeningSchema {
+        // Cycle 4 M-3: the loop body is factored into
+        // `PermissiveAdClassifier.smartShrinkClassify` so tests can
+        // inject a fail-then-succeed `respond` closure without having
+        // to boot a real `LanguageModelSession`. The actor method here
+        // is a thin adapter that forwards the production
+        // `respond(to:)` call site.
+        return try await Self.smartShrinkClassify(
+            initialSegments: initialSegments,
+            initialError: initialError,
+            maxIterations: Self.coarseSmartShrinkMaxIterations,
+            respond: { prompt in try await self.respond(to: prompt) }
+        )
+    }
+
+    /// Maximum number of smart-shrink iterations on the permissive
+    /// coarse path. Matches `FoundationModelClassifier.coarseSmartShrinkMaxIterations`
+    /// in spirit; defined locally so the actor doesn't need a static
+    /// import.
+    static let coarseSmartShrinkMaxIterations: Int = 3
+
+    /// Cycle 4 M-3: testable extraction of the smart-shrink retry loop.
+    /// Each iteration halves the current segment count, rebuilds the
+    /// permissive prompt, and calls the injected `respond` closure. On
+    /// success the parsed `CoarseScreeningSchema` is returned. On
+    /// repeated `.exceededContextWindowSize` the loop continues; any
+    /// other thrown error promotes to
+    /// `PermissiveClassificationError.failed(.permissiveDecodingFailure,
+    /// …)`. After `maxIterations` attempts the helper throws
+    /// `.permissiveContextOverflow`.
+    ///
+    /// The helper is `static` and consumes a closure so unit tests can
+    /// construct a fail-then-succeed stub without touching the actor's
+    /// private `respond(to:)` path.
+    static func smartShrinkClassify(
+        initialSegments: [AdTranscriptSegment],
+        initialError: LanguageModelSession.GenerationError,
+        maxIterations: Int,
+        respond: @Sendable (String) async throws -> String
+    ) async throws -> CoarseScreeningSchema {
         var current = initialSegments
         var lastError: Error = initialError
-        for _ in 0..<Self.coarseSmartShrinkMaxIterations {
-            // Halve the prompt each iteration. The exact target count
-            // is irrelevant — Apple's tokenizer is opaque, so we use a
-            // simple bisection rather than trying to predict the right
-            // size from the previous error string.
+        for _ in 0..<maxIterations {
             let target = max(1, current.count / 2)
             guard target < current.count else { break }
             current = Array(current.prefix(target))
             do {
                 let prompt = PermissiveAdGrammar.buildPrompt(for: current)
-                let raw = try await respond(to: prompt)
+                let raw = try await respond(prompt)
                 return try PermissiveAdGrammar.parseClassify(
                     raw,
                     validLineRefs: current.map(\.segmentIndex)
                 )
+            } catch is CancellationError {
+                // Cycle 4 M-1: cooperative cancellation must propagate
+                // through the shrink loop untouched.
+                throw CancellationError()
             } catch let error as LanguageModelSession.GenerationError {
                 if case .exceededContextWindowSize = error {
                     lastError = error
                     continue
                 }
-                // Promote any other underlying error type.
                 throw PermissiveClassificationError.failed(
                     reason: .permissiveDecodingFailure,
                     underlyingDescription: String(describing: error)
@@ -864,12 +948,6 @@ actor PermissiveAdClassifier {
             underlyingDescription: String(describing: lastError)
         )
     }
-
-    /// Maximum number of smart-shrink iterations on the permissive
-    /// coarse path. Matches `FoundationModelClassifier.coarseSmartShrinkMaxIterations`
-    /// in spirit; defined locally so the actor doesn't need a static
-    /// import.
-    private static let coarseSmartShrinkMaxIterations: Int = 3
     #endif
 
 }

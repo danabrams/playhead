@@ -157,11 +157,54 @@ struct Cycle2FixesTests {
         }
     }
 
-    @Test("Cycle 2 C2: permissiveStatus maps every Reason to the matching SemanticScanStatus")
+    @Test("Cycle 4 H-1: permissiveStatus maps every Reason to the dedicated permissive SemanticScanStatus case")
     func permissiveStatusMappingCoversEveryReason() {
-        #expect(FoundationModelClassifier.permissiveStatus(for: .permissiveRefusal) == .refusal)
-        #expect(FoundationModelClassifier.permissiveStatus(for: .permissiveDecodingFailure) == .decodingFailure)
-        #expect(FoundationModelClassifier.permissiveStatus(for: .permissiveContextOverflow) == .exceededContextWindow)
+        #expect(FoundationModelClassifier.permissiveStatus(for: .permissiveRefusal) == .permissiveRefusal)
+        #expect(FoundationModelClassifier.permissiveStatus(for: .permissiveDecodingFailure) == .permissiveDecodingFailure)
+        #expect(FoundationModelClassifier.permissiveStatus(for: .permissiveContextOverflow) == .permissiveContextOverflow)
+
+        // The inverse (standard-path) mapping must NOT collapse onto
+        // permissive. A standard-path `.refusal` / `.decodingFailure` /
+        // `.exceededContextWindow` stays on its own case.
+        #expect(SemanticScanStatus.refusal != .permissiveRefusal)
+        #expect(SemanticScanStatus.decodingFailure != .permissiveDecodingFailure)
+        #expect(SemanticScanStatus.exceededContextWindow != .permissiveContextOverflow)
+    }
+
+    // MARK: - Cycle 4 H-1: new permissive SemanticScanStatus cases
+
+    @Test("Cycle 4 H-1: new permissive cases retryPolicy == .persistFailure")
+    func newPermissiveCasesRetryPolicy() {
+        #expect(SemanticScanStatus.permissiveRefusal.retryPolicy == .persistFailure)
+        #expect(SemanticScanStatus.permissiveDecodingFailure.retryPolicy == .persistFailure)
+        #expect(SemanticScanStatus.permissiveContextOverflow.retryPolicy == .persistFailure)
+    }
+
+    @Test("Cycle 4 H-1: new permissive cases have stable persisted rawValues")
+    func newPermissiveCasesRawValues() {
+        #expect(SemanticScanStatus.permissiveRefusal.rawValue == "permissive_refusal")
+        #expect(SemanticScanStatus.permissiveDecodingFailure.rawValue == "permissive_decoding_failure")
+        #expect(SemanticScanStatus.permissiveContextOverflow.rawValue == "permissive_context_overflow")
+    }
+
+    @Test("Cycle 4 H-1: new permissive cases round-trip through rawValue init")
+    func newPermissiveCasesRoundTripRawValue() {
+        #expect(SemanticScanStatus(rawValue: "permissive_refusal") == .permissiveRefusal)
+        #expect(SemanticScanStatus(rawValue: "permissive_decoding_failure") == .permissiveDecodingFailure)
+        #expect(SemanticScanStatus(rawValue: "permissive_context_overflow") == .permissiveContextOverflow)
+    }
+
+    @Test("Cycle 4 H-1: new permissive cases round-trip through JSON Codable")
+    func newPermissiveCasesRoundTripCodable() throws {
+        for status in [
+            SemanticScanStatus.permissiveRefusal,
+            .permissiveDecodingFailure,
+            .permissiveContextOverflow
+        ] {
+            let encoded = try JSONEncoder().encode(status)
+            let decoded = try JSONDecoder().decode(SemanticScanStatus.self, from: encoded)
+            #expect(decoded == status)
+        }
     }
 
     // MARK: - H4: ownershipInferenceWasSuppressed round-trip
@@ -213,17 +256,26 @@ struct Cycle2FixesTests {
         #expect(decoded[0].ownershipInferenceWasSuppressed == false)
     }
 
-    @Test("Cycle 2 H4: legacy spansJSON without the field decodes with suppressed=nil (default false)")
+    @Test("Cycle 4 M-6: legacy spansJSON without the field decodes with suppressed=false")
     func legacySpansJSONDecodesWithDefault() throws {
         // A pre-H4 row encoded only the original five fields plus the
         // bd-3vm anchors[]. We construct one by hand and verify the
-        // optional decodes to nil.
+        // non-optional Bool decodes to its default value `false`.
         let legacyJSON = #"""
         [{"firstLineRef":0,"lastLineRef":1,"commercialIntent":"paid","ownership":"thirdParty","certainty":"strong","anchors":[]}]
         """#
         let decoded = try BackfillJobRunner.decodeRefinedSpansForTesting(legacyJSON)
         try #require(decoded.count == 1)
-        #expect(decoded[0].ownershipInferenceWasSuppressed == nil)
+        #expect(decoded[0].ownershipInferenceWasSuppressed == false)
+    }
+
+    @Test("Cycle 4 M-6: legacy EvidencePayload without the field decodes with suppressed=false")
+    func legacyEvidencePayloadDecodesWithDefault() throws {
+        let legacyJSON = #"""
+        {"commercialIntent":"paid","ownership":"thirdParty","certainty":"strong","boundaryPrecision":"usable","firstLineRef":0,"lastLineRef":1,"jobId":"j1","memoryWriteEligible":false,"anchors":[]}
+        """#
+        let decoded = try BackfillJobRunner.decodeEvidencePayloadForTesting(legacyJSON)
+        #expect(decoded.ownershipInferenceWasSuppressed == false)
     }
 
     @Test("Cycle 2 H4: EvidencePayload round-trip preserves ownershipInferenceWasSuppressed=true")

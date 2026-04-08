@@ -200,6 +200,19 @@ actor BackfillJobRunner {
     /// the scan cohort and transcript version are unchanged. Returns a
     /// `RunResult` describing what was admitted, persisted, or deferred.
     func runPendingBackfill(for inputs: AssetInputs) async throws -> RunResult {
+        // Cycle 4 H-3: reset per-run counters BEFORE plan execution so
+        // a second invocation of `runPendingBackfill` on the same actor
+        // instance does not accumulate permissive/asymmetric telemetry
+        // from earlier runs. Mirror of the expansion-counter reset
+        // Agent B added; when branches merge this block is the
+        // canonical place to reset every run-scoped counter. Agent B4
+        // should fold expansion counters into this same reset block on
+        // merge.
+        permissiveRefusalCount = 0
+        permissiveDecodingFailureCount = 0
+        permissiveContextOverflowCount = 0
+        asymmetricWindowCount = 0
+
         guard mode != .disabled else {
             logger.debug("FM backfill skipped: mode=disabled")
             return .empty
@@ -1879,9 +1892,10 @@ actor BackfillJobRunner {
     /// `semantic_scan_results.spansJSON`. The `anchors` field is optional
     /// so legacy rows (which omitted it entirely) decode without throwing.
     ///
-    /// Cycle 2 H4: `ownershipInferenceWasSuppressed` is also optional so
-    /// legacy rows decode with a `false` default. Set to `true` only on
-    /// the permissive bypass path where the runner hardcodes
+    /// Cycle 2 H4 / Cycle 4 M-6: `ownershipInferenceWasSuppressed` is a
+    /// non-optional `Bool` that defaults to `false` when a legacy
+    /// spansJSON row omits the key. Set to `true` only on the
+    /// permissive bypass path where the runner hardcodes
     /// commercialIntent / ownership / alternativeExplanation defaults
     /// rather than reading them from the FM. Phase 8 sponsor-memory
     /// writers MUST gate writes on this flag (skip suppressed spans)
@@ -1895,9 +1909,53 @@ actor BackfillJobRunner {
         /// bd-3vm: per-anchor identity tuples. Nil on legacy rows; empty
         /// array on post-bd-3vm rows whose span carried no anchors.
         let anchors: [EncodedAnchor]?
-        /// Cycle 2 H4: nil on legacy rows (default false on decode);
-        /// true only on permissive-bypass spans.
-        let ownershipInferenceWasSuppressed: Bool?
+        /// Cycle 2 H4 / Cycle 4 M-6: non-optional so legacy rows that
+        /// omitted the key decode to `false` (the safe default — a
+        /// row written before H4 cannot be a permissive-bypass span).
+        let ownershipInferenceWasSuppressed: Bool
+
+        init(
+            firstLineRef: Int,
+            lastLineRef: Int,
+            commercialIntent: String,
+            ownership: String,
+            certainty: String,
+            anchors: [EncodedAnchor]?,
+            ownershipInferenceWasSuppressed: Bool = false
+        ) {
+            self.firstLineRef = firstLineRef
+            self.lastLineRef = lastLineRef
+            self.commercialIntent = commercialIntent
+            self.ownership = ownership
+            self.certainty = certainty
+            self.anchors = anchors
+            self.ownershipInferenceWasSuppressed = ownershipInferenceWasSuppressed
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case firstLineRef
+            case lastLineRef
+            case commercialIntent
+            case ownership
+            case certainty
+            case anchors
+            case ownershipInferenceWasSuppressed
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.firstLineRef = try container.decode(Int.self, forKey: .firstLineRef)
+            self.lastLineRef = try container.decode(Int.self, forKey: .lastLineRef)
+            self.commercialIntent = try container.decode(String.self, forKey: .commercialIntent)
+            self.ownership = try container.decode(String.self, forKey: .ownership)
+            self.certainty = try container.decode(String.self, forKey: .certainty)
+            self.anchors = try container.decodeIfPresent([EncodedAnchor].self, forKey: .anchors)
+            // Cycle 4 M-6: default to false on legacy rows.
+            self.ownershipInferenceWasSuppressed = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .ownershipInferenceWasSuppressed
+            ) ?? false
+        }
     }
 
     /// bd-3vm: shared encoder. Exposed `internal static` so tests can
@@ -1969,12 +2027,13 @@ extension BackfillJobRunner {
         /// evidence anchors. Optional so legacy evidence_events rows
         /// (written before bd-3vm) decode cleanly with `anchors == nil`.
         let anchors: [EncodedAnchor]?
-        /// Cycle 2 H4: optional so legacy rows decode with the safe
+        /// Cycle 2 H4 / Cycle 4 M-6: non-optional so legacy
+        /// evidence_events rows (written before H4) decode to the safe
         /// default `false` (a row written before H4 cannot be a
         /// permissive-bypass span and must not be skipped retroactively
         /// by sponsor-memory writers). Set to `true` only by spans
         /// emitted on the permissive bypass path.
-        let ownershipInferenceWasSuppressed: Bool?
+        let ownershipInferenceWasSuppressed: Bool
 
         init(
             commercialIntent: String,
@@ -1986,7 +2045,7 @@ extension BackfillJobRunner {
             jobId: String,
             memoryWriteEligible: Bool,
             anchors: [EncodedAnchor]?,
-            ownershipInferenceWasSuppressed: Bool? = nil
+            ownershipInferenceWasSuppressed: Bool = false
         ) {
             self.commercialIntent = commercialIntent
             self.ownership = ownership
@@ -1998,6 +2057,37 @@ extension BackfillJobRunner {
             self.memoryWriteEligible = memoryWriteEligible
             self.anchors = anchors
             self.ownershipInferenceWasSuppressed = ownershipInferenceWasSuppressed
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case commercialIntent
+            case ownership
+            case certainty
+            case boundaryPrecision
+            case firstLineRef
+            case lastLineRef
+            case jobId
+            case memoryWriteEligible
+            case anchors
+            case ownershipInferenceWasSuppressed
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.commercialIntent = try container.decode(String.self, forKey: .commercialIntent)
+            self.ownership = try container.decode(String.self, forKey: .ownership)
+            self.certainty = try container.decode(String.self, forKey: .certainty)
+            self.boundaryPrecision = try container.decode(String.self, forKey: .boundaryPrecision)
+            self.firstLineRef = try container.decode(Int.self, forKey: .firstLineRef)
+            self.lastLineRef = try container.decode(Int.self, forKey: .lastLineRef)
+            self.jobId = try container.decode(String.self, forKey: .jobId)
+            self.memoryWriteEligible = try container.decode(Bool.self, forKey: .memoryWriteEligible)
+            self.anchors = try container.decodeIfPresent([EncodedAnchor].self, forKey: .anchors)
+            // Cycle 4 M-6: default to false on legacy rows.
+            self.ownershipInferenceWasSuppressed = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .ownershipInferenceWasSuppressed
+            ) ?? false
         }
     }
 }

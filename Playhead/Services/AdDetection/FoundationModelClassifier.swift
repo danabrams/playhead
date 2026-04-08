@@ -862,6 +862,15 @@ struct FoundationModelClassifier: Sendable {
     /// production prompt path is byte-identical until the flag is set.
     private let redactor: PromptRedactor
 
+    #if DEBUG
+    /// Cycle 4 M-5: test hook exposing the live redactor so unit tests
+    /// can assert `PlayheadRuntime`'s factory actually injects a
+    /// non-noop redactor. This guard is DEBUG-only so the production
+    /// ABI stays unchanged. The accessor is read-only — tests cannot
+    /// mutate the redactor once the classifier is constructed.
+    var redactorForTesting: PromptRedactor { redactor }
+    #endif
+
     init(
         runtime: Runtime? = nil,
         config: Config = .default,
@@ -1812,20 +1821,23 @@ struct FoundationModelClassifier: Sendable {
     }
 
     /// Cycle 2 C2: map a `PermissiveClassificationError.Reason` to the
-    /// matching `SemanticScanStatus` slot the runner already understands.
-    /// All three reasons collapse onto existing failed-window statuses
-    /// — refusal/decoding/exceededContextWindow — so the
-    /// `failedWindowStatuses` array remains a homogeneous list of
-    /// `SemanticScanStatus` values and the per-reason counter logic is
-    /// purely additional telemetry rather than a new persistence row.
+    /// matching `SemanticScanStatus` permissive variant. The persisted
+    /// `semantic_scan_results.status` column preserves the
+    /// permissive-path distinction from the standard-path
+    /// `.refusal` / `.decodingFailure` / `.exceededContextWindow`
+    /// cases so downstream consumers can tell which path produced the
+    /// failure without scraping the side-channel counter.
+    ///
+    /// Cycle 4 H-1: changed from collapsing onto the non-permissive
+    /// statuses to returning the dedicated permissive variants.
     static func permissiveStatus(for reason: PermissiveClassificationError.Reason) -> SemanticScanStatus {
         switch reason {
         case .permissiveRefusal:
-            return .refusal
+            return .permissiveRefusal
         case .permissiveDecodingFailure:
-            return .decodingFailure
+            return .permissiveDecodingFailure
         case .permissiveContextOverflow:
-            return .exceededContextWindow
+            return .permissiveContextOverflow
         }
     }
 
