@@ -117,47 +117,33 @@ struct SensitiveWindowRouterTests {
         #expect(router.hasRules == false)
     }
 
-    // MARK: - bd-1en Phase 2: catalog-aware routing
+    // MARK: - bd-1en Phase 2: literal-prompt routing via routeText
 
-    @Test("catalog-aware route fires on benign window with sensitive catalog text")
-    func catalogTriggerRoutesSensitive() {
-        // The Kelly Ripa #1 case: window content is benign Kelly Ripa
-        // cross-promo, but the embedded evidence catalog contains
-        // CVS pre-roll atoms from elsewhere in the episode. The
-        // catalog-aware overload must catch this so refinement routes
-        // through the permissive path.
+    @Test("routeText fires when the rendered prompt embeds pharma trigger vocabulary")
+    func routeTextFiresOnEmbeddedPharma() {
+        // The refinement-pass code path passes `plan.prompt` (the literal
+        // rendered prompt the FM will see) to `routeText`. This catches
+        // pharma triggers regardless of whether they live in the window
+        // segments or in the embedded evidence-catalog snippet.
         let router = makeRouter()
-        let benignSegments = [
-            makeSegment(index: 4, text: "Hey everyone, it's Kelly Ripa, and we're celebrating 3 years of my podcast"),
-            makeSegment(index: 5, text: "Let's talk off camera"),
-        ]
-        let catalogTexts = [
-            "Schedule your shingles, RSV, pneumococcal pneumonia vaccine today at cvs.com"
-        ]
-        #expect(router.route(window: benignSegments, catalogTexts: catalogTexts) == .sensitive)
+        let prompt = """
+        Refine ad spans.
+        L4> "Hey everyone, welcome to the show"
+        L5> "Let's talk off camera"
+        [E1] "Schedule your shingles vaccine at CVS today" (brandSpan, line 0)
+        """
+        #expect(router.routeText(prompt) == .sensitive)
     }
 
-    @Test("catalog-aware route stays normal when both segments and catalog are clean")
-    func catalogCleanStaysNormal() {
+    @Test("routeText stays normal when the rendered prompt is clean")
+    func routeTextStaysNormalOnCleanPrompt() {
         let router = makeRouter()
-        let segments = [makeSegment(index: 0, text: "Welcome back to the show.")]
-        let catalogTexts = ["Conan tells a joke about his dog."]
-        #expect(router.route(window: segments, catalogTexts: catalogTexts) == .normal)
-    }
-
-    @Test("catalog-aware route fires when only the segments are sensitive")
-    func catalogAwareSegmentTriggerStillFires() {
-        let router = makeRouter()
-        let segments = [makeSegment(index: 0, text: "Schedule your flu vaccine at CVS today.")]
-        #expect(router.route(window: segments, catalogTexts: []) == .sensitive)
-    }
-
-    @Test("catalog-aware noop router still returns normal")
-    func catalogAwareNoopStaysNormal() {
-        let router = SensitiveWindowRouter.noop
-        let segments = [makeSegment(index: 0, text: "Schedule your flu vaccine at CVS.")]
-        let catalogTexts = ["Talk to your doctor about Trulicity."]
-        #expect(router.route(window: segments, catalogTexts: catalogTexts) == .normal)
+        let prompt = """
+        Refine ad spans.
+        L0> "Welcome back to the show."
+        L1> "Conan tells a joke about his dog."
+        """
+        #expect(router.routeText(prompt) == .normal)
     }
 }
 

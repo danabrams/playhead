@@ -57,26 +57,111 @@ import FoundationModels
 /// reason `PermissiveAdClassifier` itself is gated). The parser and
 /// prompt builder do not touch FoundationModels at all — they're
 /// pure Foundation/regex helpers.
-/// bd-1en Phase 2: result of running the permissive refinement pass on
-/// a single window. The runner uses this to decide what to persist:
+/// Result of running the permissive refinement pass on a single window.
 ///
-/// - `.spans`  → build one `RefinedAdSpan` per pair (anchorless; the
-///               permissive path has no evidence catalog by design).
-/// - `.noAd`   → drop the window. The focused refinement contradicted
-///               the coarse verdict; trust the more focused signal.
+/// - `.spans`    → one `RefinedAdSpan` per pair (anchorless by design;
+///                  the permissive path omits the evidence catalog).
+/// - `.noAd`     → drop the window. The focused refinement contradicted
+///                  the coarse verdict; trust the more focused signal.
 /// - `.unparsed` → fall back to a single full-window `RefinedAdSpan`.
-///                 This is the recall safety net: parser failures and
-///                 garbage / template-parroting output should never
-///                 cost us an ad we already know is in the window.
+///                  Recall safety net: parser failures must never cost
+///                  us an ad we already coarse-confirmed.
 enum PermissiveRefinementResult: Sendable, Equatable {
     case spans([RefinementSpanPair])
     case noAd
     case unparsed
 }
 
-/// bd-1en Phase 2: a (firstLineRef, lastLineRef) pair extracted from a
-/// permissive refinement response. Each pair becomes one
-/// `RefinedAdSpan` in the runner. Pairs are inclusive on both ends.
+extension PermissiveRefinementResult: CustomStringConvertible {
+    var description: String {
+        switch self {
+        case .spans: return "spans"
+        case .noAd: return "noAd"
+        case .unparsed: return "unparsed"
+        }
+    }
+}
+
+extension PermissiveRefinementResult {
+    /// Convert this result into the `[RefinedAdSpan]` shape the runner
+    /// persists. Bypasses `FoundationModelClassifier.sanitize` because
+    /// that path rejects anchorless spans outright.
+    ///
+    /// `.unparsed` collapses to a single full-window span: coarse
+    /// already classified the window as containsAd via the permissive
+    /// path, so losing the ad to a parser glitch is strictly worse
+    /// than emitting a slightly-too-wide span.
+    func refinedSpans(
+        for plan: RefinementWindowPlan,
+        lineRefLookup: [Int: AdTranscriptSegment]
+    ) -> [RefinedAdSpan] {
+        switch self {
+        case .noAd:
+            return []
+        case let .spans(pairs):
+            return pairs.compactMap { pair in
+                guard let firstSegment = lineRefLookup[pair.firstLineRef],
+                      let lastSegment = lineRefLookup[pair.lastLineRef] else {
+                    return nil
+                }
+                return Self.makeAnchorlessSpan(
+                    firstLineRef: pair.firstLineRef,
+                    lastLineRef: pair.lastLineRef,
+                    firstSegment: firstSegment,
+                    lastSegment: lastSegment,
+                    boundaryPrecision: .usable
+                )
+            }
+        case .unparsed:
+            guard let firstLineRef = plan.lineRefs.first,
+                  let lastLineRef = plan.lineRefs.last,
+                  let firstSegment = lineRefLookup[firstLineRef],
+                  let lastSegment = lineRefLookup[lastLineRef] else {
+                return []
+            }
+            return [
+                Self.makeAnchorlessSpan(
+                    firstLineRef: firstLineRef,
+                    lastLineRef: lastLineRef,
+                    firstSegment: firstSegment,
+                    lastSegment: lastSegment,
+                    boundaryPrecision: .rough
+                )
+            ]
+        }
+    }
+
+    /// Defaults: `.paid` + `.thirdParty` because the router only fires
+    /// on coarse-confirmed sponsor-shaped pharma content. `.strong`
+    /// because coarse already said containsAd. `memoryWriteEligible`
+    /// is always false — anchorless spans never write to sponsor memory.
+    private static func makeAnchorlessSpan(
+        firstLineRef: Int,
+        lastLineRef: Int,
+        firstSegment: AdTranscriptSegment,
+        lastSegment: AdTranscriptSegment,
+        boundaryPrecision: BoundaryPrecision
+    ) -> RefinedAdSpan {
+        RefinedAdSpan(
+            commercialIntent: .paid,
+            ownership: .thirdParty,
+            firstLineRef: firstLineRef,
+            lastLineRef: lastLineRef,
+            firstAtomOrdinal: firstSegment.firstAtomOrdinal,
+            lastAtomOrdinal: lastSegment.lastAtomOrdinal,
+            certainty: .strong,
+            boundaryPrecision: boundaryPrecision,
+            resolvedEvidenceAnchors: [],
+            memoryWriteEligible: false,
+            alternativeExplanation: .unknown,
+            reasonTags: []
+        )
+    }
+}
+
+/// A `(firstLineRef, lastLineRef)` pair extracted from a permissive
+/// refinement response. Each pair becomes one `RefinedAdSpan`. Inclusive
+/// on both ends.
 struct RefinementSpanPair: Sendable, Equatable, Hashable {
     let firstLineRef: Int
     let lastLineRef: Int
@@ -209,16 +294,10 @@ enum PermissiveAdGrammar {
         )
     }
 
-    /// bd-1en Phase 2: build the refinement-pass permissive prompt for a
-    /// window. Same grammar surface as the coarse prompt — the only
-    /// behavioral difference is the instruction asks the model to find
-    /// the *tightest* contiguous line ref range(s) that are part of an
-    /// ad, so refinement output is more precise than coarse output. The
-    /// permissive refinement path deliberately omits the evidence
-    /// catalog (which is what triggers Kelly Ripa #1 refusals on the
-    /// `@Generable` refinement path — the catalog embeds pharma atoms
-    /// from elsewhere in the episode and the safety classifier reads
-    /// the gestalt). Window text alone, no catalog.
+    /// Refinement variant of `buildPrompt`. Asks the model for the
+    /// *tightest* contiguous line ref range(s). Deliberately omits the
+    /// evidence catalog — the catalog snippet is what trips refusals
+    /// on the standard refinement path.
     static func buildRefinementPrompt(for segments: [AdTranscriptSegment]) -> String {
         let lineRefs = segments.map(\.segmentIndex)
         let lineRefList = lineRefs.map { "L\($0)" }.joined(separator: ", ")
@@ -255,14 +334,11 @@ enum PermissiveAdGrammar {
         """
     }
 
-    /// bd-1en Phase 2: refinement-pass parser. Returns the parsed
-    /// (firstLineRef, lastLineRef) PAIRS, not a flattened set, so
-    /// non-contiguous spans become separate `RefinedAdSpan`s downstream.
-    /// Each pair is clamped to `validLineRefs`; pairs that fall entirely
-    /// outside the window are dropped. Garbage / template-parroting /
-    /// refusal-shaped output collapses to `.unparsed`, which the runner
-    /// treats as a fallback signal (use the full coarse window as a
-    /// single span rather than losing the ad entirely).
+    /// Refinement variant of `parse`. Preserves pair structure (so
+    /// non-contiguous spans become separate `RefinedAdSpan`s), clamps
+    /// each pair to `validLineRefs`, and snaps endpoints inward when
+    /// the window has planner gaps. Garbage / template-parroting /
+    /// refusal-shaped output collapses to `.unparsed`.
     static func parseRefinement(_ raw: String, validLineRefs: [Int]) -> PermissiveRefinementResult {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .unparsed }

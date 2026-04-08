@@ -95,27 +95,6 @@ struct SensitiveWindowRouter: Sendable {
         return .normal
     }
 
-    /// bd-1en Phase 2: refinement-time routing. Refinement prompts embed
-    /// an evidence catalog snippet from elsewhere in the episode, and
-    /// the safety classifier reads the gestalt of segments + catalog
-    /// when deciding whether to refuse. The Kelly Ripa #1 cross-promo
-    /// is the canonical example: benign window content but the catalog
-    /// embeds CVS pre-roll atoms from elsewhere in the episode, which
-    /// trips the safety classifier on the refinement call. This
-    /// overload ALSO inspects the catalog text so refinement-time
-    /// routing matches the actual content the FM will see.
-    ///
-    /// Returns `.sensitive` as soon as any rule matches any segment OR
-    /// any catalog text; otherwise `.normal`.
-    func route(window segments: [AdTranscriptSegment], catalogTexts: [String]) -> Route {
-        guard !triggerRules.isEmpty else { return .normal }
-        if route(window: segments) == .sensitive { return .sensitive }
-        for text in catalogTexts {
-            if matchesAnyTrigger(in: text) { return .sensitive }
-        }
-        return .normal
-    }
-
     /// Convenience: classify a single piece of text. Used by router unit
     /// tests so they don't need to construct full `AdTranscriptSegment`
     /// fixtures, and by the integration path when the caller already has

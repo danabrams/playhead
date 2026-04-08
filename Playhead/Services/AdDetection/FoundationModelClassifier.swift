@@ -1338,23 +1338,12 @@ struct FoundationModelClassifier: Sendable {
         )
     }
 
-    /// bd-1en Phase 2: dispatching overload that routes sensitive
-    /// refinement windows (pharma / medical content in either the
-    /// window segments OR the embedded evidence catalog) through
-    /// `PermissiveAdClassifier.refine` instead of the `@Generable`
-    /// refinement path. The standard `@Generable` path is the only
-    /// way to get evidence-anchor-resolved spans, but it ALSO runs
-    /// the default safety classifier and refuses on pharma content
-    /// (and on benign content whose catalog snippet contains pharma).
-    /// The permissive refinement path returns anchorless spans —
-    /// the caller pays a small precision cost in exchange for not
-    /// losing the ad entirely.
-    ///
-    /// When BOTH `sensitiveRouter` and `permissiveClassifier` are
-    /// provided AND the router has rules loaded, sensitive plans
-    /// short-circuit the FM call entirely. When either is nil or the
-    /// router is the noop, behavior is byte-identical to the
-    /// pre-bd-1en Phase 2 path.
+    /// Dispatching overload: sensitive plans route through
+    /// `PermissiveAdClassifier.refine` to avoid `@Generable` refusals
+    /// on pharma content. The permissive path returns anchorless
+    /// spans, trading evidence-anchor precision for not losing the
+    /// ad entirely. When either argument is nil this collapses to
+    /// the pre-Phase-2 path.
     @available(iOS 26.0, *)
     func refinePassB(
         zoomPlans: [RefinementWindowPlan],
@@ -1420,12 +1409,6 @@ struct FoundationModelClassifier: Sendable {
         // Mirrors the coarse `failedWindowStatuses` bookkeeping.
         var failedWindowStatuses: [SemanticScanStatus] = []
 
-        // bd-1en Phase 2: gate the permissive refinement dispatch on
-        // both a router with rules AND a non-nil permissive classifier.
-        // When either is missing, every plan falls through to the
-        // existing `@Generable` refinement path with no behavioral
-        // change. This is the same opt-in pattern used for the coarse
-        // dispatch in `coarsePassA`.
         let permissiveDispatchEnabled =
             sensitiveRouter?.hasRules == true && permissiveClassifier != nil
 
@@ -1463,31 +1446,20 @@ struct FoundationModelClassifier: Sendable {
 
             let windowStart = clock.now
 
-            // bd-1en Phase 2: route sensitive refinement plans through
-            // the permissive `SystemLanguageModel` path *before* paying
-            // for an `@Generable` refinement call we know would refuse.
-            //
-            // The router inspects the LITERAL rendered prompt (`plan.prompt`)
-            // rather than just the window segments + structured evidence
-            // catalog. The first on-device run of Phase 2 (2026-04-08)
-            // proved that Kelly Ripa #1 still refused even after we added
-            // segments+catalogTexts routing — the pharma trigger words
-            // were embedded in the prompt by SOME channel other than
-            // `plan.promptEvidence.matchedText` (the catalog snippet
-            // builder, the focus-cluster context, the surrounding
-            // narration — doesn't matter which one). The literal prompt
-            // is the only ground truth for "what bytes will the safety
-            // classifier read." Routing on `plan.prompt` catches every
-            // path the trigger vocabulary can take into the FM call.
+            // Route sensitive plans through the permissive path before
+            // an `@Generable` call we know would refuse. We inspect the
+            // literal rendered `plan.prompt` because trigger vocabulary
+            // can reach the FM via channels other than the structured
+            // catalog (focus-cluster context, narration, etc.) — the
+            // bytes the classifier reads are the only ground truth.
             if permissiveDispatchEnabled,
                let router = sensitiveRouter,
                let permissive = permissiveClassifier {
                 let windowSegments = plan.lineRefs.compactMap { lineRefLookup[$0] }
                 if router.routeText(plan.prompt) == .sensitive {
                     let permissiveResult = await permissive.refine(window: windowSegments)
-                    let permissiveSpans = Self.buildPermissiveRefinedSpans(
-                        result: permissiveResult,
-                        plan: plan,
+                    let permissiveSpans = permissiveResult.refinedSpans(
+                        for: plan,
                         lineRefLookup: lineRefLookup
                     )
                     let permissiveLatency = Self.latencyMillis(since: windowStart, clock: clock)
@@ -1499,7 +1471,7 @@ struct FoundationModelClassifier: Sendable {
                         firstLineRef=\(plan.lineRefs.first ?? -1, privacy: .public) \
                         lastLineRef=\(plan.lineRefs.last ?? -1, privacy: .public) \
                         lineRefCount=\(plan.lineRefs.count, privacy: .public) \
-                        result=\(Self.permissiveResultLabel(permissiveResult), privacy: .public) \
+                        result=\(permissiveResult.description, privacy: .public) \
                         spans=\(permissiveSpans.count, privacy: .public) \
                         latencyMillis=\(permissiveLatency, privacy: .public)
                         """
@@ -1623,118 +1595,6 @@ struct FoundationModelClassifier: Sendable {
             return first
         }
         return .failedTransient
-    }
-
-    /// bd-1en Phase 2: convert a `PermissiveRefinementResult` into the
-    /// `[RefinedAdSpan]` shape the runner persists. The permissive
-    /// refinement path has no evidence catalog by design (the catalog
-    /// is what trips refusal-prone refinement), so every span produced
-    /// here has empty `resolvedEvidenceAnchors` — and we deliberately
-    /// bypass the standard `sanitize()` path because that path rejects
-    /// anchorless spans outright.
-    ///
-    /// Mapping:
-    ///
-    /// - `.spans(pairs)` → one `RefinedAdSpan` per pair, clamped to
-    ///   the plan's window line refs (the parser already clamps, but
-    ///   we re-validate against `lineRefLookup` so a planner-gap line
-    ///   ref still gets dropped if it slips through).
-    /// - `.noAd` → empty array (caller drops the window).
-    /// - `.unparsed` → SINGLE full-window span as the recall safety
-    ///   net. Coarse already classified this window as containsAd via
-    ///   the permissive path, so losing the ad to a parser glitch is
-    ///   strictly worse than emitting a slightly-too-wide span.
-    ///
-    /// Defaults for the unenriched fields:
-    ///
-    /// - `commercialIntent = .paid` — the conservative assumption for
-    ///   pharma reads is that they ARE paid sponsorships. Anything we
-    ///   route through this path is a coarse-confirmed ad in a window
-    ///   the router flagged as sensitive.
-    /// - `ownership = .thirdParty` — pharma reads are almost always
-    ///   third-party sponsors, not show-owned content.
-    /// - `certainty = .strong` — coarse already said containsAd via
-    ///   the permissive path; the focused refinement either confirmed
-    ///   precise spans or fell back to the full window. Both are
-    ///   strong signals.
-    /// - `boundaryPrecision = .usable` for parsed spans, `.rough` for
-    ///   the full-window fallback.
-    /// - `memoryWriteEligible = false` — anchorless spans NEVER write
-    ///   to the cross-session memory store. Memory writes require a
-    ///   resolved evidence anchor and the permissive path has none.
-    /// - `alternativeExplanation = .unknown`, `reasonTags = []`.
-    static func buildPermissiveRefinedSpans(
-        result: PermissiveRefinementResult,
-        plan: RefinementWindowPlan,
-        lineRefLookup: [Int: AdTranscriptSegment]
-    ) -> [RefinedAdSpan] {
-        switch result {
-        case .noAd:
-            return []
-        case let .spans(pairs):
-            var spans: [RefinedAdSpan] = []
-            spans.reserveCapacity(pairs.count)
-            for pair in pairs {
-                guard let firstSegment = lineRefLookup[pair.firstLineRef],
-                      let lastSegment = lineRefLookup[pair.lastLineRef] else {
-                    continue
-                }
-                spans.append(
-                    RefinedAdSpan(
-                        commercialIntent: .paid,
-                        ownership: .thirdParty,
-                        firstLineRef: pair.firstLineRef,
-                        lastLineRef: pair.lastLineRef,
-                        firstAtomOrdinal: firstSegment.firstAtomOrdinal,
-                        lastAtomOrdinal: lastSegment.lastAtomOrdinal,
-                        certainty: .strong,
-                        boundaryPrecision: .usable,
-                        resolvedEvidenceAnchors: [],
-                        memoryWriteEligible: false,
-                        alternativeExplanation: .unknown,
-                        reasonTags: []
-                    )
-                )
-            }
-            return spans
-        case .unparsed:
-            // Recall safety net: single full-window span using the
-            // plan's first/last line refs. The full-window span loses
-            // sub-window precision but preserves the ad detection.
-            guard let firstLineRef = plan.lineRefs.first,
-                  let lastLineRef = plan.lineRefs.last,
-                  let firstSegment = lineRefLookup[firstLineRef],
-                  let lastSegment = lineRefLookup[lastLineRef] else {
-                return []
-            }
-            return [
-                RefinedAdSpan(
-                    commercialIntent: .paid,
-                    ownership: .thirdParty,
-                    firstLineRef: firstLineRef,
-                    lastLineRef: lastLineRef,
-                    firstAtomOrdinal: firstSegment.firstAtomOrdinal,
-                    lastAtomOrdinal: lastSegment.lastAtomOrdinal,
-                    certainty: .strong,
-                    boundaryPrecision: .rough,
-                    resolvedEvidenceAnchors: [],
-                    memoryWriteEligible: false,
-                    alternativeExplanation: .unknown,
-                    reasonTags: []
-                )
-            ]
-        }
-    }
-
-    /// bd-1en Phase 2: short label used in the
-    /// `refinement_pass_window_permissive_route` log line so the
-    /// device-log diff between runs is greppable.
-    static func permissiveResultLabel(_ result: PermissiveRefinementResult) -> String {
-        switch result {
-        case .spans: return "spans"
-        case .noAd: return "noAd"
-        case .unparsed: return "unparsed"
-        }
     }
 
     // H14: Lines are prefixed `L<n>>` (not `<n>:`) so the model cannot be

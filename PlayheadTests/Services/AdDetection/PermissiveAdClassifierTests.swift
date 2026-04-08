@@ -202,32 +202,25 @@ struct PermissiveAdClassifierTests {
         #expect(result == .spans([RefinementSpanPair(firstLineRef: 7, lastLineRef: 7)]))
     }
 
-    // MARK: - bd-1en Phase 2: buildPermissiveRefinedSpans
+    // MARK: - PermissiveRefinementResult.refinedSpans(for:lineRefLookup:)
 
-    @Test("buildPermissiveRefinedSpans .noAd → empty spans (window dropped)")
-    func buildPermissiveSpansNoAdReturnsEmpty() {
+    @Test("refinedSpans .noAd → empty spans (window dropped)")
+    func refinedSpansNoAdReturnsEmpty() {
         let plan = makePermissiveTestPlan(lineRefs: [0, 1])
         let lookup = makePermissiveTestLookup(indices: [0, 1])
-        let spans = FoundationModelClassifier.buildPermissiveRefinedSpans(
-            result: .noAd,
-            plan: plan,
-            lineRefLookup: lookup
-        )
+        let spans = PermissiveRefinementResult.noAd.refinedSpans(for: plan, lineRefLookup: lookup)
         #expect(spans.isEmpty)
     }
 
-    @Test("buildPermissiveRefinedSpans .spans → one RefinedAdSpan per pair")
-    func buildPermissiveSpansSpansReturnOnePerPair() {
+    @Test("refinedSpans .spans → one RefinedAdSpan per pair")
+    func refinedSpansSpansReturnOnePerPair() {
         let plan = makePermissiveTestPlan(lineRefs: [0, 1, 2, 3])
         let lookup = makePermissiveTestLookup(indices: [0, 1, 2, 3])
-        let spans = FoundationModelClassifier.buildPermissiveRefinedSpans(
-            result: .spans([
-                RefinementSpanPair(firstLineRef: 0, lastLineRef: 1),
-                RefinementSpanPair(firstLineRef: 2, lastLineRef: 3)
-            ]),
-            plan: plan,
-            lineRefLookup: lookup
-        )
+        let result = PermissiveRefinementResult.spans([
+            RefinementSpanPair(firstLineRef: 0, lastLineRef: 1),
+            RefinementSpanPair(firstLineRef: 2, lastLineRef: 3)
+        ])
+        let spans = result.refinedSpans(for: plan, lineRefLookup: lookup)
         #expect(spans.count == 2)
         #expect(spans[0].firstLineRef == 0 && spans[0].lastLineRef == 1)
         #expect(spans[1].firstLineRef == 2 && spans[1].lastLineRef == 3)
@@ -239,18 +232,14 @@ struct PermissiveAdClassifierTests {
         #expect(spans.allSatisfy { $0.boundaryPrecision == .usable })
     }
 
-    @Test("buildPermissiveRefinedSpans .unparsed → single full-window fallback span")
-    func buildPermissiveSpansUnparsedFallback() {
+    @Test("refinedSpans .unparsed → single full-window fallback span")
+    func refinedSpansUnparsedFallback() {
         // Recall safety net: parser failure must NOT lose the ad. Emit
         // a single span covering the full plan window with .rough
         // boundaryPrecision so downstream knows it's a wide fallback.
         let plan = makePermissiveTestPlan(lineRefs: [4, 5, 6, 7])
         let lookup = makePermissiveTestLookup(indices: [4, 5, 6, 7])
-        let spans = FoundationModelClassifier.buildPermissiveRefinedSpans(
-            result: .unparsed,
-            plan: plan,
-            lineRefLookup: lookup
-        )
+        let spans = PermissiveRefinementResult.unparsed.refinedSpans(for: plan, lineRefLookup: lookup)
         #expect(spans.count == 1)
         #expect(spans[0].firstLineRef == 4)
         #expect(spans[0].lastLineRef == 7)
@@ -259,23 +248,29 @@ struct PermissiveAdClassifierTests {
         #expect(spans[0].memoryWriteEligible == false)
     }
 
-    @Test("buildPermissiveRefinedSpans .spans drops pairs whose endpoints are missing from the lookup")
-    func buildPermissiveSpansDropsMissingLookupEntries() {
+    @Test("refinedSpans .spans drops pairs whose endpoints are missing from the lookup")
+    func refinedSpansDropsMissingLookupEntries() {
         let plan = makePermissiveTestPlan(lineRefs: [0, 1, 2])
         // Lookup only has line refs 0 and 2 — line ref 1 is missing.
         // The pair (1, 2) should drop because firstSegment is nil; the
         // pair (0, 0) should survive.
         let lookup = makePermissiveTestLookup(indices: [0, 2])
-        let spans = FoundationModelClassifier.buildPermissiveRefinedSpans(
-            result: .spans([
-                RefinementSpanPair(firstLineRef: 0, lastLineRef: 0),
-                RefinementSpanPair(firstLineRef: 1, lastLineRef: 2)
-            ]),
-            plan: plan,
-            lineRefLookup: lookup
-        )
+        let result = PermissiveRefinementResult.spans([
+            RefinementSpanPair(firstLineRef: 0, lastLineRef: 0),
+            RefinementSpanPair(firstLineRef: 1, lastLineRef: 2)
+        ])
+        let spans = result.refinedSpans(for: plan, lineRefLookup: lookup)
         #expect(spans.count == 1)
         #expect(spans[0].firstLineRef == 0 && spans[0].lastLineRef == 0)
+    }
+
+    // MARK: - PermissiveRefinementResult description
+
+    @Test("description returns short label for log lines")
+    func descriptionReturnsLabel() {
+        #expect(PermissiveRefinementResult.spans([]).description == "spans")
+        #expect(PermissiveRefinementResult.noAd.description == "noAd")
+        #expect(PermissiveRefinementResult.unparsed.description == "unparsed")
     }
 }
 
