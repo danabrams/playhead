@@ -1163,15 +1163,22 @@ final class PlayheadFMSmokeTests: XCTestCase {
         // Create a SystemLanguageModel with permissive guardrails. Per
         // Apple docs (and the iOS expert), this is the documented path
         // for relaxing the safety classifier on sensitive source text.
-        // Note: this init form may not exist on every iOS 26.x point
-        // release — if the build fails, we have new data to send back.
+        // The cached SystemLanguageModel.default keeps model assets warm
+        // across sessions, so we hold a single model reference but
+        // construct a FRESH LanguageModelSession per probe — see bd-34e
+        // Fix B v5 (production coarse path uses per-window sessions for
+        // exactly the same reason: a shared session accumulates ~4000
+        // tokens of conversation history after 7 successful exchanges
+        // and starts hitting GenerationError.exceededContextWindowSize
+        // even though each individual prompt is well under budget).
         let model = SystemLanguageModel(guardrails: .permissiveContentTransformations)
-        let session = LanguageModelSession(model: model)
 
         var results: [(label: String, status: String, detail: String)] = []
         results.reserveCapacity(Self.safetyProbeMatrix.count)
 
         for probe in Self.safetyProbeMatrix {
+            // Fresh session per probe — see header comment.
+            let session = LanguageModelSession(model: model)
             let prompt = Self.makePermissivePrompt(transcript: probe.text)
 
             do {
