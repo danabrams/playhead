@@ -120,17 +120,11 @@ final class PlayheadFMSmokeTests: XCTestCase {
             """
         )
 
-        XCTExpectFailure(
-            """
-            bd-1my known gap: the FM still misses one of the four ground-truth \
-            Conan ads under the outward-expansion path. The exact ad varies \
-            with FM version and prompt variant; the most-frequent miss is the \
-            Kelly Ripa cross-promo that opens with no commerce structure. \
-            bd-38j and a future high-recall pass will close this gap.
-            """
-        ) {
-            XCTAssertEqual(missed.count, 0, "all 4 Conan ads were caught — pinned expectation can be retired")
-        }
+        XCTAssertEqual(
+            missed.count,
+            0,
+            "bd-1my full recall: all 4 Conan ads must be caught. missed=\(missed)"
+        )
     }
 
     // MARK: - Test 2: synthetic no-expansion control

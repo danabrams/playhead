@@ -57,6 +57,31 @@ import FoundationModels
 /// reason `PermissiveAdClassifier` itself is gated). The parser and
 /// prompt builder do not touch FoundationModels at all — they're
 /// pure Foundation/regex helpers.
+/// bd-1en Phase 2: result of running the permissive refinement pass on
+/// a single window. The runner uses this to decide what to persist:
+///
+/// - `.spans`  → build one `RefinedAdSpan` per pair (anchorless; the
+///               permissive path has no evidence catalog by design).
+/// - `.noAd`   → drop the window. The focused refinement contradicted
+///               the coarse verdict; trust the more focused signal.
+/// - `.unparsed` → fall back to a single full-window `RefinedAdSpan`.
+///                 This is the recall safety net: parser failures and
+///                 garbage / template-parroting output should never
+///                 cost us an ad we already know is in the window.
+enum PermissiveRefinementResult: Sendable, Equatable {
+    case spans([RefinementSpanPair])
+    case noAd
+    case unparsed
+}
+
+/// bd-1en Phase 2: a (firstLineRef, lastLineRef) pair extracted from a
+/// permissive refinement response. Each pair becomes one
+/// `RefinedAdSpan` in the runner. Pairs are inclusive on both ends.
+struct RefinementSpanPair: Sendable, Equatable, Hashable {
+    let firstLineRef: Int
+    let lastLineRef: Int
+}
+
 enum PermissiveAdGrammar {
 
     /// Build the production permissive prompt for a window. The
@@ -184,6 +209,120 @@ enum PermissiveAdGrammar {
         )
     }
 
+    /// bd-1en Phase 2: build the refinement-pass permissive prompt for a
+    /// window. Same grammar surface as the coarse prompt — the only
+    /// behavioral difference is the instruction asks the model to find
+    /// the *tightest* contiguous line ref range(s) that are part of an
+    /// ad, so refinement output is more precise than coarse output. The
+    /// permissive refinement path deliberately omits the evidence
+    /// catalog (which is what triggers Kelly Ripa #1 refusals on the
+    /// `@Generable` refinement path — the catalog embeds pharma atoms
+    /// from elsewhere in the episode and the safety classifier reads
+    /// the gestalt). Window text alone, no catalog.
+    static func buildRefinementPrompt(for segments: [AdTranscriptSegment]) -> String {
+        let lineRefs = segments.map(\.segmentIndex)
+        let lineRefList = lineRefs.map { "L\($0)" }.joined(separator: ", ")
+        let transcriptBody = segments
+            .map { "L\($0.segmentIndex)> \"\($0.text)\"" }
+            .joined(separator: "\n")
+        return """
+        You are refining the ad span boundaries inside a podcast transcript window.
+
+        The transcript below has these line refs: \(lineRefList). Use ONLY these line refs in your answer.
+
+        Output exactly one line. Choose ONE of these forms:
+
+          NO_AD                              (window contains no ad)
+          UNCERTAIN                          (you cannot tell)
+          AD L<start>-L<end>                 (one ad span)
+          AD L<n1>-L<m1>,L<n2>-L<m2>         (multiple non-contiguous ad spans)
+
+        Identify the TIGHTEST contiguous line ref range(s) that are part of an ad / sponsorship / promotional read. Do not include surrounding host content.
+
+        Do NOT output literal text like "L<n>" or "L<start>" — substitute actual line ref numbers from the transcript above.
+        Do NOT echo or paraphrase the transcript.
+        Do NOT explain your reasoning.
+        Do NOT use line refs that are not in the transcript.
+
+        Examples (these are illustrative, not part of your input):
+          Transcript with L0, L1, L2 → if L0-L1 is the ad and L2 is host content, output "AD L0-L1"
+          Transcript with L4, L5 → if neither is an ad, output "NO_AD"
+          Transcript with L10, L11, L12 → if L10 and L12 are unrelated ads, output "AD L10-L10,L12-L12"
+
+        Now refine this transcript:
+
+        \(transcriptBody)
+        """
+    }
+
+    /// bd-1en Phase 2: refinement-pass parser. Returns the parsed
+    /// (firstLineRef, lastLineRef) PAIRS, not a flattened set, so
+    /// non-contiguous spans become separate `RefinedAdSpan`s downstream.
+    /// Each pair is clamped to `validLineRefs`; pairs that fall entirely
+    /// outside the window are dropped. Garbage / template-parroting /
+    /// refusal-shaped output collapses to `.unparsed`, which the runner
+    /// treats as a fallback signal (use the full coarse window as a
+    /// single span rather than losing the ad entirely).
+    static func parseRefinement(_ raw: String, validLineRefs: [Int]) -> PermissiveRefinementResult {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .unparsed }
+
+        let firstNonEmptyLine: String? = trimmed
+            .split(whereSeparator: { $0.isNewline })
+            .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+        guard let line = firstNonEmptyLine, !line.isEmpty else { return .unparsed }
+
+        let upper = line.uppercased()
+        if upper == "NO_AD" { return .noAd }
+        if upper == "UNCERTAIN" { return .unparsed }
+        guard upper.hasPrefix("AD ") else { return .unparsed }
+
+        let body = String(line.dropFirst(3))
+        let rawPairs = parseAdPairs(body)
+        guard !rawPairs.isEmpty else { return .unparsed }
+
+        // Clamp each pair to the window line refs. The window's line
+        // refs are not necessarily a contiguous integer range (e.g.
+        // [4, 5, 7, 8] if a planner gap exists), so clamping uses the
+        // sorted set's min/max as the inclusive window bounds AND drops
+        // pairs whose intersection with the valid set is empty.
+        let validSorted = validLineRefs.sorted()
+        guard let lo = validSorted.first, let hi = validSorted.last else {
+            return .unparsed
+        }
+        let validSet = Set(validLineRefs)
+
+        var clamped: [RefinementSpanPair] = []
+        clamped.reserveCapacity(rawPairs.count)
+        for (a, b) in rawPairs {
+            let pairLo = min(a, b)
+            let pairHi = max(a, b)
+            // No overlap with the window at all → drop.
+            if pairHi < lo || pairLo > hi { continue }
+            let clampedLo = max(pairLo, lo)
+            let clampedHi = min(pairHi, hi)
+            // Walk the clamped range and find the tightest sub-range
+            // whose endpoints both exist in the window. Sparse-window
+            // case: the FM may name endpoints that fall in a planner
+            // gap; we snap each end inward to the nearest valid ref.
+            guard let snappedLo = validSet.contains(clampedLo)
+                ? clampedLo
+                : (clampedLo...clampedHi).first(where: { validSet.contains($0) }),
+                  let snappedHi = validSet.contains(clampedHi)
+                ? clampedHi
+                : (clampedLo...clampedHi).reversed().first(where: { validSet.contains($0) }),
+                  snappedLo <= snappedHi
+            else {
+                continue
+            }
+            clamped.append(RefinementSpanPair(firstLineRef: snappedLo, lastLineRef: snappedHi))
+        }
+
+        guard !clamped.isEmpty else { return .unparsed }
+        return .spans(clamped)
+    }
+
     /// Pull `(start, end)` integer pairs out of an `L<digits>-L<digits>`
     /// (comma-separated, optional whitespace) body. Returns an empty
     /// array if no concrete numeric pairs were found, which is the
@@ -277,6 +416,49 @@ actor PermissiveAdClassifier {
         _ = prompt
         _ = lineRefs
         return CoarseScreeningSchema(disposition: .uncertain, support: nil)
+        #endif
+    }
+
+    /// bd-1en Phase 2: refinement-pass entry point. Mirrors `classify`
+    /// but uses the refinement prompt grammar and returns parsed
+    /// `(firstLineRef, lastLineRef)` pairs (or `.noAd` / `.unparsed`).
+    /// Same per-call session pattern, same greedy sampling, same
+    /// graceful failure handling — any catastrophic failure collapses
+    /// to `.unparsed` so the runner can fall back to the full coarse
+    /// window rather than losing the ad outright.
+    func refine(window segments: [AdTranscriptSegment]) async -> PermissiveRefinementResult {
+        let lineRefs = segments.map(\.segmentIndex)
+        let prompt = PermissiveAdGrammar.buildRefinementPrompt(for: segments)
+
+        #if canImport(FoundationModels)
+        let session = LanguageModelSession(model: model)
+        do {
+            let response = try await session.respond(
+                to: prompt,
+                options: GenerationOptions(sampling: .greedy)
+            )
+            let raw = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            return PermissiveAdGrammar.parseRefinement(raw, validLineRefs: lineRefs)
+        } catch let error as LanguageModelSession.GenerationError {
+            switch error {
+            case .refusal:
+                logger.debug("permissive_refinement_refused window=\(lineRefs.count, privacy: .public) segments")
+            case .decodingFailure:
+                logger.debug("permissive_refinement_decoding_failure window=\(lineRefs.count, privacy: .public) segments")
+            case .exceededContextWindowSize:
+                logger.debug("permissive_refinement_exceeded_context_window window=\(lineRefs.count, privacy: .public) segments")
+            default:
+                logger.debug("permissive_refinement_generation_error window=\(lineRefs.count, privacy: .public) segments error=\(String(describing: error), privacy: .public)")
+            }
+            return .unparsed
+        } catch {
+            logger.debug("permissive_refinement_unexpected_error window=\(lineRefs.count, privacy: .public) segments error=\(error.localizedDescription, privacy: .public)")
+            return .unparsed
+        }
+        #else
+        _ = prompt
+        _ = lineRefs
+        return .unparsed
         #endif
     }
 

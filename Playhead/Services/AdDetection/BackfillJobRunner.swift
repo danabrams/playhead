@@ -559,11 +559,30 @@ actor BackfillJobRunner {
                 evidenceCatalog: inputs.evidenceCatalog
             )
             if !zoomPlans.isEmpty {
-                let refinement = try await classifier.refinePassB(
-                    zoomPlans: zoomPlans,
-                    segments: inputs.segments,
-                    evidenceCatalog: inputs.evidenceCatalog
-                )
+                // bd-1en Phase 2: route sensitive refinement plans
+                // through `PermissiveAdClassifier.refine` instead of
+                // the `@Generable` refinement path. Mirrors the
+                // coarse-pass dispatch above. When either the router
+                // or the box is nil the call collapses to the legacy
+                // single-arg overload, preserving pre-Phase-2 behavior.
+                let refinement: FMRefinementScanOutput
+                if #available(iOS 26.0, *),
+                   let router = sensitiveRouter,
+                   let classifierBox = permissiveClassifierBox {
+                    refinement = try await classifier.refinePassB(
+                        zoomPlans: zoomPlans,
+                        segments: inputs.segments,
+                        evidenceCatalog: inputs.evidenceCatalog,
+                        sensitiveRouter: router,
+                        permissiveClassifier: classifierBox.classifier
+                    )
+                } else {
+                    refinement = try await classifier.refinePassB(
+                        zoomPlans: zoomPlans,
+                        segments: inputs.segments,
+                        evidenceCatalog: inputs.evidenceCatalog
+                    )
+                }
                 for window in refinement.windows {
                     try Task.checkCancellation()
                     let result = makeRefinementScanResult(
@@ -839,12 +858,28 @@ actor BackfillJobRunner {
                 expansionInvocationCount += 1
 
                 // Run a single-window refinement pass for the expansion
-                // window.
-                let expansionRefinement = try await classifier.refinePassB(
-                    zoomPlans: [plan],
-                    segments: inputs.segments,
-                    evidenceCatalog: inputs.evidenceCatalog
-                )
+                // window. bd-1en Phase 2: route through the permissive
+                // dispatch overload when both router + classifier are
+                // available, so expansion windows that grow into pharma
+                // territory don't refuse on the @Generable path.
+                let expansionRefinement: FMRefinementScanOutput
+                if #available(iOS 26.0, *),
+                   let router = sensitiveRouter,
+                   let classifierBox = permissiveClassifierBox {
+                    expansionRefinement = try await classifier.refinePassB(
+                        zoomPlans: [plan],
+                        segments: inputs.segments,
+                        evidenceCatalog: inputs.evidenceCatalog,
+                        sensitiveRouter: router,
+                        permissiveClassifier: classifierBox.classifier
+                    )
+                } else {
+                    expansionRefinement = try await classifier.refinePassB(
+                        zoomPlans: [plan],
+                        segments: inputs.segments,
+                        evidenceCatalog: inputs.evidenceCatalog
+                    )
+                }
 
                 // If the FM blew up on the expansion call we surface a
                 // failure row but stop expanding cleanly — we keep the

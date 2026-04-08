@@ -116,6 +116,49 @@ struct SensitiveWindowRouterTests {
         let router = SensitiveWindowRouter(redactor: redactor)
         #expect(router.hasRules == false)
     }
+
+    // MARK: - bd-1en Phase 2: catalog-aware routing
+
+    @Test("catalog-aware route fires on benign window with sensitive catalog text")
+    func catalogTriggerRoutesSensitive() {
+        // The Kelly Ripa #1 case: window content is benign Kelly Ripa
+        // cross-promo, but the embedded evidence catalog contains
+        // CVS pre-roll atoms from elsewhere in the episode. The
+        // catalog-aware overload must catch this so refinement routes
+        // through the permissive path.
+        let router = makeRouter()
+        let benignSegments = [
+            makeSegment(index: 4, text: "Hey everyone, it's Kelly Ripa, and we're celebrating 3 years of my podcast"),
+            makeSegment(index: 5, text: "Let's talk off camera"),
+        ]
+        let catalogTexts = [
+            "Schedule your shingles, RSV, pneumococcal pneumonia vaccine today at cvs.com"
+        ]
+        #expect(router.route(window: benignSegments, catalogTexts: catalogTexts) == .sensitive)
+    }
+
+    @Test("catalog-aware route stays normal when both segments and catalog are clean")
+    func catalogCleanStaysNormal() {
+        let router = makeRouter()
+        let segments = [makeSegment(index: 0, text: "Welcome back to the show.")]
+        let catalogTexts = ["Conan tells a joke about his dog."]
+        #expect(router.route(window: segments, catalogTexts: catalogTexts) == .normal)
+    }
+
+    @Test("catalog-aware route fires when only the segments are sensitive")
+    func catalogAwareSegmentTriggerStillFires() {
+        let router = makeRouter()
+        let segments = [makeSegment(index: 0, text: "Schedule your flu vaccine at CVS today.")]
+        #expect(router.route(window: segments, catalogTexts: []) == .sensitive)
+    }
+
+    @Test("catalog-aware noop router still returns normal")
+    func catalogAwareNoopStaysNormal() {
+        let router = SensitiveWindowRouter.noop
+        let segments = [makeSegment(index: 0, text: "Schedule your flu vaccine at CVS.")]
+        let catalogTexts = ["Talk to your doctor about Trulicity."]
+        #expect(router.route(window: segments, catalogTexts: catalogTexts) == .normal)
+    }
 }
 
 // MARK: - Fixtures

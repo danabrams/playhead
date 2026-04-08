@@ -1,0 +1,197 @@
+# FoundationModels Safety Classifier — Kelly Ripa #1 Mystery
+
+**Audience:** iOS / FoundationModels expert (same one who advised on the original pharma refusal problem)
+**Author:** Dan Abrams (Playhead)
+**Date:** 2026-04-08
+**Status:** working but mysterious; one residual we can't explain
+**Companion doc:** [`fm-safety-classifier-problem.md`](fm-safety-classifier-problem.md) — the original pharma problem and your earlier guidance
+
+---
+
+## TL;DR
+
+Your original advice (use `SystemLanguageModel(guardrails: .permissiveContentTransformations)` with plain `String` output and route sensitive content there instead of trying to bypass the default guardrails) **worked**. We built two phases on top of it and got Conan recall from 2/4 to 4/4 on real iPhone hardware.
+
+But there's one residual we can't explain: a refinement-pass refusal on a window of completely benign Kelly Ripa cross-promo content where our trigger-vocabulary router does NOT fire, and the literal rendered prompt does NOT contain any of our pharma trigger words. Apple's safety classifier still refuses with `contextDebugDescription="May contain sensitive content"`.
+
+We're shipping anyway because outward expansion from a sibling window catches the same ad indirectly, but the direct-refinement refusal is fragile and we'd like to understand it.
+
+---
+
+## What we built since the last note
+
+Following your guidance:
+
+### Phase 1: Permissive coarse path (shipped)
+
+- New `PermissiveAdClassifier` actor wrapping `SystemLanguageModel(guardrails: .permissiveContentTransformations)`
+- Plain `String` output via a hand-rolled grammar (`NO_AD` / `UNCERTAIN` / `AD L<start>-L<end>[,L<n>-L<m>]...`)
+- Per-call sessions (`LanguageModelSession(model: model)` per request) — same fix as the bd-34e Fix B v5 conversation-history accumulation bug we hit on the standard path
+- Greedy sampling (`GenerationOptions(sampling: .greedy)`) for determinism
+- A `SensitiveWindowRouter` that uses our existing `RedactionRules.json` dictionary as a *routing* dictionary instead of a *redaction* dictionary
+- Coarse-pass dispatch: sensitive windows short-circuit the `@Generable` call entirely and go through the permissive classifier
+
+A 124-probe validation matrix on real device produced **0 refusals** across the entire pharma family (CVS pre-roll, Trulicity, Ozempic, Rinvoq, BetterHelp, regulated medical tests). Phase 1 confirmed your architectural recommendation empirically.
+
+### Phase 2: Permissive refinement path (just shipped today)
+
+The first phase only handled coarse classification. Refinement (which produces precise span boundaries from a coarse `containsAd` verdict) was still going through `LanguageModelSession.respond(generating: RefinementWindowSchema.self)` and refusing on the same content. Phase 2 mirrors Phase 1 for refinement:
+
+- New `PermissiveAdClassifier.refine(window:)` actor method
+- New refinement parser preserving `(firstLineRef, lastLineRef)` pair structure (so non-contiguous spans become separate `RefinedAdSpan`s downstream)
+- New `refinePassB` dispatch overload that routes sensitive plans through the permissive path
+- Recall safety net: if the permissive parser fails or returns garbage, we emit a single full-window `RefinedAdSpan` as a fallback rather than losing the ad
+- Per-plan routing inspects the **literal `plan.prompt`** rather than just the structured catalog — this is the cleanest signal because it's what the FM actually sees
+
+Phase 2 recovered the CVS pre-roll refinement (which had been silently dropped by the @Generable refusal), getting recall from 2/4 to 3/4 on the first end-to-end run.
+
+Pulling the fourth ad over the line happened via outward expansion from a sibling window — see the mystery below.
+
+---
+
+## The mystery
+
+Conan "Fanhausen Revisited" episode, four ground-truth ads:
+
+1. **CVS pharmacy pre-roll** — segments 0–3 (clearly pharma, the trigger family)
+2. **Kelly Ripa cross-promo #1** — segments 4–5 (completely benign promo for her own podcast)
+3. **SiriusXM credits** — segments around 19–20
+4. **Kelly Ripa cross-promo #2** — segments later in the episode
+
+The permissive refinement path routes Kelly Ripa #1's **window** through the bypass when the literal prompt contains pharma trigger vocabulary. But on the latest device run:
+
+- Kelly Ripa #1 refinement plan window=3, lineRefs 4–5, **promptTokens=424**
+- The router (`routeText(plan.prompt)`) inspected the literal rendered prompt and returned `.normal`
+- The plan went through the standard `@Generable` refinement path
+- Apple's safety classifier refused with:
+  - `contextDebugDescription="May contain sensitive content"`
+  - `GenerationError.refusal(record: TranscriptRecord)`
+
+**The Kelly Ripa #1 window contents:**
+
+```
+L4> "Hey everyone, it's Kelly Ripa, and we're celebrating 3 years of my podcast"
+L5> "Let's talk off camera"
+```
+
+These are the only two transcript segments in the window. There is nothing pharma about them. The refinement prompt is 424 tokens — too small to contain a meaningful evidence-catalog snippet pulling in pharma atoms from elsewhere in the episode. Our pharma trigger vocabulary (vaccines, drug brands, mental health services, regulated medical tests) does not fire on the rendered prompt at all — we verified by routing on `plan.prompt` directly.
+
+Earlier Phase 2 work hypothesized that the embedded evidence catalog from elsewhere in the episode was the culprit (the catalog is built per-episode, so a window's refinement prompt might embed CVS pre-roll catalog atoms). We added a catalog-aware routing overload to inspect `plan.promptEvidence.matchedText` for trigger words. That overload also did not fire on Kelly Ripa #1 — so the catalog snippet for this plan does not contain pharma either.
+
+**But Apple still refuses, every run, with "May contain sensitive content."**
+
+---
+
+## What this is NOT
+
+We've ruled out the obvious explanations:
+
+1. **Not the segments themselves** — "Hey everyone, it's Kelly Ripa, and we're celebrating 3 years of my podcast" / "Let's talk off camera" passes the safety classifier on its own as a coarse probe (we ran it through the 124-probe matrix).
+2. **Not the embedded catalog** — `plan.promptEvidence.matchedText` for this plan contains no pharma trigger words. Our router check inspects the literal `plan.prompt` byte-for-byte and finds zero matches against our 5-category rule dictionary.
+3. **Not a token-budget overflow** — promptTokens=424, well under the budget. The shrink retry loop is not in play.
+4. **Not the schema** — we're using the slim `@Generable RefinementWindowSchema` that we already token-counted on this device.
+5. **Not an injected adversarial preamble** — bd-34e replaced the old jailbreak-defense framing with neutral instructional framing months ago, and that fix recovered other refusals successfully.
+6. **Not non-determinism we can pin** — the refusal happens **every** run on this content, with greedy sampling, with per-call sessions (no conversation-history pollution from prior windows).
+7. **Not session state from prior calls** — each refinement window gets its own freshly-minted, freshly-prewarmed `LanguageModelSession`. The bd-34e Fix B v5 bug (shared sessions accumulating ~4000 tokens of conversation history) is gone.
+
+---
+
+## Why we're shipping anyway: outward expansion catches it
+
+The other half of this work is bd-1my, an "outward expansion" pass: after refinement produces spans, any span that touches its window's first or last line ref triggers a re-refinement on a window expanded outward by N segments. The expansion is bounded (max 3 iterations, max ±10 segments).
+
+On the same device run:
+
+```
+fm.classifier.expansion-trimmed sourceWindow=5 requestedLowerAdd=5 requestedUpperAdd=5 acceptedLowerAdd=2 acceptedUpperAdd=2
+```
+
+`sourceWindow=5` was originally lineRefs 6–8 (the SiriusXM credits area). Its initial refinement produced a span touching the lower boundary (lineRef 6), which triggered an outward expansion downward by 2 segments — sweeping the expanded window into lineRefs 4–8. The expanded refinement prompt covered Kelly Ripa #1's content (lineRefs 4–5) along with the SiriusXM credits, AND the expanded prompt was no longer refused. The FM produced refined spans covering 4–5, and those spans got persisted as the Kelly Ripa #1 detection.
+
+So the architectural pair (permissive bypass + outward expansion) recovers all 4 ads, even though the direct refinement on Kelly Ripa #1 still refuses.
+
+This works but feels load-bearing on luck. If the model's expansion behavior changes — or the SiriusXM credits stop touching their window's lower boundary — the Kelly Ripa #1 catch could regress overnight. We'd like to understand what's actually triggering the refusal so we can either pre-empt it through the permissive route OR confirm we can stop chasing it.
+
+---
+
+## What's in the prompt that we might be missing
+
+Our refinement prompt builder (`buildRefinementPrompt`) constructs:
+
+1. **Preamble** — short instructional framing: "Refine ad spans. Classify whether the following podcast transcript window contains advertising or promotional content. Each transcript line is prefixed with `L<number>>` followed by quoted text. Use the line numbers to cite supporting evidence in your output."
+2. **Schema preamble** — lists the `RefinementWindowSchema` field expectations
+3. **Evidence catalog snippet** — lines like `[E1] "matched-text" (kind, line N)` for each `PromptEvidenceEntry` in the plan
+4. **Transcript fence** — `<<<TRANSCRIPT>>>` ... `<<<END TRANSCRIPT>>>` containing the L-prefixed window lines
+
+The Kelly Ripa #1 prompt contains all of the above. The transcript section is just the two benign Kelly Ripa lines. The catalog section has whatever atoms the episode-wide `EvidenceCatalogBuilder` placed adjacent to lineRefs 4–5 — we believe small (the prompt is only 424 tokens total) and known to contain no pharma trigger vocabulary per our dictionary.
+
+Could there be a **non-pharma classifier signal** in here — celebrity names? podcast cross-promotion language? "Hey everyone"? Some heuristic Apple's safety classifier applies to "this looks like ad copy I should refuse"? The ironic case would be Apple's classifier refusing because it correctly detected this is an ad and treats ad classification of ads as some kind of meta-loop.
+
+---
+
+## Specific questions
+
+1. **Does Apple's safety classifier have a category for "celebrity name + show cross-promotion"** that fires independent of pharma? Our dictionary doesn't cover this, but the symptom looks like a non-pharma category trigger.
+
+2. **Is there session state we don't see** — Kelly Ripa #1 is roughly the third refinement call in this run. Could there be a per-process or per-actor accumulation that's not visible at the `LanguageModelSession` level? We've already eliminated per-session conversation history with the per-call session pattern.
+
+3. **Does the refusal record's `TranscriptRecord` carry diagnostic information** beyond `contextDebugDescription`? We're logging `String(describing: error)` and only seeing `recordReflect=...GenerationError.Refusal(record: TranscriptRecord)`. If there's a richer field, what's the API to read it?
+
+4. **Is there a way to ask FoundationModels "would this prompt refuse?"** — a dry-run / preflight that returns the refusal classification without consuming the call? That would let us route on the actual classifier decision instead of trying to predict it via vocabulary.
+
+5. **Can we file a Feedback Assistant report on this specific case** with the verbatim Kelly Ripa #1 refinement prompt and have Apple categorize the refusal? We have the exact prompt text, the exact device, the exact iOS version. Reproducer is trivial.
+
+---
+
+## Minimal reproducer
+
+The exact refinement prompt that refuses (rendered from the Kelly Ripa #1 plan, 424 tokens):
+
+```
+Refine ad spans. Classify whether the following podcast transcript window contains advertising or promotional content. Each transcript line is prefixed with `L<number>>` followed by quoted text. Use the line numbers to cite supporting evidence in your output.
+
+[evidence catalog snippet — small, no pharma trigger vocab in any line]
+
+<<<TRANSCRIPT>>>
+L4> "Hey everyone, it's Kelly Ripa, and we're celebrating 3 years of my podcast"
+L5> "Let's talk off camera"
+<<<END TRANSCRIPT>>>
+```
+
+Submitted via `LanguageModelSession.respond(to: prompt, generating: RefinementWindowSchema.self, options: GenerationOptions(maximumResponseTokens: ...))`.
+
+Refuses on every run with `GenerationError.refusal(record: TranscriptRecord)` and `contextDebugDescription="May contain sensitive content"`.
+
+Submit the same content via `SystemLanguageModel(guardrails: .permissiveContentTransformations)` + plain `String` output and it does not refuse — so the content is passable on the permissive path. The mystery is why the default-guardrails path refuses given the absence of pharma trigger vocabulary.
+
+---
+
+## Where the code lives
+
+- `Playhead/Services/AdDetection/PermissiveAdClassifier.swift` — Phase 1 + Phase 2 permissive path (coarse + refinement)
+- `Playhead/Services/AdDetection/SensitiveWindowRouter.swift` — routing dictionary
+- `Playhead/Services/AdDetection/FoundationModelClassifier.swift` — `coarsePassA` and `refinePassB` dispatching overloads, the per-plan `routeText(plan.prompt)` check, and the standard `@Generable` paths
+- `Playhead/Resources/RedactionRules.json` — the trigger vocabulary dictionary (now repurposed for routing)
+- `PlayheadTests/Services/AdDetection/PermissiveAdClassifierTests.swift` — parser + builder unit tests (44 tests, all passing)
+- `PlayheadTests/Services/AdDetection/SensitiveWindowRouterTests.swift` — router unit tests including catalog-aware routing
+- `PlayheadTests/Services/AdDetection/PlayheadFMSmokeTests.swift` — on-device smoke test, currently asserting full 4/4 recall
+- `PlayheadTests/Fixtures/RealEpisodes/ConanFanhausenRevisitedFixture.swift` — verbatim transcript with the four ground-truth ads
+
+---
+
+## What we'd consider "solved"
+
+Any of:
+
+- A documented Apple category that explains why the Kelly Ripa #1 refinement prompt refuses (so we can extend our routing dictionary to include it)
+- A diagnostic API that surfaces *which* classifier rule fired the refusal
+- A preflight API to predict the refusal without consuming a generation call
+- An official "yes, that content trips the celebrity-cross-promo classifier and there's no way to opt out via the default guardrails — use the permissive path" answer, so we can mark this as a known limitation and stop chasing it
+
+---
+
+## What worked, for the record
+
+Your original recommendation was the right call. The permissive guardrails + plain `String` output + per-call sessions + greedy sampling architecture is now load-bearing in our production path and recovers every pharma probe we've thrown at it. Phase 1 (coarse) and Phase 2 (refinement) both ship behind a router that's wired through `PlayheadRuntime` so the dispatch is byte-identical to the legacy path when the router is `.noop`. The integration was clean and the unit-test footprint is small.
+
+Thank you again for the architectural pointer — this unblocked weeks of redactor whack-a-mole.
