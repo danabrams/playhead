@@ -131,6 +131,71 @@ func probeIndexExists(in directory: URL, indexName: String) throws -> Bool {
     return sqlite3_step(stmt) == SQLITE_ROW
 }
 
+/// Cycle 4 H1: hand-builds a v1-shape SQLite database suitable for driving
+/// `AnalysisStore.migrateOnlyForTesting()` in isolation from
+/// `createTables()`. Only the tables that the V*IfNeeded ladder touches
+/// are seeded, in their v1 shape: no `needsShadowRetry`, no
+/// `transcriptVersion` on evidence_events, no `phase` columns. The
+/// caller seeds `_meta.schema_version` explicitly via
+/// `seedSchemaVersion`.
+func seedV1ShapeDatabase(in directory: URL) throws {
+    let dbURL = directory.appendingPathComponent("analysis.sqlite")
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(
+        dbURL.path,
+        &db,
+        SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE,
+        nil
+    ) == SQLITE_OK else {
+        throw NSError(domain: "SeedV1Shape", code: 1)
+    }
+    defer { sqlite3_close_v2(db) }
+
+    let ddl = """
+        CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS analysis_assets (
+            id TEXT PRIMARY KEY,
+            episodeId TEXT NOT NULL,
+            assetFingerprint TEXT NOT NULL,
+            weakFingerprint TEXT,
+            sourceURL TEXT NOT NULL,
+            featureCoverageEndTime REAL,
+            fastTranscriptCoverageEndTime REAL,
+            confirmedAdCoverageEndTime REAL,
+            analysisState TEXT NOT NULL,
+            analysisVersion INTEGER NOT NULL,
+            capabilitySnapshot TEXT,
+            createdAt REAL NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS analysis_sessions (
+            id TEXT PRIMARY KEY,
+            analysisAssetId TEXT NOT NULL,
+            state TEXT NOT NULL,
+            startedAt REAL NOT NULL,
+            updatedAt REAL NOT NULL,
+            failureReason TEXT
+        );
+        CREATE TABLE IF NOT EXISTS evidence_events (
+            id TEXT PRIMARY KEY,
+            analysisAssetId TEXT NOT NULL,
+            eventType TEXT NOT NULL,
+            sourceType TEXT NOT NULL,
+            atomOrdinals TEXT NOT NULL,
+            evidenceJSON TEXT NOT NULL,
+            scanCohortJSON TEXT NOT NULL,
+            createdAt REAL NOT NULL
+        );
+        """
+    guard sqlite3_exec(db, ddl, nil, nil, nil) == SQLITE_OK else {
+        let msg = sqlite3_errmsg(db).map { String(cString: $0) } ?? "unknown"
+        throw NSError(
+            domain: "SeedV1Shape",
+            code: 2,
+            userInfo: [NSLocalizedDescriptionKey: msg]
+        )
+    }
+}
+
 /// H11: probe a table's existence by name.
 func probeTableExists(in directory: URL, table: String) throws -> Bool {
     let dbURL = directory.appendingPathComponent("analysis.sqlite")

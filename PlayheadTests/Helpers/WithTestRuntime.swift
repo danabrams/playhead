@@ -10,10 +10,23 @@
 // `deinit` used to spawn an unbounded `Task { await observer.stop() }` to
 // chase the cleanup, which raced with subsequent constructions).
 //
+// Cycle 4 H3: the default was flipped from `isPreviewRuntime: true` to
+// `false`. Preview runtimes set `shadowRetryObserver = nil`, so a test
+// that constructs a preview runtime NEVER exercises the observer's
+// teardown path — C7's whole point went unverified through the runtime.
+// Tests that explicitly want preview behavior (most `NowPlayingViewModel`
+// tests, which only read playback state) now pass
+// `isPreviewRuntime: true` at the call site.
+//
 // Usage:
 //
 //     try await withTestRuntime { runtime in
-//         // exercise runtime here
+//         // Full-fat runtime, observer is live and torn down on exit.
+//     }
+//
+//     try await withTestRuntime(isPreviewRuntime: true) { runtime in
+//         // Preview-mode runtime, observer is nil — use for
+//         // view-model tests that only touch playback state.
 //     }
 //
 // The helper is `@MainActor` because `PlayheadRuntime` is `@MainActor`.
@@ -23,7 +36,7 @@ import Foundation
 
 @MainActor
 func withTestRuntime<T>(
-    isPreviewRuntime: Bool = true,
+    isPreviewRuntime: Bool = false,
     _ body: (PlayheadRuntime) async throws -> T
 ) async rethrows -> T {
     let runtime = PlayheadRuntime(isPreviewRuntime: isPreviewRuntime)

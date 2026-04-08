@@ -89,7 +89,41 @@ enum AdBoundaryState: String, Sendable {
 /// Protocol abstraction for ad detection, enabling test stubs.
 protocol AdDetectionProviding: Sendable {
     func runHotPath(chunks: [TranscriptChunk], analysisAssetId: String, episodeDuration: Double) async throws -> [AdWindow]
-    func runBackfill(chunks: [TranscriptChunk], analysisAssetId: String, podcastId: String, episodeDuration: Double) async throws
+
+    /// Cycle 4 H5: callers that know the analysis session id at dispatch
+    /// time (e.g. `AnalysisCoordinator.finalizeBackfill`) pass it here so
+    /// the shadow phase can stamp `needsShadowRetry` on the exact session
+    /// without a `fetchLatestSessionForAsset` lookup that races concurrent
+    /// reprocessing. Legacy callers that don't track sessions (e.g.
+    /// `AnalysisJobRunner`, which operates on analysis_jobs not sessions)
+    /// pass `nil` and the marker is skipped on bail — acceptable because
+    /// pre-roll warmup does not yet have a user-facing session to retry.
+    func runBackfill(
+        chunks: [TranscriptChunk],
+        analysisAssetId: String,
+        podcastId: String,
+        episodeDuration: Double,
+        sessionId: String?
+    ) async throws
+}
+
+extension AdDetectionProviding {
+    /// Convenience for callers that don't track session ids. Delegates
+    /// to the primary entry point with `sessionId: nil`.
+    func runBackfill(
+        chunks: [TranscriptChunk],
+        analysisAssetId: String,
+        podcastId: String,
+        episodeDuration: Double
+    ) async throws {
+        try await runBackfill(
+            chunks: chunks,
+            analysisAssetId: analysisAssetId,
+            podcastId: podcastId,
+            episodeDuration: episodeDuration,
+            sessionId: nil
+        )
+    }
 }
 
 // MARK: - AdDetectionService
@@ -264,7 +298,8 @@ actor AdDetectionService {
         chunks: [TranscriptChunk],
         analysisAssetId: String,
         podcastId: String,
-        episodeDuration: Double
+        episodeDuration: Double,
+        sessionId: String? = nil
     ) async throws {
         self.episodeDuration = episodeDuration
         guard !chunks.isEmpty else { return }
@@ -374,7 +409,8 @@ actor AdDetectionService {
                 _ = await runShadowFMPhase(
                     chunks: chunks,
                     analysisAssetId: analysisAssetId,
-                    podcastId: podcastId
+                    podcastId: podcastId,
+                    sessionIdOverride: sessionId
                 )
             }
         }
@@ -415,28 +451,24 @@ actor AdDetectionService {
             return .skipped
         }
 
-        // H7 (cycle 2): capture the session id at the START of the shadow
-        // phase, before any concurrent reprocessing on the same asset can
-        // create a newer session and race the marker. `sessionIdOverride`
-        // is set by `retryShadowFMPhaseForSession` to pin the exact
-        // session being retried; production callers from `runBackfill`
-        // resolve "latest session for the asset" once and freeze it.
+        // Cycle 4 H5: `sessionIdOverride` is the only source of truth for
+        // the session id. It's captured by the caller at dispatch time:
+        //   • `AnalysisCoordinator.finalizeBackfill` threads the session
+        //     id it already knows through `runBackfill(sessionId:)` →
+        //     `runShadowFMPhase(sessionIdOverride:)`.
+        //   • `retryShadowFMPhaseForSession` passes the exact session id
+        //     being retried.
+        //   • `AnalysisJobRunner` (pre-roll warmup) has no session
+        //     concept and passes nil — the marker is then skipped on
+        //     bail, which is correct for that path (no user-facing
+        //     session to retry).
         //
-        // Failures here just log and skip the marker — the marker is
-        // best-effort telemetry, not a load-bearing path.
-        let resolvedSessionId: String?
-        if let sessionIdOverride {
-            resolvedSessionId = sessionIdOverride
-        } else {
-            do {
-                resolvedSessionId = try await store.fetchLatestSessionForAsset(
-                    assetId: analysisAssetId
-                )?.id
-            } catch {
-                logger.warning("Shadow FM phase: failed to resolve session id for asset \(analysisAssetId): \(error.localizedDescription)")
-                resolvedSessionId = nil
-            }
-        }
+        // The previous `fetchLatestSessionForAsset` fallback was removed
+        // because it raced concurrent reprocessing: session B for asset
+        // X could land between the start of the shadow phase and the
+        // marker call, and the marker would tag the wrong (newer) row.
+        // With the override-only model, the race is unrepresentable.
+        let resolvedSessionId: String? = sessionIdOverride
 
         // M-D: skip the entire shadow phase on devices that can't run
         // Foundation Models. Atomization, segmentation, and catalog builds

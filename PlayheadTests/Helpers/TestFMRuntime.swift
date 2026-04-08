@@ -141,20 +141,11 @@ actor TestFMRuntime {
         return refs.sorted()
     }
 
-    /// Rev4-L3: reset accumulated state between scoped runtime invocations.
-    /// `withTestRuntime` calls this on its way out so the prompt arrays
-    /// don't grow unbounded across long test runs that share a
-    /// `TestFMRuntime` instance via a `let` capture.
-    func reset() {
-        coarseQueue.removeAll(keepingCapacity: false)
-        refinementQueue.removeAll(keepingCapacity: false)
-        coarseFailureQueue.removeAll(keepingCapacity: false)
-        refinementFailureQueue.removeAll(keepingCapacity: false)
-        coarsePrompts.removeAll(keepingCapacity: false)
-        refinementPrompts.removeAll(keepingCapacity: false)
-        coarseCallCount = 0
-        refinementCallCount = 0
-    }
+    // Cycle 4 H4: Rev4-L3 originally added a `reset()` method here, but
+    // every call site constructs a fresh `TestFMRuntime` instance per test
+    // (there is no shared/static runtime), so `reset()` had no production
+    // users. Removed to kill the dead code path rather than leaving a
+    // method whose contract was never enforced.
 }
 
 enum TestFMRuntimeFailure: Sendable {

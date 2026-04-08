@@ -3,6 +3,7 @@
 
 @preconcurrency import AVFoundation
 import Foundation
+import os
 import OSLog
 import UIKit
 
@@ -477,6 +478,17 @@ final class PlayheadRuntime {
         shadowRetryObserverStartupTask?.cancel()
     }
 
+    #if DEBUG
+    /// Cycle 4 H3: DEBUG-only accessor so `RuntimeTeardownTests` can
+    /// assert that the shadow retry observer's loop actually exited
+    /// after `shutdown()`. Exposed as a test seam rather than making the
+    /// stored property internal to keep production access patterns
+    /// unchanged.
+    func _shadowRetryObserverForTesting() -> ShadowRetryObserver? {
+        shadowRetryObserver
+    }
+    #endif
+
     /// Stops long-lived runtime observers and cancels any pending startup
     /// task. Safe to call more than once.
     func shutdown() async {
@@ -754,13 +766,29 @@ final class PlayheadRuntime {
 
 }
 
-/// Sendable holder for the lazily-initialized `ShadowRetryObserver`. The
-/// shadow-skip-marker closure (built before the observer is constructed)
-/// captures this holder and reads through it at call time. The observer
-/// reference is set exactly once during runtime init and then never
-/// mutated, so the unchecked Sendable conformance is sound: every read
-/// happens after the single write, ordered by the synchronous init
-/// sequence on the MainActor.
-private final class ShadowRetryObserverHolder: @unchecked Sendable {
-    var observer: ShadowRetryObserver?
+/// Thread-safe holder for the lazily-initialized `ShadowRetryObserver`.
+///
+/// The shadow-skip-marker closure is built BEFORE the observer is
+/// constructed (the observer depends on `AdDetectionService`, which
+/// already captured the marker closure). The closure therefore needs a
+/// box it can read through at call time. The write happens exactly
+/// once, on the MainActor during runtime init, but reads happen from
+/// arbitrary actor contexts whenever a shadow session is flagged —
+/// that's a cross-thread read of a mutable field and must be
+/// synchronized.
+///
+/// Cycle-4 M1: previously implemented as `@unchecked Sendable` with a
+/// plain `var`, justified by "writes happen before the first marker
+/// call can reach the closure". That argument is functionally correct
+/// but brittle — a future refactor that hoists a marker call earlier in
+/// init would silently race. `OSAllocatedUnfairLock` makes the
+/// synchronization explicit and lets the type drop the `@unchecked`
+/// escape hatch.
+private final class ShadowRetryObserverHolder: Sendable {
+    private let storage = OSAllocatedUnfairLock<ShadowRetryObserver?>(initialState: nil)
+
+    var observer: ShadowRetryObserver? {
+        get { storage.withLock { $0 } }
+        set { storage.withLock { $0 = newValue } }
+    }
 }

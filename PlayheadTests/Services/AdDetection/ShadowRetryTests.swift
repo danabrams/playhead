@@ -95,7 +95,7 @@ struct ShadowRetryTests {
 
     // MARK: - Test A — bail path marks the session
 
-    @Test("Test A: shadow phase bail flags the latest session as needs_shadow_retry")
+    @Test("Test A: shadow phase bail flags the latest session as needsShadowRetry")
     func testA_bailMarksSession() async throws {
         // Mirrors the production wiring: when the shadow phase bails on
         // FM unavailability it calls `shadowSkipMarker(assetId, podcastId)`,
@@ -156,11 +156,16 @@ struct ShadowRetryTests {
             shadowSkipMarker: shadowSkipMarker
         )
 
+        // Cycle 4 H5: `runBackfill` now requires an explicit sessionId
+        // for the shadow-skip marker to fire. Production callers thread
+        // this through from `AnalysisCoordinator.finalizeBackfill`; we
+        // pass "sess-A" directly to exercise the same path.
         try await service.runBackfill(
             chunks: makeChunks(assetId: assetId),
             analysisAssetId: assetId,
             podcastId: "podcast-A",
-            episodeDuration: 90
+            episodeDuration: 90,
+            sessionId: "sess-A"
         )
 
         #expect(factoryCalls == 0, "factory must not be invoked when FM is unavailable")
@@ -725,6 +730,17 @@ struct ShadowRetryH7Tests {
         )
     }
 
+    private func makeSession(id: String, assetId: String) -> AnalysisSession {
+        AnalysisSession(
+            id: id,
+            analysisAssetId: assetId,
+            state: "complete",
+            startedAt: Date().timeIntervalSince1970,
+            updatedAt: Date().timeIntervalSince1970,
+            failureReason: nil
+        )
+    }
+
     @Test("H7: marker stamps the session captured at shadow-phase start, not the latest")
     func testH7_markerStampsCapturedSession() async throws {
         let store = try await makeTestStore()
@@ -769,17 +785,21 @@ struct ShadowRetryH7Tests {
         #expect(newSession?.needsShadowRetry == false, "newer session must NOT be flagged by sessionId-pinned marker")
     }
 
-    @Test("H7: AdDetectionService runShadowFMPhase resolves session id at start")
+    @Test("H7: AdDetectionService runShadowFMPhase honors the explicit sessionId override")
     func testH7_runShadowFMPhasePinsSessionAtStart() async throws {
         // This test exercises the runShadowFMPhase code path with
         // FM=false to drive the bail+marker. The marker captures the
-        // sessionId it receives. We assert the captured id is the latest
-        // session AT THE MOMENT runShadowFMPhase begins, even if a newer
-        // session is inserted concurrently. The race is hard to model
-        // deterministically; we approximate by inserting two sessions
-        // before the call and asserting the marker received the LATEST
-        // one (which is the only one that exists from
-        // `fetchLatestSessionForAsset`'s perspective at start).
+        // sessionId it receives.
+        //
+        // Cycle 4 H5: the cycle-2 version of this test relied on
+        // `fetchLatestSessionForAsset` as an implicit fallback for the
+        // marker id. That fallback has been removed (it raced concurrent
+        // reprocessing); the caller is now required to pass the
+        // sessionId explicitly via `runBackfill(..., sessionId:)`. This
+        // test now pins the explicit-override behavior: the caller hands
+        // in "sess-h7-target" and the marker must be stamped with it,
+        // regardless of any other sessions that exist for the same
+        // asset.
         let store = try await makeTestStore()
         let assetId = "asset-h7-svc"
         try await store.insertAsset(makeAsset(id: assetId))
@@ -849,10 +869,186 @@ struct ShadowRetryH7Tests {
             chunks: chunks,
             analysisAssetId: assetId,
             podcastId: "pod-h7-svc",
-            episodeDuration: 90
+            episodeDuration: 90,
+            sessionId: "sess-h7-target"
         )
 
-        #expect(capturedSessionId == "sess-h7-target", "marker must be called with the latest session id captured at start")
+        #expect(capturedSessionId == "sess-h7-target", "marker must be called with the explicit sessionId override")
+    }
+
+    // Cycle 4 H5 expand: the cycle-2 fix only covered the
+    // `retryShadowFMPhaseForSession` path; the `runBackfill` path still
+    // fell back to `fetchLatestSessionForAsset` at the marker site. This
+    // test pins the new behavior: `runBackfill` threads the sessionId the
+    // caller (AnalysisCoordinator / tests) captured at dispatch time
+    // straight through to `runShadowFMPhase`, and the marker stamps THAT
+    // id — even if a newer session for the same asset exists in the
+    // store by the time the marker fires.
+    @Test("Cycle 4 H5: runBackfill stamps the explicit sessionId, not the latest row for the asset")
+    func testH5_runBackfillPinsExplicitSessionId() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-h5"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let now = Date().timeIntervalSince1970
+        // The session that runBackfill is dispatched against ("the OLD
+        // session, from the caller's perspective").
+        try await store.insertSession(
+            AnalysisSession(
+                id: "sess-h5-dispatch",
+                analysisAssetId: assetId,
+                state: "complete",
+                startedAt: now,
+                updatedAt: now,
+                failureReason: nil
+            )
+        )
+        // A newer session for the same asset, modeling concurrent
+        // reprocessing landing BEFORE the shadow phase's marker fires.
+        // Pre-fix (cycle-2 runBackfill path), `fetchLatestSessionForAsset`
+        // would return this row and the marker would stamp the wrong id.
+        try await store.insertSession(
+            AnalysisSession(
+                id: "sess-h5-concurrent",
+                analysisAssetId: assetId,
+                state: "complete",
+                startedAt: now + 10,
+                updatedAt: now + 10,
+                failureReason: nil
+            )
+        )
+
+        nonisolated(unsafe) var capturedSessionId: String?
+        let marker: @Sendable (String, String) async -> Void = { sessionId, _ in
+            capturedSessionId = sessionId
+        }
+
+        let chunks = [
+            TranscriptChunk(
+                id: "c0", analysisAssetId: assetId, segmentFingerprint: "f0", chunkIndex: 0,
+                startTime: 0, endTime: 30, text: "hello", normalizedText: "hello",
+                pass: "final", modelVersion: "test-v1", transcriptVersion: "tv-1", atomOrdinal: 0
+            )
+        ]
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: AdDetectionConfig(
+                candidateThreshold: 0.40,
+                confirmationThreshold: 0.70,
+                suppressionThreshold: 0.25,
+                hotPathLookahead: 90.0,
+                detectorVersion: "detection-v1",
+                fmBackfillMode: .shadow
+            ),
+            backfillJobRunnerFactory: { store, mode in
+                BackfillJobRunner(
+                    store: store,
+                    admissionController: AdmissionController(),
+                    classifier: FoundationModelClassifier(runtime: TestFMRuntime().runtime),
+                    coveragePlanner: CoveragePlanner(),
+                    mode: mode,
+                    capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+                    batteryLevelProvider: { 1.0 },
+                    scanCohortJSON: makeTestScanCohortJSON()
+                )
+            },
+            canUseFoundationModelsProvider: { false },
+            shadowSkipMarker: marker
+        )
+        // Caller pins the OLD session id. The concurrent row that
+        // landed between session creation and this call must not win.
+        try await service.runBackfill(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            podcastId: "pod-h5",
+            episodeDuration: 90,
+            sessionId: "sess-h5-dispatch"
+        )
+
+        #expect(
+            capturedSessionId == "sess-h5-dispatch",
+            "runBackfill must stamp the explicit sessionId the caller passed, not the latest session for the asset"
+        )
+
+        // Production persistence path: mark via the real store to pin
+        // that ONLY the dispatched session gets flagged.
+        try await store.markSessionNeedsShadowRetry(
+            id: capturedSessionId ?? "unknown",
+            podcastId: "pod-h5"
+        )
+        let dispatched = try await store.fetchSession(id: "sess-h5-dispatch")
+        let concurrent = try await store.fetchSession(id: "sess-h5-concurrent")
+        #expect(dispatched?.needsShadowRetry == true)
+        #expect(concurrent?.needsShadowRetry == false, "concurrent session must not be flagged by runBackfill's marker")
+    }
+
+    @Test("Cycle 4 H5: runBackfill with nil sessionId skips the marker entirely (no race via fetchLatestSessionForAsset)")
+    func testH5_runBackfillNilSessionSkipsMarker() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-h5-nil"
+        try await store.insertAsset(makeAsset(id: assetId))
+        // Insert a session so that a pre-fix `fetchLatestSessionForAsset`
+        // fallback would have something to find and stamp.
+        try await store.insertSession(makeSession(id: "sess-h5-nil", assetId: assetId))
+
+        nonisolated(unsafe) var capturedSessionId: String?
+        nonisolated(unsafe) var markerCallCount = 0
+        let marker: @Sendable (String, String) async -> Void = { sessionId, _ in
+            markerCallCount += 1
+            capturedSessionId = sessionId
+        }
+
+        let chunks = [
+            TranscriptChunk(
+                id: "c0", analysisAssetId: assetId, segmentFingerprint: "f0", chunkIndex: 0,
+                startTime: 0, endTime: 30, text: "hello", normalizedText: "hello",
+                pass: "final", modelVersion: "test-v1", transcriptVersion: "tv-1", atomOrdinal: 0
+            )
+        ]
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: AdDetectionConfig(
+                candidateThreshold: 0.40,
+                confirmationThreshold: 0.70,
+                suppressionThreshold: 0.25,
+                hotPathLookahead: 90.0,
+                detectorVersion: "detection-v1",
+                fmBackfillMode: .shadow
+            ),
+            backfillJobRunnerFactory: { store, mode in
+                BackfillJobRunner(
+                    store: store,
+                    admissionController: AdmissionController(),
+                    classifier: FoundationModelClassifier(runtime: TestFMRuntime().runtime),
+                    coveragePlanner: CoveragePlanner(),
+                    mode: mode,
+                    capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+                    batteryLevelProvider: { 1.0 },
+                    scanCohortJSON: makeTestScanCohortJSON()
+                )
+            },
+            canUseFoundationModelsProvider: { false },
+            shadowSkipMarker: marker
+        )
+
+        // Legacy caller (e.g. AnalysisJobRunner) has no session context
+        // and passes nil. With the fallback removed, the marker is
+        // skipped cleanly — no spurious stamping on "whichever row won
+        // the race".
+        try await service.runBackfill(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            podcastId: "pod-h5-nil",
+            episodeDuration: 90,
+            sessionId: nil
+        )
+
+        #expect(markerCallCount == 0, "nil sessionId must cause the marker to be skipped, not fall back to fetchLatestSessionForAsset")
+        #expect(capturedSessionId == nil)
     }
 }
 

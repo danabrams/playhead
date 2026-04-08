@@ -25,6 +25,9 @@ final class StubAdDetectionProvider: AdDetectionProviding, @unchecked Sendable {
     var backfillError: Error?
     var hotPathCallCount = 0
     var backfillCallCount = 0
+    /// Cycle 4 H5: records the sessionId passed on each `runBackfill` call
+    /// so regression tests can assert the coordinator threaded it through.
+    var backfillSessionIds: [String?] = []
 
     func runHotPath(chunks: [TranscriptChunk], analysisAssetId: String, episodeDuration: Double) async throws -> [AdWindow] {
         hotPathCallCount += 1
@@ -32,8 +35,15 @@ final class StubAdDetectionProvider: AdDetectionProviding, @unchecked Sendable {
         return hotPathResult
     }
 
-    func runBackfill(chunks: [TranscriptChunk], analysisAssetId: String, podcastId: String, episodeDuration: Double) async throws {
+    func runBackfill(
+        chunks: [TranscriptChunk],
+        analysisAssetId: String,
+        podcastId: String,
+        episodeDuration: Double,
+        sessionId: String?
+    ) async throws {
         backfillCallCount += 1
+        backfillSessionIds.append(sessionId)
         if let error = backfillError { throw error }
     }
 }

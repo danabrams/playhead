@@ -138,6 +138,16 @@ actor ShadowRetryObserver {
         loopDidExit
     }
 
+    /// Cycle 4 H3: test sentinel for polling "has `start()` actually
+    /// created the loop task yet?". Returns true iff `loopTask` is
+    /// non-nil AND the loop hasn't exited. The runtime's observer
+    /// startup chain is multi-hop async (migrate → startup task → loop
+    /// task) so tests that want to assert a clean teardown must first
+    /// wait for the loop to actually be running.
+    func testIsLoopRunning() -> Bool {
+        loopTask != nil && !loopDidExit
+    }
+
     /// Starts the observer loop. Safe to call once; subsequent calls no-op.
     /// Calling `start()` after `stop()` is rejected (the wake stream has
     /// been finished and the sentinel is permanent).

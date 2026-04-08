@@ -1613,29 +1613,29 @@ struct BackfillJobRunnerTests {
         // below must enumerate every case explicitly — `default:` would
         // defeat the rail.
         //
-        // Permanence classification must match `BackfillJobRunner`'s
-        // private `isPermanent(_:)` (lines ~1388 of BackfillJobRunner).
-        // Drift between this test's table and the real switch will only
-        // surface as a behavior difference, but the rail still catches
-        // the case-addition gap (the worst class of bug for this
-        // function).
-        let allCases: [AnalysisStoreError] = [
-            .openFailed(code: 1, message: "x"),
-            .migrationFailed("x"),
-            .queryFailed("x"),
-            .insertFailed("x"),
-            .insertFailed("payloadTooLarge: 999"),
-            .notFound,
-            .duplicateJobId("x"),
-            .invalidRow(column: 0),
-            .invalidEvidenceEvent("x"),
-            .invalidScanCohortJSON("x"),
-            .invalidStateTransition(jobId: "j", fromStatus: nil, toStatus: "running"),
-            .evidenceEventBodyMismatch(id: "x"),
+        // Cycle 4 M3: the cycle-2 version of this test only enumerated
+        // cases at compile time; it never called the real production
+        // `isPermanent` so drift between this table and the real switch
+        // would have gone undetected. Now every case is paired with its
+        // expected classification and the test calls
+        // `BackfillJobRunner.isPermanentForTesting(_:)` for real.
+        let cases: [(AnalysisStoreError, Bool)] = [
+            (.openFailed(code: 1, message: "x"), false),
+            (.migrationFailed("x"), false),
+            (.queryFailed("x"), false),
+            (.insertFailed("x"), false),
+            (.insertFailed("payloadTooLarge: 999"), true),
+            (.notFound, false),
+            (.duplicateJobId("x"), false),
+            (.invalidRow(column: 0), true),
+            (.invalidEvidenceEvent("x"), true),
+            (.invalidScanCohortJSON("x"), true),
+            (.invalidStateTransition(jobId: "j", fromStatus: nil, toStatus: "running"), false),
+            (.evidenceEventBodyMismatch(id: "x"), true),
         ]
         // Force the switch to be exhaustive against the enum so a new
         // case fails compilation here.
-        for error in allCases {
+        for (error, _) in cases {
             switch error {
             case .openFailed,
                  .migrationFailed,
@@ -1651,7 +1651,16 @@ struct BackfillJobRunnerTests {
                 continue
             }
         }
-        #expect(allCases.count == 12)
+        // Real production call — any drift between this table and the
+        // real `isPermanent(_:)` switch lights up here.
+        for (error, expected) in cases {
+            let actual = BackfillJobRunner.isPermanentForTesting(error)
+            #expect(
+                actual == expected,
+                "isPermanent(\(error)) expected \(expected) got \(actual)"
+            )
+        }
+        #expect(cases.count == 12)
     }
 
     @Test("bd-1tl: caseName covers every AnalysisStoreError case with a stable token")

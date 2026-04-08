@@ -1951,7 +1951,7 @@ struct NowPlayingViewModelReattachmentTests {
         // pattern (bare `PlayheadRuntime(isPreviewRuntime: true)`) leaked
         // the shadow-retry observer task on non-preview runtimes; routing
         // every test through this scope makes the discipline uniform.
-        await withTestRuntime { runtime in
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
             let viewModel = NowPlayingViewModel(runtime: runtime)
 
             await runtime.playbackService._testingInjectState(
@@ -2006,7 +2006,7 @@ struct NowPlayingViewModelPlaybackStateTests {
     @MainActor
     @Test("loading state maps to a non-playing UI with current metadata")
     func loadingStateMapping() async {
-        await withTestRuntime { runtime in
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
             let viewModel = NowPlayingViewModel(runtime: runtime)
 
             await runtime.playbackService._testingInjectState(
@@ -2036,7 +2036,7 @@ struct NowPlayingViewModelPlaybackStateTests {
     @MainActor
     @Test("failed state maps to a non-playing UI")
     func failedStateMapping() async {
-        await withTestRuntime { runtime in
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
             let viewModel = NowPlayingViewModel(runtime: runtime)
 
             await runtime.playbackService._testingInjectState(
@@ -2066,7 +2066,7 @@ struct NowPlayingViewModelPlaybackStateTests {
     @MainActor
     @Test("rate-driven playback reports playing even before status catches up")
     func rateDrivenPlaybackMapping() async {
-        await withTestRuntime { runtime in
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
             let viewModel = NowPlayingViewModel(runtime: runtime)
 
             await runtime.playbackService._testingInjectState(

@@ -415,6 +415,38 @@ actor AnalysisStore {
             migratedPaths.removeAll()
         }
     }
+
+    /// Cycle 4 H1: runs ONLY the V*IfNeeded migration ladder against an
+    /// already-opened store, bypassing `createTables()`. The cycle-2
+    /// `MigrationLadderTests` seeded `_meta.schema_version` but still
+    /// went through full `migrate()`, which calls `createTables()` first
+    /// and builds every table in its v4 shape via
+    /// `CREATE TABLE IF NOT EXISTS`. Tables-already-present short-circuits
+    /// most of the ladder body, so the tests passed even against pre-C6
+    /// code (the C6 bug could not actually be reached).
+    ///
+    /// This seam lets a test seed a v1-shape DB manually (via raw SQL)
+    /// and then run the ladder without painting over. Failing under
+    /// pre-C6 code proves the rail bites.
+    ///
+    /// Not transaction-wrapped — tests are expected to begin/commit
+    /// themselves when they want to assert rollback semantics. The
+    /// default behavior here mirrors what `migrate()` would do minus
+    /// `createTables()`.
+    func migrateOnlyForTesting() throws {
+        try writeInitialSchemaVersionIfNeeded()
+        try migrateEvidenceEventsNaturalKeyV2IfNeeded()
+        try migrateEvidenceEventsTranscriptVersionV3IfNeeded()
+        try migrateAnalysisSessionsShadowRetryV4IfNeeded()
+        try migratePodcastPlannerStateV4IfNeeded()
+        // Mirror the belt-and-suspenders phase column re-add that
+        // `migrate()` performs after the v2/v3 evidence_events rebuild.
+        try addColumnIfNeeded(
+            table: "evidence_events",
+            column: "phase",
+            definition: "TEXT NOT NULL DEFAULT 'shadow'"
+        )
+    }
     #endif
 
     /// Probes `sqlite_master` for the `_meta` table. Used by `migrate()` to
@@ -461,15 +493,25 @@ actor AnalysisStore {
     /// `…V3IfNeeded`, `…V4IfNeeded`, `migratePodcastPlannerStateV4IfNeeded`)
     /// climbs correctly to `currentSchemaVersion`.
     ///
-    /// C6 fix: this used to bind `String(currentSchemaVersion)` which left
-    /// brand-new DBs at the latest version immediately, causing every
-    /// V*IfNeeded migration's `guard schemaVersion < N` to short-circuit.
-    /// On a fresh DB the V2 → V4 ALTER TABLE / CREATE TABLE statements were
-    /// silently skipped — fine in practice because `createTables()` already
-    /// builds the latest shape, but it left the migration ladder broken for
-    /// any path that needed the V*IfNeeded blocks to actually run (e.g. a
-    /// DB that was hand-rolled at v1 with no _meta row, or a future
-    /// migration block that does work `createTables()` cannot).
+    /// C6 fix (scope): this used to bind `String(currentSchemaVersion)`
+    /// which left brand-new DBs at the latest version immediately,
+    /// causing every V*IfNeeded migration's `guard schemaVersion < N` to
+    /// short-circuit.
+    ///
+    /// Important caveat (cycle-4 L4): **in the production `migrate()`
+    /// path, `createTables()` runs BEFORE this function** and already
+    /// builds every table in its final v4 shape via
+    /// `CREATE TABLE IF NOT EXISTS`, so the V*IfNeeded blocks are
+    /// effectively prophylactic for production callers — the ladder they
+    /// fix cannot be reached from `migrate()` alone, because the tables
+    /// they would recreate already exist. The C6 fix matters for any
+    /// future migration that does work `createTables()` cannot (e.g. a
+    /// data backfill across existing rows, or a DDL change that requires
+    /// inspecting `_meta.schema_version`). It also matters for
+    /// `migrateOnlyForTesting()`, which bypasses `createTables()` so the
+    /// ladder can be exercised against a hand-seeded v1/v2/v3 DB in
+    /// isolation — that is the only path where the pre-C6 bug was
+    /// actually reachable.
     ///
     /// `INSERT OR IGNORE` keeps this idempotent on re-migration: if a row
     /// already exists (any version) we leave it alone and the V*IfNeeded
