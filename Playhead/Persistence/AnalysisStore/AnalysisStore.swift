@@ -2750,12 +2750,14 @@ actor AnalysisStore {
         windowLastAtomOrdinal: Int,
         scanPass: String,
         transcriptVersion: String,
-        scanCohortJSON: String
+        scanCohortJSON: String,
+        reuseScope: String? = nil
     ) -> String {
         let canonicalCohort = canonicalizeCohortJSON(scanCohortJSON)
+        let scope = reuseScope ?? "default"
         let canonical =
             "\(analysisAssetId)|\(windowFirstAtomOrdinal)|\(windowLastAtomOrdinal)|" +
-            "\(scanPass)|\(transcriptVersion)|\(canonicalCohort)"
+            "\(scanPass)|\(transcriptVersion)|\(canonicalCohort)|\(scope)"
         let digest = SHA256.hash(data: Data(canonical.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
@@ -2791,7 +2793,8 @@ actor AnalysisStore {
             windowLastAtomOrdinal: result.windowLastAtomOrdinal,
             scanPass: result.scanPass,
             transcriptVersion: result.transcriptVersion,
-            scanCohortJSON: result.scanCohortJSON
+            scanCohortJSON: result.scanCohortJSON,
+            reuseScope: result.reuseScope
         )
 
         // H-1: a cached `.success` row must never be overwritten by a
@@ -2880,7 +2883,8 @@ actor AnalysisStore {
                     windowLastAtomOrdinal: result.windowLastAtomOrdinal,
                     scanPass: result.scanPass,
                     transcriptVersion: result.transcriptVersion,
-                    scanCohortJSON: result.scanCohortJSON
+                    scanCohortJSON: result.scanCohortJSON,
+                    reuseScope: result.reuseScope
                 )
                 let probe = try prepare("SELECT status FROM semantic_scan_results WHERE reuseKeyHash = ? LIMIT 1")
                 defer { sqlite3_finalize(probe) }
@@ -2971,7 +2975,8 @@ actor AnalysisStore {
         windowLastAtomOrdinal: Int,
         scanPass: String,
         scanCohortJSON: String,
-        transcriptVersion: String
+        transcriptVersion: String,
+        reuseScope: String? = nil
     ) throws -> SemanticScanResult? {
         let hash = Self.semanticScanReuseKeyHash(
             analysisAssetId: analysisAssetId,
@@ -2979,7 +2984,8 @@ actor AnalysisStore {
             windowLastAtomOrdinal: windowLastAtomOrdinal,
             scanPass: scanPass,
             transcriptVersion: transcriptVersion,
-            scanCohortJSON: scanCohortJSON
+            scanCohortJSON: scanCohortJSON,
+            reuseScope: reuseScope
         )
         let sql = """
             SELECT \(Self.semanticScanResultColumns) FROM semantic_scan_results

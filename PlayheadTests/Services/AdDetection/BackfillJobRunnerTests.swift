@@ -217,6 +217,19 @@ struct BackfillJobRunnerTests {
         let fullFirst = try #require(inputs.segments.first?.firstAtomOrdinal)
         let fullLast = try #require(inputs.segments.last?.lastAtomOrdinal)
         let fullWidth = fullLast - fullFirst
+        let fullLineRefs = Set(inputs.segments.map(\.segmentIndex))
+        let submittedLineRefs = await runtime.snapshotSubmittedCoarseLineRefs()
+        #expect(submittedLineRefs.count == 3, "targeted mode should submit one coarse window per targeted phase for this fixture")
+
+        for refs in submittedLineRefs {
+            let scannedSet = Set(refs)
+            #expect(!refs.isEmpty)
+            #expect(scannedSet.isSubset(of: fullLineRefs))
+            #expect(scannedSet.count < fullLineRefs.count, "targeted phase should submit a strict subset of transcript lines")
+            let sorted = refs.sorted()
+            let contiguous = Array((sorted.first ?? 0)...(sorted.last ?? -1))
+            #expect(sorted == contiguous, "targeted phase should submit a contiguous envelope, got \(sorted)")
+        }
 
         for row in passA {
             #expect(row.windowFirstAtomOrdinal >= fullFirst)

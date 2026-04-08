@@ -150,7 +150,11 @@ enum TargetedWindowNarrower {
                 ((lineRef - padding)...(lineRef + padding)).filter { availableLineRefs.contains($0) }
             }
         )
-        return orderedSegments.filter { expanded.contains($0.segmentIndex) }
+        guard let firstIndex = orderedSegments.firstIndex(where: { expanded.contains($0.segmentIndex) }),
+              let lastIndex = orderedSegments.lastIndex(where: { expanded.contains($0.segmentIndex) }) else {
+            return []
+        }
+        return Array(orderedSegments[firstIndex...lastIndex])
     }
 
     private static func fallbackIfEmpty(

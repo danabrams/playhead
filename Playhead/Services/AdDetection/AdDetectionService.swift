@@ -449,11 +449,9 @@ actor AdDetectionService {
         // Lazy semantics: a missing row means we have never observed this
         // podcast, so we fall back to the conservative cold-start defaults.
         // The runner's `recordPodcastEpisodeObservation` call site (also
-        // bd-m8k) materializes the row and advances the observed-episode
-        // counters, but production still records `fullRescanPrecisionSample`
-        // as `nil`. That leaves the precision ring empty and keeps the
-        // planner on the conservative path until the follow-up precision
-        // sampling work lands (tracked in playhead-nlh).
+        // bd-m8k) materializes the row, advances observed-episode counters,
+        // and persists full-rescan precision samples derived from the shared
+        // targeted-window narrowing helper.
         //
         // Failure mode: a fetch error here must NEVER block the shadow
         // pass — the whole point of shadow mode is that it cannot affect

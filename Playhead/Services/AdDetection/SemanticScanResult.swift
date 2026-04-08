@@ -33,6 +33,54 @@ struct SemanticScanResult: Sendable, Equatable {
     let prewarmHit: Bool
     let scanCohortJSON: String
     let transcriptVersion: String
+    /// Optional stable scope included in persistence reuse hashing so
+    /// logically distinct jobs/phases that share the same window bounds do
+    /// not collapse each other. Nil preserves legacy reuse semantics.
+    let reuseScope: String?
+
+    init(
+        id: String,
+        analysisAssetId: String,
+        windowFirstAtomOrdinal: Int,
+        windowLastAtomOrdinal: Int,
+        windowStartTime: Double,
+        windowEndTime: Double,
+        scanPass: String,
+        transcriptQuality: TranscriptQuality,
+        disposition: CoarseDisposition,
+        spansJSON: String,
+        status: SemanticScanStatus,
+        attemptCount: Int,
+        errorContext: String?,
+        inputTokenCount: Int?,
+        outputTokenCount: Int?,
+        latencyMs: Double?,
+        prewarmHit: Bool,
+        scanCohortJSON: String,
+        transcriptVersion: String,
+        reuseScope: String? = nil
+    ) {
+        self.id = id
+        self.analysisAssetId = analysisAssetId
+        self.windowFirstAtomOrdinal = windowFirstAtomOrdinal
+        self.windowLastAtomOrdinal = windowLastAtomOrdinal
+        self.windowStartTime = windowStartTime
+        self.windowEndTime = windowEndTime
+        self.scanPass = scanPass
+        self.transcriptQuality = transcriptQuality
+        self.disposition = disposition
+        self.spansJSON = spansJSON
+        self.status = status
+        self.attemptCount = attemptCount
+        self.errorContext = errorContext
+        self.inputTokenCount = inputTokenCount
+        self.outputTokenCount = outputTokenCount
+        self.latencyMs = latencyMs
+        self.prewarmHit = prewarmHit
+        self.scanCohortJSON = scanCohortJSON
+        self.transcriptVersion = transcriptVersion
+        self.reuseScope = reuseScope
+    }
 
     func isReusable(
         scanCohortJSON: String,

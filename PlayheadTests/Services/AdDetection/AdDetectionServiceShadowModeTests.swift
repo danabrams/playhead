@@ -343,4 +343,133 @@ struct AdDetectionServiceShadowModeTests {
         let windows = try await store.fetchAdWindows(assetId: "asset-tel")
         #expect(windows.allSatisfy { $0.detectorVersion == "detection-v1" })
     }
+
+    @Test("live runBackfill path flips planner into targetedWithAudit and executes targeted jobs")
+    func runBackfillFlipsPlannerAndExecutesTargetedJobs() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-live-targeted"
+        let runtime = TestFMRuntime(
+            coarseResponses: Array(
+                repeating: CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [2],
+                        certainty: .strong
+                    )
+                ),
+                count: 24
+            )
+        )
+
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: AdDetectionConfig(
+                candidateThreshold: 0.40,
+                confirmationThreshold: 0.70,
+                suppressionThreshold: 0.25,
+                hotPathLookahead: 90.0,
+                detectorVersion: "detection-v1",
+                fmBackfillMode: .shadow
+            ),
+            backfillJobRunnerFactory: { store, mode in
+                BackfillJobRunner(
+                    store: store,
+                    admissionController: AdmissionController(),
+                    classifier: FoundationModelClassifier(runtime: runtime.runtime),
+                    coveragePlanner: CoveragePlanner(),
+                    mode: mode,
+                    capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+                    batteryLevelProvider: { 1.0 },
+                    scanCohortJSON: makeTestScanCohortJSON()
+                )
+            }
+        )
+
+        func makeEpisodeChunks(_ assetId: String) -> [TranscriptChunk] {
+            let lines = [
+                "Welcome back to the show and today's interview.",
+                "Before we continue, this episode is brought to you by ExampleCo.",
+                "Visit example.com slash deal and use promo code PLAYHEAD.",
+                "Now back to the conversation with our guest.",
+                "We discuss the roadmap and next release milestones.",
+                "The panel shares lessons learned from production incidents.",
+                "Audience questions focus on reliability and performance.",
+                "Thanks for listening and see you next week."
+            ]
+            return lines.enumerated().map { index, text in
+                TranscriptChunk(
+                    id: "\(assetId)-chunk-\(index)",
+                    analysisAssetId: assetId,
+                    segmentFingerprint: "\(assetId)-fp-\(index)",
+                    chunkIndex: index,
+                    startTime: Double(index) * 10,
+                    endTime: Double(index + 1) * 10,
+                    text: text,
+                    normalizedText: text.lowercased(),
+                    pass: "final",
+                    modelVersion: "test-v1",
+                    transcriptVersion: nil,
+                    atomOrdinal: nil
+                )
+            }
+        }
+
+        for episode in 1...6 {
+            let assetId = "asset-live-targeted-\(episode)"
+            try await store.insertAsset(makeAsset(id: assetId))
+            try await service.runBackfill(
+                chunks: makeEpisodeChunks(assetId),
+                analysisAssetId: assetId,
+                podcastId: podcastId,
+                episodeDuration: 80
+            )
+        }
+
+        let plannerState = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+        #expect(plannerState.observedEpisodeCount == 6)
+        #expect(plannerState.stablePrecisionFlag)
+
+        let targetedAssetId = "asset-live-targeted-6"
+        let passA = try await store.fetchSemanticScanResults(
+            analysisAssetId: targetedAssetId,
+            scanPass: "passA"
+        )
+        #expect(passA.count == 3, "targeted episode should produce one passA row per targeted phase")
+
+        let episodeChunks = makeEpisodeChunks(targetedAssetId)
+        let (_, version) = TranscriptAtomizer.atomize(
+            chunks: episodeChunks,
+            analysisAssetId: targetedAssetId,
+            normalizationHash: "norm-v1",
+            sourceHash: "asr-v1"
+        )
+
+        let expectedTargetedPhases: [BackfillJobPhase] = [
+            .scanHarvesterProposals,
+            .scanLikelyAdSlots,
+            .scanRandomAuditWindows,
+        ]
+        for (offset, phase) in expectedTargetedPhases.enumerated() {
+            let jobId = BackfillJobRunner.makeJobIdForTesting(
+                analysisAssetId: targetedAssetId,
+                transcriptVersion: version.transcriptVersion,
+                phase: phase,
+                offset: offset
+            )
+            let job = try #require(await store.fetchBackfillJob(byId: jobId))
+            #expect(job.status == .complete)
+            #expect(job.phase == phase)
+        }
+
+        let fullEpisodeJobId = BackfillJobRunner.makeJobIdForTesting(
+            analysisAssetId: targetedAssetId,
+            transcriptVersion: version.transcriptVersion,
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+        let fullEpisodeJob = try await store.fetchBackfillJob(byId: fullEpisodeJobId)
+        #expect(fullEpisodeJob == nil)
+    }
 }

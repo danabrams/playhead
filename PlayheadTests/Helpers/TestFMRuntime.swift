@@ -19,6 +19,8 @@ actor TestFMRuntime {
     private var refinementQueue: [RefinementWindowSchema]
     private var coarseFailureQueue: [TestFMRuntimeFailure?]
     private var refinementFailureQueue: [TestFMRuntimeFailure?]
+    private var coarsePrompts: [String] = []
+    private var refinementPrompts: [String] = []
     private let defaultCoarse: CoarseScreeningSchema
     private let defaultRefinement: RefinementWindowSchema
     private let contextSizeValue: Int
@@ -69,14 +71,19 @@ actor TestFMRuntime {
             makeSession: {
                 FoundationModelClassifier.Runtime.Session(
                     prewarm: { _ in },
-                    respondCoarse: { _ in try await self.nextCoarse() },
-                    respondRefinement: { _ in try await self.nextRefinement() }
+                    respondCoarse: { prompt in try await self.nextCoarse(prompt: prompt) },
+                    respondRefinement: { prompt in try await self.nextRefinement(prompt: prompt) }
                 )
             }
         )
     }
 
-    private func nextCoarse() throws -> CoarseScreeningSchema {
+    func snapshotSubmittedCoarseLineRefs() -> [[Int]] {
+        coarsePrompts.map(Self.submittedLineRefs(from:))
+    }
+
+    private func nextCoarse(prompt: String) throws -> CoarseScreeningSchema {
+        coarsePrompts.append(prompt)
         coarseCallCount += 1
         if !coarseFailureQueue.isEmpty {
             let failure = coarseFailureQueue.removeFirst()
@@ -90,7 +97,8 @@ actor TestFMRuntime {
         return coarseQueue.removeFirst()
     }
 
-    private func nextRefinement() throws -> RefinementWindowSchema {
+    private func nextRefinement(prompt: String) throws -> RefinementWindowSchema {
+        refinementPrompts.append(prompt)
         refinementCallCount += 1
         if !refinementFailureQueue.isEmpty {
             let failure = refinementFailureQueue.removeFirst()
@@ -102,6 +110,23 @@ actor TestFMRuntime {
             return defaultRefinement
         }
         return refinementQueue.removeFirst()
+    }
+
+    nonisolated private static func submittedLineRefs(from prompt: String) -> [Int] {
+        guard let regex = try? NSRegularExpression(pattern: #"L(\d+)>"#) else {
+            return []
+        }
+        let nsPrompt = prompt as NSString
+        let range = NSRange(location: 0, length: nsPrompt.length)
+        var refs: [Int] = []
+        var seen = Set<Int>()
+        for match in regex.matches(in: prompt, range: range) {
+            guard match.numberOfRanges > 1 else { continue }
+            let refString = nsPrompt.substring(with: match.range(at: 1))
+            guard let ref = Int(refString), seen.insert(ref).inserted else { continue }
+            refs.append(ref)
+        }
+        return refs.sorted()
     }
 }
 

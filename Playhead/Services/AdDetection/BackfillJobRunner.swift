@@ -1491,7 +1491,8 @@ actor BackfillJobRunner {
             latencyMs: windowOutput.latencyMillis,
             prewarmHit: false,
             scanCohortJSON: scanCohortJSON,
-            transcriptVersion: inputs.transcriptVersion
+            transcriptVersion: inputs.transcriptVersion,
+            reuseScope: jobId
         )
     }
 
@@ -1541,7 +1542,8 @@ actor BackfillJobRunner {
             latencyMs: windowOutput.latencyMillis,
             prewarmHit: false,
             scanCohortJSON: scanCohortJSON,
-            transcriptVersion: inputs.transcriptVersion
+            transcriptVersion: inputs.transcriptVersion,
+            reuseScope: jobId
         )
     }
 
@@ -1582,7 +1584,8 @@ actor BackfillJobRunner {
             latencyMs: latencyMs,
             prewarmHit: false,
             scanCohortJSON: scanCohortJSON,
-            transcriptVersion: inputs.transcriptVersion
+            transcriptVersion: inputs.transcriptVersion,
+            reuseScope: jobId
         )
     }
 
