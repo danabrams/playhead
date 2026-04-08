@@ -26,6 +26,9 @@
 
 import Foundation
 import XCTest
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
 @testable import Playhead
 
 final class PlayheadFMSmokeTests: XCTestCase {
@@ -1117,5 +1120,219 @@ final class PlayheadFMSmokeTests: XCTestCase {
             everyProbeBroken,
             "every refinement probe was anomalous — test setup is broken"
         )
+    }
+
+    // MARK: - bd-1en validation: permissive content transformations probe matrix
+
+    /// Validation probe for the iOS-expert-recommended architecture
+    /// (2026-04-08): instead of fighting the safety classifier with token
+    /// redaction, route sensitive content through Apple's documented
+    /// `.permissiveContentTransformations` guardrails mode + plain string
+    /// output. Apple's docs say this mode relaxes guardrails for
+    /// text-to-text transformation tasks but ONLY when generating a String
+    /// — guided generation (`@Generable`) always runs the default
+    /// guardrails. So our entire bd-1en redactor approach was the wrong
+    /// abstraction; the right abstraction is a routing layer that sends
+    /// pharma/medical content through a different `SystemLanguageModel`
+    /// initialization with relaxed guardrails and a hand-rolled string
+    /// output grammar.
+    ///
+    /// This test runs the SAME 124 probes from `safetyProbeMatrix` but
+    /// through the permissive path with a line-ref-only output grammar.
+    /// If the probes that previously REFUSED now return AD/NO_AD/UNCERTAIN
+    /// strings, the architecture is empirically validated and we can
+    /// commit to the rebuild. If the permissive path also refuses on the
+    /// same content, the expert was wrong about this specific application
+    /// and we have new data to send back.
+    ///
+    /// Output grammar (single line):
+    ///   NO_AD
+    ///   UNCERTAIN
+    ///   AD L<start>-L<end>[,L<start>-L<end>]...
+    ///
+    /// We never let the model echo the transcript back — line refs only.
+    func testPermissiveTransformationProbeMatrix() async throws {
+        guard #available(iOS 26.0, *) else {
+            throw XCTSkip("permissive content transformations require iOS 26.0+")
+        }
+
+        #if !canImport(FoundationModels)
+        throw XCTSkip("FoundationModels framework not available in this build configuration")
+        #else
+
+        // Create a SystemLanguageModel with permissive guardrails. Per
+        // Apple docs (and the iOS expert), this is the documented path
+        // for relaxing the safety classifier on sensitive source text.
+        // Note: this init form may not exist on every iOS 26.x point
+        // release — if the build fails, we have new data to send back.
+        let model = SystemLanguageModel(guardrails: .permissiveContentTransformations)
+        let session = LanguageModelSession(model: model)
+
+        var results: [(label: String, status: String, detail: String)] = []
+        results.reserveCapacity(Self.safetyProbeMatrix.count)
+
+        for probe in Self.safetyProbeMatrix {
+            let prompt = Self.makePermissivePrompt(transcript: probe.text)
+
+            do {
+                let response = try await session.respond(
+                    to: prompt,
+                    options: GenerationOptions(sampling: .greedy)
+                )
+                let raw = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                let (status, detail) = Self.parsePermissiveResponse(raw)
+                results.append((probe.label, status, detail))
+            } catch let error as LanguageModelSession.GenerationError {
+                // Apple's GenerationError is the documented refusal path.
+                // We pattern-match the case to distinguish refusal from
+                // other errors (decoding, context window, etc.).
+                let statusString: String
+                let detailString: String
+                switch error {
+                case .refusal:
+                    statusString = "REFUSED"
+                    detailString = "GenerationError.refusal"
+                case .decodingFailure:
+                    statusString = "DECODING-FAILURE"
+                    detailString = "GenerationError.decodingFailure"
+                case .exceededContextWindowSize:
+                    statusString = "CONTEXT-OVERFLOW"
+                    detailString = "GenerationError.exceededContextWindowSize"
+                default:
+                    statusString = "GEN-ERROR"
+                    detailString = "\(error)"
+                }
+                results.append((probe.label, statusString, detailString))
+            } catch {
+                results.append((probe.label, "THROWN", "\(error)"))
+            }
+        }
+
+        // Print the matrix in the same format as the existing probe test
+        // so the two outputs are directly comparable side-by-side.
+        let labelWidth = (results.map(\.label.count).max() ?? 20) + 2
+        print("\n=== FM PERMISSIVE TRANSFORMATIONS PROBE MATRIX RESULTS ===")
+        print("(validation of the iOS-expert-recommended architecture: route")
+        print("sensitive content through .permissiveContentTransformations +")
+        print("plain string output instead of @Generable guided generation)")
+        print("")
+        print("(PASS-AD          = parsed `AD L<start>-L<end>` from response)")
+        print("(PASS-NOAD        = parsed `NO_AD`)")
+        print("(PASS-UNCERTAIN   = parsed `UNCERTAIN`)")
+        print("(REFUSED          = GenerationError.refusal — even permissive guardrails refused)")
+        print("(PARSE-FAILED     = response received but didn't match grammar)")
+        print("(DECODING-FAILURE = malformed output)")
+        print("(THROWN           = unexpected exception)\n")
+
+        for (label, status, detail) in results {
+            let paddedLabel = label.padding(toLength: labelWidth, withPad: " ", startingAt: 0)
+            let paddedStatus = status.padding(toLength: 18, withPad: " ", startingAt: 0)
+            print("  \(paddedLabel) \(paddedStatus)  \(detail)")
+        }
+
+        let passAdCount       = results.filter { $0.status == "PASS-AD" }.count
+        let passNoAdCount     = results.filter { $0.status == "PASS-NOAD" }.count
+        let passUncertain     = results.filter { $0.status == "PASS-UNCERTAIN" }.count
+        let refusedCount      = results.filter { $0.status == "REFUSED" }.count
+        let parseFailedCount  = results.filter { $0.status == "PARSE-FAILED" }.count
+        let otherCount        = results.count - passAdCount - passNoAdCount - passUncertain - refusedCount - parseFailedCount
+
+        print("\n  Summary: \(passAdCount) PASS-AD, \(passNoAdCount) PASS-NOAD, \(passUncertain) PASS-UNCERTAIN, \(refusedCount) REFUSED, \(parseFailedCount) PARSE-FAILED, \(otherCount) other")
+
+        // The most informative comparison: the previously-refused probes
+        // from the @Generable matrix that now PASS through the permissive
+        // path. If this list is large, the architecture is validated.
+        let knownPharmaProbeLabels: Set<String> = [
+            "R4-original-cvs-known-refuse",
+            "CVS-A1-vaccine-as-product",
+            "CVS-A2-vaccine-as-treatment",
+            "CVS-A3-vaccine-as-appointment",
+            "CVS-A4-vaccine-as-checkup",
+            "CVS-A5-vaccine-as-service",
+            "CVS-A6-vaccine-as-protection",
+            "CVS-A7-vaccine-deleted",
+            "CVS-A8-vaccine-as-shot",
+            "CVS-A9-vaccine-as-jab",
+            "CVS-H2-multiline-vaccine-stripped",
+            "PHARMA-1-trulicity",
+            "PHARMA-2-ozempic",
+            "PHARMA-3-rinvoq",
+            "PHARMA-5-prescription-only",
+            "HEALTH-3-physical",
+            "HEALTH-4-skin-cancer-screening",
+            "HEALTH-5-blood-pressure-check",
+            "HEALTH-7-flu-test",
+            "HEALTH-8-covid-test",
+        ]
+
+        let recoveredProbes = results.filter { result in
+            knownPharmaProbeLabels.contains(result.label) &&
+            (result.status == "PASS-AD" || result.status == "PASS-NOAD" || result.status == "PASS-UNCERTAIN")
+        }
+
+        print("\n  KEY METRIC — pharma/medical probes that the @Generable matrix refused")
+        print("  but the permissive path accepted:")
+        print("    \(recoveredProbes.count) of \(knownPharmaProbeLabels.count) recovered\n")
+
+        for probe in recoveredProbes {
+            print("    ✓ \(probe.label) → \(probe.status)")
+        }
+
+        print("==========================================================\n")
+
+        // Diagnostic test only fails if EVERY probe errored out. Individual
+        // refusals or parse failures are the expected diagnostic output.
+        let everyProbeBroken = results.allSatisfy {
+            $0.status == "THROWN" || $0.status == "GEN-ERROR"
+        }
+        XCTAssertFalse(
+            everyProbeBroken,
+            "every probe failed to reach the permissive FM path — test setup is broken"
+        )
+        #endif
+    }
+
+    /// Compose the permissive prompt for a single transcript line. The
+    /// expert's recommended grammar is intentionally tiny: never echo the
+    /// transcript text, only return line refs. Each probe is one line at
+    /// `L0`, so the expected outputs are `NO_AD`, `UNCERTAIN`, or
+    /// `AD L0-L0`.
+    private static func makePermissivePrompt(transcript: String) -> String {
+        """
+        Transform the transcript window into ad annotations.
+
+        Rules:
+        - Never quote or paraphrase the transcript.
+        - Never give medical advice.
+        - Return exactly one line with one of these forms:
+          NO_AD
+          UNCERTAIN
+          AD L<start>-L<end>[,L<start>-L<end>]...
+
+        Transcript:
+        L0> "\(transcript)"
+        """
+    }
+
+    /// Parse the permissive response into one of the expected status
+    /// labels. The expected grammar is one line; we trim and inspect.
+    private static func parsePermissiveResponse(_ raw: String) -> (status: String, detail: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let firstLine = trimmed.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? trimmed
+        let token = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if token == "NO_AD" || token.uppercased() == "NO_AD" {
+            return ("PASS-NOAD", "raw=\(token)")
+        }
+        if token == "UNCERTAIN" || token.uppercased() == "UNCERTAIN" {
+            return ("PASS-UNCERTAIN", "raw=\(token)")
+        }
+        if token.uppercased().hasPrefix("AD ") || token.uppercased().hasPrefix("AD L") {
+            return ("PASS-AD", "raw=\(token)")
+        }
+        // The model returned something unexpected. Surface it so we can
+        // see what it actually said and tighten the parser if needed.
+        let preview = String(token.prefix(80))
+        return ("PARSE-FAILED", "raw=\(preview)")
     }
 }
