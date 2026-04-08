@@ -72,9 +72,14 @@ final class PlayheadRuntime {
     /// Held strongly by the runtime so its observer loop survives until the
     /// runtime is torn down. Stopped explicitly via `shutdown()`; tests that
     /// spin up transient runtimes should call that to avoid leaking
-    /// AsyncStream subscriptions across tests.
+    /// AsyncStream subscriptions across tests. `deinit` also makes a
+    /// best-effort stop so an abandoned runtime does not keep the observer
+    /// alive forever.
     @ObservationIgnored
     private let shadowRetryObserver: ShadowRetryObserver?
+    @ObservationIgnored
+    private var shadowRetryObserverStartupTask: Task<Void, Never>?
+    private var isShutdown = false
 
     /// True when an episode is actively loaded for playback.
     var isPlayingEpisode: Bool {
@@ -322,13 +327,6 @@ final class PlayheadRuntime {
 
         Task { await capabilitiesService.startObserving() }
 
-        // bd-3bz (Phase 4): start the shadow-retry observer loop. The actor
-        // owns its own loop Task internally; this fire-and-forget hop just
-        // kicks the loop off the MainActor.
-        if let shadowRetryObserver {
-            Task { await shadowRetryObserver.start() }
-        }
-
         Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService] in
             // Migrate the analysis store before any component queries its tables.
             do {
@@ -356,6 +354,14 @@ final class PlayheadRuntime {
             } catch {
                 Logger(subsystem: "com.playhead", category: "Runtime")
                     .warning("Cohort orphan prune failed: \(error.localizedDescription, privacy: .public)")
+            }
+
+            // bd-3bz (Phase 4): only start the shadow-retry observer after
+            // the store is definitely migrated. The observer immediately
+            // queries the sessions table, so starting it earlier races the
+            // schema bootstrap on cold launch.
+            if let shadowRetryObserver {
+                await self.startShadowRetryObserverIfNeeded(observer: shadowRetryObserver)
             }
 
             await downloadManager.setAnalysisWorkScheduler(analysisWorkScheduler)
@@ -440,6 +446,33 @@ final class PlayheadRuntime {
             await backgroundProcessingService.start()
             await entitlementManager.start()
             await capabilitiesService.runSelfTest()
+        }
+    }
+
+    deinit {
+        shadowRetryObserverStartupTask?.cancel()
+        let observer = shadowRetryObserver
+        Task {
+            await observer?.stop()
+        }
+    }
+
+    /// Stops long-lived runtime observers and cancels any pending startup
+    /// task. Safe to call more than once.
+    func shutdown() async {
+        guard !isShutdown else { return }
+        isShutdown = true
+        shadowRetryObserverStartupTask?.cancel()
+        shadowRetryObserverStartupTask = nil
+        await shadowRetryObserver?.stop()
+    }
+
+    @MainActor
+    private func startShadowRetryObserverIfNeeded(observer: ShadowRetryObserver) {
+        guard !isShutdown, shadowRetryObserverStartupTask == nil else { return }
+        shadowRetryObserverStartupTask = Task { [observer] in
+            guard !Task.isCancelled else { return }
+            await observer.start()
         }
     }
 

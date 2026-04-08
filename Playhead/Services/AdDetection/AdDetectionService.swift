@@ -365,7 +365,7 @@ actor AdDetectionService {
             if podcastId.isEmpty {
                 logger.info("Skipping shadow FM phase: missing podcastId for asset \(analysisAssetId)")
             } else {
-                await runShadowFMPhase(
+                _ = await runShadowFMPhase(
                     chunks: chunks,
                     analysisAssetId: analysisAssetId,
                     podcastId: podcastId
@@ -376,6 +376,22 @@ actor AdDetectionService {
 
     // MARK: - Shadow FM Phase
 
+    private enum ShadowFMPhaseOutcome: Sendable {
+        case skipped
+        case requeued
+        case ranNeedsRetry
+        case ranSucceeded
+        case ranFailed
+
+        var didExecute: Bool {
+            self == .ranSucceeded || self == .ranFailed || self == .ranNeedsRetry
+        }
+
+        var shouldClearRetryFlag: Bool {
+            self == .ranSucceeded
+        }
+    }
+
     /// Invokes `BackfillJobRunner` to execute the Foundation Model backfill in
     /// shadow mode. Failures are logged but never propagated, because shadow
     /// mode must never affect cue computation or user-visible behavior. Reads
@@ -384,12 +400,12 @@ actor AdDetectionService {
         chunks: [TranscriptChunk],
         analysisAssetId: String,
         podcastId: String
-    ) async {
-        guard config.fmBackfillMode != .disabled else { return }
+    ) async -> ShadowFMPhaseOutcome {
+        guard config.fmBackfillMode != .disabled else { return .skipped }
 
         guard let factory = backfillJobRunnerFactory else {
             logger.debug("Shadow FM phase skipped: no runner factory injected")
-            return
+            return .skipped
         }
 
         // M-D: skip the entire shadow phase on devices that can't run
@@ -408,7 +424,7 @@ actor AdDetectionService {
         guard await canUseFoundationModelsProvider() else {
             logger.debug("Shadow FM phase skipped: canUseFoundationModels=false (bd-3bz: marking session for retry)")
             await shadowSkipMarker(analysisAssetId, podcastId)
-            return
+            return .requeued
         }
 
         let runner = factory(store, config.fmBackfillMode)
@@ -433,9 +449,11 @@ actor AdDetectionService {
         // Lazy semantics: a missing row means we have never observed this
         // podcast, so we fall back to the conservative cold-start defaults.
         // The runner's `recordPodcastEpisodeObservation` call site (also
-        // bd-m8k) is what eventually materializes the row and accumulates
-        // the observed-episode count + precision ring that lets the flag
-        // flip true.
+        // bd-m8k) materializes the row and advances the observed-episode
+        // counters, but production still records `fullRescanPrecisionSample`
+        // as `nil`. That leaves the precision ring empty and keeps the
+        // planner on the conservative path until the follow-up precision
+        // sampling work lands (tracked in playhead-nlh).
         //
         // Failure mode: a fetch error here must NEVER block the shadow
         // pass — the whole point of shadow mode is that it cannot affect
@@ -470,8 +488,13 @@ actor AdDetectionService {
         do {
             let result = try await runner.runPendingBackfill(for: inputs)
             logger.info("Shadow FM phase: admitted=\(result.admittedJobIds.count) scans=\(result.scanResultIds.count) deferred=\(result.deferredJobIds.count)")
+            if result.deferredJobIds.isEmpty {
+                return .ranSucceeded
+            }
+            return .ranNeedsRetry
         } catch {
             logger.warning("Shadow FM phase failed (suppressed by invariant): \(error.localizedDescription)")
+            return .ranFailed
         }
     }
 
@@ -503,7 +526,8 @@ actor AdDetectionService {
     ///
     /// Returns `true` if the drain actually executed the shadow phase
     /// (regardless of runner outcome), `false` if the session was missing,
-    /// not flagged, lacked chunks, or the FM capability guard bailed.
+    /// not flagged, lacked chunks, the FM capability guard bailed, or the
+    /// shadow phase could not even start (for example, no runner factory).
     @discardableResult
     func retryShadowFMPhaseForSession(sessionId: String) async -> Bool {
         guard let session = try? await store.fetchSession(id: sessionId) else {
@@ -546,11 +570,18 @@ actor AdDetectionService {
         }
 
         logger.info("Shadow retry: draining session \(sessionId) asset=\(analysisAssetId)")
-        await runShadowFMPhase(
+        let outcome = await runShadowFMPhase(
             chunks: finalChunks,
             analysisAssetId: analysisAssetId,
             podcastId: podcastId
         )
+        guard outcome.didExecute else {
+            return false
+        }
+        guard outcome.shouldClearRetryFlag else {
+            logger.debug("Shadow retry: shadow phase still has outstanding work for \(sessionId), leaving retry flag set")
+            return true
+        }
         // Clear only if the inner guard didn't re-stamp the session. A
         // race window exists where capability could have flipped mid-run,
         // but `runShadowFMPhase` would have re-marked the session via the

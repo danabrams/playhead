@@ -273,14 +273,153 @@ struct ShadowRetryTests {
         #expect(!scans.isEmpty, "shadow phase must have written semantic scan rows")
     }
 
-    // MARK: - Test C — happy-path session is unaffected by capability flips
+    // MARK: - Test C — failed retry leaves the flag set
 
-    @Test("Test C: session processed under FM=true is not flagged when capability flips later")
-    func testC_happyPathIsNotMarked() async throws {
+    @Test("Test C: retry keeps the flag set when the shadow phase fails")
+    func testC_retryFailureLeavesFlagSet() async throws {
         let store = try await makeTestStore()
         let assetId = "asset-C"
         try await store.insertAsset(makeAsset(id: assetId))
-        try await store.insertSession(makeSession(id: "sess-C", assetId: assetId))
+        try await store.insertSession(
+            AnalysisSession(
+                id: "sess-C",
+                analysisAssetId: assetId,
+                state: "complete",
+                startedAt: Date().timeIntervalSince1970,
+                updatedAt: Date().timeIntervalSince1970,
+                failureReason: nil,
+                needsShadowRetry: true,
+                shadowRetryPodcastId: "podcast-C"
+            )
+        )
+        try await store.insertTranscriptChunks(makeChunks(assetId: assetId))
+
+        // Force the inner shadow runner to fail before it can persist any
+        // telemetry by returning a runner backed by a different store with no
+        // parent asset row. This models a transient runner/store failure
+        // while still driving the real `runShadowFMPhase` code path.
+        let failingStore = try await makeTestStore()
+        nonisolated(unsafe) var factoryCalls = 0
+        let failingFactory: @Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner = { _, mode in
+            factoryCalls += 1
+            return BackfillJobRunner(
+                store: failingStore,
+                admissionController: AdmissionController(),
+                classifier: FoundationModelClassifier(runtime: TestFMRuntime().runtime),
+                coveragePlanner: CoveragePlanner(),
+                mode: mode,
+                capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+                batteryLevelProvider: { 1.0 },
+                scanCohortJSON: makeTestScanCohortJSON()
+            )
+        }
+
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: AdDetectionConfig(
+                candidateThreshold: 0.40,
+                confirmationThreshold: 0.70,
+                suppressionThreshold: 0.25,
+                hotPathLookahead: 90.0,
+                detectorVersion: "detection-v1",
+                fmBackfillMode: .shadow
+            ),
+            backfillJobRunnerFactory: failingFactory,
+            canUseFoundationModelsProvider: { true }
+        )
+
+        let didRun = await service.retryShadowFMPhaseForSession(sessionId: "sess-C")
+        #expect(didRun, "retry should report that the shadow phase was attempted")
+        #expect(factoryCalls == 1, "shadow phase factory should still be invoked")
+
+        let stillFlagged = try await store.fetchSession(id: "sess-C")
+        #expect(stillFlagged?.needsShadowRetry == true, "failed retry must leave the flag set")
+        #expect(stillFlagged?.shadowRetryPodcastId == "podcast-C")
+        let flagged = try await store.fetchSessionsNeedingShadowRetry()
+        #expect(flagged.count == 1)
+        #expect(flagged.first?.id == "sess-C")
+
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+        #expect(scans.isEmpty, "failed retry should not write scan rows into the main store")
+    }
+
+    // MARK: - Test D — deferred retry leaves the flag set
+
+    @Test("Test D: retry keeps the flag set when the shadow phase defers work")
+    func testD_retryDeferralLeavesFlagSet() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-D"
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await store.insertSession(
+            AnalysisSession(
+                id: "sess-D",
+                analysisAssetId: assetId,
+                state: "complete",
+                startedAt: Date().timeIntervalSince1970,
+                updatedAt: Date().timeIntervalSince1970,
+                failureReason: nil,
+                needsShadowRetry: true,
+                shadowRetryPodcastId: "podcast-D"
+            )
+        )
+        try await store.insertTranscriptChunks(makeChunks(assetId: assetId))
+
+        nonisolated(unsafe) var factoryCalls = 0
+        let deferredFactory: @Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner = { store, mode in
+            factoryCalls += 1
+            return BackfillJobRunner(
+                store: store,
+                admissionController: AdmissionController(),
+                classifier: FoundationModelClassifier(runtime: TestFMRuntime().runtime),
+                coveragePlanner: CoveragePlanner(),
+                mode: mode,
+                capabilitySnapshotProvider: { makeThermalThrottledSnapshot() },
+                batteryLevelProvider: { 1.0 },
+                scanCohortJSON: makeTestScanCohortJSON()
+            )
+        }
+
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: AdDetectionConfig(
+                candidateThreshold: 0.40,
+                confirmationThreshold: 0.70,
+                suppressionThreshold: 0.25,
+                hotPathLookahead: 90.0,
+                detectorVersion: "detection-v1",
+                fmBackfillMode: .shadow
+            ),
+            backfillJobRunnerFactory: deferredFactory,
+            canUseFoundationModelsProvider: { true }
+        )
+
+        let didRun = await service.retryShadowFMPhaseForSession(sessionId: "sess-D")
+        #expect(didRun, "retry should report that the shadow phase was attempted")
+        #expect(factoryCalls == 1, "shadow phase factory should still be invoked")
+
+        let stillFlagged = try await store.fetchSession(id: "sess-D")
+        #expect(stillFlagged?.needsShadowRetry == true, "deferred retry must leave the flag set")
+        #expect(stillFlagged?.shadowRetryPodcastId == "podcast-D")
+        let flagged = try await store.fetchSessionsNeedingShadowRetry()
+        #expect(flagged.count == 1)
+        #expect(flagged.first?.id == "sess-D")
+
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+        #expect(scans.isEmpty, "deferred retry should not write scan rows into the main store")
+    }
+
+    // MARK: - Test E — happy-path session is unaffected by capability flips
+
+    @Test("Test E: session processed under FM=true is not flagged when capability flips later")
+    func testE_happyPathIsNotMarked() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-E"
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await store.insertSession(makeSession(id: "sess-E", assetId: assetId))
 
         // FM available — the bail path is never reached, so the marker
         // closure should never fire even though we wire one in.
@@ -309,27 +448,27 @@ struct ShadowRetryTests {
         try await service.runBackfill(
             chunks: makeChunks(assetId: assetId),
             analysisAssetId: assetId,
-            podcastId: "podcast-C",
+            podcastId: "podcast-E",
             episodeDuration: 90
         )
 
         #expect(markerCalls == 0, "marker must not be invoked when FM is available")
 
-        let refreshed = try await store.fetchSession(id: "sess-C")
+        let refreshed = try await store.fetchSession(id: "sess-E")
         #expect(refreshed?.needsShadowRetry == false, "happy-path session should not be flagged")
         #expect(try await store.fetchSessionsNeedingShadowRetry().isEmpty)
 
         // Now "flip" the capability: in production this is the observer's
         // job, but the contract here is that nothing in the system should
         // retroactively mark a clean session. We re-fetch to confirm.
-        let stillClean = try await store.fetchSession(id: "sess-C")
+        let stillClean = try await store.fetchSession(id: "sess-E")
         #expect(stillClean?.needsShadowRetry == false, "no spurious re-marking on capability flip")
     }
 
-    // MARK: - Test D — observer debounce
+    // MARK: - Test F — observer debounce
 
-    @Test("Test D: observer waits 60s of stable FM=true before draining; cancels on flip")
-    func testD_observerDebounce() async throws {
+    @Test("Test F: observer waits 60s of stable FM=true before draining; cancels on flip")
+    func testF_observerDebounce() async throws {
         // Synchronously-driven fake clock. Each `sleep(seconds:)` call parks
         // a continuation that the test resumes by calling `release()`. The
         // observer's drain task only runs when its parked sleep is released.
@@ -339,13 +478,13 @@ struct ShadowRetryTests {
         let store = StubShadowRetryStoreReader(rows: [
             AnalysisSession(
                 id: "sess-D",
-                analysisAssetId: "asset-D",
+                analysisAssetId: "asset-F",
                 state: "complete",
                 startedAt: 0,
                 updatedAt: 0,
                 failureReason: nil,
                 needsShadowRetry: true,
-                shadowRetryPodcastId: "podcast-D"
+                shadowRetryPodcastId: "podcast-F"
             )
         ])
 
