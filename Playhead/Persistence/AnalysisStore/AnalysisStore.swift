@@ -2619,6 +2619,14 @@ actor AnalysisStore {
     func dropPodcastPlannerStateForTesting() throws {
         try exec("DROP TABLE IF EXISTS podcast_planner_state")
     }
+
+    /// Cycle 2 Rev4-M3 test-only helper: run an arbitrary DDL/DML
+    /// statement so tests can corrupt rows on purpose to exercise the
+    /// fetchPodcastPlannerState clamp warning. Production code MUST NOT
+    /// call this; it bypasses every validator the store enforces.
+    func execForTesting(_ sql: String) throws {
+        try exec(sql)
+    }
     #endif
 
     #if DEBUG

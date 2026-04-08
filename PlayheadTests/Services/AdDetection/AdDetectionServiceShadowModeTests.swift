@@ -353,7 +353,11 @@ struct AdDetectionServiceShadowModeTests {
                 repeating: CoarseScreeningSchema(
                     disposition: .containsAd,
                     support: CoarseSupportSchema(
-                        supportLineRefs: [2],
+                        // Cycle 2 C5: align with the 30-line fixture's
+                        // ad copy at lines 14-15 so the recall sample
+                        // computed by the runner is non-zero and the
+                        // planner ring fills with passing samples.
+                        supportLineRefs: [14],
                         certainty: .strong
                     )
                 ),
@@ -388,16 +392,24 @@ struct AdDetectionServiceShadowModeTests {
         )
 
         func makeEpisodeChunks(_ assetId: String) -> [TranscriptChunk] {
-            let lines = [
-                "Welcome back to the show and today's interview.",
-                "Before we continue, this episode is brought to you by ExampleCo.",
-                "Visit example.com slash deal and use promo code PLAYHEAD.",
-                "Now back to the conversation with our guest.",
-                "We discuss the roadmap and next release milestones.",
-                "The panel shares lessons learned from production incidents.",
-                "Audience questions focus on reliability and performance.",
-                "Thanks for listening and see you next week."
-            ]
+            // Cycle 2 C5/Rev3-M6: 30-line fixture so the per-anchor
+            // narrowing model produces a strict subset (anchors land at
+            // lines 14/15, narrowed envelope ~[9..20] = 12 segments,
+            // strictly less than the 30-segment full episode). The
+            // legacy 8-line fixture was too small for the new model: a
+            // single anchor with default padding=5 already covers the
+            // full episode and the Rev3-M6 narrowing rail can't fire.
+            var lines: [String] = []
+            for idx in 0..<30 {
+                switch idx {
+                case 14:
+                    lines.append("Before we continue, this episode is brought to you by ExampleCo.")
+                case 15:
+                    lines.append("Visit example.com slash deal and use promo code PLAYHEAD.")
+                default:
+                    lines.append("Editorial line \(idx) about the topic of the day.")
+                }
+            }
             return lines.enumerated().map { index, text in
                 TranscriptChunk(
                     id: "\(assetId)-chunk-\(index)",
@@ -423,7 +435,7 @@ struct AdDetectionServiceShadowModeTests {
                 chunks: makeEpisodeChunks(assetId),
                 analysisAssetId: assetId,
                 podcastId: podcastId,
-                episodeDuration: 80
+                episodeDuration: 300
             )
         }
 
@@ -471,5 +483,26 @@ struct AdDetectionServiceShadowModeTests {
         )
         let fullEpisodeJob = try await store.fetchBackfillJob(byId: fullEpisodeJobId)
         #expect(fullEpisodeJob == nil)
+
+        // Cycle 2 Rev3-M6: prove at least one targeted phase row was
+        // actually narrowed — i.e. the persisted scan window's
+        // atom-ordinal span is strictly smaller than the full episode's
+        // atom-ordinal span. The legacy assertion only checked that 3
+        // passA rows existed, which would also pass if the runner had
+        // quietly fallen back to full-episode coverage on every targeted
+        // phase.
+        let (allAtoms, _) = TranscriptAtomizer.atomize(
+            chunks: makeEpisodeChunks(targetedAssetId),
+            analysisAssetId: targetedAssetId,
+            normalizationHash: "norm-v1",
+            sourceHash: "asr-v1"
+        )
+        let firstOrdinal = allAtoms.first?.atomKey.atomOrdinal ?? 0
+        let lastOrdinal = allAtoms.last?.atomKey.atomOrdinal ?? 0
+        let episodeAtomCount = lastOrdinal - firstOrdinal
+        let narrowedRowExists = passA.contains { row in
+            (row.windowLastAtomOrdinal - row.windowFirstAtomOrdinal) < episodeAtomCount
+        }
+        #expect(narrowedRowExists, "Cycle 2 Rev3-M6: at least one targeted phase row must be a strict subset of the full episode")
     }
 }

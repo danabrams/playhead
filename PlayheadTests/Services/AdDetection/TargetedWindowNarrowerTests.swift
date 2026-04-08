@@ -41,7 +41,11 @@ struct TargetedWindowNarrowerTests {
 
     @Test("Cycle 2 C5: harvester narrowing produces DISJOINT windows for far-apart anchors")
     func harvesterFarApartProducesDisjointWindows() {
-        let inputs = makeFarApartInputs()
+        // Replaces the legacy `harvesterNarrowingIsContiguousAcrossFarApartAnchors`.
+        // Under the per-anchor model, anchors that are >= 2*padding+1
+        // segments apart MUST produce two disjoint windows rather than a
+        // contiguous hull spanning the gap.
+        let inputs = makeSyntheticInputs(segmentCount: 100, anchorIndices: [10, 80])
         let result = TargetedWindowNarrower.narrow(
             phase: .scanHarvesterProposals,
             inputs: inputs
@@ -49,12 +53,10 @@ struct TargetedWindowNarrowerTests {
         let segments = try! #require(result.narrowedSegments)
         let lineRefs = segments.map(\.segmentIndex).sorted()
 
-        // Far-apart anchors must NOT collapse into a hull. With anchors at
-        // ~1 and ~7 (or ~8) and a default padding of 5, each anchor
-        // produces its own window; the merged total is < the contiguous
-        // hull width.
         let hullWidth = (lineRefs.last ?? 0) - (lineRefs.first ?? 0) + 1
         #expect(lineRefs.count < hullWidth, "narrowing must NOT return a contiguous hull")
+        // And the gap must contain segments that are NOT in the result.
+        #expect(!lineRefs.contains(45), "the gap between anchors must remain unscanned")
     }
 
     @Test("Cycle 2 C5: single anchor at segment 0 clips to [0, padding]")

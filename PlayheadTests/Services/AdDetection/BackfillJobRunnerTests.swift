@@ -75,19 +75,32 @@ struct BackfillJobRunnerTests {
         transcriptVersion: String = "tx-targeted-v1",
         plannerContext: CoveragePlannerContext
     ) -> BackfillJobRunner.AssetInputs {
+        // Cycle 2 C5: the per-anchor narrowing model uses padding=5 by
+        // default, so a 5-segment-wide window centered on every anchor
+        // covers ~11 segments. The legacy 8-segment fixture is smaller
+        // than that envelope, which made every "narrowed" phase devolve
+        // back to the full transcript and broke the strict-subset
+        // invariant this test pins. Use a 30-segment fixture with the
+        // ad lines clustered near the middle so the narrowed envelope
+        // is meaningfully smaller than the full transcript.
+        var lines: [(Double, Double, String)] = []
+        for idx in 0..<30 {
+            let start = Double(idx) * 10.0
+            let text: String
+            switch idx {
+            case 12:
+                text = "Before we continue, this episode is brought to you by ExampleCo."
+            case 13:
+                text = "Visit example.com slash deal and use promo code PLAYHEAD."
+            default:
+                text = "Editorial line \(idx) about the topic of the day."
+            }
+            lines.append((start, start + 10.0, text))
+        }
         let segments = makeFMSegments(
             analysisAssetId: assetId,
             transcriptVersion: transcriptVersion,
-            lines: [
-                (0, 10, "Welcome back to the show and today's interview."),
-                (10, 20, "Before we continue, this episode is brought to you by ExampleCo."),
-                (20, 30, "Visit example.com slash deal and use promo code PLAYHEAD."),
-                (30, 40, "Now back to the conversation with our guest."),
-                (40, 50, "We discuss the roadmap and next release milestones."),
-                (50, 60, "The panel shares lessons learned from production incidents."),
-                (60, 70, "Audience questions focus on reliability and performance."),
-                (70, 80, "Thanks for listening and see you next week.")
-            ]
+            lines: lines
         )
         let evidenceCatalog = EvidenceCatalogBuilder.build(
             atoms: segments.flatMap(\.atoms),
@@ -245,11 +258,16 @@ struct BackfillJobRunnerTests {
     func fullRescanPersistsPrecisionSamplesAndUnlocksTargetedCoverage() async throws {
         let store = try await makeTestStore()
         let podcastId = "podcast-planner-live"
+        // Cycle 2 C5: under the new makeTargetedInputs fixture the ad
+        // copy lives at line refs 12-13 (so the harvester anchors land
+        // there). The fake coarse FM must report a support line ref that
+        // overlaps the narrower's predicted window so the recall sample
+        // is non-zero.
         let coarseResponses = (0..<5).map { _ in
             CoarseScreeningSchema(
                 disposition: .containsAd,
                 support: CoarseSupportSchema(
-                    supportLineRefs: [2],
+                    supportLineRefs: [12],
                     certainty: .strong
                 )
             )
