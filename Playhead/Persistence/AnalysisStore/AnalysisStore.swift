@@ -1300,6 +1300,24 @@ actor AnalysisStore {
                 VALUES (new.rowid, new.text, new.normalizedText);
             END
             """)
+
+        // decoded_spans (Phase 5, playhead-4my.5.2)
+        // New table — additive-only migration. Never extends ad_windows.
+        // `anchorProvenanceJSON` is a JSON-encoded [AnchorRef] array.
+        // INSERT OR REPLACE makes re-runs idempotent (same id → same row).
+        try exec("""
+            CREATE TABLE IF NOT EXISTS decoded_spans (
+                id                  TEXT PRIMARY KEY,
+                assetId             TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                firstAtomOrdinal    INTEGER NOT NULL,
+                lastAtomOrdinal     INTEGER NOT NULL,
+                startTime           REAL NOT NULL,
+                endTime             REAL NOT NULL,
+                anchorProvenanceJSON TEXT NOT NULL DEFAULT '[]'
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_decoded_spans_asset ON decoded_spans(assetId)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_decoded_spans_asset_time ON decoded_spans(assetId, startTime)")
     }
 
     // MARK: - CRUD: analysis_assets
@@ -3844,5 +3862,98 @@ actor AnalysisStore {
         } catch {
             throw AnalysisStoreError.queryFailed("Failed to decode \(T.self): \(error)")
         }
+    }
+
+    // MARK: - CRUD: decoded_spans (Phase 5, playhead-4my.5.2)
+
+    /// Persist decoded spans for an asset. Uses INSERT OR REPLACE for idempotency:
+    /// re-running the decoder on the same input produces the same ids and overwrites
+    /// existing rows without creating duplicates.
+    func upsertDecodedSpans(_ spans: [DecodedSpan]) throws {
+        guard !spans.isEmpty else { return }
+        let encoder = JSONEncoder()
+        try exec("BEGIN TRANSACTION")
+        do {
+            let sql = """
+                INSERT OR REPLACE INTO decoded_spans
+                (id, assetId, firstAtomOrdinal, lastAtomOrdinal, startTime, endTime, anchorProvenanceJSON)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """
+            let stmt = try prepare(sql)
+            defer { sqlite3_finalize(stmt) }
+            for span in spans {
+                let provenanceData = (try? encoder.encode(span.anchorProvenance)) ?? Data()
+                let provenanceJSON = String(decoding: provenanceData, as: UTF8.self)
+                sqlite3_reset(stmt)
+                bind(stmt, 1, span.id)
+                bind(stmt, 2, span.assetId)
+                bind(stmt, 3, span.firstAtomOrdinal)
+                bind(stmt, 4, span.lastAtomOrdinal)
+                bind(stmt, 5, span.startTime)
+                bind(stmt, 6, span.endTime)
+                bind(stmt, 7, provenanceJSON)
+                try step(stmt, expecting: SQLITE_DONE)
+            }
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Fetch all decoded spans for an asset, ordered by startTime.
+    func fetchDecodedSpans(assetId: String) throws -> [DecodedSpan] {
+        let sql = """
+            SELECT id, assetId, firstAtomOrdinal, lastAtomOrdinal,
+                   startTime, endTime, anchorProvenanceJSON
+            FROM decoded_spans
+            WHERE assetId = ?
+            ORDER BY startTime
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+
+        let decoder = JSONDecoder()
+        var results: [DecodedSpan] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id = text(stmt, 0)
+            let aid = text(stmt, 1)
+            let firstOrdinal = Int(sqlite3_column_int(stmt, 2))
+            let lastOrdinal = Int(sqlite3_column_int(stmt, 3))
+            let startTime = sqlite3_column_double(stmt, 4)
+            let endTime = sqlite3_column_double(stmt, 5)
+            let provenanceJSON = text(stmt, 6)
+
+            let provenance: [AnchorRef]
+            if provenanceJSON.isEmpty || provenanceJSON == "[]" {
+                provenance = []
+            } else if let data = provenanceJSON.data(using: .utf8),
+                      let decoded = try? decoder.decode([AnchorRef].self, from: data) {
+                provenance = decoded
+            } else {
+                provenance = []
+            }
+
+            results.append(DecodedSpan(
+                id: id,
+                assetId: aid,
+                firstAtomOrdinal: firstOrdinal,
+                lastAtomOrdinal: lastOrdinal,
+                startTime: startTime,
+                endTime: endTime,
+                anchorProvenance: provenance
+            ))
+        }
+        return results
+    }
+
+    /// Delete all decoded spans for an asset. Used by tests and idempotent re-runs.
+    func deleteDecodedSpans(assetId: String) throws {
+        let sql = "DELETE FROM decoded_spans WHERE assetId = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        try step(stmt, expecting: SQLITE_DONE)
     }
 }
