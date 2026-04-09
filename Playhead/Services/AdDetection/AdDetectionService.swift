@@ -89,7 +89,41 @@ enum AdBoundaryState: String, Sendable {
 /// Protocol abstraction for ad detection, enabling test stubs.
 protocol AdDetectionProviding: Sendable {
     func runHotPath(chunks: [TranscriptChunk], analysisAssetId: String, episodeDuration: Double) async throws -> [AdWindow]
-    func runBackfill(chunks: [TranscriptChunk], analysisAssetId: String, podcastId: String, episodeDuration: Double) async throws
+
+    /// Cycle 4 H5: callers that know the analysis session id at dispatch
+    /// time (e.g. `AnalysisCoordinator.finalizeBackfill`) pass it here so
+    /// the shadow phase can stamp `needsShadowRetry` on the exact session
+    /// without a `fetchLatestSessionForAsset` lookup that races concurrent
+    /// reprocessing. Legacy callers that don't track sessions (e.g.
+    /// `AnalysisJobRunner`, which operates on analysis_jobs not sessions)
+    /// pass `nil` and the marker is skipped on bail — acceptable because
+    /// pre-roll warmup does not yet have a user-facing session to retry.
+    func runBackfill(
+        chunks: [TranscriptChunk],
+        analysisAssetId: String,
+        podcastId: String,
+        episodeDuration: Double,
+        sessionId: String?
+    ) async throws
+}
+
+extension AdDetectionProviding {
+    /// Convenience for callers that don't track session ids. Delegates
+    /// to the primary entry point with `sessionId: nil`.
+    func runBackfill(
+        chunks: [TranscriptChunk],
+        analysisAssetId: String,
+        podcastId: String,
+        episodeDuration: Double
+    ) async throws {
+        try await runBackfill(
+            chunks: chunks,
+            analysisAssetId: analysisAssetId,
+            podcastId: podcastId,
+            episodeDuration: episodeDuration,
+            sessionId: nil
+        )
+    }
 }
 
 // MARK: - AdDetectionService
@@ -120,12 +154,18 @@ actor AdDetectionService {
     /// reference to `CapabilitiesService.currentSnapshot`; tests default to
     /// `{ true }` so existing fixtures continue to exercise the shadow path.
     private let canUseFoundationModelsProvider: @Sendable () async -> Bool
-    /// bd-3bz (Phase 4): called from `runShadowFMPhase` when the shadow guard
-    /// bails on `canUseFoundationModels == false`, so the session can be
-    /// flagged for a later retry. Receives `(analysisAssetId, podcastId)` so
-    /// the recipient can locate the right session row. Default no-op keeps
-    /// existing callers (and tests that never flip FM to false) unchanged.
-    private let shadowSkipMarker: @Sendable (_ analysisAssetId: String, _ podcastId: String) async -> Void
+    /// bd-3bz (Phase 4) / H7 (cycle 2): called from `runShadowFMPhase` when
+    /// the shadow guard bails on `canUseFoundationModels == false`, so the
+    /// session can be flagged for a later retry.
+    ///
+    /// H7 fix: the marker now receives an explicit `sessionId` captured at
+    /// the START of the shadow phase, before any concurrent reprocessing
+    /// can race a fresh session row in for the same asset. The previous
+    /// closure shape was `(assetId, podcastId)` and the runtime side did a
+    /// `fetchLatestSessionForAsset` lookup at marker time, which under
+    /// concurrent reprocessing could mark the wrong (newer) session. Tests
+    /// that don't care about FM availability default this to a no-op.
+    private let shadowSkipMarker: @Sendable (_ sessionId: String, _ podcastId: String) async -> Void
 
     // MARK: - Cached State
 
@@ -146,7 +186,7 @@ actor AdDetectionService {
         podcastProfile: PodcastProfile? = nil,
         backfillJobRunnerFactory: (@Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner)? = nil,
         canUseFoundationModelsProvider: @escaping @Sendable () async -> Bool = { true },
-        shadowSkipMarker: @escaping @Sendable (_ analysisAssetId: String, _ podcastId: String) async -> Void = { _, _ in }
+        shadowSkipMarker: @escaping @Sendable (_ sessionId: String, _ podcastId: String) async -> Void = { _, _ in }
     ) {
         self.store = store
         self.classifier = classifier
@@ -258,7 +298,8 @@ actor AdDetectionService {
         chunks: [TranscriptChunk],
         analysisAssetId: String,
         podcastId: String,
-        episodeDuration: Double
+        episodeDuration: Double,
+        sessionId: String? = nil
     ) async throws {
         self.episodeDuration = episodeDuration
         guard !chunks.isEmpty else { return }
@@ -368,7 +409,8 @@ actor AdDetectionService {
                 _ = await runShadowFMPhase(
                     chunks: chunks,
                     analysisAssetId: analysisAssetId,
-                    podcastId: podcastId
+                    podcastId: podcastId,
+                    sessionIdOverride: sessionId
                 )
             }
         }
@@ -399,7 +441,8 @@ actor AdDetectionService {
     private func runShadowFMPhase(
         chunks: [TranscriptChunk],
         analysisAssetId: String,
-        podcastId: String
+        podcastId: String,
+        sessionIdOverride: String? = nil
     ) async -> ShadowFMPhaseOutcome {
         guard config.fmBackfillMode != .disabled else { return .skipped }
 
@@ -407,6 +450,25 @@ actor AdDetectionService {
             logger.debug("Shadow FM phase skipped: no runner factory injected")
             return .skipped
         }
+
+        // Cycle 4 H5: `sessionIdOverride` is the only source of truth for
+        // the session id. It's captured by the caller at dispatch time:
+        //   • `AnalysisCoordinator.finalizeBackfill` threads the session
+        //     id it already knows through `runBackfill(sessionId:)` →
+        //     `runShadowFMPhase(sessionIdOverride:)`.
+        //   • `retryShadowFMPhaseForSession` passes the exact session id
+        //     being retried.
+        //   • `AnalysisJobRunner` (pre-roll warmup) has no session
+        //     concept and passes nil — the marker is then skipped on
+        //     bail, which is correct for that path (no user-facing
+        //     session to retry).
+        //
+        // The previous `fetchLatestSessionForAsset` fallback was removed
+        // because it raced concurrent reprocessing: session B for asset
+        // X could land between the start of the shadow phase and the
+        // marker call, and the marker would tag the wrong (newer) row.
+        // With the override-only model, the race is unrepresentable.
+        let resolvedSessionId: String? = sessionIdOverride
 
         // M-D: skip the entire shadow phase on devices that can't run
         // Foundation Models. Atomization, segmentation, and catalog builds
@@ -423,7 +485,11 @@ actor AdDetectionService {
         // `retryShadowFMPhaseForSession` for the re-entrant retry path.
         guard await canUseFoundationModelsProvider() else {
             logger.debug("Shadow FM phase skipped: canUseFoundationModels=false (bd-3bz: marking session for retry)")
-            await shadowSkipMarker(analysisAssetId, podcastId)
+            if let resolvedSessionId {
+                await shadowSkipMarker(resolvedSessionId, podcastId)
+            } else {
+                logger.debug("Shadow FM phase: no session id resolved, marker skipped")
+            }
             return .requeued
         }
 
@@ -520,7 +586,7 @@ actor AdDetectionService {
     ///     drain actually runs, the inner guard bails and re-marks the
     ///     session — the retry queue effectively rolls forward to the
     ///     next stable-true window.
-    ///   • The session's `needs_shadow_retry` flag is cleared ONLY when
+    ///   • The session's `needsShadowRetry` flag is cleared ONLY when
     ///     the shadow phase runs to completion under a true capability.
     ///     Failures inside the runner (network, thermal, etc.) leave the
     ///     flag set so the next capability transition retries again.
@@ -564,9 +630,10 @@ actor AdDetectionService {
         // executed + bailed").
         guard await canUseFoundationModelsProvider() else {
             logger.debug("Shadow retry bailed: canUseFoundationModels flipped false before drain")
-            // Re-stamp the marker so updatedAt advances (keeps ordering
-            // monotonic for the next drain).
-            await shadowSkipMarker(analysisAssetId, podcastId)
+            // H7: pass the explicit `sessionId` we already have so the
+            // marker stamps the same session that was being retried,
+            // never a newer concurrent session for the same asset.
+            await shadowSkipMarker(sessionId, podcastId)
             return false
         }
 
@@ -574,7 +641,8 @@ actor AdDetectionService {
         let outcome = await runShadowFMPhase(
             chunks: finalChunks,
             analysisAssetId: analysisAssetId,
-            podcastId: podcastId
+            podcastId: podcastId,
+            sessionIdOverride: sessionId
         )
         guard outcome.didExecute else {
             return false

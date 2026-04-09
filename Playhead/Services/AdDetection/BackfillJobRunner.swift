@@ -1632,6 +1632,18 @@ actor BackfillJobRunner {
         }
     }
 
+    #if DEBUG
+    /// Cycle 4 M3: DEBUG accessor for the cycle-2 Rev1-L5 exhaustiveness
+    /// test. The cycle-2 test only enumerated cases inside a local switch
+    /// and never actually called `isPermanent`, so drift between the
+    /// test's expected permanence table and the real production switch
+    /// would go undetected. This accessor lets the test call the real
+    /// function and assert the expected classification per case.
+    static func isPermanentForTesting(_ error: AnalysisStoreError) -> Bool {
+        isPermanent(error)
+    }
+    #endif
+
     private func phasePriority(_ phase: BackfillJobPhase) -> Int {
         switch phase {
         case .scanLikelyAdSlots: 30
@@ -1860,7 +1872,7 @@ actor BackfillJobRunner {
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
             reuseScope: jobId,
-            phase: jobPhase.rawValue
+            jobPhase: jobPhase.rawValue
         )
     }
 
@@ -1913,7 +1925,7 @@ actor BackfillJobRunner {
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
             reuseScope: jobId,
-            phase: jobPhase.rawValue
+            jobPhase: jobPhase.rawValue
         )
     }
 
@@ -1957,7 +1969,7 @@ actor BackfillJobRunner {
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
             reuseScope: jobId,
-            phase: jobPhase.rawValue
+            jobPhase: jobPhase.rawValue
         )
     }
 
@@ -2113,7 +2125,7 @@ actor BackfillJobRunner {
                     evidenceJSON: evidenceJSON,
                     scanCohortJSON: scanCohortJSON,
                     createdAt: clock().timeIntervalSince1970,
-                    phase: jobPhase.rawValue
+                    jobPhase: jobPhase.rawValue
                 )
             )
         }

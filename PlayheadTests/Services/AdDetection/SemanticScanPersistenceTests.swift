@@ -1911,11 +1911,11 @@ struct SemanticScanPersistenceTests {
                 scanCohortJSON: cohort,
                 transcriptVersion: "tx-v1",
                 reuseScope: "scope-\(phase.rawValue)",
-                phase: phase.rawValue
+                jobPhase: phase.rawValue
             )
             try await store.insertSemanticScanResult(row)
             let fetched = try await store.fetchSemanticScanResult(id: row.id)
-            #expect(fetched?.phase == phase.rawValue, "phase round-trip failed for \(phase.rawValue)")
+            #expect(fetched?.jobPhase == phase.rawValue, "jobPhase round-trip failed for \(phase.rawValue)")
         }
 
         // Legacy default: a row constructed without specifying phase
@@ -1944,7 +1944,7 @@ struct SemanticScanPersistenceTests {
         )
         try await store.insertSemanticScanResult(legacy)
         let fetched = try await store.fetchSemanticScanResult(id: legacy.id)
-        #expect(fetched?.phase == "shadow", "default phase must be \"shadow\" for legacy callers")
+        #expect(fetched?.jobPhase == "shadow", "default jobPhase must be \"shadow\" for legacy callers")
     }
 
     @Test("Cycle 6 B6 Rev3-M6: evidence_events persists phase column and returns it on read")
@@ -1965,7 +1965,7 @@ struct SemanticScanPersistenceTests {
             evidenceJSON: "{\"commercialIntent\":\"sponsorship\"}",
             scanCohortJSON: cohort,
             createdAt: 123,
-            phase: BackfillJobPhase.scanHarvesterProposals.rawValue
+            jobPhase: BackfillJobPhase.scanHarvesterProposals.rawValue
         )
         _ = try await store.insertEvidenceEvent(harvester, transcriptVersion: "tx-v1")
 
@@ -1983,7 +1983,7 @@ struct SemanticScanPersistenceTests {
 
         let events = try await store.fetchEvidenceEvents(analysisAssetId: "asset-phase-ev")
         let byId = Dictionary(uniqueKeysWithValues: events.map { ($0.id, $0) })
-        #expect(byId["ev-harvester"]?.phase == BackfillJobPhase.scanHarvesterProposals.rawValue)
-        #expect(byId["ev-default"]?.phase == "shadow")
+        #expect(byId["ev-harvester"]?.jobPhase == BackfillJobPhase.scanHarvesterProposals.rawValue)
+        #expect(byId["ev-default"]?.jobPhase == "shadow")
     }
 }

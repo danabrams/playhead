@@ -521,9 +521,9 @@ struct AdDetectionServiceShadowModeTests {
             (row.windowLastAtomOrdinal - row.windowFirstAtomOrdinal) < episodeAtomCount
         }
 
-        let harvesterRows = passA.filter { $0.phase == BackfillJobPhase.scanHarvesterProposals.rawValue }
-        let lexicalRows = passA.filter { $0.phase == BackfillJobPhase.scanLikelyAdSlots.rawValue }
-        let auditRows = passA.filter { $0.phase == BackfillJobPhase.scanRandomAuditWindows.rawValue }
+        let harvesterRows = passA.filter { $0.jobPhase == BackfillJobPhase.scanHarvesterProposals.rawValue }
+        let lexicalRows = passA.filter { $0.jobPhase == BackfillJobPhase.scanLikelyAdSlots.rawValue }
+        let auditRows = passA.filter { $0.jobPhase == BackfillJobPhase.scanRandomAuditWindows.rawValue }
 
         #expect(!harvesterRows.isEmpty, "harvester phase must persist at least one passA row")
         #expect(!lexicalRows.isEmpty, "lexical phase must persist at least one passA row")

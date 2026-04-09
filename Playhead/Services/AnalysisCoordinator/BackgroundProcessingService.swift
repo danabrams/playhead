@@ -20,6 +20,7 @@
 
 import BackgroundTasks
 import Foundation
+import os
 import OSLog
 import UIKit
 
@@ -93,6 +94,22 @@ enum BackgroundTaskID {
 /// Owns the lifecycle of BGProcessingTask and BGContinuedProcessingTask
 /// registrations. Delegates actual analysis work to AnalysisCoordinator.
 actor BackgroundProcessingService {
+
+    /// Cycle 4 H3: process-wide guard against double BGTaskScheduler
+    /// registration. Flips true on the first call to
+    /// `registerBackgroundTasks()`. Subsequent calls no-op, so tests that
+    /// construct a second `PlayheadRuntime` in the same process (after
+    /// the test host's real `PlayheadApp` has already registered) don't
+    /// crash the test runner.
+    private static let registrationFlag = OSAllocatedUnfairLock<Bool>(initialState: false)
+
+    nonisolated static func registerOnce() -> Bool {
+        registrationFlag.withLock { flag in
+            if flag { return false }
+            flag = true
+            return true
+        }
+    }
 
     private let logger = Logger(subsystem: "com.playhead", category: "BackgroundProcessing")
 
@@ -211,7 +228,21 @@ actor BackgroundProcessingService {
 
     /// Re-register background task identifiers with real handlers.
     /// Call once the service is fully initialized with its dependencies.
+    ///
+    /// Cycle 4 H3: guarded against double registration within a single
+    /// process. `BGTaskScheduler.register(forTaskWithIdentifier:)`
+    /// crashes with an `NSInternalInconsistencyException` on the second
+    /// call for the same identifier, which is fatal for any test that
+    /// wants to construct a non-preview `PlayheadRuntime` in a process
+    /// where the test host's real `PlayheadApp` already launched. The
+    /// guard is process-wide because BGTaskScheduler itself is a
+    /// singleton and has no deregister API.
     nonisolated func registerBackgroundTasks() {
+        guard Self.registerOnce() else {
+            // Already registered in this process — nothing to do. The
+            // first registrar's handlers remain live.
+            return
+        }
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: BackgroundTaskID.backfillProcessing,
             using: nil

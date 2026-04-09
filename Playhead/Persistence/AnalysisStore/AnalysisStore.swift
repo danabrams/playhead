@@ -413,19 +413,29 @@ actor AnalysisStore {
             try migrateEvidenceEventsTranscriptVersionV3IfNeeded()
             try migrateAnalysisSessionsShadowRetryV4IfNeeded()
             try migratePodcastPlannerStateV4IfNeeded()
-            // Cycle 6 B6 Rev3-M6: `migrateEvidenceEventsTranscriptVersionV3IfNeeded`
-            // runs a DROP + CREATE TABLE cycle on `evidence_events` that does NOT
-            // preserve the `phase` column. Re-apply it here after every migration
-            // step so a pre-phase DB climbing the migration ladder still ends up
-            // with the column present. Idempotent via PRAGMA table_info check.
+            // Cycle 8 reconciliation: both C4 (Rev3-M5 shadow/targeted) and
+            // B6 (Rev3-M6 BackfillJobPhase.rawValue) added a `phase` column
+            // for different semantic dimensions. Keep C4's `phase` column
+            // (will be renamed to `runMode` in a follow-up reconciliation
+            // commit) and introduce a distinct `jobPhase` column for B6.
+            //
+            // V2 and V3 rebuild `evidence_events` from scratch (CREATE _vN,
+            // copy, DROP, RENAME), and those rebuilds intentionally don't
+            // carry either column. Re-apply both here once the table has
+            // reached its final v3 shape.
             try addColumnIfNeeded(
                 table: "evidence_events",
                 column: "phase",
                 definition: "TEXT NOT NULL DEFAULT 'shadow'"
             )
             try addColumnIfNeeded(
+                table: "evidence_events",
+                column: "jobPhase",
+                definition: "TEXT NOT NULL DEFAULT 'shadow'"
+            )
+            try addColumnIfNeeded(
                 table: "semantic_scan_results",
-                column: "phase",
+                column: "jobPhase",
                 definition: "TEXT NOT NULL DEFAULT 'shadow'"
             )
             try exec("COMMIT")
@@ -448,6 +458,38 @@ actor AnalysisStore {
         migratedLock.withLock {
             migratedPaths.removeAll()
         }
+    }
+
+    /// Cycle 4 H1: runs ONLY the V*IfNeeded migration ladder against an
+    /// already-opened store, bypassing `createTables()`. The cycle-2
+    /// `MigrationLadderTests` seeded `_meta.schema_version` but still
+    /// went through full `migrate()`, which calls `createTables()` first
+    /// and builds every table in its v4 shape via
+    /// `CREATE TABLE IF NOT EXISTS`. Tables-already-present short-circuits
+    /// most of the ladder body, so the tests passed even against pre-C6
+    /// code (the C6 bug could not actually be reached).
+    ///
+    /// This seam lets a test seed a v1-shape DB manually (via raw SQL)
+    /// and then run the ladder without painting over. Failing under
+    /// pre-C6 code proves the rail bites.
+    ///
+    /// Not transaction-wrapped — tests are expected to begin/commit
+    /// themselves when they want to assert rollback semantics. The
+    /// default behavior here mirrors what `migrate()` would do minus
+    /// `createTables()`.
+    func migrateOnlyForTesting() throws {
+        try writeInitialSchemaVersionIfNeeded()
+        try migrateEvidenceEventsNaturalKeyV2IfNeeded()
+        try migrateEvidenceEventsTranscriptVersionV3IfNeeded()
+        try migrateAnalysisSessionsShadowRetryV4IfNeeded()
+        try migratePodcastPlannerStateV4IfNeeded()
+        // Mirror the belt-and-suspenders phase column re-add that
+        // `migrate()` performs after the v2/v3 evidence_events rebuild.
+        try addColumnIfNeeded(
+            table: "evidence_events",
+            column: "phase",
+            definition: "TEXT NOT NULL DEFAULT 'shadow'"
+        )
     }
     #endif
 
@@ -490,13 +532,37 @@ actor AnalysisStore {
         try exec("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)")
     }
 
-    /// Records the current schema version on first migration. Future
-    /// migrations should read this value, branch on it, and bump it inside the
-    /// same transaction as the DDL change.
+    /// Seeds `_meta.schema_version = '1'` on a brand-new database so the
+    /// subsequent migration ladder (`migrateEvidenceEventsNaturalKeyV2IfNeeded`,
+    /// `…V3IfNeeded`, `…V4IfNeeded`, `migratePodcastPlannerStateV4IfNeeded`)
+    /// climbs correctly to `currentSchemaVersion`.
+    ///
+    /// C6 fix (scope): this used to bind `String(currentSchemaVersion)`
+    /// which left brand-new DBs at the latest version immediately,
+    /// causing every V*IfNeeded migration's `guard schemaVersion < N` to
+    /// short-circuit.
+    ///
+    /// Important caveat (cycle-4 L4): **in the production `migrate()`
+    /// path, `createTables()` runs BEFORE this function** and already
+    /// builds every table in its final v4 shape via
+    /// `CREATE TABLE IF NOT EXISTS`, so the V*IfNeeded blocks are
+    /// effectively prophylactic for production callers — the ladder they
+    /// fix cannot be reached from `migrate()` alone, because the tables
+    /// they would recreate already exist. The C6 fix matters for any
+    /// future migration that does work `createTables()` cannot (e.g. a
+    /// data backfill across existing rows, or a DDL change that requires
+    /// inspecting `_meta.schema_version`). It also matters for
+    /// `migrateOnlyForTesting()`, which bypasses `createTables()` so the
+    /// ladder can be exercised against a hand-seeded v1/v2/v3 DB in
+    /// isolation — that is the only path where the pre-C6 bug was
+    /// actually reachable.
+    ///
+    /// `INSERT OR IGNORE` keeps this idempotent on re-migration: if a row
+    /// already exists (any version) we leave it alone and the V*IfNeeded
+    /// blocks read it via `schemaVersion()` and decide what to do.
     private func writeInitialSchemaVersionIfNeeded() throws {
-        let stmt = try prepare("INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', ?)")
+        let stmt = try prepare("INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '1')")
         defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, String(Self.currentSchemaVersion))
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -572,7 +638,7 @@ actor AnalysisStore {
         try setSchemaVersion(3)
     }
 
-    /// bd-3bz (Phase 4): add `needs_shadow_retry` and `shadowRetryPodcastId`
+    /// bd-3bz (Phase 4): add `needsShadowRetry` and `shadowRetryPodcastId`
     /// columns to `analysis_sessions`. The Foundation Models shadow phase
     /// stamps these when it bails on `canUseFoundationModels == false`; a
     /// capability observer in `PlayheadRuntime` drains the queue after FM
@@ -583,11 +649,24 @@ actor AnalysisStore {
     /// NOT retroactively marked — sessions already in `.complete` stay as-is;
     /// only sessions whose shadow phase bails AFTER the migration set the
     /// flag.
+    ///
+    /// H10: column was originally `needs_shadow_retry` (snake_case,
+    /// inconsistent with the rest of `analysis_sessions`). Renamed in place
+    /// in the v4 migration block — single-user app, full DB wipe is
+    /// acceptable so no v5 bump. Pre-existing on-device DBs that already
+    /// applied v4 with the snake_case column are repaired by the
+    /// `renameColumnIfNeeded` call below.
     private func migrateAnalysisSessionsShadowRetryV4IfNeeded() throws {
-        guard (try schemaVersion() ?? 1) < 4 else { return }
+        guard (try schemaVersion() ?? 1) < 4 else {
+            // Even on v4+ DBs, repair the H10 rename if a pre-rename column
+            // is still present. Idempotent: no-op when the column already
+            // has the new name.
+            try renameSnakeCaseShadowRetryIfNeeded()
+            return
+        }
         try addColumnIfNeeded(
             table: "analysis_sessions",
-            column: "needs_shadow_retry",
+            column: "needsShadowRetry",
             definition: "INTEGER NOT NULL DEFAULT 0"
         )
         try addColumnIfNeeded(
@@ -600,9 +679,31 @@ actor AnalysisStore {
         try exec("""
             CREATE INDEX IF NOT EXISTS idx_sessions_shadow_retry
             ON analysis_sessions(id)
-            WHERE needs_shadow_retry = 1
+            WHERE needsShadowRetry = 1
             """)
         try setSchemaVersion(4)
+    }
+
+    /// H10 repair: an earlier v4 migration created the column as
+    /// `needs_shadow_retry`. If a pre-rename column is still present and the
+    /// new camelCase column is not, rename in place via SQLite's
+    /// `ALTER TABLE ... RENAME COLUMN` (3.25+). Idempotent.
+    private func renameSnakeCaseShadowRetryIfNeeded() throws {
+        let hasNew = try columnExists(table: "analysis_sessions", column: "needsShadowRetry")
+        let hasOld = try columnExists(table: "analysis_sessions", column: "needs_shadow_retry")
+        if hasNew { return }
+        if hasOld {
+            // Drop the old partial index first — its WHERE predicate
+            // references the old column name and the rename would invalidate
+            // the predicate.
+            try exec("DROP INDEX IF EXISTS idx_sessions_shadow_retry")
+            try exec("ALTER TABLE analysis_sessions RENAME COLUMN needs_shadow_retry TO needsShadowRetry")
+            try exec("""
+                CREATE INDEX IF NOT EXISTS idx_sessions_shadow_retry
+                ON analysis_sessions(id)
+                WHERE needsShadowRetry = 1
+                """)
+        }
     }
 
     /// bd-m8k: v4 creates `podcast_planner_state` for per-podcast
@@ -721,9 +822,12 @@ actor AnalysisStore {
         try exec("CREATE INDEX IF NOT EXISTS idx_assets_episode ON analysis_assets(episodeId)")
 
         // analysis_sessions
-        // bd-3bz (Phase 4): `needs_shadow_retry` + `shadowRetryPodcastId` are
+        // bd-3bz (Phase 4): `needsShadowRetry` + `shadowRetryPodcastId` are
         // created here for fresh databases. Existing DBs pick them up via
         // `migrateAnalysisSessionsShadowRetryV4IfNeeded`.
+        // H10: column is `needsShadowRetry` (camelCase) to match the rest of
+        // analysis_sessions; pre-rename DBs are repaired by
+        // `renameSnakeCaseShadowRetryIfNeeded`.
         try exec("""
             CREATE TABLE IF NOT EXISTS analysis_sessions (
                 id                    TEXT PRIMARY KEY,
@@ -732,21 +836,25 @@ actor AnalysisStore {
                 startedAt             REAL NOT NULL,
                 updatedAt             REAL NOT NULL,
                 failureReason         TEXT,
-                needs_shadow_retry    INTEGER NOT NULL DEFAULT 0,
+                needsShadowRetry      INTEGER NOT NULL DEFAULT 0,
                 shadowRetryPodcastId  TEXT
             )
             """)
         // bd-3bz on-device hotfix: when a pre-bd-3bz database exists at the
         // store's path, the `CREATE TABLE IF NOT EXISTS` above is a silent
-        // no-op against the older table shape (no `needs_shadow_retry`
+        // no-op against the older table shape (no `needsShadowRetry`
         // column), and the partial index below would fail with
-        // "no such column: needs_shadow_retry" before the v4 migration ever
+        // "no such column: needsShadowRetry" before the v4 migration ever
         // runs. Patch the column in defensively here so both fresh and
         // upgraded databases reach the index creation with the column
         // present.
+        // H10 repair: an even-older shape may carry the snake_case
+        // `needs_shadow_retry` column. Rename it in place before adding the
+        // camelCase column so we don't end up with both.
+        try renameSnakeCaseShadowRetryIfNeeded()
         try addColumnIfNeeded(
             table: "analysis_sessions",
-            column: "needs_shadow_retry",
+            column: "needsShadowRetry",
             definition: "INTEGER NOT NULL DEFAULT 0"
         )
         try addColumnIfNeeded(
@@ -758,7 +866,7 @@ actor AnalysisStore {
         try exec("""
             CREATE INDEX IF NOT EXISTS idx_sessions_shadow_retry
             ON analysis_sessions(id)
-            WHERE needs_shadow_retry = 1
+            WHERE needsShadowRetry = 1
             """)
 
         // feature_windows
@@ -928,6 +1036,10 @@ actor AnalysisStore {
         // gives us bounded cache growth (one row per reuse key) without the
         // cost of indexing the long scanCohortJSON column directly. Insert
         // path uses INSERT OR REPLACE so the latest write wins.
+        // Rev3-M5: `phase` is the LAST column on purpose — the column list
+        // ordering is referenced by SELECT statements that read by index,
+        // and keeping the new column at the bottom keeps post-merge
+        // ordering predictable when sibling agents add their own fields.
         try exec("""
             CREATE TABLE IF NOT EXISTS semantic_scan_results (
                 id TEXT PRIMARY KEY,
@@ -951,20 +1063,30 @@ actor AnalysisStore {
                 transcriptVersion TEXT NOT NULL,
                 reuseKeyHash TEXT NOT NULL,
                 phase TEXT NOT NULL DEFAULT 'shadow',
+                jobPhase TEXT NOT NULL DEFAULT 'shadow',
                 UNIQUE(reuseKeyHash)
             )
             """)
-        // Cycle 6 B6 Rev3-M6: make sure upgraded DBs that already carry the
-        // base `semantic_scan_results` shape pick up the `phase` column before
-        // the first bind path runs. `addColumnIfNeeded` is a no-op on fresh
-        // DBs where `CREATE TABLE` above already defines the column.
+        // Cycle 8 reconciliation:
+        //   * `phase` (C4 Rev3-M5) — shadow vs targeted run mode discriminator.
+        //     Will be renamed to `runMode` in a follow-up reconciliation commit.
+        //   * `jobPhase` (B6 Rev3-M6) — BackfillJobPhase.rawValue, the originating
+        //     backfill job phase (harvester/lexical/audit/fullEpisodeScan).
+        // Both columns are defensively added here via `addColumnIfNeeded` so
+        // pre-existing DBs pick them up without a schema-version bump.
         try addColumnIfNeeded(
             table: "semantic_scan_results",
             column: "phase",
             definition: "TEXT NOT NULL DEFAULT 'shadow'"
         )
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "jobPhase",
+            definition: "TEXT NOT NULL DEFAULT 'shadow'"
+        )
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_pass ON semantic_scan_results(analysisAssetId, scanPass)")
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_phase ON semantic_scan_results(analysisAssetId, phase)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_jobPhase ON semantic_scan_results(analysisAssetId, jobPhase)")
         // M1/L3: dropped `idx_semantic_scan_results_reuse` and
         // `idx_semantic_scan_results_reuse_cohort` — neither is used by the
         // primary reuse query (which now hits the UNIQUE(reuseKeyHash) index).
@@ -989,6 +1111,11 @@ actor AnalysisStore {
         // constraint plus INSERT OR IGNORE: an exact rerun silently dedups,
         // while a new transcriptVersion, cohort, or materially different FM
         // span naturally appends.
+        // Rev3-M5: `phase` is the LAST column on purpose, mirroring
+        // `semantic_scan_results`. NOT included in the UNIQUE constraint:
+        // the same logical span (asset, eventType, sourceType, atoms,
+        // body, cohort, transcriptVersion) is the natural identity, and
+        // the phase tag is an attribute of the row, not part of its key.
         try exec("""
             CREATE TABLE IF NOT EXISTS evidence_events (
                 id TEXT PRIMARY KEY,
@@ -1001,18 +1128,24 @@ actor AnalysisStore {
                 transcriptVersion TEXT NOT NULL DEFAULT '',
                 createdAt REAL NOT NULL,
                 phase TEXT NOT NULL DEFAULT 'shadow',
+                jobPhase TEXT NOT NULL DEFAULT 'shadow',
                 UNIQUE(
                     analysisAssetId, eventType, sourceType, atomOrdinals,
                     evidenceJSON, scanCohortJSON, transcriptVersion
                 )
             )
             """)
-        // Cycle 6 B6 Rev3-M6: `addColumnIfNeeded` after the V2/V3 evidence_events
-        // rebuilds restores the column for DBs whose `evidence_events` table was
-        // rebuilt by an earlier migration that did not know about `phase`.
+        // Cycle 8 reconciliation: defensively add both `phase` (C4) and
+        // `jobPhase` (B6) after the V2/V3 rebuilds that would have stripped
+        // them. See semantic_scan_results above for the naming rationale.
         try addColumnIfNeeded(
             table: "evidence_events",
             column: "phase",
+            definition: "TEXT NOT NULL DEFAULT 'shadow'"
+        )
+        try addColumnIfNeeded(
+            table: "evidence_events",
+            column: "jobPhase",
             definition: "TEXT NOT NULL DEFAULT 'shadow'"
         )
         try exec("CREATE INDEX IF NOT EXISTS idx_evidence_events_asset_created ON evidence_events(analysisAssetId, createdAt ASC)")
@@ -1190,7 +1323,7 @@ actor AnalysisStore {
         let sql = """
             INSERT INTO analysis_sessions
                 (id, analysisAssetId, state, startedAt, updatedAt, failureReason,
-                 needs_shadow_retry, shadowRetryPodcastId)
+                 needsShadowRetry, shadowRetryPodcastId)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
@@ -1209,7 +1342,7 @@ actor AnalysisStore {
     func fetchSession(id: String) throws -> AnalysisSession? {
         let sql = """
             SELECT id, analysisAssetId, state, startedAt, updatedAt, failureReason,
-                   needs_shadow_retry, shadowRetryPodcastId
+                   needsShadowRetry, shadowRetryPodcastId
             FROM analysis_sessions WHERE id = ?
             """
         let stmt = try prepare(sql)
@@ -1222,7 +1355,7 @@ actor AnalysisStore {
     func fetchLatestSessionForAsset(assetId: String) throws -> AnalysisSession? {
         let sql = """
             SELECT id, analysisAssetId, state, startedAt, updatedAt, failureReason,
-                   needs_shadow_retry, shadowRetryPodcastId
+                   needsShadowRetry, shadowRetryPodcastId
             FROM analysis_sessions WHERE analysisAssetId = ?
             ORDER BY updatedAt DESC LIMIT 1
             """
@@ -1265,7 +1398,7 @@ actor AnalysisStore {
     func markSessionNeedsShadowRetry(id: String, podcastId: String) throws {
         let sql = """
             UPDATE analysis_sessions
-            SET needs_shadow_retry = 1,
+            SET needsShadowRetry = 1,
                 shadowRetryPodcastId = ?,
                 updatedAt = ?
             WHERE id = ?
@@ -1283,7 +1416,7 @@ actor AnalysisStore {
     func clearSessionShadowRetry(id: String) throws {
         let sql = """
             UPDATE analysis_sessions
-            SET needs_shadow_retry = 0,
+            SET needsShadowRetry = 0,
                 shadowRetryPodcastId = NULL,
                 updatedAt = ?
             WHERE id = ?
@@ -1301,9 +1434,9 @@ actor AnalysisStore {
     func fetchSessionsNeedingShadowRetry() throws -> [AnalysisSession] {
         let sql = """
             SELECT id, analysisAssetId, state, startedAt, updatedAt, failureReason,
-                   needs_shadow_retry, shadowRetryPodcastId
+                   needsShadowRetry, shadowRetryPodcastId
             FROM analysis_sessions
-            WHERE needs_shadow_retry = 1
+            WHERE needsShadowRetry = 1
             ORDER BY updatedAt ASC
             """
         let stmt = try prepare(sql)
@@ -2871,8 +3004,8 @@ actor AnalysisStore {
     /// 0  id                         9  spansJSON           17 scanCohortJSON
     /// 1  analysisAssetId           10 status               18 transcriptVersion
     /// 2  windowFirstAtomOrdinal    11 attemptCount         19 reuseKeyHash
-    /// 3  windowLastAtomOrdinal     12 errorContext
-    /// 4  windowStartTime           13 inputTokenCount
+    /// 3  windowLastAtomOrdinal     12 errorContext         20 phase   (Rev3-M5)
+    /// 4  windowStartTime           13 inputTokenCount      21 jobPhase (Rev3-M6)
     /// 5  windowEndTime             14 outputTokenCount
     /// 6  scanPass                  15 latencyMs
     /// 7  transcriptQuality         16 prewarmHit
@@ -2882,7 +3015,7 @@ actor AnalysisStore {
         windowStartTime, windowEndTime, scanPass, transcriptQuality,
         disposition, spansJSON, status, attemptCount, errorContext,
         inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
-        scanCohortJSON, transcriptVersion, reuseKeyHash, phase
+        scanCohortJSON, transcriptVersion, reuseKeyHash, phase, jobPhase
         """
 
     /// H-1: canonicalize a `scanCohortJSON` before hashing so two
@@ -2910,6 +3043,18 @@ actor AnalysisStore {
     /// keeping inserts and lookups in lockstep. The `scanCohortJSON` field is
     /// canonicalized (sorted keys) before hashing so cohort-equivalent inputs
     /// collapse to the same hash regardless of upstream JSON formatting.
+    ///
+    /// H12 (cycle 2): `reuseScope` was added to the hash domain in bd-3vm
+    /// to keep logically distinct jobs/phases (e.g. shadow vs. targeted)
+    /// from collapsing each other when they share the same window bounds,
+    /// scan pass, and transcript version. The string layout is
+    ///   "<assetId>|<first>|<last>|<scanPass>|<transcriptVersion>|<canonicalCohort>|<scope>"
+    /// where `scope` is `reuseScope ?? "default"`. **Pre-bd-3vm cached
+    /// rows will not be reused** by post-bd-3vm callers because the hash
+    /// domain expanded — those rows hash to the old layout (no scope
+    /// segment) and never collide with the new lookups. Single user, full
+    /// DB wipe on cohort change is acceptable, so we accept the cache
+    /// miss instead of running a one-shot rehash migration.
     static func semanticScanReuseKeyHash(
         analysisAssetId: String,
         windowFirstAtomOrdinal: Int,
@@ -2992,8 +3137,8 @@ actor AnalysisStore {
              windowStartTime, windowEndTime, scanPass, transcriptQuality,
              disposition, spansJSON, status, attemptCount, errorContext,
              inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
-             scanCohortJSON, transcriptVersion, reuseKeyHash, phase)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             scanCohortJSON, transcriptVersion, reuseKeyHash, phase, jobPhase)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -3017,7 +3162,8 @@ actor AnalysisStore {
         bind(stmt, 18, result.scanCohortJSON)
         bind(stmt, 19, result.transcriptVersion)
         bind(stmt, 20, reuseKeyHash)
-        bind(stmt, 21, result.phase)
+        bind(stmt, 21, result.phase.rawValue)
+        bind(stmt, 22, result.jobPhase)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -3171,10 +3317,11 @@ actor AnalysisStore {
     /// Canonical column order for `evidence_events` readers:
     /// 0 id, 1 analysisAssetId, 2 eventType, 3 sourceType,
     /// 4 atomOrdinals, 5 evidenceJSON, 6 scanCohortJSON, 7 createdAt,
-    /// 8 phase.
+    /// 8 phase (Rev3-M5, shadow/targeted), 9 jobPhase (Rev3-M6,
+    /// BackfillJobPhase.rawValue).
     private static let evidenceEventColumns = """
         id, analysisAssetId, eventType, sourceType,
-        atomOrdinals, evidenceJSON, scanCohortJSON, createdAt, phase
+        atomOrdinals, evidenceJSON, scanCohortJSON, createdAt, phase, jobPhase
         """
 
     @discardableResult
@@ -3192,8 +3339,8 @@ actor AnalysisStore {
         let sql = """
             INSERT OR IGNORE INTO evidence_events
             (id, analysisAssetId, eventType, sourceType, atomOrdinals,
-             evidenceJSON, scanCohortJSON, transcriptVersion, createdAt, phase)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             evidenceJSON, scanCohortJSON, transcriptVersion, createdAt, phase, jobPhase)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -3206,7 +3353,8 @@ actor AnalysisStore {
         bind(stmt, 7, event.scanCohortJSON)
         bind(stmt, 8, transcriptVersion)
         bind(stmt, 9, event.createdAt)
-        bind(stmt, 10, event.phase)
+        bind(stmt, 10, event.phase.rawValue)
+        bind(stmt, 11, event.jobPhase)
         try step(stmt, expecting: SQLITE_DONE)
         if sqlite3_changes(db) > 0 {
             return event.id
@@ -3374,6 +3522,11 @@ actor AnalysisStore {
             throw AnalysisStoreError.queryFailed("Unknown semantic scan status '\(statusRaw)'")
         }
 
+        // Rev3-M5: column 20 is `phase`. Default to `.shadow` for any
+        // legacy row that escaped the migration's NOT NULL DEFAULT.
+        let phaseRaw = optionalText(stmt, 20) ?? SemanticScanPhase.shadow.rawValue
+        let phase = SemanticScanPhase(rawValue: phaseRaw) ?? .shadow
+
         return SemanticScanResult(
             id: try requireText(stmt, 0),
             analysisAssetId: try requireText(stmt, 1),
@@ -3395,7 +3548,8 @@ actor AnalysisStore {
             scanCohortJSON: try requireText(stmt, 17),
             transcriptVersion: try requireText(stmt, 18),
             // column 19 = reuseKeyHash (not persisted back onto the struct)
-            phase: optionalText(stmt, 20) ?? "shadow"
+            phase: phase,
+            jobPhase: optionalText(stmt, 21) ?? "shadow"
         )
     }
 
@@ -3404,6 +3558,11 @@ actor AnalysisStore {
         guard let sourceType = EvidenceSourceType(rawValue: sourceTypeRaw) else {
             throw AnalysisStoreError.queryFailed("Unknown evidence source type '\(sourceTypeRaw)'")
         }
+
+        // Rev3-M5: column 8 is `phase`. Default to `.shadow` for any
+        // legacy row that escaped the migration's NOT NULL DEFAULT.
+        let phaseRaw = optionalText(stmt, 8) ?? SemanticScanPhase.shadow.rawValue
+        let phase = SemanticScanPhase(rawValue: phaseRaw) ?? .shadow
 
         return EvidenceEvent(
             id: try requireText(stmt, 0),
@@ -3414,7 +3573,8 @@ actor AnalysisStore {
             evidenceJSON: try requireText(stmt, 5),
             scanCohortJSON: try requireText(stmt, 6),
             createdAt: sqlite3_column_double(stmt, 7),
-            phase: optionalText(stmt, 8) ?? "shadow"
+            phase: phase,
+            jobPhase: optionalText(stmt, 9) ?? "shadow"
         )
     }
 

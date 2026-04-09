@@ -112,8 +112,20 @@ actor TestFMRuntime {
         return refinementQueue.removeFirst()
     }
 
+    /// Rev4-L2: exposed for adversarial-input regression tests.
+    nonisolated static func submittedLineRefsForTesting(from prompt: String) -> [Int] {
+        submittedLineRefs(from: prompt)
+    }
+
     nonisolated private static func submittedLineRefs(from prompt: String) -> [Int] {
-        guard let regex = try? NSRegularExpression(pattern: #"L(\d+)>"#) else {
+        // Rev4-L2: tightened from `L(\d+)>` to require either a
+        // non-letter character before the `L` or the start of input.
+        // The previous pattern matched things like `XYL12>` (a token
+        // ending in `L` followed by digits and `>`) and reported `12`
+        // as a submitted line ref, polluting the submission record. The
+        // capture group on the digits is now group 1; the prefix is a
+        // non-capturing assertion.
+        guard let regex = try? NSRegularExpression(pattern: #"(?:^|[^A-Za-z])L(\d+)>"#) else {
             return []
         }
         let nsPrompt = prompt as NSString
@@ -128,6 +140,12 @@ actor TestFMRuntime {
         }
         return refs.sorted()
     }
+
+    // Cycle 4 H4: Rev4-L3 originally added a `reset()` method here, but
+    // every call site constructs a fresh `TestFMRuntime` instance per test
+    // (there is no shared/static runtime), so `reset()` had no production
+    // users. Removed to kill the dead code path rather than leaving a
+    // method whose contract was never enforced.
 }
 
 enum TestFMRuntimeFailure: Sendable {

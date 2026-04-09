@@ -13,6 +13,16 @@ private let semanticScanLogger = Logger(
     category: "SemanticScanResult"
 )
 
+/// Rev3-M5: discriminator for `semantic_scan_results.phase` and
+/// `evidence_events.phase`. Phase 3 shadow rows and Phase 5 targeted rows
+/// are otherwise indistinguishable in those tables (only differ by
+/// `reuseKeyHash`); the explicit phase tag lets queries filter without
+/// reverse-engineering the hash inputs.
+enum SemanticScanPhase: String, Sendable, Hashable, CaseIterable {
+    case shadow
+    case targeted
+}
+
 struct SemanticScanResult: Sendable, Equatable {
     let id: String
     let analysisAssetId: String
@@ -37,12 +47,17 @@ struct SemanticScanResult: Sendable, Equatable {
     /// logically distinct jobs/phases that share the same window bounds do
     /// not collapse each other. Nil preserves legacy reuse semantics.
     let reuseScope: String?
+    /// Rev3-M5 (C4): phase discriminator persisted as a real column. Defaults
+    /// to `.shadow` so existing call sites stay byte-identical without
+    /// edits. Targeted-narrowed rows opt-in by passing `.targeted`.
+    let phase: SemanticScanPhase
     /// Cycle 6 B6 Rev3-M6: originating backfill phase (BackfillJobPhase.rawValue)
     /// or the sentinel `"shadow"` for rows persisted by callers that do not yet
-    /// attribute phase. Written into the `phase` column at insert time and used
-    /// by Rev3-M6 tests to verify that harvester and lexical narrowing phases
+    /// attribute phase. Written into a distinct `jobPhase` column at insert
+    /// time (renamed from `phase` during cycle 8 reconciliation) and used by
+    /// Rev3-M6 tests to verify that harvester and lexical narrowing phases
     /// actually produce strict-subset coverage.
-    let phase: String
+    let jobPhase: String
 
     init(
         id: String,
@@ -65,7 +80,8 @@ struct SemanticScanResult: Sendable, Equatable {
         scanCohortJSON: String,
         transcriptVersion: String,
         reuseScope: String? = nil,
-        phase: String = "shadow"
+        phase: SemanticScanPhase = .shadow,
+        jobPhase: String = "shadow"
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -88,6 +104,7 @@ struct SemanticScanResult: Sendable, Equatable {
         self.transcriptVersion = transcriptVersion
         self.reuseScope = reuseScope
         self.phase = phase
+        self.jobPhase = jobPhase
     }
 
     func isReusable(
@@ -152,10 +169,13 @@ struct EvidenceEvent: Sendable, Equatable {
     let evidenceJSON: String
     let scanCohortJSON: String
     let createdAt: Double
+    /// Rev3-M5 (C4): phase discriminator persisted as a real column. Defaults
+    /// to `.shadow` so existing call sites stay byte-identical.
+    let phase: SemanticScanPhase
     /// Cycle 6 B6 Rev3-M6: originating backfill phase (BackfillJobPhase.rawValue)
-    /// or the sentinel `"shadow"` for legacy rows. Defaults keep all existing
-    /// callers compiling unchanged.
-    let phase: String
+    /// or the sentinel `"shadow"` for legacy rows. Stored in a distinct
+    /// `jobPhase` column post cycle-8 reconciliation.
+    let jobPhase: String
 
     init(
         id: String,
@@ -166,7 +186,8 @@ struct EvidenceEvent: Sendable, Equatable {
         evidenceJSON: String,
         scanCohortJSON: String,
         createdAt: Double,
-        phase: String = "shadow"
+        phase: SemanticScanPhase = .shadow,
+        jobPhase: String = "shadow"
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -177,5 +198,6 @@ struct EvidenceEvent: Sendable, Equatable {
         self.scanCohortJSON = scanCohortJSON
         self.createdAt = createdAt
         self.phase = phase
+        self.jobPhase = jobPhase
     }
 }

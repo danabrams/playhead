@@ -1946,51 +1946,57 @@ struct NowPlayingViewModelReattachmentTests {
     @MainActor
     @Test("Reattaching restores the latest playback state without waiting for a new event")
     func reattachingRestoresLatestPlaybackState() async {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        let viewModel = NowPlayingViewModel(runtime: runtime)
+        // C7: route through `withTestRuntime` so the runtime's
+        // `shutdown()` is awaited before this test returns. The previous
+        // pattern (bare `PlayheadRuntime(isPreviewRuntime: true)`) leaked
+        // the shadow-retry observer task on non-preview runtimes; routing
+        // every test through this scope makes the discipline uniform.
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let viewModel = NowPlayingViewModel(runtime: runtime)
 
-        await runtime.playbackService._testingInjectState(
-            PlaybackState(
-                status: .playing,
-                currentTime: 32,
-                duration: 600,
-                rate: 1,
-                playbackSpeed: 1.0
+            await runtime.playbackService._testingInjectState(
+                PlaybackState(
+                    status: .playing,
+                    currentTime: 32,
+                    duration: 600,
+                    rate: 1,
+                    playbackSpeed: 1.0
+                )
             )
-        )
 
-        viewModel.startObserving()
+            viewModel.startObserving()
 
-        #expect(await eventually {
-            viewModel.isPlaying
-                && viewModel.currentTime == 32
-                && viewModel.duration == 600
-                && viewModel.playbackSpeed == 1.0
-        })
+            #expect(await eventually {
+                viewModel.isPlaying
+                    && viewModel.currentTime == 32
+                    && viewModel.duration == 600
+                    && viewModel.playbackSpeed == 1.0
+            })
 
-        viewModel.stopObserving()
+            viewModel.stopObserving()
 
-        await runtime.playbackService._testingInjectState(
-            PlaybackState(
-                status: .paused,
-                currentTime: 275,
-                duration: 600,
-                rate: 0,
-                playbackSpeed: 1.5
+            await runtime.playbackService._testingInjectState(
+                PlaybackState(
+                    status: .paused,
+                    currentTime: 275,
+                    duration: 600,
+                    rate: 0,
+                    playbackSpeed: 1.5
+                )
             )
-        )
 
-        viewModel.startObserving()
+            viewModel.startObserving()
 
-        #expect(await eventually {
-            !viewModel.isPlaying
-                && viewModel.currentTime == 275
-                && viewModel.duration == 600
-                && viewModel.playbackSpeed == 1.5
-        })
+            #expect(await eventually {
+                !viewModel.isPlaying
+                    && viewModel.currentTime == 275
+                    && viewModel.duration == 600
+                    && viewModel.playbackSpeed == 1.5
+            })
 
-        viewModel.stopObserving()
-        await runtime.playbackService.tearDown()
+            viewModel.stopObserving()
+            await runtime.playbackService.tearDown()
+        }
     }
 }
 
@@ -2000,87 +2006,90 @@ struct NowPlayingViewModelPlaybackStateTests {
     @MainActor
     @Test("loading state maps to a non-playing UI with current metadata")
     func loadingStateMapping() async {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        let viewModel = NowPlayingViewModel(runtime: runtime)
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let viewModel = NowPlayingViewModel(runtime: runtime)
 
-        await runtime.playbackService._testingInjectState(
-            PlaybackState(
-                status: .loading,
-                currentTime: 5,
-                duration: 180,
-                rate: 0,
-                playbackSpeed: 1.25
+            await runtime.playbackService._testingInjectState(
+                PlaybackState(
+                    status: .loading,
+                    currentTime: 5,
+                    duration: 180,
+                    rate: 0,
+                    playbackSpeed: 1.25
+                )
             )
-        )
 
-        viewModel.startObserving()
+            viewModel.startObserving()
 
-        #expect(await eventually {
-            !viewModel.isPlaying
-                && viewModel.currentTime == 5
-                && viewModel.duration == 180
-                && viewModel.playbackSpeed == 1.25
-        })
+            #expect(await eventually {
+                !viewModel.isPlaying
+                    && viewModel.currentTime == 5
+                    && viewModel.duration == 180
+                    && viewModel.playbackSpeed == 1.25
+            })
 
-        viewModel.stopObserving()
-        await runtime.playbackService.tearDown()
+            viewModel.stopObserving()
+            await runtime.playbackService.tearDown()
+        }
     }
 
     @MainActor
     @Test("failed state maps to a non-playing UI")
     func failedStateMapping() async {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        let viewModel = NowPlayingViewModel(runtime: runtime)
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let viewModel = NowPlayingViewModel(runtime: runtime)
 
-        await runtime.playbackService._testingInjectState(
-            PlaybackState(
-                status: .failed("network"),
-                currentTime: 20,
-                duration: 300,
-                rate: 0,
-                playbackSpeed: 1.0
+            await runtime.playbackService._testingInjectState(
+                PlaybackState(
+                    status: .failed("network"),
+                    currentTime: 20,
+                    duration: 300,
+                    rate: 0,
+                    playbackSpeed: 1.0
+                )
             )
-        )
 
-        viewModel.startObserving()
+            viewModel.startObserving()
 
-        #expect(await eventually {
-            !viewModel.isPlaying
-                && viewModel.currentTime == 20
-                && viewModel.duration == 300
-                && viewModel.playbackSpeed == 1.0
-        })
+            #expect(await eventually {
+                !viewModel.isPlaying
+                    && viewModel.currentTime == 20
+                    && viewModel.duration == 300
+                    && viewModel.playbackSpeed == 1.0
+            })
 
-        viewModel.stopObserving()
-        await runtime.playbackService.tearDown()
+            viewModel.stopObserving()
+            await runtime.playbackService.tearDown()
+        }
     }
 
     @MainActor
     @Test("rate-driven playback reports playing even before status catches up")
     func rateDrivenPlaybackMapping() async {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        let viewModel = NowPlayingViewModel(runtime: runtime)
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let viewModel = NowPlayingViewModel(runtime: runtime)
 
-        await runtime.playbackService._testingInjectState(
-            PlaybackState(
-                status: .paused,
-                currentTime: 42,
-                duration: 420,
-                rate: 1.0,
-                playbackSpeed: 1.0
+            await runtime.playbackService._testingInjectState(
+                PlaybackState(
+                    status: .paused,
+                    currentTime: 42,
+                    duration: 420,
+                    rate: 1.0,
+                    playbackSpeed: 1.0
+                )
             )
-        )
 
-        viewModel.startObserving()
+            viewModel.startObserving()
 
-        #expect(await eventually {
-            viewModel.isPlaying
-                && viewModel.currentTime == 42
-                && viewModel.duration == 420
-        })
+            #expect(await eventually {
+                viewModel.isPlaying
+                    && viewModel.currentTime == 42
+                    && viewModel.duration == 420
+            })
 
-        viewModel.stopObserving()
-        await runtime.playbackService.tearDown()
+            viewModel.stopObserving()
+            await runtime.playbackService.tearDown()
+        }
     }
 }
 
