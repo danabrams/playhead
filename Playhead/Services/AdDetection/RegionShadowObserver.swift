@@ -10,11 +10,12 @@
 // any risk of affecting live decision logic.
 //
 // Contract:
-//   • The observer is injected into `AdDetectionService` via an optional
-//     init parameter. When nil, the Phase 4 shadow phase is a no-op. This
-//     mirrors the DEBUG-only injection pattern used by
-//     `FoundationModelsFeedbackStore` in `PlayheadRuntime` — production
-//     release builds never construct one, so no sandbox/persistence footprint.
+//   • Compiled in all configurations. The shadow phase only runs when an
+//     observer is injected; PlayheadRuntime constructs the observer behind
+//     `#if DEBUG`, so production builds never reach this code. This mirrors
+//     the injection pattern used by `FoundationModelsFeedbackStore` in
+//     `PlayheadRuntime` — production release builds never construct one, so
+//     no sandbox/persistence footprint.
 //   • Writes are per-asset. Repeated writes for the same asset overwrite the
 //     previous bundle set (backfill re-runs are allowed to refresh the
 //     snapshot; tests inspect the latest).

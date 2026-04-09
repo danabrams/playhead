@@ -45,6 +45,50 @@ final class DesignTokenForbiddenPatternsTests: XCTestCase {
         XCTAssertTrue(categories.contains(.motion))
         XCTAssertTrue(categories.contains(.typography))
         XCTAssertTrue(categories.contains(.haptic))
+        XCTAssertTrue(categories.contains(.shadow))
+        XCTAssertTrue(categories.contains(.proportion))
+    }
+
+    // MARK: - HapticEvent drift check
+
+    /// Every `HapticEvent` case must appear in `DesignTokenInventory.haptics`.
+    /// The source-walk test below only inspects `static let` / `static var`
+    /// declarations and so cannot catch drift in enum cases. We use
+    /// `CaseIterable` + `Mirror` to reflect on each case and compare its
+    /// label against the inventory.
+    func testHapticEventCasesMatchInventory() {
+        let inventoryNames = Set(DesignTokenInventory.haptics.map(\.name))
+        var caseLabels: Set<String> = []
+        for event in HapticEvent.allCases {
+            let mirror = Mirror(reflecting: event)
+            // Enum cases without associated values reflect as a mirror whose
+            // `displayStyle` is `.enum` and a single child whose label is the
+            // case name. Fall back to `String(describing:)` which for simple
+            // enum cases returns the bare case name (e.g. "menuOpen").
+            let label: String
+            if let first = mirror.children.first?.label {
+                label = first
+            } else {
+                label = String(describing: event)
+            }
+            caseLabels.insert(label)
+            XCTAssertTrue(
+                inventoryNames.contains(label),
+                "HapticEvent case `.\(label)` is defined in HapticManager.swift "
+                + "but missing from `DesignTokenInventory.haptics`. Add it so "
+                + "the forbidden-name sweep covers it."
+            )
+        }
+
+        // Reverse check: every inventory haptic must correspond to a real
+        // HapticEvent case (stale inventory after a case was removed).
+        for invName in inventoryNames {
+            XCTAssertTrue(
+                caseLabels.contains(invName),
+                "`DesignTokenInventory.haptics` lists `\(invName)` but no "
+                + "matching `HapticEvent` case exists. The inventory is stale."
+            )
+        }
     }
 
     // MARK: - Source-code regex sweep
@@ -322,6 +366,18 @@ final class DesignTokenForbiddenPatternsTests: XCTestCase {
             typeName: "AppTypography",
             fileName: "Typography.swift",
             inventoryNames: Set(DesignTokenInventory.typography.map(\.name)),
+            allowlist: []
+        ),
+        InventoryNamespace(
+            typeName: "AppShadow",
+            fileName: "Theme.swift",
+            inventoryNames: Set(DesignTokenInventory.shadows.map(\.name)),
+            allowlist: []
+        ),
+        InventoryNamespace(
+            typeName: "CardProportion",
+            fileName: "Theme.swift",
+            inventoryNames: Set(DesignTokenInventory.proportions.map(\.name)),
             allowlist: []
         )
     ]

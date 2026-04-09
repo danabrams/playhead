@@ -8,6 +8,10 @@
 // driven from `AdDetectionService.runBackfill` with a narrow blast radius
 // and exercised directly from integration tests without a full runtime.
 //
+// Compiled in all configurations. The shadow phase only runs when an
+// observer is injected; PlayheadRuntime constructs the observer behind
+// `#if DEBUG`, so production builds never reach this code.
+//
 // Why a standalone helper and not inline code in `AdDetectionService`:
 //   1. Keeps the live decision path untouched. The backfill function only
 //      gains a single call site guarded by the optional observer parameter.

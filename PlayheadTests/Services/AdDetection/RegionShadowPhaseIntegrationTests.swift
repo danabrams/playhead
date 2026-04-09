@@ -194,15 +194,34 @@ struct RegionShadowPhaseIntegrationTests {
             // regionShadowObserver intentionally omitted — default nil.
         )
 
+        // Capture the baseline call log so we can assert a *delta* rather
+        // than an absolute count — other fetchFeatureWindows calls from
+        // `classifyCandidates` (steps 1-9 of runBackfill) are expected and
+        // don't tell us anything about the shadow path.
+        let baselineLog = await store.fetchFeatureWindowsCallLog
+
         try await service.runBackfill(
             chunks: makeChunks(assetId: assetId),
             analysisAssetId: assetId,
             podcastId: "podcast-no-observer",
             episodeDuration: 90
         )
-        // Nothing to assert on the observer (there isn't one). The test
-        // passes iff `runBackfill` returns without error and without
-        // trying to construct or poke a shadow pipeline.
+
+        // The Phase 4 shadow phase fetches the whole episode with
+        // `from: 0, to: episodeDuration`. If a regression ever defaulted
+        // `regionShadowObserver` to a live instance (e.g. via
+        // `regionShadowObserver ?? RegionShadowObserver()`), that exact
+        // fetch would appear in the call log below. Assert it never
+        // happens for this asset. Other fetchFeatureWindows calls (from
+        // per-candidate classifyCandidates) are permitted.
+        let newCalls = await store.fetchFeatureWindowsCallLog.dropFirst(baselineLog.count)
+        let sawFullEpisodeShadowFetch = newCalls.contains { call in
+            call.assetId == assetId && call.from == 0 && call.to == 90
+        }
+        #expect(
+            !sawFullEpisodeShadowFetch,
+            "Phase 4 shadow phase must not fetch the full episode when regionShadowObserver is nil"
+        )
     }
 
     @Test("RegionShadowPhase.run produces uniform feature bundles from synthetic inputs")

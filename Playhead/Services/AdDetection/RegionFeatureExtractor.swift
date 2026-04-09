@@ -85,8 +85,17 @@ enum RegionFeatureExtractor {
         // Defense-in-depth: if two atoms share an ordinal (shouldn't happen per
         // transcript invariants, but `uniqueKeysWithValues:` would trap on collision),
         // keep the last writer. One atom per ordinal is all downstream consumers need.
+        //
+        // We sort by `atomOrdinal` first so that the "last write wins" reduction is
+        // determined by the input *set*, not by the caller's insertion order. This
+        // mirrors `RegionProposalBuilder.build`, which sorts before its own dedup.
+        // Note: `sorted(by:)` is not a stable sort, so when two atoms share the same
+        // ordinal the relative order of those duplicates is not guaranteed — full
+        // determinism only holds for inputs with unique ordinals (the expected case
+        // per transcript invariants).
+        let sortedAtoms = input.atoms.sorted { $0.atomKey.atomOrdinal < $1.atomKey.atomOrdinal }
         let atomsByOrdinal = Dictionary(
-            input.atoms.map { ($0.atomKey.atomOrdinal, $0) },
+            sortedAtoms.map { ($0.atomKey.atomOrdinal, $0) },
             uniquingKeysWith: { _, new in new }
         )
         let lexicalScanner = LexicalScanner(podcastProfile: input.podcastProfile)

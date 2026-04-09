@@ -470,6 +470,17 @@ actor AdDetectionService {
         episodeDuration: Double,
         lexicalCandidates: [LexicalCandidate]
     ) async {
+        // Defense-in-depth: `episodeDuration` must be supplied by the caller
+        // explicitly. Historically this read `self.episodeDuration`, an
+        // instance field mutated by `runBackfill` — a refactor that reordered
+        // assignment or added a new entry point could silently invoke shadow
+        // with a zero duration, causing a `from: 0, to: 0` fetch that bypasses
+        // the Phase 4 break detector entirely. Trip in DEBUG if that happens.
+        precondition(
+            episodeDuration > 0,
+            "runRegionShadowPhase requires a positive episodeDuration; received \(episodeDuration)"
+        )
+
         // Fetch every feature window for the asset. The Phase 4 acoustic
         // break detector expects a contiguous view of the episode; fetching
         // a narrow sub-range would bias the break detector toward false
@@ -479,7 +490,7 @@ actor AdDetectionService {
             featureWindows = try await store.fetchFeatureWindows(
                 assetId: analysisAssetId,
                 from: 0,
-                to: max(episodeDuration, 0)
+                to: episodeDuration
             )
         } catch {
             logger.warning("Region shadow phase: fetchFeatureWindows failed (skipping): \(error.localizedDescription)")

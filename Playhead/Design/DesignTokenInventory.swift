@@ -13,6 +13,8 @@ enum DesignTokenCategory: String, Equatable, CaseIterable {
     case motion
     case typography
     case haptic
+    case shadow
+    case proportion
 }
 
 struct DesignTokenEntry: Equatable {
@@ -21,7 +23,8 @@ struct DesignTokenEntry: Equatable {
 }
 
 enum DesignTokenInventory {
-    static let all: [DesignTokenEntry] = colors + spacing + cornerRadii + motion + typography + haptics
+    static let all: [DesignTokenEntry] =
+        colors + spacing + cornerRadii + motion + typography + haptics + shadows + proportions
 
     static let colors: [DesignTokenEntry] = [
         // Raw palette
@@ -77,8 +80,21 @@ enum DesignTokenInventory {
     ]
 
     static let haptics: [DesignTokenEntry] = [
-        .init(name: "skip",    category: .haptic),
-        .init(name: "control", category: .haptic),
-        .init(name: "save",    category: .haptic)
+        .init(name: "skip",     category: .haptic),
+        .init(name: "control",  category: .haptic),
+        .init(name: "save",     category: .haptic),
+        .init(name: "menuOpen", category: .haptic),
+        .init(name: "notice",   category: .haptic)
+    ]
+
+    static let shadows: [DesignTokenEntry] = [
+        .init(name: "card",     category: .shadow),
+        .init(name: "elevated", category: .shadow)
+    ]
+
+    static let proportions: [DesignTokenEntry] = [
+        .init(name: "wide",   category: .proportion),
+        .init(name: "banner", category: .proportion),
+        .init(name: "strip",  category: .proportion)
     ]
 }

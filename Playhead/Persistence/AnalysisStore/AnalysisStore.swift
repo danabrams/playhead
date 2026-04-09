@@ -1587,7 +1587,19 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    #if DEBUG
+    /// Test-only call log of `fetchFeatureWindows` invocations, captured as
+    /// `(assetId, from, to)` tuples in call order. Used by
+    /// `RegionShadowPhaseIntegrationTests` to pin that the Phase 4 shadow
+    /// phase's full-episode fetch does NOT occur when no observer is
+    /// injected. Never read in production code.
+    var fetchFeatureWindowsCallLog: [(assetId: String, from: Double, to: Double)] = []
+    #endif
+
     func fetchFeatureWindows(assetId: String, from start: Double, to end: Double) throws -> [FeatureWindow] {
+        #if DEBUG
+        fetchFeatureWindowsCallLog.append((assetId: assetId, from: start, to: end))
+        #endif
         let sql = """
             SELECT * FROM feature_windows
             WHERE analysisAssetId = ? AND startTime >= ? AND endTime <= ?

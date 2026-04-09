@@ -55,10 +55,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          rm -rf TestResults.xcresult
           xcodebuild test \
             -project "$PROJECT_FILE" \
             -scheme "$SCHEME" \
-            -destination 'platform=iOS Simulator,name=iPhone 17'
+            -destination 'platform=iOS Simulator,name=iPhone 17' \
+            -resultBundlePath TestResults.xcresult
+
+      - name: Upload test result bundle
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-xcresult
+          path: TestResults.xcresult
+          retention-days: 14
+          if-no-files-found: warn
 
   deploy:
     needs: test
