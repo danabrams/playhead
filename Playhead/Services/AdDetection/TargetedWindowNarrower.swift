@@ -525,11 +525,6 @@ enum TargetedWindowNarrower {
         }
     }
 
-    /// Resolve `targetTime` to a segment index by (a) finding the nearest
-    /// acoustic break within `snapDistance`, then (b) mapping that break's
-    /// time to the segment whose timespan contains it. Returns `nil` if no
-    /// break is in range or if the break time cannot be placed inside any
-    /// available segment.
     /// Result of a single-edge snap lookup. `segmentIndex` is the resolved
     /// segment the edge should move to; `breakDistanceSeconds` is the
     /// absolute time distance from the edge to the chosen break (carried
@@ -539,6 +534,11 @@ enum TargetedWindowNarrower {
         let breakDistanceSeconds: Double
     }
 
+    /// Resolve `targetTime` to a segment index by (a) finding the nearest
+    /// acoustic break within `snapDistance`, then (b) mapping that break's
+    /// time to the segment whose timespan contains it. Returns `nil` if no
+    /// break is in range or if the break time cannot be placed inside any
+    /// available segment.
     private static func snapEdge(
         targetTime: Double,
         acousticBreaks: [AcousticBreak],
