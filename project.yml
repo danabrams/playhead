@@ -47,7 +47,17 @@ targets:
           - com.playhead.app.preanalysis.recovery
     scheme:
       testTargets:
-        - PlayheadTests
+        # parallelizable: false — the test suite includes suites that
+        # exercise process-global singletons (MPNowPlayingInfoCenter,
+        # AVAudioSession) and use tight wall-clock deadlines for stop
+        # promptness / polling-loop deadline regressions. Running them
+        # in parallel causes cross-test pollution of the singletons and
+        # cooperative-thread-pool starvation that inflates 5ms sleeps to
+        # multiple seconds. Serial execution is what production sees and
+        # is the only honest way to assert those invariants. See
+        # playhead-p1v.
+        - name: PlayheadTests
+          parallelizable: false
       storeKitConfiguration: Playhead/Resources/Playhead.storekit
   PlayheadTests:
     type: bundle.unit-test
