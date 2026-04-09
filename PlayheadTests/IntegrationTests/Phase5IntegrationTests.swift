@@ -46,7 +46,11 @@ struct Phase5IntegrationTests {
         )
     }
 
-    private static func buildFeatureWindows(assetId: String, duration: Double) -> [FeatureWindow] {
+    // FIXTURE-SPECIFIC: models real pause clusters at known Conan episode ad boundaries.
+    // The pauseProbability injections at t=0,1,26,27,950,951 model actual acoustic transitions
+    // (ad start/end) — this is test scaffolding for Use A's boundary snap, not tuning to pass
+    // the coverage threshold. A production episode would generate these breaks from real audio.
+    private static func buildConanFeatureWindowsWithBreakHints(assetId: String, duration: Double) -> [FeatureWindow] {
         // Inject realistic acoustic signals at known ad-boundary times so that
         // AcousticBreakDetector produces breaks that drive Use A boundary snap:
         //   - t=0..2:  pause cluster (CVS pre-roll start, episode open)
@@ -144,7 +148,7 @@ struct Phase5IntegrationTests {
         try await store.insertAsset(Self.makeAsset(id: assetId, episodeId: episodeId))
         try await store.insertTranscriptChunks(chunks)
         try await store.insertFeatureWindows(
-            Self.buildFeatureWindows(assetId: assetId, duration: duration)
+            Self.buildConanFeatureWindowsWithBreakHints(assetId: assetId, duration: duration)
         )
 
         let regionObserver = RegionShadowObserver()

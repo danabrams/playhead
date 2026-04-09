@@ -36,6 +36,13 @@ struct MinimalContiguousSpanDecoder {
     ///   - atoms: Per-atom annotations from AtomEvidenceProjector.
     ///   - assetId: The analysis asset ID (used for DecodedSpan.id computation).
     /// - Returns: Decoded ad spans, sorted by startTime.
+    ///
+    // Idempotency note: decode(atoms, id) == decode(atoms, id) when given identical AtomEvidence
+    // input — verified by tests. Full-pipeline idempotency (project → decode → re-project → decode)
+    // is NOT guaranteed if span boundary ordinals are fed back as inputs to a second projection,
+    // because Use A can expand boundaries beyond the original anchored range. Phase 6 must not
+    // assume re-projection is idempotent across boundary changes. Tracked as known risk in the
+    // Phase 5 design doc (docs/plans/2026-04-09-phase-5-design.md).
     func decode(atoms: [AtomEvidence], assetId: String) -> [DecodedSpan] {
         guard !atoms.isEmpty else { return [] }
 

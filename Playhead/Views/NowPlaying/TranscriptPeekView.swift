@@ -222,8 +222,21 @@ private extension TranscriptPeekView {
                 }
 
                 VStack(alignment: .leading, spacing: Spacing.xxs) {
-                    // Phase 5: AD badge at the start of the first row in a decoded span
-                    if isDecodedAd {
+                    // Phase 5: AD badge only on the FIRST chunk of a decoded span.
+                    // A chunk is the first of its span when no previous chunk shares any
+                    // of the same overlapping span IDs.
+                    let isFirstChunkOfSpan: Bool = {
+                        guard isDecodedAd else { return false }
+                        guard index > 0 else { return true }
+                        let prevChunk = peekViewModel.chunks[index - 1]
+                        let prevSpanIds = Set(peekViewModel.decodedSpansOverlapping(
+                            startTime: prevChunk.startTime,
+                            endTime: prevChunk.endTime
+                        ).map(\.id))
+                        let currentSpanIds = Set(overlappingSpans.map(\.id))
+                        return currentSpanIds.isDisjoint(with: prevSpanIds)
+                    }()
+                    if isFirstChunkOfSpan {
                         HStack(spacing: Spacing.xxs) {
                             Text("AD")
                                 .font(AppTypography.sans(size: 10, weight: .semibold))

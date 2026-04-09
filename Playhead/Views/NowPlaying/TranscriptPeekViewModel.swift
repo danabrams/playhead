@@ -132,11 +132,6 @@ final class TranscriptPeekViewModel {
         }
     }
 
-    /// Returns true if the given time range is covered by any Phase 5 decoded span.
-    func isDecodedAdSegment(startTime: Double, endTime: Double) -> Bool {
-        !decodedSpansOverlapping(startTime: startTime, endTime: endTime).isEmpty
-    }
-
     /// Debug stats summary for TestFlight diagnostics.
     private(set) var debugStats: String = "loading…"
 

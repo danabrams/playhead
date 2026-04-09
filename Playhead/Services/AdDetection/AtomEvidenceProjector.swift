@@ -17,7 +17,6 @@
 
 import Foundation
 import OSLog
-import CryptoKit
 
 // MARK: - AtomEvidenceProjector
 
@@ -189,11 +188,15 @@ actor AtomEvidenceProjector {
             // Path 3: Use C — single-window FM + co-located acoustic break.
             if anchorProvenance.isEmpty,
                let singleFMRegionId = singleWindowFMAtoms[ordinal] {
-                // Look for a strong acoustic break within ±useCBreakRadiusAtoms.
-                if let nearestBreak = allAcousticBreaks.first(where: { brk in
-                    abs(brk.ordinal - ordinal) <= Self.useCBreakRadiusAtoms &&
-                    brk.breakStrength >= Self.useCMinBreakStrength
-                }) {
+                // Look for the nearest strong acoustic break within ±useCBreakRadiusAtoms.
+                // Select by minimum abs(distance) among all qualifying breaks, not just the first.
+                let nearestBreak = allAcousticBreaks
+                    .filter { brk in
+                        abs(brk.ordinal - ordinal) <= Self.useCBreakRadiusAtoms &&
+                        brk.breakStrength >= Self.useCMinBreakStrength
+                    }
+                    .min(by: { abs($0.ordinal - ordinal) < abs($1.ordinal - ordinal) })
+                if let nearestBreak {
                     anchorProvenance.append(.fmAcousticCorroborated(
                         regionId: singleFMRegionId,
                         breakStrength: nearestBreak.breakStrength
