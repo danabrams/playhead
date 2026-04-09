@@ -9,6 +9,7 @@
 
 @preconcurrency import AVFoundation
 import Foundation
+import MediaPlayer
 import Testing
 @testable import Playhead
 
@@ -61,7 +62,15 @@ struct InterruptionHandlingTests {
     /// the "Incorrect actor executor assumption" crash with Combine observers.
     @Test("Interruption notification handled on actor without crash")
     func interruptionBegan() async throws {
-        let service = await PlaybackService()
+        // playhead-86s: use a private NotificationCenter + fake seams so
+        // parallel test instances can't clobber each other via the process
+        // global AVAudioSession / MPNowPlayingInfoCenter.
+        let center = NotificationCenter()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: center
+        )
 
         // Put the service into a playing state so pause() has an effect.
         await service._testingInjectState(PlaybackState(
@@ -79,9 +88,9 @@ struct InterruptionHandlingTests {
         // exactly how AVAudioSession delivers it when Siri activates.
         // With the old Combine .sink, this would crash here.
         await MainActor.run {
-            NotificationCenter.default.post(
+            center.post(
                 name: AVAudioSession.interruptionNotification,
-                object: AVAudioSession.sharedInstance(),
+                object: nil,
                 userInfo: [
                     AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue
                 ]
@@ -98,7 +107,12 @@ struct InterruptionHandlingTests {
 
     @Test("Interruption ended with shouldResume resumes playback")
     func interruptionEndedResumes() async throws {
-        let service = await PlaybackService()
+        let center = NotificationCenter()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: center
+        )
 
         // Start in paused state (as if interruption already began).
         await service._testingInjectState(PlaybackState(
@@ -111,15 +125,16 @@ struct InterruptionHandlingTests {
 
         // Post interruption ended with shouldResume.
         await MainActor.run {
-            NotificationCenter.default.post(
+            center.post(
                 name: AVAudioSession.interruptionNotification,
-                object: AVAudioSession.sharedInstance(),
+                object: nil,
                 userInfo: [
                     AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.ended.rawValue,
                     AVAudioSessionInterruptionOptionKey: AVAudioSession.InterruptionOptions.shouldResume.rawValue
                 ]
             )
         }
+        _ = service
 
         try await Task.sleep(for: .milliseconds(100))
 
@@ -130,7 +145,12 @@ struct InterruptionHandlingTests {
 
     @Test("Route change notification handled on actor without crash")
     func routeChange() async throws {
-        let service = await PlaybackService()
+        let center = NotificationCenter()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: center
+        )
 
         await service._testingInjectState(PlaybackState(
             status: .playing,
@@ -146,9 +166,9 @@ struct InterruptionHandlingTests {
 
         // Post route change (headphones unplugged) on main queue.
         await MainActor.run {
-            NotificationCenter.default.post(
+            center.post(
                 name: AVAudioSession.routeChangeNotification,
-                object: AVAudioSession.sharedInstance(),
+                object: nil,
                 userInfo: [
                     AVAudioSessionRouteChangeReasonKey: AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue
                 ]
@@ -167,7 +187,12 @@ struct InterruptionHandlingTests {
     /// The old Combine pattern would crash on the first or second notification.
     @Test("Rapid interruption notifications don't crash")
     func rapidInterruptions() async throws {
-        let service = await PlaybackService()
+        let center = NotificationCenter()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: center
+        )
 
         await service._testingInjectState(PlaybackState(
             status: .playing,
@@ -181,9 +206,9 @@ struct InterruptionHandlingTests {
         await MainActor.run {
             for i in 0..<20 {
                 let type: AVAudioSession.InterruptionType = i % 2 == 0 ? .began : .ended
-                NotificationCenter.default.post(
+                center.post(
                     name: AVAudioSession.interruptionNotification,
-                    object: AVAudioSession.sharedInstance(),
+                    object: nil,
                     userInfo: [
                         AVAudioSessionInterruptionTypeKey: type.rawValue
                     ]
@@ -197,5 +222,55 @@ struct InterruptionHandlingTests {
         // Just verify we're still alive and the service is responsive.
         let snapshot = await service.snapshot()
         #expect(snapshot.duration == 100)
+    }
+}
+
+// MARK: - Seam Injection (playhead-86s)
+
+@Suite("PlaybackService – Injected System Seams")
+struct PlaybackServiceSeamInjectionTests {
+
+    /// With fakes injected, PlaybackService should talk to them instead of
+    /// AVAudioSession.sharedInstance() / MPNowPlayingInfoCenter.default().
+    /// This is the regression test for the parallel-test coupling that forced
+    /// parallelizable: false in project.yml.
+    @Test("Injected seams capture all audio-session + now-playing writes")
+    func injectedSeamsReceiveCalls() async throws {
+        let audio = FakeAudioSessionProvider()
+        let nowPlaying = FakeNowPlayingInfoProvider()
+        let center = NotificationCenter()
+
+        let service = await PlaybackService(
+            audioSession: audio,
+            nowPlayingInfo: nowPlaying,
+            notificationCenter: center
+        )
+
+        // Drive a code path that writes to the now-playing info seam.
+        await service._testingInjectState(PlaybackState(
+            status: .paused,
+            currentTime: 5,
+            duration: 100,
+            rate: 0,
+            playbackSpeed: 1.0
+        ))
+        await service.setSpeed(1.5)
+
+        // Give the actor's init-time configureAudioSession Task time to run.
+        // The init hops onto PlaybackServiceActor and calls setCategory/setActive
+        // from a detached Task, so we need a checkpoint on the actor before
+        // asserting. Taking a snapshot serializes behind any pending work.
+        _ = await service.snapshot()
+
+        #expect(audio.categoryCalls.count == 1,
+                "configureAudioSession should call setCategory exactly once")
+        #expect(audio.setActiveCalls == [true],
+                "configureAudioSession should activate the session")
+
+        let info = nowPlaying.info
+        #expect(info != nil, "setSpeed should push a now-playing update")
+        #expect(info?[MPNowPlayingInfoPropertyDefaultPlaybackRate] as? Float == 1.5)
+
+        await service.tearDown()
     }
 }
