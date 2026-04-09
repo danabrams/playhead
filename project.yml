@@ -47,17 +47,13 @@ targets:
           - com.playhead.app.preanalysis.recovery
     scheme:
       testTargets:
-        # parallelizable: false — playhead-86s landed the AVAudioSession +
-        # MPNowPlayingInfoCenter seams that PlaybackService needed, so the
-        # process-global clobbering half of the problem is fixed. The other
-        # half — ShadowRetryObserver / runBackfillPollingLoop tests use
-        # literal wall-clock deadlines that starve under parallel execution
-        # — is still open as playhead-p06. Until p06 lands, the scheme
-        # stays serial. Flipping this to true prematurely makes the
-        # following tests flake: RunPendingBackfillPollingLoopTests
-        # (drainedLoopHonorsDeadlineWithAlternatingPending, runPendingBackfillRespectsStop),
-        # ShadowRetryTests (testH1_stopExitsLoopWithoutCapabilityYield),
-        # SchedulerBugFixRegressionTests (testSchedulerResolvesRealAssetIdForNilJobAssetId).
+        # parallelizable: false — playhead-86s (PlaybackService singleton
+        # seams) and playhead-p06 (injectable poll/wait deadlines) closed
+        # most of the parallel-execution races, but two scheduler tests
+        # still flake under parallelization:
+        #   SchedulerBugFixRegressionTests.testSchedulerResolvesRealAssetIdForNilJobAssetId
+        #   SchedulerRegressionTests.testLeaseReleasedAfterProcessJob
+        # Tracked separately. Until those are addressed, this stays serial.
         - name: PlayheadTests
           parallelizable: false
       storeKitConfiguration: Playhead/Resources/Playhead.storekit
