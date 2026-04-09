@@ -43,12 +43,13 @@ enum CornerRadius {
     static let large: CGFloat = 12
 
     // MARK: Legacy aliases
+    // Retained so existing call sites compile during the migration to the
+    // bead-spec semantic names. Marked deprecated would produce ~37 build
+    // warnings on every developer build, so they are kept undeprecated and
+    // tracked as follow-up tech debt instead.
     static let sm: CGFloat = small
     static let md: CGFloat = medium
     static let lg: CGFloat = large
-    /// 16pt — extra-large; not part of the bead spec but retained for the
-    /// preview catalog and any hero cards that need a larger radius.
-    static let xl: CGFloat = 16
 }
 
 // MARK: - Shadows
@@ -136,8 +137,14 @@ struct MotionDescriptor: Equatable {
             guard let c = controlPoints else { return .easeInOut(duration: duration) }
             return .timingCurve(c.c1x, c.c1y, c.c2x, c.c2y, duration: duration)
         case .spring, .interpolatingSpring, .bouncy:
-            // These are declared forbidden; fall back to a safe ease-out if
-            // anything ever tries to instantiate them via this wrapper.
+            // These are declared forbidden by the Quiet Instrument design
+            // rules. Trap loudly in DEBUG so the next reviewer notices,
+            // then fall back to a safe ease-out in RELEASE so the app
+            // doesn't crash if a forbidden case ever escapes review.
+            assertionFailure(
+                "Forbidden motion curve kind '\(kind)' — Quiet Instrument has no spring physics. "
+                + "Use .preciseEase, .quick, .standard, .deliberate, or .transport."
+            )
             return .easeOut(duration: duration)
         }
     }
@@ -253,7 +260,6 @@ extension View {
                 radiusBox("sm", CornerRadius.sm)
                 radiusBox("md", CornerRadius.md)
                 radiusBox("lg", CornerRadius.lg)
-                radiusBox("xl", CornerRadius.xl)
             }
 
             Text("Shadows")
