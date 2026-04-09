@@ -31,15 +31,23 @@ enum Spacing {
 
 // MARK: - Corner Radii
 
-/// Corner radius tokens. Smaller for dense UI, larger for prominent cards.
+/// Corner radius tokens. Restrained, never bubbly: small=4, medium=8, large=12.
+/// The `sm/md/lg` aliases exist for backward-compatibility with call sites
+/// predating the semantic names.
 enum CornerRadius {
     /// 4pt — buttons, small chips
-    static let sm: CGFloat = 4
+    static let small: CGFloat = 4
     /// 8pt — cards, input fields
-    static let md: CGFloat = 8
+    static let medium: CGFloat = 8
     /// 12pt — sheets, modals
-    static let lg: CGFloat = 12
-    /// 16pt — hero cards, bottom sheets
+    static let large: CGFloat = 12
+
+    // MARK: Legacy aliases
+    static let sm: CGFloat = small
+    static let md: CGFloat = medium
+    static let lg: CGFloat = large
+    /// 16pt — extra-large; not part of the bead spec but retained for the
+    /// preview catalog and any hero cards that need a larger radius.
     static let xl: CGFloat = 16
 }
 
@@ -82,20 +90,103 @@ extension View {
 
 // MARK: - Animation Curves
 
+/// Curve kind recorded in a `MotionDescriptor`. Tests assert against this
+/// enum so they don't have to parse SwiftUI's opaque `Animation` internals.
+enum MotionCurveKind: String, Equatable {
+    case linear
+    case easeIn
+    case easeOut
+    case easeInOut
+    case timingCurve
+    // The following are forbidden by the "Quiet Instrument" design rules and
+    // are enumerated only so tests can assert their absence.
+    case spring
+    case interpolatingSpring
+    case bouncy
+}
+
+/// Cubic Bezier control points for a custom timing curve.
+struct MotionControlPoints: Equatable {
+    let c1x: Double
+    let c1y: Double
+    let c2x: Double
+    let c2y: Double
+}
+
+/// A testable description of a motion token. Wraps a SwiftUI `Animation`
+/// while preserving the metadata needed to prove we're not using springs.
+struct MotionDescriptor: Equatable {
+    let name: String
+    let kind: MotionCurveKind
+    let duration: Double
+    let controlPoints: MotionControlPoints?
+
+    /// The underlying SwiftUI `Animation` ready to hand to `.animation(_:value:)`.
+    var animation: Animation {
+        switch kind {
+        case .linear:
+            return .linear(duration: duration)
+        case .easeIn:
+            return .easeIn(duration: duration)
+        case .easeOut:
+            return .easeOut(duration: duration)
+        case .easeInOut:
+            return .easeInOut(duration: duration)
+        case .timingCurve:
+            guard let c = controlPoints else { return .easeInOut(duration: duration) }
+            return .timingCurve(c.c1x, c.c1y, c.c2x, c.c2y, duration: duration)
+        case .spring, .interpolatingSpring, .bouncy:
+            // These are declared forbidden; fall back to a safe ease-out if
+            // anything ever tries to instantiate them via this wrapper.
+            return .easeOut(duration: duration)
+        }
+    }
+}
+
 /// Animation presets. All eased, never springy.
 /// "Like a well-damped needle" — quick, precise, no overshoot.
+///
+/// Spec:
+/// - `quick`       = 0.15s
+/// - `standard`    = 0.25s
+/// - `deliberate`  = 0.4s
+/// - `preciseEase` = custom cubic (0.2, 0.0, 0.0, 1.0) — fast settle, no overshoot
+/// - `transport`   = linear (for scrubber / playhead tracking)
 enum Motion {
-    /// Standard interaction feedback (0.2s ease-in-out).
-    static let quick: Animation = .easeInOut(duration: 0.2)
 
-    /// Content transitions, screen changes (0.3s ease-in-out).
-    static let standard: Animation = .easeInOut(duration: 0.3)
+    // MARK: Descriptors (testable)
 
-    /// Deliberate, noticeable transitions (0.45s ease-in-out).
-    static let slow: Animation = .easeInOut(duration: 0.45)
+    static let quickDescriptor = MotionDescriptor(
+        name: "quick", kind: .easeInOut, duration: 0.15, controlPoints: nil
+    )
+    static let standardDescriptor = MotionDescriptor(
+        name: "standard", kind: .easeInOut, duration: 0.25, controlPoints: nil
+    )
+    static let deliberateDescriptor = MotionDescriptor(
+        name: "deliberate", kind: .easeInOut, duration: 0.4, controlPoints: nil
+    )
+    static let preciseEaseDescriptor = MotionDescriptor(
+        name: "preciseEase",
+        kind: .timingCurve,
+        duration: 0.25,
+        controlPoints: MotionControlPoints(c1x: 0.2, c1y: 0.0, c2x: 0.0, c2y: 1.0)
+    )
+    static let transportDescriptor = MotionDescriptor(
+        name: "transport", kind: .linear, duration: 0.15, controlPoints: nil
+    )
 
-    /// Fade-in for lazy-loaded content (0.25s ease-out).
-    static let fadeIn: Animation = .easeOut(duration: 0.25)
+    // MARK: SwiftUI Animations (call sites)
+
+    /// 0.15s ease-in-out — taps, small state flips.
+    static let quick: Animation = quickDescriptor.animation
+    /// 0.25s ease-in-out — default content transitions.
+    static let standard: Animation = standardDescriptor.animation
+    /// 0.4s ease-in-out — deliberate, noticeable transitions.
+    static let deliberate: Animation = deliberateDescriptor.animation
+    /// Custom fast-settle curve with zero overshoot (Material "decelerate").
+    static let preciseEase: Animation = preciseEaseDescriptor.animation
+    /// Linear curve for the transport / scrubber (no easing artifacts while scrubbing).
+    static let transport: Animation = transportDescriptor.animation
 }
 
 // MARK: - Card Proportions

@@ -48,30 +48,56 @@ enum AppColors {
         dark: Palette.charcoal
     )
 
+    /// A second level of elevation on top of `surface`.
+    /// Dark: slightly lifted charcoal  Light: bone
+    static let surfaceElevated = Color.dynamicColor(
+        light: Palette.bone,
+        dark: Color(red: 0.145, green: 0.168, blue: 0.208) // ~#252B35 — one step above Charcoal
+    )
+
     /// Primary text.
     /// Dark: Bone (#F3EEE4)  Light: Ink (#0E1116)
-    static let text = Color.dynamicColor(
+    static let textPrimary = Color.dynamicColor(
         light: Palette.ink,
         dark: Palette.bone
+    )
+
+    /// Secondary text and icons.
+    /// Dark: Soft Steel (#95A0AE)  Light: Muted Sage (#8C9B90)
+    static let textSecondary = Color.dynamicColor(
+        light: Palette.mutedSage,
+        dark: Palette.softSteel
+    )
+
+    /// Tertiary labels: metadata, timestamps, disabled text.
+    /// Soft Steel with reduced opacity in light mode.
+    static let textTertiary = Color.dynamicColor(
+        light: Palette.softSteel.opacity(0.8),
+        dark: Palette.softSteel
     )
 
     /// Signal accent — Copper. Same in both modes.
     /// Use sparingly: active playhead, key CTAs, progress indicators.
     static let accent = Palette.copper
 
-    /// Secondary text and icons.
-    /// Dark: Soft Steel (#95A0AE)  Light: Muted Sage (#8C9B90)
-    static let secondary = Color.dynamicColor(
-        light: Palette.mutedSage,
-        dark: Palette.softSteel
-    )
+    /// Recessed accent treatment for muted/skipped states.
+    /// Copper at 16% opacity over the current background.
+    /// NOT for text — contrast is insufficient. Use for fills on recessed rows,
+    /// strike-through overlays on skipped ad segments, etc.
+    static let accentSubtle: Color = Palette.copper.opacity(0.16)
 
-    /// Metadata, timestamps, tertiary labels.
-    /// Soft Steel in both modes (slightly reduced opacity in light mode).
-    static let metadata = Color.dynamicColor(
-        light: Palette.softSteel.opacity(0.8),
-        dark: Palette.softSteel
-    )
+    // MARK: - Legacy aliases
+    //
+    // These names predate the bead-spec semantic layer. Keep them as
+    // deprecated aliases so existing call sites compile. Prefer
+    // `textPrimary`/`textSecondary`/`textTertiary` in new code.
+
+    /// Deprecated: use `textPrimary`.
+    static let text = textPrimary
+    /// Deprecated: use `textSecondary`.
+    static let secondary = textSecondary
+    /// Deprecated: use `textTertiary`.
+    static let metadata = textTertiary
 }
 
 // MARK: - Color Helpers
