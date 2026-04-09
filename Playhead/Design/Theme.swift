@@ -286,7 +286,7 @@ private func spacingBox(_ label: String, _ size: CGFloat) -> some View {
             .frame(width: size, height: 40)
         Text(label)
             .font(AppTypography.caption)
-            .foregroundStyle(AppColors.metadata)
+            .foregroundStyle(AppColors.textTertiary)
     }
 }
 
@@ -302,7 +302,7 @@ private func radiusBox(_ label: String, _ radius: CGFloat) -> some View {
             )
         Text(label)
             .font(AppTypography.caption)
-            .foregroundStyle(AppColors.metadata)
+            .foregroundStyle(AppColors.textTertiary)
     }
 }
 
@@ -315,7 +315,7 @@ private func shadowBox(_ label: String, _ style: AppShadow.ShadowStyle) -> some 
             .themeShadow(style)
         Text(label)
             .font(AppTypography.caption)
-            .foregroundStyle(AppColors.metadata)
+            .foregroundStyle(AppColors.textTertiary)
     }
 }
 
@@ -330,6 +330,6 @@ private func proportionBox(_ label: String, _ ratio: CGFloat) -> some View {
             .themeShadow(AppShadow.card)
         Text(label)
             .font(AppTypography.caption)
-            .foregroundStyle(AppColors.metadata)
+            .foregroundStyle(AppColors.textTertiary)
     }
 }

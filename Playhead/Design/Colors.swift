@@ -41,17 +41,23 @@ enum AppColors {
         dark: Palette.ink
     )
 
-    /// Elevated surface (cards, sheets, grouped sections).
-    /// Dark: Charcoal (#1A1F27)  Light: White
+    /// Default surface for content (cards, sheets, grouped sections).
+    /// Dark: Charcoal (#1A1F27)  Light: Bone (#F3EEE4) — same as background
+    /// in light mode; cards on the page are distinguished by shadow rather
+    /// than tint, keeping the warm Bone field unbroken.
     static let surface = Color.dynamicColor(
-        light: .white,
+        light: Palette.bone,
         dark: Palette.charcoal
     )
 
-    /// A second level of elevation on top of `surface`.
-    /// Dark: slightly lifted charcoal  Light: bone
+    /// One step higher in the elevation hierarchy than `surface`.
+    /// Dark: a hair brighter than Charcoal (#252B35)
+    /// Light: pure white — strictly brighter than Bone, so elevation
+    /// reads as "lifted" in both modes (lighter = closer to the viewer).
+    /// The luminance invariant `surfaceElevated >= surface` is enforced
+    /// by `DesignTokenColorsTests.testElevationLuminanceMonotonic`.
     static let surfaceElevated = Color.dynamicColor(
-        light: Palette.bone,
+        light: .white,
         dark: Color(red: 0.145, green: 0.168, blue: 0.208) // ~#252B35 — one step above Charcoal
     )
 
@@ -141,10 +147,12 @@ extension Color {
             Group {
                 semanticSwatch("background", AppColors.background)
                 semanticSwatch("surface", AppColors.surface)
-                semanticSwatch("text", AppColors.text)
+                semanticSwatch("surfaceElevated", AppColors.surfaceElevated)
+                semanticSwatch("textPrimary", AppColors.textPrimary)
+                semanticSwatch("textSecondary", AppColors.textSecondary)
+                semanticSwatch("textTertiary", AppColors.textTertiary)
                 semanticSwatch("accent", AppColors.accent)
-                semanticSwatch("secondary", AppColors.secondary)
-                semanticSwatch("metadata", AppColors.metadata)
+                semanticSwatch("accentSubtle", AppColors.accentSubtle)
             }
         }
         .padding()
@@ -181,7 +189,7 @@ private func semanticSwatch(_ name: String, _ color: Color) -> some View {
             )
         Text(".\(name)")
             .font(.system(.caption, design: .monospaced))
-            .foregroundStyle(AppColors.text)
+            .foregroundStyle(AppColors.textPrimary)
         Spacer()
     }
 }
