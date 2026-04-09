@@ -131,6 +131,156 @@ struct ShowPriors: Sendable {
     }
 }
 
+// MARK: - Shared Region Scoring
+
+/// Shared signal scoring helpers used both by the hot-path classifier and
+/// by the Phase 4 region feature backfill.
+enum RegionScoring {
+    /// RMS drop threshold: a window whose RMS is this fraction below the
+    /// region mean is considered a significant energy change.
+    private static let rmsDropFraction: Double = 0.35
+
+    /// Spectral flux threshold: windows above this percentile of the region's
+    /// flux distribution indicate a timbral transition.
+    private static let spectralFluxPercentile: Double = 0.80
+
+    /// How close (as a fraction of episode duration) a candidate must be
+    /// to a known ad slot position to receive the prior boost.
+    private static let slotProximityThreshold: Double = 0.05
+
+    /// Score based on RMS energy drops at region boundaries.
+    /// Ads typically start/end with a noticeable volume change.
+    static func computeRmsDropScore(windows: [FeatureWindow]) -> Double {
+        guard windows.count >= 3 else { return 0.0 }
+
+        let rmsValues = windows.map(\.rms)
+        let mean = rmsValues.reduce(0, +) / Double(rmsValues.count)
+        guard mean > 0 else { return 0.0 }
+
+        // Check first and last windows for energy transition.
+        let firstRms = rmsValues[0]
+        let lastRms = rmsValues[rmsValues.count - 1]
+        let interiorMean = rmsValues.dropFirst().dropLast().reduce(0, +)
+            / Double(max(rmsValues.count - 2, 1))
+
+        var score = 0.0
+
+        // Entry transition: RMS change at start.
+        let entryDelta = abs(firstRms - interiorMean) / mean
+        if entryDelta > Self.rmsDropFraction {
+            score += 0.5
+        }
+
+        // Exit transition: RMS change at end.
+        let exitDelta = abs(lastRms - interiorMean) / mean
+        if exitDelta > Self.rmsDropFraction {
+            score += 0.5
+        }
+
+        return min(score, 1.0)
+    }
+
+    /// Score based on spectral flux spikes at boundaries.
+    /// High spectral flux indicates timbral change (different speaker/production).
+    static func computeSpectralChangeScore(windows: [FeatureWindow]) -> Double {
+        guard windows.count >= 3 else { return 0.0 }
+
+        let fluxValues = windows.map(\.spectralFlux)
+        let sorted = fluxValues.sorted()
+        let threshold = sorted[Int(Double(sorted.count) * Self.spectralFluxPercentile)]
+
+        // Check boundary windows for spectral transitions.
+        var score = 0.0
+
+        if fluxValues[0] > threshold { score += 0.4 }
+        if fluxValues[fluxValues.count - 1] > threshold { score += 0.4 }
+
+        // Interior high-flux windows suggest production changes (jingles, etc).
+        let interiorHighFlux = fluxValues.dropFirst().dropLast()
+            .filter { $0 > threshold }.count
+        let interiorFraction = Double(interiorHighFlux)
+            / Double(max(fluxValues.count - 2, 1))
+        score += interiorFraction * 0.2
+
+        return min(score, 1.0)
+    }
+
+    /// Score based on music probability across the region.
+    /// Ad segments often have background music or jingles.
+    static func computeMusicScore(windows: [FeatureWindow]) -> Double {
+        guard !windows.isEmpty else { return 0.0 }
+
+        let musicProbs = windows.map(\.musicProbability)
+        let avgMusic = musicProbs.reduce(0, +) / Double(musicProbs.count)
+
+        // Ads often have some music. A moderate music probability is a
+        // positive signal. Very high music (>0.8) might be actual music
+        // content, so we cap the contribution.
+        if avgMusic > 0.8 {
+            return 0.5 // Could be music content, not just ad jingle
+        }
+        return min(avgMusic * 1.5, 1.0)
+    }
+
+    /// Score based on speaker cluster changes at region boundaries.
+    /// Ad reads often involve a different speaker or a return to the
+    /// main host after the ad.
+    static func computeSpeakerChangeScore(windows: [FeatureWindow]) -> Double {
+        guard windows.count >= 2 else { return 0.0 }
+
+        let speakerIds = windows.compactMap(\.speakerClusterId)
+        guard speakerIds.count >= 2 else { return 0.0 }
+
+        let uniqueSpeakers = Set(speakerIds)
+
+        // Multiple speakers in the region = higher ad probability.
+        if uniqueSpeakers.count >= 3 { return 1.0 }
+        if uniqueSpeakers.count == 2 { return 0.7 }
+
+        // Check if boundary speakers differ from interior.
+        if let first = windows.first?.speakerClusterId,
+           let last = windows.last?.speakerClusterId,
+           first == last {
+            // Same speaker at boundaries, might be host returning.
+            let interiorIds = windows.dropFirst().dropLast().compactMap(\.speakerClusterId)
+            let interiorSet = Set(interiorIds)
+            if !interiorSet.isEmpty && !interiorSet.contains(first) {
+                return 0.9 // Classic "host -> ad reader -> host" pattern
+            }
+        }
+
+        return 0.0
+    }
+
+    /// Score based on per-show ad slot priors.
+    /// Shows that consistently place ads at certain positions get a boost.
+    static func computePriorScore(
+        startTime: Double,
+        endTime: Double,
+        episodeDuration: Double,
+        priors: ShowPriors
+    ) -> Double {
+        guard !priors.slotPositions.isEmpty,
+              episodeDuration > 0,
+              priors.trustWeight > 0
+        else { return 0.0 }
+
+        let candidateCenter = (startTime + endTime) / 2.0
+        let normalizedPosition = candidateCenter / episodeDuration
+
+        // Find the closest known ad slot position.
+        let minDistance = priors.slotPositions
+            .map { abs($0 - normalizedPosition) }
+            .min() ?? 1.0
+
+        guard minDistance <= Self.slotProximityThreshold else { return 0.0 }
+
+        // Score inversely proportional to distance, scaled by trust.
+        let proximity = 1.0 - (minDistance / Self.slotProximityThreshold)
+        return proximity * priors.trustWeight
+    }
+}
+
 // MARK: - ClassifierService Protocol
 
 /// Protocol for ad region classifiers. Both the rule-based heuristic
@@ -172,18 +322,6 @@ struct RuleBasedClassifier: ClassifierService {
         static let prior:          Double = 0.10
     }
 
-    /// RMS drop threshold: a window whose RMS is this fraction below the
-    /// region mean is considered a significant energy change.
-    private static let rmsDropFraction: Double = 0.35
-
-    /// Spectral flux threshold: windows above this percentile of the region's
-    /// flux distribution indicate a timbral transition.
-    private static let spectralFluxPercentile: Double = 0.80
-
-    /// How close (as a fraction of episode duration) a candidate must be
-    /// to a known ad slot position to receive the prior boost.
-    private static let slotProximityThreshold: Double = 0.05
-
     /// Sigmoid steepness for calibration.
     private static let sigmoidK: Double = 8.0
     /// Sigmoid midpoint (raw score at which output = 0.5).
@@ -213,12 +351,13 @@ struct RuleBasedClassifier: ClassifierService {
 
         let lexicalScore = candidate.confidence
 
-        let rmsDropScore = computeRmsDropScore(windows: windows)
-        let spectralChangeScore = computeSpectralChangeScore(windows: windows)
-        let musicScore = computeMusicScore(windows: windows)
-        let speakerChangeScore = computeSpeakerChangeScore(windows: windows)
-        let priorScore = computePriorScore(
-            candidate: candidate,
+        let rmsDropScore = RegionScoring.computeRmsDropScore(windows: windows)
+        let spectralChangeScore = RegionScoring.computeSpectralChangeScore(windows: windows)
+        let musicScore = RegionScoring.computeMusicScore(windows: windows)
+        let speakerChangeScore = RegionScoring.computeSpeakerChangeScore(windows: windows)
+        let priorScore = RegionScoring.computePriorScore(
+            startTime: candidate.startTime,
+            endTime: candidate.endTime,
             episodeDuration: input.episodeDuration,
             priors: priors
         )
@@ -264,139 +403,6 @@ struct RuleBasedClassifier: ClassifierService {
             endAdjustment: endAdj,
             signalBreakdown: breakdown
         )
-    }
-
-    // MARK: - Signal Scoring
-
-    /// Score based on RMS energy drops at region boundaries.
-    /// Ads typically start/end with a noticeable volume change.
-    private func computeRmsDropScore(windows: [FeatureWindow]) -> Double {
-        guard windows.count >= 3 else { return 0.0 }
-
-        let rmsValues = windows.map(\.rms)
-        let mean = rmsValues.reduce(0, +) / Double(rmsValues.count)
-        guard mean > 0 else { return 0.0 }
-
-        // Check first and last windows for energy transition.
-        let firstRms = rmsValues[0]
-        let lastRms = rmsValues[rmsValues.count - 1]
-        let interiorMean = rmsValues.dropFirst().dropLast().reduce(0, +)
-            / Double(max(rmsValues.count - 2, 1))
-
-        var score = 0.0
-
-        // Entry transition: RMS change at start.
-        let entryDelta = abs(firstRms - interiorMean) / mean
-        if entryDelta > Self.rmsDropFraction {
-            score += 0.5
-        }
-
-        // Exit transition: RMS change at end.
-        let exitDelta = abs(lastRms - interiorMean) / mean
-        if exitDelta > Self.rmsDropFraction {
-            score += 0.5
-        }
-
-        return min(score, 1.0)
-    }
-
-    /// Score based on spectral flux spikes at boundaries.
-    /// High spectral flux indicates timbral change (different speaker/production).
-    private func computeSpectralChangeScore(windows: [FeatureWindow]) -> Double {
-        guard windows.count >= 3 else { return 0.0 }
-
-        let fluxValues = windows.map(\.spectralFlux)
-        let sorted = fluxValues.sorted()
-        let threshold = sorted[Int(Double(sorted.count) * Self.spectralFluxPercentile)]
-
-        // Check boundary windows for spectral transitions.
-        var score = 0.0
-
-        if fluxValues[0] > threshold { score += 0.4 }
-        if fluxValues[fluxValues.count - 1] > threshold { score += 0.4 }
-
-        // Interior high-flux windows suggest production changes (jingles, etc).
-        let interiorHighFlux = fluxValues.dropFirst().dropLast()
-            .filter { $0 > threshold }.count
-        let interiorFraction = Double(interiorHighFlux)
-            / Double(max(fluxValues.count - 2, 1))
-        score += interiorFraction * 0.2
-
-        return min(score, 1.0)
-    }
-
-    /// Score based on music probability across the region.
-    /// Ad segments often have background music or jingles.
-    private func computeMusicScore(windows: [FeatureWindow]) -> Double {
-        guard !windows.isEmpty else { return 0.0 }
-
-        let musicProbs = windows.map(\.musicProbability)
-        let avgMusic = musicProbs.reduce(0, +) / Double(musicProbs.count)
-
-        // Ads often have some music. A moderate music probability is a
-        // positive signal. Very high music (>0.8) might be actual music
-        // content, so we cap the contribution.
-        if avgMusic > 0.8 {
-            return 0.5 // Could be music content, not just ad jingle
-        }
-        return min(avgMusic * 1.5, 1.0)
-    }
-
-    /// Score based on speaker cluster changes at region boundaries.
-    /// Ad reads often involve a different speaker or a return to the
-    /// main host after the ad.
-    private func computeSpeakerChangeScore(windows: [FeatureWindow]) -> Double {
-        guard windows.count >= 2 else { return 0.0 }
-
-        let speakerIds = windows.compactMap(\.speakerClusterId)
-        guard speakerIds.count >= 2 else { return 0.0 }
-
-        let uniqueSpeakers = Set(speakerIds)
-
-        // Multiple speakers in the region = higher ad probability.
-        if uniqueSpeakers.count >= 3 { return 1.0 }
-        if uniqueSpeakers.count == 2 { return 0.7 }
-
-        // Check if boundary speakers differ from interior.
-        if let first = windows.first?.speakerClusterId,
-           let last = windows.last?.speakerClusterId,
-           first == last {
-            // Same speaker at boundaries, might be host returning.
-            let interiorIds = windows.dropFirst().dropLast().compactMap(\.speakerClusterId)
-            let interiorSet = Set(interiorIds)
-            if !interiorSet.isEmpty && !interiorSet.contains(first) {
-                return 0.9 // Classic "host -> ad reader -> host" pattern
-            }
-        }
-
-        return 0.0
-    }
-
-    /// Score based on per-show ad slot priors.
-    /// Shows that consistently place ads at certain positions get a boost.
-    private func computePriorScore(
-        candidate: LexicalCandidate,
-        episodeDuration: Double,
-        priors: ShowPriors
-    ) -> Double {
-        guard !priors.slotPositions.isEmpty,
-              episodeDuration > 0,
-              priors.trustWeight > 0
-        else { return 0.0 }
-
-        let candidateCenter = (candidate.startTime + candidate.endTime) / 2.0
-        let normalizedPosition = candidateCenter / episodeDuration
-
-        // Find the closest known ad slot position.
-        let minDistance = priors.slotPositions
-            .map { abs($0 - normalizedPosition) }
-            .min() ?? 1.0
-
-        guard minDistance <= Self.slotProximityThreshold else { return 0.0 }
-
-        // Score inversely proportional to distance, scaled by trust.
-        let proximity = 1.0 - (minDistance / Self.slotProximityThreshold)
-        return proximity * priors.trustWeight
     }
 
     // MARK: - Boundary Adjustment
