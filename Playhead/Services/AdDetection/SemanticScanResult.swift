@@ -59,6 +59,19 @@ struct SemanticScanResult: Sendable, Equatable {
     /// reconciliation and used by Rev3-M6 tests to verify that harvester
     /// and lexical narrowing phases actually produce strict-subset coverage.
     let jobPhase: String
+    /// playhead-36t: model-generated refusal explanation captured from
+    /// `LanguageModelSession.GenerationError.Refusal.explanation` when
+    /// the FM classifier refuses this window. Nil for successful scans,
+    /// for permissive-path scans, and when the async explanation fetch
+    /// fails. Diagnostic only — does not affect routing or persistence
+    /// schema.
+    let refusalExplanation: String?
+    /// playhead-eu1: true when the @Generable default path refused this
+    /// window and the permissive string path was used as a fallback.
+    let usedPermissiveFallback: Bool
+    /// playhead-eu1: the refusal context debug description that triggered
+    /// the permissive fallback. Nil when `usedPermissiveFallback` is false.
+    let permissiveFallbackReason: String?
 
     init(
         id: String,
@@ -82,7 +95,10 @@ struct SemanticScanResult: Sendable, Equatable {
         transcriptVersion: String,
         reuseScope: String? = nil,
         runMode: SemanticScanPhase = .shadow,
-        jobPhase: String = "shadow"
+        jobPhase: String = "shadow",
+        refusalExplanation: String? = nil,
+        usedPermissiveFallback: Bool = false,
+        permissiveFallbackReason: String? = nil
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -106,6 +122,9 @@ struct SemanticScanResult: Sendable, Equatable {
         self.reuseScope = reuseScope
         self.runMode = runMode
         self.jobPhase = jobPhase
+        self.refusalExplanation = refusalExplanation
+        self.usedPermissiveFallback = usedPermissiveFallback
+        self.permissiveFallbackReason = permissiveFallbackReason
     }
 
     func isReusable(
