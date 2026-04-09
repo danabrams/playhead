@@ -480,7 +480,7 @@ enum RegionProposalBuilder {
     }
 
     private static func anchorIdentityKey(_ anchor: ResolvedEvidenceAnchor) -> String {
-        let evidenceRef = anchor.entry?.evidenceRef.map(String.init) ?? "nil"
+        let evidenceRef = (anchor.entry?.evidenceRef).map(String.init) ?? "nil"
         return "\(evidenceRef)|\(anchor.lineRef)|\(anchor.kind.rawValue)|\(anchor.resolutionSource.rawValue)"
     }
 
