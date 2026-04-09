@@ -696,6 +696,18 @@ actor BackfillJobRunner {
             return (scanResultIds, evidenceEventIds, detectedAdLineRefs)
         }
 
+        // Cycle 10 Rev3-M5: derive the `runMode` discriminator from the
+        // persisted job's coveragePolicy. The original Rev3-M5 intent was
+        // to distinguish Phase 3 shadow-validation rows from Phase 5
+        // targeted-execution rows via the PLANNER policy, not via
+        // FMBackfillMode. `job.coveragePolicy` is already stamped by
+        // `runPendingBackfill` when the job is enqueued, so every
+        // persistence-row construction site in this function can read it
+        // without re-plumbing the plan.
+        let runMode: SemanticScanPhase = (job.coveragePolicy == .targetedWithAudit)
+            ? .targeted
+            : .shadow
+
         // bd-1en Phase 1: dispatch sensitive windows (pharma /
         // medical / mental-health / regulated tests) through the
         // permissive `SystemLanguageModel` path. The router and
@@ -730,7 +742,8 @@ actor BackfillJobRunner {
                 jobId: job.jobId,
                 jobPhase: job.phase,
                 scanPass: "passA",
-                status: .success
+                status: .success,
+                runMode: runMode
             )
             try await store.insertSemanticScanResult(result)
             scanResultIds.append(result.id)
@@ -760,7 +773,8 @@ actor BackfillJobRunner {
                             jobId: job.jobId,
                             jobPhase: job.phase,
                             status: status,
-                            latencyMs: coarse.latencyMillis
+                            latencyMs: coarse.latencyMillis,
+                            runMode: runMode
                         ) {
                     try await store.insertSemanticScanResult(failureResult)
                     scanResultIds.append(failureResult.id)
@@ -775,7 +789,8 @@ actor BackfillJobRunner {
                             jobId: job.jobId,
                             jobPhase: job.phase,
                             status: coarse.status,
-                            latencyMs: coarse.latencyMillis
+                            latencyMs: coarse.latencyMillis,
+                            runMode: runMode
                        ) {
                 try await store.insertSemanticScanResult(failureResult)
                 scanResultIds.append(failureResult.id)
@@ -788,7 +803,8 @@ actor BackfillJobRunner {
                     jobId: job.jobId,
                     jobPhase: job.phase,
                     status: coarse.status,
-                    latencyMs: coarse.latencyMillis
+                    latencyMs: coarse.latencyMillis,
+                    runMode: runMode
                   ) {
             try await store.insertSemanticScanResult(failureResult)
             scanResultIds.append(failureResult.id)
@@ -820,7 +836,8 @@ actor BackfillJobRunner {
                         inputs: inputs,
                         jobId: job.jobId,
                         jobPhase: job.phase,
-                        status: .success
+                        status: .success,
+                        runMode: runMode
                     )
                     for span in window.spans {
                         detectedAdLineRefs.formUnion(span.firstLineRef...span.lastLineRef)
@@ -829,7 +846,8 @@ actor BackfillJobRunner {
                         windowOutput: window,
                         inputs: inputs,
                         jobId: job.jobId,
-                        jobPhase: job.phase
+                        jobPhase: job.phase,
+                        runMode: runMode
                     )
                     // C-3: Pass-B scan row and its evidence events must be
                     // written atomically. The store's batch API wraps both in
@@ -853,7 +871,8 @@ actor BackfillJobRunner {
                             jobId: job.jobId,
                             jobPhase: job.phase,
                             status: status,
-                            latencyMs: refinement.latencyMillis
+                            latencyMs: refinement.latencyMillis,
+                            runMode: runMode
                         ) {
                             try await store.insertSemanticScanResult(failureResult)
                             scanResultIds.append(failureResult.id)
@@ -868,7 +887,8 @@ actor BackfillJobRunner {
                             jobId: job.jobId,
                             jobPhase: job.phase,
                             status: refinement.status,
-                            latencyMs: refinement.latencyMillis
+                            latencyMs: refinement.latencyMillis,
+                            runMode: runMode
                        ) {
                         try await store.insertSemanticScanResult(failureResult)
                         scanResultIds.append(failureResult.id)
@@ -883,7 +903,8 @@ actor BackfillJobRunner {
                         jobId: job.jobId,
                         jobPhase: job.phase,
                         status: refinement.status,
-                        latencyMs: refinement.latencyMillis
+                        latencyMs: refinement.latencyMillis,
+                        runMode: runMode
                     ) {
                         try await store.insertSemanticScanResult(failureResult)
                         scanResultIds.append(failureResult.id)
@@ -911,7 +932,8 @@ actor BackfillJobRunner {
                         baseRefinement: refinement,
                         inputs: inputs,
                         jobId: job.jobId,
-                        jobPhase: job.phase
+                        jobPhase: job.phase,
+                        runMode: runMode
                     )
                     scanResultIds.append(contentsOf: expansionResults.scanResultIds)
                     evidenceEventIds.append(contentsOf: expansionResults.evidenceEventIds)
@@ -996,7 +1018,8 @@ actor BackfillJobRunner {
         baseRefinement: FMRefinementScanOutput,
         inputs: AssetInputs,
         jobId: String,
-        jobPhase: BackfillJobPhase
+        jobPhase: BackfillJobPhase,
+        runMode: SemanticScanPhase
     ) async throws -> ExpansionResults {
         var results = ExpansionResults()
 
@@ -1145,7 +1168,8 @@ actor BackfillJobRunner {
                         jobId: jobId,
                         jobPhase: jobPhase,
                         status: expansionRefinement.status,
-                        latencyMs: expansionRefinement.latencyMillis
+                        latencyMs: expansionRefinement.latencyMillis,
+                        runMode: runMode
                     ) {
                         try await store.insertSemanticScanResult(failureResult)
                         results.scanResultIds.append(failureResult.id)
@@ -1199,13 +1223,15 @@ actor BackfillJobRunner {
                     inputs: inputs,
                     jobId: jobId,
                     jobPhase: jobPhase,
-                    status: .success
+                    status: .success,
+                    runMode: runMode
                 )
                 let mergedEvents = makeEvidenceEvents(
                     windowOutput: mergedWindowOutput,
                     inputs: inputs,
                     jobId: jobId,
-                    jobPhase: jobPhase
+                    jobPhase: jobPhase,
+                    runMode: runMode
                 )
                 let persistedEventIds = try await store.recordSemanticScanResult(
                     mergedScanResult,
@@ -1830,7 +1856,8 @@ actor BackfillJobRunner {
         jobId: String,
         jobPhase: BackfillJobPhase,
         scanPass: String,
-        status: SemanticScanStatus
+        status: SemanticScanStatus,
+        runMode: SemanticScanPhase
     ) -> SemanticScanResult {
         let firstAtom = inputs.segments.first(where: {
             $0.segmentIndex == windowOutput.lineRefs.first
@@ -1880,6 +1907,7 @@ actor BackfillJobRunner {
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
             reuseScope: jobId,
+            runMode: runMode,
             jobPhase: jobPhase.rawValue
         )
     }
@@ -1889,7 +1917,8 @@ actor BackfillJobRunner {
         inputs: AssetInputs,
         jobId: String,
         jobPhase: BackfillJobPhase,
-        status: SemanticScanStatus
+        status: SemanticScanStatus,
+        runMode: SemanticScanPhase
     ) -> SemanticScanResult {
         let firstAtom = inputs.segments.first(where: {
             $0.segmentIndex == windowOutput.lineRefs.first
@@ -1933,6 +1962,7 @@ actor BackfillJobRunner {
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
             reuseScope: jobId,
+            runMode: runMode,
             jobPhase: jobPhase.rawValue
         )
     }
@@ -1945,6 +1975,7 @@ actor BackfillJobRunner {
         jobPhase: BackfillJobPhase,
         status: SemanticScanStatus,
         latencyMs: Double,
+        runMode: SemanticScanPhase,
         windowKey: String? = nil
     ) -> SemanticScanResult? {
         guard let range = attemptedRange(for: attemptedSegments) else {
@@ -1977,6 +2008,7 @@ actor BackfillJobRunner {
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
             reuseScope: jobId,
+            runMode: runMode,
             jobPhase: jobPhase.rawValue
         )
     }
@@ -1987,7 +2019,8 @@ actor BackfillJobRunner {
         jobId: String,
         jobPhase: BackfillJobPhase,
         status: SemanticScanStatus,
-        latencyMs: Double
+        latencyMs: Double,
+        runMode: SemanticScanPhase
     ) -> SemanticScanResult? {
         let attemptedSegments = inputs.segments.filter { plan.lineRefs.contains($0.segmentIndex) }
         return makeFailureScanResult(
@@ -1998,6 +2031,7 @@ actor BackfillJobRunner {
             jobPhase: jobPhase,
             status: status,
             latencyMs: latencyMs,
+            runMode: runMode,
             windowKey: "window=\(plan.windowIndex)"
         )
     }
@@ -2008,7 +2042,8 @@ actor BackfillJobRunner {
         jobId: String,
         jobPhase: BackfillJobPhase,
         status: SemanticScanStatus,
-        latencyMs: Double
+        latencyMs: Double,
+        runMode: SemanticScanPhase
     ) -> SemanticScanResult? {
         let attemptedSegments = inputs.segments.filter { plan.lineRefs.contains($0.segmentIndex) }
         return makeFailureScanResult(
@@ -2019,6 +2054,7 @@ actor BackfillJobRunner {
             jobPhase: jobPhase,
             status: status,
             latencyMs: latencyMs,
+            runMode: runMode,
             windowKey: "window=\(plan.windowIndex)"
         )
     }
@@ -2058,7 +2094,8 @@ actor BackfillJobRunner {
         windowOutput: FMRefinementWindowOutput,
         inputs: AssetInputs,
         jobId: String,
-        jobPhase: BackfillJobPhase
+        jobPhase: BackfillJobPhase,
+        runMode: SemanticScanPhase
     ) -> [EvidenceEvent] {
         var events: [EvidenceEvent] = []
         var seenEventIds = Set<String>()
@@ -2133,6 +2170,7 @@ actor BackfillJobRunner {
                     evidenceJSON: evidenceJSON,
                     scanCohortJSON: scanCohortJSON,
                     createdAt: clock().timeIntervalSince1970,
+                    runMode: runMode,
                     jobPhase: jobPhase.rawValue
                 )
             )

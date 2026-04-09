@@ -254,6 +254,156 @@ struct BackfillJobRunnerTests {
         }
     }
 
+    // Cycle 10 Rev3-M5: production-path rail for the `runMode` discriminator.
+    //
+    // The schema column, struct field, and decoder were wired in cycle 2, but
+    // until cycle 10 no production call site in `BackfillJobRunner` ever
+    // passed `runMode: .targeted` — every row defaulted to `.shadow`, making
+    // the column dead storage. This test drives the runner end-to-end under a
+    // `targetedWithAudit` plan and asserts that the persisted scan-result +
+    // evidence-event rows carry `.targeted` so a query like
+    // `WHERE runMode = 'targeted'` returns the rows the planner produced.
+    //
+    // Mapping: `runMode = .targeted` iff `job.coveragePolicy == .targetedWithAudit`.
+    // This matches the original Rev3-M5 intent (distinguish Phase 3 shadow
+    // validation rows from Phase 5 targeted execution rows via planner policy,
+    // not via FMBackfillMode). A non-targeted plan (fullCoverage) must write
+    // `.shadow` regardless of FMBackfillMode so existing readers stay stable.
+    @Test("cycle10 Rev3-M5: runner writes runMode=targeted under targetedWithAudit plans")
+    func targetedPlanWritesTargetedRunMode() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-runmode-targeted"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        // Seed the refinement path so at least one passB row + evidence row
+        // gets persisted — we want coverage on both tables, not just passA.
+        let spanSchema = SpanRefinementSchema(
+            commercialIntent: .paid,
+            ownership: .thirdParty,
+            firstLineRef: 12,
+            lastLineRef: 13,
+            certainty: .strong,
+            boundaryPrecision: .precise,
+            evidenceAnchors: [
+                EvidenceAnchorSchema(
+                    evidenceRef: nil,
+                    lineRef: 12,
+                    kind: .ctaPhrase,
+                    certainty: .strong
+                )
+            ],
+            alternativeExplanation: .none,
+            reasonTags: [.callToAction]
+        )
+        let runtime = TestFMRuntime(
+            coarseResponses: (0..<4).map { _ in
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [12],
+                        certainty: .strong
+                    )
+                )
+            },
+            refinementResponses: (0..<4).map { _ in
+                RefinementWindowSchema(spans: [spanSchema])
+            }
+        )
+        let runner = makeRunner(store: store, runtime: runtime.runtime)
+        let targetedContext = CoveragePlannerContext(
+            observedEpisodeCount: 20,
+            stableRecall: true,
+            isFirstEpisodeAfterCohortInvalidation: false,
+            recallDegrading: false,
+            sponsorDriftDetected: false,
+            auditMissDetected: false,
+            episodesSinceLastFullRescan: 1,
+            periodicFullRescanIntervalEpisodes: 10
+        )
+        // Sanity: the planner under this context must actually produce the
+        // targetedWithAudit policy — otherwise the test would be green against
+        // a shadow-only run and provide no coverage.
+        let plan = CoveragePlanner().plan(for: targetedContext)
+        #expect(plan.policy == .targetedWithAudit)
+
+        let inputs = makeTargetedInputs(
+            assetId: assetId,
+            podcastId: "podcast-runmode-targeted",
+            transcriptVersion: "tx-runmode-targeted-v1",
+            plannerContext: targetedContext
+        )
+
+        let result = try await runner.runPendingBackfill(for: inputs)
+        #expect(!result.scanResultIds.isEmpty)
+
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+        #expect(!scans.isEmpty, "targeted plan should persist at least one scan result row")
+
+        // Every row written under a targetedWithAudit plan must carry
+        // runMode = .targeted. Zero rows with the default .shadow are
+        // permitted — the planner policy is the discriminator and every
+        // job in this plan was admitted under that policy.
+        let targetedScans = scans.filter { $0.runMode == .targeted }
+        let shadowScans = scans.filter { $0.runMode == .shadow }
+        #expect(
+            targetedScans.count == scans.count,
+            "all \(scans.count) rows should carry runMode=.targeted, got \(targetedScans.count) targeted / \(shadowScans.count) shadow"
+        )
+        #expect(shadowScans.isEmpty, "no rows should fall through to the default .shadow under a targetedWithAudit plan")
+
+        // Evidence events produced by passB under the targeted plan must
+        // also be tagged targeted so `WHERE runMode = 'targeted'` queries
+        // on `evidence_events` return them.
+        let evidence = try await store.fetchEvidenceEvents(analysisAssetId: assetId)
+        if !evidence.isEmpty {
+            let targetedEvidence = evidence.filter { $0.runMode == .targeted }
+            #expect(
+                targetedEvidence.count == evidence.count,
+                "all \(evidence.count) evidence rows should carry runMode=.targeted, got \(targetedEvidence.count)"
+            )
+        }
+    }
+
+    // Cycle 10 Rev3-M5: the non-targeted control rail. A fullCoverage plan
+    // (the default Phase 3 shadow-validation path) must keep writing
+    // runMode=.shadow so existing shadow-mode consumers and the Rev3-M5
+    // store-level round-trip rail stay green. This pins the semantics of
+    // the mapping: `.targeted` only when the PLANNER policy is
+    // `.targetedWithAudit`, independent of FMBackfillMode.
+    @Test("cycle10 Rev3-M5: runner writes runMode=shadow under fullCoverage plans")
+    func fullCoveragePlanWritesShadowRunMode() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [1],
+                        certainty: .strong
+                    )
+                )
+            ]
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        let inputs = makeInputs()
+        // Sanity: default plannerContext must still map to fullCoverage so
+        // this test exercises the control rail rather than silently
+        // following the same path as the targeted test above.
+        let plan = CoveragePlanner().plan(for: inputs.plannerContext)
+        #expect(plan.policy == .fullCoverage)
+
+        _ = try await runner.runPendingBackfill(for: inputs)
+
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")
+        #expect(!scans.isEmpty)
+        #expect(
+            scans.allSatisfy { $0.runMode == .shadow },
+            "fullCoverage plan must write runMode=.shadow for every row"
+        )
+    }
+
     @Test("playhead-nlh: full-rescan path records non-nil precision samples and unlocks targetedWithAudit")
     func fullRescanPersistsPrecisionSamplesAndUnlocksTargetedCoverage() async throws {
         let store = try await makeTestStore()
