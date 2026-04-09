@@ -66,6 +66,25 @@ final class PlaybackService: NSObject, Sendable {
     private var playerItem: AVPlayerItem?
     private var timeObserverToken: Any?
 
+    // MARK: - Injected Seams
+
+    /// Injectable AVAudioSession seam. Production uses the real singleton;
+    /// tests pass a fake so parallel instances don't clobber each other's
+    /// category/active state. See playhead-86s.
+    private let audioSession: AudioSessionProviding
+
+    /// Injectable MPNowPlayingInfoCenter seam. Production wraps the real
+    /// MPNowPlayingInfoCenter.default(); tests pass a fake that stores the
+    /// dictionary locally so parallel instances don't clobber each other.
+    private let nowPlayingInfo: NowPlayingInfoProviding
+
+    /// Injectable NotificationCenter for interruption + route-change
+    /// observation. Production uses .default (where AVAudioSession actually
+    /// posts); tests pass a private NotificationCenter and post synthetic
+    /// interruption notifications to it without disturbing the process
+    /// global or other parallel test instances.
+    private let notificationCenter: NotificationCenter
+
     // MARK: - State
 
     private var _state = PlaybackState()
@@ -91,10 +110,29 @@ final class PlaybackService: NSObject, Sendable {
 
     // MARK: - Init
 
-    nonisolated override init() {
+    nonisolated convenience override init() {
+        self.init(
+            audioSession: SystemAudioSessionProvider.shared,
+            nowPlayingInfo: SystemNowPlayingInfoProvider.shared,
+            notificationCenter: .default
+        )
+    }
+
+    /// Designated initializer with injectable system seams. Production code
+    /// uses the no-arg convenience init, which wires in the real singletons.
+    /// Tests substitute fakes to keep parallel instances isolated from each
+    /// other and from the process globals. See playhead-86s.
+    nonisolated init(
+        audioSession: AudioSessionProviding,
+        nowPlayingInfo: NowPlayingInfoProviding,
+        notificationCenter: NotificationCenter
+    ) {
         let player = AVPlayer()
         player.automaticallyWaitsToMinimizeStalling = true
         self.player = player
+        self.audioSession = audioSession
+        self.nowPlayingInfo = nowPlayingInfo
+        self.notificationCenter = notificationCenter
 
         super.init()
 
@@ -132,9 +170,8 @@ final class PlaybackService: NSObject, Sendable {
 
     private func configureAudioSession() {
         do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .spokenAudio, policy: .longFormAudio)
-            try session.setActive(true)
+            try audioSession.setCategory(.playback, mode: .spokenAudio, policy: .longFormAudio)
+            try audioSession.setActive(true)
         } catch {
             updateState { $0.status = .failed("Audio session: \(error.localizedDescription)") }
         }
@@ -398,8 +435,9 @@ final class PlaybackService: NSObject, Sendable {
     /// the Swift 6 actor isolation crash that occurs when Combine's .sink
     /// closure accesses actor-isolated self from the main queue.
     private func observeInterruptionsAsync() {
+        let center = notificationCenter
         Task { @PlaybackServiceActor [weak self] in
-            let notifications = NotificationCenter.default.notifications(
+            let notifications = center.notifications(
                 named: AVAudioSession.interruptionNotification
             )
             for await notification in notifications {
@@ -429,8 +467,9 @@ final class PlaybackService: NSObject, Sendable {
     // MARK: - Route Changes (Async)
 
     private func observeRouteChangesAsync() {
+        let center = notificationCenter
         Task { @PlaybackServiceActor [weak self] in
-            let notifications = NotificationCenter.default.notifications(
+            let notifications = center.notifications(
                 named: AVAudioSession.routeChangeNotification
             )
             for await notification in notifications {
@@ -453,12 +492,12 @@ final class PlaybackService: NSObject, Sendable {
     // MARK: - Now Playing Info Center
 
     private func updateNowPlayingInfo() {
-        var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+        var info = nowPlayingInfo.getNowPlayingInfo() ?? [:]
         info[MPMediaItemPropertyPlaybackDuration] = _state.duration
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = _state.currentTime
         info[MPNowPlayingInfoPropertyPlaybackRate] = _state.rate
         info[MPNowPlayingInfoPropertyDefaultPlaybackRate] = _state.playbackSpeed
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        nowPlayingInfo.setNowPlayingInfo(info)
     }
 
     /// Update Now Playing with episode metadata (title, artwork, etc.).
@@ -468,7 +507,7 @@ final class PlaybackService: NSObject, Sendable {
         albumTitle: String? = nil,
         artworkImage: UIImage? = nil
     ) {
-        var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+        var info = nowPlayingInfo.getNowPlayingInfo() ?? [:]
         info[MPMediaItemPropertyTitle] = title
         if let artist { info[MPMediaItemPropertyArtist] = artist }
         if let albumTitle { info[MPMediaItemPropertyAlbumTitle] = albumTitle }
@@ -478,7 +517,7 @@ final class PlaybackService: NSObject, Sendable {
         info[MPMediaItemPropertyPlaybackDuration] = _state.duration
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = _state.currentTime
         info[MPNowPlayingInfoPropertyPlaybackRate] = _state.rate
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        nowPlayingInfo.setNowPlayingInfo(info)
     }
 
     /// Non-isolated so the closure avoids actor-executor crashes at call site.
