@@ -60,7 +60,7 @@ struct NowPlayingBar: View {
             // Bar content
             HStack(spacing: Spacing.sm) {
                 // Artwork
-                RoundedRectangle(cornerRadius: CornerRadius.sm)
+                RoundedRectangle(cornerRadius: CornerRadius.small)
                     .fill(AppColors.surface)
                     .frame(width: 40, height: 40)
                     .overlay(
@@ -75,27 +75,27 @@ struct NowPlayingBar: View {
                                     case .failure:
                                         Image(systemName: "mic.fill")
                                             .font(.caption)
-                                            .foregroundStyle(AppColors.secondary.opacity(0.4))
+                                            .foregroundStyle(AppColors.textSecondary.opacity(0.4))
                                     case .empty:
                                         ProgressView()
-                                            .tint(AppColors.secondary)
+                                            .tint(AppColors.textSecondary)
                                     @unknown default:
                                         Image(systemName: "mic.fill")
                                             .font(.caption)
-                                            .foregroundStyle(AppColors.secondary.opacity(0.4))
+                                            .foregroundStyle(AppColors.textSecondary.opacity(0.4))
                                     }
                                 }
                             } else {
                                 Image(systemName: "mic.fill")
                                     .font(.caption)
-                                    .foregroundStyle(AppColors.secondary.opacity(0.4))
+                                    .foregroundStyle(AppColors.textSecondary.opacity(0.4))
                             }
                         }
-                        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.sm))
+                        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.small))
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: CornerRadius.sm)
-                            .stroke(AppColors.secondary.opacity(0.2), lineWidth: 0.5)
+                        RoundedRectangle(cornerRadius: CornerRadius.small)
+                            .stroke(AppColors.textSecondary.opacity(0.2), lineWidth: 0.5)
                     )
                     .accessibilityHidden(true)
 
@@ -103,13 +103,13 @@ struct NowPlayingBar: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(viewModel.episodeTitle)
                         .font(AppTypography.sans(size: 14, weight: .medium))
-                        .foregroundStyle(AppColors.text)
+                        .foregroundStyle(AppColors.textPrimary)
                         .lineLimit(1)
 
                     if !viewModel.podcastTitle.isEmpty {
                         Text(viewModel.podcastTitle)
                             .font(AppTypography.caption)
-                            .foregroundStyle(AppColors.secondary)
+                            .foregroundStyle(AppColors.textSecondary)
                             .lineLimit(1)
                     }
                 }
@@ -122,7 +122,7 @@ struct NowPlayingBar: View {
                 } label: {
                     Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 20, weight: .medium))
-                        .foregroundStyle(AppColors.text)
+                        .foregroundStyle(AppColors.textPrimary)
                         .frame(width: 44, height: 44)
                         .contentShape(Rectangle())
                 }

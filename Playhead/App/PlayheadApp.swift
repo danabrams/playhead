@@ -205,15 +205,15 @@ private struct RootView: View {
         VStack(spacing: Spacing.md) {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: 48, weight: .thin))
-                .foregroundStyle(AppColors.secondary)
+                .foregroundStyle(AppColors.textSecondary)
 
             Text("Something went wrong")
                 .font(AppTypography.sans(size: 20, weight: .semibold))
-                .foregroundStyle(AppColors.text)
+                .foregroundStyle(AppColors.textPrimary)
 
             Text(message)
                 .font(AppTypography.body)
-                .foregroundStyle(AppColors.secondary)
+                .foregroundStyle(AppColors.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, Spacing.xl)
         }
@@ -249,7 +249,7 @@ private struct ReturningSplashView: View {
 
                     Text("Playhead")
                         .font(AppTypography.sans(size: 36, weight: .semibold))
-                        .foregroundStyle(AppColors.text)
+                        .foregroundStyle(AppColors.textPrimary)
                 }
             }
         }

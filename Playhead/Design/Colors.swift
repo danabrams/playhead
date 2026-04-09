@@ -94,15 +94,19 @@ enum AppColors {
 
     // MARK: - Legacy aliases
     //
-    // These names predate the bead-spec semantic layer. Keep them as
-    // deprecated aliases so existing call sites compile. Prefer
-    // `textPrimary`/`textSecondary`/`textTertiary` in new code.
+    // These names predate the bead-spec semantic layer. Every call site in
+    // app code has been migrated to the canonical semantic names; the only
+    // remaining consumers live on a parallel follow-up branch
+    // (SpeedSelectorView, TimelineRailView). Once that branch lands these
+    // declarations can be deleted outright. Until then they are marked
+    // deprecated so `LegacyAliasUsageTests` surfaces any regression and the
+    // parallel branch sees clear rename hints.
 
-    /// Deprecated: use `textPrimary`.
+    @available(*, deprecated, renamed: "textPrimary")
     static let text = textPrimary
-    /// Deprecated: use `textSecondary`.
+    @available(*, deprecated, renamed: "textSecondary")
     static let secondary = textSecondary
-    /// Deprecated: use `textTertiary`.
+    @available(*, deprecated, renamed: "textTertiary")
     static let metadata = textTertiary
 }
 

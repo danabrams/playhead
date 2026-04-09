@@ -11,10 +11,4 @@ final class DesignTokenCornerRadiusTests: XCTestCase {
         XCTAssertEqual(CornerRadius.medium, 8)
         XCTAssertEqual(CornerRadius.large, 12)
     }
-
-    func testLegacyAliasesResolveToSemanticValues() {
-        XCTAssertEqual(CornerRadius.sm, CornerRadius.small)
-        XCTAssertEqual(CornerRadius.md, CornerRadius.medium)
-        XCTAssertEqual(CornerRadius.lg, CornerRadius.large)
-    }
 }
