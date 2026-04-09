@@ -51,13 +51,35 @@ struct RuntimeTeardownTests {
     ///      `isPreviewRuntime: true` meant this path was never exercised
     ///      through the runtime.
     @MainActor
-    @Test("Non-preview runtime: observer is live and shutdown drives the loop to clean exit")
+    @Test("Non-preview runtime: observer is live, shutdown drives the loop to clean exit, and M-5 call-site wires an active redactor")
     func nonPreviewRuntimeObserverLifecycle() async throws {
         var capturedObserver: ShadowRetryObserver?
         try await withTestRuntime { runtime in
             let observer = runtime._shadowRetryObserverForTesting()
             #expect(observer != nil, "non-preview runtime must construct the shadow retry observer")
             capturedObserver = observer
+
+            // Cycle 8 M-5 call-site rail: invoke the real factory closure
+            // that was constructed inside `PlayheadRuntime.init` (the very
+            // call site at PlayheadRuntime.swift:228 that cycle 7's
+            // reviewer flagged as unrailed) and assert the runner it
+            // produces hands the production classifier a non-noop
+            // redactor. A regression that swaps `bd1enRedactor` for
+            // `.noop` at that call site trips `isActive == false` here.
+            guard
+                let factory = await runtime.adDetectionService
+                    .backfillJobRunnerFactoryForTesting()
+            else {
+                Issue.record("non-preview runtime must install the backfill runner factory on AdDetectionService")
+                return
+            }
+            let testStore = try await makeTestStore()
+            let runner = factory(testStore, .shadow)
+            let redactor = await runner.classifierForTesting.redactorForTesting
+            #expect(
+                redactor.isActive,
+                "Cycle 8 M-5: the production runtime's backfill factory must inject an ACTIVE PromptRedactor. isActive=false means the call site reverted to .noop — sensitive prompts would ship unredacted."
+            )
 
             // The runtime spawns its shadow-retry observer inside a
             // background startup task that waits on

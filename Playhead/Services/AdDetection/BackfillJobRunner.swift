@@ -1642,6 +1642,14 @@ actor BackfillJobRunner {
     static func isPermanentForTesting(_ error: AnalysisStoreError) -> Bool {
         isPermanent(error)
     }
+
+    /// Cycle 8 M-5 call-site rail: DEBUG accessor exposing the classifier
+    /// the runner was constructed with, so a test can walk
+    /// PlayheadRuntime → AdDetectionService → factory → runner → classifier
+    /// and assert the production wiring still injects an ACTIVE redactor
+    /// (not `.noop`). A regression that swaps `.noop` for `bd1enRedactor`
+    /// at the call site on `PlayheadRuntime.swift:228` trips this rail.
+    var classifierForTesting: FoundationModelClassifier { classifier }
     #endif
 
     private func phasePriority(_ phase: BackfillJobPhase) -> Int {

@@ -199,6 +199,19 @@ actor AdDetectionService {
         self.shadowSkipMarker = shadowSkipMarker
     }
 
+    #if DEBUG
+    /// Cycle 8 M-5 call-site rail: DEBUG accessor that returns the factory
+    /// closure the service was constructed with, so a test can invoke the
+    /// very closure defined on `PlayheadRuntime.swift:214` and inspect the
+    /// runner it produces. This is the "real call-site rail" the cycle-7
+    /// reviewer asked for: a regression that swaps the live redactor for
+    /// `.noop` inside the closure body fails the test at the construction
+    /// site, not at some parallel factory.
+    func backfillJobRunnerFactoryForTesting() -> (@Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner)? {
+        backfillJobRunnerFactory
+    }
+    #endif
+
     // MARK: - Profile Update
 
     /// Update the scanner and priors when the podcast profile changes.
