@@ -12,11 +12,6 @@ final class DesignTokenHapticTests: XCTestCase {
         // Drive off `allCases` so a newly added case forces this count to
         // be updated alongside the per-mapping assertions below.
         XCTAssertEqual(HapticEvent.allCases.count, 5)
-        for event in HapticEvent.allCases {
-            // Every case must resolve to a mapping; this loop would trap
-            // if a future case were added without a `mapping` entry.
-            _ = event.mapping
-        }
     }
 
     func testSkipMapsToMediumImpact() {

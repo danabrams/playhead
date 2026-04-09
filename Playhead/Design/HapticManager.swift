@@ -94,9 +94,9 @@ struct SystemHapticPlayer: HapticPlaying {
                 HapticManager.medium()
             case .soft:
                 HapticManager.soft()
-            case .heavy:
-                HapticManager.medium()
-            case .rigid:
+            // No HapticEvent currently maps to .heavy/.rigid; aliased to
+            // medium until a dedicated event is added.
+            case .heavy, .rigid:
                 HapticManager.medium()
             @unknown default:
                 assertionFailure("Unhandled impact style \(style)")
