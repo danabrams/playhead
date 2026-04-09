@@ -471,6 +471,8 @@ enum TargetedWindowNarrower {
 
         return merged.map { interval -> (Int, Int) in
             var (lo, hi) = interval
+            let originalLo = lo
+            let originalHi = hi
             guard let loSegment = segmentByIndex[lo],
                   let hiSegment = segmentByIndex[hi] else {
                 return interval
@@ -479,27 +481,39 @@ enum TargetedWindowNarrower {
             // LEFT edge snap: find the nearest break to the interval's
             // start time. If one is within the snap distance, resolve it
             // to a segment index and update `lo`.
-            if let snappedLo = snapEdge(
+            if let snap = snapEdge(
                 targetTime: loSegment.startTime,
                 acousticBreaks: acousticBreaks,
                 snapDistance: snapDistance,
                 orderedSegments: orderedSegments,
                 availableLineRefs: availableLineRefs
             ) {
-                let clamped = min(max(snappedLo, lo - maxDrift), lo + maxDrift)
-                lo = max(lower, clamped)
+                let clamped = min(max(snap.segmentIndex, lo - maxDrift), lo + maxDrift)
+                let candidate = max(lower, clamped)
+                if candidate != lo {
+                    narrowerLogger.debug(
+                        "snap: left edge moved from segment \(originalLo, privacy: .public) to segment \(candidate, privacy: .public) (delta \(candidate - originalLo, privacy: .public) segments, \(snap.breakDistanceSeconds, privacy: .public)s break distance)"
+                    )
+                    lo = candidate
+                }
             }
 
             // RIGHT edge snap: same logic for the interval's end time.
-            if let snappedHi = snapEdge(
+            if let snap = snapEdge(
                 targetTime: hiSegment.endTime,
                 acousticBreaks: acousticBreaks,
                 snapDistance: snapDistance,
                 orderedSegments: orderedSegments,
                 availableLineRefs: availableLineRefs
             ) {
-                let clamped = min(max(snappedHi, hi - maxDrift), hi + maxDrift)
-                hi = min(upper, clamped)
+                let clamped = min(max(snap.segmentIndex, hi - maxDrift), hi + maxDrift)
+                let candidate = min(upper, clamped)
+                if candidate != hi {
+                    narrowerLogger.debug(
+                        "snap: right edge moved from segment \(originalHi, privacy: .public) to segment \(candidate, privacy: .public) (delta \(candidate - originalHi, privacy: .public) segments, \(snap.breakDistanceSeconds, privacy: .public)s break distance)"
+                    )
+                    hi = candidate
+                }
             }
 
             if lo > hi {
@@ -516,13 +530,22 @@ enum TargetedWindowNarrower {
     /// time to the segment whose timespan contains it. Returns `nil` if no
     /// break is in range or if the break time cannot be placed inside any
     /// available segment.
+    /// Result of a single-edge snap lookup. `segmentIndex` is the resolved
+    /// segment the edge should move to; `breakDistanceSeconds` is the
+    /// absolute time distance from the edge to the chosen break (carried
+    /// through so the caller can log observability without re-scanning).
+    private struct SnapResult {
+        let segmentIndex: Int
+        let breakDistanceSeconds: Double
+    }
+
     private static func snapEdge(
         targetTime: Double,
         acousticBreaks: [AcousticBreak],
         snapDistance: Double,
         orderedSegments: [AdTranscriptSegment],
         availableLineRefs: [Int]
-    ) -> Int? {
+    ) -> SnapResult? {
         var nearest: (distance: Double, time: Double)?
         for candidate in acousticBreaks {
             let distance = abs(candidate.time - targetTime)
@@ -530,7 +553,9 @@ enum TargetedWindowNarrower {
             if let current = nearest, distance >= current.distance { continue }
             nearest = (distance, candidate.time)
         }
-        guard let breakTime = nearest?.time else { return nil }
+        guard let nearest else { return nil }
+        let breakTime = nearest.time
+        let breakDistance = nearest.distance
 
         // Find the segment whose [startTime, endTime] contains breakTime.
         // If breakTime falls in a gap between segments, pick the segment
@@ -559,7 +584,8 @@ enum TargetedWindowNarrower {
               let upper = availableLineRefs.last else {
             return nil
         }
-        return min(max(resolved, lower), upper)
+        let clipped = min(max(resolved, lower), upper)
+        return SnapResult(segmentIndex: clipped, breakDistanceSeconds: breakDistance)
     }
 
     private static func auditSegments(
