@@ -350,6 +350,63 @@ struct RegionProposalBuilderTests {
         #expect(regions[0].fmConsensusStrength == .low)
     }
 
+    @Test("duplicate atom ordinals do not trap and still produce a deterministic region")
+    func duplicateAtomOrdinalsAreTolerated() {
+        // Two atoms share ordinal 2. Dictionary(uniqueKeysWithValues:) would trap;
+        // the defensive last-write-wins path must keep the builder running.
+        var atoms = makeAtoms(count: 5)
+        let duplicate = TranscriptAtom(
+            atomKey: TranscriptAtomKey(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                atomOrdinal: 2
+            ),
+            contentHash: "hash-2-dup",
+            startTime: 2.0,
+            endTime: 3.0,
+            text: "duplicate",
+            chunkIndex: 2
+        )
+        atoms.append(duplicate)
+
+        let input = RegionProposalInput(
+            atoms: atoms,
+            lexicalCandidates: [],
+            acousticBreaks: [],
+            sponsorMatches: [
+                makeSponsorMatch(firstAtomOrdinal: 1, lastAtomOrdinal: 3)
+            ],
+            fingerprintMatches: [],
+            fmWindows: []
+        )
+
+        let regions = RegionProposalBuilder.build(input)
+
+        #expect(regions.count == 1)
+        #expect(regions[0].firstAtomOrdinal == 1)
+        #expect(regions[0].lastAtomOrdinal == 3)
+    }
+
+    @Test("lexical candidates that do not overlap any atom are skipped rather than collapsing to an edge region")
+    func lexicalCandidateWithoutAtomOverlapIsSkipped() {
+        let atoms = makeAtoms(count: 4) // atoms span times 0..4
+        let input = RegionProposalInput(
+            atoms: atoms,
+            lexicalCandidates: [
+                // Entirely outside the atom time range.
+                makeLexicalCandidate(startTime: 50.0, endTime: 55.0)
+            ],
+            acousticBreaks: [],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            fmWindows: []
+        )
+
+        let regions = RegionProposalBuilder.build(input)
+
+        #expect(regions.isEmpty)
+    }
+
     @Test("interior acoustic breaks do not claim boundary provenance")
     func interiorAcousticBreaksDoNotMarkAcousticOrigin() {
         let atoms = makeAtoms(count: 6)

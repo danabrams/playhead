@@ -82,7 +82,13 @@ enum RegionFeatureExtractor {
         _ input: Input,
         config: Config = .default
     ) -> [RegionFeatureBundle] {
-        let atomsByOrdinal = Dictionary(uniqueKeysWithValues: input.atoms.map { ($0.atomKey.atomOrdinal, $0) })
+        // Defense-in-depth: if two atoms share an ordinal (shouldn't happen per
+        // transcript invariants, but `uniqueKeysWithValues:` would trap on collision),
+        // keep the last writer. One atom per ordinal is all downstream consumers need.
+        let atomsByOrdinal = Dictionary(
+            input.atoms.map { ($0.atomKey.atomOrdinal, $0) },
+            uniquingKeysWith: { _, new in new }
+        )
         let lexicalScanner = LexicalScanner(podcastProfile: input.podcastProfile)
 
         return input.regions.map { region in
@@ -130,7 +136,11 @@ enum RegionFeatureExtractor {
         for region: ProposedRegion,
         atomsByOrdinal: [Int: TranscriptAtom]
     ) -> [TranscriptAtom] {
-        (region.firstAtomOrdinal...region.lastAtomOrdinal)
+        // Defense-in-depth: `a...b` traps when `a > b`. Builder invariants currently
+        // guarantee ordering, but an inverted range (e.g. from a hand-constructed
+        // region) should return empty rather than crash.
+        guard region.firstAtomOrdinal <= region.lastAtomOrdinal else { return [] }
+        return (region.firstAtomOrdinal...region.lastAtomOrdinal)
             .compactMap { atomsByOrdinal[$0] }
     }
 

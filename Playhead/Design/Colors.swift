@@ -149,11 +149,11 @@ extension Color {
 @ViewBuilder
 private func swatch(_ name: String, _ color: Color) -> some View {
     HStack {
-        RoundedRectangle(cornerRadius: 6)
+        RoundedRectangle(cornerRadius: CornerRadius.small)
             .fill(color)
             .frame(width: 48, height: 48)
             .overlay(
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: CornerRadius.small)
                     .stroke(Color.gray.opacity(0.3), lineWidth: 1)
             )
         Text(name)
@@ -166,11 +166,11 @@ private func swatch(_ name: String, _ color: Color) -> some View {
 @ViewBuilder
 private func semanticSwatch(_ name: String, _ color: Color) -> some View {
     HStack {
-        RoundedRectangle(cornerRadius: 6)
+        RoundedRectangle(cornerRadius: CornerRadius.small)
             .fill(color)
             .frame(width: 48, height: 48)
             .overlay(
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: CornerRadius.small)
                     .stroke(Color.gray.opacity(0.3), lineWidth: 1)
             )
         Text(".\(name)")

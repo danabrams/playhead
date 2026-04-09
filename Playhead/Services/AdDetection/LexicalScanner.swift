@@ -310,6 +310,10 @@ struct LexicalScanner: Sendable {
             return nil
         }
 
+        // Synthetic ID and segmentFingerprint are safe here: scanChunk is a pure
+        // regex pass and does not persist or memoize anything keyed on these
+        // fields. The chunk never leaves this function — it is built, scanned,
+        // and discarded — so minting fresh UUIDs cannot pollute any cache.
         let syntheticChunk = TranscriptChunk(
             id: UUID().uuidString,
             analysisAssetId: analysisAssetId,

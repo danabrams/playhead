@@ -3,6 +3,10 @@ name: TestFlight Deploy
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - '.beads/**'
+      - 'docs/**'
   workflow_dispatch:
     inputs:
       release_notes:
@@ -30,7 +34,34 @@ env:
   IPA_PATH: ${{ github.workspace }}/build/export/Playhead.ipa
 
 jobs:
+  test:
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec "$PROJECT_SPEC"
+
+      - name: Run tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+            -project "$PROJECT_FILE" \
+            -scheme "$SCHEME" \
+            -destination 'platform=iOS Simulator,name=iPhone 17'
+
   deploy:
+    needs: test
     runs-on: macos-26
     timeout-minutes: 60
 

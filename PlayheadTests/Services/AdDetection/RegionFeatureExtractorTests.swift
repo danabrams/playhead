@@ -181,6 +181,90 @@ struct RegionFeatureExtractorTests {
         #expect(bundle.fmEvidence.reasonTags.isEmpty)
         #expect(bundle.fmEvidence.resolvedEvidenceAnchors.isEmpty)
     }
+
+    @Test("duplicate atom ordinals in the extractor input do not trap")
+    func duplicateAtomOrdinalsAreTolerated() {
+        let baseAtoms = makeNeutralRegionFeatureAtoms()
+        // Append a duplicate of ordinal 2 — Dictionary(uniqueKeysWithValues:) would
+        // trap; the defensive last-write-wins path must keep extraction running.
+        let duplicate = TranscriptAtom(
+            atomKey: TranscriptAtomKey(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                atomOrdinal: 2
+            ),
+            contentHash: "neutral-hash-2-dup",
+            startTime: 2.0,
+            endTime: 3.0,
+            text: "duplicate",
+            chunkIndex: 2
+        )
+        let atoms = baseAtoms + [duplicate]
+
+        let region = RegionProposalBuilder.build(
+            RegionProposalInput(
+                atoms: atoms,
+                lexicalCandidates: [],
+                acousticBreaks: [],
+                sponsorMatches: [
+                    makeRegionFeatureSponsorMatch(firstAtomOrdinal: 0, lastAtomOrdinal: 5)
+                ],
+                fingerprintMatches: [],
+                fmWindows: []
+            )
+        )[0]
+
+        let bundles = RegionFeatureExtractor.extract(
+            RegionFeatureExtractor.Input(
+                regions: [region],
+                atoms: atoms,
+                featureWindows: makeRegionFeatureWindows(),
+                episodeDuration: 100.0,
+                priors: makeRegionFeaturePriors()
+            )
+        )
+
+        #expect(bundles.count == 1)
+    }
+
+    @Test("a hand-constructed region with inverted ordinals yields an empty bundle rather than trapping")
+    func invertedRegionOrdinalsYieldEmptyAtoms() {
+        let atoms = makeNeutralRegionFeatureAtoms()
+        // Bypass the builder: fabricate a ProposedRegion with first > last.
+        let invertedRegion = ProposedRegion(
+            analysisAssetId: "asset-1",
+            transcriptVersion: "transcript-v1",
+            firstAtomOrdinal: 5,
+            lastAtomOrdinal: 2,
+            startTime: 5.0,
+            endTime: 2.0,
+            origins: .sponsor,
+            fmConsensusStrength: .none,
+            lexicalCandidates: [],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            acousticBreaks: [],
+            foundationModelSpans: [],
+            resolvedEvidenceAnchors: [],
+            fmEvidence: nil
+        )
+
+        let bundles = RegionFeatureExtractor.extract(
+            RegionFeatureExtractor.Input(
+                regions: [invertedRegion],
+                atoms: atoms,
+                featureWindows: makeRegionFeatureWindows(),
+                episodeDuration: 100.0,
+                priors: makeRegionFeaturePriors()
+            )
+        )
+
+        // Must not trap. Inverted range → no region atoms → no lexical hits.
+        #expect(bundles.count == 1)
+        #expect(bundles[0].lexicalHitCount == 0)
+        #expect(bundles[0].lexicalScore == 0.0)
+        #expect(bundles[0].lexicalCategories.isEmpty)
+    }
 }
 
 @Suite("RegionScoring")

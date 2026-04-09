@@ -82,7 +82,13 @@ enum RegionProposalBuilder {
         let sortedAtoms = input.atoms.sorted { $0.atomKey.atomOrdinal < $1.atomKey.atomOrdinal }
         guard let firstAtom = sortedAtoms.first else { return [] }
 
-        let atomsByOrdinal = Dictionary(uniqueKeysWithValues: sortedAtoms.map { ($0.atomKey.atomOrdinal, $0) })
+        // Defense-in-depth: if two atoms share an ordinal (should not happen given
+        // transcript invariants, but `uniqueKeysWithValues:` would trap on collision),
+        // keep the last writer. Downstream consumers only need one atom per ordinal.
+        let atomsByOrdinal = Dictionary(
+            sortedAtoms.map { ($0.atomKey.atomOrdinal, $0) },
+            uniquingKeysWith: { _, new in new }
+        )
         let metadata = (
             analysisAssetId: firstAtom.atomKey.analysisAssetId,
             transcriptVersion: firstAtom.atomKey.transcriptVersion
@@ -387,27 +393,17 @@ enum RegionProposalBuilder {
             atom.endTime > startTime && atom.startTime < endTime
         }
 
-        if let first = overlapping.first, let last = overlapping.last {
-            return CanonicalRange(
-                firstAtomOrdinal: first.atomKey.atomOrdinal,
-                lastAtomOrdinal: last.atomKey.atomOrdinal,
-                startTime: first.startTime,
-                endTime: last.endTime
-            )
-        }
-
-        guard let first = atoms.last(where: { $0.startTime <= startTime }) ?? atoms.first,
-              let last = atoms.first(where: { $0.endTime >= endTime }) ?? atoms.last else {
+        // No overlap → return nil so the caller can skip this window rather than
+        // collapse to a spurious single-atom region at the edge of the transcript.
+        guard let first = overlapping.first, let last = overlapping.last else {
             return nil
         }
 
-        let lower = min(first.atomKey.atomOrdinal, last.atomKey.atomOrdinal)
-        let upper = max(first.atomKey.atomOrdinal, last.atomKey.atomOrdinal)
         return CanonicalRange(
-            firstAtomOrdinal: lower,
-            lastAtomOrdinal: upper,
-            startTime: min(first.startTime, last.startTime),
-            endTime: max(first.endTime, last.endTime)
+            firstAtomOrdinal: first.atomKey.atomOrdinal,
+            lastAtomOrdinal: last.atomKey.atomOrdinal,
+            startTime: first.startTime,
+            endTime: last.endTime
         )
     }
 

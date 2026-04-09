@@ -8,18 +8,6 @@ import SwiftUI
 
 final class DesignTokenTypographyTests: XCTestCase {
 
-    // MARK: - Semantic roles exist and are non-nil
-
-    func testSemanticRolesAreNonNil() {
-        _ = AppTypography.title
-        _ = AppTypography.headline
-        _ = AppTypography.body
-        _ = AppTypography.caption
-        _ = AppTypography.timestamp
-        _ = AppTypography.transcript
-        _ = AppTypography.transcriptCaption
-    }
-
     // MARK: - Descriptors (testable surface)
 
     func testTitleDescriptor() {

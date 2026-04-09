@@ -262,6 +262,18 @@ struct RuntimeShutdownLifecycleTests {
             // deinit-while-loop-running, which is the hard case for
             // cycle avoidance. Without this yield the test would be
             // trivially easy (no loop task exists yet).
+            //
+            // NOTE: This yield/sleep pattern is cooperative-pool sensitive
+            // and depends on serial test execution. Under parallel
+            // execution the yielded-to Tasks can be starved by sibling
+            // suite workloads and the startup chain may never reach
+            // `startShadowRetryObserverIfNeeded` within the 50ms budget,
+            // making the deinit-while-loop-running scenario flake into
+            // the trivial "no loop existed" path. Serial execution is
+            // enforced via `parallelizable: false` in `project.yml`
+            // (commit 17b6c7c). Do not change that setting without also
+            // rewriting this block to poll for observer loop liveness
+            // the way test 1 does via `waitForLoopRunning`.
             for _ in 0..<10 { await Task.yield() }
             try? await Task.sleep(nanoseconds: 50_000_000)  // 50ms
             // Runtime drops here.

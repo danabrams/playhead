@@ -407,6 +407,7 @@ actor AnalysisStore {
         try exec("BEGIN IMMEDIATE")
         do {
             try createTables()
+            // Ordering: transcript_chunks Phase 1 runs before the V*IfNeeded ladder because no later migration touches `transcript_chunks` or `transcript_chunks_fts`, so its FTS rebuild cannot be undone downstream; the backfill only depends on columns `createTables()` has already (re)asserted.
             try migrateTranscriptChunksPhase1()
             try writeInitialSchemaVersionIfNeeded()
             try migrateEvidenceEventsNaturalKeyV2IfNeeded()
@@ -521,6 +522,18 @@ actor AnalysisStore {
     }
 
     private func backfillLegacyTranscriptChunksPhase1IfNeeded() throws {
+        // invariant: no nested transaction/savepoint is required here.
+        // The production caller (`migrate()`) runs this inside an outer
+        // BEGIN IMMEDIATE … COMMIT, and the test-only caller
+        // (`migrateOnlyForTesting()`) is intentionally unwrapped. Even
+        // without the outer transaction, re-running after a partial crash
+        // is correct because (a) the SELECT predicate
+        // `WHERE pass != 'fast' AND (transcriptVersion IS NULL OR
+        // atomOrdinal IS NULL)` self-skips rows already backfilled, and
+        // (b) `legacyTranscriptVersion` is a SHA256 over the chunks'
+        // normalizedText — content-addressed, so the hash is stable
+        // across partial states and a resumed run writes the same value
+        // that a crashed run would have written.
         let assetStmt = try prepare("""
             SELECT DISTINCT analysisAssetId
             FROM transcript_chunks
