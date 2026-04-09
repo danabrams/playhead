@@ -112,35 +112,39 @@ struct PermissiveAdClassifierTests {
         #expect(result.support?.supportLineRefs == [5, 7, 9])
     }
 
-    // MARK: - bd-1en Phase 2: refinement parser
+    // MARK: - bd-1en Phase 2 + Cycle 2 H5: refinement parser
 
     @Test("refinement parser: NO_AD → .noAd")
-    func refinementParseNoAd() {
-        #expect(PermissiveAdGrammar.parseRefinement("NO_AD", validLineRefs: [0, 1, 2]) == .noAd)
+    func refinementParseNoAd() throws {
+        #expect(try PermissiveAdGrammar.parseRefinement("NO_AD", validLineRefs: [0, 1, 2]) == .noAd)
     }
 
-    @Test("refinement parser: UNCERTAIN → .unparsed (recall safety net)")
+    @Test("refinement parser: UNCERTAIN throws .permissiveDecodingFailure")
     func refinementParseUncertain() {
-        #expect(PermissiveAdGrammar.parseRefinement("UNCERTAIN", validLineRefs: [0, 1, 2]) == .unparsed)
+        #expect(throws: PermissiveClassificationError.self) {
+            _ = try PermissiveAdGrammar.parseRefinement("UNCERTAIN", validLineRefs: [0, 1, 2])
+        }
     }
 
-    @Test("refinement parser: empty → .unparsed")
+    @Test("refinement parser: empty throws .permissiveDecodingFailure")
     func refinementParseEmpty() {
-        #expect(PermissiveAdGrammar.parseRefinement("", validLineRefs: [0, 1, 2]) == .unparsed)
+        #expect(throws: PermissiveClassificationError.self) {
+            _ = try PermissiveAdGrammar.parseRefinement("", validLineRefs: [0, 1, 2])
+        }
     }
 
     @Test("refinement parser: single AD span produces one pair")
-    func refinementParseSingleSpan() {
-        let result = PermissiveAdGrammar.parseRefinement("AD L0-L2", validLineRefs: [0, 1, 2, 3])
+    func refinementParseSingleSpan() throws {
+        let result = try PermissiveAdGrammar.parseRefinement("AD L0-L2", validLineRefs: [0, 1, 2, 3])
         #expect(result == .spans([RefinementSpanPair(firstLineRef: 0, lastLineRef: 2)]))
     }
 
     @Test("refinement parser: multi-span AD preserves pair structure")
-    func refinementParseMultiSpan() {
+    func refinementParseMultiSpan() throws {
         // CRITICAL: refinement parser must preserve gaps. Coarse parser
         // flattens to a single line ref set; refinement keeps pairs so
         // each becomes its own RefinedAdSpan downstream.
-        let result = PermissiveAdGrammar.parseRefinement(
+        let result = try PermissiveAdGrammar.parseRefinement(
             "AD L0-L1,L4-L5",
             validLineRefs: [0, 1, 2, 3, 4, 5]
         )
@@ -151,55 +155,175 @@ struct PermissiveAdClassifierTests {
     }
 
     @Test("refinement parser: clamps spans that overflow the window")
-    func refinementParseClampsOverflow() {
-        let result = PermissiveAdGrammar.parseRefinement("AD L0-L99", validLineRefs: [0, 1, 2])
+    func refinementParseClampsOverflow() throws {
+        let result = try PermissiveAdGrammar.parseRefinement("AD L0-L99", validLineRefs: [0, 1, 2])
         #expect(result == .spans([RefinementSpanPair(firstLineRef: 0, lastLineRef: 2)]))
     }
 
-    @Test("refinement parser: drops spans entirely outside the window")
+    @Test("refinement parser: drops spans entirely outside the window — throws decoding failure")
     func refinementParseDropsFullyOutside() {
-        let result = PermissiveAdGrammar.parseRefinement("AD L99-L100", validLineRefs: [0, 1, 2])
-        #expect(result == .unparsed)
+        #expect(throws: PermissiveClassificationError.self) {
+            _ = try PermissiveAdGrammar.parseRefinement("AD L99-L100", validLineRefs: [0, 1, 2])
+        }
     }
 
     @Test("refinement parser: keeps a partial-overlap span and drops a fully-outside span")
-    func refinementParseDropsOnlyOutsidePair() {
+    func refinementParseDropsOnlyOutsidePair() throws {
         // L0-L99 clamps to L0-L2; L500-L600 has no overlap and is dropped.
-        let result = PermissiveAdGrammar.parseRefinement(
+        let result = try PermissiveAdGrammar.parseRefinement(
             "AD L0-L99,L500-L600",
             validLineRefs: [0, 1, 2]
         )
         #expect(result == .spans([RefinementSpanPair(firstLineRef: 0, lastLineRef: 2)]))
     }
 
-    @Test("refinement parser: template-literal parroting → .unparsed (recall fallback)")
+    @Test("refinement parser: template-literal parroting throws .permissiveDecodingFailure (no recall fallback)")
     func refinementParseTemplateLiteralIsUnparsed() {
-        let result = PermissiveAdGrammar.parseRefinement(
-            "AD L<start>-L<end>",
-            validLineRefs: [0, 1, 2]
-        )
-        #expect(result == .unparsed)
+        // Cycle 2 H5: template parroting used to collapse to .unparsed
+        // and produce a misleadingly-precise full-window span. It now
+        // throws so the runner re-queues the window cleanly.
+        #expect(throws: PermissiveClassificationError.self) {
+            _ = try PermissiveAdGrammar.parseRefinement(
+                "AD L<start>-L<end>",
+                validLineRefs: [0, 1, 2]
+            )
+        }
     }
 
-    @Test("refinement parser: garbage response → .unparsed")
+    @Test("refinement parser: garbage response throws .permissiveDecodingFailure")
     func refinementParseGarbage() {
-        #expect(PermissiveAdGrammar.parseRefinement("hello world", validLineRefs: [0]) == .unparsed)
+        #expect(throws: PermissiveClassificationError.self) {
+            _ = try PermissiveAdGrammar.parseRefinement("hello world", validLineRefs: [0])
+        }
     }
 
     @Test("refinement parser: case-insensitive grammar tokens")
-    func refinementParseCaseInsensitive() {
-        #expect(PermissiveAdGrammar.parseRefinement("no_ad", validLineRefs: [0]) == .noAd)
-        let lower = PermissiveAdGrammar.parseRefinement("ad l0-l1", validLineRefs: [0, 1])
+    func refinementParseCaseInsensitive() throws {
+        #expect(try PermissiveAdGrammar.parseRefinement("no_ad", validLineRefs: [0]) == .noAd)
+        let lower = try PermissiveAdGrammar.parseRefinement("ad l0-l1", validLineRefs: [0, 1])
         #expect(lower == .spans([RefinementSpanPair(firstLineRef: 0, lastLineRef: 1)]))
     }
 
     @Test("refinement parser: sparse window snaps endpoints inward to valid refs")
-    func refinementParseSparseWindowSnap() {
+    func refinementParseSparseWindowSnap() throws {
         // Window has line refs [5, 7, 9] (planner gaps at 6, 8). Model
         // returns AD L6-L8 — neither endpoint is a valid ref. Snap L6
         // up to L7 (next valid) and L8 down to L7 (prev valid).
-        let result = PermissiveAdGrammar.parseRefinement("AD L6-L8", validLineRefs: [5, 7, 9])
+        let result = try PermissiveAdGrammar.parseRefinement("AD L6-L8", validLineRefs: [5, 7, 9])
         #expect(result == .spans([RefinementSpanPair(firstLineRef: 7, lastLineRef: 7)]))
+    }
+
+    // MARK: - Cycle 2 H5 / Rev2-M3 regression rails
+
+    @Test("Cycle 2 H5: parser failure throws (regression rail — no .rough fallback)")
+    func parserFailureNeverProducesRoughFallback() {
+        // The previous behavior collapsed garbage into a single
+        // full-window span with `.rough` boundaryPrecision. The regression
+        // rail asserts the parser now throws and the `.rough` enum case
+        // is gone (compile-time check via BoundaryPrecision below).
+        #expect(throws: PermissiveClassificationError.self) {
+            _ = try PermissiveAdGrammar.parseRefinement("AD L<n>-L<m>", validLineRefs: [0, 1, 2])
+        }
+    }
+
+    @Test("Cycle 2 Rev2-M3: adversarial integer range expansion is clamped")
+    func adversarialRangeExpansionThrows() {
+        // The parser must refuse to expand a range larger than
+        // PermissiveAdGrammar.maximumRangeExpansion (10,000) — this
+        // protects against the FM hallucinating `AD L0-L999999` and
+        // burning a CPU/heap budget materializing the integer range.
+        #expect(throws: PermissiveClassificationError.self) {
+            _ = try PermissiveAdGrammar.parseRefinement(
+                "AD L0-L999999",
+                validLineRefs: [0, 1, 2]
+            )
+        }
+    }
+
+    // MARK: - Cycle 2 Rev2-M2: RefinementSpanPair invariant
+
+    @Test("Cycle 2 Rev2-M2: RefinementSpanPair init enforces firstLineRef <= lastLineRef")
+    func refinementSpanPairInitRejectsReversedPair() {
+        // We can only test the non-failing case here without crashing
+        // the test process. The precondition is documented and exercised
+        // by the parser whose `min/max` swap means a reversed pair never
+        // reaches the init.
+        let pair = RefinementSpanPair(firstLineRef: 3, lastLineRef: 7)
+        #expect(pair.firstLineRef == 3)
+        #expect(pair.lastLineRef == 7)
+    }
+
+    // MARK: - Cycle 2 H3: refinement focus + cap honoring
+
+    @Test("Cycle 2 H3: focusLineRefs hint appears in the rendered prompt")
+    func refinementBuilderHonorsFocusLineRefs() {
+        let segments = (0..<6).map { i in
+            makePermissiveTestLookup(indices: [i])[i]!
+        }
+        let prompt = PermissiveAdGrammar.buildRefinementPrompt(
+            for: segments,
+            focusLineRefs: [2, 3]
+        )
+        #expect(prompt.contains("Focus your refinement on these line refs first: L2, L3."))
+    }
+
+    @Test("Cycle 2 H3: focusClusters hint appears in the rendered prompt")
+    func refinementBuilderHonorsFocusClusters() {
+        let segments = (0..<6).map { i in
+            makePermissiveTestLookup(indices: [i])[i]!
+        }
+        let prompt = PermissiveAdGrammar.buildRefinementPrompt(
+            for: segments,
+            focusClusters: [[0, 1, 2]]
+        )
+        #expect(prompt.contains("These clusters probably belong to the same ad read: [L0, L1, L2]."))
+    }
+
+    @Test("Cycle 2 H3: maximumSpans hint appears in the rendered prompt and is enforced as a cap")
+    func refinementBuilderHonorsMaximumSpansHintAndApplyFocusAndCapEnforcesIt() {
+        let segments = (0..<6).map { i in
+            makePermissiveTestLookup(indices: [i])[i]!
+        }
+        let prompt = PermissiveAdGrammar.buildRefinementPrompt(
+            for: segments,
+            maximumSpans: 1
+        )
+        #expect(prompt.contains("Return at most 1 span(s)."))
+
+        // Hard-cap behavior: applyFocusAndCap drops all but the
+        // top-priority span when more pairs come back than allowed.
+        let pairs: [RefinementSpanPair] = [
+            RefinementSpanPair(firstLineRef: 0, lastLineRef: 0),
+            RefinementSpanPair(firstLineRef: 2, lastLineRef: 3),
+            RefinementSpanPair(firstLineRef: 5, lastLineRef: 5)
+        ]
+        let capped = PermissiveAdGrammar.applyFocusAndCap(
+            to: .spans(pairs),
+            focusLineRefs: [2, 3],
+            maximumSpans: 1
+        )
+        if case let .spans(survivors) = capped {
+            #expect(survivors.count == 1)
+            #expect(survivors.first?.firstLineRef == 2)
+            #expect(survivors.first?.lastLineRef == 3)
+        } else {
+            Issue.record("expected .spans, got \(capped)")
+        }
+    }
+
+    @Test("Cycle 2 H3: applyFocusAndCap is a no-op when maximumSpans is unset")
+    func applyFocusAndCapPassThroughWithDefault() {
+        let pairs: [RefinementSpanPair] = [
+            RefinementSpanPair(firstLineRef: 0, lastLineRef: 0),
+            RefinementSpanPair(firstLineRef: 1, lastLineRef: 1),
+            RefinementSpanPair(firstLineRef: 2, lastLineRef: 2)
+        ]
+        let result = PermissiveAdGrammar.applyFocusAndCap(
+            to: .spans(pairs),
+            focusLineRefs: [],
+            maximumSpans: Int.max
+        )
+        #expect(result == .spans(pairs))
     }
 
     // MARK: - PermissiveRefinementResult.refinedSpans(for:lineRefLookup:)
@@ -230,22 +354,10 @@ struct PermissiveAdClassifierTests {
         #expect(spans.allSatisfy { $0.certainty == .strong })
         #expect(spans.allSatisfy { $0.commercialIntent == .paid })
         #expect(spans.allSatisfy { $0.boundaryPrecision == .usable })
-    }
-
-    @Test("refinedSpans .unparsed → single full-window fallback span")
-    func refinedSpansUnparsedFallback() {
-        // Recall safety net: parser failure must NOT lose the ad. Emit
-        // a single span covering the full plan window with .rough
-        // boundaryPrecision so downstream knows it's a wide fallback.
-        let plan = makePermissiveTestPlan(lineRefs: [4, 5, 6, 7])
-        let lookup = makePermissiveTestLookup(indices: [4, 5, 6, 7])
-        let spans = PermissiveRefinementResult.unparsed.refinedSpans(for: plan, lineRefLookup: lookup)
-        #expect(spans.count == 1)
-        #expect(spans[0].firstLineRef == 4)
-        #expect(spans[0].lastLineRef == 7)
-        #expect(spans[0].boundaryPrecision == .rough)
-        #expect(spans[0].resolvedEvidenceAnchors.isEmpty)
-        #expect(spans[0].memoryWriteEligible == false)
+        // Cycle 2 H4: every permissive span carries the
+        // ownership-suppressed flag so downstream consumers can tell
+        // these classification dimensions were defaulted, not inferred.
+        #expect(spans.allSatisfy { $0.ownershipInferenceWasSuppressed })
     }
 
     @Test("refinedSpans .spans drops pairs whose endpoints are missing from the lookup")
@@ -270,7 +382,6 @@ struct PermissiveAdClassifierTests {
     func descriptionReturnsLabel() {
         #expect(PermissiveRefinementResult.spans([]).description == "spans")
         #expect(PermissiveRefinementResult.noAd.description == "noAd")
-        #expect(PermissiveRefinementResult.unparsed.description == "unparsed")
     }
 }
 

@@ -14,6 +14,10 @@ import Foundation
 /// Disease names alone are NOT redacted (R2 in the probe matrix passed
 /// without redaction). The co-occurrence rule means disease names get
 /// masked only when they appear in the same line as a trigger word.
+///
+/// Rev2-L1 (Cycle 2): nested manifest type renamed from `Dictionary`
+/// to `Manifest` so call sites are not ambiguous against Swift's
+/// `Dictionary<Key, Value>`.
 public struct PromptRedactor: Sendable {
     public struct RedactionRule: Sendable, Codable {
         public let pattern: String
@@ -34,22 +38,92 @@ public struct PromptRedactor: Sendable {
         public let cooccurrentWith: [String]?
     }
 
-    public struct Dictionary: Sendable, Codable {
+    public struct Manifest: Sendable, Codable {
         public let version: Int
         public let schemaVersion: Int
         public let categories: [Category]
     }
 
-    private let dictionary: Dictionary
-    private let triggerCategories: Set<String>
+    /// Cycle 2 H8: a rule whose regex has already been compiled at load
+    /// time. The redactor and the static `ruleMatches` helper use the
+    /// pre-compiled instance instead of re-compiling per call site, and
+    /// load-time compile failures fail loud (precondition in
+    /// `loadDefault`) instead of silently swallowing the bad pattern.
+    struct CompiledRule: @unchecked Sendable {
+        let rule: RedactionRule
+        let regex: NSRegularExpression
+    }
 
-    public init(dictionary: Dictionary) {
-        self.dictionary = dictionary
+    /// Errors surfaced by `loadDefault` so callers (PlayheadRuntime) can
+    /// distinguish "the bundle does not contain RedactionRules.json"
+    /// from "the JSON is malformed" from "one of the regex patterns
+    /// failed to compile". H9 wires all three into a precondition with
+    /// a clear, named cause.
+    public enum LoadFailure: Error, Equatable, CustomStringConvertible {
+        case missing
+        case malformedJSON(parseError: String)
+        case invalidPattern(categoryId: String, pattern: String, parseError: String)
+
+        public var description: String {
+            switch self {
+            case .missing:
+                return "RedactionRules.json missing from bundle"
+            case let .malformedJSON(parseError):
+                return "RedactionRules.json failed to decode: \(parseError)"
+            case let .invalidPattern(categoryId, pattern, parseError):
+                return "RedactionRules.json invalid regex in category=\(categoryId) pattern=\(pattern): \(parseError)"
+            }
+        }
+    }
+
+    private let manifest: Manifest
+    private let triggerCategories: Set<String>
+    private let compiledRulesByCategory: [String: [CompiledRule]]
+    private let allCompiledTriggerRules: [CompiledRule]
+
+    public init(manifest: Manifest) throws {
+        self.manifest = manifest
         self.triggerCategories = Set(
-            dictionary.categories
+            manifest.categories
                 .filter { $0.category == "trigger" }
                 .map(\.id)
         )
+
+        // H8: pre-compile every rule's regex at construction time so
+        // ruleMatches/applyCategory hot paths never re-compile, and a
+        // malformed pattern surfaces here as a thrown error instead of
+        // silently disabling that rule.
+        var byCategory: [String: [CompiledRule]] = [:]
+        for category in manifest.categories {
+            var compiled: [CompiledRule] = []
+            compiled.reserveCapacity(category.patterns.count)
+            for rule in category.patterns {
+                do {
+                    let regex = try Self.compile(rule: rule)
+                    compiled.append(CompiledRule(rule: rule, regex: regex))
+                } catch {
+                    throw LoadFailure.invalidPattern(
+                        categoryId: category.id,
+                        pattern: rule.pattern,
+                        parseError: String(describing: error)
+                    )
+                }
+            }
+            byCategory[category.id] = compiled
+        }
+        self.compiledRulesByCategory = byCategory
+        self.allCompiledTriggerRules = manifest.categories
+            .filter { $0.category == "trigger" }
+            .flatMap { byCategory[$0.id] ?? [] }
+    }
+
+    /// Convenience for tests that want a noop instance without going
+    /// through the throwing initializer.
+    init(noopForTesting: Void = ()) {
+        self.manifest = Manifest(version: 0, schemaVersion: 1, categories: [])
+        self.triggerCategories = []
+        self.compiledRulesByCategory = [:]
+        self.allCompiledTriggerRules = []
     }
 
     /// Redact a single line of text. Trigger categories are always
@@ -63,7 +137,7 @@ public struct PromptRedactor: Sendable {
         var result = line
         var matchedTriggerCategories: Set<String> = []
 
-        for category in dictionary.categories where category.category == "trigger" {
+        for category in manifest.categories where category.category == "trigger" {
             let (newResult, didMatch) = applyCategory(category, to: result)
             result = newResult
             if didMatch {
@@ -71,7 +145,7 @@ public struct PromptRedactor: Sendable {
             }
         }
 
-        for category in dictionary.categories where category.category == "cooccurrent" {
+        for category in manifest.categories where category.category == "cooccurrent" {
             guard let triggers = category.cooccurrentWith,
                   !Set(triggers).intersection(matchedTriggerCategories).isEmpty else {
                 continue
@@ -86,27 +160,13 @@ public struct PromptRedactor: Sendable {
     private func applyCategory(_ category: Category, to text: String) -> (String, Bool) {
         var result = text
         var matched = false
-        for rule in category.patterns {
-            let bodyPattern: String
-            if rule.isRegex {
-                bodyPattern = rule.pattern
-            } else {
-                bodyPattern = NSRegularExpression.escapedPattern(for: rule.pattern)
-            }
-            // Word-boundary wrap. Falls back to a literal match if the
-            // first/last char is not a word character (e.g. "Johnson &
-            // Johnson"), since `\b` requires a word char on the inside.
-            let leftBoundary = bodyPattern.first.map(Self.isWordChar) ?? false ? "\\b" : ""
-            let rightBoundary = bodyPattern.last.map(Self.isWordChar) ?? false ? "\\b" : ""
-            let pattern = leftBoundary + bodyPattern + rightBoundary
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-                continue
-            }
+        let compiled = compiledRulesByCategory[category.id] ?? []
+        // Escape `$` in the placeholder so it isn't interpreted as a
+        // backreference template by NSRegularExpression.
+        let template = NSRegularExpression.escapedTemplate(for: category.placeholder)
+        for compiledRule in compiled {
             let range = NSRange(result.startIndex..., in: result)
-            // Escape `$` in the placeholder so it isn't interpreted as a
-            // backreference template by NSRegularExpression.
-            let template = NSRegularExpression.escapedTemplate(for: category.placeholder)
-            let newResult = regex.stringByReplacingMatches(
+            let newResult = compiledRule.regex.stringByReplacingMatches(
                 in: result,
                 options: [],
                 range: range,
@@ -120,35 +180,74 @@ public struct PromptRedactor: Sendable {
         return (result, matched)
     }
 
+    /// H8: shared compiler for a single rule. Used by `init` to populate
+    /// `compiledRulesByCategory` and by the legacy `ruleMatches(_:in:)`
+    /// static helper which still has callers in the test suite.
+    static func compile(rule: RedactionRule) throws -> NSRegularExpression {
+        let bodyPattern: String
+        if rule.isRegex {
+            bodyPattern = rule.pattern
+        } else {
+            bodyPattern = NSRegularExpression.escapedPattern(for: rule.pattern)
+        }
+        let leftBoundary = bodyPattern.first.map(isWordChar) ?? false ? "\\b" : ""
+        let rightBoundary = bodyPattern.last.map(isWordChar) ?? false ? "\\b" : ""
+        let pattern = leftBoundary + bodyPattern + rightBoundary
+        return try NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+    }
+
     private static func isWordChar(_ ch: Character) -> Bool {
         guard let scalar = ch.unicodeScalars.first else { return false }
         return CharacterSet.alphanumerics.contains(scalar) || ch == "_"
     }
 
-    /// Default loader: reads `RedactionRules.json` from the main bundle.
-    /// Returns nil if the resource isn't found or fails to parse, so
-    /// callers can fall back to a no-op redactor.
-    public static func loadDefault(bundle: Bundle = .main) -> PromptRedactor? {
+    /// Default loader: reads `RedactionRules.json` from the main bundle
+    /// and pre-compiles every regex pattern. Returns the loaded redactor
+    /// on success.
+    ///
+    /// H8 / H9 (Cycle 2): the loader now distinguishes three load
+    /// failures so PlayheadRuntime can fail loud with a precondition
+    /// that names the cause:
+    ///
+    ///   - `.missing` — Bundle.url(forResource:) returned nil
+    ///   - `.malformedJSON` — JSONDecoder threw
+    ///   - `.invalidPattern` — one of the regex patterns failed to compile
+    ///
+    /// Pre-compilation happens inside `init(manifest:)`, which throws
+    /// `LoadFailure.invalidPattern` for the first bad pattern with the
+    /// offending category id and the original NSRegularExpression error.
+    public static func loadDefault(bundle: Bundle = .main) throws -> PromptRedactor {
         guard let url = bundle.url(forResource: "RedactionRules", withExtension: "json") else {
-            return nil
+            throw LoadFailure.missing
         }
+        let data: Data
         do {
-            let data = try Data(contentsOf: url)
-            let dictionary = try JSONDecoder().decode(Dictionary.self, from: data)
-            return PromptRedactor(dictionary: dictionary)
+            data = try Data(contentsOf: url)
         } catch {
-            return nil
+            throw LoadFailure.malformedJSON(parseError: error.localizedDescription)
         }
+        let manifest: Manifest
+        do {
+            manifest = try JSONDecoder().decode(Manifest.self, from: data)
+        } catch {
+            throw LoadFailure.malformedJSON(parseError: String(describing: error))
+        }
+        return try PromptRedactor(manifest: manifest)
     }
 
-    /// No-op redactor for tests / fallback when no dictionary is loaded.
-    public static let noop = PromptRedactor(
-        dictionary: Dictionary(version: 0, schemaVersion: 1, categories: [])
-    )
+    /// No-op redactor for tests / fallback when no manifest is loaded.
+    public static let noop = PromptRedactor()
+
+    /// Public constructor for the noop redactor (and any other
+    /// non-throwing zero-rule case). Equivalent to `PromptRedactor.noop`
+    /// but works in places where a static let is awkward.
+    public init() {
+        self.init(noopForTesting: ())
+    }
 
     /// True when this redactor has at least one rule (i.e. not the noop).
     public var isActive: Bool {
-        !dictionary.categories.isEmpty
+        !manifest.categories.isEmpty
     }
 
     // MARK: - bd-1en Phase 1 routing accessors
@@ -172,9 +271,16 @@ public struct PromptRedactor: Sendable {
     /// preserves its `pattern` and `isRegex` flag so the router can apply
     /// the same word-boundary regex matching the redactor uses internally.
     public func allTriggerRules() -> [RedactionRule] {
-        dictionary.categories
+        manifest.categories
             .filter { $0.category == "trigger" }
             .flatMap(\.patterns)
+    }
+
+    /// All trigger-category compiled rules. The router uses these so it
+    /// reuses the load-time-compiled NSRegularExpression instances rather
+    /// than re-compiling per check.
+    func allCompiledTriggerRulesForRouting() -> [CompiledRule] {
+        allCompiledTriggerRules
     }
 
     /// Word-boundary substring search using the same matching semantics as
@@ -182,20 +288,26 @@ public struct PromptRedactor: Sendable {
     /// rule's `isRegex` flag, with `\b` boundaries unless the pattern's
     /// edge characters are non-word). Exposed as a static helper so the
     /// router can call it without owning a `PromptRedactor` instance.
+    ///
+    /// H8 (Cycle 2): this helper is only used in tests / legacy code
+    /// paths that don't have a `PromptRedactor` instance handy. Each
+    /// call still re-compiles the regex (because there's no cache to
+    /// hit at the call site), but loadDefault no longer relies on this
+    /// helper to silently swallow malformed patterns — production
+    /// loading is via `init(manifest:)` which is throwing.
     public static func ruleMatches(_ rule: RedactionRule, in text: String) -> Bool {
-        let bodyPattern: String
-        if rule.isRegex {
-            bodyPattern = rule.pattern
-        } else {
-            bodyPattern = NSRegularExpression.escapedPattern(for: rule.pattern)
-        }
-        let leftBoundary = bodyPattern.first.map(isWordChar) ?? false ? "\\b" : ""
-        let rightBoundary = bodyPattern.last.map(isWordChar) ?? false ? "\\b" : ""
-        let pattern = leftBoundary + bodyPattern + rightBoundary
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+        guard let regex = try? compile(rule: rule) else {
             return false
         }
         let range = NSRange(text.startIndex..., in: text)
         return regex.firstMatch(in: text, options: [], range: range) != nil
+    }
+
+    /// Compiled-rule variant. Routers and other hot-path callers should
+    /// prefer this over `ruleMatches(_:in:)` so the load-time regex is
+    /// reused instead of being recompiled per call.
+    static func ruleMatches(_ compiledRule: CompiledRule, in text: String) -> Bool {
+        let range = NSRange(text.startIndex..., in: text)
+        return compiledRule.regex.firstMatch(in: text, options: [], range: range) != nil
     }
 }

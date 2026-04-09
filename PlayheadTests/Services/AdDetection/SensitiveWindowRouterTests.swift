@@ -110,9 +110,9 @@ struct SensitiveWindowRouterTests {
     }
 
     @Test("router built from a redactor with no categories has no rules")
-    func emptyDictionaryRouterHasNoRules() {
-        let dict = PromptRedactor.Dictionary(version: 0, schemaVersion: 1, categories: [])
-        let redactor = PromptRedactor(dictionary: dict)
+    func emptyManifestRouterHasNoRules() throws {
+        let manifest = PromptRedactor.Manifest(version: 0, schemaVersion: 1, categories: [])
+        let redactor = try PromptRedactor(manifest: manifest)
         let router = SensitiveWindowRouter(redactor: redactor)
         #expect(router.hasRules == false)
     }
@@ -153,14 +153,16 @@ private func makeRouter() -> SensitiveWindowRouter {
     // The PlayheadTests bundle is a hosted unit-test bundle, so the
     // bundled `RedactionRules.json` is reachable through Bundle.main
     // (the host app's bundle).
-    guard let redactor = PromptRedactor.loadDefault() else {
-        // If the dictionary failed to load the routing tests have
+    do {
+        let redactor = try PromptRedactor.loadDefault()
+        return SensitiveWindowRouter(redactor: redactor)
+    } catch {
+        // If the manifest failed to load the routing tests have
         // nothing to assert; surface the failure clearly rather than
         // silently passing on a noop router.
-        Issue.record("RedactionRules.json failed to load — bundle resource missing")
+        Issue.record("RedactionRules.json failed to load: \(error)")
         return SensitiveWindowRouter.noop
     }
-    return SensitiveWindowRouter(redactor: redactor)
 }
 
 private func makeSegment(

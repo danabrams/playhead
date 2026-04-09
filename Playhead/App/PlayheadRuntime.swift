@@ -3,6 +3,7 @@
 
 @preconcurrency import AVFoundation
 import Foundation
+import os
 import OSLog
 import UIKit
 
@@ -68,7 +69,7 @@ final class PlayheadRuntime {
     private var activeProgressiveLoader: ProgressiveResourceLoader?
     /// bd-3bz (Phase 4): observer that watches `canUseFoundationModels` for
     /// false→true transitions and, after a 60s-stable-true debounce, drains
-    /// any `analysis_sessions` rows flagged with `needs_shadow_retry = 1`.
+    /// any `analysis_sessions` rows flagged with `needsShadowRetry = 1`.
     /// Held strongly by the runtime so its observer loop survives until the
     /// runtime is torn down. Stopped explicitly via `shutdown()`; tests that
     /// spin up transient runtimes should call that to avoid leaking
@@ -176,17 +177,33 @@ final class PlayheadRuntime {
         // no-mass-defer invariant is pinned by
         // `concurrentRunBackfillsDoNotMassDeferEachOther` in
         // BackfillJobRunnerTests.
-        // bd-1en Phase 1: build the sensitive-window router and the
-        // permissive-path classifier once and capture them in the
-        // factory closure. Both are opt-in: if `RedactionRules.json`
-        // fails to load the router falls back to `.noop` and dispatch
-        // is a no-op (production behavior is byte-identical to the
-        // pre-bd-1en path). The permissive classifier is constructed
-        // only on iOS 26+ since `SystemLanguageModel(guardrails:)` is
-        // gated.
-        let bd1enRedactor = PromptRedactor.loadDefault()
-        let bd1enRouter: SensitiveWindowRouter = bd1enRedactor.map { SensitiveWindowRouter(redactor: $0) }
-            ?? .noop
+        // bd-1en Phase 1 + Cycle 2 C1/H9: build the sensitive-window
+        // router AND the production redactor up front so:
+        //
+        //   - The router and the redactor share the same compiled
+        //     RedactionRules.json (single source of truth for trigger
+        //     vocabulary).
+        //   - FoundationModelClassifier is constructed with the redactor
+        //     non-noop in production. The standard `@Generable` coarse
+        //     and refinement prompts are redacted before submission;
+        //     router-to-permissive bypasses are NOT also redacted (no
+        //     double-mitigation — the permissive guardrails are the
+        //     only relaxation needed once the router fires).
+        //   - Missing/malformed/invalid-pattern manifests fail loud at
+        //     startup with a precondition message that names the cause
+        //     instead of silently degrading to a noop redactor.
+        //
+        // The permissive classifier is constructed only on iOS 26+ since
+        // `SystemLanguageModel(guardrails:)` is gated.
+        let bd1enRedactor: PromptRedactor
+        do {
+            bd1enRedactor = try PromptRedactor.loadDefault()
+        } catch let failure as PromptRedactor.LoadFailure {
+            preconditionFailure("PromptRedactor.loadDefault failed: \(failure)")
+        } catch {
+            preconditionFailure("PromptRedactor.loadDefault failed with unknown error: \(error)")
+        }
+        let bd1enRouter = SensitiveWindowRouter(redactor: bd1enRedactor)
         let bd1enPermissiveBox: BackfillJobRunner.PermissiveClassifierBox? = {
             if #available(iOS 26.0, *) {
                 return BackfillJobRunner.PermissiveClassifierBox(PermissiveAdClassifier())
@@ -195,11 +212,23 @@ final class PlayheadRuntime {
         }()
 
         let backfillJobRunnerFactory: @Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner = {
-            [capabilitiesServiceForFactory, batteryProvider, feedbackStore, bd1enRouter, bd1enPermissiveBox] store, mode in
+            [capabilitiesServiceForFactory, batteryProvider, feedbackStore, bd1enRouter, bd1enPermissiveBox, bd1enRedactor] store, mode in
             BackfillJobRunner(
                 store: store,
                 admissionController: AdmissionController(),
-                classifier: FoundationModelClassifier(feedbackStore: feedbackStore),
+                // Cycle 2 C1: the standard @Generable path gets the
+                // production redactor. The permissive bypass branch
+                // inside dispatch does NOT call into this redactor —
+                // it sends the original window text to the permissive
+                // model unmasked.
+                // Cycle 6 M-5: route through the shared factory so the
+                // regression rail in Cycle4RedactorWiringTests pins the
+                // wiring — any future change that passes `.noop` here
+                // fails an automated test.
+                classifier: PlayheadRuntime.makeFoundationModelClassifier(
+                    redactor: bd1enRedactor,
+                    feedbackStore: feedbackStore
+                ),
                 coveragePlanner: CoveragePlanner(),
                 mode: mode,
                 capabilitySnapshotProvider: { await capabilitiesServiceForFactory.currentSnapshot },
@@ -215,26 +244,36 @@ final class PlayheadRuntime {
                 permissiveClassifier: bd1enPermissiveBox
             )
         }
-        // bd-3bz (Phase 4): when the shadow phase bails on FM unavailability,
-        // mark the latest session for the asset so the capability observer
-        // can drain it after FM recovers. Failures inside the marker are
-        // swallowed — the shadow phase must never throw. `fetchLatestSessionForAsset`
-        // is the right lookup because `AdDetectionService.runShadowFMPhase`
-        // runs inside `finalizeBackfill`, whose session is the latest row on
-        // that asset by `updatedAt`.
+        // bd-3bz (Phase 4) / H7 (cycle 2): when the shadow phase bails on
+        // FM unavailability, mark the explicit session id supplied by the
+        // shadow phase. The marker no longer does an asset→session lookup
+        // (see H7 in AdDetectionService.runShadowFMPhase): the session id
+        // is captured at the START of the shadow phase to fix a race
+        // window where concurrent reprocessing on the same asset could
+        // create a newer session and the marker would tag the wrong row.
+        //
+        // H2 (cycle 2): after marking, immediately wake the shadow retry
+        // observer. Without this, a session flagged while capability is
+        // already stable-true would never re-drain — the observer's
+        // capability stream only fires on transitions, not on flags.
+        // The observer is constructed below (after AdDetectionService,
+        // since the observer depends on the service as its drainer), so
+        // we capture a Sendable holder here and populate it once the
+        // observer exists. The closure reads through the holder lazily.
         let analysisStoreForMarker = analysisStore
-        let shadowSkipMarker: @Sendable (String, String) async -> Void = { assetId, podcastId in
+        let observerHolder = ShadowRetryObserverHolder()
+        let shadowSkipMarker: @Sendable (String, String) async -> Void = { sessionId, podcastId in
             do {
-                guard let session = try await analysisStoreForMarker.fetchLatestSessionForAsset(assetId: assetId) else {
-                    return
-                }
                 try await analysisStoreForMarker.markSessionNeedsShadowRetry(
-                    id: session.id,
+                    id: sessionId,
                     podcastId: podcastId
                 )
+                if let observer = observerHolder.observer {
+                    await observer.wake()
+                }
             } catch {
                 Logger(subsystem: "com.playhead", category: "Runtime")
-                    .warning("bd-3bz: failed to mark session for shadow retry on asset \(assetId): \(error.localizedDescription)")
+                    .warning("bd-3bz: failed to mark session \(sessionId) for shadow retry: \(error.localizedDescription)")
             }
         }
 
@@ -301,11 +340,16 @@ final class PlayheadRuntime {
         // want stray AsyncStream subscriptions piling up there. The observer
         // task is started below after `super`-style initialization completes.
         if !isPreviewRuntime {
-            self.shadowRetryObserver = ShadowRetryObserver(
+            let observer = ShadowRetryObserver(
                 capabilities: capabilitiesService,
                 store: analysisStore,
                 drainer: adDetectionService
             )
+            self.shadowRetryObserver = observer
+            // H2: publish the observer through the holder captured by the
+            // shadow-skip marker closure so subsequent marker invocations
+            // can wake() the observer.
+            observerHolder.observer = observer
         } else {
             self.shadowRetryObserver = nil
         }
@@ -450,12 +494,60 @@ final class PlayheadRuntime {
     }
 
     deinit {
+        // C7b: previously this `deinit` spawned `Task { await observer.stop() }`
+        // to chase the async observer teardown. That was racy: the spawned
+        // task could outlive the runtime by an unbounded amount, and a new
+        // PlayheadRuntime construction back-to-back could find a stale
+        // observer task still draining the wake stream from the prior
+        // instance. Calling `shutdown()` is now mandatory (`withTestRuntime`
+        // enforces this in tests). The `deinit` only does the synchronous
+        // safety nets — cancelling the startup task and the drain timer —
+        // and leaves the observer loop teardown to `shutdown()`.
         shadowRetryObserverStartupTask?.cancel()
-        let observer = shadowRetryObserver
-        Task {
-            await observer?.stop()
-        }
     }
+
+    // MARK: - FM classifier factory (Cycle 6 M-5 regression rail)
+
+    /// Cycle 6 M-5: single factory that both the production
+    /// `backfillJobRunnerFactory` closure AND unit tests call, so a
+    /// regression that swaps in `.noop` on the production construction
+    /// site fails an automated test instead of shipping silently.
+    ///
+    /// The factory is deliberately thin — it only forwards arguments
+    /// into `FoundationModelClassifier.init`. Keeping it pure makes the
+    /// regression rail meaningful: a test can hand it a real redactor
+    /// and assert the returned classifier exposes that exact redactor
+    /// via `redactorForTesting`. If the body is ever changed to ignore
+    /// the incoming `redactor` parameter (or substitute `.noop`),
+    /// `runtimeFactoryProducesActiveRedactor` fails at the assertion
+    /// site; the negative rail
+    /// `runtimeFactoryWithNoopProducesNoopRedactor` proves that the
+    /// assertion actually discriminates between active and inactive
+    /// redactors.
+    ///
+    /// `nonisolated` so tests (which are not on MainActor by default)
+    /// can invoke it without hopping onto the main actor just to
+    /// construct a classifier.
+    nonisolated static func makeFoundationModelClassifier(
+        redactor: PromptRedactor,
+        feedbackStore: FoundationModelsFeedbackStore? = nil
+    ) -> FoundationModelClassifier {
+        FoundationModelClassifier(
+            feedbackStore: feedbackStore,
+            redactor: redactor
+        )
+    }
+
+    #if DEBUG
+    /// Cycle 4 H3: DEBUG-only accessor so `RuntimeTeardownTests` can
+    /// assert that the shadow retry observer's loop actually exited
+    /// after `shutdown()`. Exposed as a test seam rather than making the
+    /// stored property internal to keep production access patterns
+    /// unchanged.
+    func _shadowRetryObserverForTesting() -> ShadowRetryObserver? {
+        shadowRetryObserver
+    }
+    #endif
 
     /// Stops long-lived runtime observers and cancels any pending startup
     /// task. Safe to call more than once.
@@ -732,4 +824,31 @@ final class PlayheadRuntime {
         )
     }
 
+}
+
+/// Thread-safe holder for the lazily-initialized `ShadowRetryObserver`.
+///
+/// The shadow-skip-marker closure is built BEFORE the observer is
+/// constructed (the observer depends on `AdDetectionService`, which
+/// already captured the marker closure). The closure therefore needs a
+/// box it can read through at call time. The write happens exactly
+/// once, on the MainActor during runtime init, but reads happen from
+/// arbitrary actor contexts whenever a shadow session is flagged —
+/// that's a cross-thread read of a mutable field and must be
+/// synchronized.
+///
+/// Cycle-4 M1: previously implemented as `@unchecked Sendable` with a
+/// plain `var`, justified by "writes happen before the first marker
+/// call can reach the closure". That argument is functionally correct
+/// but brittle — a future refactor that hoists a marker call earlier in
+/// init would silently race. `OSAllocatedUnfairLock` makes the
+/// synchronization explicit and lets the type drop the `@unchecked`
+/// escape hatch.
+private final class ShadowRetryObserverHolder: Sendable {
+    private let storage = OSAllocatedUnfairLock<ShadowRetryObserver?>(initialState: nil)
+
+    var observer: ShadowRetryObserver? {
+        get { storage.withLock { $0 } }
+        set { storage.withLock { $0 = newValue } }
+    }
 }

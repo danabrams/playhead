@@ -1092,11 +1092,19 @@ actor AnalysisCoordinator {
 
         let allChunks = try await store.fetchTranscriptChunks(assetId: assetId)
         if let podcastId = activePodcastId, !allChunks.isEmpty {
+            // Cycle 4 H5: thread the sessionId through so the shadow FM
+            // phase can stamp `needsShadowRetry` on this exact session if
+            // the FM capability is unavailable. Captures the sessionId at
+            // dispatch time, before any concurrent reprocessing on the
+            // same asset could create a newer session and race the
+            // marker. See `AdDetectionService.runShadowFMPhase` for the
+            // override-only resolution rule.
             try await adDetectionService.runBackfill(
                 chunks: allChunks,
                 analysisAssetId: assetId,
                 podcastId: podcastId,
-                episodeDuration: currentEpisodeDuration()
+                episodeDuration: currentEpisodeDuration(),
+                sessionId: sessionId
             )
         }
 

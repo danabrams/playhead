@@ -1877,4 +1877,113 @@ struct SemanticScanPersistenceTests {
         let fetched = try await store.fetchSemanticScanResult(id: row.id)
         #expect(fetched?.errorContext?.count == justUnder.count)
     }
+
+    // MARK: - Cycle 6 B6 Rev3-M6: phase column write+read round-trip
+
+    @Test("Cycle 6 B6 Rev3-M6: semantic_scan_results persists phase column and returns it on read")
+    func semanticScanResultPhaseRoundTrip() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset(id: "asset-phase"))
+        let cohort = try makeScanCohortJSON()
+
+        // Write one row per BackfillJobPhase so the full matrix is
+        // exercised. Each row varies windowFirstAtomOrdinal so the
+        // reuseKeyHash unique index does not collapse them.
+        for (idx, phase) in BackfillJobPhase.allCases.enumerated() {
+            let row = SemanticScanResult(
+                id: "row-\(phase.rawValue)",
+                analysisAssetId: "asset-phase",
+                windowFirstAtomOrdinal: idx * 10,
+                windowLastAtomOrdinal: idx * 10 + 5,
+                windowStartTime: Double(idx) * 10,
+                windowEndTime: Double(idx) * 10 + 5,
+                scanPass: "passA",
+                transcriptQuality: .good,
+                disposition: .containsAd,
+                spansJSON: "[]",
+                status: .success,
+                attemptCount: 1,
+                errorContext: nil,
+                inputTokenCount: nil,
+                outputTokenCount: nil,
+                latencyMs: nil,
+                prewarmHit: false,
+                scanCohortJSON: cohort,
+                transcriptVersion: "tx-v1",
+                reuseScope: "scope-\(phase.rawValue)",
+                jobPhase: phase.rawValue
+            )
+            try await store.insertSemanticScanResult(row)
+            let fetched = try await store.fetchSemanticScanResult(id: row.id)
+            #expect(fetched?.jobPhase == phase.rawValue, "jobPhase round-trip failed for \(phase.rawValue)")
+        }
+
+        // Legacy default: a row constructed without specifying phase
+        // must decode as "shadow".
+        let legacy = SemanticScanResult(
+            id: "row-legacy-default",
+            analysisAssetId: "asset-phase",
+            windowFirstAtomOrdinal: 9000,
+            windowLastAtomOrdinal: 9010,
+            windowStartTime: 900,
+            windowEndTime: 910,
+            scanPass: "passA",
+            transcriptQuality: .good,
+            disposition: .noAds,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: cohort,
+            transcriptVersion: "tx-v1",
+            reuseScope: "scope-legacy"
+        )
+        try await store.insertSemanticScanResult(legacy)
+        let fetched = try await store.fetchSemanticScanResult(id: legacy.id)
+        #expect(fetched?.jobPhase == "shadow", "default jobPhase must be \"shadow\" for legacy callers")
+    }
+
+    @Test("Cycle 6 B6 Rev3-M6: evidence_events persists phase column and returns it on read")
+    func evidenceEventPhaseRoundTrip() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset(id: "asset-phase-ev"))
+        let cohort = try makeScanCohortJSON()
+
+        // Need a scan row (evidence_events has an asset FK, not a scan
+        // row FK, so a bare asset row is sufficient). Write an evidence
+        // event tagged with harvester and another with the default.
+        let harvester = EvidenceEvent(
+            id: "ev-harvester",
+            analysisAssetId: "asset-phase-ev",
+            eventType: "fm.spanRefinement",
+            sourceType: .fm,
+            atomOrdinals: "[1,2,3]",
+            evidenceJSON: "{\"commercialIntent\":\"sponsorship\"}",
+            scanCohortJSON: cohort,
+            createdAt: 123,
+            jobPhase: BackfillJobPhase.scanHarvesterProposals.rawValue
+        )
+        _ = try await store.insertEvidenceEvent(harvester, transcriptVersion: "tx-v1")
+
+        let defaulted = EvidenceEvent(
+            id: "ev-default",
+            analysisAssetId: "asset-phase-ev",
+            eventType: "fm.spanRefinement",
+            sourceType: .fm,
+            atomOrdinals: "[7,8,9]",
+            evidenceJSON: "{\"commercialIntent\":\"editorial\"}",
+            scanCohortJSON: cohort,
+            createdAt: 124
+        )
+        _ = try await store.insertEvidenceEvent(defaulted, transcriptVersion: "tx-v1")
+
+        let events = try await store.fetchEvidenceEvents(analysisAssetId: "asset-phase-ev")
+        let byId = Dictionary(uniqueKeysWithValues: events.map { ($0.id, $0) })
+        #expect(byId["ev-harvester"]?.jobPhase == BackfillJobPhase.scanHarvesterProposals.rawValue)
+        #expect(byId["ev-default"]?.jobPhase == "shadow")
+    }
 }

@@ -79,6 +79,75 @@ actor BackfillJobRunner {
     /// `PermissiveAdClassifier` is itself an actor.
     private let permissiveClassifierBox: PermissiveClassifierBox?
 
+    /// Cycle 2 C2: per-reason telemetry counters for permissive
+    /// failures. Incremented inside the runner whenever the persisted
+    /// failed-window status came from a permissive bypass call. Logged
+    /// at run completion via `logPermissiveTelemetry`. Test hook
+    /// `snapshotPermissiveTelemetry` lets unit tests assert without
+    /// scraping OSLog.
+    private var permissiveRefusalCount: Int = 0
+    private var permissiveDecodingFailureCount: Int = 0
+    private var permissiveContextOverflowCount: Int = 0
+
+    /// Cycle 2 Rev2-M5 / Rev3-M1: counter incremented every time the
+    /// runner observes asymmetric routing — coarse routed `.normal` but
+    /// refine routed `.sensitive`, OR coarse routed `.sensitive` but
+    /// refine routed `.normal` — for the same window. Asymmetric
+    /// dispatch is a routing-vocabulary mismatch surface; this counter
+    /// makes it observable from the test suite.
+    private var asymmetricWindowCount: Int = 0
+
+    func snapshotPermissiveTelemetry() -> (
+        refusal: Int,
+        decodingFailure: Int,
+        contextOverflow: Int
+    ) {
+        (permissiveRefusalCount, permissiveDecodingFailureCount, permissiveContextOverflowCount)
+    }
+
+    func snapshotAsymmetricWindowCount() -> Int {
+        asymmetricWindowCount
+    }
+
+    /// Increment a permissive per-reason counter from the dispatch
+    /// catch arms. Called by the per-job runner whenever a window's
+    /// failed-window status came from a permissive bypass.
+    func incrementPermissiveFailure(reason: PermissiveClassificationError.Reason) {
+        switch reason {
+        case .permissiveRefusal:
+            permissiveRefusalCount += 1
+        case .permissiveDecodingFailure:
+            permissiveDecodingFailureCount += 1
+        case .permissiveContextOverflow:
+            permissiveContextOverflowCount += 1
+        }
+    }
+
+    /// Increment the asymmetric-window counter (Rev2-M5 / Rev3-M1).
+    func incrementAsymmetricWindow() {
+        asymmetricWindowCount += 1
+    }
+
+    /// Run-completion telemetry log. Called once per `run` invocation
+    /// from the existing run-result emitter; emits a single structured
+    /// line so on-device test scripts can grep for the per-reason
+    /// counters without having to inspect OSLog message-by-message.
+    private func logPermissiveTelemetry() {
+        guard permissiveRefusalCount > 0
+            || permissiveDecodingFailureCount > 0
+            || permissiveContextOverflowCount > 0
+            || asymmetricWindowCount > 0 else { return }
+        logger.debug(
+            """
+            backfill.runner.permissive_telemetry \
+            refusal=\(self.permissiveRefusalCount, privacy: .public) \
+            decodingFailure=\(self.permissiveDecodingFailureCount, privacy: .public) \
+            contextOverflow=\(self.permissiveContextOverflowCount, privacy: .public) \
+            asymmetric_window=\(self.asymmetricWindowCount, privacy: .public)
+            """
+        )
+    }
+
     /// Sendable wrapper around the gated `PermissiveAdClassifier` actor.
     /// `PermissiveAdClassifier` is `@available(iOS 26.0, *)` so storing
     /// it directly on the runner would force the entire runner to be
@@ -131,6 +200,19 @@ actor BackfillJobRunner {
     /// the scan cohort and transcript version are unchanged. Returns a
     /// `RunResult` describing what was admitted, persisted, or deferred.
     func runPendingBackfill(for inputs: AssetInputs) async throws -> RunResult {
+        // Cycle 4 H-3: reset per-run counters BEFORE plan execution so
+        // a second invocation of `runPendingBackfill` on the same actor
+        // instance does not accumulate permissive/asymmetric telemetry
+        // from earlier runs. Mirror of the expansion-counter reset
+        // Agent B added; when branches merge this block is the
+        // canonical place to reset every run-scoped counter. Agent B4
+        // should fold expansion counters into this same reset block on
+        // merge.
+        permissiveRefusalCount = 0
+        permissiveDecodingFailureCount = 0
+        permissiveContextOverflowCount = 0
+        asymmetricWindowCount = 0
+
         guard mode != .disabled else {
             logger.debug("FM backfill skipped: mode=disabled")
             return .empty
@@ -141,6 +223,25 @@ actor BackfillJobRunner {
                 "fmBackfillMode=.enabled requested but Phase 6 fusion is not yet implemented; falling back to .shadow"
             )
         }
+
+        // Cycle 2 Rev1-L4: counters that scope to a single
+        // `runPendingBackfill` invocation must be reset on entry. The
+        // prior implementation accumulated `expansionInvocationCount` and
+        // `expansionTruncatedCount` across calls on the same actor,
+        // which made test ordering visible to assertions and made
+        // production telemetry depend on actor lifetime. Reset all
+        // per-run counters here so each call has a clean slate.
+        expansionInvocationCount = 0
+        expansionTruncatedCount = 0
+        narrowingAbortedByPhase = [:]
+        narrowingEmptyByPhase = [:]
+        narrowingAllPhasesEmptyCount = 0
+        episodesObservedWithoutSample = 0
+        // Cycle 4 B4: per-run set of non-fullEpisodeScan phases that
+        // returned `wasEmpty == true`. Used below to increment the
+        // persisted `narrowingAllPhasesEmptyEpisodeCount` on live
+        // targetedWithAudit runs where every phase narrows to nothing.
+        narrowingPhasesEmptyThisRun = []
 
         let plan = coveragePlanner.plan(for: inputs.plannerContext)
         let now = clock().timeIntervalSince1970
@@ -294,11 +395,26 @@ actor BackfillJobRunner {
                 // row's audit trail is not lost when it resumes.
                 try await store.markBackfillJobRunning(jobId: job.jobId)
 
-                let jobInputs = narrowedInputs(
+                // Cycle 2 H13: `narrowedInputs` returns nil when the
+                // phase produced no anchors and we should skip dispatching
+                // FM work entirely. Mark the job complete with an empty
+                // progress cursor so the M5 idempotency path skips it on
+                // re-invocation.
+                guard let jobInputs = narrowedInputs(
                     for: job,
                     plan: plan,
                     rootInputs: inputs
-                )
+                ) else {
+                    try await store.markBackfillJobComplete(
+                        jobId: job.jobId,
+                        progressCursor: BackfillProgressCursor(
+                            processedUnitCount: 0,
+                            lastProcessedUpperBoundSec: nil
+                        )
+                    )
+                    await admissionController.finish(jobId: job.jobId)
+                    continue
+                }
                 let (resultIds, eventIds, detectedAdLineRefs) = try await runJob(job, inputs: jobInputs)
                 scanResultIds.append(contentsOf: resultIds)
                 evidenceEventIds.append(contentsOf: eventIds)
@@ -444,33 +560,99 @@ actor BackfillJobRunner {
         //
         if !admitted.isEmpty {
             let wasFullRescan = (plan.policy == .fullCoverage || plan.policy == .periodicFullRescan)
-            let precisionSample: Double?
+            // Cycle 2 C4: this sample is **recall**, not precision —
+            // the metric was historically misnamed. Formula:
+            //   covered = |predictedTargetedLineRefs ∩ actualAdLineRefs|
+            //   recall  = covered / |actualAdLineRefs|
+            // Persistence keeps the legacy `precision*` column / JSON
+            // names; the rename is code-only. The store API still
+            // accepts `fullRescanPrecisionSample` (historical name)
+            // and the column-side comments document the alias.
+            //
+            // Cycle 2 H13: when EVERY non-fullEpisodeScan phase narrows
+            // to empty, we record `episodesObservedWithoutSample` and
+            // do NOT advance the recall ring even if there were detected
+            // ad line refs — the targeted phases would never have
+            // covered them so emitting a 0-recall sample would push the
+            // planner toward fullCoverage on a transcript that the
+            // narrower simply couldn't index.
+            let recallSample: Double?
+            // Cycle 4 B4: per-podcast persisted counters. These accrue
+            // across runs on the planner state row so operators can
+            // read "this show has had N ad-free episodes total" instead
+            // of the per-run 0/1 signal the runner-level counters used
+            // to give.
+            var incrementEpisodesObservedWithoutSample = false
+            var incrementNarrowingAllPhasesEmpty = false
             if wasFullRescan {
-                // Conservative contract: no detected-ad signal means no
-                // precision sample for this episode (nil), so ad-free or
-                // unresolved episodes do not bias the stability ring.
-                let predicted = TargetedWindowNarrower.predictedTargetedLineRefs(
-                    inputs: TargetedWindowNarrower.Inputs(
+                if fullRescanDetectedAdLineRefs.isEmpty {
+                    // Cycle 2 C4: ad-free episode. Nil sample (do NOT
+                    // fake 1.0). Bump the dedicated counter so we can
+                    // distinguish "ad-free" from "ad-bearing but
+                    // narrower failed to predict it".
+                    episodesObservedWithoutSample += 1
+                    incrementEpisodesObservedWithoutSample = true
+                    recallSample = nil
+                } else {
+                    let narrowerInputs = TargetedWindowNarrower.Inputs(
                         analysisAssetId: inputs.analysisAssetId,
                         podcastId: inputs.podcastId,
                         transcriptVersion: inputs.transcriptVersion,
                         segments: inputs.segments,
                         evidenceCatalog: inputs.evidenceCatalog,
-                        auditWindowSampleRate: coveragePlanner.auditWindowSampleRate
+                        auditWindowSampleRate: coveragePlanner.auditWindowSampleRate,
+                        episodesSinceLastFullRescan: inputs.plannerContext.episodesSinceLastFullRescan
                     )
-                )
-                precisionSample = TargetedWindowNarrower.precisionSample(
-                    predictedTargetedLineRefs: predicted,
-                    actualAdLineRefs: fullRescanDetectedAdLineRefs
-                )
+                    // Cycle 2 H13: if every non-fullEpisodeScan phase
+                    // came back empty, contribute no recall sample.
+                    let phaseResults = BackfillJobPhase.allCases
+                        .filter { $0 != .fullEpisodeScan }
+                        .map { TargetedWindowNarrower.narrow(phase: $0, inputs: narrowerInputs) }
+                    let nonEmptyPhases = phaseResults.filter { !$0.wasEmpty }
+                    if nonEmptyPhases.isEmpty {
+                        narrowingAllPhasesEmptyCount += 1
+                        incrementNarrowingAllPhasesEmpty = true
+                        recallSample = nil
+                    } else {
+                        let predicted = TargetedWindowNarrower.predictedTargetedLineRefs(
+                            inputs: narrowerInputs
+                        )
+                        recallSample = TargetedWindowNarrower.recallSample(
+                            predictedTargetedLineRefs: predicted,
+                            actualAdLineRefs: fullRescanDetectedAdLineRefs
+                        )
+                    }
+                }
             } else {
-                precisionSample = nil
+                recallSample = nil
+                // Cycle 4 B4 M: live targetedWithAudit path. Previously
+                // the cross-phase "all phases narrowed empty" signal was
+                // lost on exactly the path that needs it most — per-phase
+                // `narrowing.empty.{phase}` fire but nothing rolls up.
+                // Read the per-run set populated by `narrowedInputs`
+                // and compare it against the non-fullEpisodeScan phases
+                // the planner asked us to run. If every such phase went
+                // empty this run, bump BOTH the per-run and per-podcast
+                // counters.
+                if plan.policy == .targetedWithAudit {
+                    let targetedPhases = Set(
+                        plan.phases.filter { $0 != .fullEpisodeScan }
+                    )
+                    if !targetedPhases.isEmpty,
+                       targetedPhases.isSubset(of: narrowingPhasesEmptyThisRun) {
+                        narrowingAllPhasesEmptyCount += 1
+                        incrementNarrowingAllPhasesEmpty = true
+                    }
+                }
             }
             do {
                 _ = try await store.recordPodcastEpisodeObservation(
                     podcastId: inputs.podcastId,
                     wasFullRescan: wasFullRescan,
-                    fullRescanPrecisionSample: precisionSample,
+                    // historical: stored as "precision"; semantically recall
+                    fullRescanPrecisionSample: recallSample,
+                    incrementEpisodesObservedWithoutSample: incrementEpisodesObservedWithoutSample,
+                    incrementNarrowingAllPhasesEmpty: incrementNarrowingAllPhasesEmpty,
                     now: clock().timeIntervalSince1970
                 )
             } catch {
@@ -479,6 +661,11 @@ actor BackfillJobRunner {
                 )
             }
         }
+
+        // Cycle 2 C2 / Rev2-M5: emit per-reason permissive failure
+        // tally + asymmetric-window counter as a single structured log
+        // line at run completion. No-op when every counter is zero.
+        logPermissiveTelemetry()
 
         return RunResult(
             admittedJobIds: admitted,
@@ -509,6 +696,18 @@ actor BackfillJobRunner {
             return (scanResultIds, evidenceEventIds, detectedAdLineRefs)
         }
 
+        // Cycle 10 Rev3-M5: derive the `runMode` discriminator from the
+        // persisted job's coveragePolicy. The original Rev3-M5 intent was
+        // to distinguish Phase 3 shadow-validation rows from Phase 5
+        // targeted-execution rows via the PLANNER policy, not via
+        // FMBackfillMode. `job.coveragePolicy` is already stamped by
+        // `runPendingBackfill` when the job is enqueued, so every
+        // persistence-row construction site in this function can read it
+        // without re-plumbing the plan.
+        let runMode: SemanticScanPhase = (job.coveragePolicy == .targetedWithAudit)
+            ? .targeted
+            : .shadow
+
         // bd-1en Phase 1: dispatch sensitive windows (pharma /
         // medical / mental-health / regulated tests) through the
         // permissive `SystemLanguageModel` path. The router and
@@ -528,14 +727,23 @@ actor BackfillJobRunner {
             coarse = try await classifier.coarsePassA(segments: inputs.segments)
         }
 
+        // Cycle 2 C2: roll up per-pass permissive failure tally into
+        // the actor-level run counters so `logPermissiveTelemetry` can
+        // surface them at run completion.
+        permissiveRefusalCount += coarse.permissiveFailureCounts.refusal
+        permissiveDecodingFailureCount += coarse.permissiveFailureCounts.decodingFailure
+        permissiveContextOverflowCount += coarse.permissiveFailureCounts.contextOverflow
+
         for window in coarse.windows {
             try Task.checkCancellation()
             let result = makeScanResult(
                 windowOutput: window,
                 inputs: inputs,
                 jobId: job.jobId,
+                jobPhase: job.phase,
                 scanPass: "passA",
-                status: .success
+                status: .success,
+                runMode: runMode
             )
             try await store.insertSemanticScanResult(result)
             scanResultIds.append(result.id)
@@ -563,8 +771,10 @@ actor BackfillJobRunner {
                             plan: plan,
                             inputs: inputs,
                             jobId: job.jobId,
+                            jobPhase: job.phase,
                             status: status,
-                            latencyMs: coarse.latencyMillis
+                            latencyMs: coarse.latencyMillis,
+                            runMode: runMode
                         ) {
                     try await store.insertSemanticScanResult(failureResult)
                     scanResultIds.append(failureResult.id)
@@ -577,8 +787,10 @@ actor BackfillJobRunner {
                             plan: blockingPlan,
                             inputs: inputs,
                             jobId: job.jobId,
+                            jobPhase: job.phase,
                             status: coarse.status,
-                            latencyMs: coarse.latencyMillis
+                            latencyMs: coarse.latencyMillis,
+                            runMode: runMode
                        ) {
                 try await store.insertSemanticScanResult(failureResult)
                 scanResultIds.append(failureResult.id)
@@ -589,8 +801,10 @@ actor BackfillJobRunner {
                     attemptedSegments: inputs.segments,
                     inputs: inputs,
                     jobId: job.jobId,
+                    jobPhase: job.phase,
                     status: coarse.status,
-                    latencyMs: coarse.latencyMillis
+                    latencyMs: coarse.latencyMillis,
+                    runMode: runMode
                   ) {
             try await store.insertSemanticScanResult(failureResult)
             scanResultIds.append(failureResult.id)
@@ -607,13 +821,23 @@ actor BackfillJobRunner {
                     zoomPlans: zoomPlans,
                     inputs: inputs
                 )
+                // Cycle 2 C2 + Rev2-M5/Rev3-M1: roll up the refinement
+                // pass's permissive failure tally and asymmetric-routing
+                // counter into the actor-level run telemetry.
+                permissiveRefusalCount += refinement.permissiveFailureCounts.refusal
+                permissiveDecodingFailureCount += refinement.permissiveFailureCounts.decodingFailure
+                permissiveContextOverflowCount += refinement.permissiveFailureCounts.contextOverflow
+                asymmetricWindowCount += refinement.asymmetricWindowCount
+
                 for window in refinement.windows {
                     try Task.checkCancellation()
                     let result = makeRefinementScanResult(
                         windowOutput: window,
                         inputs: inputs,
                         jobId: job.jobId,
-                        status: .success
+                        jobPhase: job.phase,
+                        status: .success,
+                        runMode: runMode
                     )
                     for span in window.spans {
                         detectedAdLineRefs.formUnion(span.firstLineRef...span.lastLineRef)
@@ -621,7 +845,9 @@ actor BackfillJobRunner {
                     let events = makeEvidenceEvents(
                         windowOutput: window,
                         inputs: inputs,
-                        jobId: job.jobId
+                        jobId: job.jobId,
+                        jobPhase: job.phase,
+                        runMode: runMode
                     )
                     // C-3: Pass-B scan row and its evidence events must be
                     // written atomically. The store's batch API wraps both in
@@ -643,8 +869,10 @@ actor BackfillJobRunner {
                             plan: plan,
                             inputs: inputs,
                             jobId: job.jobId,
+                            jobPhase: job.phase,
                             status: status,
-                            latencyMs: refinement.latencyMillis
+                            latencyMs: refinement.latencyMillis,
+                            runMode: runMode
                         ) {
                             try await store.insertSemanticScanResult(failureResult)
                             scanResultIds.append(failureResult.id)
@@ -657,8 +885,10 @@ actor BackfillJobRunner {
                             plan: blockingPlan,
                             inputs: inputs,
                             jobId: job.jobId,
+                            jobPhase: job.phase,
                             status: refinement.status,
-                            latencyMs: refinement.latencyMillis
+                            latencyMs: refinement.latencyMillis,
+                            runMode: runMode
                        ) {
                         try await store.insertSemanticScanResult(failureResult)
                         scanResultIds.append(failureResult.id)
@@ -671,8 +901,10 @@ actor BackfillJobRunner {
                         attemptedSegments: attemptedSegments,
                         inputs: inputs,
                         jobId: job.jobId,
+                        jobPhase: job.phase,
                         status: refinement.status,
-                        latencyMs: refinement.latencyMillis
+                        latencyMs: refinement.latencyMillis,
+                        runMode: runMode
                     ) {
                         try await store.insertSemanticScanResult(failureResult)
                         scanResultIds.append(failureResult.id)
@@ -699,7 +931,9 @@ actor BackfillJobRunner {
                     let expansionResults = try await runOutwardExpansion(
                         baseRefinement: refinement,
                         inputs: inputs,
-                        jobId: job.jobId
+                        jobId: job.jobId,
+                        jobPhase: job.phase,
+                        runMode: runMode
                     )
                     scanResultIds.append(contentsOf: expansionResults.scanResultIds)
                     evidenceEventIds.append(contentsOf: expansionResults.evidenceEventIds)
@@ -783,7 +1017,9 @@ actor BackfillJobRunner {
     private func runOutwardExpansion(
         baseRefinement: FMRefinementScanOutput,
         inputs: AssetInputs,
-        jobId: String
+        jobId: String,
+        jobPhase: BackfillJobPhase,
+        runMode: SemanticScanPhase
     ) async throws -> ExpansionResults {
         var results = ExpansionResults()
 
@@ -930,8 +1166,10 @@ actor BackfillJobRunner {
                         plan: plan,
                         inputs: inputs,
                         jobId: jobId,
+                        jobPhase: jobPhase,
                         status: expansionRefinement.status,
-                        latencyMs: expansionRefinement.latencyMillis
+                        latencyMs: expansionRefinement.latencyMillis,
+                        runMode: runMode
                     ) {
                         try await store.insertSemanticScanResult(failureResult)
                         results.scanResultIds.append(failureResult.id)
@@ -984,12 +1222,16 @@ actor BackfillJobRunner {
                     windowOutput: mergedWindowOutput,
                     inputs: inputs,
                     jobId: jobId,
-                    status: .success
+                    jobPhase: jobPhase,
+                    status: .success,
+                    runMode: runMode
                 )
                 let mergedEvents = makeEvidenceEvents(
                     windowOutput: mergedWindowOutput,
                     inputs: inputs,
-                    jobId: jobId
+                    jobId: jobId,
+                    jobPhase: jobPhase,
+                    runMode: runMode
                 )
                 let persistedEventIds = try await store.recordSemanticScanResult(
                     mergedScanResult,
@@ -1205,7 +1447,12 @@ actor BackfillJobRunner {
             ),
             memoryWriteEligible: lhs.memoryWriteEligible && rhs.memoryWriteEligible,
             alternativeExplanation: preferred.alternativeExplanation,
-            reasonTags: Array(Set(lhs.reasonTags).union(rhs.reasonTags))
+            reasonTags: Array(Set(lhs.reasonTags).union(rhs.reasonTags)),
+            // Cycle 2 H4: a unioned span is suppressed iff both inputs
+            // were suppressed. If either side carried real FM-inferred
+            // ownership/intent, the union has at least that signal.
+            ownershipInferenceWasSuppressed: lhs.ownershipInferenceWasSuppressed
+                && rhs.ownershipInferenceWasSuppressed
         )
     }
 
@@ -1228,6 +1475,17 @@ actor BackfillJobRunner {
 
     /// bd-1my M3: dedupe a concatenated anchor list by identity key,
     /// preserving input order and the first-seen copy of each anchor.
+    ///
+    /// Cycle 2 Rev2-M1: certainty is **content**, not identity. Two
+    /// anchors with the same `(evidenceRef, lineRef, kind, source)`
+    /// tuple but different certainty bands collapse to one entry —
+    /// the first-seen one. We deliberately do NOT promote the
+    /// certainty during dedupe: the union pass already runs the FM
+    /// twice on overlapping windows and the second pass's certainty
+    /// is just as authoritative as the first. Treating certainty as
+    /// identity here would explode the anchor set with one entry per
+    /// (key, certainty) pair instead of one entry per grounding,
+    /// which is the unit downstream consumers actually care about.
     private static func dedupAnchors(_ anchors: [ResolvedEvidenceAnchor]) -> [ResolvedEvidenceAnchor] {
         var seen = Set<String>()
         var result: [ResolvedEvidenceAnchor] = []
@@ -1400,6 +1658,26 @@ actor BackfillJobRunner {
         }
     }
 
+    #if DEBUG
+    /// Cycle 4 M3: DEBUG accessor for the cycle-2 Rev1-L5 exhaustiveness
+    /// test. The cycle-2 test only enumerated cases inside a local switch
+    /// and never actually called `isPermanent`, so drift between the
+    /// test's expected permanence table and the real production switch
+    /// would go undetected. This accessor lets the test call the real
+    /// function and assert the expected classification per case.
+    static func isPermanentForTesting(_ error: AnalysisStoreError) -> Bool {
+        isPermanent(error)
+    }
+
+    /// Cycle 8 M-5 call-site rail: DEBUG accessor exposing the classifier
+    /// the runner was constructed with, so a test can walk
+    /// PlayheadRuntime → AdDetectionService → factory → runner → classifier
+    /// and assert the production wiring still injects an ACTIVE redactor
+    /// (not `.noop`). A regression that swaps `.noop` for `bd1enRedactor`
+    /// at the call site on `PlayheadRuntime.swift:228` trips this rail.
+    var classifierForTesting: FoundationModelClassifier { classifier }
+    #endif
+
     private func phasePriority(_ phase: BackfillJobPhase) -> Int {
         switch phase {
         case .scanLikelyAdSlots: 30
@@ -1409,15 +1687,51 @@ actor BackfillJobRunner {
         }
     }
 
+    /// Cycle 2 Rev1-M4: this guard intentionally short-circuits whenever
+    /// the plan is anything OTHER than `.targetedWithAudit` and whenever
+    /// the phase is `.fullEpisodeScan`. The contract:
+    ///
+    /// - `.fullCoverage` / `.periodicFullRescan` plans only contain a
+    ///   single `.fullEpisodeScan` phase, which by definition runs
+    ///   against the entire transcript and must NOT be narrowed.
+    /// - `.targetedWithAudit` runs all three targeted phases — narrowing
+    ///   applies to each one individually.
+    ///
+    /// Any future targeted variant (e.g. a hypothetical `.targetedAdsOnly`
+    /// without audit, or a `.targetedWithDriftCheck` policy) will hit
+    /// this guard, fall through, and run unnarrowed against the full
+    /// transcript. That's a safe default — over-scanning costs FM tokens
+    /// but never produces incorrect output. The trade-off is intentional:
+    /// when a new targeted policy lands, the runner author MUST add it to
+    /// this guard explicitly so the narrowing semantics are an opt-in
+    /// design decision rather than an accidental inheritance.
+    ///
+    /// Cycle 2 C5/H13: returns `nil` when narrowing skipped the phase
+    /// entirely (wasEmpty). The caller must NOT dispatch FM work on a
+    /// nil result and must NOT contribute to the recall sample numerator
+    /// for that phase.
     private func narrowedInputs(
         for job: BackfillJob,
         plan: CoveragePlan,
         rootInputs: AssetInputs
-    ) -> AssetInputs {
+    ) -> AssetInputs? {
         guard plan.policy == .targetedWithAudit, job.phase != .fullEpisodeScan else {
             return rootInputs
         }
-        let narrowed = TargetedWindowNarrower.narrow(
+        #if DEBUG
+        // Cycle 6 B6 M: test-only path that forces every non-fullEpisodeScan
+        // phase to record `wasEmpty`. Used by `targetedAllPhasesEmpty…`
+        // runner-level rails to exercise the rollup at the bottom of
+        // `runPendingBackfill` (the live path cannot drive audit empty
+        // under a natural fixture). Gated behind DEBUG so release builds
+        // never see the short-circuit.
+        if forceNarrowingEmptyForTesting {
+            narrowingEmptyByPhase[job.phase, default: 0] += 1
+            narrowingPhasesEmptyThisRun.insert(job.phase)
+            return nil
+        }
+        #endif
+        let result = TargetedWindowNarrower.narrow(
             phase: job.phase,
             inputs: TargetedWindowNarrower.Inputs(
                 analysisAssetId: rootInputs.analysisAssetId,
@@ -1425,16 +1739,114 @@ actor BackfillJobRunner {
                 transcriptVersion: rootInputs.transcriptVersion,
                 segments: rootInputs.segments,
                 evidenceCatalog: rootInputs.evidenceCatalog,
-                auditWindowSampleRate: plan.auditWindowSampleRate ?? coveragePlanner.auditWindowSampleRate
+                auditWindowSampleRate: plan.auditWindowSampleRate ?? coveragePlanner.auditWindowSampleRate,
+                episodesSinceLastFullRescan: rootInputs.plannerContext.episodesSinceLastFullRescan
             )
         )
+        if result.wasEmpty {
+            // Cycle 2 H13: empty phase. Skip without dispatching FM work.
+            // Counter is bumped by phase name so cross-show patterns are
+            // visible (e.g. "harvester is consistently empty on this show").
+            narrowingEmptyByPhase[job.phase, default: 0] += 1
+            // Cycle 4 B4: track per-run for the all-phases-empty rollup.
+            narrowingPhasesEmptyThisRun.insert(job.phase)
+            return nil
+        }
+        if result.aborted {
+            // Cycle 2 C5: per-anchor windows merged to more than the cap.
+            // Fall back to the full segment list (root inputs) so we still
+            // get coverage; bump the abort counter exactly once for this
+            // phase invocation.
+            narrowingAbortedByPhase[job.phase, default: 0] += 1
+            return rootInputs
+        }
+        // Cycle 4 L3: `narrowedSegments` cannot be nil on this path.
+        // `wasEmpty` and `aborted` both return early above, so a fall-through
+        // means the narrower produced a concrete segment list. Force-unwrap
+        // with a precondition so a future regression (e.g. a fourth
+        // terminal state slipping into `TargetedWindowNarrower.Result`)
+        // turns into a loud trap instead of a silent full-episode fallback
+        // that masks the bug.
+        guard let narrowedSegments = result.narrowedSegments else {
+            preconditionFailure(
+                "TargetedWindowNarrower returned neither wasEmpty, aborted, nor narrowedSegments for phase=\(job.phase.rawValue)"
+            )
+        }
         return AssetInputs(
             analysisAssetId: rootInputs.analysisAssetId,
             podcastId: rootInputs.podcastId,
-            segments: narrowed,
+            segments: narrowedSegments,
             evidenceCatalog: rootInputs.evidenceCatalog,
             transcriptVersion: rootInputs.transcriptVersion,
             plannerContext: rootInputs.plannerContext
+        )
+    }
+
+    // MARK: - Cycle 2 narrowing telemetry (C5 + H13)
+
+    /// Cycle 2 C5: per-phase counter incremented when the merged
+    /// per-anchor windows exceed `NarrowingConfig.maxNarrowedSegmentsPerPhase`
+    /// and the runner falls back to root inputs for that phase.
+    private(set) var narrowingAbortedByPhase: [BackfillJobPhase: Int] = [:]
+    /// Cycle 2 H13: per-phase counter incremented when narrowing returned
+    /// `wasEmpty` and the phase was skipped entirely (no FM dispatch, no
+    /// contribution to the recall sample).
+    private(set) var narrowingEmptyByPhase: [BackfillJobPhase: Int] = [:]
+    /// Cycle 2 H13: counter incremented when EVERY non-fullEpisodeScan
+    /// phase for the episode came back empty. Distinct from per-phase
+    /// `narrowingEmptyByPhase` so operators can distinguish "harvester
+    /// always empty" from "this whole episode produced nothing".
+    private(set) var narrowingAllPhasesEmptyCount: Int = 0
+    /// Cycle 2 C4: counter incremented on every full-rescan run that
+    /// produced an ad-free episode (empty `actualAdLineRefs`). Such runs
+    /// do NOT advance the planner ring — see the recall-sample call
+    /// site for the policy.
+    private(set) var episodesObservedWithoutSample: Int = 0
+    /// Cycle 4 B4: per-run set of non-fullEpisodeScan phases for which
+    /// `TargetedWindowNarrower.narrow` returned `wasEmpty = true` during
+    /// THIS invocation of `runPendingBackfill`. Populated lazily by
+    /// `narrowedInputs`. Reset on entry to `runPendingBackfill` alongside
+    /// the other per-run counters. Consumed once at the bottom of the
+    /// run to decide whether to bump the persisted
+    /// `narrowingAllPhasesEmptyEpisodeCount` on the planner state row.
+    private(set) var narrowingPhasesEmptyThisRun: Set<BackfillJobPhase> = []
+
+    #if DEBUG
+    /// Cycle 6 B6 L: test-only hook to seed `narrowingPhasesEmptyThisRun`
+    /// between two `runPendingBackfill` calls so the reset rail at the
+    /// top of `runPendingBackfill` can be asserted directly. Not exposed
+    /// in release builds.
+    func forceSeedPhasesEmptyThisRunForTesting(_ phases: Set<BackfillJobPhase>) {
+        narrowingPhasesEmptyThisRun = phases
+    }
+
+    /// Cycle 6 B6 M: test-only flag that forces every non-fullEpisodeScan
+    /// phase's narrowing call to record `wasEmpty`. Exercised by the
+    /// runner-level rail `targetedAllPhasesEmptyBumpsPersistedCounter…Runner`
+    /// to drive the rollup at the bottom of `runPendingBackfill`. The
+    /// live path cannot produce audit-empty under any natural fixture
+    /// (auditSegments always returns at least one segment), so a test
+    /// hook is the only way to rail the runner-side rollup.
+    var forceNarrowingEmptyForTesting: Bool = false
+
+    func setForceNarrowingEmptyForTesting(_ enabled: Bool) {
+        forceNarrowingEmptyForTesting = enabled
+    }
+    #endif
+
+    func snapshotNarrowingTelemetry() -> (
+        abortedByPhase: [BackfillJobPhase: Int],
+        emptyByPhase: [BackfillJobPhase: Int],
+        allPhasesEmpty: Int,
+        observedWithoutSample: Int,
+        phasesEmptyThisRun: Set<BackfillJobPhase>
+    ) {
+        (
+            narrowingAbortedByPhase,
+            narrowingEmptyByPhase,
+            narrowingAllPhasesEmptyCount,
+            episodesObservedWithoutSample,
+            narrowingPhasesEmptyThisRun
         )
     }
 
@@ -1442,8 +1854,10 @@ actor BackfillJobRunner {
         windowOutput: FMCoarseWindowOutput,
         inputs: AssetInputs,
         jobId: String,
+        jobPhase: BackfillJobPhase,
         scanPass: String,
-        status: SemanticScanStatus
+        status: SemanticScanStatus,
+        runMode: SemanticScanPhase
     ) -> SemanticScanResult {
         let firstAtom = inputs.segments.first(where: {
             $0.segmentIndex == windowOutput.lineRefs.first
@@ -1492,7 +1906,9 @@ actor BackfillJobRunner {
             prewarmHit: false,
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
-            reuseScope: jobId
+            reuseScope: jobId,
+            runMode: runMode,
+            jobPhase: jobPhase.rawValue
         )
     }
 
@@ -1500,7 +1916,9 @@ actor BackfillJobRunner {
         windowOutput: FMRefinementWindowOutput,
         inputs: AssetInputs,
         jobId: String,
-        status: SemanticScanStatus
+        jobPhase: BackfillJobPhase,
+        status: SemanticScanStatus,
+        runMode: SemanticScanPhase
     ) -> SemanticScanResult {
         let firstAtom = inputs.segments.first(where: {
             $0.segmentIndex == windowOutput.lineRefs.first
@@ -1543,7 +1961,9 @@ actor BackfillJobRunner {
             prewarmHit: false,
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
-            reuseScope: jobId
+            reuseScope: jobId,
+            runMode: runMode,
+            jobPhase: jobPhase.rawValue
         )
     }
 
@@ -1552,8 +1972,10 @@ actor BackfillJobRunner {
         attemptedSegments: [AdTranscriptSegment],
         inputs: AssetInputs,
         jobId: String,
+        jobPhase: BackfillJobPhase,
         status: SemanticScanStatus,
         latencyMs: Double,
+        runMode: SemanticScanPhase,
         windowKey: String? = nil
     ) -> SemanticScanResult? {
         guard let range = attemptedRange(for: attemptedSegments) else {
@@ -1585,7 +2007,9 @@ actor BackfillJobRunner {
             prewarmHit: false,
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
-            reuseScope: jobId
+            reuseScope: jobId,
+            runMode: runMode,
+            jobPhase: jobPhase.rawValue
         )
     }
 
@@ -1593,8 +2017,10 @@ actor BackfillJobRunner {
         plan: RefinementWindowPlan,
         inputs: AssetInputs,
         jobId: String,
+        jobPhase: BackfillJobPhase,
         status: SemanticScanStatus,
-        latencyMs: Double
+        latencyMs: Double,
+        runMode: SemanticScanPhase
     ) -> SemanticScanResult? {
         let attemptedSegments = inputs.segments.filter { plan.lineRefs.contains($0.segmentIndex) }
         return makeFailureScanResult(
@@ -1602,8 +2028,10 @@ actor BackfillJobRunner {
             attemptedSegments: attemptedSegments,
             inputs: inputs,
             jobId: jobId,
+            jobPhase: jobPhase,
             status: status,
             latencyMs: latencyMs,
+            runMode: runMode,
             windowKey: "window=\(plan.windowIndex)"
         )
     }
@@ -1612,8 +2040,10 @@ actor BackfillJobRunner {
         plan: CoarsePassWindowPlan,
         inputs: AssetInputs,
         jobId: String,
+        jobPhase: BackfillJobPhase,
         status: SemanticScanStatus,
-        latencyMs: Double
+        latencyMs: Double,
+        runMode: SemanticScanPhase
     ) -> SemanticScanResult? {
         let attemptedSegments = inputs.segments.filter { plan.lineRefs.contains($0.segmentIndex) }
         return makeFailureScanResult(
@@ -1621,8 +2051,10 @@ actor BackfillJobRunner {
             attemptedSegments: attemptedSegments,
             inputs: inputs,
             jobId: jobId,
+            jobPhase: jobPhase,
             status: status,
             latencyMs: latencyMs,
+            runMode: runMode,
             windowKey: "window=\(plan.windowIndex)"
         )
     }
@@ -1661,7 +2093,9 @@ actor BackfillJobRunner {
     private func makeEvidenceEvents(
         windowOutput: FMRefinementWindowOutput,
         inputs: AssetInputs,
-        jobId: String
+        jobId: String,
+        jobPhase: BackfillJobPhase,
+        runMode: SemanticScanPhase
     ) -> [EvidenceEvent] {
         var events: [EvidenceEvent] = []
         var seenEventIds = Set<String>()
@@ -1695,12 +2129,20 @@ actor BackfillJobRunner {
                 lastLineRef: span.lastLineRef,
                 jobId: jobId,
                 // R4-Fix4: persist `memoryWriteEligible` so the H-R3-1
-                // in-memory protection has a production consumer. A future
-                // Phase 8 sponsor-memory writer reading
-                // `evidence_events.evidenceJSON` can honor the eligibility
-                // decision without recomputing it.
+                // in-memory protection has a production consumer. A
+                // future Phase 8 sponsor-memory writer reading
+                // `evidence_events.evidenceJSON` can honor the
+                // eligibility decision without recomputing it.
                 memoryWriteEligible: span.memoryWriteEligible,
-                anchors: encodedAnchors
+                anchors: encodedAnchors,
+                // Cycle 2 H4: persist the suppression flag alongside
+                // memoryWriteEligible. Phase 8 sponsor-memory writers
+                // MUST skip spans with `ownershipInferenceWasSuppressed
+                // == true` because the commercialIntent / ownership /
+                // alternativeExplanation fields on these spans are
+                // hardcoded constants from the permissive bypass path,
+                // not real FM-inferred classification signals.
+                ownershipInferenceWasSuppressed: span.ownershipInferenceWasSuppressed
             )
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
@@ -1727,7 +2169,9 @@ actor BackfillJobRunner {
                     atomOrdinals: atomOrdinals,
                     evidenceJSON: evidenceJSON,
                     scanCohortJSON: scanCohortJSON,
-                    createdAt: clock().timeIntervalSince1970
+                    createdAt: clock().timeIntervalSince1970,
+                    runMode: runMode,
+                    jobPhase: jobPhase.rawValue
                 )
             )
         }
@@ -1765,6 +2209,15 @@ actor BackfillJobRunner {
     /// bd-3vm: serialized form of a `RefinedAdSpan` written to
     /// `semantic_scan_results.spansJSON`. The `anchors` field is optional
     /// so legacy rows (which omitted it entirely) decode without throwing.
+    ///
+    /// Cycle 2 H4 / Cycle 4 M-6: `ownershipInferenceWasSuppressed` is a
+    /// non-optional `Bool` that defaults to `false` when a legacy
+    /// spansJSON row omits the key. Set to `true` only on the
+    /// permissive bypass path where the runner hardcodes
+    /// commercialIntent / ownership / alternativeExplanation defaults
+    /// rather than reading them from the FM. Phase 8 sponsor-memory
+    /// writers MUST gate writes on this flag (skip suppressed spans)
+    /// because their classification dimensions are not real signals.
     struct EncodedRefinedSpan: Codable, Equatable {
         let firstLineRef: Int
         let lastLineRef: Int
@@ -1774,6 +2227,53 @@ actor BackfillJobRunner {
         /// bd-3vm: per-anchor identity tuples. Nil on legacy rows; empty
         /// array on post-bd-3vm rows whose span carried no anchors.
         let anchors: [EncodedAnchor]?
+        /// Cycle 2 H4 / Cycle 4 M-6: non-optional so legacy rows that
+        /// omitted the key decode to `false` (the safe default — a
+        /// row written before H4 cannot be a permissive-bypass span).
+        let ownershipInferenceWasSuppressed: Bool
+
+        init(
+            firstLineRef: Int,
+            lastLineRef: Int,
+            commercialIntent: String,
+            ownership: String,
+            certainty: String,
+            anchors: [EncodedAnchor]?,
+            ownershipInferenceWasSuppressed: Bool = false
+        ) {
+            self.firstLineRef = firstLineRef
+            self.lastLineRef = lastLineRef
+            self.commercialIntent = commercialIntent
+            self.ownership = ownership
+            self.certainty = certainty
+            self.anchors = anchors
+            self.ownershipInferenceWasSuppressed = ownershipInferenceWasSuppressed
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case firstLineRef
+            case lastLineRef
+            case commercialIntent
+            case ownership
+            case certainty
+            case anchors
+            case ownershipInferenceWasSuppressed
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.firstLineRef = try container.decode(Int.self, forKey: .firstLineRef)
+            self.lastLineRef = try container.decode(Int.self, forKey: .lastLineRef)
+            self.commercialIntent = try container.decode(String.self, forKey: .commercialIntent)
+            self.ownership = try container.decode(String.self, forKey: .ownership)
+            self.certainty = try container.decode(String.self, forKey: .certainty)
+            self.anchors = try container.decodeIfPresent([EncodedAnchor].self, forKey: .anchors)
+            // Cycle 4 M-6: default to false on legacy rows.
+            self.ownershipInferenceWasSuppressed = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .ownershipInferenceWasSuppressed
+            ) ?? false
+        }
     }
 
     /// bd-3vm: shared encoder. Exposed `internal static` so tests can
@@ -1796,7 +2296,11 @@ actor BackfillJobRunner {
                 commercialIntent: span.commercialIntent.rawValue,
                 ownership: span.ownership.rawValue,
                 certainty: span.certainty.rawValue,
-                anchors: anchors
+                anchors: anchors,
+                // Cycle 2 H4: persist the suppression flag so a future
+                // sponsor-memory writer reading spansJSON or
+                // EvidencePayload can skip permissive-bypass spans.
+                ownershipInferenceWasSuppressed: span.ownershipInferenceWasSuppressed
             )
         }
         let encoder = JSONEncoder()
@@ -1841,6 +2345,13 @@ extension BackfillJobRunner {
         /// evidence anchors. Optional so legacy evidence_events rows
         /// (written before bd-3vm) decode cleanly with `anchors == nil`.
         let anchors: [EncodedAnchor]?
+        /// Cycle 2 H4 / Cycle 4 M-6: non-optional so legacy
+        /// evidence_events rows (written before H4) decode to the safe
+        /// default `false` (a row written before H4 cannot be a
+        /// permissive-bypass span and must not be skipped retroactively
+        /// by sponsor-memory writers). Set to `true` only by spans
+        /// emitted on the permissive bypass path.
+        let ownershipInferenceWasSuppressed: Bool
 
         init(
             commercialIntent: String,
@@ -1851,7 +2362,8 @@ extension BackfillJobRunner {
             lastLineRef: Int,
             jobId: String,
             memoryWriteEligible: Bool,
-            anchors: [EncodedAnchor]?
+            anchors: [EncodedAnchor]?,
+            ownershipInferenceWasSuppressed: Bool = false
         ) {
             self.commercialIntent = commercialIntent
             self.ownership = ownership
@@ -1862,6 +2374,38 @@ extension BackfillJobRunner {
             self.jobId = jobId
             self.memoryWriteEligible = memoryWriteEligible
             self.anchors = anchors
+            self.ownershipInferenceWasSuppressed = ownershipInferenceWasSuppressed
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case commercialIntent
+            case ownership
+            case certainty
+            case boundaryPrecision
+            case firstLineRef
+            case lastLineRef
+            case jobId
+            case memoryWriteEligible
+            case anchors
+            case ownershipInferenceWasSuppressed
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.commercialIntent = try container.decode(String.self, forKey: .commercialIntent)
+            self.ownership = try container.decode(String.self, forKey: .ownership)
+            self.certainty = try container.decode(String.self, forKey: .certainty)
+            self.boundaryPrecision = try container.decode(String.self, forKey: .boundaryPrecision)
+            self.firstLineRef = try container.decode(Int.self, forKey: .firstLineRef)
+            self.lastLineRef = try container.decode(Int.self, forKey: .lastLineRef)
+            self.jobId = try container.decode(String.self, forKey: .jobId)
+            self.memoryWriteEligible = try container.decode(Bool.self, forKey: .memoryWriteEligible)
+            self.anchors = try container.decodeIfPresent([EncodedAnchor].self, forKey: .anchors)
+            // Cycle 4 M-6: default to false on legacy rows.
+            self.ownershipInferenceWasSuppressed = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .ownershipInferenceWasSuppressed
+            ) ?? false
         }
     }
 }

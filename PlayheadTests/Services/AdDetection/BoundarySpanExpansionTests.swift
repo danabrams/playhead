@@ -511,7 +511,7 @@ private func makeBoundarySpanSchema(firstLineRef: Int, lastLineRef: Int) -> Refi
             firstLineRef: firstLineRef,
             lastLineRef: lastLineRef,
             certainty: .strong,
-            boundaryPrecision: .rough,
+            boundaryPrecision: .usable,
             evidenceAnchors: makeAnchorsCovering(firstLineRef: firstLineRef, lastLineRef: lastLineRef),
             alternativeExplanation: .none,
             reasonTags: []
@@ -596,7 +596,7 @@ private func makeExpansionInputs(
     )
     let plannerContext = CoveragePlannerContext(
         observedEpisodeCount: 0,
-        stablePrecision: false,
+        stableRecall: false,
         isFirstEpisodeAfterCohortInvalidation: false,
         recallDegrading: false,
         sponsorDriftDetected: false,

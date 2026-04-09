@@ -51,7 +51,7 @@ struct BackfillJobRunnerTests {
         )
         let plannerContext = CoveragePlannerContext(
             observedEpisodeCount: 0,
-            stablePrecision: false,
+            stableRecall: false,
             isFirstEpisodeAfterCohortInvalidation: false,
             recallDegrading: false,
             sponsorDriftDetected: false,
@@ -75,19 +75,32 @@ struct BackfillJobRunnerTests {
         transcriptVersion: String = "tx-targeted-v1",
         plannerContext: CoveragePlannerContext
     ) -> BackfillJobRunner.AssetInputs {
+        // Cycle 2 C5: the per-anchor narrowing model uses padding=5 by
+        // default, so a 5-segment-wide window centered on every anchor
+        // covers ~11 segments. The legacy 8-segment fixture is smaller
+        // than that envelope, which made every "narrowed" phase devolve
+        // back to the full transcript and broke the strict-subset
+        // invariant this test pins. Use a 30-segment fixture with the
+        // ad lines clustered near the middle so the narrowed envelope
+        // is meaningfully smaller than the full transcript.
+        var lines: [(Double, Double, String)] = []
+        for idx in 0..<30 {
+            let start = Double(idx) * 10.0
+            let text: String
+            switch idx {
+            case 12:
+                text = "Before we continue, this episode is brought to you by ExampleCo."
+            case 13:
+                text = "Visit example.com slash deal and use promo code PLAYHEAD."
+            default:
+                text = "Editorial line \(idx) about the topic of the day."
+            }
+            lines.append((start, start + 10.0, text))
+        }
         let segments = makeFMSegments(
             analysisAssetId: assetId,
             transcriptVersion: transcriptVersion,
-            lines: [
-                (0, 10, "Welcome back to the show and today's interview."),
-                (10, 20, "Before we continue, this episode is brought to you by ExampleCo."),
-                (20, 30, "Visit example.com slash deal and use promo code PLAYHEAD."),
-                (30, 40, "Now back to the conversation with our guest."),
-                (40, 50, "We discuss the roadmap and next release milestones."),
-                (50, 60, "The panel shares lessons learned from production incidents."),
-                (60, 70, "Audience questions focus on reliability and performance."),
-                (70, 80, "Thanks for listening and see you next week.")
-            ]
+            lines: lines
         )
         let evidenceCatalog = EvidenceCatalogBuilder.build(
             atoms: segments.flatMap(\.atoms),
@@ -190,7 +203,7 @@ struct BackfillJobRunnerTests {
         let runner = makeRunner(store: store, runtime: runtime.runtime)
         let targetedContext = CoveragePlannerContext(
             observedEpisodeCount: 20,
-            stablePrecision: true,
+            stableRecall: true,
             isFirstEpisodeAfterCohortInvalidation: false,
             recallDegrading: false,
             sponsorDriftDetected: false,
@@ -241,15 +254,170 @@ struct BackfillJobRunnerTests {
         }
     }
 
+    // Cycle 10 Rev3-M5: production-path rail for the `runMode` discriminator.
+    //
+    // The schema column, struct field, and decoder were wired in cycle 2, but
+    // until cycle 10 no production call site in `BackfillJobRunner` ever
+    // passed `runMode: .targeted` — every row defaulted to `.shadow`, making
+    // the column dead storage. This test drives the runner end-to-end under a
+    // `targetedWithAudit` plan and asserts that the persisted scan-result +
+    // evidence-event rows carry `.targeted` so a query like
+    // `WHERE runMode = 'targeted'` returns the rows the planner produced.
+    //
+    // Mapping: `runMode = .targeted` iff `job.coveragePolicy == .targetedWithAudit`.
+    // This matches the original Rev3-M5 intent (distinguish Phase 3 shadow
+    // validation rows from Phase 5 targeted execution rows via planner policy,
+    // not via FMBackfillMode). A non-targeted plan (fullCoverage) must write
+    // `.shadow` regardless of FMBackfillMode so existing readers stay stable.
+    @Test("cycle10 Rev3-M5: runner writes runMode=targeted under targetedWithAudit plans")
+    func targetedPlanWritesTargetedRunMode() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-runmode-targeted"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        // Seed the refinement path so at least one passB row + evidence row
+        // gets persisted — we want coverage on both tables, not just passA.
+        let spanSchema = SpanRefinementSchema(
+            commercialIntent: .paid,
+            ownership: .thirdParty,
+            firstLineRef: 12,
+            lastLineRef: 13,
+            certainty: .strong,
+            boundaryPrecision: .precise,
+            evidenceAnchors: [
+                EvidenceAnchorSchema(
+                    evidenceRef: nil,
+                    lineRef: 12,
+                    kind: .ctaPhrase,
+                    certainty: .strong
+                )
+            ],
+            alternativeExplanation: .none,
+            reasonTags: [.callToAction]
+        )
+        let runtime = TestFMRuntime(
+            coarseResponses: (0..<4).map { _ in
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [12],
+                        certainty: .strong
+                    )
+                )
+            },
+            refinementResponses: (0..<4).map { _ in
+                RefinementWindowSchema(spans: [spanSchema])
+            }
+        )
+        let runner = makeRunner(store: store, runtime: runtime.runtime)
+        let targetedContext = CoveragePlannerContext(
+            observedEpisodeCount: 20,
+            stableRecall: true,
+            isFirstEpisodeAfterCohortInvalidation: false,
+            recallDegrading: false,
+            sponsorDriftDetected: false,
+            auditMissDetected: false,
+            episodesSinceLastFullRescan: 1,
+            periodicFullRescanIntervalEpisodes: 10
+        )
+        // Sanity: the planner under this context must actually produce the
+        // targetedWithAudit policy — otherwise the test would be green against
+        // a shadow-only run and provide no coverage.
+        let plan = CoveragePlanner().plan(for: targetedContext)
+        #expect(plan.policy == .targetedWithAudit)
+
+        let inputs = makeTargetedInputs(
+            assetId: assetId,
+            podcastId: "podcast-runmode-targeted",
+            transcriptVersion: "tx-runmode-targeted-v1",
+            plannerContext: targetedContext
+        )
+
+        let result = try await runner.runPendingBackfill(for: inputs)
+        #expect(!result.scanResultIds.isEmpty)
+
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+        #expect(!scans.isEmpty, "targeted plan should persist at least one scan result row")
+
+        // Every row written under a targetedWithAudit plan must carry
+        // runMode = .targeted. Zero rows with the default .shadow are
+        // permitted — the planner policy is the discriminator and every
+        // job in this plan was admitted under that policy.
+        let targetedScans = scans.filter { $0.runMode == .targeted }
+        let shadowScans = scans.filter { $0.runMode == .shadow }
+        #expect(
+            targetedScans.count == scans.count,
+            "all \(scans.count) rows should carry runMode=.targeted, got \(targetedScans.count) targeted / \(shadowScans.count) shadow"
+        )
+        #expect(shadowScans.isEmpty, "no rows should fall through to the default .shadow under a targetedWithAudit plan")
+
+        // Evidence events produced by passB under the targeted plan must
+        // also be tagged targeted so `WHERE runMode = 'targeted'` queries
+        // on `evidence_events` return them.
+        let evidence = try await store.fetchEvidenceEvents(analysisAssetId: assetId)
+        if !evidence.isEmpty {
+            let targetedEvidence = evidence.filter { $0.runMode == .targeted }
+            #expect(
+                targetedEvidence.count == evidence.count,
+                "all \(evidence.count) evidence rows should carry runMode=.targeted, got \(targetedEvidence.count)"
+            )
+        }
+    }
+
+    // Cycle 10 Rev3-M5: the non-targeted control rail. A fullCoverage plan
+    // (the default Phase 3 shadow-validation path) must keep writing
+    // runMode=.shadow so existing shadow-mode consumers and the Rev3-M5
+    // store-level round-trip rail stay green. This pins the semantics of
+    // the mapping: `.targeted` only when the PLANNER policy is
+    // `.targetedWithAudit`, independent of FMBackfillMode.
+    @Test("cycle10 Rev3-M5: runner writes runMode=shadow under fullCoverage plans")
+    func fullCoveragePlanWritesShadowRunMode() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [1],
+                        certainty: .strong
+                    )
+                )
+            ]
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        let inputs = makeInputs()
+        // Sanity: default plannerContext must still map to fullCoverage so
+        // this test exercises the control rail rather than silently
+        // following the same path as the targeted test above.
+        let plan = CoveragePlanner().plan(for: inputs.plannerContext)
+        #expect(plan.policy == .fullCoverage)
+
+        _ = try await runner.runPendingBackfill(for: inputs)
+
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")
+        #expect(!scans.isEmpty)
+        #expect(
+            scans.allSatisfy { $0.runMode == .shadow },
+            "fullCoverage plan must write runMode=.shadow for every row"
+        )
+    }
+
     @Test("playhead-nlh: full-rescan path records non-nil precision samples and unlocks targetedWithAudit")
     func fullRescanPersistsPrecisionSamplesAndUnlocksTargetedCoverage() async throws {
         let store = try await makeTestStore()
         let podcastId = "podcast-planner-live"
+        // Cycle 2 C5: under the new makeTargetedInputs fixture the ad
+        // copy lives at line refs 12-13 (so the harvester anchors land
+        // there). The fake coarse FM must report a support line ref that
+        // overlaps the narrower's predicted window so the recall sample
+        // is non-zero.
         let coarseResponses = (0..<5).map { _ in
             CoarseScreeningSchema(
                 disposition: .containsAd,
                 support: CoarseSupportSchema(
-                    supportLineRefs: [2],
+                    supportLineRefs: [12],
                     certainty: .strong
                 )
             )
@@ -264,7 +432,7 @@ struct BackfillJobRunnerTests {
             let state = try await store.fetchPodcastPlannerState(podcastId: podcastId)
             let context = CoveragePlannerContext(
                 observedEpisodeCount: state?.observedEpisodeCount ?? 0,
-                stablePrecision: state?.stablePrecisionFlag ?? false,
+                stableRecall: state?.stableRecallFlag ?? false,
                 isFirstEpisodeAfterCohortInvalidation: false,
                 recallDegrading: false,
                 sponsorDriftDetected: false,
@@ -284,12 +452,12 @@ struct BackfillJobRunnerTests {
 
         let finalState = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
         #expect(finalState.observedEpisodeCount == 5)
-        #expect(!finalState.precisionSamples.isEmpty, "live full-rescan path should persist precision samples")
-        #expect(finalState.stablePrecisionFlag, "stable precision should flip true once sample and episode thresholds are met")
+        #expect(!finalState.recallSamples.isEmpty, "live full-rescan path should persist precision samples")
+        #expect(finalState.stableRecallFlag, "stable precision should flip true once sample and episode thresholds are met")
 
         let plannerContext = CoveragePlannerContext(
             observedEpisodeCount: finalState.observedEpisodeCount,
-            stablePrecision: finalState.stablePrecisionFlag,
+            stableRecall: finalState.stableRecallFlag,
             isFirstEpisodeAfterCohortInvalidation: false,
             recallDegrading: false,
             sponsorDriftDetected: false,
@@ -1079,7 +1247,7 @@ struct BackfillJobRunnerTests {
 
         let plannerContext = CoveragePlannerContext(
             observedEpisodeCount: 20,
-            stablePrecision: true,
+            stableRecall: true,
             isFirstEpisodeAfterCohortInvalidation: false,
             recallDegrading: false,
             sponsorDriftDetected: false,
@@ -1163,7 +1331,7 @@ struct BackfillJobRunnerTests {
 
         let plannerContext = CoveragePlannerContext(
             observedEpisodeCount: 20,
-            stablePrecision: true,
+            stableRecall: true,
             isFirstEpisodeAfterCohortInvalidation: false,
             recallDegrading: false,
             sponsorDriftDetected: false,
@@ -1605,6 +1773,64 @@ struct BackfillJobRunnerTests {
         #expect(a == b)
     }
 
+    @Test("Rev1-L5: every AnalysisStoreError case has a defined permanence classification")
+    func isPermanentExhaustivenessRail() {
+        // Mirrors `caseNameCoversEveryCase`: this test exists so any new
+        // `AnalysisStoreError` case fails compilation here BEFORE it
+        // ships with an undefined permanence classification. The switch
+        // below must enumerate every case explicitly — `default:` would
+        // defeat the rail.
+        //
+        // Cycle 4 M3: the cycle-2 version of this test only enumerated
+        // cases at compile time; it never called the real production
+        // `isPermanent` so drift between this table and the real switch
+        // would have gone undetected. Now every case is paired with its
+        // expected classification and the test calls
+        // `BackfillJobRunner.isPermanentForTesting(_:)` for real.
+        let cases: [(AnalysisStoreError, Bool)] = [
+            (.openFailed(code: 1, message: "x"), false),
+            (.migrationFailed("x"), false),
+            (.queryFailed("x"), false),
+            (.insertFailed("x"), false),
+            (.insertFailed("payloadTooLarge: 999"), true),
+            (.notFound, false),
+            (.duplicateJobId("x"), false),
+            (.invalidRow(column: 0), true),
+            (.invalidEvidenceEvent("x"), true),
+            (.invalidScanCohortJSON("x"), true),
+            (.invalidStateTransition(jobId: "j", fromStatus: nil, toStatus: "running"), false),
+            (.evidenceEventBodyMismatch(id: "x"), true),
+        ]
+        // Force the switch to be exhaustive against the enum so a new
+        // case fails compilation here.
+        for (error, _) in cases {
+            switch error {
+            case .openFailed,
+                 .migrationFailed,
+                 .queryFailed,
+                 .insertFailed,
+                 .notFound,
+                 .duplicateJobId,
+                 .invalidRow,
+                 .invalidEvidenceEvent,
+                 .invalidScanCohortJSON,
+                 .invalidStateTransition,
+                 .evidenceEventBodyMismatch:
+                continue
+            }
+        }
+        // Real production call — any drift between this table and the
+        // real `isPermanent(_:)` switch lights up here.
+        for (error, expected) in cases {
+            let actual = BackfillJobRunner.isPermanentForTesting(error)
+            #expect(
+                actual == expected,
+                "isPermanent(\(error)) expected \(expected) got \(actual)"
+            )
+        }
+        #expect(cases.count == 12)
+    }
+
     @Test("bd-1tl: caseName covers every AnalysisStoreError case with a stable token")
     func caseNameCoversEveryCase() {
         // bd-1tl: the on-device run reported `AnalysisStoreError error 9`
@@ -1744,7 +1970,7 @@ struct BackfillJobRunnerTests {
             transcriptVersion: "tx-runner-v1",
             plannerContext: CoveragePlannerContext(
                 observedEpisodeCount: 0,
-                stablePrecision: false,
+                stableRecall: false,
                 isFirstEpisodeAfterCohortInvalidation: false,
                 recallDegrading: false,
                 sponsorDriftDetected: false,

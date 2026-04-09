@@ -7,7 +7,13 @@ import Testing
 import FoundationModels
 #endif
 
-@Suite("Foundation Model Classifier — Pass A/B")
+// Cycle 2 Agent A: pin this suite to serial execution so the
+// shared static `coarsePassDiagnosticObserver` /
+// `refinementRefusalDiagnosticObserver` test hooks cannot race
+// across parallel test runs. Adding the new Cycle2FixesTests suite
+// shifted Swift Testing's parallel scheduling enough to surface a
+// pre-existing race that was masked by the previous test count.
+@Suite("Foundation Model Classifier — Pass A/B", .serialized)
 struct FoundationModelClassifierTests {
 
     @Test("coarse screening schema round-trips with certainty bands")
@@ -751,7 +757,7 @@ struct FoundationModelClassifierTests {
                             firstLineRef: 1,
                             lastLineRef: 5,
                             certainty: .weak,
-                            boundaryPrecision: .rough,
+                            boundaryPrecision: .usable,
                             evidenceAnchors: [],
                             alternativeExplanation: .unknown,
                             reasonTags: [.hostReadPitch]
@@ -1253,7 +1259,7 @@ struct FoundationModelClassifierTests {
                             firstLineRef: 1,
                             lastLineRef: 17,
                             certainty: .strong,
-                            boundaryPrecision: .rough,
+                            boundaryPrecision: .usable,
                             evidenceAnchors: [
                                 EvidenceAnchorSchema(evidenceRef: 10, lineRef: 1, kind: .url, certainty: .strong),
                                 EvidenceAnchorSchema(evidenceRef: 11, lineRef: 1, kind: .url, certainty: .strong),
@@ -1349,7 +1355,7 @@ struct FoundationModelClassifierTests {
                             firstLineRef: 1,
                             lastLineRef: 17,
                             certainty: .strong,
-                            boundaryPrecision: .rough,
+                            boundaryPrecision: .usable,
                             evidenceAnchors: [
                                 duplicateAnchor,
                                 duplicateAnchor,
