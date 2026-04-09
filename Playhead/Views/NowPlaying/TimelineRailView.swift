@@ -15,6 +15,11 @@ struct TimelineRailView: View {
     /// Called when the user scrubs to a new position (fraction 0...1).
     let onSeek: (Double) -> Void
 
+    /// Injected haptic player — defaults to `SystemHapticPlayer` in
+    /// production, tests swap in a `RecordingHapticPlayer`. See
+    /// `NowPlayingBar` for the canonical seam pattern.
+    var hapticPlayer: any HapticPlaying = SystemHapticPlayer()
+
     @State private var isDragging = false
     @State private var dragProgress: Double = 0
 
@@ -33,6 +38,21 @@ struct TimelineRailView: View {
 
     private var effectiveProgress: Double {
         isDragging ? dragProgress : progress
+    }
+
+    /// Scrub-begin handler. Factored out so unit tests can drive it
+    /// directly with an injected `HapticPlaying` and assert the recorded
+    /// event without constructing a real `DragGesture`.
+    func handleScrubBegin() {
+        hapticPlayer.play(.control)
+    }
+
+    /// Scrub-end handler. Factored out for the same test-seam reason.
+    /// Calls `onSeek` with the final fraction and fires the confirm haptic.
+    /// Matches the original gesture ordering: seek first, then haptic.
+    func handleScrubEnd(fraction: Double) {
+        onSeek(fraction)
+        hapticPlayer.play(.control)
     }
 
     var body: some View {
@@ -56,7 +76,7 @@ struct TimelineRailView: View {
 
                 // MARK: Elapsed Fill
                 RoundedRectangle(cornerRadius: railHeight / 2)
-                    .fill(AppColors.secondary.opacity(0.4))
+                    .fill(AppColors.textSecondary.opacity(0.4))
                     .frame(width: max(effectiveProgress * width, 0), height: railHeight)
 
                 // MARK: Copper Playhead Line
@@ -75,16 +95,19 @@ struct TimelineRailView: View {
                     .onChanged { value in
                         if !isDragging {
                             isDragging = true
-                            HapticManager.light()
+                            handleScrubBegin()
                         }
                         let fraction = min(max(value.location.x / width, 0), 1)
                         dragProgress = fraction
                     }
                     .onEnded { value in
                         let fraction = min(max(value.location.x / width, 0), 1)
+                        // Match original order: seek → reset isDragging → haptic.
+                        // handleScrubEnd covers seek+haptic; isDragging reset
+                        // sits between them exactly as the legacy code had it.
                         onSeek(fraction)
                         isDragging = false
-                        HapticManager.light()
+                        hapticPlayer.play(.control)
                     }
             )
         }

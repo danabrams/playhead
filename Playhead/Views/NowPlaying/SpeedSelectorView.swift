@@ -9,14 +9,32 @@ struct SpeedSelectorView: View {
     let currentSpeed: Float
     let onSpeedChanged: (Float) -> Void
 
+    /// Injected haptic player — defaults to `SystemHapticPlayer` in
+    /// production, tests swap in a `RecordingHapticPlayer`. See
+    /// `NowPlayingBar` for the canonical seam pattern.
+    var hapticPlayer: any HapticPlaying = SystemHapticPlayer()
+
     private static let presets: [Float] = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 0.5, 0.75]
 
     @State private var showingPicker = false
 
+    /// Tap handler for the cycle action. Factored out so unit tests can
+    /// drive it directly with an injected `HapticPlaying` and assert the
+    /// recorded event without rendering a real SwiftUI hierarchy.
+    func handleCycleTap() {
+        hapticPlayer.play(.control)
+        cycleSpeed()
+    }
+
+    /// Long-press handler. Factored out for the same test-seam reason.
+    func handleLongPress() {
+        hapticPlayer.play(.skip)
+        showingPicker = true
+    }
+
     var body: some View {
         Button {
-            HapticManager.light()
-            cycleSpeed()
+            handleCycleTap()
         } label: {
             Text(Self.formatSpeed(currentSpeed))
                 .font(AppTypography.mono(size: 14, weight: .medium))
@@ -24,11 +42,11 @@ struct SpeedSelectorView: View {
                 .padding(.horizontal, Spacing.sm)
                 .padding(.vertical, Spacing.xxs)
                 .background(
-                    RoundedRectangle(cornerRadius: CornerRadius.sm)
+                    RoundedRectangle(cornerRadius: CornerRadius.small)
                         .fill(AppColors.surface)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: CornerRadius.sm)
+                    RoundedRectangle(cornerRadius: CornerRadius.small)
                         .stroke(AppColors.accent.opacity(0.3), lineWidth: 1)
                 )
         }
@@ -37,8 +55,7 @@ struct SpeedSelectorView: View {
         .accessibilityHint("Tap to cycle speed, long press for all options")
         .accessibilityValue(Self.formatSpeed(currentSpeed))
         .onLongPressGesture {
-            HapticManager.medium()
-            showingPicker = true
+            handleLongPress()
         }
         .confirmationDialog("Playback Speed", isPresented: $showingPicker) {
             ForEach(Self.presets.sorted(), id: \.self) { speed in
