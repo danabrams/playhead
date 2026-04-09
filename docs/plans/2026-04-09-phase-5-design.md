@@ -57,8 +57,9 @@ An atom is **anchored** if and only if it is covered by at least one of:
 
 - A Phase 4 region with `.foundationModel` origin AND `fmConsensusStrength >= .medium` (i.e. `fmConsensusStrength.value >= 0.5` — FM agreed across at least 2 windows; single-window FM is excluded). `FMConsensusStrength` is an enum with raw doubles `none=0.0, low=0.35, medium=0.7, high=1.0` — there is no 0.5 case, so the comparison must use the enum form or the `.value` property. See `Playhead/Services/AdDetection/RegionProposalBuilder.swift:13-24`.
 - An `EvidenceEntry` (from `EvidenceCatalog`, built by `EvidenceCatalogBuilder`) of trustworthy type (URL, promo code, explicit disclosure phrase, CTA phrase). See `Playhead/Services/AdDetection/EvidenceCatalogBuilder.swift:26`.
+- **Use C — single-window FM corroborated by a strong acoustic break**: a Phase 4 region with `.foundationModel` origin AND `fmConsensusStrength >= .low` (but less than `.medium`, i.e. only one FM window agreed) covers the atom, AND there is an `.acoustic`-origin region break with `breakStrength >= 0.5` within ±2 atoms of that atom. Neither signal alone is sufficient; together they form a corroborated anchor. See "Acoustic break hints (Uses A/B/C)" below.
 
-That is the entire anchor source list. Two paths. Both come pre-validated by upstream phases. Phase 5 does not run its own anchor detection logic; it consumes anchors that already passed Phase 4's filtering.
+That is the entire anchor source list. Three paths. All come pre-validated by upstream phases (including the Phase 4 `playhead-8jd` fix that surfaces `.acoustic`-origin regions). Phase 5 does not run its own anchor detection logic; it consumes anchors that already passed Phase 4's filtering.
 
 What does NOT anchor:
 
@@ -75,14 +76,18 @@ These can still produce regions in `AnalysisStore` for diagnostics and Phase 6 r
 ```swift
 struct AtomEvidence: Sendable {
     let atomOrdinal: Int
-    let isAnchored: Bool
+    let startTime: Double           // for decoder duration enforcement
+    let endTime: Double
+    let isAnchored: Bool            // FM consensus + EvidenceEntry + Use C corroboration
     let anchorProvenance: [AnchorRef]
+    let hasAcousticBreakHint: Bool  // for Use A boundary snap + Use B anti-merge
     let correctionMask: CorrectionState
 }
 
 enum AnchorRef: Sendable, Equatable {
     case fmConsensus(regionId: String, consensusStrength: Double)
     case evidenceCatalog(entry: EvidenceEntry)
+    case fmAcousticCorroborated(regionId: String, breakStrength: Double) // Use C
 }
 
 enum CorrectionState: Sendable {
@@ -143,6 +148,69 @@ struct DecodedSpan: Sendable {
 ```
 
 The decoder refuses to emit any span without an upstream anchor. **No anchor → no span. Period.** This is the precision-first invariant.
+
+### Acoustic break hints (Uses A/B/C)
+
+Phase 4's `RegionProposalBuilder` (once `playhead-8jd` lands) surfaces `.acoustic`-origin regions backed by `AcousticBreakDetector` output. These carry an `AcousticBreak.breakStrength` in `0...1`. Phase 5 uses them in three precision-preserving ways. None of the three ever manufactures a span on its own: Use A refines an already-anchored span's edges, Use B blocks an inappropriate merge, and Use C requires simultaneous single-window FM corroboration — so every span still traces back to at least one primary anchor source.
+
+`AtomEvidenceProjector` (5.1) reads `.acoustic`-origin regions from Phase 4 and sets `hasAcousticBreakHint = true` on every atom covered by an acoustic break. The projector is also where Use C is evaluated (before `isAnchored` is frozen).
+
+**Universal constant: `BOUNDARY_SNAP_RADIUS_ATOMS = 3`.** Same magnitude as `MERGE_GAP_ATOMS` — roughly two seconds of speech. Small enough to keep the snap a tight refinement of the existing boundary, large enough to catch breaks that landed slightly off the lex/FM hit that anchored the span.
+
+#### Use A — boundary refinement (decoder)
+
+When the decoder has formed a candidate span from anchored atoms, it looks for `hasAcousticBreakHint` atoms within `±BOUNDARY_SNAP_RADIUS_ATOMS` of the span's first and last atom ordinals. If one is found, the span's boundary snaps to that atom's ordinal and time.
+
+```
+for each candidate span:
+  leftWindow  = [firstAtomOrdinal - 3, firstAtomOrdinal + 3]
+  rightWindow = [lastAtomOrdinal  - 3, lastAtomOrdinal  + 3]
+  if any atom in leftWindow has hasAcousticBreakHint:
+      snap firstAtomOrdinal / startTime to that atom
+  if any atom in rightWindow has hasAcousticBreakHint:
+      snap lastAtomOrdinal  / endTime   to that atom
+```
+
+**Why.** Phase 4's region boundaries can be sloppy — they're driven by the lex/FM hit, not by the actual moment the host stops talking and the ad starts. Acoustic edges (energy drops, pause clusters, spectral spikes) are usually the real transition. Snapping makes spans more accurate without making them more frequent.
+
+**Concrete example on the Conan fixture.** The CVS ad spans 0:00–0:26. The lex anchor fires at 0:21 (CVS regex hit). With default widening the span is 0:21–0:26 (5s of coverage — just barely above `MIN_DURATION`). If an acoustic break fires at 0:00 (the actual ad start), Use A snaps the left edge to that break and the span becomes 0:00–0:26 (26s) — perfect coverage without weakening the anchor logic.
+
+**Precision-first preservation.** Use A only adjusts an already-anchored span's edges. It never creates a span where none existed.
+
+#### Use B — anti-merge tie-breaker (decoder)
+
+In the merge step, before merging two adjacent candidate spans across a gap of fewer than `MERGE_GAP_ATOMS` (3) unanchored atoms, the decoder checks whether any atom in the gap has `hasAcousticBreakHint`. If yes, **do not merge**.
+
+```
+if gap_length < MERGE_GAP_ATOMS
+   and no .userVetoed atom in gap
+   and no atom in gap has hasAcousticBreakHint:
+       merge the two spans
+else:
+       leave them as separate spans
+```
+
+**Why.** This prevents the classic "two adjacent ads separated by a 2-second host transition get glued together into one mega-ad" failure mode. Acoustic breaks are exactly the signal for "this gap is a real transition, not a within-span pause."
+
+**Precision-first preservation.** Use B only blocks an inappropriate merge. It never creates a span.
+
+#### Use C — weak-FM corroboration (projector)
+
+When an atom is covered by a single-window FM region (`fmConsensusStrength >= .low` but less than `.medium` — only one window agreed) AND there is an acoustic break with `breakStrength >= 0.5` within `±2` atoms of that atom, the atom counts as anchored with a new provenance case:
+
+```swift
+.fmAcousticCorroborated(regionId: String, breakStrength: Double)
+```
+
+Neither the single FM window nor the acoustic break would be sufficient on its own. Together, they pass the precision-first bar via structural corroboration — two independent detectors firing at the same place.
+
+**Parameter rationale.**
+- `>= .low` is the `FMConsensusStrength` enum case — a real raw value of `0.35`, not a tunable Double. The band is "some FM signal, below consensus."
+- `breakStrength >= 0.5` is the midpoint cutoff on the `AcousticBreak.breakStrength` field (0..1 range produced by `AcousticBreakDetector.computeStrength`).
+- `±2 atoms` is atom-count (not seconds) so behavior is invariant across transcript density.
+
+**Precision-first preservation.** Use C requires TWO independent signals. It cannot fire from a single weak signal; the acoustic break alone, or the single-window FM hit alone, still does not anchor.
+
 
 ### Materialization
 
@@ -215,8 +283,8 @@ Already pinned on the epic from earlier in the brainstorm:
 
 ## Implementation order
 
-1. `AtomEvidence` struct + `AnchorRef` enum + `CorrectionState` enum + `CorrectionMaskProvider` protocol with `NoCorrectionMaskProvider` stub
-2. `AtomEvidenceProjector.project(...)` with unit tests (5.1)
+1. `AtomEvidence` struct (including `hasAcousticBreakHint`) + `AnchorRef` enum (including `.fmAcousticCorroborated`) + `CorrectionState` enum + `CorrectionMaskProvider` protocol with `NoCorrectionMaskProvider` stub
+2. `AtomEvidenceProjector.project(...)` with unit tests (5.1). 5.1 also reads `.acoustic`-origin regions from Phase 4 to populate `hasAcousticBreakHint` and evaluates Use C corroboration.
 3. `MinimalContiguousSpanDecoder.decode(...)` with unit tests (5.2)
 4. `AnalysisStore` materialization + migration + idempotency tests (5.2)
 5. Phase 4 → Phase 5 round-trip integration test against Conan fixture (5.3)
