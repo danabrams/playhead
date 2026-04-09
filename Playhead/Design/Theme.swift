@@ -40,20 +40,6 @@ enum CornerRadius {
     /// 12pt — sheets, modals
     static let large: CGFloat = 12
 
-    // MARK: Legacy aliases
-    //
-    // Every app call site has been migrated to `small`/`medium`/`large`.
-    // Only the parallel follow-up branch (SpeedSelectorView, TimelineRailView)
-    // still touches these names; once it lands these declarations can be
-    // deleted outright. Until then they are marked deprecated so any
-    // reintroduction is surfaced by `LegacyAliasUsageTests` and any stray
-    // call site sees a clear rename hint.
-    @available(*, deprecated, renamed: "small")
-    static let sm: CGFloat = small
-    @available(*, deprecated, renamed: "medium")
-    static let md: CGFloat = medium
-    @available(*, deprecated, renamed: "large")
-    static let lg: CGFloat = large
 }
 
 // MARK: - Shadows

@@ -1,18 +1,17 @@
 // LegacyAliasUsageTests.swift
-// Regression guard: forbids new usage of the deprecated design-token aliases
+// Regression guard: forbids any usage of the legacy design-token names
 // `AppColors.text/secondary/metadata` and `CornerRadius.sm/md/lg` in view code.
 //
 // The semantic names (`textPrimary`, `textSecondary`, `textTertiary`, `small`,
-// `medium`, `large`) landed in bead playhead-8bb. Legacy aliases are kept only
-// long enough to migrate every call site; this test ensures the migration is
-// never regressed.
+// `medium`, `large`) landed in bead playhead-8bb. Every call site has since
+// been migrated and the alias declarations have been deleted from
+// `Playhead/Design/`. This test prevents any future commit from
+// accidentally reintroducing the legacy names.
 //
 // Scope:
 // - Walks every `.swift` file under the `Playhead/` source tree.
-// - Excludes the `Playhead/Design/` folder (alias DECLARATIONS live there).
-// - Excludes `SpeedSelectorView.swift` and `TimelineRailView.swift` which are
-//   owned by a parallel follow-up branch that migrates them alongside their
-//   haptic seam work. Once that branch lands, delete these exclusions.
+// - Excludes the `Playhead/Design/` folder so that test source files inside
+//   it (which mention the names as string literals) don't false-positive.
 
 import XCTest
 
@@ -27,15 +26,10 @@ final class LegacyAliasUsageTests: XCTestCase {
         (#"CornerRadius\.lg\b"#, "CornerRadius.large"),
     ]
 
-    /// Files temporarily exempted from the scan because they are being
-    /// migrated on a parallel branch. Keep this list as short as possible.
-    private static let excludedFilenames: Set<String> = [
-        "SpeedSelectorView.swift",
-        "TimelineRailView.swift",
-    ]
-
     /// Folders whose *contents* are exempted from the scan. Used for the
-    /// `Playhead/Design/` directory where the alias declarations live.
+    /// `Playhead/Design/` directory which previously held the alias
+    /// declarations themselves and so legitimately referenced the names.
+    /// (The aliases have since been deleted, but the test history kept.)
     private static let excludedFolderComponents: Set<String> = [
         "Design",
     ]
@@ -65,10 +59,6 @@ final class LegacyAliasUsageTests: XCTestCase {
             // Skip excluded folders anywhere under the Playhead/ tree.
             let components = Set(url.pathComponents)
             if !components.isDisjoint(with: Self.excludedFolderComponents) {
-                continue
-            }
-
-            if Self.excludedFilenames.contains(url.lastPathComponent) {
                 continue
             }
 

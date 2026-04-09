@@ -92,22 +92,6 @@ enum AppColors {
     /// strike-through overlays on skipped ad segments, etc.
     static let accentSubtle: Color = Palette.copper.opacity(0.16)
 
-    // MARK: - Legacy aliases
-    //
-    // These names predate the bead-spec semantic layer. Every call site in
-    // app code has been migrated to the canonical semantic names; the only
-    // remaining consumers live on a parallel follow-up branch
-    // (SpeedSelectorView, TimelineRailView). Once that branch lands these
-    // declarations can be deleted outright. Until then they are marked
-    // deprecated so `LegacyAliasUsageTests` surfaces any regression and the
-    // parallel branch sees clear rename hints.
-
-    @available(*, deprecated, renamed: "textPrimary")
-    static let text = textPrimary
-    @available(*, deprecated, renamed: "textSecondary")
-    static let secondary = textSecondary
-    @available(*, deprecated, renamed: "textTertiary")
-    static let metadata = textTertiary
 }
 
 // MARK: - Color Helpers
