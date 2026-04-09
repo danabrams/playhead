@@ -297,6 +297,44 @@ struct LexicalScanner: Sendable {
         return hits
     }
 
+    /// Re-run the scanner over a synthetic region-sized chunk while preserving
+    /// the same normalization, pattern matching, and confidence rules as the
+    /// regular transcript-chunk path.
+    func rescoreRegionText(
+        _ text: String,
+        analysisAssetId: String,
+        startTime: Double,
+        endTime: Double
+    ) -> LexicalCandidate? {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        let syntheticChunk = TranscriptChunk(
+            id: UUID().uuidString,
+            analysisAssetId: analysisAssetId,
+            segmentFingerprint: UUID().uuidString,
+            chunkIndex: 0,
+            startTime: startTime,
+            endTime: endTime,
+            text: text,
+            normalizedText: TranscriptEngineService.normalizeText(text),
+            pass: "final",
+            modelVersion: "region-feature-extractor",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+        let hits = scanChunk(syntheticChunk)
+        guard !hits.isEmpty else { return nil }
+
+        return buildCandidate(
+            from: hits,
+            startTime: startTime,
+            endTime: endTime,
+            analysisAssetId: analysisAssetId
+        )
+    }
+
     // MARK: - Pattern compilation
 
     /// Compile all built-in regex patterns. Called once at init.

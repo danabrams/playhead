@@ -480,10 +480,7 @@ enum RegionProposalBuilder {
     }
 
     private static func anchorIdentityKey(_ anchor: ResolvedEvidenceAnchor) -> String {
-        // Parens are required: without them Swift parses
-        // `entry?.evidenceRef.map(String.init)` as `.map` on the Int field
-        // (which has no `.map`), not on the chained Optional<Int>.
-        let evidenceRef = (anchor.entry?.evidenceRef).map(String.init) ?? "nil"
+        let evidenceRef = anchor.entry.map { String($0.evidenceRef) } ?? "nil"
         return "\(evidenceRef)|\(anchor.lineRef)|\(anchor.kind.rawValue)|\(anchor.resolutionSource.rawValue)"
     }
 
