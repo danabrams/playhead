@@ -251,7 +251,7 @@ Stage C wired a real-audio variant of the Phase 4 shadow benchmark and ran it ag
 
 - **Phase 4 region pipeline**: shipped via `913bff6` (wire-up) + `bd-1my` (outward expansion) + `bd-1en` (permissive refinement)
 - **TargetedWindowNarrower**: shipped via cycle 8 merge `7a472d1`. Belongs conceptually at Phase 4.5, not Phase 5
-- **Acoustic-origin dropped upstream**: `AcousticBreakDetector` produces breaks but `RegionProposalBuilder` does not surface them as `origins=acoustic` regions. Tracked as a separate Phase 4 bead filed in parallel on 2026-04-09 (search `bd list -l phase-4` for the acoustic-origin bead — ID to be resolved once the parallel filing commit lands).
+- **Acoustic-origin dropped upstream**: `AcousticBreakDetector` produces breaks but `RegionProposalBuilder` does not surface them as `origins=acoustic` regions. Tracked as `playhead-8jd`. Bug confirmed via Stage C real-audio benchmark (3 breaks found, 0 surfaced as `.acoustic` origin). Fix is independent of Phase 5; lands separately.
 - **Kelly Ripa expert recommendations**: tracked separately as `playhead-994` (`includeSchemaInPrompt` experiment), `playhead-36t` (`refusal.explanation` capture), `playhead-eu1` (auto-retry via permissive), `playhead-66k` (Feedback Assistant report)
 - **Phase 7 user corrections**: will conform `UserCorrectionStore` to the protocol introduced here, replacing the stub
 - **Phase 12 timeline segmentation decoder**: will replace `MinimalContiguousSpanDecoder` with a full Viterbi-style decoder once labeled training data is available
