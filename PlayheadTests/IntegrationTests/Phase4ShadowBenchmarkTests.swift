@@ -577,5 +577,11 @@ struct Phase4ShadowBenchmarkTests {
         // --- Step 5: lenient assertions ---
         #expect(bundles.count > 0, "Phase 4 shadow phase should record at least one bundle (real features)")
         #expect(scoring.totalRegions > 0, "Phase 4 should produce at least one region (real features)")
+        // playhead-8jd acceptance criterion: at least one bundle must surface
+        // an `.acoustic`-origin region so we know the AcousticBreakDetector
+        // output is reaching the proposal pipeline end-to-end on real audio.
+        let acousticBundleCount = bundles.filter { $0.region.origins.contains(.acoustic) }.count
+        print("Bundles with .acoustic origin: \(acousticBundleCount)")
+        #expect(acousticBundleCount > 0, "Phase 4 should surface at least one .acoustic-origin bundle (real features) — playhead-8jd acceptance criterion")
     }
 }

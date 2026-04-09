@@ -35,6 +35,14 @@ struct ProposedRegion: Sendable {
     let lexicalCandidates: [LexicalCandidate]
     let sponsorMatches: [SponsorMatch]
     let fingerprintMatches: [FingerprintMatch]
+    /// Acoustic breaks associated with this region for provenance.
+    ///
+    /// The same `AcousticBreak` may appear in multiple `ProposedRegion`s when it
+    /// is within `associateAcousticBreaks` edge tolerance of a neighbor but
+    /// anchored to a different atom via `makeAcousticProposals`. This is
+    /// per-region provenance, not global uniqueness — downstream consumers
+    /// doing `regions.flatMap(\.acousticBreaks)` should `Set`-dedupe if they
+    /// need a global break list.
     let acousticBreaks: [AcousticBreak]
     let foundationModelSpans: [RefinedAdSpan]
     let resolvedEvidenceAnchors: [ResolvedEvidenceAnchor]
