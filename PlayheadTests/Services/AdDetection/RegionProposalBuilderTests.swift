@@ -140,6 +140,49 @@ struct RegionProposalBuilderTests {
         #expect(clustered[0].fmEvidence?.certainty == .strong)
     }
 
+    @Test("overlapping FM spans below the IoU threshold do not cluster")
+    func lowIoUFMSpansDoNotCluster() {
+        let atoms = makeAtoms(count: 10)
+        let input = RegionProposalInput(
+            atoms: atoms,
+            lexicalCandidates: [],
+            acousticBreaks: [],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            fmWindows: [
+                makeFMWindow(
+                    windowIndex: 0,
+                    sourceWindowIndex: 0,
+                    lineRefs: [1, 2, 3, 4, 5],
+                    spans: [
+                        makeRefinedSpan(
+                            firstAtomOrdinal: 1,
+                            lastAtomOrdinal: 4,
+                            anchors: [makeResolvedAnchor(lineRef: 2, evidenceRef: 210)]
+                        )
+                    ]
+                ),
+                makeFMWindow(
+                    windowIndex: 1,
+                    sourceWindowIndex: 1,
+                    lineRefs: [4, 5, 6, 7, 8],
+                    spans: [
+                        makeRefinedSpan(
+                            firstAtomOrdinal: 4,
+                            lastAtomOrdinal: 7,
+                            anchors: [makeResolvedAnchor(lineRef: 2, evidenceRef: 210)]
+                        )
+                    ]
+                )
+            ]
+        )
+
+        let regions = RegionProposalBuilder.build(input)
+
+        #expect(regions.count == 2)
+        #expect(regions.allSatisfy { $0.fmConsensusStrength == .low })
+    }
+
     @Test("single FM span still emits a low-consensus proposal")
     func singleFMSpanProducesLowConsensusProposal() {
         let atoms = makeAtoms(count: 6)
@@ -262,6 +305,49 @@ struct RegionProposalBuilderTests {
 
         #expect(regions.count == 1)
         #expect(regions[0].fmConsensusStrength == .medium)
+    }
+
+    @Test("FM windows with insufficient center separation stay low-consensus")
+    func insufficientCenterSeparationKeepsLowConsensus() {
+        let atoms = makeAtoms(count: 8)
+        let input = RegionProposalInput(
+            atoms: atoms,
+            lexicalCandidates: [],
+            acousticBreaks: [],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            fmWindows: [
+                makeFMWindow(
+                    windowIndex: 0,
+                    sourceWindowIndex: 0,
+                    lineRefs: [1, 2, 3, 4, 5],
+                    spans: [
+                        makeRefinedSpan(
+                            firstAtomOrdinal: 2,
+                            lastAtomOrdinal: 4,
+                            anchors: [makeResolvedAnchor(lineRef: 3, evidenceRef: 601)]
+                        )
+                    ]
+                ),
+                makeFMWindow(
+                    windowIndex: 1,
+                    sourceWindowIndex: 1,
+                    lineRefs: [1, 2, 3, 4, 5],
+                    spans: [
+                        makeRefinedSpan(
+                            firstAtomOrdinal: 2,
+                            lastAtomOrdinal: 4,
+                            anchors: [makeResolvedAnchor(lineRef: 3, evidenceRef: 601)]
+                        )
+                    ]
+                )
+            ]
+        )
+
+        let regions = RegionProposalBuilder.build(input)
+
+        #expect(regions.count == 1)
+        #expect(regions[0].fmConsensusStrength == .low)
     }
 
     @Test("interior acoustic breaks do not claim boundary provenance")
