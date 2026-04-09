@@ -1,6 +1,10 @@
 # Agent Instructions
 
-This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
+This project uses **bd** (beads, installed via Homebrew `beads` formula) for issue tracking. Run `bd onboard` to get started.
+
+## DO NOT use `br` (beads_rust)
+
+`br` is a separate Rust reimplementation of beads with its own database and issue prefix (`bd-*` vs bd's `playhead-*`). It may be installed on the machine at `~/.cargo/bin/br` from an earlier session — **leave it alone**. Using `br` creates a parallel ghost tracker whose IDs never resolve in bd; any bead work done via `br` is invisible to Dan and has to be redone. If a skill or prior commit message references `br`, substitute `bd`.
 
 ## Quick Reference
 
