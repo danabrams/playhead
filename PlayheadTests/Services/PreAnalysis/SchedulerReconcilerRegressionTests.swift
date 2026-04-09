@@ -211,9 +211,22 @@ struct SchedulerRegressionTests {
         let scheduler = makeScheduler(store: store, downloads: downloads)
         await scheduler.startSchedulerLoop()
 
-        // Wait for the scheduler to pick up and process the job.
-        try await Task.sleep(for: .seconds(2))
+        // playhead-qtc: poll for the scheduler to complete the job instead of
+        // a fixed Task.sleep. A fixed wait flakes under parallel-test CPU
+        // contention because the scheduler loop's MainActor hops and actor
+        // hops are starved by neighboring suites. Event-based polling keeps
+        // this deterministic: we wait until the job is actually in a terminal
+        // state (complete / superseded / failed), then assert the lease was
+        // released as part of that transition.
+        let processed = await pollUntil {
+            let j = try? await store.fetchJob(byId: "lease-job")
+            switch j?.state {
+            case "complete", "superseded", "failed": return true
+            default: return false
+            }
+        }
         await scheduler.stop()
+        #expect(processed, "Scheduler did not process lease-job within deadline")
 
         let fetched = try await store.fetchJob(byId: "lease-job")
         #expect(fetched?.leaseOwner == nil, "Lease should be released after processing")
@@ -696,8 +709,18 @@ struct SchedulerBugFixRegressionTests {
 
         let scheduler = makeScheduler(store: store, downloads: downloads)
         await scheduler.startSchedulerLoop()
-        try await Task.sleep(for: .milliseconds(400))
+        // playhead-qtc: poll until the scheduler has resolved the analysis
+        // asset id instead of waiting a fixed 400ms. The fixed wait flaked
+        // under parallel execution because the scheduler loop couldn't
+        // complete fetchNextEligibleJob → lease acquire → asset resolve
+        // within the budget when dozens of other suites were contending for
+        // the simulator's main and global actor queues.
+        let resolved = await pollUntil {
+            let j = try? await store.fetchJob(byId: "fk-regression-job")
+            return j?.analysisAssetId != nil
+        }
         await scheduler.stop()
+        #expect(resolved, "Scheduler did not resolve analysisAssetId within deadline")
 
         let updatedJob = try #require(await store.fetchJob(byId: "fk-regression-job"))
         let analysisAssetId = try #require(updatedJob.analysisAssetId)

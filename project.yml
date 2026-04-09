@@ -47,15 +47,8 @@ targets:
           - com.playhead.app.preanalysis.recovery
     scheme:
       testTargets:
-        # parallelizable: false — playhead-86s (PlaybackService singleton
-        # seams) and playhead-p06 (injectable poll/wait deadlines) closed
-        # most of the parallel-execution races, but two scheduler tests
-        # still flake under parallelization:
-        #   SchedulerBugFixRegressionTests.testSchedulerResolvesRealAssetIdForNilJobAssetId
-        #   SchedulerRegressionTests.testLeaseReleasedAfterProcessJob
-        # Tracked separately. Until those are addressed, this stays serial.
         - name: PlayheadTests
-          parallelizable: false
+          parallelizable: true
       storeKitConfiguration: Playhead/Resources/Playhead.storekit
   PlayheadTests:
     type: bundle.unit-test
