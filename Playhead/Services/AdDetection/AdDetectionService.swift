@@ -166,6 +166,15 @@ actor AdDetectionService {
     /// concurrent reprocessing could mark the wrong (newer) session. Tests
     /// that don't care about FM availability default this to a no-op.
     private let shadowSkipMarker: @Sendable (_ sessionId: String, _ podcastId: String) async -> Void
+    /// playhead-xba (Phase 4 shadow wire-up): optional observation-only sink
+    /// for `RegionProposalBuilder` + `RegionFeatureExtractor` output. When
+    /// `nil`, the Phase 4 shadow phase inside `runBackfill` is a no-op — no
+    /// atomization, no region building, no feature extraction. Production
+    /// release builds construct this service with `nil`, mirroring the
+    /// DEBUG-only `FoundationModelsFeedbackStore` pattern on
+    /// `PlayheadRuntime`. Tests inject a live observer and assert that the
+    /// pipeline produced bundles.
+    private let regionShadowObserver: RegionShadowObserver?
 
     // MARK: - Cached State
 
@@ -186,7 +195,8 @@ actor AdDetectionService {
         podcastProfile: PodcastProfile? = nil,
         backfillJobRunnerFactory: (@Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner)? = nil,
         canUseFoundationModelsProvider: @escaping @Sendable () async -> Bool = { true },
-        shadowSkipMarker: @escaping @Sendable (_ sessionId: String, _ podcastId: String) async -> Void = { _, _ in }
+        shadowSkipMarker: @escaping @Sendable (_ sessionId: String, _ podcastId: String) async -> Void = { _, _ in },
+        regionShadowObserver: RegionShadowObserver? = nil
     ) {
         self.store = store
         self.classifier = classifier
@@ -197,6 +207,7 @@ actor AdDetectionService {
         self.backfillJobRunnerFactory = backfillJobRunnerFactory
         self.canUseFoundationModelsProvider = canUseFoundationModelsProvider
         self.shadowSkipMarker = shadowSkipMarker
+        self.regionShadowObserver = regionShadowObserver
     }
 
     #if DEBUG
@@ -427,6 +438,65 @@ actor AdDetectionService {
                 )
             }
         }
+
+        // 10. playhead-xba (Phase 4 shadow wire-up): run the region proposal +
+        // feature extraction pipeline purely for observation. Gated on a
+        // non-nil `regionShadowObserver`, which production release builds
+        // never construct — this matches the DEBUG-only injection pattern
+        // used for `FoundationModelsFeedbackStore`. Nothing here can affect
+        // AdWindow rows, skip cues, or metadata; the only side effect is a
+        // write into an in-memory actor. Failures are logged and swallowed.
+        if let observer = regionShadowObserver {
+            await runRegionShadowPhase(
+                observer: observer,
+                chunks: chunks,
+                analysisAssetId: analysisAssetId,
+                episodeDuration: episodeDuration,
+                lexicalCandidates: lexicalCandidates
+            )
+        }
+    }
+
+    // MARK: - Region Shadow Phase (playhead-xba)
+
+    /// Runs `RegionShadowPhase.run` and records the resulting bundles in
+    /// the injected observer. Any failure fetching feature windows is
+    /// logged and the phase is skipped — shadow telemetry must never
+    /// affect user-visible behavior.
+    private func runRegionShadowPhase(
+        observer: RegionShadowObserver,
+        chunks: [TranscriptChunk],
+        analysisAssetId: String,
+        episodeDuration: Double,
+        lexicalCandidates: [LexicalCandidate]
+    ) async {
+        // Fetch every feature window for the asset. The Phase 4 acoustic
+        // break detector expects a contiguous view of the episode; fetching
+        // a narrow sub-range would bias the break detector toward false
+        // positives at the slice edges.
+        let featureWindows: [FeatureWindow]
+        do {
+            featureWindows = try await store.fetchFeatureWindows(
+                assetId: analysisAssetId,
+                from: 0,
+                to: max(episodeDuration, 0)
+            )
+        } catch {
+            logger.warning("Region shadow phase: fetchFeatureWindows failed (skipping): \(error.localizedDescription)")
+            return
+        }
+
+        let input = RegionShadowPhase.Input(
+            analysisAssetId: analysisAssetId,
+            chunks: chunks,
+            lexicalCandidates: lexicalCandidates,
+            featureWindows: featureWindows,
+            episodeDuration: episodeDuration,
+            priors: showPriors,
+            podcastProfile: nil
+        )
+        let bundles = RegionShadowPhase.run(input)
+        await observer.record(assetId: analysisAssetId, bundles: bundles)
     }
 
     // MARK: - Shadow FM Phase

@@ -51,6 +51,19 @@ final class PlayheadRuntime {
     let feedbackStore: FoundationModelsFeedbackStore? = nil
     #endif
 
+    /// playhead-xba (Phase 4 shadow wire-up): DEBUG-only observation sink
+    /// for `RegionProposalBuilder` + `RegionFeatureExtractor` output. The
+    /// `AdDetectionService` backfill path writes into this observer only
+    /// when it is non-nil, so release builds skip the Phase 4 shadow phase
+    /// entirely. This mirrors the `feedbackStore` injection pattern and
+    /// keeps production users free of any Phase 4 runtime footprint until
+    /// the pipeline graduates out of shadow mode.
+    #if DEBUG
+    let regionShadowObserver: RegionShadowObserver?
+    #else
+    let regionShadowObserver: RegionShadowObserver? = nil
+    #endif
+
     private let isPreviewRuntime: Bool
     private let logger = Logger(subsystem: "com.playhead", category: "Runtime")
     @ObservationIgnored
@@ -163,6 +176,16 @@ final class PlayheadRuntime {
         self.feedbackStore = feedbackStore
         #else
         let feedbackStore: FoundationModelsFeedbackStore? = nil
+        #endif
+
+        // playhead-xba: DEBUG-only Phase 4 shadow observer. Release builds
+        // leave the stored property nil (declared above) so the backfill
+        // skips the entire region pipeline.
+        #if DEBUG
+        let regionShadowObserver = RegionShadowObserver()
+        self.regionShadowObserver = regionShadowObserver
+        #else
+        let regionShadowObserver: RegionShadowObserver? = nil
         #endif
 
         // HIGH-1: round-2's M-B hoist shared one AdmissionController across
@@ -289,7 +312,11 @@ final class PlayheadRuntime {
             canUseFoundationModelsProvider: { [capabilitiesServiceForFactory] in
                 await capabilitiesServiceForFactory.currentSnapshot.canUseFoundationModels
             },
-            shadowSkipMarker: shadowSkipMarker
+            shadowSkipMarker: shadowSkipMarker,
+            // playhead-xba (Phase 4 shadow wire-up): hand the DEBUG-only
+            // region observer to the service. In release builds this is
+            // `nil`, which makes the Phase 4 shadow phase a no-op.
+            regionShadowObserver: regionShadowObserver
         )
         self.skipOrchestrator = SkipOrchestrator(
             store: analysisStore,
