@@ -995,10 +995,11 @@ struct TranscriptChunkMigrationTests {
         #expect(fetched[0].atomOrdinal == 42)
     }
 
-    @Test("ALTER TABLE migration adds columns to pre-existing database")
+    @Test("ALTER TABLE migration backfills legacy transcript chunks")
     func alterTableMigration() async throws {
         // Simulate a database created by an older app version without the new columns.
         let dir = try makeTempDir(prefix: "MigrationTest")
+        defer { try? FileManager.default.removeItem(at: dir) }
         let dbURL = dir.appendingPathComponent("analysis.sqlite")
 
         // Create old-schema database directly
@@ -1027,73 +1028,86 @@ struct TranscriptChunkMigrationTests {
                 pass TEXT NOT NULL DEFAULT 'fast', modelVersion TEXT NOT NULL
             );
             INSERT INTO analysis_assets (id, episodeId, assetFingerprint, sourceURL) VALUES ('a1', 'ep', 'fp', 'url');
-            INSERT INTO transcript_chunks (id, analysisAssetId, segmentFingerprint, chunkIndex, startTime, endTime, text, normalizedText, modelVersion)
-            VALUES ('old-chunk', 'a1', 'fp-old', 0, 0.0, 10.0, 'old text', 'old text', 'v0');
+            INSERT INTO transcript_chunks (id, analysisAssetId, segmentFingerprint, chunkIndex, startTime, endTime, text, normalizedText, pass, modelVersion)
+            VALUES ('old-chunk-late', 'a1', 'fp-old-2', 10, 10.0, 20.0, 'late text', 'late text', 'final', 'v0');
+            INSERT INTO transcript_chunks (id, analysisAssetId, segmentFingerprint, chunkIndex, startTime, endTime, text, normalizedText, pass, modelVersion)
+            VALUES ('old-chunk-early', 'a1', 'fp-old-1', 2, 0.0, 10.0, 'early text', 'early text', 'final', 'v0');
             """
         var errMsg: UnsafeMutablePointer<CChar>?
         sqlite3_exec(db, oldDDL, nil, nil, &errMsg)
         sqlite3_close(db)
 
         // Now open via AnalysisStore which runs migration
-        let store = try AnalysisStore(directory: dir)
-        try await store.migrate()
+        do {
+            let store = try AnalysisStore(directory: dir)
+            try await store.migrate()
 
-        // Old row should have nil for new columns
-        let fetched = try await store.fetchTranscriptChunks(assetId: "a1")
-        #expect(fetched.count == 1)
-        #expect(fetched[0].id == "old-chunk")
-        #expect(fetched[0].transcriptVersion == nil)
-        #expect(fetched[0].atomOrdinal == nil)
+            // Legacy rows should be backfilled deterministically by chunkIndex order.
+            let fetched = try await store.fetchTranscriptChunks(assetId: "a1")
+            #expect(fetched.count == 2)
+            #expect(fetched.map(\.id) == ["old-chunk-early", "old-chunk-late"])
+            #expect(fetched.map(\.chunkIndex) == [2, 10])
+            #expect(fetched.map(\.atomOrdinal) == [0, 1])
+            #expect(fetched[0].transcriptVersion == fetched[1].transcriptVersion)
+            #expect(fetched[0].transcriptVersion?.isEmpty == false)
 
-        // New row with non-nil values should round-trip
-        let newChunk = TranscriptChunk(
-            id: "new-chunk", analysisAssetId: "a1",
-            segmentFingerprint: "fp-new", chunkIndex: 1,
-            startTime: 10, endTime: 20,
-            text: "new text", normalizedText: "new text",
-            pass: "final", modelVersion: "v1",
-            transcriptVersion: "version-hash",
-            atomOrdinal: 7
-        )
-        try await store.insertTranscriptChunk(newChunk)
+            // New row with non-nil values should round-trip
+            let newChunk = TranscriptChunk(
+                id: "new-chunk", analysisAssetId: "a1",
+                segmentFingerprint: "fp-new", chunkIndex: 1,
+                startTime: 10, endTime: 20,
+                text: "new text", normalizedText: "new text",
+                pass: "final", modelVersion: "v1",
+                transcriptVersion: "version-hash",
+                atomOrdinal: 7
+            )
+            try await store.insertTranscriptChunk(newChunk)
 
-        let all = try await store.fetchTranscriptChunks(assetId: "a1")
-        #expect(all.count == 2)
-        let newRow = all.first { $0.id == "new-chunk" }!
-        #expect(newRow.transcriptVersion == "version-hash")
-        #expect(newRow.atomOrdinal == 7)
-
-        try? FileManager.default.removeItem(at: dir)
+            let all = try await store.fetchTranscriptChunks(assetId: "a1")
+            #expect(all.count == 3)
+            let newRow = all.first { $0.id == "new-chunk" }!
+            #expect(newRow.transcriptVersion == "version-hash")
+            #expect(newRow.atomOrdinal == 7)
+        }
     }
 
     @Test("Nil values for new columns on fast-pass chunks")
     func nilColumnsRoundTrip() async throws {
-        let store = try await makeTestStore()
+        let dir = try makeTempDir(prefix: "NilMigrationTest")
+        defer { try? FileManager.default.removeItem(at: dir) }
 
-        let asset = AnalysisAsset(
-            id: "asset-nil", episodeId: "ep-2",
-            assetFingerprint: "fp2", weakFingerprint: nil,
-            sourceURL: "file:///test.m4a",
-            featureCoverageEndTime: nil,
-            fastTranscriptCoverageEndTime: nil,
-            confirmedAdCoverageEndTime: nil,
-            analysisState: "running", analysisVersion: 1,
-            capabilitySnapshot: nil
-        )
-        try await store.insertAsset(asset)
+        do {
+            let store = try AnalysisStore(directory: dir)
+            try await store.migrate()
 
-        let chunk = TranscriptChunk(
-            id: "chunk-nil", analysisAssetId: "asset-nil",
-            segmentFingerprint: "fp-nil", chunkIndex: 0,
-            startTime: 0, endTime: 10,
-            text: "fast pass text", normalizedText: "fast pass text",
-            pass: "fast", modelVersion: "v1",
-            transcriptVersion: nil,
-            atomOrdinal: nil
-        )
-        try await store.insertTranscriptChunk(chunk)
+            let asset = AnalysisAsset(
+                id: "asset-nil", episodeId: "ep-2",
+                assetFingerprint: "fp2", weakFingerprint: nil,
+                sourceURL: "file:///test.m4a",
+                featureCoverageEndTime: nil,
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil,
+                analysisState: "running", analysisVersion: 1,
+                capabilitySnapshot: nil
+            )
+            try await store.insertAsset(asset)
 
-        let fetched = try await store.fetchTranscriptChunks(assetId: "asset-nil")
+            let chunk = TranscriptChunk(
+                id: "chunk-nil", analysisAssetId: "asset-nil",
+                segmentFingerprint: "fp-nil", chunkIndex: 0,
+                startTime: 0, endTime: 10,
+                text: "fast pass text", normalizedText: "fast pass text",
+                pass: "fast", modelVersion: "v1",
+                transcriptVersion: nil,
+                atomOrdinal: nil
+            )
+            try await store.insertTranscriptChunk(chunk)
+        }
+
+        let reopened = try AnalysisStore(directory: dir)
+        try await reopened.migrate()
+
+        let fetched = try await reopened.fetchTranscriptChunks(assetId: "asset-nil")
         #expect(fetched.count == 1)
         #expect(fetched[0].transcriptVersion == nil)
         #expect(fetched[0].atomOrdinal == nil)

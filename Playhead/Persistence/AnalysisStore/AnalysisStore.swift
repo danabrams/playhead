@@ -393,7 +393,7 @@ actor AnalysisStore {
         // builds: its absence means this connection is looking at a fresh
         // DB that still needs migration, regardless of the cache.
         if Self.migratedPaths.contains(path) {
-            if try metaTableExists() {
+            if try tableExists("_meta") {
                 return
             }
             Self.migratedPaths.remove(path)
@@ -479,6 +479,9 @@ actor AnalysisStore {
     /// `createTables()`.
     func migrateOnlyForTesting() throws {
         try writeInitialSchemaVersionIfNeeded()
+        if try tableExists("transcript_chunks") {
+            try migrateTranscriptChunksPhase1()
+        }
         try migrateEvidenceEventsNaturalKeyV2IfNeeded()
         try migrateEvidenceEventsTranscriptVersionV3IfNeeded()
         try migrateAnalysisSessionsShadowRetryV4IfNeeded()
@@ -499,11 +502,11 @@ actor AnalysisStore {
     }
     #endif
 
-    /// Probes `sqlite_master` for the `_meta` table. Used by `migrate()` to
+    /// Probes `sqlite_master` for a table by name. Used by `migrate()` to
     /// detect a stale `migratedPaths` cache entry pointing at a file that
     /// has since been deleted and recreated empty.
-    private func metaTableExists() throws -> Bool {
-        let stmt = try prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_meta'")
+    private func tableExists(_ table: String) throws -> Bool {
+        let stmt = try prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '\(table)'")
         defer { sqlite3_finalize(stmt) }
         return sqlite3_step(stmt) == SQLITE_ROW
     }
@@ -514,6 +517,70 @@ actor AnalysisStore {
         // PRAGMA table_info first and only ALTER when the column is missing.
         try addColumnIfNeeded(table: "transcript_chunks", column: "transcriptVersion", definition: "TEXT")
         try addColumnIfNeeded(table: "transcript_chunks", column: "atomOrdinal", definition: "INTEGER")
+        try backfillLegacyTranscriptChunksPhase1IfNeeded()
+    }
+
+    private func backfillLegacyTranscriptChunksPhase1IfNeeded() throws {
+        let assetStmt = try prepare("""
+            SELECT DISTINCT analysisAssetId
+            FROM transcript_chunks
+            WHERE pass != 'fast'
+              AND (transcriptVersion IS NULL OR atomOrdinal IS NULL)
+            ORDER BY analysisAssetId
+            """)
+        defer { sqlite3_finalize(assetStmt) }
+
+        let updateStmt = try prepare("""
+            UPDATE transcript_chunks
+            SET transcriptVersion = ?, atomOrdinal = ?
+            WHERE id = ?
+            """)
+        defer { sqlite3_finalize(updateStmt) }
+
+        var rebuiltFTS = false
+        while sqlite3_step(assetStmt) == SQLITE_ROW {
+            let assetId = text(assetStmt, 0)
+            if !rebuiltFTS, try tableExists("transcript_chunks_fts") {
+                // Old databases can contain transcript rows that predate the
+                // external-content FTS table. Rebuild before mutating any of
+                // those rows so the UPDATE trigger's delete/insert cycle sees
+                // matching index entries instead of tripping SQLite corruption
+                // checks on missing rowids.
+                try exec("INSERT INTO transcript_chunks_fts(transcript_chunks_fts) VALUES('rebuild')")
+                rebuiltFTS = true
+            }
+            let chunks = try fetchTranscriptChunks(assetId: assetId)
+            let legacyChunks = chunks
+                .filter { $0.pass != "fast" }
+                .sorted(by: legacyTranscriptChunkSort)
+            guard !legacyChunks.isEmpty else { continue }
+
+            let version = legacyTranscriptVersion(for: legacyChunks)
+            for (ordinal, chunk) in legacyChunks.enumerated() {
+                sqlite3_reset(updateStmt)
+                bind(updateStmt, 1, version)
+                bind(updateStmt, 2, ordinal)
+                bind(updateStmt, 3, chunk.id)
+                try step(updateStmt, expecting: SQLITE_DONE)
+            }
+        }
+    }
+
+    private func legacyTranscriptChunkSort(_ lhs: TranscriptChunk, _ rhs: TranscriptChunk) -> Bool {
+        if lhs.chunkIndex != rhs.chunkIndex {
+            return lhs.chunkIndex < rhs.chunkIndex
+        }
+        return lhs.id < rhs.id
+    }
+
+    private func legacyTranscriptVersion(for chunks: [TranscriptChunk]) -> String {
+        var hasher = SHA256()
+        for chunk in chunks.sorted(by: legacyTranscriptChunkSort) {
+            let textData = Data(chunk.normalizedText.utf8)
+            withUnsafeBytes(of: UInt32(textData.count).bigEndian) { hasher.update(bufferPointer: $0) }
+            hasher.update(data: textData)
+        }
+        return hasher.finalize().prefix(16).map { String(format: "%02x", $0) }.joined()
     }
 
     private func columnExists(table: String, column: String) throws -> Bool {
