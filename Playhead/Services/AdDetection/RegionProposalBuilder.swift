@@ -102,6 +102,7 @@ enum RegionProposalBuilder {
         proposals.append(contentsOf: makeLexicalProposals(input.lexicalCandidates, atoms: sortedAtoms))
         proposals.append(contentsOf: makeSponsorProposals(input.sponsorMatches, atomsByOrdinal: atomsByOrdinal))
         proposals.append(contentsOf: makeFingerprintProposals(input.fingerprintMatches, atomsByOrdinal: atomsByOrdinal))
+        proposals.append(contentsOf: makeAcousticProposals(input.acousticBreaks, atomsByOrdinal: atomsByOrdinal))
         proposals.sort { lhs, rhs in
             if lhs.range.firstAtomOrdinal == rhs.range.firstAtomOrdinal {
                 return lhs.range.lastAtomOrdinal < rhs.range.lastAtomOrdinal
@@ -119,13 +120,20 @@ enum RegionProposalBuilder {
         }
 
         return merged.map { proposal in
+            // Belt-and-suspenders: `makeAcousticProposals` spawns standalone
+            // acoustic proposals anchored to the atom containing each break.
+            // `associateAcousticBreaks` additionally decorates proposals whose
+            // edges are within tolerance of a break but did not happen to land
+            // in the same atom. Union + dedupe the two paths so a single break
+            // that fires via both routes only appears once in the output.
             let associatedBreaks = associateAcousticBreaks(
                 input.acousticBreaks,
                 with: proposal.range,
                 tolerance: config.acousticBreakAssociationTolerance
             )
+            let mergedBreaks = dedupAcousticBreaks(proposal.acousticBreaks + associatedBreaks)
             var origins = proposal.origins
-            if !associatedBreaks.isEmpty {
+            if !mergedBreaks.isEmpty {
                 origins.insert(.acoustic)
             }
             return ProposedRegion(
@@ -140,7 +148,7 @@ enum RegionProposalBuilder {
                 lexicalCandidates: proposal.lexicalCandidates,
                 sponsorMatches: proposal.sponsorMatches,
                 fingerprintMatches: proposal.fingerprintMatches,
-                acousticBreaks: associatedBreaks,
+                acousticBreaks: mergedBreaks,
                 foundationModelSpans: proposal.foundationModelSpans,
                 resolvedEvidenceAnchors: proposal.resolvedEvidenceAnchors,
                 fmEvidence: aggregateFMEvidence(from: proposal)
@@ -210,6 +218,42 @@ enum RegionProposalBuilder {
                 range: range,
                 origins: .fingerprint,
                 fingerprintMatches: [match]
+            )
+        }
+    }
+
+    /// Promote each `AcousticBreak` to a 1-atom-wide standalone proposal with
+    /// `.acoustic` origin. Width comes for free from merging with adjacent
+    /// lex/FM/sponsor/fingerprint proposals in the main merge loop — standalone
+    /// acoustic regions are anchors/hints for Phase 5/6, not classifiable spans.
+    /// Breaks whose `time` does not land in any atom are dropped silently.
+    /// Iteration follows `AcousticBreakDetector.detectBreaks` ordering (sorted
+    /// by time) so output is deterministic.
+    private static func makeAcousticProposals(
+        _ breaks: [AcousticBreak],
+        atomsByOrdinal: [Int: TranscriptAtom]
+    ) -> [SourceProposal] {
+        guard !atomsByOrdinal.isEmpty else { return [] }
+        let sortedAtoms = atomsByOrdinal.values.sorted {
+            $0.atomKey.atomOrdinal < $1.atomKey.atomOrdinal
+        }
+        return breaks.compactMap { breakPoint -> SourceProposal? in
+            // Find the atom whose [startTime, endTime) contains the break time.
+            guard let atom = sortedAtoms.first(where: { atom in
+                atom.startTime <= breakPoint.time && breakPoint.time < atom.endTime
+            }) else {
+                return nil
+            }
+            let range = CanonicalRange(
+                firstAtomOrdinal: atom.atomKey.atomOrdinal,
+                lastAtomOrdinal: atom.atomKey.atomOrdinal,
+                startTime: atom.startTime,
+                endTime: atom.endTime
+            )
+            return SourceProposal(
+                range: range,
+                origins: .acoustic,
+                acousticBreaks: [breakPoint]
             )
         }
     }
@@ -347,7 +391,8 @@ enum RegionProposalBuilder {
                 existing.resolvedEvidenceAnchors + incoming.resolvedEvidenceAnchors
             ),
             fmConsensusStrength: max(existing.fmConsensusStrength, incoming.fmConsensusStrength),
-            fmClusterID: existing.fmClusterID ?? incoming.fmClusterID
+            fmClusterID: existing.fmClusterID ?? incoming.fmClusterID,
+            acousticBreaks: dedupAcousticBreaks(existing.acousticBreaks + incoming.acousticBreaks)
         )
     }
 
@@ -480,6 +525,27 @@ enum RegionProposalBuilder {
         return "\(evidenceRef)|\(anchor.lineRef)|\(anchor.kind.rawValue)|\(anchor.resolutionSource.rawValue)"
     }
 
+    /// Dedupe acoustic breaks by (time, signals) identity. Preserves order of
+    /// first appearance. Used to merge breaks coming from both the standalone
+    /// acoustic-proposal path and the edge-tolerance decoration path without
+    /// double-counting when they both fire on the same final region.
+    private static func dedupAcousticBreaks(_ breaks: [AcousticBreak]) -> [AcousticBreak] {
+        var seen = Set<String>()
+        var deduped: [AcousticBreak] = []
+        deduped.reserveCapacity(breaks.count)
+        for breakPoint in breaks {
+            let signalKey = breakPoint.signals
+                .map(\.rawValue)
+                .sorted()
+                .joined(separator: ",")
+            let key = "\(breakPoint.time)|\(signalKey)"
+            if seen.insert(key).inserted {
+                deduped.append(breakPoint)
+            }
+        }
+        return deduped
+    }
+
     private static func dedupAnchors(_ anchors: [ResolvedEvidenceAnchor]) -> [ResolvedEvidenceAnchor] {
         var seen = Set<String>()
         var deduped: [ResolvedEvidenceAnchor] = []
@@ -549,6 +615,10 @@ private struct SourceProposal: Sendable {
     var resolvedEvidenceAnchors: [ResolvedEvidenceAnchor] = []
     var fmConsensusStrength: FMConsensusStrength = .none
     var fmClusterID: Int? = nil
+    /// Acoustic breaks carried along for provenance — set when a break spawns
+    /// a standalone acoustic proposal via `makeAcousticProposals`. Concatenated
+    /// across merges so the final `ProposedRegion` can surface them downstream.
+    var acousticBreaks: [AcousticBreak] = []
 }
 
 private struct FMObservation: Sendable {

@@ -14,9 +14,15 @@ struct RegionProposalBuilderTests {
             lexicalCandidates: [
                 makeLexicalCandidate(startTime: 1.1, endTime: 3.9)
             ],
+            // Both breaks land inside atoms 1 and 3 (within the lex atom span 1..3),
+            // so each spawns a standalone 1-atom acoustic proposal that merges with
+            // the existing cross-source cluster at atoms 1..3. The edge-tolerance
+            // decoration path in associateAcousticBreaks also picks them up because
+            // each break is within 1.0s of a region edge; dedupe keeps the output
+            // at two breaks, not four.
             acousticBreaks: [
-                AcousticBreak(time: 1.0, breakStrength: 0.8, signals: [.energyDrop]),
-                AcousticBreak(time: 4.0, breakStrength: 0.7, signals: [.energyRise])
+                AcousticBreak(time: 1.5, breakStrength: 0.8, signals: [.energyDrop]),
+                AcousticBreak(time: 3.5, breakStrength: 0.7, signals: [.energyRise])
             ],
             sponsorMatches: [
                 makeSponsorMatch(firstAtomOrdinal: 1, lastAtomOrdinal: 3)
@@ -407,8 +413,13 @@ struct RegionProposalBuilderTests {
         #expect(regions.isEmpty)
     }
 
-    @Test("interior acoustic breaks do not claim boundary provenance")
-    func interiorAcousticBreaksDoNotMarkAcousticOrigin() {
+    @Test("interior acoustic breaks merge into overlapping lexical region and contribute provenance")
+    func interiorAcousticBreaksMergeIntoOverlappingRegion() {
+        // Post playhead-8jd: interior acoustic breaks that land inside an atom
+        // overlapping an existing proposal now spawn a standalone 1-atom
+        // acoustic proposal that merges with the overlapping region, lifting
+        // `.acoustic` into its origins and flowing the break through as
+        // provenance. Previously this signal was silently dropped.
         let atoms = makeAtoms(count: 6)
         let input = RegionProposalInput(
             atoms: atoms,
@@ -426,8 +437,152 @@ struct RegionProposalBuilderTests {
         let regions = RegionProposalBuilder.build(input)
 
         #expect(regions.count == 1)
-        #expect(!regions[0].origins.contains(.acoustic))
-        #expect(regions[0].acousticBreaks.isEmpty)
+        #expect(regions[0].origins.contains(.lexical))
+        #expect(regions[0].origins.contains(.acoustic))
+        #expect(regions[0].acousticBreaks.count == 1)
+        #expect(regions[0].acousticBreaks[0].time == 2.5)
+    }
+
+    @Test("standalone acoustic break with no overlapping lexical hit creates its own 1-atom region")
+    func standaloneAcousticBreakCreatesOwnRegion() {
+        // Lexical hit at atoms 0..1, acoustic break at atom 4 — disjoint.
+        // The break should spawn a standalone 1-atom-wide .acoustic region.
+        let atoms = makeAtoms(count: 6)
+        let input = RegionProposalInput(
+            atoms: atoms,
+            lexicalCandidates: [
+                makeLexicalCandidate(startTime: 0.0, endTime: 2.0)
+            ],
+            acousticBreaks: [
+                AcousticBreak(time: 4.5, breakStrength: 0.8, signals: [.spectralSpike])
+            ],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            fmWindows: []
+        )
+
+        let regions = RegionProposalBuilder.build(input)
+
+        #expect(regions.count == 2)
+        let acoustic = regions.first { $0.origins.contains(.acoustic) }
+        #expect(acoustic != nil)
+        #expect(acoustic?.origins.contains(.lexical) == false)
+        // 1-atom-wide anchor.
+        #expect(acoustic?.firstAtomOrdinal == acoustic?.lastAtomOrdinal)
+        #expect(acoustic?.firstAtomOrdinal == 4)
+        #expect(acoustic?.acousticBreaks.count == 1)
+        #expect(acoustic?.acousticBreaks.first?.time == 4.5)
+    }
+
+    @Test("acoustic break colocated with lexical hit merges into single region")
+    func acousticBreakMergesWithOverlappingLexicalHit() {
+        let atoms = makeAtoms(count: 15)
+        let input = RegionProposalInput(
+            atoms: atoms,
+            lexicalCandidates: [
+                // Spans atoms 10..11 (startTime 10 to endTime 12).
+                makeLexicalCandidate(startTime: 10.0, endTime: 12.0)
+            ],
+            acousticBreaks: [
+                // Lands inside atom 10.
+                AcousticBreak(time: 10.5, breakStrength: 0.8, signals: [.energyDrop])
+            ],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            fmWindows: []
+        )
+
+        let regions = RegionProposalBuilder.build(input)
+
+        #expect(regions.count == 1)
+        #expect(regions[0].origins.contains(.lexical))
+        #expect(regions[0].origins.contains(.acoustic))
+    }
+
+    @Test("acoustic breaks outside the atom time range are dropped silently")
+    func outOfRangeAcousticBreaksAreDropped() {
+        let atoms = makeAtoms(count: 5)
+        let input = RegionProposalInput(
+            atoms: atoms,
+            lexicalCandidates: [],
+            acousticBreaks: [
+                AcousticBreak(time: -1.0, breakStrength: 0.9, signals: [.energyDrop]),
+                AcousticBreak(time: 999_999.0, breakStrength: 0.9, signals: [.spectralSpike])
+            ],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            fmWindows: []
+        )
+
+        let regions = RegionProposalBuilder.build(input)
+
+        #expect(regions.isEmpty)
+    }
+
+    @Test("acoustic proposal pipeline is deterministic across repeated runs")
+    func acousticProposalPipelineIsDeterministic() {
+        let atoms = makeAtoms(count: 10)
+        let input = RegionProposalInput(
+            atoms: atoms,
+            lexicalCandidates: [
+                makeLexicalCandidate(startTime: 1.0, endTime: 3.0)
+            ],
+            acousticBreaks: [
+                AcousticBreak(time: 1.5, breakStrength: 0.7, signals: [.energyDrop]),
+                AcousticBreak(time: 5.5, breakStrength: 0.6, signals: [.spectralSpike]),
+                AcousticBreak(time: 8.5, breakStrength: 0.8, signals: [.pauseCluster])
+            ],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            fmWindows: []
+        )
+
+        let first = RegionProposalBuilder.build(input)
+        let second = RegionProposalBuilder.build(input)
+
+        #expect(first.count == second.count)
+        for (lhs, rhs) in zip(first, second) {
+            #expect(lhs.firstAtomOrdinal == rhs.firstAtomOrdinal)
+            #expect(lhs.lastAtomOrdinal == rhs.lastAtomOrdinal)
+            #expect(lhs.startTime == rhs.startTime)
+            #expect(lhs.endTime == rhs.endTime)
+            #expect(lhs.origins.rawValue == rhs.origins.rawValue)
+            #expect(lhs.acousticBreaks.count == rhs.acousticBreaks.count)
+        }
+    }
+
+    @Test("acoustic break near a lexical region edge still fires the decoration path")
+    func acousticBreakNearLexicalEdgeFiresDecorationPath() {
+        // Lex region spans atoms 11..15 (startTime 11, endTime 16).
+        // Break at time 10.5 lands in atom 10 — outside the lex region but
+        // within the 1.0s edge tolerance of the region's startTime (11.0).
+        // The standalone acoustic proposal does NOT overlap the lex atoms
+        // (10 vs 11..15), so the existing `associateAcousticBreaks` decoration
+        // path is what lifts `.acoustic` into the lex region's origins.
+        let atoms = makeAtoms(count: 20)
+        let input = RegionProposalInput(
+            atoms: atoms,
+            lexicalCandidates: [
+                makeLexicalCandidate(startTime: 11.0, endTime: 16.0)
+            ],
+            acousticBreaks: [
+                AcousticBreak(time: 10.5, breakStrength: 0.8, signals: [.energyRise])
+            ],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            fmWindows: []
+        )
+
+        let regions = RegionProposalBuilder.build(input)
+
+        // Expect the lex region decorated with .acoustic via the tolerance
+        // path, plus a standalone acoustic-only region for the 1-atom anchor.
+        let lexRegion = regions.first {
+            $0.origins.contains(.lexical) && $0.firstAtomOrdinal == 11
+        }
+        #expect(lexRegion != nil)
+        #expect(lexRegion?.origins.contains(.acoustic) == true)
+        #expect(lexRegion?.acousticBreaks.isEmpty == false)
     }
 }
 
