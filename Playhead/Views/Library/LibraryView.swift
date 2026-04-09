@@ -58,16 +58,16 @@ private extension LibraryView {
         VStack(spacing: Spacing.md) {
             Image(systemName: "square.stack")
                 .font(.system(size: 48, weight: .thin))
-                .foregroundStyle(AppColors.secondary)
+                .foregroundStyle(AppColors.textSecondary)
                 .accessibilityHidden(true)
 
             Text("No Podcasts Yet")
                 .font(AppTypography.sans(size: 20, weight: .semibold))
-                .foregroundStyle(AppColors.text)
+                .foregroundStyle(AppColors.textPrimary)
 
             Text("Search to subscribe to your first podcast.")
                 .font(AppTypography.body)
-                .foregroundStyle(AppColors.secondary)
+                .foregroundStyle(AppColors.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, Spacing.xl)
         }
@@ -153,7 +153,7 @@ private struct PodcastGridCell: View {
         VStack(spacing: Spacing.xs) {
             // Stamp-sized artwork
             ZStack(alignment: .topTrailing) {
-                RoundedRectangle(cornerRadius: CornerRadius.md)
+                RoundedRectangle(cornerRadius: CornerRadius.medium)
                     .fill(AppColors.surface)
                     .aspectRatio(1, contentMode: .fit)
                     .overlay(
@@ -164,12 +164,12 @@ private struct PodcastGridCell: View {
                                     .scaledToFill()
                             } else if podcast.artworkURL != nil && !loadFailed {
                                 ProgressView()
-                                    .tint(AppColors.secondary)
+                                    .tint(AppColors.textSecondary)
                             } else {
                                 artworkPlaceholder
                             }
                         }
-                        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md))
+                        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.medium))
                     )
                     .task(id: podcast.artworkURL) {
                         guard let url = podcast.artworkURL else { return }
@@ -189,8 +189,8 @@ private struct PodcastGridCell: View {
                         }
                     }
                     .overlay(
-                        RoundedRectangle(cornerRadius: CornerRadius.md)
-                            .stroke(AppColors.secondary.opacity(0.15), lineWidth: 1)
+                        RoundedRectangle(cornerRadius: CornerRadius.medium)
+                            .stroke(AppColors.textSecondary.opacity(0.15), lineWidth: 1)
                     )
                     .themeShadow(AppShadow.card)
 
@@ -218,7 +218,7 @@ private struct PodcastGridCell: View {
 
                 Text(podcast.title)
                     .font(AppTypography.caption)
-                    .foregroundStyle(AppColors.text)
+                    .foregroundStyle(AppColors.textPrimary)
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity, alignment: .top)
@@ -230,7 +230,7 @@ private struct PodcastGridCell: View {
     private var artworkPlaceholder: some View {
         Image(systemName: "mic.fill")
             .font(.system(size: 28, weight: .light))
-            .foregroundStyle(AppColors.secondary.opacity(0.5))
+            .foregroundStyle(AppColors.textSecondary.opacity(0.5))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(AppColors.surface)
             .accessibilityHidden(true)

@@ -28,7 +28,7 @@ struct TranscriptPeekView: View {
                 .padding(.bottom, Spacing.sm)
 
             Divider()
-                .foregroundStyle(AppColors.secondary.opacity(0.2))
+                .foregroundStyle(AppColors.textSecondary.opacity(0.2))
 
             if peekViewModel.isLoading {
                 loadingState
@@ -60,7 +60,7 @@ private extension TranscriptPeekView {
 
     var grabHandle: some View {
         Capsule()
-            .fill(AppColors.secondary.opacity(0.3))
+            .fill(AppColors.textSecondary.opacity(0.3))
             .frame(width: 36, height: 5)
             .accessibilityHidden(true)
     }
@@ -71,7 +71,7 @@ private extension TranscriptPeekView {
         HStack {
             Text("TRANSCRIPT")
                 .font(AppTypography.sans(size: 11, weight: .semibold))
-                .foregroundStyle(AppColors.metadata)
+                .foregroundStyle(AppColors.textTertiary)
                 .tracking(1.4)
 
             Spacer()
@@ -104,14 +104,14 @@ private extension TranscriptPeekView {
         VStack(spacing: Spacing.sm) {
             Spacer()
             ProgressView()
-                .tint(AppColors.secondary)
+                .tint(AppColors.textSecondary)
                 .accessibilityLabel("Preparing transcript")
             Text("Preparing transcript…")
                 .font(AppTypography.caption)
-                .foregroundStyle(AppColors.metadata)
+                .foregroundStyle(AppColors.textTertiary)
             Text("Downloading and analyzing audio")
                 .font(AppTypography.sans(size: 11, weight: .regular))
-                .foregroundStyle(AppColors.metadata.opacity(0.6))
+                .foregroundStyle(AppColors.textTertiary.opacity(0.6))
             Spacer()
         }
         .frame(maxWidth: .infinity)
@@ -124,10 +124,10 @@ private extension TranscriptPeekView {
             Spacer()
             Text("No transcript yet")
                 .font(AppTypography.transcript)
-                .foregroundStyle(AppColors.metadata)
+                .foregroundStyle(AppColors.textTertiary)
             Text("Transcript will appear as the episode plays.")
                 .font(AppTypography.caption)
-                .foregroundStyle(AppColors.metadata.opacity(0.7))
+                .foregroundStyle(AppColors.textTertiary.opacity(0.7))
                 .multilineTextAlignment(.center)
             Spacer()
         }
@@ -152,7 +152,7 @@ private extension TranscriptPeekView {
                     // Debug stats for TestFlight diagnostics
                     Text(peekViewModel.debugStats)
                         .font(AppTypography.mono(size: 9, weight: .medium))
-                        .foregroundStyle(AppColors.metadata.opacity(0.5))
+                        .foregroundStyle(AppColors.textTertiary.opacity(0.5))
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.top, Spacing.sm)
 
@@ -199,7 +199,7 @@ private extension TranscriptPeekView {
                 Text(timestampLabel(chunk: chunk, adScore: adScore))
                     .font(AppTypography.mono(size: 10, weight: .medium))
                     .foregroundStyle(
-                        adScore != nil ? .red : (isActive ? AppColors.accent : AppColors.metadata)
+                        adScore != nil ? .red : (isActive ? AppColors.accent : AppColors.textTertiary)
                     )
 
                 // Transcript text
@@ -221,9 +221,9 @@ private extension TranscriptPeekView {
 
     func chunkTextColor(isActive: Bool, isAd: Bool) -> Color {
         if isAd {
-            return AppColors.metadata
+            return AppColors.textTertiary
         }
-        return isActive ? AppColors.text : AppColors.secondary
+        return isActive ? AppColors.textPrimary : AppColors.textSecondary
     }
 
     func timestampLabel(chunk: TranscriptChunk, adScore: Double?) -> String {

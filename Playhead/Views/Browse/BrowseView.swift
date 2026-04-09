@@ -57,16 +57,16 @@ private extension BrowseView {
         VStack(spacing: Spacing.md) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 48, weight: .thin))
-                .foregroundStyle(AppColors.secondary)
+                .foregroundStyle(AppColors.textSecondary)
                 .accessibilityHidden(true)
 
             Text("Discover Podcasts")
                 .font(AppTypography.sans(size: 20, weight: .semibold))
-                .foregroundStyle(AppColors.text)
+                .foregroundStyle(AppColors.textPrimary)
 
             Text("Search by name, topic, or creator.")
                 .font(AppTypography.body)
-                .foregroundStyle(AppColors.secondary)
+                .foregroundStyle(AppColors.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, Spacing.xl)
         }
@@ -76,16 +76,16 @@ private extension BrowseView {
         VStack(spacing: Spacing.md) {
             Image(systemName: "tray")
                 .font(.system(size: 48, weight: .thin))
-                .foregroundStyle(AppColors.secondary)
+                .foregroundStyle(AppColors.textSecondary)
                 .accessibilityHidden(true)
 
             Text("No Results")
                 .font(AppTypography.sans(size: 20, weight: .semibold))
-                .foregroundStyle(AppColors.text)
+                .foregroundStyle(AppColors.textPrimary)
 
             Text("Try a different search term.")
                 .font(AppTypography.body)
-                .foregroundStyle(AppColors.secondary)
+                .foregroundStyle(AppColors.textSecondary)
         }
     }
 
@@ -105,7 +105,7 @@ private extension BrowseView {
 
                     if result.id != viewModel.results.last?.id {
                         Divider()
-                            .foregroundStyle(AppColors.secondary.opacity(0.2))
+                            .foregroundStyle(AppColors.textSecondary.opacity(0.2))
                             .padding(.leading, 76)
                     }
                 }
@@ -139,19 +139,19 @@ private struct SearchResultRow: View {
             VStack(alignment: .leading, spacing: Spacing.xxs) {
                 Text(result.title)
                     .font(AppTypography.sans(size: 15, weight: .medium))
-                    .foregroundStyle(AppColors.text)
+                    .foregroundStyle(AppColors.textPrimary)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
 
                 Text(result.author)
                     .font(AppTypography.caption)
-                    .foregroundStyle(AppColors.secondary)
+                    .foregroundStyle(AppColors.textSecondary)
                     .lineLimit(1)
 
                 if let genre = result.genre {
                     Text(genre)
                         .font(AppTypography.mono(size: 11, weight: .regular))
-                        .foregroundStyle(AppColors.metadata)
+                        .foregroundStyle(AppColors.textTertiary)
                         .lineLimit(1)
                 }
             }
@@ -160,7 +160,7 @@ private struct SearchResultRow: View {
 
             Image(systemName: "chevron.right")
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(AppColors.secondary.opacity(0.5))
+                .foregroundStyle(AppColors.textSecondary.opacity(0.5))
                 .accessibilityHidden(true)
         }
         .padding(.horizontal, Spacing.md)
@@ -171,7 +171,7 @@ private struct SearchResultRow: View {
     }
 
     private var artworkView: some View {
-        RoundedRectangle(cornerRadius: CornerRadius.md)
+        RoundedRectangle(cornerRadius: CornerRadius.medium)
             .fill(AppColors.surface)
             .overlay(
                 Group {
@@ -186,7 +186,7 @@ private struct SearchResultRow: View {
                                 artworkPlaceholder
                             case .empty:
                                 ProgressView()
-                                    .tint(AppColors.secondary)
+                                    .tint(AppColors.textSecondary)
                             @unknown default:
                                 artworkPlaceholder
                             }
@@ -195,18 +195,18 @@ private struct SearchResultRow: View {
                         artworkPlaceholder
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md))
+                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.medium))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: CornerRadius.md)
-                    .stroke(AppColors.secondary.opacity(0.15), lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: CornerRadius.medium)
+                    .stroke(AppColors.textSecondary.opacity(0.15), lineWidth: 0.5)
             )
     }
 
     private var artworkPlaceholder: some View {
         Image(systemName: "mic.fill")
             .font(.system(size: 20, weight: .light))
-            .foregroundStyle(AppColors.secondary.opacity(0.5))
+            .foregroundStyle(AppColors.textSecondary.opacity(0.5))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(AppColors.surface)
     }
@@ -241,17 +241,17 @@ struct PodcastDetailView: View {
                     VStack(spacing: Spacing.xs) {
                         Text(result.title)
                             .font(AppTypography.title)
-                            .foregroundStyle(AppColors.text)
+                            .foregroundStyle(AppColors.textPrimary)
                             .multilineTextAlignment(.center)
 
                         Text(result.author)
                             .font(AppTypography.body)
-                            .foregroundStyle(AppColors.secondary)
+                            .foregroundStyle(AppColors.textSecondary)
 
                         if let genre = result.genre {
                             Text(genre)
                                 .font(AppTypography.mono(size: 12, weight: .medium))
-                                .foregroundStyle(AppColors.metadata)
+                                .foregroundStyle(AppColors.textTertiary)
                                 .padding(.horizontal, Spacing.sm)
                                 .padding(.vertical, Spacing.xxs)
                                 .background(
@@ -263,7 +263,7 @@ struct PodcastDetailView: View {
                         if let count = result.episodeCount, count > 0 {
                             Text("\(count) episodes")
                                 .font(AppTypography.caption)
-                                .foregroundStyle(AppColors.metadata)
+                                .foregroundStyle(AppColors.textTertiary)
                         }
                     }
                     .padding(.horizontal, Spacing.md)
@@ -288,7 +288,7 @@ struct PodcastDetailView: View {
     }
 
     private var heroArtwork: some View {
-        RoundedRectangle(cornerRadius: CornerRadius.lg)
+        RoundedRectangle(cornerRadius: CornerRadius.large)
             .fill(AppColors.surface)
             .frame(width: 200, height: 200)
             .overlay(
@@ -304,7 +304,7 @@ struct PodcastDetailView: View {
                                 heroPlaceholder
                             case .empty:
                                 ProgressView()
-                                    .tint(AppColors.secondary)
+                                    .tint(AppColors.textSecondary)
                             @unknown default:
                                 heroPlaceholder
                             }
@@ -313,11 +313,11 @@ struct PodcastDetailView: View {
                         heroPlaceholder
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.lg))
+                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.large))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: CornerRadius.lg)
-                    .stroke(AppColors.secondary.opacity(0.15), lineWidth: 1)
+                RoundedRectangle(cornerRadius: CornerRadius.large)
+                    .stroke(AppColors.textSecondary.opacity(0.15), lineWidth: 1)
             )
             .themeShadow(AppShadow.elevated)
     }
@@ -325,7 +325,7 @@ struct PodcastDetailView: View {
     private var heroPlaceholder: some View {
         Image(systemName: "mic.fill")
             .font(.system(size: 48, weight: .light))
-            .foregroundStyle(AppColors.secondary.opacity(0.5))
+            .foregroundStyle(AppColors.textSecondary.opacity(0.5))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(AppColors.surface)
             .accessibilityHidden(true)
@@ -348,17 +348,17 @@ struct PodcastDetailView: View {
                 }
             }
             .font(AppTypography.sans(size: 16, weight: .semibold))
-            .foregroundStyle(subscribed ? AppColors.text : Palette.bone)
+            .foregroundStyle(subscribed ? AppColors.textPrimary : Palette.bone)
             .frame(maxWidth: .infinity)
             .frame(height: 48)
             .background(
-                RoundedRectangle(cornerRadius: CornerRadius.md)
+                RoundedRectangle(cornerRadius: CornerRadius.medium)
                     .fill(subscribed ? AppColors.surface : AppColors.accent)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: CornerRadius.md)
+                RoundedRectangle(cornerRadius: CornerRadius.medium)
                     .stroke(
-                        subscribed ? AppColors.secondary.opacity(0.3) : .clear,
+                        subscribed ? AppColors.textSecondary.opacity(0.3) : .clear,
                         lineWidth: 1
                     )
             )

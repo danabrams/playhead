@@ -121,7 +121,7 @@ private extension NowPlayingView {
             } label: {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(AppColors.secondary)
+                    .foregroundStyle(AppColors.textSecondary)
             }
             .accessibilityLabel("Dismiss")
             .accessibilityHint("Closes the now playing screen")
@@ -131,12 +131,12 @@ private extension NowPlayingView {
             VStack(spacing: 2) {
                 Text("PLAYING FROM")
                     .font(AppTypography.sans(size: 10, weight: .semibold))
-                    .foregroundStyle(AppColors.metadata)
+                    .foregroundStyle(AppColors.textTertiary)
                     .tracking(1.2)
 
                 Text(viewModel.podcastTitle)
                     .font(AppTypography.caption)
-                    .foregroundStyle(AppColors.secondary)
+                    .foregroundStyle(AppColors.textSecondary)
                     .lineLimit(1)
             }
             .accessibilityElement(children: .combine)
@@ -150,7 +150,7 @@ private extension NowPlayingView {
                 } label: {
                     Image(systemName: "text.quote")
                         .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(AppColors.secondary)
+                        .foregroundStyle(AppColors.textSecondary)
                 }
                 .accessibilityLabel("Transcript")
                 .accessibilityHint("Opens the transcript peek sheet")
@@ -165,7 +165,7 @@ private extension NowPlayingView {
     // MARK: Artwork
 
     var artworkSection: some View {
-        RoundedRectangle(cornerRadius: CornerRadius.md)
+        RoundedRectangle(cornerRadius: CornerRadius.medium)
             .fill(AppColors.surface)
             .aspectRatio(1, contentMode: .fit)
             .frame(maxWidth: 140, maxHeight: 140)
@@ -182,7 +182,7 @@ private extension NowPlayingView {
                                 artworkPlaceholder
                             case .empty:
                                 ProgressView()
-                                    .tint(AppColors.secondary)
+                                    .tint(AppColors.textSecondary)
                             @unknown default:
                                 artworkPlaceholder
                             }
@@ -191,11 +191,11 @@ private extension NowPlayingView {
                         artworkPlaceholder
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md))
+                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.medium))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: CornerRadius.md)
-                    .stroke(AppColors.secondary.opacity(0.2), lineWidth: 1)
+                RoundedRectangle(cornerRadius: CornerRadius.medium)
+                    .stroke(AppColors.textSecondary.opacity(0.2), lineWidth: 1)
             )
             .themeShadow(AppShadow.card)
             .accessibilityLabel("Episode artwork")
@@ -204,7 +204,7 @@ private extension NowPlayingView {
     private var artworkPlaceholder: some View {
         Image(systemName: "mic.fill")
             .font(.title2)
-            .foregroundStyle(AppColors.secondary.opacity(0.4))
+            .foregroundStyle(AppColors.textSecondary.opacity(0.4))
     }
 
     // MARK: Titles
@@ -213,13 +213,13 @@ private extension NowPlayingView {
         VStack(spacing: Spacing.xxs) {
             Text(viewModel.episodeTitle)
                 .font(AppTypography.sans(size: 20, weight: .semibold))
-                .foregroundStyle(AppColors.text)
+                .foregroundStyle(AppColors.textPrimary)
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
 
             Text(viewModel.podcastTitle)
                 .font(AppTypography.caption)
-                .foregroundStyle(AppColors.secondary)
+                .foregroundStyle(AppColors.textSecondary)
                 .lineLimit(1)
         }
         .accessibilityElement(children: .combine)
@@ -241,14 +241,14 @@ private extension NowPlayingView {
             HStack {
                 Text(viewModel.elapsedFormatted)
                     .font(AppTypography.timestamp)
-                    .foregroundStyle(AppColors.metadata)
+                    .foregroundStyle(AppColors.textTertiary)
                     .accessibilityLabel("Elapsed: \(viewModel.elapsedFormatted)")
 
                 Spacer()
 
                 Text(viewModel.remainingFormatted)
                     .font(AppTypography.timestamp)
-                    .foregroundStyle(AppColors.metadata)
+                    .foregroundStyle(AppColors.textTertiary)
                     .accessibilityLabel("Remaining: \(viewModel.remainingFormatted)")
             }
         }
@@ -327,7 +327,7 @@ private struct TransportButton: View {
         } label: {
             Image(systemName: systemName)
                 .font(.system(size: size, weight: .medium))
-                .foregroundStyle(AppColors.text)
+                .foregroundStyle(AppColors.textPrimary)
                 .frame(width: size + 20, height: size + 20)
                 .contentShape(Rectangle())
         }

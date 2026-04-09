@@ -59,16 +59,16 @@ private extension EpisodeListView {
         VStack(spacing: Spacing.md) {
             Image(systemName: "waveform")
                 .font(.system(size: 48, weight: .thin))
-                .foregroundStyle(AppColors.secondary)
+                .foregroundStyle(AppColors.textSecondary)
                 .accessibilityHidden(true)
 
             Text("No Episodes")
                 .font(AppTypography.sans(size: 20, weight: .semibold))
-                .foregroundStyle(AppColors.text)
+                .foregroundStyle(AppColors.textPrimary)
 
             Text("Pull to refresh, or episodes will appear after the next feed sync.")
                 .font(AppTypography.body)
-                .foregroundStyle(AppColors.secondary)
+                .foregroundStyle(AppColors.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, Spacing.xl)
         }
@@ -81,7 +81,7 @@ private extension EpisodeListView {
             ForEach(episodes) { episode in
                 EpisodeRow(episode: episode)
                     .listRowBackground(AppColors.background)
-                    .listRowSeparatorTint(AppColors.secondary.opacity(0.2))
+                    .listRowSeparatorTint(AppColors.textSecondary.opacity(0.2))
                     .contentShape(Rectangle())
                     .onTapGesture {
                         playEpisode(episode)
@@ -104,7 +104,7 @@ private extension EpisodeListView {
                                     ? "circle" : "checkmark.circle.fill"
                             )
                         }
-                        .tint(AppColors.secondary)
+                        .tint(AppColors.textSecondary)
 
                         Button {
                             queueEpisode(episode)
@@ -154,7 +154,7 @@ private struct EpisodeRow: View {
             // Title (serif per spec)
             Text(episode.title)
                 .font(AppTypography.serif(size: 17, weight: .regular))
-                .foregroundStyle(episode.isPlayed ? AppColors.secondary : AppColors.text)
+                .foregroundStyle(episode.isPlayed ? AppColors.textSecondary : AppColors.textPrimary)
                 .lineLimit(2)
 
             // Date and duration (mono)
@@ -162,13 +162,13 @@ private struct EpisodeRow: View {
                 if let date = episode.publishedAt {
                     Text(Self.formatEpisodeDate(date))
                         .font(AppTypography.timestamp)
-                        .foregroundStyle(AppColors.metadata)
+                        .foregroundStyle(AppColors.textTertiary)
                 }
 
                 if let duration = episode.duration {
                     Text(TimeFormatter.formatDuration(duration))
                         .font(AppTypography.timestamp)
-                        .foregroundStyle(AppColors.metadata)
+                        .foregroundStyle(AppColors.textTertiary)
                 }
 
                 Spacer()
@@ -198,7 +198,7 @@ private struct EpisodeRow: View {
                     let fraction = min(episode.playbackPosition / duration, 1.0)
                     ZStack(alignment: .leading) {
                         RoundedRectangle(cornerRadius: 1)
-                            .fill(AppColors.secondary.opacity(0.2))
+                            .fill(AppColors.textSecondary.opacity(0.2))
                             .frame(height: 2)
                         RoundedRectangle(cornerRadius: 1)
                             .fill(AppColors.accent)

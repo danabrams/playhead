@@ -102,11 +102,11 @@ private struct WelcomeStepView: View {
                     VStack(spacing: Spacing.xs) {
                         Text("Playhead")
                             .font(AppTypography.sans(size: 36, weight: .semibold))
-                            .foregroundStyle(AppColors.text)
+                            .foregroundStyle(AppColors.textPrimary)
 
                         Text("Podcast listening, minus the ads.")
                             .font(AppTypography.body)
-                            .foregroundStyle(AppColors.secondary)
+                            .foregroundStyle(AppColors.textSecondary)
                     }
                     .opacity(textVisible ? 1 : 0)
                     .offset(y: textVisible ? 0 : 12)
@@ -200,11 +200,11 @@ private struct ValuePropStepView: View {
             VStack(alignment: .leading, spacing: Spacing.xxs) {
                 Text(title)
                     .font(AppTypography.sans(size: 17, weight: .semibold))
-                    .foregroundStyle(AppColors.text)
+                    .foregroundStyle(AppColors.textPrimary)
 
                 Text(detail)
                     .font(AppTypography.body)
-                    .foregroundStyle(AppColors.secondary)
+                    .foregroundStyle(AppColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -228,7 +228,7 @@ private struct ModelDownloadStepView: View {
                 // Animated indicator
                 ZStack {
                     Circle()
-                        .stroke(AppColors.secondary.opacity(0.2), lineWidth: 3)
+                        .stroke(AppColors.textSecondary.opacity(0.2), lineWidth: 3)
                         .frame(width: 72, height: 72)
 
                     if viewModel.fastPathReady {
@@ -250,11 +250,11 @@ private struct ModelDownloadStepView: View {
                 VStack(spacing: Spacing.xs) {
                     Text(viewModel.fastPathReady ? "Ready to go" : "Preparing ad detection")
                         .font(AppTypography.sans(size: 20, weight: .semibold))
-                        .foregroundStyle(AppColors.text)
+                        .foregroundStyle(AppColors.textPrimary)
 
                     Text(viewModel.statusMessage)
                         .font(AppTypography.caption)
-                        .foregroundStyle(AppColors.secondary)
+                        .foregroundStyle(AppColors.textSecondary)
                         .multilineTextAlignment(.center)
                 }
             }
@@ -275,7 +275,7 @@ private struct ModelDownloadStepView: View {
                 if viewModel.backgroundModelsRemaining > 0 && viewModel.fastPathReady {
                     Text("Remaining models download in the background.")
                         .font(AppTypography.caption)
-                        .foregroundStyle(AppColors.metadata)
+                        .foregroundStyle(AppColors.textTertiary)
                 }
             }
             .padding(.horizontal, Spacing.xl)
@@ -306,11 +306,11 @@ private struct FirstPodcastStepView: View {
             VStack(spacing: Spacing.xs) {
                 Text("Find your first podcast")
                     .font(AppTypography.sans(size: 24, weight: .semibold))
-                    .foregroundStyle(AppColors.text)
+                    .foregroundStyle(AppColors.textPrimary)
 
                 Text("Search for a show to try ad-free listening.")
                     .font(AppTypography.body)
-                    .foregroundStyle(AppColors.secondary)
+                    .foregroundStyle(AppColors.textSecondary)
                     .multilineTextAlignment(.center)
             }
             .padding(.top, Spacing.xxl)
@@ -320,12 +320,12 @@ private struct FirstPodcastStepView: View {
             HStack(spacing: Spacing.sm) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(AppColors.secondary)
+                    .foregroundStyle(AppColors.textSecondary)
                     .accessibilityHidden(true)
 
                 TextField("Search podcasts", text: $viewModel.searchText)
                     .font(AppTypography.body)
-                    .foregroundStyle(AppColors.text)
+                    .foregroundStyle(AppColors.textPrimary)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                     .submitLabel(.search)
@@ -337,7 +337,7 @@ private struct FirstPodcastStepView: View {
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .font(.system(size: 16))
-                            .foregroundStyle(AppColors.secondary)
+                            .foregroundStyle(AppColors.textSecondary)
                     }
                     .accessibilityLabel("Clear search")
                 }
@@ -345,12 +345,12 @@ private struct FirstPodcastStepView: View {
             .padding(.horizontal, Spacing.md)
             .padding(.vertical, Spacing.sm)
             .background(
-                RoundedRectangle(cornerRadius: CornerRadius.md)
+                RoundedRectangle(cornerRadius: CornerRadius.medium)
                     .fill(AppColors.surface)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: CornerRadius.md)
-                    .stroke(AppColors.secondary.opacity(0.2), lineWidth: 1)
+                RoundedRectangle(cornerRadius: CornerRadius.medium)
+                    .stroke(AppColors.textSecondary.opacity(0.2), lineWidth: 1)
             )
             .padding(.horizontal, Spacing.lg)
             .padding(.top, Spacing.lg)
@@ -366,18 +366,18 @@ private struct FirstPodcastStepView: View {
                 Spacer()
                 Text("No results found.")
                     .font(AppTypography.body)
-                    .foregroundStyle(AppColors.secondary)
+                    .foregroundStyle(AppColors.textSecondary)
                 Spacer()
             } else if viewModel.results.isEmpty {
                 Spacer()
                 Image(systemName: "waveform")
                     .font(.system(size: 40, weight: .thin))
-                    .foregroundStyle(AppColors.secondary.opacity(0.5))
+                    .foregroundStyle(AppColors.textSecondary.opacity(0.5))
                     .padding(.bottom, Spacing.sm)
                     .accessibilityHidden(true)
                 Text("Type a name or topic above.")
                     .font(AppTypography.caption)
-                    .foregroundStyle(AppColors.metadata)
+                    .foregroundStyle(AppColors.textTertiary)
                 Spacer()
             } else {
                 ScrollView {
@@ -393,7 +393,7 @@ private struct FirstPodcastStepView: View {
 
                             if result.id != viewModel.results.last?.id {
                                 Divider()
-                                    .foregroundStyle(AppColors.secondary.opacity(0.15))
+                                    .foregroundStyle(AppColors.textSecondary.opacity(0.15))
                                     .padding(.leading, 72)
                             }
                         }
@@ -473,13 +473,13 @@ private struct OnboardingSearchRow: View {
             VStack(alignment: .leading, spacing: Spacing.xxs) {
                 Text(result.title)
                     .font(AppTypography.sans(size: 15, weight: .medium))
-                    .foregroundStyle(AppColors.text)
+                    .foregroundStyle(AppColors.textPrimary)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
 
                 Text(result.author)
                     .font(AppTypography.caption)
-                    .foregroundStyle(AppColors.secondary)
+                    .foregroundStyle(AppColors.textSecondary)
                     .lineLimit(1)
             }
 
@@ -509,7 +509,7 @@ private struct OnboardingSearchRow: View {
     }
 
     private var artworkView: some View {
-        RoundedRectangle(cornerRadius: CornerRadius.md)
+        RoundedRectangle(cornerRadius: CornerRadius.medium)
             .fill(AppColors.surface)
             .overlay(
                 Group {
@@ -521,7 +521,7 @@ private struct OnboardingSearchRow: View {
                             case .failure:
                                 artworkPlaceholder
                             case .empty:
-                                ProgressView().tint(AppColors.secondary)
+                                ProgressView().tint(AppColors.textSecondary)
                             @unknown default:
                                 artworkPlaceholder
                             }
@@ -530,18 +530,18 @@ private struct OnboardingSearchRow: View {
                         artworkPlaceholder
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md))
+                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.medium))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: CornerRadius.md)
-                    .stroke(AppColors.secondary.opacity(0.15), lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: CornerRadius.medium)
+                    .stroke(AppColors.textSecondary.opacity(0.15), lineWidth: 0.5)
             )
     }
 
     private var artworkPlaceholder: some View {
         Image(systemName: "mic.fill")
             .font(.system(size: 18, weight: .light))
-            .foregroundStyle(AppColors.secondary.opacity(0.5))
+            .foregroundStyle(AppColors.textSecondary.opacity(0.5))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(AppColors.surface)
     }
@@ -562,7 +562,7 @@ private struct OnboardingButton: View {
                 .frame(maxWidth: .infinity)
                 .frame(height: 52)
                 .background(
-                    RoundedRectangle(cornerRadius: CornerRadius.md)
+                    RoundedRectangle(cornerRadius: CornerRadius.medium)
                         .fill(AppColors.accent)
                 )
         }

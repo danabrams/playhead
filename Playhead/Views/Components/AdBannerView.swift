@@ -242,7 +242,7 @@ struct AdBannerView: View {
                         .padding(.horizontal, Spacing.sm)
                         .padding(.vertical, Spacing.xxs)
                         .background(
-                            RoundedRectangle(cornerRadius: CornerRadius.sm)
+                            RoundedRectangle(cornerRadius: CornerRadius.small)
                                 .fill(AppColors.accent.opacity(0.12))
                         )
                 }
@@ -267,7 +267,7 @@ struct AdBannerView: View {
         .padding(.horizontal, Spacing.md)
         .padding(.vertical, Spacing.sm)
         .background(
-            RoundedRectangle(cornerRadius: CornerRadius.md)
+            RoundedRectangle(cornerRadius: CornerRadius.medium)
                 .fill(Palette.ink)
                 .themeShadow(AppShadow.elevated)
         )

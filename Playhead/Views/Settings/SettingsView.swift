@@ -96,17 +96,17 @@ private extension SettingsView {
                 VStack(alignment: .leading, spacing: Spacing.xxs) {
                     Text("Apple Speech")
                         .font(AppTypography.body)
-                        .foregroundStyle(AppColors.text)
+                        .foregroundStyle(AppColors.textPrimary)
                     Text("Speech assets are managed by iOS and stay on device.")
                         .font(AppTypography.caption)
-                        .foregroundStyle(AppColors.secondary)
+                        .foregroundStyle(AppColors.textSecondary)
                 }
                 .padding(.vertical, Spacing.xxs)
                 .listRowBackground(AppColors.surface)
             } else if viewModel.modelStatuses.isEmpty {
                 Text("No models in manifest")
                     .font(AppTypography.body)
-                    .foregroundStyle(AppColors.secondary)
+                    .foregroundStyle(AppColors.textSecondary)
             } else {
                 ForEach(viewModel.modelStatuses, id: \.0.id) { entry, status in
                     modelRow(entry: entry, status: status)
@@ -117,7 +117,7 @@ private extension SettingsView {
         } footer: {
             Text("On-device analysis assets never leave your device.")
                 .font(AppTypography.caption)
-                .foregroundStyle(AppColors.metadata)
+                .foregroundStyle(AppColors.textTertiary)
         }
     }
 
@@ -127,16 +127,16 @@ private extension SettingsView {
             VStack(alignment: .leading, spacing: Spacing.xxs) {
                 Text(entry.displayName)
                     .font(AppTypography.body)
-                    .foregroundStyle(AppColors.text)
+                    .foregroundStyle(AppColors.textPrimary)
 
                 HStack(spacing: Spacing.xs) {
                     Text(entry.role.rawValue)
                         .font(AppTypography.caption)
-                        .foregroundStyle(AppColors.metadata)
+                        .foregroundStyle(AppColors.textTertiary)
 
                     Text(SettingsViewModel.formattedSize(entry.uncompressedSizeBytes))
                         .font(AppTypography.timestamp)
-                        .foregroundStyle(AppColors.metadata)
+                        .foregroundStyle(AppColors.textTertiary)
                 }
             }
 
@@ -172,7 +172,7 @@ private extension SettingsView {
                     .frame(width: 60)
                 Text("\(Int(progress * 100))%")
                     .font(AppTypography.timestamp)
-                    .foregroundStyle(AppColors.metadata)
+                    .foregroundStyle(AppColors.textTertiary)
             }
             .accessibilityValue("Downloading: \(Int(progress * 100)) percent")
 
@@ -193,7 +193,7 @@ private extension SettingsView {
             HStack(spacing: Spacing.xs) {
                 Text("v\(version)")
                     .font(AppTypography.timestamp)
-                    .foregroundStyle(AppColors.secondary)
+                    .foregroundStyle(AppColors.textSecondary)
 
                 if viewModel.isDeletingModel == entry.id {
                     ProgressView()
@@ -218,7 +218,7 @@ private extension SettingsView {
             VStack(alignment: .trailing, spacing: 4) {
                 Text("v\(current)")
                     .font(AppTypography.timestamp)
-                    .foregroundStyle(AppColors.metadata)
+                    .foregroundStyle(AppColors.textTertiary)
                 Text("v\(new) available")
                     .font(AppTypography.caption)
                     .foregroundStyle(AppColors.accent)
@@ -294,7 +294,7 @@ private extension SettingsView {
             } label: {
                 Label("Ad Skip", systemImage: "forward.fill")
                     .font(AppTypography.body)
-                    .foregroundStyle(AppColors.text)
+                    .foregroundStyle(AppColors.textPrimary)
             }
             .listRowBackground(AppColors.surface)
             .accessibilityLabel("Ad skip mode")
@@ -304,7 +304,7 @@ private extension SettingsView {
         } footer: {
             Text(skipBehaviorFooter(prefs))
                 .font(AppTypography.caption)
-                .foregroundStyle(AppColors.metadata)
+                .foregroundStyle(AppColors.textTertiary)
         }
     }
 
@@ -331,7 +331,7 @@ private extension SettingsView {
                 HStack {
                     Label("Playback Speed", systemImage: "gauge.with.needle")
                         .font(AppTypography.body)
-                        .foregroundStyle(AppColors.text)
+                        .foregroundStyle(AppColors.textPrimary)
                     Spacer()
                     Text(String(format: "%.1fx", prefs.playbackSpeed))
                         .font(AppTypography.timestamp)
@@ -355,7 +355,7 @@ private extension SettingsView {
             HStack {
                 Label("Skip Forward", systemImage: "goforward")
                     .font(AppTypography.body)
-                    .foregroundStyle(AppColors.text)
+                    .foregroundStyle(AppColors.textPrimary)
                 Spacer()
                 Picker("", selection: Binding(
                     get: { prefs.skipIntervals.forwardSeconds },
@@ -376,7 +376,7 @@ private extension SettingsView {
             HStack {
                 Label("Skip Back", systemImage: "gobackward")
                     .font(AppTypography.body)
-                    .foregroundStyle(AppColors.text)
+                    .foregroundStyle(AppColors.textPrimary)
                 Spacer()
                 Picker("", selection: Binding(
                     get: { prefs.skipIntervals.backwardSeconds },
@@ -414,7 +414,7 @@ private extension SettingsView {
             )) {
                 Label("Background Processing", systemImage: "arrow.triangle.2.circlepath")
                     .font(AppTypography.body)
-                    .foregroundStyle(AppColors.text)
+                    .foregroundStyle(AppColors.textPrimary)
             }
             .tint(AppColors.accent)
             .listRowBackground(AppColors.surface)
@@ -423,7 +423,7 @@ private extension SettingsView {
         } footer: {
             Text("When enabled, episodes are transcribed and analyzed in the background. Requires sufficient battery and may use network for model downloads.")
                 .font(AppTypography.caption)
-                .foregroundStyle(AppColors.metadata)
+                .foregroundStyle(AppColors.textTertiary)
         }
     }
 }
@@ -471,13 +471,13 @@ private extension SettingsView {
         HStack {
             Label(label, systemImage: icon)
                 .font(AppTypography.body)
-                .foregroundStyle(AppColors.text)
+                .foregroundStyle(AppColors.textPrimary)
 
             Spacer()
 
             Text(SettingsViewModel.formattedSize(size))
                 .font(AppTypography.timestamp)
-                .foregroundStyle(AppColors.metadata)
+                .foregroundStyle(AppColors.textTertiary)
 
             if let clearAction, size > 0 {
                 Button("Clear", action: clearAction)
@@ -551,7 +551,7 @@ private extension SettingsView {
                 HStack {
                     Label("Export Current Episode", systemImage: "square.and.arrow.up")
                         .font(AppTypography.body)
-                        .foregroundStyle(hasCurrentEpisode ? AppColors.accent : AppColors.secondary)
+                        .foregroundStyle(hasCurrentEpisode ? AppColors.accent : AppColors.textSecondary)
 
                     Spacer()
 
@@ -599,7 +599,7 @@ private extension SettingsView {
 
                 Text(export.filename)
                     .font(AppTypography.caption)
-                    .foregroundStyle(AppColors.metadata)
+                    .foregroundStyle(AppColors.textTertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .listRowBackground(AppColors.surface)
@@ -608,7 +608,7 @@ private extension SettingsView {
             if !hasCurrentEpisode {
                 Text("Start playing an episode to enable export.")
                     .font(AppTypography.caption)
-                    .foregroundStyle(AppColors.metadata)
+                    .foregroundStyle(AppColors.textTertiary)
                     .listRowBackground(AppColors.surface)
             }
         } header: {
@@ -616,7 +616,7 @@ private extension SettingsView {
         } footer: {
             Text("Exports transcript, detected ads, evidence catalog, feature summary, and acoustic breaks for the current episode. DEBUG builds only.")
                 .font(AppTypography.caption)
-                .foregroundStyle(AppColors.metadata)
+                .foregroundStyle(AppColors.textTertiary)
         }
     }
 
@@ -669,7 +669,7 @@ private extension SettingsView {
         Section {
             Text("\(fmFeedbackAttachmentURLs.count) attachment\(fmFeedbackAttachmentURLs.count == 1 ? "" : "s") captured")
                 .font(AppTypography.body)
-                .foregroundStyle(AppColors.text)
+                .foregroundStyle(AppColors.textPrimary)
                 .listRowBackground(AppColors.surface)
 
             if !fmFeedbackAttachmentURLs.isEmpty {
@@ -704,7 +704,7 @@ private extension SettingsView {
         } footer: {
             Text("Captured automatically when the on-device model refuses a classification or fails to produce structured output. Tap Share to attach to a Feedback Assistant report.")
                 .font(AppTypography.caption)
-                .foregroundStyle(AppColors.metadata)
+                .foregroundStyle(AppColors.textTertiary)
         }
         .task {
             await refreshFMFeedback()
@@ -736,7 +736,7 @@ private extension SettingsView {
     func sectionHeader(_ title: String) -> some View {
         Text(title)
             .font(AppTypography.sans(size: 13, weight: .semibold))
-            .foregroundStyle(AppColors.secondary)
+            .foregroundStyle(AppColors.textSecondary)
             .textCase(nil)
     }
 }
