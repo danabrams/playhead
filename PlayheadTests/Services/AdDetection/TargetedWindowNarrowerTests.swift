@@ -238,30 +238,104 @@ struct TargetedWindowNarrowerTests {
         #expect(!first.isEmpty)
     }
 
-    @Test("playhead-7q3: snap cannot widen windows past the per-phase cap (still aborts)")
+    @Test("playhead-7q3: snap-induced widening that blows the cap still aborts")
     func snapRespectsCapAbort() {
-        // Seven widely-spaced anchors already blow the cap before snap
-        // logic fires. Verify the cap check still fires when breaks are
-        // present — the snap must not accidentally paper over the abort
-        // path by re-ordering the cap/snap steps.
-        let anchors = [10, 30, 50, 70, 90, 110, 130]
-        let inputs = makeSyntheticInputs(segmentCount: 200, anchorIndices: anchors)
-        // Sprinkle breaks right at every anchor's padded edges so snap
-        // logic is actively invoked on every merged interval.
+        // Exercises the genuinely interesting case: a merged input whose
+        // pre-snap size is comfortably under the per-phase cap, but whose
+        // post-snap widening (driven by acoustic breaks placed OUTSIDE the
+        // existing merged edges) pushes the total over the cap.
+        //
+        // Setup (padding=5, cap=60, snap distance override=6.0):
+        //   - 5 anchors at [20, 50, 80, 110, 140] in a 200-segment episode.
+        //   - Pre-snap: 5 disjoint windows of width 11 ([15,25], [45,55],
+        //     [75,85], [105,115], [135,145]). Total = 55 < 60 cap, so
+        //     the same inputs WITHOUT breaks pass the cap check.
+        //   - Breaks are placed one per edge, 4.5s beyond each edge:
+        //       * left break at (lo-5).midpoint so snap pulls lo -> lo-5
+        //       * right break at (hi+5).midpoint so snap pushes hi -> hi+5
+        //     Each window widens from 11 to 21 segs. 5 * 21 = 105 > 60
+        //     → the cap check MUST fire AFTER snap and abort.
+        //
+        // Anchors are spaced far enough (30 segs) that neither the
+        // breaks nor the widened intervals bleed across anchors.
+        let anchors = [20, 50, 80, 110, 140]
+        let baseInputs = makeSyntheticInputs(segmentCount: 200, anchorIndices: anchors)
+
+        // Sanity: without breaks the same config does NOT abort (55 < 60).
+        // This pins the "cap abort is snap-induced" claim.
+        let baselineResult = TargetedWindowNarrower.narrow(
+            phase: .scanHarvesterProposals,
+            inputs: baseInputs,
+            config: NarrowingConfig(
+                perAnchorPaddingSegments: 5,
+                maxNarrowedSegmentsPerPhase: 60,
+                acousticBreakSnapMaxDistanceSeconds: 6.0
+            )
+        )
+        #expect(!baselineResult.aborted, "baseline without breaks must fit under the cap (55 < 60)")
+        #expect((baselineResult.narrowedSegments ?? []).count == 55)
+
+        // Each anchor contributes two breaks placed at the midpoint of
+        // the segments that sit exactly `padding` (5) segs beyond the
+        // pre-snap edges. The synthetic segment `idx` spans [idx, idx+1],
+        // so the midpoint is `Double(idx) + 0.5`.
         let breaks: [AcousticBreak] = anchors.flatMap { anchor -> [AcousticBreak] in
-            [
+            let lo = anchor - 5          // pre-snap left edge
+            let hi = anchor + 5          // pre-snap right edge
+            let leftTarget = Double(lo - 5) + 0.5   // midpoint of (lo-5)
+            let rightTarget = Double(hi + 5) + 0.5  // midpoint of (hi+5)
+            return [
                 AcousticBreak(
-                    time: Double(anchor) - 5.0,
-                    breakStrength: 0.7,
+                    time: leftTarget,
+                    breakStrength: 0.8,
                     signals: [.energyDrop]
                 ),
                 AcousticBreak(
-                    time: Double(anchor) + 5.0,
-                    breakStrength: 0.7,
+                    time: rightTarget,
+                    breakStrength: 0.8,
                     signals: [.energyRise]
                 )
             ]
         }
+        let withBreaks = TargetedWindowNarrower.Inputs(
+            analysisAssetId: baseInputs.analysisAssetId,
+            podcastId: baseInputs.podcastId,
+            transcriptVersion: baseInputs.transcriptVersion,
+            segments: baseInputs.segments,
+            evidenceCatalog: baseInputs.evidenceCatalog,
+            auditWindowSampleRate: baseInputs.auditWindowSampleRate,
+            episodesSinceLastFullRescan: baseInputs.episodesSinceLastFullRescan,
+            acousticBreaks: breaks
+        )
+        let result = TargetedWindowNarrower.narrow(
+            phase: .scanHarvesterProposals,
+            inputs: withBreaks,
+            config: NarrowingConfig(
+                perAnchorPaddingSegments: 5,
+                maxNarrowedSegmentsPerPhase: 60,
+                acousticBreakSnapMaxDistanceSeconds: 6.0
+            )
+        )
+        #expect(result.aborted, "snap widening should push merged total past cap (expected 105 > 60)")
+        #expect(result.narrowedSegments == nil)
+    }
+
+    @Test("playhead-7q3: default NarrowingConfig snaps within 2.0s of an edge")
+    func defaultConfigSnapTriggersAtTwoSeconds() {
+        // Pins the PRODUCTION-DEFAULT snap behavior. A future change to
+        // the `acousticBreakSnapMaxDistanceSeconds` default constant
+        // (which is 2.0s, matching the FeatureWindow duration) will trip
+        // this test by either failing to snap or snapping too aggressively.
+        //
+        // Synthetic layout: 30 one-second segments; anchor at segment 10,
+        // default padding=5 → pre-snap window [5, 15]. Segment 5 spans
+        // [5.0, 6.0], so its startTime is 5.0. Place a break at 3.5s:
+        //   distance = |5.0 - 3.5| = 1.5s < 2.0s default ✓
+        //   break time 3.5 falls inside segment 3 ([3.0, 4.0]) ✓
+        //   snap drift = |5 - 3| = 2 ≤ padding(5) ✓
+        // Expected: left edge moves from 5 → 3. Right edge unchanged at 15
+        // (no nearby break).
+        let inputs = makeSyntheticInputs(segmentCount: 30, anchorIndices: [10])
         let withBreaks = TargetedWindowNarrower.Inputs(
             analysisAssetId: inputs.analysisAssetId,
             podcastId: inputs.podcastId,
@@ -270,18 +344,23 @@ struct TargetedWindowNarrowerTests {
             evidenceCatalog: inputs.evidenceCatalog,
             auditWindowSampleRate: inputs.auditWindowSampleRate,
             episodesSinceLastFullRescan: inputs.episodesSinceLastFullRescan,
-            acousticBreaks: breaks
+            acousticBreaks: [
+                AcousticBreak(
+                    time: 3.5,
+                    breakStrength: 0.7,
+                    signals: [.energyDrop, .pauseCluster]
+                )
+            ]
         )
+        // NarrowingConfig.default — no override; this is the point.
         let result = TargetedWindowNarrower.narrow(
             phase: .scanHarvesterProposals,
-            inputs: withBreaks,
-            config: NarrowingConfig(
-                perAnchorPaddingSegments: 5,
-                maxNarrowedSegmentsPerPhase: 60
-            )
+            inputs: withBreaks
         )
-        #expect(result.aborted)
-        #expect(result.narrowedSegments == nil)
+        let lineRefs = (result.narrowedSegments ?? []).map(\.segmentIndex).sorted()
+        #expect(lineRefs.first == 3, "default 2.0s snap should pull left edge from 5 to 3 (got \(lineRefs.first ?? -1))")
+        #expect(lineRefs.last == 15, "right edge should be unchanged (no nearby break)")
+        #expect(lineRefs == Array(3...15))
     }
 
     // MARK: - Cycle 2 H13: empty / wasEmpty
