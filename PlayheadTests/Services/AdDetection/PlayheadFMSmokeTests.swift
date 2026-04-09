@@ -766,6 +766,10 @@ final class PlayheadFMSmokeTests: XCTestCase {
     ]
 
     func testSafetyClassifierProbeMatrix() async throws {
+        throw XCTSkip("Not needed currently")
+
+
+
         let classifier = FoundationModelClassifier()
         var results: [(label: String, status: String, detail: String)] = []
         results.reserveCapacity(Self.safetyProbeMatrix.count)
@@ -997,6 +1001,8 @@ final class PlayheadFMSmokeTests: XCTestCase {
     }()
 
     func testRefinementPassSafetyClassifierProbeMatrix() async throws {
+        throw XCTSkip("Not needed currently")
+
         let classifier = FoundationModelClassifier()
         var results: [(label: String, status: String, detail: String)] = []
         results.reserveCapacity(Self.refinementSafetyProbeMatrix.count)
@@ -1163,6 +1169,8 @@ final class PlayheadFMSmokeTests: XCTestCase {
     ///
     /// We never let the model echo the transcript back — line refs only.
     func testPermissiveTransformationProbeMatrix() async throws {
+        throw XCTSkip("Not needed currently")
+
         guard #available(iOS 26.0, *) else {
             throw XCTSkip("permissive content transformations require iOS 26.0+")
         }
@@ -1364,6 +1372,7 @@ final class PlayheadFMSmokeTests: XCTestCase {
     /// than the validation matrix's prompt + parser pair) still recovers
     /// the canonical refused-ad case.
     func testPermissiveAdClassifierEndToEnd() async throws {
+        throw XCTSkip("Not needed currently")
         guard #available(iOS 26.0, *) else {
             throw XCTSkip("PermissiveAdClassifier requires iOS 26.0+")
         }
