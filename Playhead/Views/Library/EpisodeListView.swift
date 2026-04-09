@@ -11,6 +11,10 @@ struct EpisodeListView: View {
 
     let podcast: Podcast
 
+    /// Injected haptic player — defaults to `SystemHapticPlayer` in
+    /// production, tests swap in a `RecordingHapticPlayer`.
+    var hapticPlayer: any HapticPlaying = SystemHapticPlayer()
+
     @Query private var episodes: [Episode]
 
     @Environment(\.modelContext) private var modelContext
@@ -19,8 +23,9 @@ struct EpisodeListView: View {
     @State private var navigateToNowPlaying = false
     @State private var selectedEpisode: Episode?
 
-    init(podcast: Podcast) {
+    init(podcast: Podcast, hapticPlayer: any HapticPlaying = SystemHapticPlayer()) {
         self.podcast = podcast
+        self.hapticPlayer = hapticPlayer
         let podcastID = podcast.persistentModelID
         _episodes = Query(
             filter: #Predicate<Episode> { episode in
@@ -28,6 +33,12 @@ struct EpisodeListView: View {
             },
             sort: [SortDescriptor(\Episode.publishedAt, order: .reverse)]
         )
+    }
+
+    func queueEpisode(_ episode: Episode) {
+        // Queue functionality will be wired in a future bead.
+        // For now, mark as a no-op placeholder with haptic feedback.
+        hapticPlayer.play(.save)
     }
 
     var body: some View {
@@ -134,12 +145,6 @@ private extension EpisodeListView {
 
     func togglePlayed(_ episode: Episode) {
         episode.isPlayed.toggle()
-    }
-
-    func queueEpisode(_ episode: Episode) {
-        // Queue functionality will be wired in a future bead.
-        // For now, mark as a no-op placeholder with haptic feedback.
-        HapticManager.notification(.success)
     }
 }
 

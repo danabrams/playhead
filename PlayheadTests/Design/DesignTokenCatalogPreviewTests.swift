@@ -51,13 +51,19 @@ final class DesignTokenCatalogPreviewTests: XCTestCase {
         )
     }
 
-    /// Render the catalog at the given Dynamic Type size and return the
-    /// natural fitting height for the iPhone SE width. Uses
-    /// `UIHostingController.sizeThatFits(in:)` so the measurement reflects
-    /// the actual layout pass, not just whatever bitmap `ImageRenderer`
-    /// happens to produce.
+    /// Render the catalog's non-scrolling content at the given Dynamic Type
+    /// size and return the natural fitting height for the iPhone SE width.
+    ///
+    /// We deliberately measure `DesignTokenCatalogContent` (the inner
+    /// VStack) instead of `DesignTokenCatalog` itself. `DesignTokenCatalog`
+    /// wraps its content in a `ScrollView`, and a `ScrollView`'s fitting
+    /// height when proposed `.greatestFiniteMagnitude` is
+    /// implementation-defined — some iOS versions return the proposed
+    /// (huge) value, which would make the default-vs-AX3 ratio assertion
+    /// vacuously true. Measuring the inner content view gives a true
+    /// intrinsic layout height that actually changes with Dynamic Type.
     private func renderedHeight(dynamicType: DynamicTypeSize) throws -> CGFloat {
-        let view = DesignTokenCatalog()
+        let view = DesignTokenCatalogContent()
             .environment(\.dynamicTypeSize, dynamicType)
         let host = UIHostingController(rootView: view)
         host.view.frame = CGRect(
@@ -69,6 +75,16 @@ final class DesignTokenCatalogPreviewTests: XCTestCase {
             width: Self.iPhoneSEWidth,
             height: .greatestFiniteMagnitude
         ))
+        // Guard against the pathological case where the layout system
+        // returns the proposed (unbounded) height instead of a true
+        // intrinsic size. If this ever fires, the content is wrapped in a
+        // greedy container and the Dynamic Type growth assertion would be
+        // vacuous.
+        XCTAssertTrue(
+            fitted.height.isFinite && fitted.height < 50_000,
+            "Fitted height (\(fitted.height)) looks like the proposed unbounded height — " +
+            "the measured view probably got wrapped in a ScrollView or other greedy container."
+        )
         return fitted.height
     }
 }

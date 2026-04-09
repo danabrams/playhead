@@ -22,11 +22,8 @@ struct NowPlayingBar: View {
 
     /// Injected haptic player — defaults to `SystemHapticPlayer` in production,
     /// tests swap in a `RecordingHapticPlayer` to assert the expected event.
-    /// An `@Environment` key with the same default is also provided by the
-    /// Design module (see `HapticManager.swift`) so call sites can override
-    /// via `.environment(\.hapticPlayer, ...)` if preferred; the init-param
-    /// form here is the canonical test seam because SwiftUI `@Environment`
-    /// values only resolve inside a live view hierarchy.
+    /// The init-param form is the canonical test seam because it works
+    /// without a live SwiftUI view hierarchy.
     var hapticPlayer: any HapticPlaying = SystemHapticPlayer()
 
     /// Height of the mini-player bar content (excluding the progress line).

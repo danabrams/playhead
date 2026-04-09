@@ -3,21 +3,20 @@
 // UIFeedbackGenerator kinds via the HapticPlaying protocol seam.
 
 import XCTest
-import UIKit
 @testable import Playhead
-
-@MainActor
-final class RecordingHapticPlayer: HapticPlaying {
-    var played: [HapticEvent] = []
-    func play(_ event: HapticEvent) { played.append(event) }
-}
 
 @MainActor
 final class DesignTokenHapticTests: XCTestCase {
 
     func testHapticEventCasesExist() {
-        let all: [HapticEvent] = [.skip, .control, .save]
-        XCTAssertEqual(all.count, 3)
+        // Drive off `allCases` so a newly added case forces this count to
+        // be updated alongside the per-mapping assertions below.
+        XCTAssertEqual(HapticEvent.allCases.count, 5)
+        for event in HapticEvent.allCases {
+            // Every case must resolve to a mapping; this loop would trap
+            // if a future case were added without a `mapping` entry.
+            _ = event.mapping
+        }
     }
 
     func testSkipMapsToMediumImpact() {
@@ -30,6 +29,14 @@ final class DesignTokenHapticTests: XCTestCase {
 
     func testSaveMapsToSuccessNotification() {
         XCTAssertEqual(HapticEvent.save.mapping, .notification(.success))
+    }
+
+    func testMenuOpenMapsToMediumImpact() {
+        XCTAssertEqual(HapticEvent.menuOpen.mapping, .impact(.medium))
+    }
+
+    func testNoticeMapsToSoftImpact() {
+        XCTAssertEqual(HapticEvent.notice.mapping, .impact(.soft))
     }
 
     func testRecordingPlayerCapturesEvents() {

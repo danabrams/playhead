@@ -1,13 +1,14 @@
 // DesignTokenForbiddenPatternsTests.swift
 // Enforces "Quiet Instrument" prohibitions in two layers:
 //   1. Token-name inventory: no token is *named* with a forbidden keyword.
-//   2. Source-code regex sweep: no `Playhead/Design/*.swift` file *uses* a
-//      forbidden API (spring physics, gradients, shimmer, purple).
+//   2. Source-code regex sweep: no `.swift` file under the entire
+//      `Playhead/` source tree *uses* a forbidden API (spring physics,
+//      gradients, shimmer, purple).
 //
 // The source sweep is the load-bearing test — name-based assertions are
 // trivially satisfied because nobody names a token "purpleGradient". The
-// source sweep would catch a future change that introduced `LinearGradient`
-// in DesignTokenCatalog.swift or `.spring(...)` in any new file.
+// source sweep catches any change that introduced `LinearGradient` or
+// `.spring(...)` anywhere in the app, not just in the design folder.
 
 import XCTest
 @testable import Playhead
@@ -48,8 +49,8 @@ final class DesignTokenForbiddenPatternsTests: XCTestCase {
 
     // MARK: - Source-code regex sweep
 
-    /// Forbidden API patterns. Each must NOT appear anywhere in
-    /// `Playhead/Design/*.swift` outside the explicit allowlist below.
+    /// Forbidden API patterns. Each must NOT appear anywhere under the
+    /// `Playhead/` source tree outside the explicit allowlist below.
     private static let forbiddenSourcePatterns: [(label: String, regex: String)] = [
         ("Animation.spring",          #"\.spring\("#),
         ("Animation.interpolatingSpring", #"\.interpolatingSpring"#),
@@ -78,23 +79,24 @@ final class DesignTokenForbiddenPatternsTests: XCTestCase {
     ]
 
     func testNoDesignSourceFileUsesAForbiddenAPI() throws {
-        let designSources = try Self.designSourceFiles()
-        XCTAssertFalse(designSources.isEmpty,
-                       "Could not locate Playhead/Design/*.swift sources from #filePath")
+        let appSources = try Self.playheadSourceFiles()
+        XCTAssertFalse(appSources.isEmpty,
+                       "Could not locate Playhead/**/*.swift sources from #filePath")
 
-        for fileURL in designSources {
+        for fileURL in appSources {
             let contents = try String(contentsOf: fileURL, encoding: .utf8)
             let lines = contents.components(separatedBy: "\n")
 
+            var inBlockComment = false
             for (index, rawLine) in lines.enumerated() {
-                let line = rawLine
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-
-                // Skip comment-only lines so doc/comment text that names a
-                // forbidden API for explanatory purposes doesn't trip the
-                // sweep. The whole point of the comment ban is on actual
-                // API usage.
-                if trimmed.hasPrefix("//") || trimmed.hasPrefix("///") {
+                // Strip comments (both `/* ... */` block comments spanning
+                // lines and trailing `//` line comments) before pattern
+                // matching so documentation mentioning forbidden APIs
+                // doesn't trip the sweep. `inBlockComment` carries across
+                // lines.
+                let stripped = Self.stripComments(from: rawLine, inBlockComment: &inBlockComment)
+                let trimmed = stripped.trimmingCharacters(in: .whitespaces)
+                if trimmed.isEmpty {
                     continue
                 }
 
@@ -103,7 +105,7 @@ final class DesignTokenForbiddenPatternsTests: XCTestCase {
                 }
 
                 for pattern in Self.forbiddenSourcePatterns {
-                    if line.range(of: pattern.regex, options: .regularExpression) != nil {
+                    if stripped.range(of: pattern.regex, options: .regularExpression) != nil {
                         XCTFail(
                             "\(fileURL.lastPathComponent):\(index + 1) — forbidden API '\(pattern.label)' "
                             + "matched on line: \(trimmed)"
@@ -114,26 +116,169 @@ final class DesignTokenForbiddenPatternsTests: XCTestCase {
         }
     }
 
-    /// Locate `Playhead/Design/*.swift` source files at test time by walking
-    /// up from this test file's `#filePath`. The repo layout is
+    // MARK: - Comment stripping helper
+
+    /// Strip Swift comments from a single source line. Handles:
+    ///   - `/* ... */` block comments, including those that span multiple
+    ///     lines. `inBlockComment` tracks open state across calls.
+    ///   - `//` line comments (trailing or whole-line).
+    ///
+    /// This is intentionally NOT a full Swift lexer — it does not attempt
+    /// to recognize `"//"` inside string literals. In practice, forbidden
+    /// APIs don't appear inside strings, so the simplicity is fine.
+    /// The goal is to prevent false positives from comments like
+    /// `// replaced the old .spring(response:) call`, not to be
+    /// bulletproof against adversarial input.
+    static func stripComments(from line: String, inBlockComment: inout Bool) -> String {
+        var result = ""
+        let chars = Array(line)
+        var i = 0
+        while i < chars.count {
+            if inBlockComment {
+                // Look for closing "*/".
+                if i + 1 < chars.count && chars[i] == "*" && chars[i + 1] == "/" {
+                    inBlockComment = false
+                    i += 2
+                    continue
+                }
+                i += 1
+                continue
+            }
+            // Not currently inside a block comment.
+            if i + 1 < chars.count && chars[i] == "/" && chars[i + 1] == "*" {
+                inBlockComment = true
+                i += 2
+                continue
+            }
+            if i + 1 < chars.count && chars[i] == "/" && chars[i + 1] == "/" {
+                // Rest of line is a line comment — discard it.
+                break
+            }
+            result.append(chars[i])
+            i += 1
+        }
+        return result
+    }
+
+    // MARK: - Comment-stripping unit tests
+
+    func testStripCommentsRemovesTrailingLineComment() {
+        var inBlock = false
+        let stripped = Self.stripComments(
+            from: "let x = 1 // not a .spring(response:) reference",
+            inBlockComment: &inBlock
+        )
+        XCTAssertFalse(inBlock)
+        // The stripped line must no longer contain the forbidden token
+        // fragment, but must still contain the real code.
+        XCTAssertTrue(stripped.contains("let x = 1"))
+        XCTAssertFalse(stripped.contains(".spring("))
+    }
+
+    func testStripCommentsKeepsRealCodeIntact() {
+        var inBlock = false
+        let stripped = Self.stripComments(
+            from: "let g = LinearGradient(colors: [])",
+            inBlockComment: &inBlock
+        )
+        XCTAssertFalse(inBlock)
+        XCTAssertTrue(stripped.contains("LinearGradient("))
+    }
+
+    func testStripCommentsHandlesBlockCommentOnSingleLine() {
+        var inBlock = false
+        let stripped = Self.stripComments(
+            from: "let y = 2 /* mentions .spring(response:) */ + 3",
+            inBlockComment: &inBlock
+        )
+        XCTAssertFalse(inBlock, "block comment closed on same line")
+        XCTAssertFalse(stripped.contains(".spring("))
+        XCTAssertTrue(stripped.contains("let y = 2"))
+        XCTAssertTrue(stripped.contains("+ 3"))
+    }
+
+    func testStripCommentsHandlesMultiLineBlockComment() {
+        var inBlock = false
+        let line1 = Self.stripComments(
+            from: "let z = 4 /* open comment mentioning LinearGradient(",
+            inBlockComment: &inBlock
+        )
+        XCTAssertTrue(inBlock, "block comment should remain open")
+        XCTAssertFalse(line1.contains("LinearGradient("))
+        XCTAssertTrue(line1.contains("let z = 4"))
+
+        let line2 = Self.stripComments(
+            from: "still inside with .spring(response: 1) mention",
+            inBlockComment: &inBlock
+        )
+        XCTAssertTrue(inBlock, "still inside block comment")
+        XCTAssertTrue(line2.trimmingCharacters(in: .whitespaces).isEmpty,
+                      "entire line consumed by block comment")
+
+        let line3 = Self.stripComments(
+            from: "closing */ let w = 5",
+            inBlockComment: &inBlock
+        )
+        XCTAssertFalse(inBlock, "block comment should close")
+        XCTAssertTrue(line3.contains("let w = 5"))
+    }
+
+    /// End-to-end sanity: a line that mentions a forbidden API only in a
+    /// trailing comment must NOT match any forbidden pattern after
+    /// stripping, and a line that genuinely uses a forbidden API still
+    /// must.
+    func testForbiddenPatternSweepIgnoresCommentedMentions() {
+        var inBlock = false
+        let falsePositive = Self.stripComments(
+            from: "doSomething() // replaces .spring(response:) with custom curve",
+            inBlockComment: &inBlock
+        )
+        for pattern in Self.forbiddenSourcePatterns {
+            XCTAssertNil(
+                falsePositive.range(of: pattern.regex, options: .regularExpression),
+                "pattern '\(pattern.label)' should NOT match stripped comment line"
+            )
+        }
+
+        var inBlock2 = false
+        let realUse = Self.stripComments(
+            from: "let grad = LinearGradient(colors: [.red, .blue])",
+            inBlockComment: &inBlock2
+        )
+        let matched = Self.forbiddenSourcePatterns.contains { pattern in
+            realUse.range(of: pattern.regex, options: .regularExpression) != nil
+        }
+        XCTAssertTrue(matched, "real LinearGradient use should still trip the sweep")
+    }
+
+    /// Locate every `.swift` source file under `Playhead/` at test time by
+    /// walking up from this test file's `#filePath`. The repo layout is
     /// `<repo>/PlayheadTests/Design/<thisFile>.swift` and
-    /// `<repo>/Playhead/Design/<sourceFile>.swift`, so 3 levels up from
-    /// `#filePath` is the repo root.
-    private static func designSourceFiles(filePath: String = #filePath) throws -> [URL] {
+    /// `<repo>/Playhead/**/<sourceFile>.swift`, so 3 levels up from
+    /// `#filePath` is the repo root. The sweep covers the entire app tree
+    /// (App/, Views/, Services/, Models/, Persistence/, Support/,
+    /// Resources/, Design/) because the forbidden-API ban applies app-wide,
+    /// not just to the design folder.
+    private static func playheadSourceFiles(filePath: String = #filePath) throws -> [URL] {
         let testFileURL = URL(fileURLWithPath: filePath)
         let repoRoot = testFileURL
             .deletingLastPathComponent()  // PlayheadTests/Design
             .deletingLastPathComponent()  // PlayheadTests
             .deletingLastPathComponent()  // <repo>
-        let designDir = repoRoot
-            .appendingPathComponent("Playhead")
-            .appendingPathComponent("Design")
-        let contents = try FileManager.default.contentsOfDirectory(
-            at: designDir,
-            includingPropertiesForKeys: nil
-        )
-        return contents
-            .filter { $0.pathExtension == "swift" }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let sourcesRoot = repoRoot.appendingPathComponent("Playhead", isDirectory: true)
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: sourcesRoot,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+        var results: [URL] = []
+        for case let url as URL in enumerator {
+            guard url.pathExtension == "swift" else { continue }
+            results.append(url)
+        }
+        return results.sorted { $0.path < $1.path }
     }
 }

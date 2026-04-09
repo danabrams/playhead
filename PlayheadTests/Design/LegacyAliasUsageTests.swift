@@ -9,9 +9,12 @@
 // accidentally reintroducing the legacy names.
 //
 // Scope:
-// - Walks every `.swift` file under the `Playhead/` source tree.
-// - Excludes the `Playhead/Design/` folder so that test source files inside
-//   it (which mention the names as string literals) don't false-positive.
+// - Walks every `.swift` file under both the `Playhead/` source tree and the
+//   `PlayheadTests/` test tree.
+// - Excludes the `Playhead/Design/` folder so that source files inside it
+//   (which historically held the alias declarations) don't false-positive.
+// - Excludes this very test file, which contains the alias names as string
+//   literals in order to detect them.
 
 import XCTest
 
@@ -26,39 +29,59 @@ final class LegacyAliasUsageTests: XCTestCase {
         (#"CornerRadius\.lg\b"#, "CornerRadius.large"),
     ]
 
-    /// Folders whose *contents* are exempted from the scan. Used for the
-    /// `Playhead/Design/` directory which previously held the alias
-    /// declarations themselves and so legitimately referenced the names.
-    /// (The aliases have since been deleted, but the test history kept.)
-    private static let excludedFolderComponents: Set<String> = [
-        "Design",
+    /// Path substrings anchoring exclusions. We intentionally match on
+    /// `/Playhead/Design/` rather than the bare folder name `Design` so that
+    /// a future unrelated directory named "Design" elsewhere in the tree
+    /// (e.g. `Playhead/Features/Design/...`) is NOT silently exempted from
+    /// the legacy-alias sweep. The design system folder previously held the
+    /// alias declarations and is kept exempted for historical continuity.
+    ///
+    /// This test file itself is also exempted: it mentions the alias names
+    /// as regex string literals in order to detect them.
+    private static let excludedPathSubstrings: [String] = [
+        "/Playhead/Design/",
+        "/PlayheadTests/Design/LegacyAliasUsageTests.swift",
     ]
 
     func testNoLegacyDesignTokenAliasesInAppSources() throws {
-        let sourcesRoot = try Self.playheadSourcesRoot()
-        let fm = FileManager.default
-
-        guard let enumerator = fm.enumerator(
-            at: sourcesRoot,
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            XCTFail("Could not enumerate \(sourcesRoot.path)")
-            return
-        }
-
+        let (appRoot, testsRoot) = try Self.sourceRoots()
         let regexes: [(NSRegularExpression, String)] = try Self.forbiddenPatterns.map {
             (try NSRegularExpression(pattern: $0.pattern), $0.replacement)
         }
 
         var violations: [String] = []
+        try Self.scan(root: appRoot, regexes: regexes, into: &violations)
+        try Self.scan(root: testsRoot, regexes: regexes, into: &violations)
+
+        if !violations.isEmpty {
+            XCTFail(
+                "Legacy design-token aliases found in code (\(violations.count) "
+                + "occurrence(s)). Replace with the semantic names:\n"
+                + violations.sorted().joined(separator: "\n")
+            )
+        }
+    }
+
+    private static func scan(
+        root: URL,
+        regexes: [(NSRegularExpression, String)],
+        into violations: inout [String]
+    ) throws {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            XCTFail("Could not enumerate \(root.path)")
+            return
+        }
 
         for case let url as URL in enumerator {
             guard url.pathExtension == "swift" else { continue }
 
-            // Skip excluded folders anywhere under the Playhead/ tree.
-            let components = Set(url.pathComponents)
-            if !components.isDisjoint(with: Self.excludedFolderComponents) {
+            // Skip excluded paths (anchored substring matches).
+            if Self.excludedPathSubstrings.contains(where: { url.path.contains($0) }) {
                 continue
             }
 
@@ -78,22 +101,15 @@ final class LegacyAliasUsageTests: XCTestCase {
                 }
             }
         }
-
-        if !violations.isEmpty {
-            XCTFail(
-                "Legacy design-token aliases found in view code (\(violations.count) "
-                + "occurrence(s)). Replace with the semantic names:\n"
-                + violations.sorted().joined(separator: "\n")
-            )
-        }
     }
 
     // MARK: - Path resolution
 
-    /// Resolves the `Playhead/` sources root by walking up from this test file
-    /// to the repository root. The test binary lives in DerivedData, so we
-    /// anchor on `#filePath` which is stamped into the binary at compile time.
-    private static func playheadSourcesRoot(file: StaticString = #filePath) throws -> URL {
+    /// Resolves the `Playhead/` and `PlayheadTests/` source roots by walking
+    /// up from this test file to the repository root. The test binary lives
+    /// in DerivedData, so we anchor on `#filePath` which is stamped into the
+    /// binary at compile time.
+    private static func sourceRoots(file: StaticString = #filePath) throws -> (app: URL, tests: URL) {
         let thisFile = URL(fileURLWithPath: String(describing: file))
         // .../PlayheadTests/Design/LegacyAliasUsageTests.swift
         //   -> .../PlayheadTests/Design
@@ -103,16 +119,19 @@ final class LegacyAliasUsageTests: XCTestCase {
             .deletingLastPathComponent() // Design
             .deletingLastPathComponent() // PlayheadTests
             .deletingLastPathComponent() // repo root
-        let sources = repoRoot.appendingPathComponent("Playhead", isDirectory: true)
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: sources.path, isDirectory: &isDir),
-              isDir.boolValue else {
-            throw NSError(
-                domain: "LegacyAliasUsageTests",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Playhead sources root not found at \(sources.path)"]
-            )
+        let app = repoRoot.appendingPathComponent("Playhead", isDirectory: true)
+        let tests = repoRoot.appendingPathComponent("PlayheadTests", isDirectory: true)
+        let fm = FileManager.default
+        for dir in [app, tests] {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else {
+                throw NSError(
+                    domain: "LegacyAliasUsageTests",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Source root not found at \(dir.path)"]
+                )
+            }
         }
-        return sources
+        return (app, tests)
     }
 }

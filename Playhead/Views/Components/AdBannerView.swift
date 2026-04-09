@@ -132,6 +132,16 @@ struct AdBannerView: View {
     /// Called when the user taps "Listen" to jump back to the skipped ad.
     var onListen: ((AdSkipBannerItem) -> Void)?
 
+    /// Injected haptic player — defaults to `SystemHapticPlayer` in
+    /// production, tests swap in a `RecordingHapticPlayer`.
+    var hapticPlayer: any HapticPlaying = SystemHapticPlayer()
+
+    /// Factored handler for the banner-appear haptic so tests can drive
+    /// it without rendering a live SwiftUI hierarchy.
+    func handleBannerAppear() {
+        hapticPlayer.play(.notice)
+    }
+
     var body: some View {
         VStack {
             Spacer()
@@ -274,7 +284,7 @@ struct AdBannerView: View {
         .accessibilityElement(children: .contain)
         .onAppear {
             // Subtle haptic on banner appear.
-            HapticManager.soft()
+            handleBannerAppear()
         }
     }
 

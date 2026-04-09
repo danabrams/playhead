@@ -102,12 +102,8 @@ struct TimelineRailView: View {
                     }
                     .onEnded { value in
                         let fraction = min(max(value.location.x / width, 0), 1)
-                        // Match original order: seek → reset isDragging → haptic.
-                        // handleScrubEnd covers seek+haptic; isDragging reset
-                        // sits between them exactly as the legacy code had it.
-                        onSeek(fraction)
                         isDragging = false
-                        hapticPlayer.play(.control)
+                        handleScrubEnd(fraction: fraction)
                     }
             )
         }

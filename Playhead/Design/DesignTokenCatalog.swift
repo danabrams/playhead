@@ -9,29 +9,39 @@ struct DesignTokenCatalog: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: Spacing.lg) {
-                header("Colors")
-                colorsSection
-
-                header("Typography")
-                typographySection
-
-                header("Spacing")
-                spacingSection
-
-                header("Corner Radii")
-                cornerRadiiSection
-
-                header("Motion")
-                motionSection
-
-                header("Haptics")
-                hapticsSection
-            }
-            .padding(Spacing.md)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            DesignTokenCatalogContent()
         }
         .background(AppColors.background)
+    }
+}
+
+/// The intrinsic, non-scrolling content of the design token catalog. Split
+/// out from `DesignTokenCatalog` so tests can measure its natural fitting
+/// size without a `ScrollView` swallowing the bounded-height proposal.
+struct DesignTokenCatalogContent: View {
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.lg) {
+            header("Colors")
+            colorsSection
+
+            header("Typography")
+            typographySection
+
+            header("Spacing")
+            spacingSection
+
+            header("Corner Radii")
+            cornerRadiiSection
+
+            header("Motion")
+            motionSection
+
+            header("Haptics")
+            hapticsSection
+        }
+        .padding(Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: Sections

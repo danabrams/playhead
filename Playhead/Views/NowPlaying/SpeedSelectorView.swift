@@ -28,7 +28,7 @@ struct SpeedSelectorView: View {
 
     /// Long-press handler. Factored out for the same test-seam reason.
     func handleLongPress() {
-        hapticPlayer.play(.skip)
+        hapticPlayer.play(.menuOpen)
         showingPicker = true
     }
 

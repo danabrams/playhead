@@ -314,16 +314,23 @@ private extension NowPlayingView {
 // MARK: - Transport Button
 
 /// A single transport control with haptic feedback.
-private struct TransportButton: View {
+struct TransportButton: View {
     let systemName: String
     let size: CGFloat
     var accessibilityText: String = ""
+    var hapticPlayer: any HapticPlaying = SystemHapticPlayer()
     let action: () -> Void
+
+    /// Factored tap handler so tests can drive the haptic + action path
+    /// without rendering a live SwiftUI hierarchy.
+    func handleTap() {
+        hapticPlayer.play(.control)
+        action()
+    }
 
     var body: some View {
         Button {
-            HapticManager.light()
-            action()
+            handleTap()
         } label: {
             Image(systemName: systemName)
                 .font(.system(size: size, weight: .medium))

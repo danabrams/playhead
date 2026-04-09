@@ -40,13 +40,17 @@ enum HapticManager {
 // MARK: - Haptic Events (bead-spec semantic layer)
 
 /// Semantic haptic events. Each maps to a single underlying feedback kind.
-enum HapticEvent: Equatable {
+enum HapticEvent: Equatable, CaseIterable {
     /// Ad skip confirmation — medium impact.
     case skip
     /// Transport / UI control tap — light impact.
     case control
     /// Save / success confirmation — success notification.
     case save
+    /// Menu/picker open — medium impact.
+    case menuOpen
+    /// Soft cushioned tap — banner appearance, gentle notice.
+    case notice
 
     /// Describes the underlying UIKit generator call used by this event.
     /// Exposed so tests can assert the mapping without firing real haptics.
@@ -57,9 +61,11 @@ enum HapticEvent: Equatable {
 
     var mapping: Mapping {
         switch self {
-        case .skip:    return .impact(.medium)
-        case .control: return .impact(.light)
-        case .save:    return .notification(.success)
+        case .skip:     return .impact(.medium)
+        case .control:  return .impact(.light)
+        case .save:     return .notification(.success)
+        case .menuOpen: return .impact(.medium)
+        case .notice:   return .impact(.soft)
         }
     }
 }
@@ -80,38 +86,31 @@ protocol HapticPlaying: Sendable {
 struct SystemHapticPlayer: HapticPlaying {
     @MainActor func play(_ event: HapticEvent) {
         switch event.mapping {
-        case .impact(.medium):
-            HapticManager.medium()
-        case .impact(.light):
-            HapticManager.light()
-        case .impact(.soft):
-            HapticManager.soft()
-        case .impact:
-            HapticManager.medium()
+        case .impact(let style):
+            switch style {
+            case .light:
+                HapticManager.light()
+            case .medium:
+                HapticManager.medium()
+            case .soft:
+                HapticManager.soft()
+            case .heavy:
+                HapticManager.medium()
+            case .rigid:
+                HapticManager.medium()
+            @unknown default:
+                assertionFailure("Unhandled impact style \(style)")
+                HapticManager.medium()
+            }
         case .notification(let type):
             HapticManager.notification(type)
         }
     }
 }
 
-// MARK: - Environment Injection
-
-private struct HapticPlayerKey: EnvironmentKey {
-    static let defaultValue: any HapticPlaying = SystemHapticPlayer()
-}
-
-extension EnvironmentValues {
-    /// The haptic player used by views that opt into the injected seam.
-    /// Defaults to `SystemHapticPlayer`. Tests can override with a recording
-    /// fake via `.environment(\.hapticPlayer, RecordingHapticPlayer())`.
-    var hapticPlayer: any HapticPlaying {
-        get { self[HapticPlayerKey.self] }
-        set { self[HapticPlayerKey.self] = newValue }
-    }
-}
-
-// NOTE: all NowPlaying views now route haptics through the injected
+// NOTE: all view-layer haptics now route through the injected
 // `HapticPlaying` seam (`NowPlayingBar`, `SpeedSelectorView`,
-// `TimelineRailView`). The only remaining references to
+// `TimelineRailView`, `NowPlayingView.TransportButton`,
+// `EpisodeListView`, `AdBannerView`). The only remaining references to
 // `HapticManager.light()/medium()/soft()/notification()` should be the
 // definitions above and `SystemHapticPlayer.play(_:)`.

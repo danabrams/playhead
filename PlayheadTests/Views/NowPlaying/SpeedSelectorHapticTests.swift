@@ -3,8 +3,8 @@
 // injected `HapticPlaying` seam instead of calling `HapticManager` directly.
 //
 // Two distinct tap actions emit haptics:
-//   - tap-to-cycle         -> .control (light)
-//   - long-press-to-picker -> .skip    (medium)
+//   - tap-to-cycle         -> .control  (light)
+//   - long-press-to-picker -> .menuOpen (medium)
 // Each is driven through a factored handler so the test does not need a
 // live SwiftUI view hierarchy.
 
@@ -31,7 +31,7 @@ final class SpeedSelectorHapticTests: XCTestCase {
             "Cycle tap must still invoke the onSpeedChanged callback with the next preset")
     }
 
-    func testLongPressEmitsSkipHaptic() {
+    func testLongPressEmitsMenuOpenHaptic() {
         let recorder = RecordingHapticPlayer()
         let view = SpeedSelectorView(
             currentSpeed: 1.0,
@@ -41,8 +41,8 @@ final class SpeedSelectorHapticTests: XCTestCase {
 
         view.handleLongPress()
 
-        XCTAssertEqual(recorder.played, [.skip],
-            "Long-press must emit exactly one .skip haptic event via the injected player")
+        XCTAssertEqual(recorder.played, [.menuOpen],
+            "Long-press must emit exactly one .menuOpen haptic event via the injected player")
     }
 
     func testDefaultHapticPlayerIsSystemPlayer() {

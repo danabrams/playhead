@@ -42,11 +42,9 @@ enum AppColors {
     )
 
     /// Default surface for content (cards, sheets, grouped sections).
-    /// Dark: Charcoal (#1A1F27)  Light: Bone (#F3EEE4) — same as background
-    /// in light mode; cards on the page are distinguished by shadow rather
-    /// than tint, keeping the warm Bone field unbroken.
+    /// Dark: Charcoal (#1A1F27)  Light: White (#FFFFFF)
     static let surface = Color.dynamicColor(
-        light: Palette.bone,
+        light: .white,
         dark: Palette.charcoal
     )
 
@@ -58,7 +56,7 @@ enum AppColors {
     /// by `DesignTokenColorsTests.testElevationLuminanceMonotonic`.
     static let surfaceElevated = Color.dynamicColor(
         light: .white,
-        dark: Color(red: 0.145, green: 0.168, blue: 0.208) // ~#252B35 — one step above Charcoal
+        dark: Color(hex: 0x252B35) // one step above Charcoal
     )
 
     /// Primary text.

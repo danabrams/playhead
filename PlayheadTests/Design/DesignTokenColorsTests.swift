@@ -122,8 +122,8 @@ final class DesignTokenColorsTests: XCTestCase {
         assertResolved(AppColors.background, light: 0xF3EEE4, dark: 0x0E1116)
     }
 
-    func testSurfaceResolvesToBoneInLightAndCharcoalInDark() {
-        assertResolved(AppColors.surface, light: 0xF3EEE4, dark: 0x1A1F27)
+    func testSurfaceResolvesToWhiteInLightAndCharcoalInDark() {
+        assertResolved(AppColors.surface, light: 0xFFFFFF, dark: 0x1A1F27)
     }
 
     func testSurfaceElevatedResolvesToWhiteInLightAndLiftedCharcoalInDark() {
