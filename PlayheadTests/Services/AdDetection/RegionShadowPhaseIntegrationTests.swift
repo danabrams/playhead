@@ -224,6 +224,173 @@ struct RegionShadowPhaseIntegrationTests {
         )
     }
 
+    @Test("RegionShadowPhase.run threads FM refinement windows through RegionProposalBuilder")
+    func regionShadowPhaseRunExposesFMOriginWhenWindowsProvided() throws {
+        // playhead-xba follow-up: pins the end-to-end property that
+        // `RegionShadowPhase.Input.fmWindows` (threaded from
+        // `BackfillJobRunner.RunResult.fmRefinementWindows` through
+        // `AdDetectionService.runBackfill`) reaches
+        // `RegionProposalBuilder.makeFMProposals` and produces a
+        // `.foundationModel`-origin region whose `fmConsensusStrength`
+        // is non-zero and whose bundle exposes populated `fmEvidence`.
+        //
+        // This test exercises the helper directly rather than driving a
+        // full `runBackfill` so that the assertion does not require the
+        // real FM stack nor a deterministic coarse→refine→span flow
+        // through `TestFMRuntime`. The integration coverage for the
+        // runner-side field (`RunResult.fmRefinementWindows`) lives in
+        // `BackfillJobRunnerTests`; this test pins the Phase 4 side.
+        let assetId = "asset-fm-origin"
+
+        // Two chunks with distinct content so the atomizer produces
+        // enough atom ordinals to host two FM-refinement spans at
+        // different atom ranges.
+        let chunks: [TranscriptChunk] = (0..<6).map { idx in
+            TranscriptChunk(
+                id: "c\(idx)-\(assetId)",
+                analysisAssetId: assetId,
+                segmentFingerprint: "fp-\(idx)",
+                chunkIndex: idx,
+                startTime: Double(idx) * 10,
+                endTime: Double(idx + 1) * 10,
+                text: "Line \(idx) synthetic content about topic \(idx).",
+                normalizedText: "line \(idx) synthetic content about topic \(idx).",
+                pass: "final",
+                modelVersion: "v",
+                transcriptVersion: nil,
+                atomOrdinal: nil
+            )
+        }
+
+        // Build a baseline ShowPriors from a nil profile — identical to
+        // what `AdDetectionService.runRegionShadowPhase` does in shadow
+        // mode when no profile is loaded.
+        let priors = ShowPriors.from(profile: nil)
+
+        // Feature windows covering the whole fixture episode, nominal
+        // values. Acoustic break detection does not drive this test;
+        // the FM clustering path is what we're pinning.
+        var featureWindows: [FeatureWindow] = []
+        var t: Double = 0
+        while t < 60 {
+            featureWindows.append(
+                FeatureWindow(
+                    analysisAssetId: assetId,
+                    startTime: t,
+                    endTime: t + 2.0,
+                    rms: 0.5,
+                    spectralFlux: 0.1,
+                    musicProbability: 0.0,
+                    pauseProbability: 0.0,
+                    speakerClusterId: 1,
+                    jingleHash: nil,
+                    featureVersion: 1
+                )
+            )
+            t += 2.0
+        }
+
+        // Atomize the chunks the same way RegionShadowPhase will so we
+        // can pick atom ordinals that actually exist and feed the FM
+        // window fixture exactly aligned atom refs.
+        let (atoms, _) = TranscriptAtomizer.atomize(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            normalizationHash: "norm-v1",
+            sourceHash: "asr-v1"
+        )
+        #expect(atoms.count >= 4, "atomizer should produce at least 4 atoms for the fixture")
+        let midOrdinals = atoms.sorted {
+            $0.atomKey.atomOrdinal < $1.atomKey.atomOrdinal
+        }.map(\.atomKey.atomOrdinal)
+        let lo = midOrdinals[1]
+        let hi = midOrdinals[midOrdinals.count - 2]
+
+        // Two synthetic refinement windows at different windowIndex
+        // values and different centers so the clustering pass sees two
+        // unique windows spanning the same atom range. Both carry a
+        // single resolved evidence anchor so `consensusStrength` can
+        // promote above `.low` when the rest of the guards pass.
+        let sharedAnchor = ResolvedEvidenceAnchor(
+            entry: nil,
+            lineRef: lo,
+            kind: .brandSpan,
+            certainty: .strong,
+            resolutionSource: .evidenceRef,
+            memoryWriteEligible: true
+        )
+        let span = RefinedAdSpan(
+            commercialIntent: .paid,
+            ownership: .thirdParty,
+            firstLineRef: lo,
+            lastLineRef: hi,
+            firstAtomOrdinal: lo,
+            lastAtomOrdinal: hi,
+            certainty: .strong,
+            boundaryPrecision: .usable,
+            resolvedEvidenceAnchors: [sharedAnchor],
+            memoryWriteEligible: true,
+            alternativeExplanation: .none,
+            reasonTags: []
+        )
+        let fmWindows: [FMRefinementWindowOutput] = [
+            FMRefinementWindowOutput(
+                windowIndex: 1,
+                sourceWindowIndex: 1,
+                lineRefs: Array(lo...hi),
+                spans: [span],
+                latencyMillis: 10
+            ),
+            FMRefinementWindowOutput(
+                windowIndex: 2,
+                sourceWindowIndex: 2,
+                lineRefs: Array(lo...hi),
+                spans: [span],
+                latencyMillis: 10
+            )
+        ]
+
+        let bundles = RegionShadowPhase.run(
+            RegionShadowPhase.Input(
+                analysisAssetId: assetId,
+                chunks: chunks,
+                lexicalCandidates: [],
+                featureWindows: featureWindows,
+                episodeDuration: 60,
+                priors: priors,
+                podcastProfile: nil,
+                fmWindows: fmWindows
+            )
+        )
+
+        #expect(!bundles.isEmpty, "FM-only shadow input should still produce at least one bundle")
+
+        // The wire-up property: at least one bundle must carry the
+        // `.foundationModel` origin flag. Before playhead-xba's
+        // follow-up plumbing this would fail because the shadow helper
+        // always passed `fmWindows: []`.
+        let fmBundles = bundles.filter { $0.region.origins.contains(.foundationModel) }
+        #expect(
+            !fmBundles.isEmpty,
+            "at least one bundle should carry the .foundationModel origin flag when fmWindows are supplied"
+        )
+
+        // Consensus strength must be non-zero. `.low` (0.35) is the
+        // weakest non-zero band and is the expected floor for two
+        // clustered windows with shared anchors.
+        #expect(
+            fmBundles.contains { $0.region.fmConsensusStrength.value > 0 },
+            "FM-origin region should have non-zero fmConsensusStrength after clustering"
+        )
+
+        // FM evidence must be populated (non-nil) on at least one bundle
+        // so downstream Phase 5+ consumers have something to read.
+        #expect(
+            fmBundles.contains { $0.region.fmEvidence != nil },
+            "at least one FM-origin bundle should expose populated fmEvidence"
+        )
+    }
+
     @Test("RegionShadowPhase.run produces uniform feature bundles from synthetic inputs")
     func regionShadowPhaseRunDirect() throws {
         // Unit-level pin on the composition helper itself: given a known

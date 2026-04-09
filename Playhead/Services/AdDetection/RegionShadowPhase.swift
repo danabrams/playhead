@@ -22,17 +22,17 @@
 //      (`RegionProposalBuilder`, `RegionFeatureExtractor`) — both are plain
 //      static enums — so there's no new actor surface to reason about.
 //
-// FM-origin regions are NOT exercised by this helper yet. The Phase 3
-// `BackfillJobRunner.runPendingBackfill` builds `FMRefinementWindowOutput`
-// values internally but does not surface them through `RunResult`. Pulling
-// them out would require either (a) extending `RunResult` with the raw
-// window outputs, or (b) reconstructing them from persisted
-// `semantic_scan_results` rows. Both are meaningful refactors that belong
-// in follow-up work (see playhead-xba for the tracking note). Until then,
-// `RegionShadowPhase.run` passes `fmWindows: []`, which exercises the
-// lexical / acoustic / sponsor / fingerprint origin paths of
-// `RegionProposalBuilder` and the full uniform feature-bundle pipeline of
-// `RegionFeatureExtractor`.
+// playhead-xba follow-up: FM-origin regions ARE now exercised by this
+// helper when `AdDetectionService.runBackfill` supplies a non-empty
+// `fmWindows` array. The Phase 3 `BackfillJobRunner.runPendingBackfill`
+// now surfaces the raw `FMRefinementWindowOutput` values it emits via
+// `RunResult.fmRefinementWindows`; `AdDetectionService.runBackfill`
+// captures them from the Phase 3 shadow pass (step 9) and hands them to
+// the Phase 4 shadow phase (step 10) through `RegionShadowPhase.Input`.
+// When the caller passes an empty array (e.g. shadow mode disabled, no
+// FM runner factory injected, or the runner produced no windows), the
+// lexical / acoustic / sponsor / fingerprint origin paths still flow
+// through `RegionProposalBuilder` exactly as before.
 
 import Foundation
 import OSLog
@@ -52,6 +52,13 @@ enum RegionShadowPhase {
         let episodeDuration: Double
         let priors: ShowPriors
         let podcastProfile: PodcastProfile?
+        /// playhead-xba follow-up: raw FM refinement windows emitted by
+        /// the Phase 3 shadow pass. Fed directly into
+        /// `RegionProposalBuilder.makeFMProposals` so the FM-origin
+        /// clustering path is exercised in shadow mode. Pass `[]` when
+        /// no FM windows are available (shadow disabled, runner not
+        /// wired, or runner produced nothing).
+        let fmWindows: [FMRefinementWindowOutput]
 
         init(
             analysisAssetId: String,
@@ -60,7 +67,8 @@ enum RegionShadowPhase {
             featureWindows: [FeatureWindow],
             episodeDuration: Double,
             priors: ShowPriors,
-            podcastProfile: PodcastProfile? = nil
+            podcastProfile: PodcastProfile? = nil,
+            fmWindows: [FMRefinementWindowOutput] = []
         ) {
             self.analysisAssetId = analysisAssetId
             self.chunks = chunks
@@ -69,6 +77,7 @@ enum RegionShadowPhase {
             self.episodeDuration = episodeDuration
             self.priors = priors
             self.podcastProfile = podcastProfile
+            self.fmWindows = fmWindows
         }
     }
 
@@ -112,10 +121,11 @@ enum RegionShadowPhase {
             acousticBreaks: acousticBreaks,
             sponsorMatches: sponsorMatches,
             fingerprintMatches: fingerprintMatches,
-            // FM windows are not yet threaded through `RunResult` — see the
-            // file header. Until that's plumbed, FM-origin clustering stays
-            // unexercised in this shadow path. Non-FM origins still flow.
-            fmWindows: []
+            // playhead-xba follow-up: FM windows are now plumbed through
+            // `RunResult.fmRefinementWindows` → `AdDetectionService` →
+            // `RegionShadowPhase.Input.fmWindows`. Empty when shadow FM
+            // was not run (disabled mode, no factory, or zero spans).
+            fmWindows: input.fmWindows
         )
 
         let proposals = RegionProposalBuilder.build(proposalInput)

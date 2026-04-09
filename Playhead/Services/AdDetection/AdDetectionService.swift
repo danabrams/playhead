@@ -426,16 +426,24 @@ actor AdDetectionService {
         // 9. Phase 3 shadow phase. Runs the FM classifier purely for telemetry;
         // its output never feeds back into AdWindow rows in this phase. The
         // shadow invariant test in PlayheadTests pins this property.
+        //
+        // playhead-xba follow-up: capture the raw FM refinement windows
+        // that the runner produced so step 10 can feed them into the
+        // Phase 4 region pipeline's FM-origin clustering path. Live
+        // decisions are still untouched — nothing downstream of step 9
+        // reads AdWindow rows from these windows.
+        var shadowFMWindows: [FMRefinementWindowOutput] = []
         if config.fmBackfillMode != .disabled {
             if podcastId.isEmpty {
                 logger.info("Skipping shadow FM phase: missing podcastId for asset \(analysisAssetId)")
             } else {
-                _ = await runShadowFMPhase(
+                let shadowResult = await runShadowFMPhase(
                     chunks: chunks,
                     analysisAssetId: analysisAssetId,
                     podcastId: podcastId,
                     sessionIdOverride: sessionId
                 )
+                shadowFMWindows = shadowResult.fmRefinementWindows
             }
         }
 
@@ -452,7 +460,8 @@ actor AdDetectionService {
                 chunks: chunks,
                 analysisAssetId: analysisAssetId,
                 episodeDuration: episodeDuration,
-                lexicalCandidates: lexicalCandidates
+                lexicalCandidates: lexicalCandidates,
+                fmWindows: shadowFMWindows
             )
         }
     }
@@ -468,7 +477,8 @@ actor AdDetectionService {
         chunks: [TranscriptChunk],
         analysisAssetId: String,
         episodeDuration: Double,
-        lexicalCandidates: [LexicalCandidate]
+        lexicalCandidates: [LexicalCandidate],
+        fmWindows: [FMRefinementWindowOutput]
     ) async {
         // Defense-in-depth: `episodeDuration` must be supplied by the caller
         // explicitly. Historically this read `self.episodeDuration`, an
@@ -504,13 +514,27 @@ actor AdDetectionService {
             featureWindows: featureWindows,
             episodeDuration: episodeDuration,
             priors: showPriors,
-            podcastProfile: nil
+            podcastProfile: nil,
+            fmWindows: fmWindows
         )
         let bundles = RegionShadowPhase.run(input)
         await observer.record(assetId: analysisAssetId, bundles: bundles)
     }
 
     // MARK: - Shadow FM Phase
+
+    private struct ShadowFMPhaseResult: Sendable {
+        let outcome: ShadowFMPhaseOutcome
+        /// playhead-xba follow-up: the raw refinement windows the runner
+        /// emitted for this shadow invocation, threaded through so that
+        /// the Phase 4 shadow phase (step 10 of `runBackfill`) can feed
+        /// them into `RegionProposalBuilder`'s FM clustering path.
+        /// Empty when the phase was skipped, failed, or produced no
+        /// windows.
+        let fmRefinementWindows: [FMRefinementWindowOutput]
+
+        static let skipped = ShadowFMPhaseResult(outcome: .skipped, fmRefinementWindows: [])
+    }
 
     private enum ShadowFMPhaseOutcome: Sendable {
         case skipped
@@ -537,12 +561,15 @@ actor AdDetectionService {
         analysisAssetId: String,
         podcastId: String,
         sessionIdOverride: String? = nil
-    ) async -> ShadowFMPhaseOutcome {
+    ) async -> ShadowFMPhaseResult {
         guard config.fmBackfillMode != .disabled else { return .skipped }
 
         guard let factory = backfillJobRunnerFactory else {
             logger.debug("Shadow FM phase skipped: no runner factory injected")
             return .skipped
+        }
+        func wrap(_ outcome: ShadowFMPhaseOutcome, _ windows: [FMRefinementWindowOutput] = []) -> ShadowFMPhaseResult {
+            ShadowFMPhaseResult(outcome: outcome, fmRefinementWindows: windows)
         }
 
         // Cycle 4 H5: `sessionIdOverride` is the only source of truth for
@@ -584,7 +611,7 @@ actor AdDetectionService {
             } else {
                 logger.debug("Shadow FM phase: no session id resolved, marker skipped")
             }
-            return .requeued
+            return wrap(.requeued)
         }
 
         let runner = factory(store, config.fmBackfillMode)
@@ -648,14 +675,14 @@ actor AdDetectionService {
 
         do {
             let result = try await runner.runPendingBackfill(for: inputs)
-            logger.info("Shadow FM phase: admitted=\(result.admittedJobIds.count) scans=\(result.scanResultIds.count) deferred=\(result.deferredJobIds.count)")
+            logger.info("Shadow FM phase: admitted=\(result.admittedJobIds.count) scans=\(result.scanResultIds.count) deferred=\(result.deferredJobIds.count) fmWindows=\(result.fmRefinementWindows.count)")
             if result.deferredJobIds.isEmpty {
-                return .ranSucceeded
+                return wrap(.ranSucceeded, result.fmRefinementWindows)
             }
-            return .ranNeedsRetry
+            return wrap(.ranNeedsRetry, result.fmRefinementWindows)
         } catch {
             logger.warning("Shadow FM phase failed (suppressed by invariant): \(error.localizedDescription)")
-            return .ranFailed
+            return wrap(.ranFailed)
         }
     }
 
@@ -732,12 +759,19 @@ actor AdDetectionService {
         }
 
         logger.info("Shadow retry: draining session \(sessionId) asset=\(analysisAssetId)")
-        let outcome = await runShadowFMPhase(
+        // playhead-xba follow-up: the retry path intentionally does NOT
+        // feed FM windows into the Phase 4 region shadow phase. That
+        // phase ran once when `runBackfill` first completed for this
+        // session; re-running it from a shadow-retry drain would
+        // double-record Phase 4 bundles for the same asset under
+        // different window sets and is outside the retry contract.
+        let shadowResult = await runShadowFMPhase(
             chunks: finalChunks,
             analysisAssetId: analysisAssetId,
             podcastId: podcastId,
             sessionIdOverride: sessionId
         )
+        let outcome = shadowResult.outcome
         guard outcome.didExecute else {
             return false
         }

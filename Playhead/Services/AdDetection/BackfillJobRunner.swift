@@ -39,17 +39,33 @@ actor BackfillJobRunner {
         }
     }
 
-    struct RunResult: Sendable, Equatable {
+    struct RunResult: Sendable {
         let admittedJobIds: [String]
         let scanResultIds: [String]
         let evidenceEventIds: [String]
         let deferredJobIds: [String]
+        /// playhead-xba follow-up: the raw Foundation Model refinement
+        /// windows produced during this run, in the order the runner
+        /// emitted them (base refinement windows first, followed by any
+        /// boundary-expansion windows from `runOutwardExpansion`). These
+        /// are surfaced so that `AdDetectionService.runRegionShadowPhase`
+        /// can feed them into `RegionProposalBuilder`'s FM-origin
+        /// clustering path. Callers that only care about persistence
+        /// (which is every non-shadow caller at HEAD) can ignore this
+        /// field — its contents are a pure-in-memory mirror of the
+        /// `semantic_scan_results` rows already written by this run.
+        ///
+        /// Empty when the runner is disabled, when the FM pass produced
+        /// no refinement windows, or when every window was aborted
+        /// before emitting spans.
+        let fmRefinementWindows: [FMRefinementWindowOutput]
 
         static let empty = RunResult(
             admittedJobIds: [],
             scanResultIds: [],
             evidenceEventIds: [],
-            deferredJobIds: []
+            deferredJobIds: [],
+            fmRefinementWindows: []
         )
     }
 
@@ -327,6 +343,12 @@ actor BackfillJobRunner {
         var scanResultIds: [String] = []
         var evidenceEventIds: [String] = []
         var fullRescanDetectedAdLineRefs = Set<Int>()
+        // playhead-xba follow-up: accumulate the raw refinement windows
+        // emitted by every admitted job so the Phase 4 shadow phase can
+        // drive `RegionProposalBuilder` FM-origin clustering from the
+        // in-memory window outputs rather than reconstructing them from
+        // `semantic_scan_results.spansJSON`.
+        var fmRefinementWindows: [FMRefinementWindowOutput] = []
 
         // Drain the queue. AdmissionController is serial; one job at a time.
         for _ in enqueuedJobs {
@@ -415,9 +437,10 @@ actor BackfillJobRunner {
                     await admissionController.finish(jobId: job.jobId)
                     continue
                 }
-                let (resultIds, eventIds, detectedAdLineRefs) = try await runJob(job, inputs: jobInputs)
+                let (resultIds, eventIds, detectedAdLineRefs, jobWindows) = try await runJob(job, inputs: jobInputs)
                 scanResultIds.append(contentsOf: resultIds)
                 evidenceEventIds.append(contentsOf: eventIds)
+                fmRefinementWindows.append(contentsOf: jobWindows)
                 if job.phase == .fullEpisodeScan {
                     fullRescanDetectedAdLineRefs.formUnion(detectedAdLineRefs)
                 }
@@ -671,7 +694,8 @@ actor BackfillJobRunner {
             admittedJobIds: admitted,
             scanResultIds: scanResultIds,
             evidenceEventIds: evidenceEventIds,
-            deferredJobIds: deferred
+            deferredJobIds: deferred,
+            fmRefinementWindows: fmRefinementWindows
         )
     }
 
@@ -686,14 +710,20 @@ actor BackfillJobRunner {
     ) async throws -> (
         scanResultIds: [String],
         evidenceEventIds: [String],
-        detectedAdLineRefs: Set<Int>
+        detectedAdLineRefs: Set<Int>,
+        fmRefinementWindows: [FMRefinementWindowOutput]
     ) {
         var scanResultIds: [String] = []
         var evidenceEventIds: [String] = []
         var detectedAdLineRefs = Set<Int>()
+        // playhead-xba follow-up: in-memory mirror of every
+        // `FMRefinementWindowOutput` emitted by this job, including
+        // outward-expansion windows. Surfaced up through `RunResult` for
+        // Phase 4 region clustering; ignored by persistence-only callers.
+        var fmRefinementWindows: [FMRefinementWindowOutput] = []
 
         guard !inputs.segments.isEmpty else {
-            return (scanResultIds, evidenceEventIds, detectedAdLineRefs)
+            return (scanResultIds, evidenceEventIds, detectedAdLineRefs, fmRefinementWindows)
         }
 
         // Cycle 10 Rev3-M5: derive the `runMode` discriminator from the
@@ -829,6 +859,14 @@ actor BackfillJobRunner {
                 permissiveContextOverflowCount += refinement.permissiveFailureCounts.contextOverflow
                 asymmetricWindowCount += refinement.asymmetricWindowCount
 
+                // playhead-xba follow-up: surface the raw base refinement
+                // windows to the caller so the Phase 4 shadow phase can
+                // drive FM-origin clustering without re-reading
+                // `semantic_scan_results.spansJSON`. Outward-expansion
+                // windows are appended further below via
+                // `runOutwardExpansion`.
+                fmRefinementWindows.append(contentsOf: refinement.windows)
+
                 for window in refinement.windows {
                     try Task.checkCancellation()
                     let result = makeRefinementScanResult(
@@ -937,11 +975,12 @@ actor BackfillJobRunner {
                     )
                     scanResultIds.append(contentsOf: expansionResults.scanResultIds)
                     evidenceEventIds.append(contentsOf: expansionResults.evidenceEventIds)
+                    fmRefinementWindows.append(contentsOf: expansionResults.fmRefinementWindows)
                 }
             }
         }
 
-        return (scanResultIds, evidenceEventIds, detectedAdLineRefs)
+        return (scanResultIds, evidenceEventIds, detectedAdLineRefs, fmRefinementWindows)
     }
 
     // MARK: - bd-1my: outward expansion
@@ -984,6 +1023,11 @@ actor BackfillJobRunner {
     private struct ExpansionResults {
         var scanResultIds: [String] = []
         var evidenceEventIds: [String] = []
+        // playhead-xba follow-up: the merged refinement windows emitted
+        // by the outward-expansion loop. Surfaced up to `runJob` alongside
+        // the persistence ids so Phase 4 FM clustering can see the final
+        // (expanded) boundary for each span.
+        var fmRefinementWindows: [FMRefinementWindowOutput] = []
     }
 
     /// Calls `refinePassB` through the bd-1en Phase 2 dispatching
@@ -1239,6 +1283,9 @@ actor BackfillJobRunner {
                 )
                 results.scanResultIds.append(mergedScanResult.id)
                 results.evidenceEventIds.append(contentsOf: persistedEventIds)
+                // playhead-xba follow-up: record the expanded window so
+                // Phase 4 FM clustering sees the final boundary.
+                results.fmRefinementWindows.append(mergedWindowOutput)
 
                 // Advance the boundaries for the next iteration. The
                 // tracked span set already reflects the new (possibly
