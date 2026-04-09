@@ -37,6 +37,12 @@ struct SemanticScanResult: Sendable, Equatable {
     /// logically distinct jobs/phases that share the same window bounds do
     /// not collapse each other. Nil preserves legacy reuse semantics.
     let reuseScope: String?
+    /// Cycle 6 B6 Rev3-M6: originating backfill phase (BackfillJobPhase.rawValue)
+    /// or the sentinel `"shadow"` for rows persisted by callers that do not yet
+    /// attribute phase. Written into the `phase` column at insert time and used
+    /// by Rev3-M6 tests to verify that harvester and lexical narrowing phases
+    /// actually produce strict-subset coverage.
+    let phase: String
 
     init(
         id: String,
@@ -58,7 +64,8 @@ struct SemanticScanResult: Sendable, Equatable {
         prewarmHit: Bool,
         scanCohortJSON: String,
         transcriptVersion: String,
-        reuseScope: String? = nil
+        reuseScope: String? = nil,
+        phase: String = "shadow"
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -80,6 +87,7 @@ struct SemanticScanResult: Sendable, Equatable {
         self.scanCohortJSON = scanCohortJSON
         self.transcriptVersion = transcriptVersion
         self.reuseScope = reuseScope
+        self.phase = phase
     }
 
     func isReusable(
@@ -144,4 +152,30 @@ struct EvidenceEvent: Sendable, Equatable {
     let evidenceJSON: String
     let scanCohortJSON: String
     let createdAt: Double
+    /// Cycle 6 B6 Rev3-M6: originating backfill phase (BackfillJobPhase.rawValue)
+    /// or the sentinel `"shadow"` for legacy rows. Defaults keep all existing
+    /// callers compiling unchanged.
+    let phase: String
+
+    init(
+        id: String,
+        analysisAssetId: String,
+        eventType: String,
+        sourceType: EvidenceSourceType,
+        atomOrdinals: String,
+        evidenceJSON: String,
+        scanCohortJSON: String,
+        createdAt: Double,
+        phase: String = "shadow"
+    ) {
+        self.id = id
+        self.analysisAssetId = analysisAssetId
+        self.eventType = eventType
+        self.sourceType = sourceType
+        self.atomOrdinals = atomOrdinals
+        self.evidenceJSON = evidenceJSON
+        self.scanCohortJSON = scanCohortJSON
+        self.createdAt = createdAt
+        self.phase = phase
+    }
 }

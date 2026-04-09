@@ -224,6 +224,25 @@ actor BackfillJobRunner {
             )
         }
 
+        // Cycle 2 Rev1-L4: counters that scope to a single
+        // `runPendingBackfill` invocation must be reset on entry. The
+        // prior implementation accumulated `expansionInvocationCount` and
+        // `expansionTruncatedCount` across calls on the same actor,
+        // which made test ordering visible to assertions and made
+        // production telemetry depend on actor lifetime. Reset all
+        // per-run counters here so each call has a clean slate.
+        expansionInvocationCount = 0
+        expansionTruncatedCount = 0
+        narrowingAbortedByPhase = [:]
+        narrowingEmptyByPhase = [:]
+        narrowingAllPhasesEmptyCount = 0
+        episodesObservedWithoutSample = 0
+        // Cycle 4 B4: per-run set of non-fullEpisodeScan phases that
+        // returned `wasEmpty == true`. Used below to increment the
+        // persisted `narrowingAllPhasesEmptyEpisodeCount` on live
+        // targetedWithAudit runs where every phase narrows to nothing.
+        narrowingPhasesEmptyThisRun = []
+
         let plan = coveragePlanner.plan(for: inputs.plannerContext)
         let now = clock().timeIntervalSince1970
 
@@ -376,11 +395,26 @@ actor BackfillJobRunner {
                 // row's audit trail is not lost when it resumes.
                 try await store.markBackfillJobRunning(jobId: job.jobId)
 
-                let jobInputs = narrowedInputs(
+                // Cycle 2 H13: `narrowedInputs` returns nil when the
+                // phase produced no anchors and we should skip dispatching
+                // FM work entirely. Mark the job complete with an empty
+                // progress cursor so the M5 idempotency path skips it on
+                // re-invocation.
+                guard let jobInputs = narrowedInputs(
                     for: job,
                     plan: plan,
                     rootInputs: inputs
-                )
+                ) else {
+                    try await store.markBackfillJobComplete(
+                        jobId: job.jobId,
+                        progressCursor: BackfillProgressCursor(
+                            processedUnitCount: 0,
+                            lastProcessedUpperBoundSec: nil
+                        )
+                    )
+                    await admissionController.finish(jobId: job.jobId)
+                    continue
+                }
                 let (resultIds, eventIds, detectedAdLineRefs) = try await runJob(job, inputs: jobInputs)
                 scanResultIds.append(contentsOf: resultIds)
                 evidenceEventIds.append(contentsOf: eventIds)
@@ -526,33 +560,99 @@ actor BackfillJobRunner {
         //
         if !admitted.isEmpty {
             let wasFullRescan = (plan.policy == .fullCoverage || plan.policy == .periodicFullRescan)
-            let precisionSample: Double?
+            // Cycle 2 C4: this sample is **recall**, not precision —
+            // the metric was historically misnamed. Formula:
+            //   covered = |predictedTargetedLineRefs ∩ actualAdLineRefs|
+            //   recall  = covered / |actualAdLineRefs|
+            // Persistence keeps the legacy `precision*` column / JSON
+            // names; the rename is code-only. The store API still
+            // accepts `fullRescanPrecisionSample` (historical name)
+            // and the column-side comments document the alias.
+            //
+            // Cycle 2 H13: when EVERY non-fullEpisodeScan phase narrows
+            // to empty, we record `episodesObservedWithoutSample` and
+            // do NOT advance the recall ring even if there were detected
+            // ad line refs — the targeted phases would never have
+            // covered them so emitting a 0-recall sample would push the
+            // planner toward fullCoverage on a transcript that the
+            // narrower simply couldn't index.
+            let recallSample: Double?
+            // Cycle 4 B4: per-podcast persisted counters. These accrue
+            // across runs on the planner state row so operators can
+            // read "this show has had N ad-free episodes total" instead
+            // of the per-run 0/1 signal the runner-level counters used
+            // to give.
+            var incrementEpisodesObservedWithoutSample = false
+            var incrementNarrowingAllPhasesEmpty = false
             if wasFullRescan {
-                // Conservative contract: no detected-ad signal means no
-                // precision sample for this episode (nil), so ad-free or
-                // unresolved episodes do not bias the stability ring.
-                let predicted = TargetedWindowNarrower.predictedTargetedLineRefs(
-                    inputs: TargetedWindowNarrower.Inputs(
+                if fullRescanDetectedAdLineRefs.isEmpty {
+                    // Cycle 2 C4: ad-free episode. Nil sample (do NOT
+                    // fake 1.0). Bump the dedicated counter so we can
+                    // distinguish "ad-free" from "ad-bearing but
+                    // narrower failed to predict it".
+                    episodesObservedWithoutSample += 1
+                    incrementEpisodesObservedWithoutSample = true
+                    recallSample = nil
+                } else {
+                    let narrowerInputs = TargetedWindowNarrower.Inputs(
                         analysisAssetId: inputs.analysisAssetId,
                         podcastId: inputs.podcastId,
                         transcriptVersion: inputs.transcriptVersion,
                         segments: inputs.segments,
                         evidenceCatalog: inputs.evidenceCatalog,
-                        auditWindowSampleRate: coveragePlanner.auditWindowSampleRate
+                        auditWindowSampleRate: coveragePlanner.auditWindowSampleRate,
+                        episodesSinceLastFullRescan: inputs.plannerContext.episodesSinceLastFullRescan
                     )
-                )
-                precisionSample = TargetedWindowNarrower.precisionSample(
-                    predictedTargetedLineRefs: predicted,
-                    actualAdLineRefs: fullRescanDetectedAdLineRefs
-                )
+                    // Cycle 2 H13: if every non-fullEpisodeScan phase
+                    // came back empty, contribute no recall sample.
+                    let phaseResults = BackfillJobPhase.allCases
+                        .filter { $0 != .fullEpisodeScan }
+                        .map { TargetedWindowNarrower.narrow(phase: $0, inputs: narrowerInputs) }
+                    let nonEmptyPhases = phaseResults.filter { !$0.wasEmpty }
+                    if nonEmptyPhases.isEmpty {
+                        narrowingAllPhasesEmptyCount += 1
+                        incrementNarrowingAllPhasesEmpty = true
+                        recallSample = nil
+                    } else {
+                        let predicted = TargetedWindowNarrower.predictedTargetedLineRefs(
+                            inputs: narrowerInputs
+                        )
+                        recallSample = TargetedWindowNarrower.recallSample(
+                            predictedTargetedLineRefs: predicted,
+                            actualAdLineRefs: fullRescanDetectedAdLineRefs
+                        )
+                    }
+                }
             } else {
-                precisionSample = nil
+                recallSample = nil
+                // Cycle 4 B4 M: live targetedWithAudit path. Previously
+                // the cross-phase "all phases narrowed empty" signal was
+                // lost on exactly the path that needs it most — per-phase
+                // `narrowing.empty.{phase}` fire but nothing rolls up.
+                // Read the per-run set populated by `narrowedInputs`
+                // and compare it against the non-fullEpisodeScan phases
+                // the planner asked us to run. If every such phase went
+                // empty this run, bump BOTH the per-run and per-podcast
+                // counters.
+                if plan.policy == .targetedWithAudit {
+                    let targetedPhases = Set(
+                        plan.phases.filter { $0 != .fullEpisodeScan }
+                    )
+                    if !targetedPhases.isEmpty,
+                       targetedPhases.isSubset(of: narrowingPhasesEmptyThisRun) {
+                        narrowingAllPhasesEmptyCount += 1
+                        incrementNarrowingAllPhasesEmpty = true
+                    }
+                }
             }
             do {
                 _ = try await store.recordPodcastEpisodeObservation(
                     podcastId: inputs.podcastId,
                     wasFullRescan: wasFullRescan,
-                    fullRescanPrecisionSample: precisionSample,
+                    // historical: stored as "precision"; semantically recall
+                    fullRescanPrecisionSample: recallSample,
+                    incrementEpisodesObservedWithoutSample: incrementEpisodesObservedWithoutSample,
+                    incrementNarrowingAllPhasesEmpty: incrementNarrowingAllPhasesEmpty,
                     now: clock().timeIntervalSince1970
                 )
             } catch {
@@ -628,6 +728,7 @@ actor BackfillJobRunner {
                 windowOutput: window,
                 inputs: inputs,
                 jobId: job.jobId,
+                jobPhase: job.phase,
                 scanPass: "passA",
                 status: .success
             )
@@ -657,6 +758,7 @@ actor BackfillJobRunner {
                             plan: plan,
                             inputs: inputs,
                             jobId: job.jobId,
+                            jobPhase: job.phase,
                             status: status,
                             latencyMs: coarse.latencyMillis
                         ) {
@@ -671,6 +773,7 @@ actor BackfillJobRunner {
                             plan: blockingPlan,
                             inputs: inputs,
                             jobId: job.jobId,
+                            jobPhase: job.phase,
                             status: coarse.status,
                             latencyMs: coarse.latencyMillis
                        ) {
@@ -683,6 +786,7 @@ actor BackfillJobRunner {
                     attemptedSegments: inputs.segments,
                     inputs: inputs,
                     jobId: job.jobId,
+                    jobPhase: job.phase,
                     status: coarse.status,
                     latencyMs: coarse.latencyMillis
                   ) {
@@ -715,6 +819,7 @@ actor BackfillJobRunner {
                         windowOutput: window,
                         inputs: inputs,
                         jobId: job.jobId,
+                        jobPhase: job.phase,
                         status: .success
                     )
                     for span in window.spans {
@@ -723,7 +828,8 @@ actor BackfillJobRunner {
                     let events = makeEvidenceEvents(
                         windowOutput: window,
                         inputs: inputs,
-                        jobId: job.jobId
+                        jobId: job.jobId,
+                        jobPhase: job.phase
                     )
                     // C-3: Pass-B scan row and its evidence events must be
                     // written atomically. The store's batch API wraps both in
@@ -745,6 +851,7 @@ actor BackfillJobRunner {
                             plan: plan,
                             inputs: inputs,
                             jobId: job.jobId,
+                            jobPhase: job.phase,
                             status: status,
                             latencyMs: refinement.latencyMillis
                         ) {
@@ -759,6 +866,7 @@ actor BackfillJobRunner {
                             plan: blockingPlan,
                             inputs: inputs,
                             jobId: job.jobId,
+                            jobPhase: job.phase,
                             status: refinement.status,
                             latencyMs: refinement.latencyMillis
                        ) {
@@ -773,6 +881,7 @@ actor BackfillJobRunner {
                         attemptedSegments: attemptedSegments,
                         inputs: inputs,
                         jobId: job.jobId,
+                        jobPhase: job.phase,
                         status: refinement.status,
                         latencyMs: refinement.latencyMillis
                     ) {
@@ -801,7 +910,8 @@ actor BackfillJobRunner {
                     let expansionResults = try await runOutwardExpansion(
                         baseRefinement: refinement,
                         inputs: inputs,
-                        jobId: job.jobId
+                        jobId: job.jobId,
+                        jobPhase: job.phase
                     )
                     scanResultIds.append(contentsOf: expansionResults.scanResultIds)
                     evidenceEventIds.append(contentsOf: expansionResults.evidenceEventIds)
@@ -885,7 +995,8 @@ actor BackfillJobRunner {
     private func runOutwardExpansion(
         baseRefinement: FMRefinementScanOutput,
         inputs: AssetInputs,
-        jobId: String
+        jobId: String,
+        jobPhase: BackfillJobPhase
     ) async throws -> ExpansionResults {
         var results = ExpansionResults()
 
@@ -1032,6 +1143,7 @@ actor BackfillJobRunner {
                         plan: plan,
                         inputs: inputs,
                         jobId: jobId,
+                        jobPhase: jobPhase,
                         status: expansionRefinement.status,
                         latencyMs: expansionRefinement.latencyMillis
                     ) {
@@ -1086,12 +1198,14 @@ actor BackfillJobRunner {
                     windowOutput: mergedWindowOutput,
                     inputs: inputs,
                     jobId: jobId,
+                    jobPhase: jobPhase,
                     status: .success
                 )
                 let mergedEvents = makeEvidenceEvents(
                     windowOutput: mergedWindowOutput,
                     inputs: inputs,
-                    jobId: jobId
+                    jobId: jobId,
+                    jobPhase: jobPhase
                 )
                 let persistedEventIds = try await store.recordSemanticScanResult(
                     mergedScanResult,
@@ -1527,15 +1641,51 @@ actor BackfillJobRunner {
         }
     }
 
+    /// Cycle 2 Rev1-M4: this guard intentionally short-circuits whenever
+    /// the plan is anything OTHER than `.targetedWithAudit` and whenever
+    /// the phase is `.fullEpisodeScan`. The contract:
+    ///
+    /// - `.fullCoverage` / `.periodicFullRescan` plans only contain a
+    ///   single `.fullEpisodeScan` phase, which by definition runs
+    ///   against the entire transcript and must NOT be narrowed.
+    /// - `.targetedWithAudit` runs all three targeted phases — narrowing
+    ///   applies to each one individually.
+    ///
+    /// Any future targeted variant (e.g. a hypothetical `.targetedAdsOnly`
+    /// without audit, or a `.targetedWithDriftCheck` policy) will hit
+    /// this guard, fall through, and run unnarrowed against the full
+    /// transcript. That's a safe default — over-scanning costs FM tokens
+    /// but never produces incorrect output. The trade-off is intentional:
+    /// when a new targeted policy lands, the runner author MUST add it to
+    /// this guard explicitly so the narrowing semantics are an opt-in
+    /// design decision rather than an accidental inheritance.
+    ///
+    /// Cycle 2 C5/H13: returns `nil` when narrowing skipped the phase
+    /// entirely (wasEmpty). The caller must NOT dispatch FM work on a
+    /// nil result and must NOT contribute to the recall sample numerator
+    /// for that phase.
     private func narrowedInputs(
         for job: BackfillJob,
         plan: CoveragePlan,
         rootInputs: AssetInputs
-    ) -> AssetInputs {
+    ) -> AssetInputs? {
         guard plan.policy == .targetedWithAudit, job.phase != .fullEpisodeScan else {
             return rootInputs
         }
-        let narrowed = TargetedWindowNarrower.narrow(
+        #if DEBUG
+        // Cycle 6 B6 M: test-only path that forces every non-fullEpisodeScan
+        // phase to record `wasEmpty`. Used by `targetedAllPhasesEmpty…`
+        // runner-level rails to exercise the rollup at the bottom of
+        // `runPendingBackfill` (the live path cannot drive audit empty
+        // under a natural fixture). Gated behind DEBUG so release builds
+        // never see the short-circuit.
+        if forceNarrowingEmptyForTesting {
+            narrowingEmptyByPhase[job.phase, default: 0] += 1
+            narrowingPhasesEmptyThisRun.insert(job.phase)
+            return nil
+        }
+        #endif
+        let result = TargetedWindowNarrower.narrow(
             phase: job.phase,
             inputs: TargetedWindowNarrower.Inputs(
                 analysisAssetId: rootInputs.analysisAssetId,
@@ -1543,16 +1693,114 @@ actor BackfillJobRunner {
                 transcriptVersion: rootInputs.transcriptVersion,
                 segments: rootInputs.segments,
                 evidenceCatalog: rootInputs.evidenceCatalog,
-                auditWindowSampleRate: plan.auditWindowSampleRate ?? coveragePlanner.auditWindowSampleRate
+                auditWindowSampleRate: plan.auditWindowSampleRate ?? coveragePlanner.auditWindowSampleRate,
+                episodesSinceLastFullRescan: rootInputs.plannerContext.episodesSinceLastFullRescan
             )
         )
+        if result.wasEmpty {
+            // Cycle 2 H13: empty phase. Skip without dispatching FM work.
+            // Counter is bumped by phase name so cross-show patterns are
+            // visible (e.g. "harvester is consistently empty on this show").
+            narrowingEmptyByPhase[job.phase, default: 0] += 1
+            // Cycle 4 B4: track per-run for the all-phases-empty rollup.
+            narrowingPhasesEmptyThisRun.insert(job.phase)
+            return nil
+        }
+        if result.aborted {
+            // Cycle 2 C5: per-anchor windows merged to more than the cap.
+            // Fall back to the full segment list (root inputs) so we still
+            // get coverage; bump the abort counter exactly once for this
+            // phase invocation.
+            narrowingAbortedByPhase[job.phase, default: 0] += 1
+            return rootInputs
+        }
+        // Cycle 4 L3: `narrowedSegments` cannot be nil on this path.
+        // `wasEmpty` and `aborted` both return early above, so a fall-through
+        // means the narrower produced a concrete segment list. Force-unwrap
+        // with a precondition so a future regression (e.g. a fourth
+        // terminal state slipping into `TargetedWindowNarrower.Result`)
+        // turns into a loud trap instead of a silent full-episode fallback
+        // that masks the bug.
+        guard let narrowedSegments = result.narrowedSegments else {
+            preconditionFailure(
+                "TargetedWindowNarrower returned neither wasEmpty, aborted, nor narrowedSegments for phase=\(job.phase.rawValue)"
+            )
+        }
         return AssetInputs(
             analysisAssetId: rootInputs.analysisAssetId,
             podcastId: rootInputs.podcastId,
-            segments: narrowed,
+            segments: narrowedSegments,
             evidenceCatalog: rootInputs.evidenceCatalog,
             transcriptVersion: rootInputs.transcriptVersion,
             plannerContext: rootInputs.plannerContext
+        )
+    }
+
+    // MARK: - Cycle 2 narrowing telemetry (C5 + H13)
+
+    /// Cycle 2 C5: per-phase counter incremented when the merged
+    /// per-anchor windows exceed `NarrowingConfig.maxNarrowedSegmentsPerPhase`
+    /// and the runner falls back to root inputs for that phase.
+    private(set) var narrowingAbortedByPhase: [BackfillJobPhase: Int] = [:]
+    /// Cycle 2 H13: per-phase counter incremented when narrowing returned
+    /// `wasEmpty` and the phase was skipped entirely (no FM dispatch, no
+    /// contribution to the recall sample).
+    private(set) var narrowingEmptyByPhase: [BackfillJobPhase: Int] = [:]
+    /// Cycle 2 H13: counter incremented when EVERY non-fullEpisodeScan
+    /// phase for the episode came back empty. Distinct from per-phase
+    /// `narrowingEmptyByPhase` so operators can distinguish "harvester
+    /// always empty" from "this whole episode produced nothing".
+    private(set) var narrowingAllPhasesEmptyCount: Int = 0
+    /// Cycle 2 C4: counter incremented on every full-rescan run that
+    /// produced an ad-free episode (empty `actualAdLineRefs`). Such runs
+    /// do NOT advance the planner ring — see the recall-sample call
+    /// site for the policy.
+    private(set) var episodesObservedWithoutSample: Int = 0
+    /// Cycle 4 B4: per-run set of non-fullEpisodeScan phases for which
+    /// `TargetedWindowNarrower.narrow` returned `wasEmpty = true` during
+    /// THIS invocation of `runPendingBackfill`. Populated lazily by
+    /// `narrowedInputs`. Reset on entry to `runPendingBackfill` alongside
+    /// the other per-run counters. Consumed once at the bottom of the
+    /// run to decide whether to bump the persisted
+    /// `narrowingAllPhasesEmptyEpisodeCount` on the planner state row.
+    private(set) var narrowingPhasesEmptyThisRun: Set<BackfillJobPhase> = []
+
+    #if DEBUG
+    /// Cycle 6 B6 L: test-only hook to seed `narrowingPhasesEmptyThisRun`
+    /// between two `runPendingBackfill` calls so the reset rail at the
+    /// top of `runPendingBackfill` can be asserted directly. Not exposed
+    /// in release builds.
+    func forceSeedPhasesEmptyThisRunForTesting(_ phases: Set<BackfillJobPhase>) {
+        narrowingPhasesEmptyThisRun = phases
+    }
+
+    /// Cycle 6 B6 M: test-only flag that forces every non-fullEpisodeScan
+    /// phase's narrowing call to record `wasEmpty`. Exercised by the
+    /// runner-level rail `targetedAllPhasesEmptyBumpsPersistedCounter…Runner`
+    /// to drive the rollup at the bottom of `runPendingBackfill`. The
+    /// live path cannot produce audit-empty under any natural fixture
+    /// (auditSegments always returns at least one segment), so a test
+    /// hook is the only way to rail the runner-side rollup.
+    var forceNarrowingEmptyForTesting: Bool = false
+
+    func setForceNarrowingEmptyForTesting(_ enabled: Bool) {
+        forceNarrowingEmptyForTesting = enabled
+    }
+    #endif
+
+    func snapshotNarrowingTelemetry() -> (
+        abortedByPhase: [BackfillJobPhase: Int],
+        emptyByPhase: [BackfillJobPhase: Int],
+        allPhasesEmpty: Int,
+        observedWithoutSample: Int,
+        phasesEmptyThisRun: Set<BackfillJobPhase>
+    ) {
+        (
+            narrowingAbortedByPhase,
+            narrowingEmptyByPhase,
+            narrowingAllPhasesEmptyCount,
+            episodesObservedWithoutSample,
+            narrowingPhasesEmptyThisRun
         )
     }
 
@@ -1560,6 +1808,7 @@ actor BackfillJobRunner {
         windowOutput: FMCoarseWindowOutput,
         inputs: AssetInputs,
         jobId: String,
+        jobPhase: BackfillJobPhase,
         scanPass: String,
         status: SemanticScanStatus
     ) -> SemanticScanResult {
@@ -1610,7 +1859,8 @@ actor BackfillJobRunner {
             prewarmHit: false,
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
-            reuseScope: jobId
+            reuseScope: jobId,
+            phase: jobPhase.rawValue
         )
     }
 
@@ -1618,6 +1868,7 @@ actor BackfillJobRunner {
         windowOutput: FMRefinementWindowOutput,
         inputs: AssetInputs,
         jobId: String,
+        jobPhase: BackfillJobPhase,
         status: SemanticScanStatus
     ) -> SemanticScanResult {
         let firstAtom = inputs.segments.first(where: {
@@ -1661,7 +1912,8 @@ actor BackfillJobRunner {
             prewarmHit: false,
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
-            reuseScope: jobId
+            reuseScope: jobId,
+            phase: jobPhase.rawValue
         )
     }
 
@@ -1670,6 +1922,7 @@ actor BackfillJobRunner {
         attemptedSegments: [AdTranscriptSegment],
         inputs: AssetInputs,
         jobId: String,
+        jobPhase: BackfillJobPhase,
         status: SemanticScanStatus,
         latencyMs: Double,
         windowKey: String? = nil
@@ -1703,7 +1956,8 @@ actor BackfillJobRunner {
             prewarmHit: false,
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
-            reuseScope: jobId
+            reuseScope: jobId,
+            phase: jobPhase.rawValue
         )
     }
 
@@ -1711,6 +1965,7 @@ actor BackfillJobRunner {
         plan: RefinementWindowPlan,
         inputs: AssetInputs,
         jobId: String,
+        jobPhase: BackfillJobPhase,
         status: SemanticScanStatus,
         latencyMs: Double
     ) -> SemanticScanResult? {
@@ -1720,6 +1975,7 @@ actor BackfillJobRunner {
             attemptedSegments: attemptedSegments,
             inputs: inputs,
             jobId: jobId,
+            jobPhase: jobPhase,
             status: status,
             latencyMs: latencyMs,
             windowKey: "window=\(plan.windowIndex)"
@@ -1730,6 +1986,7 @@ actor BackfillJobRunner {
         plan: CoarsePassWindowPlan,
         inputs: AssetInputs,
         jobId: String,
+        jobPhase: BackfillJobPhase,
         status: SemanticScanStatus,
         latencyMs: Double
     ) -> SemanticScanResult? {
@@ -1739,6 +1996,7 @@ actor BackfillJobRunner {
             attemptedSegments: attemptedSegments,
             inputs: inputs,
             jobId: jobId,
+            jobPhase: jobPhase,
             status: status,
             latencyMs: latencyMs,
             windowKey: "window=\(plan.windowIndex)"
@@ -1779,7 +2037,8 @@ actor BackfillJobRunner {
     private func makeEvidenceEvents(
         windowOutput: FMRefinementWindowOutput,
         inputs: AssetInputs,
-        jobId: String
+        jobId: String,
+        jobPhase: BackfillJobPhase
     ) -> [EvidenceEvent] {
         var events: [EvidenceEvent] = []
         var seenEventIds = Set<String>()
@@ -1853,7 +2112,8 @@ actor BackfillJobRunner {
                     atomOrdinals: atomOrdinals,
                     evidenceJSON: evidenceJSON,
                     scanCohortJSON: scanCohortJSON,
-                    createdAt: clock().timeIntervalSince1970
+                    createdAt: clock().timeIntervalSince1970,
+                    phase: jobPhase.rawValue
                 )
             )
         }

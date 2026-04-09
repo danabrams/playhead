@@ -277,7 +277,7 @@ final class PlayheadFMSmokeTests: XCTestCase {
             transcriptVersion: version.transcriptVersion,
             plannerContext: CoveragePlannerContext(
                 observedEpisodeCount: 0,
-                stablePrecision: false,
+                stableRecall: false,
                 isFirstEpisodeAfterCohortInvalidation: false,
                 recallDegrading: false,
                 sponsorDriftDetected: false,
@@ -342,7 +342,7 @@ final class PlayheadFMSmokeTests: XCTestCase {
             transcriptVersion: transcriptVersion,
             plannerContext: CoveragePlannerContext(
                 observedEpisodeCount: 0,
-                stablePrecision: false,
+                stableRecall: false,
                 isFirstEpisodeAfterCohortInvalidation: false,
                 recallDegrading: false,
                 sponsorDriftDetected: false,
@@ -397,7 +397,7 @@ final class PlayheadFMSmokeTests: XCTestCase {
             transcriptVersion: transcriptVersion,
             plannerContext: CoveragePlannerContext(
                 observedEpisodeCount: 0,
-                stablePrecision: false,
+                stableRecall: false,
                 isFirstEpisodeAfterCohortInvalidation: false,
                 recallDegrading: false,
                 sponsorDriftDetected: false,

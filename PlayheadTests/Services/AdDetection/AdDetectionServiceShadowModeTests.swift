@@ -353,7 +353,11 @@ struct AdDetectionServiceShadowModeTests {
                 repeating: CoarseScreeningSchema(
                     disposition: .containsAd,
                     support: CoarseSupportSchema(
-                        supportLineRefs: [2],
+                        // Cycle 2 C5: align with the 30-line fixture's
+                        // ad copy at lines 14-15 so the recall sample
+                        // computed by the runner is non-zero and the
+                        // planner ring fills with passing samples.
+                        supportLineRefs: [14],
                         certainty: .strong
                     )
                 ),
@@ -388,24 +392,49 @@ struct AdDetectionServiceShadowModeTests {
         )
 
         func makeEpisodeChunks(_ assetId: String) -> [TranscriptChunk] {
-            let lines = [
-                "Welcome back to the show and today's interview.",
-                "Before we continue, this episode is brought to you by ExampleCo.",
-                "Visit example.com slash deal and use promo code PLAYHEAD.",
-                "Now back to the conversation with our guest.",
-                "We discuss the roadmap and next release milestones.",
-                "The panel shares lessons learned from production incidents.",
-                "Audience questions focus on reliability and performance.",
-                "Thanks for listening and see you next week."
-            ]
+            // Cycle 2 C5 / Cycle 4 B4 Rev3-M6: 30-line fixture so the
+            // per-anchor narrowing model produces a strict subset
+            // (anchors land at lines 14/15, narrowed envelope ~[9..20]
+            // = 12 segments, strictly less than the 30-segment full
+            // episode). The legacy 8-line fixture was too small for the
+            // new model: a single anchor with default padding=5 already
+            // covers the full episode and the Rev3-M6 narrowing rail
+            // can't fire.
+            //
+            // Cycle 4 B4: the chunks MUST include time gaps between
+            // adjacent pieces so `TranscriptSegmenter` splits them
+            // into distinct segments rather than collapsing everything
+            // into a handful of big segments. The segmenter's default
+            // pause threshold is 1.5s — use a 5s gap per chunk to
+            // clear it comfortably. Without this, 30 chunks collapse
+            // into 2-3 segments and the per-anchor narrowing envelope
+            // (padding=5 in segment index space) covers the entire
+            // episode, making the harvester / lexical phase rows look
+            // like full-rescan rows and silently defeating Rev3-M6.
+            var lines: [String] = []
+            for idx in 0..<30 {
+                switch idx {
+                case 14:
+                    lines.append("Before we continue, this episode is brought to you by ExampleCo.")
+                case 15:
+                    lines.append("Visit example.com slash deal and use promo code PLAYHEAD.")
+                default:
+                    lines.append("Editorial line \(idx) about the topic of the day.")
+                }
+            }
             return lines.enumerated().map { index, text in
-                TranscriptChunk(
+                // 10s of content + 5s pause per chunk. The 5s gap
+                // exceeds the segmenter's default 1.5s pause threshold
+                // and forces a hard break between every chunk.
+                let chunkStart = Double(index) * 15.0
+                let chunkEnd = chunkStart + 10.0
+                return TranscriptChunk(
                     id: "\(assetId)-chunk-\(index)",
                     analysisAssetId: assetId,
                     segmentFingerprint: "\(assetId)-fp-\(index)",
                     chunkIndex: index,
-                    startTime: Double(index) * 10,
-                    endTime: Double(index + 1) * 10,
+                    startTime: chunkStart,
+                    endTime: chunkEnd,
                     text: text,
                     normalizedText: text.lowercased(),
                     pass: "final",
@@ -423,13 +452,13 @@ struct AdDetectionServiceShadowModeTests {
                 chunks: makeEpisodeChunks(assetId),
                 analysisAssetId: assetId,
                 podcastId: podcastId,
-                episodeDuration: 80
+                episodeDuration: 300
             )
         }
 
         let plannerState = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
         #expect(plannerState.observedEpisodeCount == 6)
-        #expect(plannerState.stablePrecisionFlag)
+        #expect(plannerState.stableRecallFlag)
 
         let targetedAssetId = "asset-live-targeted-6"
         let passA = try await store.fetchSemanticScanResults(
@@ -471,5 +500,46 @@ struct AdDetectionServiceShadowModeTests {
         )
         let fullEpisodeJob = try await store.fetchBackfillJob(byId: fullEpisodeJobId)
         #expect(fullEpisodeJob == nil)
+
+        // Cycle 6 B6 Rev3-M6: now that BackfillJobRunner persists the
+        // originating phase into `semantic_scan_results.phase`, filter
+        // rows by phase and assert that BOTH harvester AND lexical
+        // narrowing phases produced at least one row that is a strict
+        // subset of the full episode. The legacy `>= 2` assertion would
+        // pass even if only audit + one of the heavy-lifting phases
+        // narrowed — this is the condition the cycle-5 reviewer flagged.
+        let (allAtoms, _) = TranscriptAtomizer.atomize(
+            chunks: makeEpisodeChunks(targetedAssetId),
+            analysisAssetId: targetedAssetId,
+            normalizationHash: "norm-v1",
+            sourceHash: "asr-v1"
+        )
+        let firstOrdinal = allAtoms.first?.atomKey.atomOrdinal ?? 0
+        let lastOrdinal = allAtoms.last?.atomKey.atomOrdinal ?? 0
+        let episodeAtomCount = lastOrdinal - firstOrdinal
+        func isStrictSubset(_ row: SemanticScanResult) -> Bool {
+            (row.windowLastAtomOrdinal - row.windowFirstAtomOrdinal) < episodeAtomCount
+        }
+
+        let harvesterRows = passA.filter { $0.phase == BackfillJobPhase.scanHarvesterProposals.rawValue }
+        let lexicalRows = passA.filter { $0.phase == BackfillJobPhase.scanLikelyAdSlots.rawValue }
+        let auditRows = passA.filter { $0.phase == BackfillJobPhase.scanRandomAuditWindows.rawValue }
+
+        #expect(!harvesterRows.isEmpty, "harvester phase must persist at least one passA row")
+        #expect(!lexicalRows.isEmpty, "lexical phase must persist at least one passA row")
+        #expect(!auditRows.isEmpty, "audit phase must persist at least one passA row")
+
+        #expect(
+            harvesterRows.contains(where: isStrictSubset),
+            "Cycle 6 B6 Rev3-M6: HARVESTER phase must produce a strict-subset row (\(harvesterRows.count) rows, none narrowed)"
+        )
+        #expect(
+            lexicalRows.contains(where: isStrictSubset),
+            "Cycle 6 B6 Rev3-M6: LEXICAL phase must produce a strict-subset row (\(lexicalRows.count) rows, none narrowed)"
+        )
+        #expect(
+            auditRows.contains(where: isStrictSubset),
+            "Cycle 6 B6 Rev3-M6: AUDIT phase must produce a strict-subset row (\(auditRows.count) rows, none narrowed)"
+        )
     }
 }

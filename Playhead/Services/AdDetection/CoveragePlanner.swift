@@ -11,13 +11,38 @@ enum CoveragePolicy: String, Codable, Sendable, Hashable, CaseIterable {
 
 struct CoveragePlannerContext: Sendable, Equatable {
     let observedEpisodeCount: Int
-    let stablePrecision: Bool
+    /// Cycle 2 C4: this flag is **stable recall**, not precision — the
+    /// metric was historically misnamed. The store column / row JSON
+    /// keys still use the legacy `stablePrecisionFlag` name to avoid a
+    /// migration; the rename is code-only. See the documentation on
+    /// `TargetedWindowNarrower.recallSample` for the formula direction.
+    let stableRecall: Bool
     let isFirstEpisodeAfterCohortInvalidation: Bool
     let recallDegrading: Bool
     let sponsorDriftDetected: Bool
     let auditMissDetected: Bool
     let episodesSinceLastFullRescan: Int
     let periodicFullRescanIntervalEpisodes: Int
+
+    init(
+        observedEpisodeCount: Int,
+        stableRecall: Bool,
+        isFirstEpisodeAfterCohortInvalidation: Bool,
+        recallDegrading: Bool,
+        sponsorDriftDetected: Bool,
+        auditMissDetected: Bool,
+        episodesSinceLastFullRescan: Int,
+        periodicFullRescanIntervalEpisodes: Int
+    ) {
+        self.observedEpisodeCount = observedEpisodeCount
+        self.stableRecall = stableRecall
+        self.isFirstEpisodeAfterCohortInvalidation = isFirstEpisodeAfterCohortInvalidation
+        self.recallDegrading = recallDegrading
+        self.sponsorDriftDetected = sponsorDriftDetected
+        self.auditMissDetected = auditMissDetected
+        self.episodesSinceLastFullRescan = episodesSinceLastFullRescan
+        self.periodicFullRescanIntervalEpisodes = periodicFullRescanIntervalEpisodes
+    }
 }
 
 struct CoveragePlan: Sendable, Equatable {
@@ -66,7 +91,7 @@ struct CoveragePlanner: Sendable {
     func reset(context: CoveragePlannerContext) -> CoveragePlannerContext {
         CoveragePlannerContext(
             observedEpisodeCount: context.observedEpisodeCount,
-            stablePrecision: context.stablePrecision,
+            stableRecall: context.stableRecall,
             isFirstEpisodeAfterCohortInvalidation: context.isFirstEpisodeAfterCohortInvalidation,
             recallDegrading: context.recallDegrading,
             sponsorDriftDetected: context.sponsorDriftDetected,
@@ -93,7 +118,7 @@ struct CoveragePlanner: Sendable {
             )
         }
 
-        if context.observedEpisodeCount >= coldStartEpisodeThreshold && context.stablePrecision {
+        if context.observedEpisodeCount >= coldStartEpisodeThreshold && context.stableRecall {
             return CoveragePlan(
                 policy: .targetedWithAudit,
                 phases: [
