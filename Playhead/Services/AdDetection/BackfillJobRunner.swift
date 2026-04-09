@@ -21,6 +21,14 @@ actor BackfillJobRunner {
         let evidenceCatalog: EvidenceCatalog
         let transcriptVersion: String
         let plannerContext: CoveragePlannerContext
+        /// playhead-7q3 (Phase 4): optional acoustic break points for the
+        /// episode. When supplied, `TargetedWindowNarrower` uses them to
+        /// snap the outer edges of merged per-anchor windows to nearby
+        /// natural audio transitions. Defaults to `[]` so every legacy
+        /// call site (and every synthetic test fixture) preserves exact
+        /// pre-change behavior until it explicitly opts in by passing
+        /// breaks.
+        let acousticBreaks: [AcousticBreak]
 
         init(
             analysisAssetId: String,
@@ -28,7 +36,8 @@ actor BackfillJobRunner {
             segments: [AdTranscriptSegment],
             evidenceCatalog: EvidenceCatalog,
             transcriptVersion: String,
-            plannerContext: CoveragePlannerContext
+            plannerContext: CoveragePlannerContext,
+            acousticBreaks: [AcousticBreak] = []
         ) {
             self.analysisAssetId = analysisAssetId
             self.podcastId = podcastId
@@ -36,6 +45,7 @@ actor BackfillJobRunner {
             self.evidenceCatalog = evidenceCatalog
             self.transcriptVersion = transcriptVersion
             self.plannerContext = plannerContext
+            self.acousticBreaks = acousticBreaks
         }
     }
 
@@ -624,7 +634,8 @@ actor BackfillJobRunner {
                         segments: inputs.segments,
                         evidenceCatalog: inputs.evidenceCatalog,
                         auditWindowSampleRate: coveragePlanner.auditWindowSampleRate,
-                        episodesSinceLastFullRescan: inputs.plannerContext.episodesSinceLastFullRescan
+                        episodesSinceLastFullRescan: inputs.plannerContext.episodesSinceLastFullRescan,
+                        acousticBreaks: inputs.acousticBreaks
                     )
                     // Cycle 2 H13: if every non-fullEpisodeScan phase
                     // came back empty, contribute no recall sample.
@@ -1787,7 +1798,8 @@ actor BackfillJobRunner {
                 segments: rootInputs.segments,
                 evidenceCatalog: rootInputs.evidenceCatalog,
                 auditWindowSampleRate: plan.auditWindowSampleRate ?? coveragePlanner.auditWindowSampleRate,
-                episodesSinceLastFullRescan: rootInputs.plannerContext.episodesSinceLastFullRescan
+                episodesSinceLastFullRescan: rootInputs.plannerContext.episodesSinceLastFullRescan,
+                acousticBreaks: rootInputs.acousticBreaks
             )
         )
         if result.wasEmpty {
@@ -1825,7 +1837,8 @@ actor BackfillJobRunner {
             segments: narrowedSegments,
             evidenceCatalog: rootInputs.evidenceCatalog,
             transcriptVersion: rootInputs.transcriptVersion,
-            plannerContext: rootInputs.plannerContext
+            plannerContext: rootInputs.plannerContext,
+            acousticBreaks: rootInputs.acousticBreaks
         )
     }
 

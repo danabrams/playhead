@@ -18,11 +18,34 @@ struct NarrowingConfig: Sendable, Equatable {
     /// the runner aborts narrowing for that phase and falls back to the full
     /// segment list (root inputs).
     let maxNarrowedSegmentsPerPhase: Int
+    /// playhead-7q3 (Phase 4): maximum absolute time distance, in seconds,
+    /// allowed between a merged per-anchor window's outer edge and an
+    /// `AcousticBreak` for the edge to be snapped to that break. Chosen as
+    /// 2.0s from first principles: `AcousticBreakDetector` uses the
+    /// `FeatureWindow` duration (2.0s at HEAD) as the grouping tolerance
+    /// inside `mergeSignals`, so two break-worthy events within 2.0s are
+    /// already considered "the same transition" upstream. Keeping this
+    /// snap distance equal to that grouping tolerance means the narrower
+    /// never pulls an edge toward a break that the detector itself would
+    /// not consider co-located with the edge. Zero-shot: this constant is
+    /// the feature-window width and is not per-show tuned.
+    let acousticBreakSnapMaxDistanceSeconds: Double
 
     static let `default` = NarrowingConfig(
         perAnchorPaddingSegments: 5,
-        maxNarrowedSegmentsPerPhase: 60
+        maxNarrowedSegmentsPerPhase: 60,
+        acousticBreakSnapMaxDistanceSeconds: 2.0
     )
+
+    init(
+        perAnchorPaddingSegments: Int,
+        maxNarrowedSegmentsPerPhase: Int,
+        acousticBreakSnapMaxDistanceSeconds: Double = 2.0
+    ) {
+        self.perAnchorPaddingSegments = perAnchorPaddingSegments
+        self.maxNarrowedSegmentsPerPhase = maxNarrowedSegmentsPerPhase
+        self.acousticBreakSnapMaxDistanceSeconds = acousticBreakSnapMaxDistanceSeconds
+    }
 }
 
 /// Cycle 2 H13: a phase narrowing now distinguishes "narrow to N segments"
@@ -74,6 +97,16 @@ enum TargetedWindowNarrower {
         /// counter through. The runner passes
         /// `PodcastPlannerState.episodesSinceLastFullRescan` here.
         let episodesSinceLastFullRescan: Int
+        /// playhead-7q3 (Phase 4): acoustic break points for the episode,
+        /// produced by `AcousticBreakDetector.detectBreaks(in:)`. When
+        /// non-empty, the narrower snaps the outer edges of each merged
+        /// per-anchor window to the nearest break within
+        /// `NarrowingConfig.acousticBreakSnapMaxDistanceSeconds`. When
+        /// empty (the default, and the behavior for any caller that does
+        /// not yet have feature windows available), the narrower falls
+        /// back to the fixed `perAnchorPaddingSegments` behavior — so
+        /// opting in to break-shaping is strictly additive.
+        let acousticBreaks: [AcousticBreak]
 
         init(
             analysisAssetId: String,
@@ -82,7 +115,8 @@ enum TargetedWindowNarrower {
             segments: [AdTranscriptSegment],
             evidenceCatalog: EvidenceCatalog,
             auditWindowSampleRate: Double,
-            episodesSinceLastFullRescan: Int = 0
+            episodesSinceLastFullRescan: Int = 0,
+            acousticBreaks: [AcousticBreak] = []
         ) {
             self.analysisAssetId = analysisAssetId
             self.podcastId = podcastId
@@ -91,6 +125,7 @@ enum TargetedWindowNarrower {
             self.evidenceCatalog = evidenceCatalog
             self.auditWindowSampleRate = auditWindowSampleRate
             self.episodesSinceLastFullRescan = episodesSinceLastFullRescan
+            self.acousticBreaks = acousticBreaks
         }
     }
 
@@ -125,6 +160,7 @@ enum TargetedWindowNarrower {
             return narrowedResult(
                 lineRefs: evidenceLineRefs(inputs: inputs),
                 orderedSegments: ordered,
+                acousticBreaks: inputs.acousticBreaks,
                 config: config,
                 phaseLabel: "scanHarvesterProposals"
             )
@@ -132,6 +168,7 @@ enum TargetedWindowNarrower {
             return narrowedResult(
                 lineRefs: lexicalCandidateLineRefs(inputs: inputs),
                 orderedSegments: ordered,
+                acousticBreaks: inputs.acousticBreaks,
                 config: config,
                 phaseLabel: "scanLikelyAdSlots"
             )
@@ -285,6 +322,7 @@ enum TargetedWindowNarrower {
     private static func narrowedResult(
         lineRefs: Set<Int>,
         orderedSegments: [AdTranscriptSegment],
+        acousticBreaks: [AcousticBreak],
         config: NarrowingConfig,
         phaseLabel: String
     ) -> PhaseNarrowingResult {
@@ -328,6 +366,35 @@ enum TargetedWindowNarrower {
             }
         }
 
+        // playhead-7q3 (Phase 4, Option D): after per-anchor merging, snap
+        // each merged interval's outer edges to the nearest acoustic break
+        // within `acousticBreakSnapMaxDistanceSeconds`. Real ad transitions
+        // tend to be marked by RMS drops, music spikes, and pause clusters;
+        // aligning the window we hand to the Foundation Model with those
+        // natural boundaries should produce more accurate refinement than a
+        // fixed-padding chunk. This step is additive-only — if no breaks
+        // are provided (the default for callers without feature windows),
+        // or no break is within snap distance of an edge, the interval is
+        // left exactly as the merge step produced it.
+        //
+        // The snap never moves an edge by more than `perAnchorPaddingSegments`
+        // to bound drift on short-duration segments, and it never causes the
+        // merged count to exceed the per-phase cap: the cap check below
+        // still fires, and callers still fall back to root inputs if the
+        // snap widens the windows past the cap. Merging of intervals that
+        // become adjacent after snapping is not re-run on purpose — the
+        // original merge step already folded overlapping/adjacent intervals,
+        // and the snap moves edges by at most one padding width, so at
+        // worst two originally-disjoint intervals may end up with a
+        // one-segment gap that was deliberately left as a gap.
+        merged = snapIntervalsToAcousticBreaks(
+            merged,
+            orderedSegments: orderedSegments,
+            availableLineRefs: availableLineRefs,
+            acousticBreaks: acousticBreaks,
+            config: config
+        )
+
         // Convert merged ranges into the actual segment objects we have
         // available in the ordered list. Use a Set lookup for the union
         // of all line refs covered.
@@ -350,6 +417,149 @@ enum TargetedWindowNarrower {
             return .empty
         }
         return .narrowed(resultSegments)
+    }
+
+    /// playhead-7q3 (Phase 4, Option D): adjust each merged per-anchor
+    /// interval's outer edges to align with nearby `AcousticBreak`s.
+    ///
+    /// The algorithm is intentionally conservative:
+    ///   1. For each merged interval `[loIdx, hiIdx]`, compute its time
+    ///      bounds from the corresponding segments.
+    ///   2. For the LEFT edge, look for the acoustic break whose `time`
+    ///      is closest to `segment(loIdx).startTime` and within the
+    ///      snap-distance window. If a break exists, resolve the segment
+    ///      index whose timespan contains that break (or the nearest
+    ///      boundary if the break falls in a gap), and move the left edge
+    ///      to that index — but only by at most `perAnchorPaddingSegments`.
+    ///   3. Repeat for the RIGHT edge.
+    ///
+    /// The snap is symmetric: an edge may be pulled inward (tightening
+    /// the window) or pushed outward (widening it). In either direction
+    /// the drift is bounded, and widening is naturally re-bounded by the
+    /// per-phase cap check the caller runs immediately after this step.
+    ///
+    /// Determinism: `acousticBreaks` is consulted with a stable "closest
+    /// time" tiebreak (index order from the input). `orderedSegments` is
+    /// already sorted by `segmentIndex` at the caller. Running this helper
+    /// twice on the same inputs produces the same output.
+    private static func snapIntervalsToAcousticBreaks(
+        _ merged: [(Int, Int)],
+        orderedSegments: [AdTranscriptSegment],
+        availableLineRefs: [Int],
+        acousticBreaks: [AcousticBreak],
+        config: NarrowingConfig
+    ) -> [(Int, Int)] {
+        guard !acousticBreaks.isEmpty, !orderedSegments.isEmpty else {
+            return merged
+        }
+
+        // Index the ordered segments by their `segmentIndex` for O(1)
+        // lookup when resolving interval endpoints to time ranges.
+        var segmentByIndex: [Int: AdTranscriptSegment] = [:]
+        segmentByIndex.reserveCapacity(orderedSegments.count)
+        for segment in orderedSegments {
+            segmentByIndex[segment.segmentIndex] = segment
+        }
+
+        guard let lower = availableLineRefs.first,
+              let upper = availableLineRefs.last else {
+            return merged
+        }
+
+        let maxDrift = config.perAnchorPaddingSegments
+        let snapDistance = config.acousticBreakSnapMaxDistanceSeconds
+
+        return merged.map { interval -> (Int, Int) in
+            var (lo, hi) = interval
+            guard let loSegment = segmentByIndex[lo],
+                  let hiSegment = segmentByIndex[hi] else {
+                return interval
+            }
+
+            // LEFT edge snap: find the nearest break to the interval's
+            // start time. If one is within the snap distance, resolve it
+            // to a segment index and update `lo`.
+            if let snappedLo = snapEdge(
+                targetTime: loSegment.startTime,
+                acousticBreaks: acousticBreaks,
+                snapDistance: snapDistance,
+                orderedSegments: orderedSegments,
+                availableLineRefs: availableLineRefs
+            ) {
+                let clamped = min(max(snappedLo, lo - maxDrift), lo + maxDrift)
+                lo = max(lower, clamped)
+            }
+
+            // RIGHT edge snap: same logic for the interval's end time.
+            if let snappedHi = snapEdge(
+                targetTime: hiSegment.endTime,
+                acousticBreaks: acousticBreaks,
+                snapDistance: snapDistance,
+                orderedSegments: orderedSegments,
+                availableLineRefs: availableLineRefs
+            ) {
+                let clamped = min(max(snappedHi, hi - maxDrift), hi + maxDrift)
+                hi = min(upper, clamped)
+            }
+
+            if lo > hi {
+                // Snapping should never invert the interval; bail back to
+                // the original merge output if it does.
+                return interval
+            }
+            return (lo, hi)
+        }
+    }
+
+    /// Resolve `targetTime` to a segment index by (a) finding the nearest
+    /// acoustic break within `snapDistance`, then (b) mapping that break's
+    /// time to the segment whose timespan contains it. Returns `nil` if no
+    /// break is in range or if the break time cannot be placed inside any
+    /// available segment.
+    private static func snapEdge(
+        targetTime: Double,
+        acousticBreaks: [AcousticBreak],
+        snapDistance: Double,
+        orderedSegments: [AdTranscriptSegment],
+        availableLineRefs: [Int]
+    ) -> Int? {
+        var nearest: (distance: Double, time: Double)?
+        for candidate in acousticBreaks {
+            let distance = abs(candidate.time - targetTime)
+            if distance > snapDistance { continue }
+            if let current = nearest, distance >= current.distance { continue }
+            nearest = (distance, candidate.time)
+        }
+        guard let breakTime = nearest?.time else { return nil }
+
+        // Find the segment whose [startTime, endTime] contains breakTime.
+        // If breakTime falls in a gap between segments, pick the segment
+        // whose boundary is closest to breakTime.
+        var containingIndex: Int?
+        var closestIndex: Int?
+        var closestDistance = Double.infinity
+        for segment in orderedSegments {
+            if breakTime >= segment.startTime && breakTime <= segment.endTime {
+                containingIndex = segment.segmentIndex
+                break
+            }
+            let distanceToStart = abs(segment.startTime - breakTime)
+            let distanceToEnd = abs(segment.endTime - breakTime)
+            let distance = min(distanceToStart, distanceToEnd)
+            if distance < closestDistance {
+                closestDistance = distance
+                closestIndex = segment.segmentIndex
+            }
+        }
+        let resolved = containingIndex ?? closestIndex
+        guard let resolved else { return nil }
+        // Clip to the available line-ref bounds so callers never see an
+        // out-of-range segment index.
+        guard let lower = availableLineRefs.first,
+              let upper = availableLineRefs.last else {
+            return nil
+        }
+        return min(max(resolved, lower), upper)
     }
 
     private static func auditSegments(

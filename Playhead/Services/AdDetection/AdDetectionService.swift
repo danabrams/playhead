@@ -678,13 +678,40 @@ actor AdDetectionService {
             episodesSinceLastFullRescan: plannerState?.episodesSinceLastFullRescan ?? 0,
             periodicFullRescanIntervalEpisodes: 10
         )
+        // playhead-7q3 (Phase 4): compute acoustic breaks from the episode
+        // feature windows and thread them into `TargetedWindowNarrower` via
+        // `AssetInputs.acousticBreaks`. The narrower snaps per-anchor
+        // window edges to nearby natural audio transitions (Option D).
+        //
+        // Failure mode: fetching or detecting breaks must NEVER block the
+        // shadow phase — shadow mode is observation-only and the narrower
+        // falls back cleanly to the legacy fixed-padding behavior on an
+        // empty break list. On any error we log and pass `[]`.
+        let acousticBreaks: [AcousticBreak]
+        if self.episodeDuration > 0 {
+            do {
+                let featureWindows = try await store.fetchFeatureWindows(
+                    assetId: analysisAssetId,
+                    from: 0,
+                    to: self.episodeDuration
+                )
+                acousticBreaks = AcousticBreakDetector.detectBreaks(in: featureWindows)
+            } catch {
+                logger.warning("playhead-7q3: fetchFeatureWindows failed for break snap (falling back to fixed padding): \(error.localizedDescription)")
+                acousticBreaks = []
+            }
+        } else {
+            acousticBreaks = []
+        }
+
         let inputs = BackfillJobRunner.AssetInputs(
             analysisAssetId: analysisAssetId,
             podcastId: podcastId,
             segments: segments,
             evidenceCatalog: evidenceCatalog,
             transcriptVersion: version.transcriptVersion,
-            plannerContext: plannerContext
+            plannerContext: plannerContext,
+            acousticBreaks: acousticBreaks
         )
 
         do {
