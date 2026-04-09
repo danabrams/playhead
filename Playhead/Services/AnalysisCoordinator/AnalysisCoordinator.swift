@@ -296,12 +296,13 @@ actor AnalysisCoordinator {
         isStopRequested: @Sendable () async -> Bool,
         fetchPendingCount: @Sendable () async -> Int,
         sleep: @Sendable (Duration) async throws -> Void,
+        now: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
         logger: Logger
     ) async {
         var processedAny = false
         var consecutiveZeroCount = 0
 
-        while !Task.isCancelled, ContinuousClock.now < deadline {
+        while !Task.isCancelled, now() < deadline {
             if await isStopRequested() {
                 logger.info("runPendingBackfill: coordinator stop requested, exiting loop")
                 return
