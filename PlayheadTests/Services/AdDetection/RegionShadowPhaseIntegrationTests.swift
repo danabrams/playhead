@@ -471,4 +471,178 @@ struct RegionShadowPhaseIntegrationTests {
         #expect(bundles.allSatisfy { $0.region.analysisAssetId == assetId })
         #expect(bundles.contains { $0.region.origins.contains(.lexical) })
     }
+
+    @Test("RegionShadowPhase.run consults podcastProfile for per-show sponsor rescoring")
+    func regionShadowPhasePodcastProfilePlumbing() throws {
+        // playhead-8n1: pins the end-to-end property that
+        // `RegionShadowPhase.Input.podcastProfile` reaches the
+        // `LexicalScanner` that `RegionFeatureExtractor` constructs to
+        // rescore each region. Prior to 8n1, `AdDetectionService`
+        // hard-coded `podcastProfile: nil` here, silently dropping
+        // per-show sponsor patterns from every shadow bundle.
+        //
+        // The load-bearing assertion is the DIFF between a run with a
+        // profile that contains a custom sponsor name and a run with
+        // `podcastProfile: nil`. The sponsor name ("Frobozzcola") is
+        // synthetic specifically so it is impossible for any built-in
+        // `LexicalScanner` pattern group to match it — the only way
+        // `lexicalHitCount` can grow is if the profile-driven sponsor
+        // lexicon is actually being compiled and scanned against the
+        // region text.
+        let assetId = "asset-profile-diff"
+
+        // Two chunks: a neutral intro and a sponsor read whose host
+        // built-in patterns ("brought to you by", "dot com slash",
+        // "use code") guarantee the upstream `LexicalScanner` emits
+        // a lexical candidate so `RegionProposalBuilder` has a region
+        // to rescore. Inside that region text, the custom sponsor
+        // "Frobozzcola" appears twice, so the profile-driven scanner
+        // should contribute two extra sponsor hits on top of whatever
+        // the built-in patterns produce.
+        let chunks: [TranscriptChunk] = [
+            TranscriptChunk(
+                id: "c0",
+                analysisAssetId: assetId,
+                segmentFingerprint: "fp-0",
+                chunkIndex: 0,
+                startTime: 0,
+                endTime: 30,
+                text: "Welcome back listeners, today we talk cooperative games.",
+                normalizedText: "welcome back listeners today we talk cooperative games",
+                pass: "final",
+                modelVersion: "v",
+                transcriptVersion: nil,
+                atomOrdinal: nil
+            ),
+            TranscriptChunk(
+                id: "c1",
+                analysisAssetId: assetId,
+                segmentFingerprint: "fp-1",
+                chunkIndex: 1,
+                startTime: 30,
+                endTime: 60,
+                text: "This episode is brought to you by Frobozzcola. Visit frobozzcola dot com slash show and use code SHOW for 20 percent off.",
+                normalizedText: "this episode is brought to you by frobozzcola visit frobozzcola dot com slash show and use code show for 20 percent off",
+                pass: "final",
+                modelVersion: "v",
+                transcriptVersion: nil,
+                atomOrdinal: nil
+            )
+        ]
+
+        // Upstream lexical scan is profile-free here on purpose: we
+        // want both pipeline invocations below to start from the
+        // same `lexicalCandidates` input so the ONLY degree of
+        // freedom between them is `Input.podcastProfile`.
+        let upstreamScanner = LexicalScanner(podcastProfile: nil)
+        let lexical = upstreamScanner.scan(chunks: chunks, analysisAssetId: assetId)
+        #expect(!lexical.isEmpty, "built-in patterns should produce an upstream lexical candidate for the ad chunk")
+
+        var featureWindows: [FeatureWindow] = []
+        var t: Double = 0
+        while t < 60 {
+            featureWindows.append(
+                FeatureWindow(
+                    analysisAssetId: assetId,
+                    startTime: t,
+                    endTime: t + 2.0,
+                    rms: 0.5,
+                    spectralFlux: 0.1,
+                    musicProbability: 0.0,
+                    pauseProbability: 0.0,
+                    speakerClusterId: 1,
+                    jingleHash: nil,
+                    featureVersion: 1
+                )
+            )
+            t += 2.0
+        }
+
+        // The profile's sponsorLexicon is a comma-separated list; a
+        // single entry is enough to prove plumbing. "Frobozzcola" is
+        // fabricated so it cannot collide with any built-in pattern.
+        let profile = PodcastProfile(
+            podcastId: "podcast-8n1",
+            sponsorLexicon: "Frobozzcola",
+            normalizedAdSlotPriors: nil,
+            repeatedCTAFragments: nil,
+            jingleFingerprints: nil,
+            implicitFalsePositiveCount: 0,
+            skipTrustScore: 0.5,
+            observationCount: 0,
+            mode: "shadow",
+            recentFalseSkipSignals: 0
+        )
+
+        func makeInput(profile: PodcastProfile?) -> RegionShadowPhase.Input {
+            RegionShadowPhase.Input(
+                analysisAssetId: assetId,
+                chunks: chunks,
+                lexicalCandidates: lexical,
+                featureWindows: featureWindows,
+                episodeDuration: 60,
+                priors: ShowPriors.from(profile: nil),
+                podcastProfile: profile
+            )
+        }
+
+        let bundlesWithoutProfile = RegionShadowPhase.run(makeInput(profile: nil))
+        let bundlesWithProfile = RegionShadowPhase.run(makeInput(profile: profile))
+
+        #expect(!bundlesWithoutProfile.isEmpty, "baseline run (nil profile) should still produce bundles")
+        #expect(
+            bundlesWithProfile.count == bundlesWithoutProfile.count,
+            "profile should not change which regions are proposed, only how they score"
+        )
+
+        // Match bundles pairwise by region identity. Proposals are
+        // deterministic for identical inputs so the ordering is
+        // stable; key by (firstAtomOrdinal, lastAtomOrdinal) anyway
+        // to survive any future sort-order changes.
+        let withoutByKey = Dictionary(
+            uniqueKeysWithValues: bundlesWithoutProfile.map { bundle in
+                ("\(bundle.region.firstAtomOrdinal)-\(bundle.region.lastAtomOrdinal)", bundle)
+            }
+        )
+
+        var sawStrictHitIncrease = false
+        for withBundle in bundlesWithProfile {
+            let key = "\(withBundle.region.firstAtomOrdinal)-\(withBundle.region.lastAtomOrdinal)"
+            guard let withoutBundle = withoutByKey[key] else {
+                Issue.record("profile run produced a region missing from the baseline run (key=\(key))")
+                continue
+            }
+            // The load-bearing assertion: at least one region's
+            // rescored lexical hit count must strictly increase when
+            // the profile is supplied. If ANY bundle satisfies this,
+            // the profile has provably reached the rescoring scanner.
+            if withBundle.lexicalHitCount > withoutBundle.lexicalHitCount {
+                sawStrictHitIncrease = true
+                // The profile-driven hits are category `.sponsor`, so
+                // the category set must also gain `.sponsor` when it
+                // wasn't already present. (Built-in phrases like
+                // "brought to you by" ARE sponsor-category too, so
+                // this is an additional sanity check rather than a
+                // strictly load-bearing one.)
+                #expect(
+                    withBundle.lexicalCategories.contains(.sponsor),
+                    "profile-rescored bundle with extra hits should expose the .sponsor category"
+                )
+                // The lexical score is a monotonically-increasing
+                // function of hit count in `buildCandidate`, so a
+                // strict hit increase must also imply a strict score
+                // increase (or at worst, equality via clamping). Use
+                // >= so any future confidence ceiling doesn't flake
+                // the test.
+                #expect(
+                    withBundle.lexicalScore >= withoutBundle.lexicalScore,
+                    "profile-rescored bundle should not lose lexical score"
+                )
+            }
+        }
+        #expect(
+            sawStrictHitIncrease,
+            "at least one region bundle must show a strictly higher lexicalHitCount when a profile with a custom sponsor is supplied — otherwise the profile is not reaching the rescoring LexicalScanner"
+        )
+    }
 }

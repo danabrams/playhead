@@ -182,6 +182,12 @@ actor AdDetectionService {
     private var scanner: LexicalScanner
     /// Per-show priors parsed from the current PodcastProfile.
     private var showPriors: ShowPriors
+    /// playhead-8n1: cache the current PodcastProfile so the Phase 4
+    /// shadow phase can thread it into `RegionFeatureExtractor`, which
+    /// in turn constructs a `LexicalScanner` with per-show sponsor
+    /// patterns. Kept in sync with `scanner`/`showPriors` in init,
+    /// `updateProfile`, and `updatePriorsFromObservation`.
+    private var currentPodcastProfile: PodcastProfile?
     /// Episode duration for position-based scoring.
     private var episodeDuration: Double = 0
 
@@ -204,6 +210,7 @@ actor AdDetectionService {
         self.config = config
         self.scanner = LexicalScanner(podcastProfile: podcastProfile)
         self.showPriors = ShowPriors.from(profile: podcastProfile)
+        self.currentPodcastProfile = podcastProfile
         self.backfillJobRunnerFactory = backfillJobRunnerFactory
         self.canUseFoundationModelsProvider = canUseFoundationModelsProvider
         self.shadowSkipMarker = shadowSkipMarker
@@ -229,6 +236,7 @@ actor AdDetectionService {
     func updateProfile(_ profile: PodcastProfile?) {
         scanner = LexicalScanner(podcastProfile: profile)
         showPriors = ShowPriors.from(profile: profile)
+        currentPodcastProfile = profile
     }
 
     // MARK: - Hot Path
@@ -514,7 +522,13 @@ actor AdDetectionService {
             featureWindows: featureWindows,
             episodeDuration: episodeDuration,
             priors: showPriors,
-            podcastProfile: nil,
+            // playhead-8n1: thread the cached PodcastProfile so the
+            // Phase 4 shadow phase's `RegionFeatureExtractor` can
+            // construct a `LexicalScanner` that actually consults
+            // the per-show sponsor lexicon. Prior to this change we
+            // hard-coded `nil`, silently skipping show-specific
+            // sponsor patterns in every shadow bundle.
+            podcastProfile: currentPodcastProfile,
             fmWindows: fmWindows
         )
         let bundles = RegionShadowPhase.run(input)
@@ -1091,6 +1105,7 @@ actor AdDetectionService {
         // Refresh the in-memory priors for subsequent use.
         showPriors = ShowPriors.from(profile: updatedProfile)
         scanner = LexicalScanner(podcastProfile: updatedProfile)
+        currentPodcastProfile = updatedProfile
 
         logger.info("Updated priors for podcast \(podcastId): observations=\(observationCount) trust=\(trustScore, format: .fixed(precision: 2))")
     }
