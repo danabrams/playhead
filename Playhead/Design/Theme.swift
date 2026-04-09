@@ -32,8 +32,6 @@ enum Spacing {
 // MARK: - Corner Radii
 
 /// Corner radius tokens. Restrained, never bubbly: small=4, medium=8, large=12.
-/// The `sm/md/lg` aliases exist for backward-compatibility with call sites
-/// predating the semantic names.
 enum CornerRadius {
     /// 4pt — buttons, small chips
     static let small: CGFloat = 4
@@ -43,12 +41,18 @@ enum CornerRadius {
     static let large: CGFloat = 12
 
     // MARK: Legacy aliases
-    // Retained so existing call sites compile during the migration to the
-    // bead-spec semantic names. Marked deprecated would produce ~37 build
-    // warnings on every developer build, so they are kept undeprecated and
-    // tracked as follow-up tech debt instead.
+    //
+    // Every app call site has been migrated to `small`/`medium`/`large`.
+    // Only the parallel follow-up branch (SpeedSelectorView, TimelineRailView)
+    // still touches these names; once it lands these declarations can be
+    // deleted outright. Until then they are marked deprecated so any
+    // reintroduction is surfaced by `LegacyAliasUsageTests` and any stray
+    // call site sees a clear rename hint.
+    @available(*, deprecated, renamed: "small")
     static let sm: CGFloat = small
+    @available(*, deprecated, renamed: "medium")
     static let md: CGFloat = medium
+    @available(*, deprecated, renamed: "large")
     static let lg: CGFloat = large
 }
 
@@ -216,7 +220,7 @@ enum CardProportion {
 /// so unwired placeholders are impossible to miss during development.
 ///
 /// Usage:
-///     RoundedRectangle(cornerRadius: CornerRadius.md)
+///     RoundedRectangle(cornerRadius: CornerRadius.medium)
 ///         .fill(AppColors.surface)
 ///         .debugPlaceholder("Artwork")
 extension View {
@@ -257,9 +261,9 @@ extension View {
                 .font(AppTypography.title)
 
             HStack(spacing: Spacing.md) {
-                radiusBox("sm", CornerRadius.sm)
-                radiusBox("md", CornerRadius.md)
-                radiusBox("lg", CornerRadius.lg)
+                radiusBox("small", CornerRadius.small)
+                radiusBox("medium", CornerRadius.medium)
+                radiusBox("large", CornerRadius.large)
             }
 
             Text("Shadows")
@@ -315,7 +319,7 @@ private func radiusBox(_ label: String, _ radius: CGFloat) -> some View {
 @MainActor @ViewBuilder
 private func shadowBox(_ label: String, _ style: AppShadow.ShadowStyle) -> some View {
     VStack(spacing: 4) {
-        RoundedRectangle(cornerRadius: CornerRadius.md)
+        RoundedRectangle(cornerRadius: CornerRadius.medium)
             .fill(AppColors.surface)
             .frame(width: 80, height: 48)
             .themeShadow(style)
@@ -328,7 +332,7 @@ private func shadowBox(_ label: String, _ style: AppShadow.ShadowStyle) -> some 
 @MainActor @ViewBuilder
 private func proportionBox(_ label: String, _ ratio: CGFloat) -> some View {
     VStack(alignment: .leading, spacing: 4) {
-        RoundedRectangle(cornerRadius: CornerRadius.md)
+        RoundedRectangle(cornerRadius: CornerRadius.medium)
             .fill(AppColors.surface)
             .frame(height: 40)
             .frame(maxWidth: .infinity)
