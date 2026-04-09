@@ -48,8 +48,8 @@ struct MigrationLadderTests {
         #expect(try probeTableExists(in: dir, table: "podcast_planner_state"))
 
         // Rev3-M5 phase columns present.
-        #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "phase"))
-        #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "phase"))
+        #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "runMode"))
+        #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "runMode"))
     }
 
     // MARK: - H11: seeded v1 → v4 ladder runs all V*IfNeeded blocks
@@ -71,10 +71,10 @@ struct MigrationLadderTests {
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
         // Cycle 4 H2: the `evidence_events` phase column must survive the
         // v2/v3 rebuild via the belt-and-suspenders
-        // `addColumnIfNeeded(...column: "phase"...)` at the tail of
+        // `addColumnIfNeeded(...column: "runMode"...)` at the tail of
         // migrate().
-        #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "phase"))
-        #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "phase"))
+        #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "runMode"))
+        #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "runMode"))
         #expect(try probeTableExists(in: dir, table: "podcast_planner_state"))
 
         // Migration is committed and the store is usable.
@@ -113,8 +113,8 @@ struct MigrationLadderTests {
         #expect(try probeIndexExists(in: dir, indexName: "idx_sessions_shadow_retry"))
         // Cycle 4 H2 / M4: phase columns must survive the v2/v3 rebuild
         // of evidence_events.
-        #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "phase"))
-        #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "phase"))
+        #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "runMode"))
+        #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "runMode"))
         // H10 camelCase rename — the snake_case column must NOT linger.
         #expect(!(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needs_shadow_retry")))
     }
@@ -136,8 +136,8 @@ struct MigrationLadderTests {
         #expect(try probeIndexExists(in: dir, indexName: "idx_sessions_shadow_retry"))
         #expect(try probeTableExists(in: dir, table: "podcast_planner_state"))
         // Cycle 4 H2: phase columns must survive the v3 rebuild.
-        #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "phase"))
-        #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "phase"))
+        #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "runMode"))
+        #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "runMode"))
     }
 
     // MARK: - Cycle 4 H1: isolated migration ladder (bypasses createTables)
@@ -175,7 +175,7 @@ struct MigrationLadderTests {
         #expect(try probeIndexExists(in: dir, indexName: "idx_sessions_shadow_retry"))
         // The tail-of-migrate() addColumnIfNeeded for `phase` is mirrored
         // in migrateOnlyForTesting, so the phase column must land.
-        #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "phase"))
+        #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "runMode"))
         // NOTE: `podcast_planner_state` is NOT asserted here. Both V4
         // migration blocks guard on `schemaVersion < 4`, and
         // `migrateAnalysisSessionsShadowRetryV4IfNeeded` runs first and
@@ -206,7 +206,7 @@ struct MigrationLadderTests {
         #expect(try await store.schemaVersion() == 4)
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
-        #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "phase"))
+        #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "runMode"))
     }
 
     @Test("Cycle 4 H1: v3-seeded DB climbs to v4 via isolated ladder")
@@ -412,7 +412,7 @@ struct MigrationLadderTests {
             scanCohortJSON: cohort,
             transcriptVersion: "tv-1",
             reuseScope: "scope-shadow",
-            phase: .shadow
+            runMode: .shadow
         )
         let targeted = SemanticScanResult(
             id: "scan-targeted",
@@ -435,20 +435,20 @@ struct MigrationLadderTests {
             scanCohortJSON: cohort,
             transcriptVersion: "tv-1",
             reuseScope: "scope-targeted",
-            phase: .targeted
+            runMode: .targeted
         )
         try await store.insertSemanticScanResult(shadow)
         try await store.insertSemanticScanResult(targeted)
 
         let all = try await store.fetchSemanticScanResults(analysisAssetId: "asset-phase")
         #expect(all.count == 2)
-        let phases = Set(all.map(\.phase))
-        #expect(phases == [.shadow, .targeted])
+        let runModes = Set(all.map(\.runMode))
+        #expect(runModes == [.shadow, .targeted])
 
-        // Pinpoint round-trip: each row reads back with its written phase.
+        // Pinpoint round-trip: each row reads back with its written runMode.
         let byId = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
-        #expect(byId["scan-shadow"]?.phase == .shadow)
-        #expect(byId["scan-targeted"]?.phase == .targeted)
+        #expect(byId["scan-shadow"]?.runMode == .shadow)
+        #expect(byId["scan-targeted"]?.runMode == .targeted)
     }
 
     @Test("Rev3-M5: evidence_events phase column round-trips")
@@ -483,7 +483,7 @@ struct MigrationLadderTests {
             evidenceJSON: #"{"shadow":true}"#,
             scanCohortJSON: cohort,
             createdAt: 1,
-            phase: .shadow
+            runMode: .shadow
         )
         let targetedEvent = EvidenceEvent(
             id: "ev-targeted",
@@ -494,14 +494,14 @@ struct MigrationLadderTests {
             evidenceJSON: #"{"targeted":true}"#,
             scanCohortJSON: cohort,
             createdAt: 2,
-            phase: .targeted
+            runMode: .targeted
         )
         _ = try await store.insertEvidenceEvent(shadowEvent, transcriptVersion: "tv-1")
         _ = try await store.insertEvidenceEvent(targetedEvent, transcriptVersion: "tv-1")
 
         let fetched = try await store.fetchEvidenceEvents(analysisAssetId: "asset-ev-phase")
         #expect(fetched.count == 2)
-        let phases = Set(fetched.map(\.phase))
-        #expect(phases == [.shadow, .targeted])
+        let runModes = Set(fetched.map(\.runMode))
+        #expect(runModes == [.shadow, .targeted])
     }
 }

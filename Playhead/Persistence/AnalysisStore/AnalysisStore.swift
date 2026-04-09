@@ -425,7 +425,7 @@ actor AnalysisStore {
             // reached its final v3 shape.
             try addColumnIfNeeded(
                 table: "evidence_events",
-                column: "phase",
+                column: "runMode",
                 definition: "TEXT NOT NULL DEFAULT 'shadow'"
             )
             try addColumnIfNeeded(
@@ -483,11 +483,17 @@ actor AnalysisStore {
         try migrateEvidenceEventsTranscriptVersionV3IfNeeded()
         try migrateAnalysisSessionsShadowRetryV4IfNeeded()
         try migratePodcastPlannerStateV4IfNeeded()
-        // Mirror the belt-and-suspenders phase column re-add that
-        // `migrate()` performs after the v2/v3 evidence_events rebuild.
+        // Mirror the belt-and-suspenders phase/jobPhase column re-adds
+        // that `migrate()` performs after the v2/v3 evidence_events
+        // rebuild (cycle-8 reconciliation: both columns coexist).
         try addColumnIfNeeded(
             table: "evidence_events",
-            column: "phase",
+            column: "runMode",
+            definition: "TEXT NOT NULL DEFAULT 'shadow'"
+        )
+        try addColumnIfNeeded(
+            table: "evidence_events",
+            column: "jobPhase",
             definition: "TEXT NOT NULL DEFAULT 'shadow'"
         )
     }
@@ -724,23 +730,13 @@ actor AnalysisStore {
     private func migratePodcastPlannerStateV4IfNeeded() throws {
         // Cycle 4 B4: two new columns were added in place to the v4 schema
         // (`episodesObservedWithoutSampleCount`,
-        // `narrowingAllPhasesEmptyEpisodeCount`). Run the column-add checks
-        // unconditionally — on a fresh DB `createTables()` already put them
-        // there and `addColumnIfNeeded` is a no-op; on a pre-Cycle-4 v4 DB
-        // these ALTERs bring the table up to the new shape. Legacy rows
-        // default-decode to 0 thanks to the `DEFAULT 0` on both columns.
-        try addColumnIfNeeded(
-            table: "podcast_planner_state",
-            column: "episodesObservedWithoutSampleCount",
-            definition: "INTEGER NOT NULL DEFAULT 0"
-        )
-        try addColumnIfNeeded(
-            table: "podcast_planner_state",
-            column: "narrowingAllPhasesEmptyEpisodeCount",
-            definition: "INTEGER NOT NULL DEFAULT 0"
-        )
+        // `narrowingAllPhasesEmptyEpisodeCount`). The `addColumnIfNeeded`
+        // calls MUST run AFTER the `CREATE TABLE IF NOT EXISTS` below —
+        // otherwise `migrateOnlyForTesting` (which skips `createTables()`)
+        // hits an `ALTER TABLE` on a non-existent table when climbing the
+        // ladder from a v1-shape DB. On a fresh DB both blocks are no-ops.
 
-        guard (try schemaVersion() ?? 1) < 4 else { return }
+        let needsV4Upgrade = (try schemaVersion() ?? 1) < 4
 
         try exec("""
             CREATE TABLE IF NOT EXISTS podcast_planner_state (
@@ -757,7 +753,23 @@ actor AnalysisStore {
                 narrowingAllPhasesEmptyEpisodeCount       INTEGER NOT NULL DEFAULT 0
             )
             """)
-        try setSchemaVersion(4)
+
+        // Idempotent column adds for pre-Cycle-4 v4 DBs. On a fresh DB both
+        // are no-ops because the CREATE TABLE above already defined them.
+        try addColumnIfNeeded(
+            table: "podcast_planner_state",
+            column: "episodesObservedWithoutSampleCount",
+            definition: "INTEGER NOT NULL DEFAULT 0"
+        )
+        try addColumnIfNeeded(
+            table: "podcast_planner_state",
+            column: "narrowingAllPhasesEmptyEpisodeCount",
+            definition: "INTEGER NOT NULL DEFAULT 0"
+        )
+
+        if needsV4Upgrade {
+            try setSchemaVersion(4)
+        }
     }
 
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
@@ -1062,21 +1074,21 @@ actor AnalysisStore {
                 scanCohortJSON TEXT NOT NULL,
                 transcriptVersion TEXT NOT NULL,
                 reuseKeyHash TEXT NOT NULL,
-                phase TEXT NOT NULL DEFAULT 'shadow',
+                runMode TEXT NOT NULL DEFAULT 'shadow',
                 jobPhase TEXT NOT NULL DEFAULT 'shadow',
                 UNIQUE(reuseKeyHash)
             )
             """)
         // Cycle 8 reconciliation:
-        //   * `phase` (C4 Rev3-M5) — shadow vs targeted run mode discriminator.
-        //     Will be renamed to `runMode` in a follow-up reconciliation commit.
+        //   * `runMode` (C4 Rev3-M5) — shadow vs targeted run-mode discriminator.
+        //     Renamed from `phase` → `runMode` to disambiguate from B6's jobPhase.
         //   * `jobPhase` (B6 Rev3-M6) — BackfillJobPhase.rawValue, the originating
         //     backfill job phase (harvester/lexical/audit/fullEpisodeScan).
         // Both columns are defensively added here via `addColumnIfNeeded` so
         // pre-existing DBs pick them up without a schema-version bump.
         try addColumnIfNeeded(
             table: "semantic_scan_results",
-            column: "phase",
+            column: "runMode",
             definition: "TEXT NOT NULL DEFAULT 'shadow'"
         )
         try addColumnIfNeeded(
@@ -1085,7 +1097,7 @@ actor AnalysisStore {
             definition: "TEXT NOT NULL DEFAULT 'shadow'"
         )
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_pass ON semantic_scan_results(analysisAssetId, scanPass)")
-        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_phase ON semantic_scan_results(analysisAssetId, phase)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_runMode ON semantic_scan_results(analysisAssetId, runMode)")
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_jobPhase ON semantic_scan_results(analysisAssetId, jobPhase)")
         // M1/L3: dropped `idx_semantic_scan_results_reuse` and
         // `idx_semantic_scan_results_reuse_cohort` — neither is used by the
@@ -1127,7 +1139,7 @@ actor AnalysisStore {
                 scanCohortJSON TEXT NOT NULL,
                 transcriptVersion TEXT NOT NULL DEFAULT '',
                 createdAt REAL NOT NULL,
-                phase TEXT NOT NULL DEFAULT 'shadow',
+                runMode TEXT NOT NULL DEFAULT 'shadow',
                 jobPhase TEXT NOT NULL DEFAULT 'shadow',
                 UNIQUE(
                     analysisAssetId, eventType, sourceType, atomOrdinals,
@@ -1135,12 +1147,12 @@ actor AnalysisStore {
                 )
             )
             """)
-        // Cycle 8 reconciliation: defensively add both `phase` (C4) and
+        // Cycle 8 reconciliation: defensively add both `runMode` (C4) and
         // `jobPhase` (B6) after the V2/V3 rebuilds that would have stripped
         // them. See semantic_scan_results above for the naming rationale.
         try addColumnIfNeeded(
             table: "evidence_events",
-            column: "phase",
+            column: "runMode",
             definition: "TEXT NOT NULL DEFAULT 'shadow'"
         )
         try addColumnIfNeeded(
@@ -3004,7 +3016,7 @@ actor AnalysisStore {
     /// 0  id                         9  spansJSON           17 scanCohortJSON
     /// 1  analysisAssetId           10 status               18 transcriptVersion
     /// 2  windowFirstAtomOrdinal    11 attemptCount         19 reuseKeyHash
-    /// 3  windowLastAtomOrdinal     12 errorContext         20 phase   (Rev3-M5)
+    /// 3  windowLastAtomOrdinal     12 errorContext         20 runMode (Rev3-M5)
     /// 4  windowStartTime           13 inputTokenCount      21 jobPhase (Rev3-M6)
     /// 5  windowEndTime             14 outputTokenCount
     /// 6  scanPass                  15 latencyMs
@@ -3015,7 +3027,7 @@ actor AnalysisStore {
         windowStartTime, windowEndTime, scanPass, transcriptQuality,
         disposition, spansJSON, status, attemptCount, errorContext,
         inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
-        scanCohortJSON, transcriptVersion, reuseKeyHash, phase, jobPhase
+        scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase
         """
 
     /// H-1: canonicalize a `scanCohortJSON` before hashing so two
@@ -3137,7 +3149,7 @@ actor AnalysisStore {
              windowStartTime, windowEndTime, scanPass, transcriptQuality,
              disposition, spansJSON, status, attemptCount, errorContext,
              inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
-             scanCohortJSON, transcriptVersion, reuseKeyHash, phase, jobPhase)
+             scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
@@ -3162,7 +3174,7 @@ actor AnalysisStore {
         bind(stmt, 18, result.scanCohortJSON)
         bind(stmt, 19, result.transcriptVersion)
         bind(stmt, 20, reuseKeyHash)
-        bind(stmt, 21, result.phase.rawValue)
+        bind(stmt, 21, result.runMode.rawValue)
         bind(stmt, 22, result.jobPhase)
         try step(stmt, expecting: SQLITE_DONE)
     }
@@ -3317,11 +3329,11 @@ actor AnalysisStore {
     /// Canonical column order for `evidence_events` readers:
     /// 0 id, 1 analysisAssetId, 2 eventType, 3 sourceType,
     /// 4 atomOrdinals, 5 evidenceJSON, 6 scanCohortJSON, 7 createdAt,
-    /// 8 phase (Rev3-M5, shadow/targeted), 9 jobPhase (Rev3-M6,
+    /// 8 runMode (Rev3-M5, shadow/targeted), 9 jobPhase (Rev3-M6,
     /// BackfillJobPhase.rawValue).
     private static let evidenceEventColumns = """
         id, analysisAssetId, eventType, sourceType,
-        atomOrdinals, evidenceJSON, scanCohortJSON, createdAt, phase, jobPhase
+        atomOrdinals, evidenceJSON, scanCohortJSON, createdAt, runMode, jobPhase
         """
 
     @discardableResult
@@ -3339,7 +3351,7 @@ actor AnalysisStore {
         let sql = """
             INSERT OR IGNORE INTO evidence_events
             (id, analysisAssetId, eventType, sourceType, atomOrdinals,
-             evidenceJSON, scanCohortJSON, transcriptVersion, createdAt, phase, jobPhase)
+             evidenceJSON, scanCohortJSON, transcriptVersion, createdAt, runMode, jobPhase)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
@@ -3353,7 +3365,7 @@ actor AnalysisStore {
         bind(stmt, 7, event.scanCohortJSON)
         bind(stmt, 8, transcriptVersion)
         bind(stmt, 9, event.createdAt)
-        bind(stmt, 10, event.phase.rawValue)
+        bind(stmt, 10, event.runMode.rawValue)
         bind(stmt, 11, event.jobPhase)
         try step(stmt, expecting: SQLITE_DONE)
         if sqlite3_changes(db) > 0 {
@@ -3522,10 +3534,10 @@ actor AnalysisStore {
             throw AnalysisStoreError.queryFailed("Unknown semantic scan status '\(statusRaw)'")
         }
 
-        // Rev3-M5: column 20 is `phase`. Default to `.shadow` for any
+        // Rev3-M5: column 20 is `runMode`. Default to `.shadow` for any
         // legacy row that escaped the migration's NOT NULL DEFAULT.
-        let phaseRaw = optionalText(stmt, 20) ?? SemanticScanPhase.shadow.rawValue
-        let phase = SemanticScanPhase(rawValue: phaseRaw) ?? .shadow
+        let runModeRaw = optionalText(stmt, 20) ?? SemanticScanPhase.shadow.rawValue
+        let runMode = SemanticScanPhase(rawValue: runModeRaw) ?? .shadow
 
         return SemanticScanResult(
             id: try requireText(stmt, 0),
@@ -3548,7 +3560,7 @@ actor AnalysisStore {
             scanCohortJSON: try requireText(stmt, 17),
             transcriptVersion: try requireText(stmt, 18),
             // column 19 = reuseKeyHash (not persisted back onto the struct)
-            phase: phase,
+            runMode: runMode,
             jobPhase: optionalText(stmt, 21) ?? "shadow"
         )
     }
@@ -3559,10 +3571,10 @@ actor AnalysisStore {
             throw AnalysisStoreError.queryFailed("Unknown evidence source type '\(sourceTypeRaw)'")
         }
 
-        // Rev3-M5: column 8 is `phase`. Default to `.shadow` for any
+        // Rev3-M5: column 8 is `runMode`. Default to `.shadow` for any
         // legacy row that escaped the migration's NOT NULL DEFAULT.
-        let phaseRaw = optionalText(stmt, 8) ?? SemanticScanPhase.shadow.rawValue
-        let phase = SemanticScanPhase(rawValue: phaseRaw) ?? .shadow
+        let runModeRaw = optionalText(stmt, 8) ?? SemanticScanPhase.shadow.rawValue
+        let runMode = SemanticScanPhase(rawValue: runModeRaw) ?? .shadow
 
         return EvidenceEvent(
             id: try requireText(stmt, 0),
@@ -3573,7 +3585,7 @@ actor AnalysisStore {
             evidenceJSON: try requireText(stmt, 5),
             scanCohortJSON: try requireText(stmt, 6),
             createdAt: sqlite3_column_double(stmt, 7),
-            phase: phase,
+            runMode: runMode,
             jobPhase: optionalText(stmt, 9) ?? "shadow"
         )
     }
