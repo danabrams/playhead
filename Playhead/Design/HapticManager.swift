@@ -110,9 +110,8 @@ extension EnvironmentValues {
     }
 }
 
-// NOTE: follow-up tech debt — migrate the remaining direct call sites off
-// `HapticManager.light()/medium()` onto `@Environment(\.hapticPlayer)`:
-//   - Playhead/Views/NowPlaying/SpeedSelectorView.swift (line ~18, ~40)
-//   - Playhead/Views/NowPlaying/TimelineRailView.swift (line ~78)
-// These are left as-is for now to keep the current change small; the
-// `NowPlayingBar` play/pause button is the first real consumer of the seam.
+// NOTE: all NowPlaying views now route haptics through the injected
+// `HapticPlaying` seam (`NowPlayingBar`, `SpeedSelectorView`,
+// `TimelineRailView`). The only remaining references to
+// `HapticManager.light()/medium()/soft()/notification()` should be the
+// definitions above and `SystemHapticPlayer.play(_:)`.
