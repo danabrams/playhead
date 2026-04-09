@@ -3,6 +3,7 @@
 // overhead of creating a new generator on every tap. Each method calls
 // prepare() before firing to ensure the Taptic Engine is warm.
 
+import SwiftUI
 import UIKit
 
 // MARK: - HapticManager
@@ -66,15 +67,18 @@ enum HapticEvent: Equatable {
 // MARK: - HapticPlaying Protocol
 
 /// Seam that lets tests substitute a recording fake for the real hardware.
-@MainActor
-protocol HapticPlaying {
-    func play(_ event: HapticEvent)
+///
+/// The protocol itself is `Sendable` and not actor-isolated so values can
+/// live in nonisolated contexts (e.g. SwiftUI `EnvironmentKey.defaultValue`,
+/// which is required to be nonisolated). The single requirement is
+/// `@MainActor` because real haptics must fire on the main thread.
+protocol HapticPlaying: Sendable {
+    @MainActor func play(_ event: HapticEvent)
 }
 
 /// Production implementation that routes through `HapticManager`.
-@MainActor
 struct SystemHapticPlayer: HapticPlaying {
-    func play(_ event: HapticEvent) {
+    @MainActor func play(_ event: HapticEvent) {
         switch event.mapping {
         case .impact(.medium):
             HapticManager.medium()
@@ -89,3 +93,26 @@ struct SystemHapticPlayer: HapticPlaying {
         }
     }
 }
+
+// MARK: - Environment Injection
+
+private struct HapticPlayerKey: EnvironmentKey {
+    static let defaultValue: any HapticPlaying = SystemHapticPlayer()
+}
+
+extension EnvironmentValues {
+    /// The haptic player used by views that opt into the injected seam.
+    /// Defaults to `SystemHapticPlayer`. Tests can override with a recording
+    /// fake via `.environment(\.hapticPlayer, RecordingHapticPlayer())`.
+    var hapticPlayer: any HapticPlaying {
+        get { self[HapticPlayerKey.self] }
+        set { self[HapticPlayerKey.self] = newValue }
+    }
+}
+
+// NOTE: follow-up tech debt — migrate the remaining direct call sites off
+// `HapticManager.light()/medium()` onto `@Environment(\.hapticPlayer)`:
+//   - Playhead/Views/NowPlaying/SpeedSelectorView.swift (line ~18, ~40)
+//   - Playhead/Views/NowPlaying/TimelineRailView.swift (line ~78)
+// These are left as-is for now to keep the current change small; the
+// `NowPlayingBar` play/pause button is the first real consumer of the seam.

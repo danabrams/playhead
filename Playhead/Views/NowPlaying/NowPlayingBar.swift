@@ -20,11 +20,28 @@ struct NowPlayingBar: View {
     /// Called when the user taps the bar to expand to full Now Playing.
     var onTap: () -> Void = {}
 
+    /// Injected haptic player — defaults to `SystemHapticPlayer` in production,
+    /// tests swap in a `RecordingHapticPlayer` to assert the expected event.
+    /// An `@Environment` key with the same default is also provided by the
+    /// Design module (see `HapticManager.swift`) so call sites can override
+    /// via `.environment(\.hapticPlayer, ...)` if preferred; the init-param
+    /// form here is the canonical test seam because SwiftUI `@Environment`
+    /// values only resolve inside a live view hierarchy.
+    var hapticPlayer: any HapticPlaying = SystemHapticPlayer()
+
     /// Height of the mini-player bar content (excluding the progress line).
     private static let barHeight: CGFloat = 56
 
     /// Height of the copper progress line at the top of the bar.
     private static let progressLineHeight: CGFloat = 2
+
+    /// Play/pause tap handler. Factored out so unit tests can drive it
+    /// directly with an injected `HapticPlaying` and assert the recorded
+    /// event without rendering a real SwiftUI hierarchy.
+    func handlePlayPauseTap() {
+        hapticPlayer.play(.control)
+        viewModel.togglePlayPause()
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -101,8 +118,7 @@ struct NowPlayingBar: View {
 
                 // Play / Pause button
                 Button {
-                    HapticManager.light()
-                    viewModel.togglePlayPause()
+                    handlePlayPauseTap()
                 } label: {
                     Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 20, weight: .medium))
