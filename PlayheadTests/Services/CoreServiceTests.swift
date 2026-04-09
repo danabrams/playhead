@@ -116,14 +116,20 @@ private func condensedSourceSnippet(_ source: String) -> String {
 }
 
 private func eventually(
-    iterations: Int = 100,
+    iterations: Int = 200,
+    pollInterval: Duration = .milliseconds(10),
     condition: @escaping @MainActor () -> Bool
 ) async -> Bool {
+    // Uses a real sleep rather than a bare Task.yield() loop because the
+    // full test suite runs hundreds of tests in parallel; a pure-yield spin
+    // can be starved on the cooperative thread pool long enough that the
+    // observed actor event never gets delivered before iterations run out.
+    // A small wall-clock sleep yields the executor *and* waits deterministically.
     for _ in 0..<iterations {
         if await MainActor.run(body: condition) {
             return true
         }
-        await Task.yield()
+        try? await Task.sleep(for: pollInterval)
     }
     return await MainActor.run(body: condition)
 }
