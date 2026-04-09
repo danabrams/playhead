@@ -161,14 +161,24 @@ struct RuntimeShutdownLifecycleTests {
         #expect(!runningAfterWake, "wake() after a racing shutdown must not revive the loop")
 
         // Bound the startup-task race: the runtime's migrate task may
-        // still be running in the background. Give it a brief window
-        // to unwind and re-check that nothing accidentally re-armed
-        // the observer (e.g. via a late `startShadowRetryObserverIfNeeded`
-        // call whose `isShutdown` guard we need to trust). 250ms is
-        // well past the migrate path on a clean in-memory store.
-        try await Task.sleep(nanoseconds: 250_000_000)
-        let runningLate = await observer.testIsLoopRunning()
-        #expect(!runningLate, "observer must stay unarmed after the startup chain fully unwinds")
+        // still be running in the background. Yield repeatedly so any
+        // tail of the startup chain gets a chance to run, then re-check
+        // that nothing accidentally re-armed the observer (e.g. via a
+        // late `startShadowRetryObserverIfNeeded` call whose `isShutdown`
+        // guard we need to trust).
+        //
+        // playhead-p06: the original code used a 250ms wall-clock sleep
+        // to "wait for the migrate path on a clean in-memory store".
+        // Under parallel execution on a loaded cooperative pool that
+        // budget was unreliable. We now assert the invariant *continuously*
+        // across a bounded yield budget: at NO point in the yield window
+        // may the observer report running.
+        for _ in 0..<200 {
+            await Task.yield()
+            let runningLate = await observer.testIsLoopRunning()
+            #expect(!runningLate, "observer must stay unarmed after the startup chain unwinds")
+            if await observer.testHasExitedLoop() { break }
+        }
     }
 
     // MARK: - 3. Deinit fallback.
@@ -260,22 +270,23 @@ struct RuntimeShutdownLifecycleTests {
             // Give the migrate chain time to reach
             // `startShadowRetryObserverIfNeeded` so we're testing
             // deinit-while-loop-running, which is the hard case for
-            // cycle avoidance. Without this yield the test would be
+            // cycle avoidance. Without this wait the test would be
             // trivially easy (no loop task exists yet).
             //
-            // NOTE: This yield/sleep pattern is cooperative-pool sensitive
-            // and depends on serial test execution. Under parallel
-            // execution the yielded-to Tasks can be starved by sibling
-            // suite workloads and the startup chain may never reach
-            // `startShadowRetryObserverIfNeeded` within the 50ms budget,
-            // making the deinit-while-loop-running scenario flake into
-            // the trivial "no loop existed" path. Serial execution is
-            // enforced via `parallelizable: false` in `project.yml`
-            // (commit 17b6c7c). Do not change that setting without also
-            // rewriting this block to poll for observer loop liveness
-            // the way test 1 does via `waitForLoopRunning`.
-            for _ in 0..<10 { await Task.yield() }
-            try? await Task.sleep(nanoseconds: 50_000_000)  // 50ms
+            // playhead-p06: originally this used a fixed 50ms wall-clock
+            // sleep which was cooperative-pool sensitive. It now polls
+            // the observer directly for loop liveness with a bounded
+            // wall-clock budget — the same pattern as `waitForLoopRunning`
+            // in test 1. We DON'T Issue.record on timeout here because
+            // the deinit test is also legal in the "no loop ever started"
+            // path; we just need to give it a fair chance.
+            if let obs = runtime._shadowRetryObserverForTesting() {
+                let loopDeadline = Date().addingTimeInterval(2.0)
+                while Date() < loopDeadline {
+                    if await obs.testIsLoopRunning() { break }
+                    try? await Task.sleep(nanoseconds: 5_000_000)  // 5ms
+                }
+            }
             // Runtime drops here.
         }()
 

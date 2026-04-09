@@ -10,6 +10,23 @@ import Testing
 
 @testable import Playhead
 
+/// playhead-p06: yields the cooperative pool until `condition` returns
+/// true or `iterations` is exhausted. A pure-yield poll (no wall-clock
+/// sleep) so tests don't race real time under parallel execution. The
+/// caller still gets to assert on the condition after return — this
+/// helper never Issues.record on timeout, it just gives the condition
+/// a bounded chance to become true.
+private func yieldUntilStable(
+    iterations: Int = 100,
+    condition: () -> Bool
+) async {
+    if condition() { return }
+    for _ in 0..<iterations {
+        await Task.yield()
+        if condition() { return }
+    }
+}
+
 @Suite("bd-3bz: shadow FM retry")
 struct ShadowRetryTests {
 
@@ -525,8 +542,13 @@ struct ShadowRetryTests {
         // capability flip false→true→false should NOT schedule another
         // drain, and any existing pending drain should be cancelled.
         await capabilities.send(canUseFoundationModels: false)
-        // No new sleep parked by the false transition.
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        // playhead-p06: the false transition cancels the pending sleep
+        // on the observer's actor. Yield until the cancellation has been
+        // processed (the observer's cancel path is synchronous once the
+        // capability event is consumed), then assert invariants.
+        await yieldUntilStable(iterations: 50) {
+            clock.pendingCount() == 0
+        }
         #expect(clock.pendingCount() == 0, "false transition must not park a new sleep")
         #expect(drainer.callCount() == 1, "drain count must not advance on false")
 
@@ -535,7 +557,7 @@ struct ShadowRetryTests {
 
     // MARK: - H1 — observer.stop() exits the loop deterministically
 
-    @Test("H1: observer.stop() exits the loop within 100ms even when capability never yields")
+    @Test("H1: observer.stop() exits the loop within a bounded yield budget even when capability never yields")
     func testH1_stopExitsLoopWithoutCapabilityYield() async throws {
         // Build a capabilities source that yields exactly once (the
         // initial snapshot from `capabilityUpdates()`) and then never
@@ -558,13 +580,32 @@ struct ShadowRetryTests {
         // Park the observer on the capability stream by *not* yielding
         // any further snapshots. The initial snapshot from
         // `capabilityUpdates()` is `false`, so no drain is scheduled.
-        try? await Task.sleep(nanoseconds: 10_000_000)
+        //
+        // playhead-p06: yield until the observer's loop task is
+        // actually running (instead of a fixed 10ms wall-clock sleep
+        // that could be starved under load).
+        for _ in 0..<200 {
+            if await observer.testIsLoopRunning() { break }
+            await Task.yield()
+        }
 
-        // Now stop. Without H1 this hangs.
-        let start = Date()
-        await observer.stop()
-        let elapsed = Date().timeIntervalSince(start)
-        #expect(elapsed < 0.1, "stop() must return within 100ms — was \(elapsed)s")
+        // Now stop. Without H1 this hangs — stop() never returns.
+        // The post-fix contract: stop() returns after at most a bounded
+        // number of cooperative-pool turns once the .shutdown wake is
+        // delivered. We enforce that contract as a bounded iteration
+        // budget instead of a wall-clock deadline: kick stop() off and
+        // poll the sentinel.
+        let stopTask = Task { await observer.stop() }
+        var exitedPromptly = false
+        for _ in 0..<1000 {
+            if await observer.testHasExitedLoop() {
+                exitedPromptly = true
+                break
+            }
+            await Task.yield()
+        }
+        await stopTask.value
+        #expect(exitedPromptly, "stop() must drive the loop out within a bounded yield budget")
         #expect(await observer.testHasExitedLoop(), "loop must have run its `defer { loopDidExit = true }` block")
     }
 
@@ -684,10 +725,18 @@ struct ShadowRetryTests {
         )
         await observer.start()
         // Let the loop process the initial-snapshot capability event.
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        // playhead-p06: yield until the loop is running, instead of a
+        // fixed 20ms wall-clock sleep.
+        for _ in 0..<200 {
+            if await observer.testIsLoopRunning() { break }
+            await Task.yield()
+        }
 
         await observer.wake()
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        // Yield a generous budget so any (erroneous) drain would have
+        // had a chance to fire. Nothing to wait *for* — we're asserting
+        // absence — so we yield then check.
+        for _ in 0..<50 { await Task.yield() }
         #expect(drainer.callCount() == 0, "wake() must not drain when capability is false")
 
         await observer.stop()

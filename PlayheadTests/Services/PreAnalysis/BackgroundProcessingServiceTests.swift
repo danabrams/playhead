@@ -619,36 +619,64 @@ struct RunPendingBackfillPollingLoopTests {
         //
         // The fix adds a `stopRequested` flag on the coordinator and a
         // closure hook in the loop that checks it each iteration.
+        //
+        // playhead-p06: this test used to measure wall-clock elapsed time
+        // against a 500ms budget, which was flaky under parallel/loaded
+        // cooperative pools. It now uses a virtual clock + iteration
+        // counter: the loop must exit within ONE iteration of the stop
+        // being flipped, regardless of wall-clock time.
 
-        // Box used so the closures can race stop-state safely.
-        actor StopBox {
-            var stopped = false
-            func stop() { stopped = true }
-            func value() -> Bool { stopped }
+        // Coordinator state shared between the sleep closure and the
+        // fetch closure. Each virtual "sleep" increments the tick; stop
+        // is set after the 3rd sleep (i.e. 3rd iteration).
+        actor LoopState {
+            var tick: Int = 0
+            var stopRequested: Bool = false
+            var fetchCallsAfterStop: Int = 0
+
+            func advance() {
+                tick += 1
+                if tick >= 3 {
+                    stopRequested = true
+                }
+            }
+            func stopped() -> Bool { stopRequested }
+            func recordFetch() {
+                if stopRequested { fetchCallsAfterStop += 1 }
+            }
+            func fetchesAfterStop() -> Int { fetchCallsAfterStop }
+            func currentTick() -> Int { tick }
         }
-        let box = StopBox()
+        let state = LoopState()
 
-        // Fire the stop shortly after the loop begins.
-        Task {
-            try? await Task.sleep(for: .milliseconds(50))
-            await box.stop()
-        }
-
-        let start = ContinuousClock.now
         await AnalysisCoordinator.runBackfillPollingLoop(
-            deadline: start + .seconds(25 * 60),
+            // Far-future deadline — the loop must exit on stop, not time.
+            deadline: .now + .seconds(60 * 60),
             pollInterval: .milliseconds(20),
-            isStopRequested: { await box.value() },
+            isStopRequested: { await state.stopped() },
             // Pending count stays positive so the loop would never drain
             // on its own — only stopRequested can end it.
-            fetchPendingCount: { 3 },
-            sleep: { try await Task.sleep(for: $0) },
+            fetchPendingCount: {
+                await state.recordFetch()
+                return 3
+            },
+            // Virtual sleep: does not wait wall-clock, just advances the
+            // logical tick counter and yields so other tasks can run.
+            sleep: { _ in
+                await state.advance()
+                await Task.yield()
+            },
             logger: Self.testLogger
         )
-        let elapsed = ContinuousClock.now - start
 
-        #expect(elapsed < .milliseconds(500),
-                "runBackfillPollingLoop must exit within 500ms once stopRequested=true (was \(elapsed))")
+        // After the stop flag flips, the loop's next iteration must
+        // observe it via `isStopRequested` and exit. At most one extra
+        // `fetchPendingCount` call is allowed (the one that races on the
+        // same iteration). Anything more means the stop was not observed
+        // promptly.
+        let leaked = await state.fetchesAfterStop()
+        #expect(leaked <= 1,
+                "runBackfillPollingLoop must exit on the first iteration after stopRequested=true (observed \(leaked) post-stop fetches)")
     }
 
     @Test("Drain requires two consecutive zero polls")
@@ -680,7 +708,10 @@ struct RunPendingBackfillPollingLoopTests {
             pollInterval: .milliseconds(5),
             isStopRequested: { false },
             fetchPendingCount: { await counts.next() },
-            sleep: { try await Task.sleep(for: $0) },
+            // playhead-p06: noop sleep — this test asserts on scripted
+            // pending-count sequences, not on timing. A noop sleep keeps
+            // the test deterministic under parallel execution.
+            sleep: { _ in await Task.yield() },
             logger: Self.testLogger
         )
 
@@ -716,7 +747,8 @@ struct RunPendingBackfillPollingLoopTests {
             pollInterval: .milliseconds(5),
             isStopRequested: { false },
             fetchPendingCount: { await counts.next() },
-            sleep: { try await Task.sleep(for: $0) },
+            // playhead-p06: noop sleep for deterministic timing.
+            sleep: { _ in await Task.yield() },
             logger: Self.testLogger
         )
 
@@ -731,6 +763,13 @@ struct RunPendingBackfillPollingLoopTests {
         // into two consecutive zeros. An adversarial queue that flips
         // between 1 and 0 forever must not hang the loop; it must exit
         // at the deadline.
+        //
+        // playhead-p06: this test used to race a 200ms wall-clock
+        // deadline against a 5ms real sleep — under a loaded cooperative
+        // pool the scheduler could starve the sleep long enough that the
+        // poll count expectation failed. It now uses a virtual clock
+        // injected via `now:` + `sleep:` so deadline arithmetic is
+        // deterministic.
         actor Counter {
             var n = 0
             func nextPending() -> Int {
@@ -742,27 +781,47 @@ struct RunPendingBackfillPollingLoopTests {
         }
         let counter = Counter()
 
-        let start = ContinuousClock.now
-        let deadline = start + .milliseconds(200)
+        // Virtual clock: a lock-guarded mutable instant. Starts at an
+        // arbitrary anchor and advances by the `sleep` duration each
+        // iteration. The deadline is 10 virtual poll intervals away, so
+        // we expect roughly 10 polls before the `while now() < deadline`
+        // guard trips.
+        final class VirtualClock: @unchecked Sendable {
+            private let lock = NSLock()
+            private var instant: ContinuousClock.Instant = .now
+            func current() -> ContinuousClock.Instant {
+                lock.lock(); defer { lock.unlock() }
+                return instant
+            }
+            func advance(by duration: Duration) {
+                lock.lock(); defer { lock.unlock() }
+                instant = instant.advanced(by: duration)
+            }
+        }
+        let vclock = VirtualClock()
+        let start = vclock.current()
+        let pollInterval: Duration = .milliseconds(5)
+        let deadline = start.advanced(by: .milliseconds(50))  // 10 virtual polls
 
         await AnalysisCoordinator.runBackfillPollingLoop(
             deadline: deadline,
-            pollInterval: .milliseconds(5),
+            pollInterval: pollInterval,
             isStopRequested: { false },
             fetchPendingCount: { await counter.nextPending() },
-            // Short sleep so the loop iterates many times within the deadline.
-            sleep: { _ in try await Task.sleep(for: .milliseconds(5)) },
+            // Virtual sleep: advances the injected clock, never waits
+            // wall-clock time.
+            sleep: { duration in vclock.advance(by: duration) },
+            now: { vclock.current() },
             logger: Self.testLogger
         )
-        let elapsed = ContinuousClock.now - start
 
-        // Loop must have exited at (or shortly after) the deadline, not hung.
-        #expect(elapsed < .milliseconds(800),
-                "Loop must respect the deadline even under perpetual alternation (elapsed=\(elapsed))")
-
-        // Verify we actually iterated many times (not exited after the first poll).
+        // With a 50ms virtual deadline and a 5ms virtual poll interval
+        // the loop must have iterated ~10 times and then exited when
+        // `now() < deadline` became false.
         let polls = await counter.count()
         #expect(polls >= 5,
-                "Loop should have polled multiple times before hitting deadline, got \(polls)")
+                "Loop should have polled multiple times before hitting virtual deadline, got \(polls)")
+        #expect(polls <= 20,
+                "Loop must exit at the virtual deadline, not hang — observed \(polls) polls")
     }
 }
