@@ -304,7 +304,7 @@ private func radiusBox(_ label: String, _ radius: CGFloat) -> some View {
             .frame(width: 48, height: 48)
             .overlay(
                 RoundedRectangle(cornerRadius: radius)
-                    .stroke(AppColors.secondary, lineWidth: 1)
+                    .stroke(AppColors.textSecondary, lineWidth: 1)
             )
         Text(label)
             .font(AppTypography.caption)
