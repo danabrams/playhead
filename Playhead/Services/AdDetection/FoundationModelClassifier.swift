@@ -510,9 +510,8 @@ struct FMRefinementWindowOutput: Sendable {
     /// playhead-eu1: true when the @Generable default path refused and
     /// the permissive path was used as a fallback for this window.
     let usedPermissiveFallback: Bool
-    /// playhead-eu1: the refusal context debug description that caused
-    /// the default path to fail and triggered the permissive fallback.
-    /// Nil when `usedPermissiveFallback` is false.
+    /// Model-generated explanation from `Refusal.explanation` at the time the permissive
+    /// fallback was triggered. `nil` if explanation was unavailable or the fallback was not used.
     let permissiveFallbackReason: String?
 
     init(

@@ -69,8 +69,8 @@ struct SemanticScanResult: Sendable, Equatable {
     /// playhead-eu1: true when the @Generable default path refused this
     /// window and the permissive string path was used as a fallback.
     let usedPermissiveFallback: Bool
-    /// playhead-eu1: the refusal context debug description that triggered
-    /// the permissive fallback. Nil when `usedPermissiveFallback` is false.
+    /// Model-generated explanation from `Refusal.explanation` at the time the permissive
+    /// fallback was triggered. `nil` if explanation was unavailable or the fallback was not used.
     let permissiveFallbackReason: String?
 
     init(

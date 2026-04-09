@@ -177,38 +177,57 @@ struct PlayheadRefusalExplanationTests {
 @Suite("playhead-eu1 — auto-retry default-path refusals via permissive path")
 struct PlayheadEu1AutoRetryTests {
 
-    // MARK: - eu1 test 1: refusal triggers permissive retry
+    // MARK: - eu1 test 1: refusal triggers permissive retry (on-device only)
 
+    // NOTE: This path cannot be unit-tested on the simulator.
+    //
+    // The conditional at FoundationModelClassifier.swift line ~1799 fires when
+    // `status == .refusal` and calls `permissive.refine(...)`. To exercise that
+    // branch in a simulator test we need `permissive.refine(...)` to succeed and
+    // return a `.spans([...])` result. However:
+    //
+    //   - `PermissiveAdClassifier` is a concrete actor, not a protocol, so there
+    //     is no injection seam for a hand-rolled mock that returns `.spans`
+    //     without real Foundation Models.
+    //   - The `#if DEBUG` fault-injection hook on `PermissiveAdClassifier` only
+    //     supports throwing a `PermissiveClassificationError` (or arbitrary
+    //     `Error`); there is no hook to return a successful `.spans` value.
+    //   - In non-FoundationModels simulator builds, `PermissiveAdClassifier.refine`
+    //     falls through to its `#else` branch and always returns `.noAd`, so
+    //     `permissiveSpans` is always empty and the `windows.append(...)` branch
+    //     never fires.
+    //
+    // The correct coverage vehicle is an on-device smoke test:
+    //   1. Construct `FoundationModelClassifier` with a live FM runtime.
+    //   2. Feed a window whose transcript text reliably triggers `@Generable`
+    //      refusal (e.g. a Kelly Ripa cross-promo line with pharma vocabulary).
+    //   3. Inject a `PermissiveAdClassifier` with no fault installed.
+    //   4. Call `refinePassB(zoomPlans:segments:evidenceCatalog:
+    //      sensitiveRouter:permissiveClassifier:)`.
+    //   5. Assert `output.windows.first?.usedPermissiveFallback == true` and
+    //      `output.windows.first?.spans.isEmpty == false`.
+    //
+    // See `PlayheadFMSmokeTests` for the on-device harness that already validates
+    // the permissive classifier's response quality.
+    //
+    // eu1 test 2 (`refusalWithoutPermissiveClassifierRemainsFailure`) covers the
+    // nil-classifier branch of the same conditional on the simulator via
+    // `FakeRefusalRuntime`, which IS feasible without real FM.
     @available(iOS 26.0, *)
-    @Test("playhead-eu1: @Generable refusal fires permissive retry and succeeds")
+    @Test(
+        "playhead-eu1: @Generable refusal + permissive retry (on-device only — see comment)",
+        .disabled("Requires live Foundation Models; run on a real device via PlayheadFMSmokeTests")
+    )
     func genreableRefusalTriggersPermissiveRetry() async throws {
-        // A two-window plan. The first window refuses the @Generable path.
-        // We inject a PermissiveAdClassifier that returns "AD L4-L5" for the
-        // first window and the FM runtime returns a valid schema for the second.
-        let permissive = PermissiveAdClassifier()
-        await permissive.installFaultInjectionForTesting(nil)
-        // Override refine to return a known span.
-        // (No fault — permissive will succeed with its default refusal-free path
-        //  but on simulator we use fault-injection to simulate success.)
-        // Actually PermissiveAdClassifier needs real FM on device. Instead we
-        // test the wiring by verifying that when @Generable refuses AND permissive
-        // is nil, the window is recorded as failed; and when permissive is
-        // provided and succeeds (via a mock), it is recorded as a success
-        // with usedPermissiveFallback=true.
+        // This test is intentionally disabled on the simulator. The path it
+        // exercises (refinePassB → status == .refusal → permissive.refine →
+        // windows.append(usedPermissiveFallback: true)) requires both a real
+        // Foundation Models refusal AND a real PermissiveAdClassifier that
+        // can respond with spans. Neither is available without live FM.
         //
-        // For the simulator-safe version we test the wiring via
-        // FMRefinementWindowOutput.usedPermissiveFallback directly.
-        let output = FMRefinementWindowOutput(
-            windowIndex: 0,
-            sourceWindowIndex: 0,
-            lineRefs: [4, 5],
-            spans: [],
-            latencyMillis: 10,
-            usedPermissiveFallback: true,
-            permissiveFallbackReason: "May contain sensitive content"
-        )
-        #expect(output.usedPermissiveFallback == true)
-        #expect(output.permissiveFallbackReason == "May contain sensitive content")
+        // If you are running this on a real device, remove the `.disabled`
+        // trait above and re-enable.
+        Issue.record("on-device only test ran in simulator context")
     }
 
     // MARK: - eu1 test 2: no permissive classifier → refusal stays as failed window
@@ -423,7 +442,7 @@ private final class DiagnosticCaptureBox: @unchecked Sendable {
 
 private actor FakeRefusalRuntime {
     private let planCount: Int
-    private let failureOnWindow: Int
+    nonisolated let failureOnWindow: Int
     private var callIndex = 0
 
     init(planCount: Int, failureOnWindow: Int) {
