@@ -15,24 +15,23 @@ struct PromptRedactorTests {
     // MARK: - Dictionary loader
 
     @Test("loadDefault parses bundled RedactionRules.json")
-    func loadDefaultParsesBundledDictionary() throws {
+    func loadDefaultParsesBundledManifest() throws {
         // PlayheadTests is a hosted unit-test bundle, so Bundle.main is
         // the Playhead app and the JSON resource is reachable via the
         // default loader path.
-        let redactor = PromptRedactor.loadDefault()
-        try #require(redactor != nil)
-        #expect(redactor!.isActive)
+        let redactor = try PromptRedactor.loadDefault()
+        #expect(redactor.isActive)
 
         // Round-trip through the Codable shape so a schema regression
         // surfaces here, not at the first call site.
         let url = try #require(Bundle.main.url(forResource: "RedactionRules", withExtension: "json"))
         let data = try Data(contentsOf: url)
-        let dict = try JSONDecoder().decode(PromptRedactor.Dictionary.self, from: data)
-        #expect(dict.version == 1)
-        #expect(dict.schemaVersion == 1)
-        #expect(dict.categories.count == 5)
+        let manifest = try JSONDecoder().decode(PromptRedactor.Manifest.self, from: data)
+        #expect(manifest.version == 1)
+        #expect(manifest.schemaVersion == 1)
+        #expect(manifest.categories.count == 5)
 
-        let byID = Dictionary(uniqueKeysWithValues: dict.categories.map { ($0.id, $0) })
+        let byID = Dictionary(uniqueKeysWithValues: manifest.categories.map { ($0.id, $0) })
         let vaccine = try #require(byID["vaccine-vocabulary"])
         #expect(vaccine.category == "trigger")
         let disease = try #require(byID["disease-names-cooccurrent"])
@@ -212,13 +211,14 @@ struct PromptRedactorTests {
 
 private func makeFixtureRedactor() -> PromptRedactor {
     // Load the bundled RedactionRules.json from the host app bundle.
-    // All assertions run against the production dictionary, not a test-
+    // All assertions run against the production manifest, not a test-
     // only fixture, so a schema regression surfaces real behavior.
-    guard let redactor = PromptRedactor.loadDefault() else {
-        Issue.record("RedactionRules.json missing from app bundle")
+    do {
+        return try PromptRedactor.loadDefault()
+    } catch {
+        Issue.record("RedactionRules.json failed to load: \(error)")
         return .noop
     }
-    return redactor
 }
 
 private func makeRedactorTestSegment(

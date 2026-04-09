@@ -511,7 +511,7 @@ private func makeBoundarySpanSchema(firstLineRef: Int, lastLineRef: Int) -> Refi
             firstLineRef: firstLineRef,
             lastLineRef: lastLineRef,
             certainty: .strong,
-            boundaryPrecision: .rough,
+            boundaryPrecision: .usable,
             evidenceAnchors: makeAnchorsCovering(firstLineRef: firstLineRef, lastLineRef: lastLineRef),
             alternativeExplanation: .none,
             reasonTags: []

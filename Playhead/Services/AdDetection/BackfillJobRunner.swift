@@ -79,6 +79,75 @@ actor BackfillJobRunner {
     /// `PermissiveAdClassifier` is itself an actor.
     private let permissiveClassifierBox: PermissiveClassifierBox?
 
+    /// Cycle 2 C2: per-reason telemetry counters for permissive
+    /// failures. Incremented inside the runner whenever the persisted
+    /// failed-window status came from a permissive bypass call. Logged
+    /// at run completion via `logPermissiveTelemetry`. Test hook
+    /// `snapshotPermissiveTelemetry` lets unit tests assert without
+    /// scraping OSLog.
+    private var permissiveRefusalCount: Int = 0
+    private var permissiveDecodingFailureCount: Int = 0
+    private var permissiveContextOverflowCount: Int = 0
+
+    /// Cycle 2 Rev2-M5 / Rev3-M1: counter incremented every time the
+    /// runner observes asymmetric routing — coarse routed `.normal` but
+    /// refine routed `.sensitive`, OR coarse routed `.sensitive` but
+    /// refine routed `.normal` — for the same window. Asymmetric
+    /// dispatch is a routing-vocabulary mismatch surface; this counter
+    /// makes it observable from the test suite.
+    private var asymmetricWindowCount: Int = 0
+
+    func snapshotPermissiveTelemetry() -> (
+        refusal: Int,
+        decodingFailure: Int,
+        contextOverflow: Int
+    ) {
+        (permissiveRefusalCount, permissiveDecodingFailureCount, permissiveContextOverflowCount)
+    }
+
+    func snapshotAsymmetricWindowCount() -> Int {
+        asymmetricWindowCount
+    }
+
+    /// Increment a permissive per-reason counter from the dispatch
+    /// catch arms. Called by the per-job runner whenever a window's
+    /// failed-window status came from a permissive bypass.
+    func incrementPermissiveFailure(reason: PermissiveClassificationError.Reason) {
+        switch reason {
+        case .permissiveRefusal:
+            permissiveRefusalCount += 1
+        case .permissiveDecodingFailure:
+            permissiveDecodingFailureCount += 1
+        case .permissiveContextOverflow:
+            permissiveContextOverflowCount += 1
+        }
+    }
+
+    /// Increment the asymmetric-window counter (Rev2-M5 / Rev3-M1).
+    func incrementAsymmetricWindow() {
+        asymmetricWindowCount += 1
+    }
+
+    /// Run-completion telemetry log. Called once per `run` invocation
+    /// from the existing run-result emitter; emits a single structured
+    /// line so on-device test scripts can grep for the per-reason
+    /// counters without having to inspect OSLog message-by-message.
+    private func logPermissiveTelemetry() {
+        guard permissiveRefusalCount > 0
+            || permissiveDecodingFailureCount > 0
+            || permissiveContextOverflowCount > 0
+            || asymmetricWindowCount > 0 else { return }
+        logger.debug(
+            """
+            backfill.runner.permissive_telemetry \
+            refusal=\(self.permissiveRefusalCount, privacy: .public) \
+            decodingFailure=\(self.permissiveDecodingFailureCount, privacy: .public) \
+            contextOverflow=\(self.permissiveContextOverflowCount, privacy: .public) \
+            asymmetric_window=\(self.asymmetricWindowCount, privacy: .public)
+            """
+        )
+    }
+
     /// Sendable wrapper around the gated `PermissiveAdClassifier` actor.
     /// `PermissiveAdClassifier` is `@available(iOS 26.0, *)` so storing
     /// it directly on the runner would force the entire runner to be
@@ -131,6 +200,19 @@ actor BackfillJobRunner {
     /// the scan cohort and transcript version are unchanged. Returns a
     /// `RunResult` describing what was admitted, persisted, or deferred.
     func runPendingBackfill(for inputs: AssetInputs) async throws -> RunResult {
+        // Cycle 4 H-3: reset per-run counters BEFORE plan execution so
+        // a second invocation of `runPendingBackfill` on the same actor
+        // instance does not accumulate permissive/asymmetric telemetry
+        // from earlier runs. Mirror of the expansion-counter reset
+        // Agent B added; when branches merge this block is the
+        // canonical place to reset every run-scoped counter. Agent B4
+        // should fold expansion counters into this same reset block on
+        // merge.
+        permissiveRefusalCount = 0
+        permissiveDecodingFailureCount = 0
+        permissiveContextOverflowCount = 0
+        asymmetricWindowCount = 0
+
         guard mode != .disabled else {
             logger.debug("FM backfill skipped: mode=disabled")
             return .empty
@@ -480,6 +562,11 @@ actor BackfillJobRunner {
             }
         }
 
+        // Cycle 2 C2 / Rev2-M5: emit per-reason permissive failure
+        // tally + asymmetric-window counter as a single structured log
+        // line at run completion. No-op when every counter is zero.
+        logPermissiveTelemetry()
+
         return RunResult(
             admittedJobIds: admitted,
             scanResultIds: scanResultIds,
@@ -527,6 +614,13 @@ actor BackfillJobRunner {
         } else {
             coarse = try await classifier.coarsePassA(segments: inputs.segments)
         }
+
+        // Cycle 2 C2: roll up per-pass permissive failure tally into
+        // the actor-level run counters so `logPermissiveTelemetry` can
+        // surface them at run completion.
+        permissiveRefusalCount += coarse.permissiveFailureCounts.refusal
+        permissiveDecodingFailureCount += coarse.permissiveFailureCounts.decodingFailure
+        permissiveContextOverflowCount += coarse.permissiveFailureCounts.contextOverflow
 
         for window in coarse.windows {
             try Task.checkCancellation()
@@ -607,6 +701,14 @@ actor BackfillJobRunner {
                     zoomPlans: zoomPlans,
                     inputs: inputs
                 )
+                // Cycle 2 C2 + Rev2-M5/Rev3-M1: roll up the refinement
+                // pass's permissive failure tally and asymmetric-routing
+                // counter into the actor-level run telemetry.
+                permissiveRefusalCount += refinement.permissiveFailureCounts.refusal
+                permissiveDecodingFailureCount += refinement.permissiveFailureCounts.decodingFailure
+                permissiveContextOverflowCount += refinement.permissiveFailureCounts.contextOverflow
+                asymmetricWindowCount += refinement.asymmetricWindowCount
+
                 for window in refinement.windows {
                     try Task.checkCancellation()
                     let result = makeRefinementScanResult(
@@ -1205,7 +1307,12 @@ actor BackfillJobRunner {
             ),
             memoryWriteEligible: lhs.memoryWriteEligible && rhs.memoryWriteEligible,
             alternativeExplanation: preferred.alternativeExplanation,
-            reasonTags: Array(Set(lhs.reasonTags).union(rhs.reasonTags))
+            reasonTags: Array(Set(lhs.reasonTags).union(rhs.reasonTags)),
+            // Cycle 2 H4: a unioned span is suppressed iff both inputs
+            // were suppressed. If either side carried real FM-inferred
+            // ownership/intent, the union has at least that signal.
+            ownershipInferenceWasSuppressed: lhs.ownershipInferenceWasSuppressed
+                && rhs.ownershipInferenceWasSuppressed
         )
     }
 
@@ -1228,6 +1335,17 @@ actor BackfillJobRunner {
 
     /// bd-1my M3: dedupe a concatenated anchor list by identity key,
     /// preserving input order and the first-seen copy of each anchor.
+    ///
+    /// Cycle 2 Rev2-M1: certainty is **content**, not identity. Two
+    /// anchors with the same `(evidenceRef, lineRef, kind, source)`
+    /// tuple but different certainty bands collapse to one entry —
+    /// the first-seen one. We deliberately do NOT promote the
+    /// certainty during dedupe: the union pass already runs the FM
+    /// twice on overlapping windows and the second pass's certainty
+    /// is just as authoritative as the first. Treating certainty as
+    /// identity here would explode the anchor set with one entry per
+    /// (key, certainty) pair instead of one entry per grounding,
+    /// which is the unit downstream consumers actually care about.
     private static func dedupAnchors(_ anchors: [ResolvedEvidenceAnchor]) -> [ResolvedEvidenceAnchor] {
         var seen = Set<String>()
         var result: [ResolvedEvidenceAnchor] = []
@@ -1695,12 +1813,20 @@ actor BackfillJobRunner {
                 lastLineRef: span.lastLineRef,
                 jobId: jobId,
                 // R4-Fix4: persist `memoryWriteEligible` so the H-R3-1
-                // in-memory protection has a production consumer. A future
-                // Phase 8 sponsor-memory writer reading
-                // `evidence_events.evidenceJSON` can honor the eligibility
-                // decision without recomputing it.
+                // in-memory protection has a production consumer. A
+                // future Phase 8 sponsor-memory writer reading
+                // `evidence_events.evidenceJSON` can honor the
+                // eligibility decision without recomputing it.
                 memoryWriteEligible: span.memoryWriteEligible,
-                anchors: encodedAnchors
+                anchors: encodedAnchors,
+                // Cycle 2 H4: persist the suppression flag alongside
+                // memoryWriteEligible. Phase 8 sponsor-memory writers
+                // MUST skip spans with `ownershipInferenceWasSuppressed
+                // == true` because the commercialIntent / ownership /
+                // alternativeExplanation fields on these spans are
+                // hardcoded constants from the permissive bypass path,
+                // not real FM-inferred classification signals.
+                ownershipInferenceWasSuppressed: span.ownershipInferenceWasSuppressed
             )
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
@@ -1765,6 +1891,15 @@ actor BackfillJobRunner {
     /// bd-3vm: serialized form of a `RefinedAdSpan` written to
     /// `semantic_scan_results.spansJSON`. The `anchors` field is optional
     /// so legacy rows (which omitted it entirely) decode without throwing.
+    ///
+    /// Cycle 2 H4 / Cycle 4 M-6: `ownershipInferenceWasSuppressed` is a
+    /// non-optional `Bool` that defaults to `false` when a legacy
+    /// spansJSON row omits the key. Set to `true` only on the
+    /// permissive bypass path where the runner hardcodes
+    /// commercialIntent / ownership / alternativeExplanation defaults
+    /// rather than reading them from the FM. Phase 8 sponsor-memory
+    /// writers MUST gate writes on this flag (skip suppressed spans)
+    /// because their classification dimensions are not real signals.
     struct EncodedRefinedSpan: Codable, Equatable {
         let firstLineRef: Int
         let lastLineRef: Int
@@ -1774,6 +1909,53 @@ actor BackfillJobRunner {
         /// bd-3vm: per-anchor identity tuples. Nil on legacy rows; empty
         /// array on post-bd-3vm rows whose span carried no anchors.
         let anchors: [EncodedAnchor]?
+        /// Cycle 2 H4 / Cycle 4 M-6: non-optional so legacy rows that
+        /// omitted the key decode to `false` (the safe default — a
+        /// row written before H4 cannot be a permissive-bypass span).
+        let ownershipInferenceWasSuppressed: Bool
+
+        init(
+            firstLineRef: Int,
+            lastLineRef: Int,
+            commercialIntent: String,
+            ownership: String,
+            certainty: String,
+            anchors: [EncodedAnchor]?,
+            ownershipInferenceWasSuppressed: Bool = false
+        ) {
+            self.firstLineRef = firstLineRef
+            self.lastLineRef = lastLineRef
+            self.commercialIntent = commercialIntent
+            self.ownership = ownership
+            self.certainty = certainty
+            self.anchors = anchors
+            self.ownershipInferenceWasSuppressed = ownershipInferenceWasSuppressed
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case firstLineRef
+            case lastLineRef
+            case commercialIntent
+            case ownership
+            case certainty
+            case anchors
+            case ownershipInferenceWasSuppressed
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.firstLineRef = try container.decode(Int.self, forKey: .firstLineRef)
+            self.lastLineRef = try container.decode(Int.self, forKey: .lastLineRef)
+            self.commercialIntent = try container.decode(String.self, forKey: .commercialIntent)
+            self.ownership = try container.decode(String.self, forKey: .ownership)
+            self.certainty = try container.decode(String.self, forKey: .certainty)
+            self.anchors = try container.decodeIfPresent([EncodedAnchor].self, forKey: .anchors)
+            // Cycle 4 M-6: default to false on legacy rows.
+            self.ownershipInferenceWasSuppressed = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .ownershipInferenceWasSuppressed
+            ) ?? false
+        }
     }
 
     /// bd-3vm: shared encoder. Exposed `internal static` so tests can
@@ -1796,7 +1978,11 @@ actor BackfillJobRunner {
                 commercialIntent: span.commercialIntent.rawValue,
                 ownership: span.ownership.rawValue,
                 certainty: span.certainty.rawValue,
-                anchors: anchors
+                anchors: anchors,
+                // Cycle 2 H4: persist the suppression flag so a future
+                // sponsor-memory writer reading spansJSON or
+                // EvidencePayload can skip permissive-bypass spans.
+                ownershipInferenceWasSuppressed: span.ownershipInferenceWasSuppressed
             )
         }
         let encoder = JSONEncoder()
@@ -1841,6 +2027,13 @@ extension BackfillJobRunner {
         /// evidence anchors. Optional so legacy evidence_events rows
         /// (written before bd-3vm) decode cleanly with `anchors == nil`.
         let anchors: [EncodedAnchor]?
+        /// Cycle 2 H4 / Cycle 4 M-6: non-optional so legacy
+        /// evidence_events rows (written before H4) decode to the safe
+        /// default `false` (a row written before H4 cannot be a
+        /// permissive-bypass span and must not be skipped retroactively
+        /// by sponsor-memory writers). Set to `true` only by spans
+        /// emitted on the permissive bypass path.
+        let ownershipInferenceWasSuppressed: Bool
 
         init(
             commercialIntent: String,
@@ -1851,7 +2044,8 @@ extension BackfillJobRunner {
             lastLineRef: Int,
             jobId: String,
             memoryWriteEligible: Bool,
-            anchors: [EncodedAnchor]?
+            anchors: [EncodedAnchor]?,
+            ownershipInferenceWasSuppressed: Bool = false
         ) {
             self.commercialIntent = commercialIntent
             self.ownership = ownership
@@ -1862,6 +2056,38 @@ extension BackfillJobRunner {
             self.jobId = jobId
             self.memoryWriteEligible = memoryWriteEligible
             self.anchors = anchors
+            self.ownershipInferenceWasSuppressed = ownershipInferenceWasSuppressed
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case commercialIntent
+            case ownership
+            case certainty
+            case boundaryPrecision
+            case firstLineRef
+            case lastLineRef
+            case jobId
+            case memoryWriteEligible
+            case anchors
+            case ownershipInferenceWasSuppressed
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.commercialIntent = try container.decode(String.self, forKey: .commercialIntent)
+            self.ownership = try container.decode(String.self, forKey: .ownership)
+            self.certainty = try container.decode(String.self, forKey: .certainty)
+            self.boundaryPrecision = try container.decode(String.self, forKey: .boundaryPrecision)
+            self.firstLineRef = try container.decode(Int.self, forKey: .firstLineRef)
+            self.lastLineRef = try container.decode(Int.self, forKey: .lastLineRef)
+            self.jobId = try container.decode(String.self, forKey: .jobId)
+            self.memoryWriteEligible = try container.decode(Bool.self, forKey: .memoryWriteEligible)
+            self.anchors = try container.decodeIfPresent([EncodedAnchor].self, forKey: .anchors)
+            // Cycle 4 M-6: default to false on legacy rows.
+            self.ownershipInferenceWasSuppressed = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .ownershipInferenceWasSuppressed
+            ) ?? false
         }
     }
 }
