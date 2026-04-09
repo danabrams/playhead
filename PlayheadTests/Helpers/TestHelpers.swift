@@ -49,6 +49,30 @@ func makeTestStore() async throws -> AnalysisStore {
     return store
 }
 
+// MARK: - Async polling helper
+
+/// Polls an async predicate until it returns true or the deadline expires.
+/// Returns `true` if the predicate became true within the deadline, `false`
+/// on timeout. Used in place of fixed `Task.sleep` waits in scheduler tests
+/// so they remain deterministic under heavy parallel-test CPU contention
+/// (playhead-qtc). The poll interval is intentionally small so tests that
+/// complete quickly aren't slowed down, and the default deadline is
+/// generous enough to absorb simulator scheduling jitter when the whole
+/// suite runs in parallel.
+func pollUntil(
+    timeout: Duration = .seconds(30),
+    interval: Duration = .milliseconds(20),
+    _ condition: @Sendable () async throws -> Bool
+) async rethrows -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while clock.now < deadline {
+        if try await condition() { return true }
+        try? await Task.sleep(for: interval)
+    }
+    return try await condition()
+}
+
 // MARK: - Migration test helpers
 
 import SQLite3
