@@ -6,6 +6,12 @@
 .beads/.br_history/
 .beads/dolt
 .beads/dolt-wal
+# Previously polluted by a rogue `br` (beads_rust) install — see playhead-vha
+# era cleanup. bd's canonical data lives in .beads/dolt (also ignored).
+.beads/issues.jsonl
+.beads/interactions.jsonl
+.beads/backup/
+.beads/embeddeddolt/
 
 # bv (beads viewer) local config and caches
 .bv/
