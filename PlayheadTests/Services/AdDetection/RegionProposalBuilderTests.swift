@@ -551,6 +551,38 @@ struct RegionProposalBuilderTests {
         }
     }
 
+    @Test("two acoustic breaks in the same atom merge into a single 1-atom region")
+    func twoBreaksInSameAtomMergeIntoSingleRegion() {
+        // Both breaks land inside atom 2's [startTime=2.0, endTime=3.0) interval.
+        // Distinct times ensure dedupAcousticBreaks doesn't collapse them.
+        // With no other proposals, makeAcousticProposals emits two 1-atom
+        // proposals with identical ranges; the merge loop must fold them into
+        // a single region that carries both breaks.
+        let atoms = makeAtoms(count: 5)
+        let input = RegionProposalInput(
+            atoms: atoms,
+            lexicalCandidates: [],
+            acousticBreaks: [
+                AcousticBreak(time: 2.25, breakStrength: 0.7, signals: [.energyDrop]),
+                AcousticBreak(time: 2.75, breakStrength: 0.8, signals: [.spectralSpike])
+            ],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            fmWindows: []
+        )
+
+        let regions = RegionProposalBuilder.build(input)
+
+        #expect(regions.count == 1)
+        let region = regions[0]
+        #expect(region.origins == [.acoustic])
+        #expect(region.firstAtomOrdinal == region.lastAtomOrdinal)
+        #expect(region.firstAtomOrdinal == 2)
+        #expect(region.acousticBreaks.count == 2)
+        let times = Set(region.acousticBreaks.map(\.time))
+        #expect(times == Set([2.25, 2.75]))
+    }
+
     @Test("acoustic break near a lexical region edge still fires the decoration path")
     func acousticBreakNearLexicalEdgeFiresDecorationPath() {
         // Lex region spans atoms 11..15 (startTime 11, endTime 16).
@@ -583,6 +615,20 @@ struct RegionProposalBuilderTests {
         #expect(lexRegion != nil)
         #expect(lexRegion?.origins.contains(.acoustic) == true)
         #expect(lexRegion?.acousticBreaks.isEmpty == false)
+
+        // Also pin that the standalone `makeAcousticProposals` path fired:
+        // atom 10 is disjoint from the lex region's atoms 11..15, so the
+        // 1-atom acoustic anchor must appear as its own acoustic-only region.
+        // Protects against a future regression where someone removes
+        // `makeAcousticProposals` entirely and relies only on the decoration path.
+        let standalone = regions.first {
+            $0.origins == [.acoustic]
+                && $0.firstAtomOrdinal == 10
+                && $0.lastAtomOrdinal == 10
+        }
+        #expect(standalone != nil)
+        #expect(standalone?.acousticBreaks.count == 1)
+        #expect(standalone?.acousticBreaks.first?.time == 10.5)
     }
 }
 
