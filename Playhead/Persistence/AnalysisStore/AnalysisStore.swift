@@ -4114,17 +4114,19 @@ actor AnalysisStore {
     }
 
     func loadDecisionResultArtifact(for analysisAssetId: String) throws -> DecisionResultArtifact? {
+        // ORDER BY / LIMIT are defensive no-ops: the UNIQUE constraint on analysisAssetId
+        // guarantees at most one row per asset. They are harmless and clarify intent.
         let sql = "SELECT id, analysisAssetId, decisionCohortJSON, inputArtifactRefs, decisionJSON, createdAt FROM ad_decision_results WHERE analysisAssetId = ? ORDER BY createdAt DESC LIMIT 1"
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, analysisAssetId)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
-        return DecisionResultArtifact(
-            id: text(stmt, 0),
-            analysisAssetId: text(stmt, 1),
-            decisionCohortJSON: text(stmt, 2),
-            inputArtifactRefs: text(stmt, 3),
-            decisionJSON: text(stmt, 4),
+        return try DecisionResultArtifact(
+            id: requireText(stmt, 0),
+            analysisAssetId: requireText(stmt, 1),
+            decisionCohortJSON: requireText(stmt, 2),
+            inputArtifactRefs: requireText(stmt, 3),
+            decisionJSON: requireText(stmt, 4),
             createdAt: sqlite3_column_double(stmt, 5)
         )
     }
@@ -4160,16 +4162,16 @@ actor AnalysisStore {
         bind(stmt, 1, analysisAssetId)
         var results: [DecisionEvent] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            results.append(DecisionEvent(
-                id: text(stmt, 0),
-                analysisAssetId: text(stmt, 1),
-                eventType: text(stmt, 2),
-                windowId: text(stmt, 3),
+            results.append(try DecisionEvent(
+                id: requireText(stmt, 0),
+                analysisAssetId: requireText(stmt, 1),
+                eventType: requireText(stmt, 2),
+                windowId: requireText(stmt, 3),
                 proposalConfidence: sqlite3_column_double(stmt, 4),
                 skipConfidence: sqlite3_column_double(stmt, 5),
-                eligibilityGate: text(stmt, 6),
-                policyAction: text(stmt, 7),
-                decisionCohortJSON: text(stmt, 8),
+                eligibilityGate: requireText(stmt, 6),
+                policyAction: requireText(stmt, 7),
+                decisionCohortJSON: requireText(stmt, 8),
                 createdAt: sqlite3_column_double(stmt, 9)
             ))
         }
@@ -4202,12 +4204,12 @@ actor AnalysisStore {
         bind(stmt, 1, analysisAssetId)
         var results: [CorrectionEvent] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            results.append(CorrectionEvent(
-                id: text(stmt, 0),
-                analysisAssetId: text(stmt, 1),
-                correctionScope: text(stmt, 2),
-                atomOrdinalRange: text(stmt, 3),
-                evidenceJSON: text(stmt, 4),
+            results.append(try CorrectionEvent(
+                id: requireText(stmt, 0),
+                analysisAssetId: requireText(stmt, 1),
+                correctionScope: requireText(stmt, 2),
+                atomOrdinalRange: requireText(stmt, 3),
+                evidenceJSON: requireText(stmt, 4),
                 createdAt: sqlite3_column_double(stmt, 5)
             ))
         }

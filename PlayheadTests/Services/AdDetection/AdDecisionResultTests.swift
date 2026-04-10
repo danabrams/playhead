@@ -65,8 +65,11 @@ struct AdDecisionResultTests {
         #expect(loaded?.decisionCohortJSON == #"{"fusionHash":"fu2"}"#)
     }
 
-    @Test("loadDecisionResultArtifact returns most recent when multiple saved")
-    func mostRecentWins() async throws {
+    // UNIQUE constraint on analysisAssetId means saving a second result for the same
+    // asset (even with a different id) replaces the first row. At most one row ever
+    // exists per asset. This test verifies the replacement happens even when ids differ.
+    @Test("saveDecisionResultArtifact replaces old result even when id differs")
+    func differentIdReplacesExistingAssetRow() async throws {
         let store = try await makeStore()
         let old = DecisionResultArtifact(
             id: "r-old", analysisAssetId: "asset1",
@@ -81,7 +84,9 @@ struct AdDecisionResultTests {
         try await store.saveDecisionResultArtifact(old)
         try await store.saveDecisionResultArtifact(new)
         let loaded = try await store.loadDecisionResultArtifact(for: "asset1")
+        // Only one row survives (UNIQUE constraint enforces this); it is the newer save.
         #expect(loaded?.id == "r-new")
+        #expect(loaded?.decisionCohortJSON == "new")
     }
 
     @Test("DecisionResultArtifact asset isolation")

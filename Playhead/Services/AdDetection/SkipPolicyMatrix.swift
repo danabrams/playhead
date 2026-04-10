@@ -58,6 +58,9 @@ struct DecisionCohort: Sendable, Codable, Hashable {
     let stabilityHash: String
     let appBuild: String
 
+    // IMPORTANT: bump each hash string manually whenever the corresponding
+    // pipeline component changes. The date suffix is a documentation aid, not
+    // a machine-readable field — there is no automated enforcement.
     static func production(appBuild: String) -> DecisionCohort {
         DecisionCohort(
             featurePipelineHash: "feature-v1-2026-04-10",
