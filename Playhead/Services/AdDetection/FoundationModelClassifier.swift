@@ -4020,27 +4020,21 @@ final actor SessionBox {
 final actor LiveSessionActor {
     private let session: LanguageModelSession
 
-    // playhead-994 experiment: env var gate for the
-    // `includeSchemaInPrompt: false` + one-shot example path.
-    // Set `PLAYHEAD_FM_994_SCHEMA_LESS=1` before running the on-device
-    // smoke test to A/B test whether stripping the framework-injected
-    // schema text removes the hidden surface that trips Apple's safety
-    // classifier on the Kelly Ripa #1 refinement window.
+    // playhead-994 (graduated to default 2026-04-09): the session is always
+    // created with a one-shot example in `Instructions` so the model
+    // understands the expected output format when the framework-injected
+    // schema text is suppressed via `includeSchemaInPrompt: false`.
     //
-    // When the flag is set the session is created with `Instructions`
-    // containing a concrete one-shot example of the desired output format
-    // (Apple's documented pattern for `includeSchemaInPrompt: false` use).
-    // The `respondRefinement` method then passes `includeSchemaInPrompt: false`
-    // to `session.respond(to:generating:includeSchemaInPrompt:options:)`.
+    // Root cause confirmed: framework-injected schema text (the hidden
+    // augmented input added when `includeSchemaInPrompt` defaults to `true`)
+    // was tipping Apple's safety classifier over its threshold on benign
+    // content (e.g. Kelly Ripa #1 cross-promo window). The one-shot example
+    // replaces the schema injection as the model's format guide.
     //
     // API note: `session.respond(to:generating:includeSchemaInPrompt:options:)`
     // is confirmed available in the FoundationModels framework
     // (verified via .swiftinterface symbol inspection, 2026-04-09).
-    private static func schemaLessExperimentEnabled() -> Bool {
-        ProcessInfo.processInfo.environment["PLAYHEAD_FM_994_SCHEMA_LESS"] == "1"
-    }
-
-    private static let schemaLessOneShotExample = """
+    private static let oneShotExample = """
         You are a transcript span extractor. Return only the ad-span line ranges that appear in the transcript window.
 
         Example output format (do not echo this — it shows the expected JSON shape):
@@ -4050,17 +4044,10 @@ final actor LiveSessionActor {
         """
 
     init() {
-        if Self.schemaLessExperimentEnabled() {
-            // playhead-994: create the session with one-shot example
-            // instructions so the model understands the output format
-            // even when the framework-injected schema text is suppressed.
-            self.session = LanguageModelSession(
-                model: SystemLanguageModel.default,
-                instructions: Instructions { Self.schemaLessOneShotExample }
-            )
-        } else {
-            self.session = LanguageModelSession(model: SystemLanguageModel.default)
-        }
+        self.session = LanguageModelSession(
+            model: SystemLanguageModel.default,
+            instructions: Instructions { Self.oneShotExample }
+        )
     }
 
     func prewarm(_ promptPrefix: String) {
@@ -4077,28 +4064,15 @@ final actor LiveSessionActor {
     }
 
     func respondRefinement(_ prompt: String, maximumResponseTokens: Int) async throws -> RefinementWindowSchema {
-        if Self.schemaLessExperimentEnabled() {
-            // playhead-994 experiment: pass includeSchemaInPrompt: false to
-            // suppress the framework-injected schema text from the augmented
-            // input. The hypothesis (from the FoundationModels expert, 2026-04-08)
-            // is that the hidden schema surface is what tips Apple's safety
-            // classifier over the line on the Kelly Ripa #1 refinement window —
-            // a benign cross-promo that has zero pharma vocabulary in the
-            // visible prompt but still refuses every run with
-            // contextDebugDescription="May contain sensitive content".
-            // The one-shot example in the session instructions replaces the
-            // schema as the model's guide to output format.
-            let response = try await session.respond(
-                to: prompt,
-                generating: RefinementWindowSchema.self,
-                includeSchemaInPrompt: false,
-                options: GenerationOptions(maximumResponseTokens: maximumResponseTokens)
-            )
-            return response.content
-        }
+        // playhead-994 (graduated to default): always pass
+        // `includeSchemaInPrompt: false` to suppress the framework-injected
+        // schema text from the augmented input. The one-shot example in the
+        // session `Instructions` block provides reliable format guidance as
+        // the permanent replacement.
         let response = try await session.respond(
             to: prompt,
             generating: RefinementWindowSchema.self,
+            includeSchemaInPrompt: false,
             options: GenerationOptions(maximumResponseTokens: maximumResponseTokens)
         )
         return response.content

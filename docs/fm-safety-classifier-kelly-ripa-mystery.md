@@ -318,4 +318,16 @@ New fields:
 
 This eu1 gate is vocabulary-independent — it fires on any `@Generable` refusal, including the Kelly Ripa false-positive pattern. The `SensitiveWindowRouter` path (vocabulary-triggered, pre-empts the `@Generable` call entirely) is unchanged.
 
+## Resolution (2026-04-09) — confirmed on device
+
+The `includeSchemaInPrompt: false` experiment (playhead-994) was run on a thermally nominal device (two runs, both thermal=nominal). Result: **zero refusals on both runs**. The Kelly Ripa #1 window passed through the default-guardrails `@Generable` path without refusal.
+
+**Root cause confirmed:** Framework-injected schema text (the hidden augmented input added when `includeSchemaInPrompt` defaults to `true`) was tipping Apple's safety classifier threshold on the Kelly Ripa window. The visible prompt content was never the issue.
+
+**Fix applied:** `includeSchemaInPrompt: false` is now the unconditional default for all `refinePassB` calls. The manual schema preamble in `buildRefinementPrompt` has been removed. The one-shot example in the session `Instructions` block provides reliable format guidance as the permanent replacement.
+
+**`eu1` auto-retry** remains active as a safety net for any future false positives. `SensitiveWindowRouter` remains as a fast-path optimization.
+
+**Status:** ✅ Resolved. `playhead-66k` (Feedback Assistant report) remains open as a report to Apple for their records.
+
 **Test coverage:** `PlayheadTests/Services/AdDetection/KellyRipaFMSafetyTests.swift` — 9 tests across two `@Suite` structs (`PlayheadRefusalExplanationTests` for 36t, `PlayheadEu1AutoRetryTests` for eu1). All pass on simulator.
