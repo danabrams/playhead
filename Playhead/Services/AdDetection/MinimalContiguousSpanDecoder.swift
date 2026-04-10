@@ -298,21 +298,25 @@ struct MinimalContiguousSpanDecoder {
         var result = span
 
         // Left edge: look in [firstOrdinal - radius, firstOrdinal + radius]
+        // Select the nearest break atom to firstOrdinal (not first/last).
         let leftLow = max(span.firstOrdinal - radius, allAtoms.first?.atomOrdinal ?? 0)
         let leftHigh = min(span.firstOrdinal + radius, span.lastOrdinal)
         if let snapAtom = (leftLow ... leftHigh)
             .compactMap({ atomsByOrdinal[$0] })
-            .first(where: { $0.hasAcousticBreakHint }) {
+            .filter({ $0.hasAcousticBreakHint })
+            .min(by: { abs($0.atomOrdinal - span.firstOrdinal) < abs($1.atomOrdinal - span.firstOrdinal) }) {
             result.firstOrdinal = snapAtom.atomOrdinal
             result.startTime = snapAtom.startTime
         }
 
         // Right edge: look in [lastOrdinal - radius, lastOrdinal + radius]
+        // Select the nearest break atom to lastOrdinal (not first/last).
         let rightLow = max(span.lastOrdinal - radius, result.firstOrdinal)
         let rightHigh = min(span.lastOrdinal + radius, allAtoms.last?.atomOrdinal ?? span.lastOrdinal)
         if let snapAtom = (rightLow ... rightHigh)
             .compactMap({ atomsByOrdinal[$0] })
-            .last(where: { $0.hasAcousticBreakHint }) {
+            .filter({ $0.hasAcousticBreakHint })
+            .min(by: { abs($0.atomOrdinal - span.lastOrdinal) < abs($1.atomOrdinal - span.lastOrdinal) }) {
             result.lastOrdinal = snapAtom.atomOrdinal
             result.endTime = snapAtom.endTime
         }
