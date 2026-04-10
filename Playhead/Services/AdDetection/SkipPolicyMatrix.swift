@@ -16,30 +16,56 @@ enum SkipPolicyAction: String, Sendable, Codable, Hashable, CaseIterable {
 
 /// Maps (CommercialIntent, AdOwnership) → SkipPolicyAction.
 ///
-/// v1: all spans arrive as (.unknown, .unknown) → .logOnly.
-/// Phase 8 (SponsorKnowledgeStore) will populate intent/ownership from business context.
+/// v1: spans with (.unknown, .unknown) → .detectOnly (banner, no auto-skip) so Phase 7
+/// (UserCorrections) has banner impressions to correct against. Unknown intent with a
+/// known ownership still falls through to .logOnly. Phase 8 (SponsorKnowledgeStore) will
+/// populate intent/ownership for full matrix evaluation.
 /// FM does NOT classify commercial intent in Phase 6.
 struct SkipPolicyMatrix: Sendable {
 
     static let defaultAction: SkipPolicyAction = .logOnly
 
     static func action(for intent: CommercialIntent, ownership: AdOwnership) -> SkipPolicyAction {
-        switch intent {
-        case .paid:
-            // paid + thirdParty: classic insertion — eligible for auto-skip.
-            // paid + show/network: show-produced paid content (e.g. dynamic in-episode reads for
-            // a brand the show also owns). The ownership attribution is ambiguous and Phase 8
-            // (SponsorKnowledgeStore) must resolve it before we can act. Until then: logOnly.
-            return ownership == .thirdParty ? .autoSkipEligible : .logOnly
-        case .owned:
-            return (ownership == .show || ownership == .network) ? .detectOnly : .logOnly
-        case .affiliate:
-            // affiliate dominates regardless of ownership
+        // All 25 (intent × ownership) combinations are enumerated explicitly so the
+        // compiler catches any future cases added to either enum.
+        switch (intent, ownership) {
+
+        // ── paid intent ────────────────────────────────────────────────────────
+        case (.paid, .thirdParty):
+            // Classic insertion ad — auto-skip eligible.
+            return .autoSkipEligible
+        case (.paid, .show), (.paid, .network):
+            // Show/network-produced paid content is ambiguous; Phase 8 resolves it.
+            return .logOnly
+        case (.paid, .guest):
+            // Paid guest endorsement: treat like a detect-only mention until Phase 8.
             return .detectOnly
-        case .organic:
-            // organic dominates regardless of ownership
+        case (.paid, .unknown):
+            return .logOnly
+
+        // ── owned intent ───────────────────────────────────────────────────────
+        case (.owned, .show), (.owned, .network):
+            // Show-owned promos: surface via banner, never skip automatically.
+            return .detectOnly
+        case (.owned, .thirdParty), (.owned, .guest), (.owned, .unknown):
+            // Conflicting signals — insufficient data.
+            return .logOnly
+
+        // ── affiliate intent ───────────────────────────────────────────────────
+        case (.affiliate, _):
+            // Affiliate reads: always show banner regardless of ownership.
+            return .detectOnly
+
+        // ── organic / unknown intent ───────────────────────────────────────────
+        case (.organic, _):
+            // Organic content: suppress all cues.
             return .suppress
-        case .unknown:
+        case (.unknown, .unknown):
+            // Phase 6.5 (playhead-4my.16): unknown-intent + unknown-ownership surfaces a
+            // banner so Phase 7 (UserCorrections) has signal to learn from. Phase 8
+            // (SponsorKnowledgeStore) populates intent/ownership for full matrix evaluation.
+            return .detectOnly
+        case (.unknown, _):
             return .logOnly
         }
     }
@@ -62,7 +88,8 @@ struct DecisionCohort: Sendable, Codable, Hashable {
     // pipeline component changes. The date suffix is a documentation aid, not
     // a machine-readable field — there is no automated enforcement.
     static func production(appBuild: String) -> DecisionCohort {
-        DecisionCohort(
+        precondition(!appBuild.isEmpty, "appBuild must be non-empty — pass the real build number")
+        return DecisionCohort(
             featurePipelineHash: "feature-v1-2026-04-10",
             fusionHash: "fusion-v1-2026-04-10",
             policyHash: "policy-v1-2026-04-10",
@@ -88,6 +115,8 @@ struct DecisionStabilityPolicy: Sendable {
     let suppressionThreshold: Double
 
     init(stayThreshold: Double = 0.45, suppressionThreshold: Double = 0.25) {
+        precondition(suppressionThreshold < stayThreshold,
+            "suppressionThreshold (\(suppressionThreshold)) must be strictly less than stayThreshold (\(stayThreshold))")
         self.stayThreshold = stayThreshold
         self.suppressionThreshold = suppressionThreshold
     }

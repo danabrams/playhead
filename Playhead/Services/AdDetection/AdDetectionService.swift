@@ -35,6 +35,11 @@ struct AdDetectionConfig: Sendable {
     let fmScanBudgetSeconds: TimeInterval
     /// Minimum overlapping FM windows needed to count as consensus.
     let fmConsensusThreshold: Int
+    /// Phase 6.5b (playhead-4my.17): skipConfidence threshold above which an otherwise
+    /// detectOnly/logOnly eligible span is promoted to autoSkipEligible. Promotion
+    /// applies only when eligibilityGate == .eligible and policyAction is not .suppress.
+    /// Default 0.75 is conservative; lower as calibration improves.
+    let autoSkipConfidenceThreshold: Double
 
     init(
         candidateThreshold: Double,
@@ -44,7 +49,8 @@ struct AdDetectionConfig: Sendable {
         detectorVersion: String,
         fmBackfillMode: FMBackfillMode = .shadow,
         fmScanBudgetSeconds: TimeInterval = 300,
-        fmConsensusThreshold: Int = 2
+        fmConsensusThreshold: Int = 2,
+        autoSkipConfidenceThreshold: Double = 0.75
     ) {
         self.candidateThreshold = candidateThreshold
         self.confirmationThreshold = confirmationThreshold
@@ -54,6 +60,7 @@ struct AdDetectionConfig: Sendable {
         self.fmBackfillMode = fmBackfillMode
         self.fmScanBudgetSeconds = fmScanBudgetSeconds
         self.fmConsensusThreshold = fmConsensusThreshold
+        self.autoSkipConfidenceThreshold = autoSkipConfidenceThreshold
     }
 
     static let `default` = AdDetectionConfig(
@@ -64,7 +71,8 @@ struct AdDetectionConfig: Sendable {
         detectorVersion: "detection-v1",
         fmBackfillMode: .shadow,
         fmScanBudgetSeconds: 300,
-        fmConsensusThreshold: 2
+        fmConsensusThreshold: 2,
+        autoSkipConfidenceThreshold: 0.75
     )
 }
 
@@ -193,6 +201,13 @@ actor AdDetectionService {
     /// output without affecting live AdWindow or skip-cue decisions.
     private let phase5ProjectorObserver: Phase5ProjectorObserver?
 
+    /// Phase 6.5 (playhead-4my.16): optional skip orchestrator. When non-nil, eligible
+    /// fusion decisions are forwarded after each backfill run, enabling Phase 7
+    /// (UserCorrections) to have banner impressions to correct against.
+    /// Production wiring lives in PlayheadRuntime. Tests inject a real orchestrator
+    /// to assert that results flow through; nil suppresses the forwarding call.
+    private let skipOrchestrator: SkipOrchestrator?
+
     // MARK: - Cached State
 
     /// Scanner is recreated per-episode when profile changes.
@@ -220,7 +235,8 @@ actor AdDetectionService {
         canUseFoundationModelsProvider: @escaping @Sendable () async -> Bool = { true },
         shadowSkipMarker: @escaping @Sendable (_ sessionId: String, _ podcastId: String) async -> Void = { _, _ in },
         regionShadowObserver: RegionShadowObserver? = nil,
-        phase5ProjectorObserver: Phase5ProjectorObserver? = nil
+        phase5ProjectorObserver: Phase5ProjectorObserver? = nil,
+        skipOrchestrator: SkipOrchestrator? = nil
     ) {
         self.store = store
         self.classifier = classifier
@@ -234,6 +250,7 @@ actor AdDetectionService {
         self.shadowSkipMarker = shadowSkipMarker
         self.regionShadowObserver = regionShadowObserver
         self.phase5ProjectorObserver = phase5ProjectorObserver
+        self.skipOrchestrator = skipOrchestrator
     }
 
     #if DEBUG
@@ -348,9 +365,10 @@ actor AdDetectionService {
     ///   11. MinimalContiguousSpanDecoder
     ///   12. BackfillEvidenceFusion + DecisionMapper
     ///   13. BoundaryRefiner
-    ///   14. SkipPolicyMatrix filter (v1: all logOnly)
+    ///   14. SkipPolicyMatrix + confidence promotion (Phase 6.5: detectOnly for unknown spans; autoSkipEligible at >=0.75)
     ///   15. MetadataExtractor
     ///   16. EvidenceEvent + DecisionEvent logging
+    ///   17. Forward eligible results to SkipOrchestrator (Phase 6.5)
     ///
     /// - Parameters:
     ///   - chunks: Final-pass TranscriptChunks (full episode).
@@ -370,9 +388,10 @@ actor AdDetectionService {
 
         // ── Steps 1–3: Atomize, segment, build catalog ───────────────────────
 
-        let finalChunks = chunks.filter { $0.pass == "final" }.isEmpty
-            ? chunks
-            : chunks.filter { $0.pass == "final" }
+        let finalChunks: [TranscriptChunk] = {
+            let filtered = chunks.filter { $0.pass == "final" }
+            return filtered.isEmpty ? chunks : filtered
+        }()
 
         let (atoms, transcriptVersion) = TranscriptAtomizer.atomize(
             chunks: finalChunks,
@@ -515,14 +534,37 @@ actor AdDetectionService {
         }
 
         let fusionConfig = FusionWeightConfig()
+        // transcriptQuality is the same for every span (derived from the full atom array),
+        // so compute it once outside the loop rather than redundantly per span.
+        let transcriptQuality = estimateTranscriptQuality(atoms: atomEvidence)
         var fusionWindows: [AdWindow] = []
         var decisionEvents: [DecisionEvent] = []
+        // Phase 6.5 (playhead-4my.16): accumulate AdDecisionResult for step 17 forwarding.
+        var fusionDecisionResults: [AdDecisionResult] = []
 
         for span in decodedSpans {
             try Task.checkCancellation()
 
+            // Step 13 (moved before fusion): snap span boundaries to acoustic transitions
+            // so that the evidence lookup and gate decision use the final refined boundaries.
+            let (startAdj, endAdj) = featureWindows.isEmpty ? (0.0, 0.0) :
+                BoundaryRefiner.computeAdjustments(
+                    windows: featureWindows,
+                    candidateStart: span.startTime,
+                    candidateEnd: span.endTime
+                )
+            let refinedSpan = DecodedSpan(
+                id: span.id,
+                assetId: span.assetId,
+                firstAtomOrdinal: span.firstAtomOrdinal,
+                lastAtomOrdinal: span.lastAtomOrdinal,
+                startTime: span.startTime + startAdj,
+                endTime: span.endTime + endAdj,
+                anchorProvenance: span.anchorProvenance
+            )
+
             let ledger = buildEvidenceLedger(
-                span: span,
+                span: refinedSpan,
                 classifierResults: classifierResults,
                 lexicalCandidates: lexicalCandidates,
                 featureWindows: featureWindows,
@@ -531,37 +573,59 @@ actor AdDetectionService {
                 fusionConfig: fusionConfig
             )
 
-            let transcriptQuality = estimateTranscriptQuality(atoms: atomEvidence)
             let mapper = DecisionMapper(
-                span: span,
+                span: refinedSpan,
                 ledger: ledger,
                 config: fusionConfig,
                 transcriptQuality: transcriptQuality
             )
             let decision = mapper.map()
 
-            // Step 14: SkipPolicyMatrix filter (v1: (.unknown, .unknown) → .logOnly)
-            let policyAction = SkipPolicyMatrix.action(
-                for: .unknown,
-                ownership: .unknown
-            )
+            // Step 14: SkipPolicyMatrix + confidence promotion.
+            // Phase 6.5 (playhead-4my.16): (.unknown, .unknown) → .detectOnly so Phase 7
+            // has banner impressions to correct against.
+            let rawPolicyAction = SkipPolicyMatrix.action(for: .unknown, ownership: .unknown)
 
-            // Build AdWindow from fusion decision.
-            // v1: all decisions are logOnly per SkipPolicyMatrix, but we persist
-            // every span so the data is available for Phase 7+ promotion.
+            // Phase 6.5b (playhead-4my.17): confidence-gated autoSkipEligible promotion.
+            // Eligible spans with skipConfidence >= threshold are promoted from
+            // detectOnly/logOnly → autoSkipEligible. .suppress is never overridden.
+            // Gate-blocked spans are excluded by the eligibilityGate check.
+            let autoSkipThreshold = config.autoSkipConfidenceThreshold
+            let policyAction: SkipPolicyAction
+            if (rawPolicyAction == .detectOnly || rawPolicyAction == .logOnly),
+               decision.eligibilityGate == .eligible,
+               decision.skipConfidence >= autoSkipThreshold {
+                policyAction = .autoSkipEligible
+                logger.debug(
+                    "Backfill: span \(refinedSpan.id, privacy: .public) promoted detectOnly→autoSkipEligible (skipConfidence=\(decision.skipConfidence, format: .fixed(precision: 2)) >= \(autoSkipThreshold, format: .fixed(precision: 2)))"
+                )
+            } else {
+                policyAction = rawPolicyAction
+            }
+
+            // Build AdWindow from fusion decision (uses already-refined span boundaries).
             let window = buildFusionAdWindow(
-                span: span,
+                span: refinedSpan,
                 decision: decision,
                 policyAction: policyAction,
                 analysisAssetId: analysisAssetId
             )
+            fusionWindows.append(window)
 
-            // Step 13: BoundaryRefiner — snap boundaries to acoustic transitions.
-            let refinedWindow = applyBoundaryRefinement(
-                window: window,
-                featureWindows: featureWindows
-            )
-            fusionWindows.append(refinedWindow)
+            // Accumulate AdDecisionResult for step 17 (orchestrator forwarding).
+            // SkipEligibilityGate has more cases than AdDecisionEligibilityGate; collapse
+            // all non-eligible variants to .blocked — receiveAdDecisionResults guards on this.
+            let orchestratorGate: AdDecisionEligibilityGate =
+                decision.eligibilityGate == .eligible ? .eligible : .blocked
+            fusionDecisionResults.append(AdDecisionResult(
+                id: window.id,
+                analysisAssetId: analysisAssetId,
+                startTime: refinedSpan.startTime,
+                endTime: refinedSpan.endTime,
+                skipConfidence: decision.skipConfidence,
+                eligibilityGate: orchestratorGate,
+                recomputationRevision: 0
+            ))
 
             // Accumulate DecisionEvent for step 16.
             let decisionCohort = DecisionCohort.production(appBuild: config.detectorVersion)
@@ -571,7 +635,7 @@ actor AdDetectionService {
                 id: UUID().uuidString,
                 analysisAssetId: analysisAssetId,
                 eventType: "backfill_fusion",
-                windowId: refinedWindow.id,
+                windowId: window.id,
                 proposalConfidence: decision.proposalConfidence,
                 skipConfidence: decision.skipConfidence,
                 eligibilityGate: decision.eligibilityGate.rawValue,
@@ -588,11 +652,8 @@ actor AdDetectionService {
         }
 
         // ── Step 15: MetadataExtractor ────────────────────────────────────────
-        // Only extract metadata for windows whose policy action would be visible
-        // to the user (not suppress). v1: all are logOnly so we extract metadata
-        // for all to keep the data pipeline complete.
-
-        let confirmedWindows = fusionWindows
+        // Extract metadata for windows that will be visible to the user (not suppressed).
+        let confirmedWindows = fusionWindows.filter { $0.decisionState != AdDecisionState.suppressed.rawValue }
         for window in confirmedWindows {
             try Task.checkCancellation()
             await extractAndPersistMetadata(window: window, chunks: chunks)
@@ -606,6 +667,16 @@ actor AdDetectionService {
             } catch {
                 logger.warning("Backfill: appendDecisionEvent failed for window \(event.windowId): \(error.localizedDescription)")
             }
+        }
+
+        // ── Step 17: Forward eligible decisions to SkipOrchestrator ──────────
+        // Phase 6.5 (playhead-4my.16): wires fusion output to the orchestrator so
+        // Phase 7 (UserCorrections) has banner impressions + skip cues to correct.
+        // The orchestrator guards on activeAssetId and eligibilityGate internally.
+        if let orchestrator = skipOrchestrator, !fusionDecisionResults.isEmpty {
+            await orchestrator.receiveAdDecisionResults(fusionDecisionResults)
+            let eligibleCount = fusionDecisionResults.filter { $0.eligibilityGate == .eligible }.count
+            logger.info("Backfill: forwarded \(fusionDecisionResults.count) fusion results (\(eligibleCount) eligible) to SkipOrchestrator")
         }
 
         // ── Post-pipeline: priors + coverage watermark ────────────────────────
@@ -822,12 +893,13 @@ actor AdDetectionService {
     }
 
     /// Estimate transcript quality from the projected atom evidence.
-    private func estimateTranscriptQuality(atoms: [AtomEvidence]) -> TranscriptQuality {
+    /// `internal` for unit-testing the 30% anchor threshold (see BackfillEvidenceFusionTests).
+    func estimateTranscriptQuality(atoms: [AtomEvidence]) -> TranscriptQuality {
         guard !atoms.isEmpty else { return .degraded }
         // Use the proportion of anchored atoms as a quality proxy.
         // If > 30% of atoms are anchored, quality is considered good.
         let anchoredFraction = Double(atoms.filter(\.isAnchored).count) / Double(atoms.count)
-        return anchoredFraction > 0.0 ? .good : .degraded
+        return anchoredFraction > 0.3 ? .good : .degraded
     }
 
     /// Build an AdWindow from a fusion DecisionResult.
@@ -1075,7 +1147,7 @@ actor AdDetectionService {
         guard config.fmBackfillMode != .off else { return .skipped }
 
         guard let factory = backfillJobRunnerFactory else {
-            logger.debug("Shadow FM phase skipped: no runner factory injected")
+            logger.warning("Shadow FM phase skipped: no runner factory injected — FM evidence will be absent. Check PlayheadRuntime wiring.")
             return .skipped
         }
         func wrap(_ outcome: ShadowFMPhaseOutcome, _ windows: [FMRefinementWindowOutput] = []) -> ShadowFMPhaseResult {

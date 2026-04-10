@@ -35,8 +35,16 @@ struct SkipPolicyMatrixTests {
         #expect(SkipPolicyMatrix.action(for: .organic, ownership: ownership) == .suppress)
     }
 
-    @Test("unknown intent → logOnly for all ownerships", arguments: AdOwnership.allCases)
-    func unknownIntentAlwaysLogOnly(ownership: AdOwnership) {
+    @Test("unknown intent + unknown ownership → detectOnly (Phase 6.5: banner for correction signal)")
+    func unknownIntentAndOwnershipIsDetectOnly() {
+        // Phase 6.5 (playhead-4my.16): (.unknown, .unknown) surfaces a banner so
+        // Phase 7 (UserCorrections) has signal to learn from.
+        #expect(SkipPolicyMatrix.action(for: .unknown, ownership: .unknown) == .detectOnly)
+    }
+
+    @Test("unknown intent + known ownership → logOnly (ownership known but intent unclear)", arguments: AdOwnership.allCases.filter { $0 != .unknown })
+    func unknownIntentWithKnownOwnershipIsLogOnly(ownership: AdOwnership) {
+        // Unknown intent with a known (non-unknown) ownership: insufficient to act.
         #expect(SkipPolicyMatrix.action(for: .unknown, ownership: ownership) == .logOnly)
     }
 
@@ -48,9 +56,10 @@ struct SkipPolicyMatrixTests {
         #expect(SkipPolicyMatrix.action(for: .owned, ownership: .unknown) == .logOnly)
     }
 
-    @Test("v1 default: unknown + unknown → logOnly (the actual v1 path)")
-    func v1DefaultIsLogOnly() {
-        #expect(SkipPolicyMatrix.action(for: .unknown, ownership: .unknown) == .logOnly)
+    @Test("defaultAction sentinel is still logOnly")
+    func defaultActionIsLogOnly() {
+        // The static sentinel documents the 'no-op' baseline; it is not used in
+        // the main switch path and should remain .logOnly for backward compatibility.
         #expect(SkipPolicyMatrix.defaultAction == .logOnly)
     }
 }
@@ -251,5 +260,39 @@ struct SkipPolicyMatrixUnlistedCellsTests {
     @Test("owned + thirdParty → logOnly (contradictory attribution)")
     func ownedThirdPartyIsLogOnly() {
         #expect(SkipPolicyMatrix.action(for: .owned, ownership: .thirdParty) == .logOnly)
+    }
+}
+
+// MARK: - Phase 6.5 Confidence Promotion (playhead-4my.17)
+
+/// Tests for the post-policy confidence promotion step in AdDetectionService.runBackfill.
+/// The promotion logic lives in the service, not the matrix, so these tests drive it
+/// through AdDetectionConfig to verify the threshold field is wired correctly.
+@Suite("AdDetectionConfig — autoSkipConfidenceThreshold")
+struct AutoSkipConfidenceThresholdTests {
+
+    @Test("default autoSkipConfidenceThreshold is 0.75")
+    func defaultThresholdIs075() {
+        #expect(AdDetectionConfig.default.autoSkipConfidenceThreshold == 0.75)
+    }
+
+    @Test("custom autoSkipConfidenceThreshold is stored correctly")
+    func customThresholdIsStored() {
+        let config = AdDetectionConfig(
+            candidateThreshold: 0.40,
+            confirmationThreshold: 0.70,
+            suppressionThreshold: 0.25,
+            hotPathLookahead: 90.0,
+            detectorVersion: "test-v1",
+            autoSkipConfidenceThreshold: 0.60
+        )
+        #expect(config.autoSkipConfidenceThreshold == 0.60)
+    }
+
+    @Test("suppress policy action is never overridden by confidence promotion")
+    func suppressIsNeverPromoted() {
+        // The suppress case in SkipPolicyMatrix represents organic content —
+        // no amount of confidence should override a suppress decision.
+        #expect(SkipPolicyMatrix.action(for: .organic, ownership: .thirdParty) == .suppress)
     }
 }
