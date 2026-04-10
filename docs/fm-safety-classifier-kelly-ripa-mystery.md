@@ -283,16 +283,14 @@ This avoids chasing undocumented classifier boundaries with lexicons.
 
 Three beads landed on `feature/kelly-ripa` in response to the expert recommendations above.
 
-### playhead-994: `includeSchemaInPrompt: false` experiment
+### playhead-994: `includeSchemaInPrompt: false` ~~experiment~~ → graduated to default
 
-`FoundationModelClassifier.LiveSessionActor` now has a flag-gated path activated by the environment variable `PLAYHEAD_FM_994_SCHEMA_LESS=1`. When set:
+This was originally a flag-gated experiment (`PLAYHEAD_FM_994_SCHEMA_LESS=1`). **The experiment is complete — the flag has been removed and `includeSchemaInPrompt: false` is now the unconditional default.** See the Resolution section below for the confirmed outcome.
+
+What the implementation does (unconditionally since 2026-04-09):
 
 - `LanguageModelSession` is initialised with a one-shot example in its `Instructions` block instead of relying on the default framework-injected schema text.
 - `session.respond(to:generating:includeSchemaInPrompt:options:)` is called with `includeSchemaInPrompt: false`.
-
-**What to expect on device:** If the Kelly Ripa refusal disappears when running with the flag set, the hidden schema/instruction surface was the extra signal triggering Apple's guardrails. If it persists, the flag alone is not sufficient and the permissive fallback path (eu1) is the correct long-term fix.
-
-**How to run:** Set `PLAYHEAD_FM_994_SCHEMA_LESS=1` in the Playhead scheme's environment variables in Xcode and exercise the Kelly Ripa fixture through the app.
 
 ### playhead-36t: capture `refusal.explanation`
 
