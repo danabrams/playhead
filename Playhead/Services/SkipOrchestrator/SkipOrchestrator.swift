@@ -343,13 +343,66 @@ actor SkipOrchestrator {
         evaluateAndPush()
     }
 
-    /// Phase 6 contract scaffold only. Bead 6.4 will replace this
-    /// logging no-op placeholder with the real AdDecisionResult path.
+    /// Receive fusion-based AdDecisionResults from AdDetectionService.
+    ///
+    /// This is the Phase 6 production entry point (playhead-4my.6.4). Replaces the
+    /// raw AdWindow path for backfill-sourced decisions. The eligibility gate is
+    /// checked before adding windows; blocked results are never promoted to applied.
+    ///
+    /// - Parameter results: Fusion decisions from BackfillEvidenceFusion + DecisionMapper.
     func receiveAdDecisionResults(_ results: [AdDecisionResult]) async {
-        guard !results.isEmpty else { return }
-        logger.warning(
-            "Ignoring \(results.count, privacy: .public) AdDecisionResult value(s) until playhead-4my.6.4 wires the contract"
-        )
+        guard !results.isEmpty, let assetId = activeAssetId else { return }
+
+        for result in results {
+            guard result.analysisAssetId == assetId else { continue }
+
+            let existingState = windows[result.id]?.decisionState
+
+            // Never process a window that was already applied or reverted.
+            if existingState == .applied || existingState == .reverted { continue }
+
+            // Blocked gate: never add blocked results to the active window set.
+            guard result.eligibilityGate == .eligible else {
+                logger.debug(
+                    "AdDecisionResult \(result.id, privacy: .public) gate=blocked — not adding to active windows"
+                )
+                continue
+            }
+
+            let snappedStart = snapBoundary(time: result.startTime, direction: .start)
+            let snappedEnd = snapBoundary(time: result.endTime, direction: .end)
+            let key = idempotencyKey(assetId: assetId, windowId: result.id)
+
+            // Build a synthetic AdWindow from the fusion decision so the existing
+            // ManagedWindow + evaluateWindow machinery can handle it unchanged.
+            let syntheticWindow = AdWindow(
+                id: result.id,
+                analysisAssetId: assetId,
+                startTime: result.startTime,
+                endTime: result.endTime,
+                confidence: result.skipConfidence,
+                boundaryState: "acousticRefined",
+                decisionState: AdDecisionState.confirmed.rawValue,
+                detectorVersion: "fusion-v1",
+                advertiser: nil, product: nil, adDescription: nil,
+                evidenceText: nil, evidenceStartTime: result.startTime,
+                metadataSource: "fusion-v1", metadataConfidence: nil,
+                metadataPromptVersion: nil,
+                wasSkipped: false, userDismissedBanner: false
+            )
+
+            let managed = ManagedWindow(
+                adWindow: syntheticWindow,
+                decisionState: .confirmed,
+                snappedStart: snappedStart,
+                snappedEnd: snappedEnd,
+                idempotencyKey: key,
+                cueActive: false
+            )
+            windows[result.id] = managed
+        }
+
+        evaluateAndPush()
     }
 
     // MARK: - Playback State Updates

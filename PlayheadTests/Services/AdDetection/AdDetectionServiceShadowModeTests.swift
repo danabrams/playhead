@@ -103,27 +103,34 @@ struct AdDetectionServiceShadowModeTests {
         "\(window.startTime)|\(window.endTime)|\(window.confidence)|\(window.boundaryState)|\(window.decisionState)|\(window.detectorVersion)|\(window.advertiser ?? "-")|\(window.product ?? "-")|\(window.evidenceText ?? "-")|\(window.evidenceSources ?? "-")|\(window.eligibilityGate ?? "-")"
     }
 
-    @Test("H-R3-3: shadow mode produces byte-identical cues to off mode (same store, same asset)")
+    @Test("H-R3-3 (Phase 6 update): shadow and off produce identical AdWindow signatures")
     func shadowAndOffProduceIdenticalAdWindows() async throws {
-        // H-R3-3: strengthened from the test #7 fix. The original
-        // comparison used two different stores + two different asset ids,
-        // which drifted the comparison: any global state or ordering issue
-        // would be hidden by the store split. Now we run BOTH modes
-        // against the SAME store + SAME asset id, toggling
-        // `fmBackfillMode` by swapping services between calls. The
-        // assertion is that AdWindow rows present on-disk before the
-        // shadow FM run are identical to the rows present after — shadow
-        // mode must never touch AdWindows.
-        let store = try await makeTestStore()
-        let assetId = "asset-shared"
-        try await store.insertAsset(makeAsset(id: assetId))
+        // playhead-4my.6.4: Phase 6 fusion has landed. The old invariant
+        // ("shadow must not touch AdWindow rows") is superseded by:
+        //   1. Both off and shadow run the FULL fusion pipeline and write
+        //      AdWindows. FM evidence is excluded from both ledgers, so the
+        //      resulting window signatures are identical.
+        //   2. Shadow mode additionally persists FM telemetry (SemanticScanResult
+        //      rows), while off mode does not.
+        //   3. Off mode must not persist FM telemetry.
+        //
+        // We use two independent stores with identical inputs to compare
+        // signatures across modes, rather than running sequentially on the same
+        // store (which would double-insert windows on the second run).
+        let offStore = try await makeTestStore()
+        let shadowStore = try await makeTestStore()
+        let offAssetId = "asset-off"
+        let shadowAssetId = "asset-shadow"
+        try await offStore.insertAsset(makeAsset(id: offAssetId))
+        try await shadowStore.insertAsset(makeAsset(id: shadowAssetId))
         let factory = makeDeterministicFactory()
-        let chunks = makeChunks(assetId: assetId)
 
-        // Run #1: off — shadow gate short-circuits, no FM work, and
-        // the classical backfill pipeline writes the baseline AdWindows.
+        // Identical chunks for both assets (different asset IDs, same content).
+        let offChunks = makeChunks(assetId: offAssetId)
+        let shadowChunks = makeChunks(assetId: shadowAssetId)
+
         let offService = makeService(
-            store: store,
+            store: offStore,
             config: AdDetectionConfig(
                 candidateThreshold: 0.40,
                 confirmationThreshold: 0.70,
@@ -134,27 +141,8 @@ struct AdDetectionServiceShadowModeTests {
             ),
             factory: factory
         )
-        try await offService.runBackfill(
-            chunks: chunks,
-            analysisAssetId: assetId,
-            podcastId: "podcast-shared",
-            episodeDuration: 90
-        )
-        let preShadowWindows = try await store.fetchAdWindows(assetId: assetId)
-        let preShadowSigs = preShadowWindows.map(adWindowSignature).sorted()
-
-        // Confirm the baseline: off mode must not have written FM
-        // telemetry.
-        let preShadowScans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
-        let preShadowEvents = try await store.fetchEvidenceEvents(analysisAssetId: assetId)
-        #expect(preShadowScans.isEmpty, "off mode must not persist semantic scan rows")
-        #expect(preShadowEvents.isEmpty, "off mode must not persist evidence events")
-
-        // Run #2: shadow — same store, same asset id. The shadow FM path
-        // must write telemetry but MUST NOT mutate the AdWindow rows we
-        // just captured.
         let shadowService = makeService(
-            store: store,
+            store: shadowStore,
             config: AdDetectionConfig(
                 candidateThreshold: 0.40,
                 confirmationThreshold: 0.70,
@@ -165,28 +153,42 @@ struct AdDetectionServiceShadowModeTests {
             ),
             factory: factory
         )
-        try await shadowService.runBackfill(
-            chunks: chunks,
-            analysisAssetId: assetId,
+
+        try await offService.runBackfill(
+            chunks: offChunks,
+            analysisAssetId: offAssetId,
             podcastId: "podcast-shared",
             episodeDuration: 90
         )
-        let postShadowWindows = try await store.fetchAdWindows(assetId: assetId)
-        let postShadowSigs = postShadowWindows.map(adWindowSignature).sorted()
+        try await shadowService.runBackfill(
+            chunks: shadowChunks,
+            analysisAssetId: shadowAssetId,
+            podcastId: "podcast-shared",
+            episodeDuration: 90
+        )
 
-        // The AdWindow set must be byte-identical before vs after the
-        // shadow FM run. This is the shadow invariant: FM is observation-
-        // only until Phase 6 fusion lands.
-        #expect(preShadowSigs == postShadowSigs,
-                "shadow FM run mutated AdWindow rows (pre=\(preShadowSigs), post=\(postShadowSigs))")
-        #expect(preShadowWindows.map(\.id).sorted() == postShadowWindows.map(\.id).sorted(),
-                "shadow FM run changed AdWindow row identities")
+        let offWindows = try await offStore.fetchAdWindows(assetId: offAssetId)
+        let shadowWindows = try await shadowStore.fetchAdWindows(assetId: shadowAssetId)
 
-        // And the shadow run MUST have actually exercised the FM pipeline —
-        // otherwise the invariant is vacuous.
-        let postShadowScans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
-        #expect(!postShadowScans.isEmpty,
-                "shadow service must have exercised the FM pipeline")
+        // Phase 6 invariant: both modes produce the same number of AdWindows
+        // with identical signatures (FM excluded from both ledgers).
+        let offSigs = offWindows.map(adWindowSignature).sorted()
+        let shadowSigs = shadowWindows.map(adWindowSignature).sorted()
+        #expect(offSigs == shadowSigs,
+                "off and shadow modes must produce identical AdWindow signatures (FM excluded from both ledgers). off=\(offSigs.count), shadow=\(shadowSigs.count)")
+
+        // Off mode must not have written FM telemetry.
+        let offScans = try await offStore.fetchSemanticScanResults(analysisAssetId: offAssetId)
+        let offEvents = try await offStore.fetchEvidenceEvents(analysisAssetId: offAssetId)
+        #expect(offScans.isEmpty, "off mode must not persist semantic scan rows")
+        #expect(offEvents.isEmpty, "off mode must not persist evidence events")
+
+        // Shadow mode MUST have exercised the FM pipeline (if factory was invoked).
+        // Note: the FM pipeline only runs if the factory is invoked AND the
+        // canUseFoundationModels guard passes. In test context both are true.
+        let shadowScans = try await shadowStore.fetchSemanticScanResults(analysisAssetId: shadowAssetId)
+        #expect(!shadowScans.isEmpty,
+                "shadow service must have exercised the FM pipeline and persisted scan rows")
     }
 
     @Test("M-D: shadow phase short-circuits when canUseFoundationModels is false")

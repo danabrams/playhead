@@ -82,7 +82,7 @@ struct CoarseScreeningSchema: Sendable, Codable, Hashable {
 
 @available(iOS 26.0, *)
 @Generable
-enum CommercialIntent: String, Sendable, Codable, Hashable {
+enum CommercialIntent: String, Sendable, Codable, Hashable, CaseIterable {
     case paid
     case owned
     case affiliate
@@ -202,7 +202,7 @@ struct CoarseScreeningSchema: Sendable, Codable, Hashable {
     var support: CoarseSupportSchema?
 }
 
-enum CommercialIntent: String, Sendable, Codable, Hashable {
+enum CommercialIntent: String, Sendable, Codable, Hashable, CaseIterable {
     case paid
     case owned
     case affiliate

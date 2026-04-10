@@ -330,21 +330,34 @@ actor AdDetectionService {
 
     // MARK: - Backfill
 
-    /// Run the backfill pipeline: re-classify with final-pass transcript,
-    /// extract metadata, update priors, promote/suppress candidates.
+    /// Run the backfill pipeline: full Phase 1–16 fusion pipeline.
+    /// BackfillEvidenceFusion + DecisionMapper are the sole decision authority.
+    /// The old promote/suppress path (resolveDecision) is removed.
     ///
-    /// Flow:
-    ///   1. Re-run lexical scan on final-pass transcript chunks
-    ///   2. Re-classify with full context
-    ///   3. Promote high-confidence to .confirmed, suppress low-confidence
-    ///   4. Run Layer 3 (metadata extraction) on confirmed windows
-    ///   5. Update PodcastProfile priors
+    /// Pipeline:
+    ///   1.  TranscriptAtomizer
+    ///   2.  TranscriptSegmenter + QualityEstimator
+    ///   3.  CueHarvesters + EvidenceCatalogBuilder
+    ///   4.  RuleBasedClassifier → .classifier ledger entries
+    ///   5.  CoveragePlanner
+    ///   6.  FM scanning (FMBackfillMode-gated)
+    ///   7.  CommercialEvidenceResolver
+    ///   8.  RegionProposalBuilder
+    ///   9.  RegionFeatureExtractor
+    ///   10. AtomEvidenceProjector
+    ///   11. MinimalContiguousSpanDecoder
+    ///   12. BackfillEvidenceFusion + DecisionMapper
+    ///   13. BoundaryRefiner
+    ///   14. SkipPolicyMatrix filter (v1: all logOnly)
+    ///   15. MetadataExtractor
+    ///   16. EvidenceEvent + DecisionEvent logging
     ///
     /// - Parameters:
     ///   - chunks: Final-pass TranscriptChunks (full episode).
     ///   - analysisAssetId: The analysis asset being processed.
     ///   - podcastId: Podcast ID for profile prior updates.
     ///   - episodeDuration: Total episode duration in seconds.
+    ///   - sessionId: Optional analysis session id for shadow retry tracking.
     func runBackfill(
         chunks: [TranscriptChunk],
         analysisAssetId: String,
@@ -355,7 +368,36 @@ actor AdDetectionService {
         self.episodeDuration = episodeDuration
         guard !chunks.isEmpty else { return }
 
-        // 1. Re-run lexical scan on final transcript.
+        // ── Steps 1–3: Atomize, segment, build catalog ───────────────────────
+
+        let finalChunks = chunks.filter { $0.pass == "final" }.isEmpty
+            ? chunks
+            : chunks.filter { $0.pass == "final" }
+
+        let (atoms, transcriptVersion) = TranscriptAtomizer.atomize(
+            chunks: finalChunks,
+            analysisAssetId: analysisAssetId,
+            normalizationHash: "norm-v1",
+            sourceHash: "asr-v1"
+        )
+
+        let evidenceCatalog: EvidenceCatalog
+        if !atoms.isEmpty {
+            evidenceCatalog = EvidenceCatalogBuilder.build(
+                atoms: atoms,
+                analysisAssetId: analysisAssetId,
+                transcriptVersion: transcriptVersion.transcriptVersion
+            )
+        } else {
+            evidenceCatalog = EvidenceCatalog(
+                analysisAssetId: analysisAssetId,
+                transcriptVersion: "",
+                entries: []
+            )
+        }
+
+        // ── Step 4: Lexical scan + RuleBasedClassifier ───────────────────────
+
         let lexicalCandidates = scanner.scan(
             chunks: chunks,
             analysisAssetId: analysisAssetId
@@ -363,7 +405,6 @@ actor AdDetectionService {
 
         logger.info("Backfill: \(lexicalCandidates.count) lexical candidates from \(chunks.count) final chunks")
 
-        // 2. Re-classify with full context.
         let classifierResults: [ClassifierResult]
         if !lexicalCandidates.isEmpty {
             classifierResults = try await classifyCandidates(
@@ -374,64 +415,203 @@ actor AdDetectionService {
             classifierResults = []
         }
 
-        // 3. Load existing candidate AdWindows for this asset.
-        let existingWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
-        let existingCandidates = existingWindows.filter {
-            $0.decisionState == AdDecisionState.candidate.rawValue
+        // ── Steps 5–6: CoveragePlanner + FM scanning ─────────────────────────
+        // FM scanning: persists SemanticScanResults for downstream ledger
+        // construction. Gated by fmBackfillMode; failures are swallowed so
+        // they never block the fusion path.
+
+        var fmRefinementWindows: [FMRefinementWindowOutput] = []
+        if config.fmBackfillMode != .off {
+            if podcastId.isEmpty {
+                logger.info("Backfill: skipping FM scan phase — missing podcastId for asset \(analysisAssetId)")
+            } else {
+                let shadowResult = await runShadowFMPhase(
+                    chunks: chunks,
+                    analysisAssetId: analysisAssetId,
+                    podcastId: podcastId,
+                    sessionIdOverride: sessionId
+                )
+                fmRefinementWindows = shadowResult.fmRefinementWindows
+            }
         }
 
-        // 4. Promote or suppress each existing candidate based on backfill results.
-        var confirmedWindowIds: [String] = []
-        for existing in existingCandidates {
+        // ── Steps 7–9: Region proposal + feature extraction ──────────────────
+        // Runs inline (production, not shadow-only) to produce RegionFeatureBundles.
+        // Also feeds the optional regionShadowObserver for diagnostics.
+
+        let featureWindows: [FeatureWindow]
+        do {
+            featureWindows = episodeDuration > 0
+                ? try await store.fetchFeatureWindows(
+                    assetId: analysisAssetId,
+                    from: 0,
+                    to: episodeDuration
+                )
+                : []
+        } catch {
+            logger.warning("Backfill: fetchFeatureWindows failed (continuing without acoustic features): \(error.localizedDescription)")
+            featureWindows = []
+        }
+
+        let regionInput = RegionShadowPhase.Input(
+            analysisAssetId: analysisAssetId,
+            chunks: chunks,
+            lexicalCandidates: lexicalCandidates,
+            featureWindows: featureWindows,
+            episodeDuration: episodeDuration,
+            priors: showPriors,
+            podcastProfile: currentPodcastProfile,
+            fmWindows: fmRefinementWindows
+        )
+        let regionBundles = RegionShadowPhase.run(regionInput)
+
+        // Also feed the shadow observer for diagnostics (no-op when nil).
+        if let observer = regionShadowObserver, episodeDuration > 0 {
+            await observer.record(assetId: analysisAssetId, bundles: regionBundles)
+        }
+
+        // ── Steps 10–11: AtomEvidenceProjector + MinimalContiguousSpanDecoder ─
+
+        let projector = AtomEvidenceProjector()
+        let atomEvidence = await projector.project(
+            regions: regionBundles,
+            catalog: evidenceCatalog,
+            atoms: atoms,
+            correctionMaskProvider: NoCorrectionMaskProvider()
+        )
+
+        let decoder = MinimalContiguousSpanDecoder()
+        let decodedSpans = decoder.decode(atoms: atomEvidence, assetId: analysisAssetId)
+
+        // Persist decoded spans so TranscriptPeekView can read them.
+        if !decodedSpans.isEmpty {
+            do {
+                try await store.upsertDecodedSpans(decodedSpans)
+            } catch {
+                logger.warning("Backfill: failed to persist decoded spans: \(error.localizedDescription)")
+            }
+        }
+
+        // Also feed the Phase 5 shadow observer for diagnostics (no-op when nil).
+        if let p5observer = phase5ProjectorObserver, !decodedSpans.isEmpty {
+            await p5observer.record(assetId: analysisAssetId, spans: decodedSpans, evidence: atomEvidence)
+        }
+
+        logger.info(
+            "Backfill: asset=\(analysisAssetId) atoms=\(atoms.count) anchored=\(atomEvidence.filter(\.isAnchored).count) spans=\(decodedSpans.count)"
+        )
+
+        // ── Steps 12–14: Fusion + DecisionMapper + SkipPolicyMatrix ──────────
+
+        // Fetch any persisted FM scan results for this asset to build FM ledger entries.
+        let semanticScanResults: [SemanticScanResult]
+        do {
+            semanticScanResults = try await store.fetchSemanticScanResults(
+                analysisAssetId: analysisAssetId
+            )
+        } catch {
+            logger.warning("Backfill: fetchSemanticScanResults failed (no FM evidence): \(error.localizedDescription)")
+            semanticScanResults = []
+        }
+
+        let fusionConfig = FusionWeightConfig()
+        var fusionWindows: [AdWindow] = []
+        var decisionEvents: [DecisionEvent] = []
+
+        for span in decodedSpans {
             try Task.checkCancellation()
 
-            let newDecision = resolveDecision(
-                existing: existing,
-                backfillResults: classifierResults
+            let ledger = buildEvidenceLedger(
+                span: span,
+                classifierResults: classifierResults,
+                lexicalCandidates: lexicalCandidates,
+                featureWindows: featureWindows,
+                catalogEntries: evidenceCatalog.entries,
+                semanticScanResults: semanticScanResults,
+                fusionConfig: fusionConfig
             )
 
-            if newDecision != existing.decisionState {
-                try await store.updateAdWindowDecision(
-                    id: existing.id,
-                    decisionState: newDecision
-                )
-            }
+            let transcriptQuality = estimateTranscriptQuality(atoms: atomEvidence)
+            let mapper = DecisionMapper(
+                span: span,
+                ledger: ledger,
+                config: fusionConfig,
+                transcriptQuality: transcriptQuality
+            )
+            let decision = mapper.map()
 
-            if newDecision == AdDecisionState.confirmed.rawValue {
-                confirmedWindowIds.append(existing.id)
-            }
+            // Step 14: SkipPolicyMatrix filter (v1: (.unknown, .unknown) → .logOnly)
+            let policyAction = SkipPolicyMatrix.action(
+                for: .unknown,
+                ownership: .unknown
+            )
+
+            // Build AdWindow from fusion decision.
+            // v1: all decisions are logOnly per SkipPolicyMatrix, but we persist
+            // every span so the data is available for Phase 7+ promotion.
+            let window = buildFusionAdWindow(
+                span: span,
+                decision: decision,
+                policyAction: policyAction,
+                analysisAssetId: analysisAssetId
+            )
+
+            // Step 13: BoundaryRefiner — snap boundaries to acoustic transitions.
+            let refinedWindow = applyBoundaryRefinement(
+                window: window,
+                featureWindows: featureWindows
+            )
+            fusionWindows.append(refinedWindow)
+
+            // Accumulate DecisionEvent for step 16.
+            let decisionCohort = DecisionCohort.production(appBuild: config.detectorVersion)
+            let cohortJSON = (try? JSONEncoder().encode(decisionCohort))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            decisionEvents.append(DecisionEvent(
+                id: UUID().uuidString,
+                analysisAssetId: analysisAssetId,
+                eventType: "backfill_fusion",
+                windowId: refinedWindow.id,
+                proposalConfidence: decision.proposalConfidence,
+                skipConfidence: decision.skipConfidence,
+                eligibilityGate: decision.eligibilityGate.rawValue,
+                policyAction: policyAction.rawValue,
+                decisionCohortJSON: cohortJSON,
+                createdAt: Date().timeIntervalSince1970
+            ))
         }
 
-        // 5. Insert any new backfill-only detections above confirmation threshold.
-        let newBackfillWindows = buildNewBackfillWindows(
-            classifierResults: classifierResults,
-            existingWindows: existingWindows,
-            analysisAssetId: analysisAssetId,
-            lexicalCandidates: lexicalCandidates
-        )
-        if !newBackfillWindows.isEmpty {
-            try await store.insertAdWindows(newBackfillWindows)
-            confirmedWindowIds.append(contentsOf: newBackfillWindows.map(\.id))
-            logger.info("Backfill: inserted \(newBackfillWindows.count) new confirmed windows")
+        // Persist fusion windows.
+        if !fusionWindows.isEmpty {
+            try await store.insertAdWindows(fusionWindows)
+            logger.info("Backfill: persisted \(fusionWindows.count) fusion windows")
         }
 
-        // 6. Run Layer 3 metadata extraction on confirmed windows.
-        let allWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
-        let confirmedWindows = allWindows.filter {
-            $0.decisionState == AdDecisionState.confirmed.rawValue
-        }
+        // ── Step 15: MetadataExtractor ────────────────────────────────────────
+        // Only extract metadata for windows whose policy action would be visible
+        // to the user (not suppress). v1: all are logOnly so we extract metadata
+        // for all to keep the data pipeline complete.
 
+        let confirmedWindows = fusionWindows
         for window in confirmedWindows {
             try Task.checkCancellation()
-            await extractAndPersistMetadata(
-                window: window,
-                chunks: chunks
-            )
+            await extractAndPersistMetadata(window: window, chunks: chunks)
         }
 
-        // 7. Update PodcastProfile priors from confirmed results.
+        // ── Step 16: Event logging ────────────────────────────────────────────
+
+        for event in decisionEvents {
+            do {
+                try await store.appendDecisionEvent(event)
+            } catch {
+                logger.warning("Backfill: appendDecisionEvent failed for window \(event.windowId): \(error.localizedDescription)")
+            }
+        }
+
+        // ── Post-pipeline: priors + coverage watermark ────────────────────────
+
         if podcastId.isEmpty {
-            logger.info("Skipping priors update: missing podcastId for asset \(analysisAssetId)")
+            logger.info("Backfill: skipping priors update — missing podcastId for asset \(analysisAssetId)")
         } else {
             try await updatePriors(
                 podcastId: podcastId,
@@ -440,7 +620,6 @@ actor AdDetectionService {
             )
         }
 
-        // 8. Update coverage watermark.
         if let maxEnd = confirmedWindows.map(\.endTime).max() {
             try await store.updateConfirmedAdCoverage(
                 id: analysisAssetId,
@@ -448,72 +627,286 @@ actor AdDetectionService {
             )
         }
 
-        logger.info("Backfill complete: \(confirmedWindows.count) confirmed, \(existingCandidates.count - confirmedWindowIds.count) suppressed")
+        logger.info("Backfill complete: spans=\(decodedSpans.count) fusion_windows=\(fusionWindows.count) decision_events=\(decisionEvents.count)")
+    }
 
-        // 9. Phase 3 shadow phase. Runs the FM classifier purely for telemetry;
-        // its output never feeds back into AdWindow rows in this phase. The
-        // shadow invariant test in PlayheadTests pins this property.
-        //
-        // playhead-xba follow-up: capture the raw FM refinement windows
-        // that the runner produced so step 10 can feed them into the
-        // Phase 4 region pipeline's FM-origin clustering path. Live
-        // decisions are still untouched — nothing downstream of step 9
-        // reads AdWindow rows from these windows.
-        var shadowFMWindows: [FMRefinementWindowOutput] = []
-        if config.fmBackfillMode != .off {
-            if podcastId.isEmpty {
-                logger.info("Skipping shadow FM phase: missing podcastId for asset \(analysisAssetId)")
-            } else {
-                let shadowResult = await runShadowFMPhase(
-                    chunks: chunks,
-                    analysisAssetId: analysisAssetId,
-                    podcastId: podcastId,
-                    sessionIdOverride: sessionId
-                )
-                shadowFMWindows = shadowResult.fmRefinementWindows
+    // MARK: - Fusion Evidence Construction (playhead-4my.6.4)
+
+    /// Build an evidence ledger for a single DecodedSpan by gathering contributions
+    /// from all available evidence sources. The ledger is consumed by DecisionMapper.
+    ///
+    /// Evidence sources:
+    ///   - classifier: best-matching ClassifierResult for the span's time range
+    ///   - fm: SemanticScanResults overlapping the span (positive-only: containsAd)
+    ///   - lexical: LexicalCandidates overlapping the span
+    ///   - acoustic: FeatureWindows in the span with energy-transition signals
+    ///   - catalog: EvidenceCatalog entries overlapping the span
+    private func buildEvidenceLedger(
+        span: DecodedSpan,
+        classifierResults: [ClassifierResult],
+        lexicalCandidates: [LexicalCandidate],
+        featureWindows: [FeatureWindow],
+        catalogEntries: [EvidenceEntry],
+        semanticScanResults: [SemanticScanResult],
+        fusionConfig: FusionWeightConfig
+    ) -> [EvidenceLedgerEntry] {
+        // Classifier entry: find the best-matching ClassifierResult for this span.
+        let classifierScore = bestClassifierScore(
+            for: span,
+            results: classifierResults
+        )
+
+        // FM entries: positive-only, mode-gated, from persisted scan results.
+        let fmEntries = buildFMLedgerEntries(
+            span: span,
+            scanResults: semanticScanResults,
+            mode: config.fmBackfillMode,
+            fusionConfig: fusionConfig
+        )
+
+        // Lexical entries: from LexicalCandidates overlapping the span.
+        let lexicalEntries = buildLexicalLedgerEntries(
+            span: span,
+            candidates: lexicalCandidates,
+            fusionConfig: fusionConfig
+        )
+
+        // Acoustic entries: from FeatureWindows in the span range.
+        let acousticEntries = buildAcousticLedgerEntries(
+            span: span,
+            featureWindows: featureWindows,
+            fusionConfig: fusionConfig
+        )
+
+        // Catalog entries: from EvidenceEntry items overlapping the span.
+        let catalogLedgerEntries = buildCatalogLedgerEntries(
+            span: span,
+            entries: catalogEntries,
+            fusionConfig: fusionConfig
+        )
+
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: classifierScore,
+            fmEntries: fmEntries,
+            lexicalEntries: lexicalEntries,
+            acousticEntries: acousticEntries,
+            catalogEntries: catalogLedgerEntries,
+            mode: config.fmBackfillMode,
+            config: fusionConfig
+        )
+        return fusion.buildLedger()
+    }
+
+    /// Find the best-matching ClassifierResult for a DecodedSpan (by time overlap).
+    private func bestClassifierScore(
+        for span: DecodedSpan,
+        results: [ClassifierResult]
+    ) -> Double {
+        let overlapping = results.filter { result in
+            let overlapStart = max(span.startTime, result.startTime)
+            let overlapEnd = min(span.endTime, result.endTime)
+            return overlapEnd > overlapStart
+        }
+        // Use the highest adProbability among overlapping results as the classifier score.
+        return overlapping.map(\.adProbability).max() ?? 0.0
+    }
+
+    /// Build FM ledger entries from SemanticScanResults overlapping the span.
+    /// Applies the Positive-Only Rule: only containsAd dispositions contribute.
+    private func buildFMLedgerEntries(
+        span: DecodedSpan,
+        scanResults: [SemanticScanResult],
+        mode: FMBackfillMode,
+        fusionConfig: FusionWeightConfig
+    ) -> [EvidenceLedgerEntry] {
+        guard mode.contributesToExistingCandidateLedger else { return [] }
+
+        return scanResults.compactMap { result in
+            // Only positive FM evidence contributes.
+            guard result.disposition == .containsAd else { return nil }
+
+            // Check time overlap with span.
+            let overlapStart = max(span.startTime, result.windowStartTime)
+            let overlapEnd = min(span.endTime, result.windowEndTime)
+            guard overlapEnd > overlapStart else { return nil }
+
+            // Map scan result to a certainty band. The coarse scan
+            // carries transcript quality; use it as a band proxy.
+            // Strong quality → .moderate, degraded → .weak.
+            let band: CertaintyBand = result.transcriptQuality == .good ? .moderate : .weak
+
+            // Weight proportional to band.
+            let weight: Double
+            switch band {
+            case .strong: weight = fusionConfig.fmCap
+            case .moderate: weight = fusionConfig.fmCap * 0.75
+            case .weak: weight = fusionConfig.fmCap * 0.5
             }
-        }
 
-        // 10. playhead-xba (Phase 4 shadow wire-up): run the region proposal +
-        // feature extraction pipeline purely for observation. Gated on a
-        // non-nil `regionShadowObserver`, which production release builds
-        // never construct — this matches the DEBUG-only injection pattern
-        // used for `FoundationModelsFeedbackStore`. Nothing here can affect
-        // AdWindow rows, skip cues, or metadata; the only side effect is a
-        // write into an in-memory actor. Failures are logged and swallowed.
-        var shadowBundles: [RegionFeatureBundle] = []
-        if let observer = regionShadowObserver {
-            await runRegionShadowPhase(
-                observer: observer,
-                chunks: chunks,
-                analysisAssetId: analysisAssetId,
-                episodeDuration: episodeDuration,
-                lexicalCandidates: lexicalCandidates,
-                fmWindows: shadowFMWindows
-            )
-            shadowBundles = (await observer.latestBundles(for: analysisAssetId)) ?? []
-        }
-
-        // 11. playhead-4my.5 (Phase 5 projector): run AtomEvidenceProjector +
-        // MinimalContiguousSpanDecoder on the Phase 4 bundles. Gated on a
-        // non-nil `phase5ProjectorObserver` (DEBUG-only injection pattern,
-        // same contract as `regionShadowObserver`). Failures are logged and
-        // swallowed. No AdWindow rows or skip cues are touched.
-        //
-        // Design note: the `!shadowBundles.isEmpty` guard is intentional.
-        // Phase 5's evidence catalog requires FM regions sourced from Phase 4
-        // bundles to produce anchored atoms; with zero bundles there are no
-        // regions to project against, so running the phase would be a no-op.
-        // Revisit this gate if Phase 5 ever needs to operate independently
-        // of Phase 4 (e.g. lexical-only projection without FM evidence).
-        if let p5observer = phase5ProjectorObserver, !shadowBundles.isEmpty {
-            await runPhase5ProjectorPhase(
-                observer: p5observer,
-                bundles: shadowBundles,
-                chunks: chunks,
-                analysisAssetId: analysisAssetId
+            return EvidenceLedgerEntry(
+                source: .fm,
+                weight: weight,
+                detail: .fm(
+                    disposition: .containsAd,
+                    band: band,
+                    cohortPromptLabel: result.scanCohortJSON
+                )
             )
         }
+    }
+
+    /// Build lexical ledger entries from LexicalCandidates overlapping the span.
+    private func buildLexicalLedgerEntries(
+        span: DecodedSpan,
+        candidates: [LexicalCandidate],
+        fusionConfig: FusionWeightConfig
+    ) -> [EvidenceLedgerEntry] {
+        candidates.compactMap { candidate in
+            let overlapStart = max(span.startTime, candidate.startTime)
+            let overlapEnd = min(span.endTime, candidate.endTime)
+            guard overlapEnd > overlapStart else { return nil }
+
+            let weight = min(candidate.confidence * fusionConfig.lexicalCap, fusionConfig.lexicalCap)
+            let categories = candidate.categories.map(\.rawValue)
+            return EvidenceLedgerEntry(
+                source: .lexical,
+                weight: weight,
+                detail: .lexical(matchedCategories: categories)
+            )
+        }
+    }
+
+    /// Build acoustic ledger entries from FeatureWindows in the span's time range.
+    private func buildAcousticLedgerEntries(
+        span: DecodedSpan,
+        featureWindows: [FeatureWindow],
+        fusionConfig: FusionWeightConfig
+    ) -> [EvidenceLedgerEntry] {
+        let spanWindows = featureWindows.filter { fw in
+            fw.startTime < span.endTime && fw.endTime > span.startTime
+        }
+        guard !spanWindows.isEmpty else { return [] }
+
+        let breakStrength = RegionScoring.computeRmsDropScore(windows: spanWindows)
+        guard breakStrength > 0 else { return [] }
+
+        let weight = min(breakStrength * fusionConfig.acousticCap, fusionConfig.acousticCap)
+        return [EvidenceLedgerEntry(
+            source: .acoustic,
+            weight: weight,
+            detail: .acoustic(breakStrength: breakStrength)
+        )]
+    }
+
+    /// Build catalog ledger entries from EvidenceEntry items overlapping the span.
+    private func buildCatalogLedgerEntries(
+        span: DecodedSpan,
+        entries: [EvidenceEntry],
+        fusionConfig: FusionWeightConfig
+    ) -> [EvidenceLedgerEntry] {
+        let overlapping = entries.filter { entry in
+            entry.startTime < span.endTime && entry.endTime > span.startTime
+        }
+        guard !overlapping.isEmpty else { return [] }
+
+        let weight = min(
+            Double(overlapping.count) * 0.05 * fusionConfig.catalogCap,
+            fusionConfig.catalogCap
+        )
+        return [EvidenceLedgerEntry(
+            source: .catalog,
+            weight: weight,
+            detail: .catalog(entryCount: overlapping.count)
+        )]
+    }
+
+    /// Estimate transcript quality from the projected atom evidence.
+    private func estimateTranscriptQuality(atoms: [AtomEvidence]) -> TranscriptQuality {
+        guard !atoms.isEmpty else { return .degraded }
+        // Use the proportion of anchored atoms as a quality proxy.
+        // If > 30% of atoms are anchored, quality is considered good.
+        let anchoredFraction = Double(atoms.filter(\.isAnchored).count) / Double(atoms.count)
+        return anchoredFraction > 0.0 ? .good : .degraded
+    }
+
+    /// Build an AdWindow from a fusion DecisionResult.
+    private func buildFusionAdWindow(
+        span: DecodedSpan,
+        decision: DecisionResult,
+        policyAction: SkipPolicyAction,
+        analysisAssetId: String
+    ) -> AdWindow {
+        // Map fusion gate + policy to AdDecisionState.
+        // v1: all spans produce .confirmed for logOnly (data preserved for Phase 7+).
+        let decisionState: AdDecisionState
+        switch policyAction {
+        case .autoSkipEligible:
+            decisionState = decision.eligibilityGate == .eligible ? .confirmed : .candidate
+        case .detectOnly, .logOnly:
+            // logOnly and detectOnly: persist but don't auto-skip.
+            decisionState = .confirmed
+        case .suppress:
+            decisionState = .suppressed
+        }
+
+        return AdWindow(
+            id: UUID().uuidString,
+            analysisAssetId: analysisAssetId,
+            startTime: span.startTime,
+            endTime: span.endTime,
+            confidence: decision.skipConfidence,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: decisionState.rawValue,
+            detectorVersion: config.detectorVersion,
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            evidenceText: nil,
+            evidenceStartTime: span.startTime,
+            metadataSource: "fusion-v1",
+            metadataConfidence: decision.proposalConfidence,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false
+        )
+    }
+
+    /// Apply BoundaryRefiner to snap an AdWindow's boundaries to acoustic transitions.
+    private func applyBoundaryRefinement(
+        window: AdWindow,
+        featureWindows: [FeatureWindow]
+    ) -> AdWindow {
+        guard !featureWindows.isEmpty else { return window }
+
+        let (startAdj, endAdj) = BoundaryRefiner.computeAdjustments(
+            windows: featureWindows,
+            candidateStart: window.startTime,
+            candidateEnd: window.endTime
+        )
+
+        guard startAdj != 0 || endAdj != 0 else { return window }
+
+        return AdWindow(
+            id: window.id,
+            analysisAssetId: window.analysisAssetId,
+            startTime: window.startTime + startAdj,
+            endTime: window.endTime + endAdj,
+            confidence: window.confidence,
+            boundaryState: window.boundaryState,
+            decisionState: window.decisionState,
+            detectorVersion: window.detectorVersion,
+            advertiser: window.advertiser,
+            product: window.product,
+            adDescription: window.adDescription,
+            evidenceText: window.evidenceText,
+            evidenceStartTime: window.evidenceStartTime,
+            metadataSource: window.metadataSource,
+            metadataConfidence: window.metadataConfidence,
+            metadataPromptVersion: window.metadataPromptVersion,
+            wasSkipped: window.wasSkipped,
+            userDismissedBanner: window.userDismissedBanner
+        )
     }
 
     // MARK: - Region Shadow Phase (playhead-xba)
@@ -1007,78 +1400,7 @@ actor AdDetectionService {
         return classifier.classify(inputs: inputs, priors: showPriors)
     }
 
-    // MARK: - Decision Resolution
-
-    /// Determine whether to confirm or suppress an existing candidate
-    /// based on backfill classifier results.
-    private func resolveDecision(
-        existing: AdWindow,
-        backfillResults: [ClassifierResult]
-    ) -> String {
-        // Find the backfill result that best overlaps this window.
-        let bestMatch = backfillResults.first { result in
-            let overlapStart = max(existing.startTime, result.startTime)
-            let overlapEnd = min(existing.endTime, result.endTime)
-            return overlapEnd - overlapStart > 0
-        }
-
-        guard let match = bestMatch else {
-            // No backfill result overlaps -- suppress if confidence was borderline.
-            if existing.confidence < config.confirmationThreshold {
-                return AdDecisionState.suppressed.rawValue
-            }
-            return existing.decisionState
-        }
-
-        if match.adProbability >= config.confirmationThreshold {
-            return AdDecisionState.confirmed.rawValue
-        } else if match.adProbability < config.suppressionThreshold {
-            return AdDecisionState.suppressed.rawValue
-        }
-
-        // Between suppression and confirmation: keep as candidate.
-        return existing.decisionState
-    }
-
-    // MARK: - New Backfill Windows
-
-    /// Build AdWindows for backfill-only detections that don't overlap
-    /// any existing window.
-    private func buildNewBackfillWindows(
-        classifierResults: [ClassifierResult],
-        existingWindows: [AdWindow],
-        analysisAssetId: String,
-        lexicalCandidates: [LexicalCandidate]
-    ) -> [AdWindow] {
-        classifierResults
-            .filter { result in
-                result.adProbability >= config.confirmationThreshold
-                    && !overlapsExisting(result: result, existing: existingWindows)
-            }
-            .map { result in
-                buildAdWindow(
-                    from: result,
-                    boundaryState: .acousticRefined,
-                    decisionState: .confirmed,
-                    evidenceText: lexicalCandidates
-                        .first { $0.id == result.candidateId }?.evidenceText
-                )
-            }
-    }
-
-    /// Check whether a classifier result overlaps any existing AdWindow.
-    private func overlapsExisting(
-        result: ClassifierResult,
-        existing: [AdWindow]
-    ) -> Bool {
-        existing.contains { window in
-            let overlapStart = max(window.startTime, result.startTime)
-            let overlapEnd = min(window.endTime, result.endTime)
-            return overlapEnd - overlapStart > 0
-        }
-    }
-
-    // MARK: - AdWindow Construction
+    // MARK: - AdWindow Construction (hot path)
 
     private func buildAdWindow(
         from result: ClassifierResult,

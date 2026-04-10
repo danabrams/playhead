@@ -394,7 +394,7 @@ struct BackfillEvidenceFusionTests {
         // Classifier is a non-FM, independent signal that satisfies the corroboration requirement
         let entries: [EvidenceLedgerEntry] = [
             .init(source: .fm, weight: 0.35, detail: .fm(disposition: .containsAd, band: .moderate, cohortPromptLabel: "v1")),
-            .init(source: .classifier, weight: 0.25, detail: .classifier(rawScore: 0.62))
+            .init(source: .classifier, weight: 0.25, detail: .classifier(score: 0.62))
         ]
         let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig(), transcriptQuality: .good)
         let result = mapper.map()
@@ -444,16 +444,18 @@ struct BackfillEvidenceFusionTests {
 
     @Test("Gate blocks action without clamping skip confidence")
     func gateDoesNotClampSkipConfidence() {
-        // fmAcousticCorroborated only — should block by quorum but keep honest score
+        // fmAcousticCorroborated with FM-only entry — blocks by quorum (no external corroboration)
+        // but the score must remain honest (> 0) regardless of the gate value.
         let span = makeSpanWithFMAcoustic(startTime: 10.0, endTime: 40.0)
         let entries: [EvidenceLedgerEntry] = [
-            .init(source: .fm, weight: 0.4, detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1")),
-            .init(source: .classifier, weight: 0.3, detail: .classifier(score: 0.9))
+            .init(source: .fm, weight: 0.4, detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1"))
+            // No external-corroboration entry — quorum fails for fmAcousticCorroborated
         ]
         let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig(), transcriptQuality: .good)
         let result = mapper.map()
-        // Gate blocks but score should remain > 0
+        // Gate blocks because no external corroboration (classifier/lexical/acoustic/catalog) is present.
         #expect(result.eligibilityGate == .blockedByEvidenceQuorum)
+        // Score is honest regardless of gate: weight sum of 0.4 (capped at fmCap 0.4).
         #expect(result.skipConfidence > 0.0, "Score should be honest even when gate blocks")
     }
 
