@@ -1,12 +1,6 @@
 name: TestFlight Deploy
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**/*.md'
-      - '.beads/**'
-      - 'docs/**'
   workflow_dispatch:
     inputs:
       release_notes:
