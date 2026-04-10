@@ -207,4 +207,49 @@ struct DecisionStabilityPolicyTests {
         #expect(DecisionStabilityPolicy.default.stayThreshold == 0.45)
         #expect(DecisionStabilityPolicy.default.suppressionThreshold == 0.25)
     }
+
+    // Boundary: stayThreshold is a strict less-than — exactly 0.45 should NOT allow removal
+    @Test("score exactly at stayThreshold (0.45) does not satisfy score condition")
+    func exactlyAtStayThresholdBlocks() {
+        #expect(!policy.canRemoveCue(
+            currentScore: 0.45,
+            userCorrected: false,
+            fmNegativeWithStrongCertainty: true,
+            transcriptVersionChanged: true,
+            cohortOnlyChange: false
+        ))
+    }
+
+    // Boundary: suppressionThreshold is a strict less-than — exactly 0.25 should NOT allow cohort-only removal
+    @Test("cohort-only: score exactly at suppressionThreshold (0.25) does not allow removal")
+    func exactlyAtSuppressionThresholdBlocksCohortOnly() {
+        #expect(!policy.canRemoveCue(
+            currentScore: 0.25,
+            userCorrected: false,
+            fmNegativeWithStrongCertainty: false,
+            transcriptVersionChanged: false,
+            cohortOnlyChange: true
+        ))
+    }
+}
+
+@Suite("SkipPolicyMatrix — unlisted matrix cells")
+struct SkipPolicyMatrixUnlistedCellsTests {
+
+    // paid + show/network: ambiguous ownership, defaults to logOnly until Phase 8
+    @Test("paid + show → logOnly (ambiguous ownership, Phase 8 will resolve)")
+    func paidShowIsLogOnly() {
+        #expect(SkipPolicyMatrix.action(for: .paid, ownership: .show) == .logOnly)
+    }
+
+    @Test("paid + network → logOnly (ambiguous ownership, Phase 8 will resolve)")
+    func paidNetworkIsLogOnly() {
+        #expect(SkipPolicyMatrix.action(for: .paid, ownership: .network) == .logOnly)
+    }
+
+    // owned + thirdParty: a third-party spot claimed as owned is suspicious → logOnly
+    @Test("owned + thirdParty → logOnly (contradictory attribution)")
+    func ownedThirdPartyIsLogOnly() {
+        #expect(SkipPolicyMatrix.action(for: .owned, ownership: .thirdParty) == .logOnly)
+    }
 }

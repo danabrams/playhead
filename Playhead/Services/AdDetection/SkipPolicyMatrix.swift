@@ -26,6 +26,10 @@ struct SkipPolicyMatrix: Sendable {
     static func action(for intent: CommercialIntent, ownership: AdOwnership) -> SkipPolicyAction {
         switch intent {
         case .paid:
+            // paid + thirdParty: classic insertion — eligible for auto-skip.
+            // paid + show/network: show-produced paid content (e.g. dynamic in-episode reads for
+            // a brand the show also owns). The ownership attribution is ambiguous and Phase 8
+            // (SponsorKnowledgeStore) must resolve it before we can act. Until then: logOnly.
             return ownership == .thirdParty ? .autoSkipEligible : .logOnly
         case .owned:
             return (ownership == .show || ownership == .network) ? .detectOnly : .logOnly

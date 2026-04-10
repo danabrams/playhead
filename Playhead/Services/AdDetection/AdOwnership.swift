@@ -9,4 +9,9 @@ enum AdOwnership: String, Sendable, Codable, Hashable, CaseIterable {
     case show       // show-produced
     case network    // network-produced
     case unknown
+
+    // TODO(playhead-4my.8): FoundationModelClassifier.Ownership has a .guest case
+    // (for guest-mention/endorsement) that has no counterpart here. When Phase 8
+    // (SponsorKnowledgeStore) maps FM Ownership → AdOwnership, .guest will need
+    // an explicit mapping decision (likely .detectOnly or a new case).
 }

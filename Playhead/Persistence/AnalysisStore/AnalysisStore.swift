@@ -935,17 +935,19 @@ actor AnalysisStore {
         )
 
         // Phase 6 decision tables (playhead-4my.6.3) — same v5 batch
+        // UNIQUE on analysisAssetId so INSERT OR REPLACE enforces one active decision per asset.
+        // A new cohort recomputes decisions → replaces the old row, preserving the last-writer-wins
+        // contract without accumulating stale rows.
         try exec("""
             CREATE TABLE IF NOT EXISTS ad_decision_results (
                 id                  TEXT PRIMARY KEY,
-                analysisAssetId     TEXT NOT NULL,
+                analysisAssetId     TEXT NOT NULL UNIQUE,
                 decisionCohortJSON  TEXT NOT NULL,
                 inputArtifactRefs   TEXT NOT NULL,
                 decisionJSON        TEXT NOT NULL,
                 createdAt           REAL NOT NULL
             )
             """)
-        try exec("CREATE INDEX IF NOT EXISTS idx_adr_asset ON ad_decision_results(analysisAssetId)")
 
         try exec("""
             CREATE TABLE IF NOT EXISTS decision_events (
