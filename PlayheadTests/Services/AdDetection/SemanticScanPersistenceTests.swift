@@ -1348,11 +1348,9 @@ struct SemanticScanPersistenceTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
-        // Phase 4 bumped schema_version to 4: bd-3bz adds needs_shadow_retry
-        // columns to analysis_sessions; bd-m8k adds podcast_planner_state.
-        // Both run during the v3→v4 step. Migration chains all v1→v4 steps,
-        // so a fresh-from-v1 store still ends up at 4.
-        #expect(try await store.schemaVersion() == 4)
+        // Current schema is v5, which layers the Phase 6 ad-window prep on top
+        // of the earlier v1→v4 migration chain.
+        #expect(try await store.schemaVersion() == 5)
 
         try await store.insertAsset(makePersistenceTestAsset())
 
@@ -1454,9 +1452,9 @@ struct SemanticScanPersistenceTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
-        // Phase 4 bumped schema_version to 4 (bd-3bz + bd-m8k both run at v4).
-        // v2→v3→v4 chains.
-        #expect(try await store.schemaVersion() == 4)
+        // Current schema is v5, so the v2→v3→v4 ladder is followed by the
+        // additive Phase 6 ad-window prep step.
+        #expect(try await store.schemaVersion() == 5)
 
         try await store.insertAsset(makePersistenceTestAsset())
 

@@ -239,10 +239,9 @@ struct BackfillJobStoreTests {
     func testSchemaVersionRecorded() async throws {
         let store = try await makeTestStore()
         let version = try await store.schemaVersion()
-        // Phase 4 bumped schema_version to 4: bd-3bz adds the
-        // needs_shadow_retry / shadowRetryPodcastId columns to
-        // analysis_sessions; bd-m8k adds the podcast_planner_state table.
-        #expect(version == 4)
+        // Current schema is v5, which layers the Phase 6 ad-window prep
+        // on top of the earlier v4 analysis/planner migrations.
+        #expect(version == 5)
     }
 
     @Test("M8: deleting an asset cascades to its backfill_jobs rows")

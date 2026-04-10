@@ -169,7 +169,7 @@ final class PlayheadRuntime {
         //   • CapabilitiesService.currentSnapshot for thermal/charging state
         //   • UIDeviceBatteryProvider for battery level (same source as BPS)
         //   • ScanCohort.productionJSON() as the reuse-cache key
-        // When AdDetectionConfig.fmBackfillMode == .disabled, the factory is
+        // When AdDetectionConfig.fmBackfillMode == .off, the factory is
         // never invoked. When .shadow (default), FM runs and writes telemetry
         // to semantic_scan_results / evidence_events but never influences
         // AdWindow rows (shadow invariant pinned by

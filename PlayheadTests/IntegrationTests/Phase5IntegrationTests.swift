@@ -160,7 +160,7 @@ struct Phase5IntegrationTests {
             suppressionThreshold: 0.25,
             hotPathLookahead: 90.0,
             detectorVersion: "phase5-bench",
-            fmBackfillMode: .disabled
+            fmBackfillMode: .off
         )
         let detector = AdDetectionService(
             store: store,

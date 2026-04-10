@@ -238,7 +238,9 @@ private func makeAdWindow(
     startTime: Double = 60,
     endTime: Double = 120,
     confidence: Double = 0.75,
-    decisionState: String = "confirmed"
+    decisionState: String = "confirmed",
+    evidenceSources: String? = nil,
+    eligibilityGate: String? = nil
 ) -> AdWindow {
     AdWindow(
         id: id,
@@ -258,7 +260,9 @@ private func makeAdWindow(
         metadataConfidence: nil,
         metadataPromptVersion: nil,
         wasSkipped: false,
-        userDismissedBanner: false
+        userDismissedBanner: false,
+        evidenceSources: evidenceSources,
+        eligibilityGate: eligibilityGate
     )
 }
 
@@ -407,12 +411,18 @@ struct AnalysisStoreCRUDTests {
     func adWindowCRUD() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAnalysisAsset())
-        let ad = makeAdWindow(id: "ad-1")
+        let ad = makeAdWindow(
+            id: "ad-1",
+            evidenceSources: #"["classifier","lexical"]"#,
+            eligibilityGate: "eligible"
+        )
         try await store.insertAdWindow(ad)
         let fetched = try await store.fetchAdWindows(assetId: "asset-1")
         #expect(fetched.count == 1)
         #expect(fetched[0].confidence == 0.75)
         #expect(fetched[0].decisionState == "confirmed")
+        #expect(fetched[0].evidenceSources == #"["classifier","lexical"]"#)
+        #expect(fetched[0].eligibilityGate == "eligible")
     }
 
     @Test("Update ad window decision state")

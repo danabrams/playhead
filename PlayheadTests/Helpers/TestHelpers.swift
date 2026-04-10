@@ -159,9 +159,10 @@ func probeIndexExists(in directory: URL, indexName: String) throws -> Bool {
 /// `AnalysisStore.migrateOnlyForTesting()` in isolation from
 /// `createTables()`. Only the tables that the V*IfNeeded ladder touches
 /// are seeded, in their v1 shape: no `needsShadowRetry`, no
-/// `transcriptVersion` on evidence_events, no `phase` columns. The
-/// caller seeds `_meta.schema_version` explicitly via
-/// `seedSchemaVersion`.
+/// `transcriptVersion` on evidence_events, no `phase` columns, and the
+/// pre-Phase-6 `ad_windows` shape without `evidenceSources` /
+/// `eligibilityGate`. The caller seeds `_meta.schema_version`
+/// explicitly via `seedSchemaVersion`.
 func seedV1ShapeDatabase(in directory: URL) throws {
     let dbURL = directory.appendingPathComponent("analysis.sqlite")
     var db: OpaquePointer?
@@ -208,6 +209,26 @@ func seedV1ShapeDatabase(in directory: URL) throws {
             evidenceJSON TEXT NOT NULL,
             scanCohortJSON TEXT NOT NULL,
             createdAt REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS ad_windows (
+            id TEXT PRIMARY KEY,
+            analysisAssetId TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+            startTime REAL NOT NULL,
+            endTime REAL NOT NULL,
+            confidence REAL NOT NULL,
+            boundaryState TEXT NOT NULL,
+            decisionState TEXT NOT NULL DEFAULT 'candidate',
+            detectorVersion TEXT NOT NULL,
+            advertiser TEXT,
+            product TEXT,
+            adDescription TEXT,
+            evidenceText TEXT,
+            evidenceStartTime REAL,
+            metadataSource TEXT NOT NULL DEFAULT 'none',
+            metadataConfidence REAL,
+            metadataPromptVersion TEXT,
+            wasSkipped INTEGER NOT NULL DEFAULT 0,
+            userDismissedBanner INTEGER NOT NULL DEFAULT 0
         );
         """
     guard sqlite3_exec(db, ddl, nil, nil, nil) == SQLITE_OK else {

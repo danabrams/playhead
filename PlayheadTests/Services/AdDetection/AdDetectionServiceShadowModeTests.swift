@@ -1,7 +1,7 @@
 // AdDetectionServiceShadowModeTests.swift
 // The shadow invariant: with fmBackfillMode = .shadow, the AdWindows produced
 // by AdDetectionService.runBackfill must be byte-identical to the AdWindows
-// produced with fmBackfillMode = .disabled. The only observable difference is
+// produced with fmBackfillMode = .off. The only observable difference is
 // rows in semantic_scan_results / evidence_events.
 
 import Foundation
@@ -68,7 +68,7 @@ struct AdDetectionServiceShadowModeTests {
 
     /// Builds a deterministic `BackfillJobRunnerFactory` that routes FM work
     /// through `TestFMRuntime` with a canned coarse response. Both the
-    /// shadow and disabled services in test #7 receive the same factory so
+    /// shadow and off services in test #7 receive the same factory so
     /// the only observable difference is the `fmBackfillMode` gate in
     /// `AdDetectionService.runShadowFMPhase`.
     private func makeDeterministicFactory() -> @Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner {
@@ -100,11 +100,11 @@ struct AdDetectionServiceShadowModeTests {
 
     private func adWindowSignature(_ window: AdWindow) -> String {
         // Strip ID/UUID-like fields so signatures stay byte-identical across runs.
-        "\(window.startTime)|\(window.endTime)|\(window.confidence)|\(window.boundaryState)|\(window.decisionState)|\(window.detectorVersion)|\(window.advertiser ?? "-")|\(window.product ?? "-")|\(window.evidenceText ?? "-")"
+        "\(window.startTime)|\(window.endTime)|\(window.confidence)|\(window.boundaryState)|\(window.decisionState)|\(window.detectorVersion)|\(window.advertiser ?? "-")|\(window.product ?? "-")|\(window.evidenceText ?? "-")|\(window.evidenceSources ?? "-")|\(window.eligibilityGate ?? "-")"
     }
 
-    @Test("H-R3-3: shadow mode produces byte-identical cues to disabled mode (same store, same asset)")
-    func shadowAndDisabledProduceIdenticalAdWindows() async throws {
+    @Test("H-R3-3: shadow mode produces byte-identical cues to off mode (same store, same asset)")
+    func shadowAndOffProduceIdenticalAdWindows() async throws {
         // H-R3-3: strengthened from the test #7 fix. The original
         // comparison used two different stores + two different asset ids,
         // which drifted the comparison: any global state or ordering issue
@@ -120,9 +120,9 @@ struct AdDetectionServiceShadowModeTests {
         let factory = makeDeterministicFactory()
         let chunks = makeChunks(assetId: assetId)
 
-        // Run #1: disabled — shadow gate short-circuits, no FM work, and
+        // Run #1: off — shadow gate short-circuits, no FM work, and
         // the classical backfill pipeline writes the baseline AdWindows.
-        let disabledService = makeService(
+        let offService = makeService(
             store: store,
             config: AdDetectionConfig(
                 candidateThreshold: 0.40,
@@ -130,11 +130,11 @@ struct AdDetectionServiceShadowModeTests {
                 suppressionThreshold: 0.25,
                 hotPathLookahead: 90.0,
                 detectorVersion: "detection-v1",
-                fmBackfillMode: .disabled
+                fmBackfillMode: .off
             ),
             factory: factory
         )
-        try await disabledService.runBackfill(
+        try await offService.runBackfill(
             chunks: chunks,
             analysisAssetId: assetId,
             podcastId: "podcast-shared",
@@ -143,12 +143,12 @@ struct AdDetectionServiceShadowModeTests {
         let preShadowWindows = try await store.fetchAdWindows(assetId: assetId)
         let preShadowSigs = preShadowWindows.map(adWindowSignature).sorted()
 
-        // Confirm the baseline: disabled mode must not have written FM
+        // Confirm the baseline: off mode must not have written FM
         // telemetry.
         let preShadowScans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
         let preShadowEvents = try await store.fetchEvidenceEvents(analysisAssetId: assetId)
-        #expect(preShadowScans.isEmpty, "disabled mode must not persist semantic scan rows")
-        #expect(preShadowEvents.isEmpty, "disabled mode must not persist evidence events")
+        #expect(preShadowScans.isEmpty, "off mode must not persist semantic scan rows")
+        #expect(preShadowEvents.isEmpty, "off mode must not persist evidence events")
 
         // Run #2: shadow — same store, same asset id. The shadow FM path
         // must write telemetry but MUST NOT mutate the AdWindow rows we

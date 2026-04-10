@@ -332,9 +332,6 @@ struct RuleBasedClassifier: ClassifierService {
     /// signals alone."
     private static let sigmoidMid: Double = 0.25
 
-    /// Maximum boundary adjustment (seconds).
-    private static let maxBoundaryAdjust: Double = 3.0
-
     // MARK: - Batch API
 
     func classify(inputs: [ClassifierInput], priors: ShowPriors) -> [ClassifierResult] {
@@ -378,7 +375,7 @@ struct RuleBasedClassifier: ClassifierService {
 
         // --- Boundary adjustment ---
 
-        let (startAdj, endAdj) = computeBoundaryAdjustments(
+        let (startAdj, endAdj) = BoundaryRefiner.computeAdjustments(
             windows: windows,
             candidateStart: candidate.startTime,
             candidateEnd: candidate.endTime
@@ -403,74 +400,6 @@ struct RuleBasedClassifier: ClassifierService {
             endAdjustment: endAdj,
             signalBreakdown: breakdown
         )
-    }
-
-    // MARK: - Boundary Adjustment
-
-    /// Snap candidate boundaries to the nearest acoustic transition.
-    /// Looks for RMS drops or spectral flux peaks near the edges.
-    private func computeBoundaryAdjustments(
-        windows: [FeatureWindow],
-        candidateStart: Double,
-        candidateEnd: Double
-    ) -> (startAdjust: Double, endAdjust: Double) {
-        guard windows.count >= 3 else { return (0.0, 0.0) }
-
-        let startAdj = findNearestTransition(
-            windows: windows,
-            anchor: candidateStart,
-            searchDirection: .backward
-        )
-        let endAdj = findNearestTransition(
-            windows: windows,
-            anchor: candidateEnd,
-            searchDirection: .forward
-        )
-
-        return (
-            max(-Self.maxBoundaryAdjust, min(startAdj, Self.maxBoundaryAdjust)),
-            max(-Self.maxBoundaryAdjust, min(endAdj, Self.maxBoundaryAdjust))
-        )
-    }
-
-    private enum SearchDirection {
-        case forward, backward
-    }
-
-    /// Find the nearest acoustic transition (RMS drop or spectral spike)
-    /// near an anchor time. Returns the time offset to adjust the boundary.
-    private func findNearestTransition(
-        windows: [FeatureWindow],
-        anchor: Double,
-        searchDirection: SearchDirection
-    ) -> Double {
-        // Find windows near the anchor.
-        let nearbyWindows = windows.filter {
-            abs(($0.startTime + $0.endTime) / 2.0 - anchor) <= Self.maxBoundaryAdjust
-        }
-        guard nearbyWindows.count >= 2 else { return 0.0 }
-
-        // Look for the biggest RMS jump between consecutive windows.
-        var bestDelta = 0.0
-        var bestTime = anchor
-
-        for i in 0 ..< nearbyWindows.count - 1 {
-            let w1 = nearbyWindows[i]
-            let w2 = nearbyWindows[i + 1]
-            let rmsDelta = abs(w2.rms - w1.rms)
-            let fluxBoost = max(w1.spectralFlux, w2.spectralFlux) * 0.5
-            let combined = rmsDelta + fluxBoost
-
-            if combined > bestDelta {
-                bestDelta = combined
-                bestTime = (w1.endTime + w2.startTime) / 2.0
-            }
-        }
-
-        // Only adjust if we found a meaningful transition.
-        guard bestDelta > 0.05 else { return 0.0 }
-
-        return bestTime - anchor
     }
 
     // MARK: - Calibration

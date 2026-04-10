@@ -121,7 +121,7 @@ struct Phase3ShadowReplayHarnessTests {
                 suppressionThreshold: 0.25,
                 hotPathLookahead: 90.0,
                 detectorVersion: "detection-v1",
-                fmBackfillMode: .disabled
+                fmBackfillMode: .off
             )
         )
     }

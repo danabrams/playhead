@@ -116,6 +116,52 @@ struct AdWindow: Sendable {
     let metadataPromptVersion: String?
     let wasSkipped: Bool
     let userDismissedBanner: Bool
+    let evidenceSources: String?
+    let eligibilityGate: String?
+
+    init(
+        id: String,
+        analysisAssetId: String,
+        startTime: Double,
+        endTime: Double,
+        confidence: Double,
+        boundaryState: String,
+        decisionState: String,
+        detectorVersion: String,
+        advertiser: String?,
+        product: String?,
+        adDescription: String?,
+        evidenceText: String?,
+        evidenceStartTime: Double?,
+        metadataSource: String,
+        metadataConfidence: Double?,
+        metadataPromptVersion: String?,
+        wasSkipped: Bool,
+        userDismissedBanner: Bool,
+        evidenceSources: String? = nil,
+        eligibilityGate: String? = nil
+    ) {
+        self.id = id
+        self.analysisAssetId = analysisAssetId
+        self.startTime = startTime
+        self.endTime = endTime
+        self.confidence = confidence
+        self.boundaryState = boundaryState
+        self.decisionState = decisionState
+        self.detectorVersion = detectorVersion
+        self.advertiser = advertiser
+        self.product = product
+        self.adDescription = adDescription
+        self.evidenceText = evidenceText
+        self.evidenceStartTime = evidenceStartTime
+        self.metadataSource = metadataSource
+        self.metadataConfidence = metadataConfidence
+        self.metadataPromptVersion = metadataPromptVersion
+        self.wasSkipped = wasSkipped
+        self.userDismissedBanner = userDismissedBanner
+        self.evidenceSources = evidenceSources
+        self.eligibilityGate = eligibilityGate
+    }
 }
 
 struct SkipCue: Sendable {
@@ -276,7 +322,7 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 4
+    nonisolated private static let currentSchemaVersion = 5
 
     /// bd-m8k / Cycle 2 C4: Maximum number of recent full-rescan **recall**
     /// samples retained for the `stable_recall_flag` ring. Must match the
@@ -414,6 +460,7 @@ actor AnalysisStore {
             try migrateEvidenceEventsTranscriptVersionV3IfNeeded()
             try migrateAnalysisSessionsShadowRetryV4IfNeeded()
             try migratePodcastPlannerStateV4IfNeeded()
+            try migrateAdWindowsPhase6PrepV5IfNeeded()
             // Cycle 8 reconciliation: both C4 (Rev3-M5 shadow/targeted) and
             // B6 (Rev3-M6 BackfillJobPhase.rawValue) added a `phase` column
             // for different semantic dimensions. Keep C4's `phase` column
@@ -465,7 +512,7 @@ actor AnalysisStore {
     /// already-opened store, bypassing `createTables()`. The cycle-2
     /// `MigrationLadderTests` seeded `_meta.schema_version` but still
     /// went through full `migrate()`, which calls `createTables()` first
-    /// and builds every table in its v4 shape via
+    /// and builds every table in its current shape via
     /// `CREATE TABLE IF NOT EXISTS`. Tables-already-present short-circuits
     /// most of the ladder body, so the tests passed even against pre-C6
     /// code (the C6 bug could not actually be reached).
@@ -487,6 +534,7 @@ actor AnalysisStore {
         try migrateEvidenceEventsTranscriptVersionV3IfNeeded()
         try migrateAnalysisSessionsShadowRetryV4IfNeeded()
         try migratePodcastPlannerStateV4IfNeeded()
+        try migrateAdWindowsPhase6PrepV5IfNeeded()
         // Mirror the belt-and-suspenders phase/jobPhase column re-adds
         // that `migrate()` performs after the v2/v3 evidence_events
         // rebuild (cycle-8 reconciliation: both columns coexist).
@@ -620,7 +668,8 @@ actor AnalysisStore {
 
     /// Seeds `_meta.schema_version = '1'` on a brand-new database so the
     /// subsequent migration ladder (`migrateEvidenceEventsNaturalKeyV2IfNeeded`,
-    /// `…V3IfNeeded`, `…V4IfNeeded`, `migratePodcastPlannerStateV4IfNeeded`)
+    /// `…V3IfNeeded`, `…V4IfNeeded`, `migratePodcastPlannerStateV4IfNeeded`,
+    /// `migrateAdWindowsPhase6PrepV5IfNeeded`)
     /// climbs correctly to `currentSchemaVersion`.
     ///
     /// C6 fix (scope): this used to bind `String(currentSchemaVersion)`
@@ -852,6 +901,22 @@ actor AnalysisStore {
         }
     }
 
+    private func migrateAdWindowsPhase6PrepV5IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 5 else { return }
+
+        try addColumnIfNeeded(
+            table: "ad_windows",
+            column: "evidenceSources",
+            definition: "TEXT"
+        )
+        try addColumnIfNeeded(
+            table: "ad_windows",
+            column: "eligibilityGate",
+            definition: "TEXT"
+        )
+        try setSchemaVersion(5)
+    }
+
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
     /// is missing (only possible on a corrupted store, since `migrate()` writes
     /// it on first run).
@@ -1018,7 +1083,9 @@ actor AnalysisStore {
                 metadataConfidence  REAL,
                 metadataPromptVersion TEXT,
                 wasSkipped          INTEGER NOT NULL DEFAULT 0,
-                userDismissedBanner INTEGER NOT NULL DEFAULT 0
+                userDismissedBanner INTEGER NOT NULL DEFAULT 0,
+                evidenceSources     TEXT,
+                eligibilityGate     TEXT
             )
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_ad_asset ON ad_windows(analysisAssetId)")
@@ -1768,8 +1835,9 @@ actor AnalysisStore {
             (id, analysisAssetId, startTime, endTime, confidence, boundaryState,
              decisionState, detectorVersion, advertiser, product, adDescription,
              evidenceText, evidenceStartTime, metadataSource, metadataConfidence,
-             metadataPromptVersion, wasSkipped, userDismissedBanner)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             metadataPromptVersion, wasSkipped, userDismissedBanner,
+             evidenceSources, eligibilityGate)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -1791,6 +1859,8 @@ actor AnalysisStore {
         bind(stmt, 16, ad.metadataPromptVersion)
         bind(stmt, 17, ad.wasSkipped ? 1 : 0)
         bind(stmt, 18, ad.userDismissedBanner ? 1 : 0)
+        bind(stmt, 19, ad.evidenceSources)
+        bind(stmt, 20, ad.eligibilityGate)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -1819,7 +1889,9 @@ actor AnalysisStore {
                 metadataConfidence: optionalDouble(stmt, 14),
                 metadataPromptVersion: optionalText(stmt, 15),
                 wasSkipped: sqlite3_column_int(stmt, 16) != 0,
-                userDismissedBanner: sqlite3_column_int(stmt, 17) != 0
+                userDismissedBanner: sqlite3_column_int(stmt, 17) != 0,
+                evidenceSources: optionalText(stmt, 18),
+                eligibilityGate: optionalText(stmt, 19)
             ))
         }
         return results

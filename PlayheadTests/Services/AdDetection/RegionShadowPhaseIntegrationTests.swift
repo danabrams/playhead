@@ -113,7 +113,7 @@ struct RegionShadowPhaseIntegrationTests {
                 detectorVersion: "test-region-shadow",
                 // Disable the Phase 3 FM shadow so this test focuses on the
                 // Phase 4 wire-up without requiring an FM runner factory.
-                fmBackfillMode: .disabled
+                fmBackfillMode: .off
             ),
             regionShadowObserver: observer
         )
@@ -189,7 +189,7 @@ struct RegionShadowPhaseIntegrationTests {
                 suppressionThreshold: 0.25,
                 hotPathLookahead: 90.0,
                 detectorVersion: "test-region-shadow-disabled",
-                fmBackfillMode: .disabled
+                fmBackfillMode: .off
             )
             // regionShadowObserver intentionally omitted — default nil.
         )

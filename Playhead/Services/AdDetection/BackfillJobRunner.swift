@@ -1,10 +1,8 @@
 // BackfillJobRunner.swift
-// Phase 3 shadow-mode orchestrator. Walks: CoveragePlanner -> AdmissionController
-// -> FoundationModelClassifier (coarse + refinement) -> SemanticScanResult /
-// EvidenceEvent persistence. The runner never writes AdWindow rows: shadow mode
-// is observation-only. Phase 6 will introduce a separate decision-fusion layer
-// that promotes FM evidence to user-visible cues; until then, .enabled silently
-// degrades to .shadow with a logged warning.
+// Backfill orchestrator. Walks: CoveragePlanner -> AdmissionController ->
+// FoundationModelClassifier (coarse + refinement) -> SemanticScanResult /
+// EvidenceEvent persistence. The runner never writes AdWindow rows directly;
+// later Phase 6 beads will consume the persisted evidence via fusion.
 
 import CryptoKit
 import Foundation
@@ -239,15 +237,12 @@ actor BackfillJobRunner {
         permissiveContextOverflowCount = 0
         asymmetricWindowCount = 0
 
-        guard mode != .disabled else {
-            logger.debug("FM backfill skipped: mode=disabled")
+        switch mode {
+        case .off:
+            logger.debug("FM backfill skipped: mode=off")
             return .empty
-        }
-
-        if mode == .enabled {
-            logger.warning(
-                "fmBackfillMode=.enabled requested but Phase 6 fusion is not yet implemented; falling back to .shadow"
-            )
+        case .shadow, .rescoreOnly, .proposalOnly, .full:
+            break
         }
 
         // Cycle 2 Rev1-L4: counters that scope to a single

@@ -138,15 +138,15 @@ struct BackfillJobRunnerTests {
 
     // MARK: - Tests
 
-    @Test("disabled mode runs no FM jobs and writes nothing")
-    func disabledModeIsNoOp() async throws {
+    @Test("off mode runs no FM jobs and writes nothing")
+    func offModeIsNoOp() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
         let fmRuntime = TestFMRuntime()
         let runner = makeRunner(
             store: store,
             runtime: fmRuntime.runtime,
-            mode: .disabled
+            mode: .off
         )
 
         let result = try await runner.runPendingBackfill(for: makeInputs())
@@ -1679,30 +1679,41 @@ struct BackfillJobRunnerTests {
         }
     }
 
-    @Test("enabled mode falls back to shadow behavior (no AdWindow writes)")
-    func enabledModeFallsBackToShadow() async throws {
-        let store = try await makeTestStore()
-        try await store.insertAsset(makeAsset())
-        let fmRuntime = TestFMRuntime(
-            coarseResponses: [
-                CoarseScreeningSchema(
-                    disposition: .containsAd,
-                    support: CoarseSupportSchema(supportLineRefs: [1], certainty: .strong)
+    @Test("non-off Phase 6 modes still run FM without writing AdWindows directly")
+    func phase6ModesPersistWithoutAdWindowWrites() async throws {
+        let modes: [FMBackfillMode] = [.shadow, .rescoreOnly, .proposalOnly, .full]
+
+        for mode in modes {
+            let assetId = "asset-\(mode.rawValue)"
+            let store = try await makeTestStore()
+            try await store.insertAsset(makeAsset(id: assetId))
+            let fmRuntime = TestFMRuntime(
+                coarseResponses: [
+                    CoarseScreeningSchema(
+                        disposition: .containsAd,
+                        support: CoarseSupportSchema(supportLineRefs: [1], certainty: .strong)
+                    )
+                ]
+            )
+            let runner = makeRunner(
+                store: store,
+                runtime: fmRuntime.runtime,
+                mode: mode
+            )
+
+            let result = try await runner.runPendingBackfill(
+                for: makeInputs(
+                    assetId: assetId,
+                    podcastId: "podcast-\(mode.rawValue)",
+                    transcriptVersion: "tx-\(mode.rawValue)"
                 )
-            ]
-        )
-        let runner = makeRunner(
-            store: store,
-            runtime: fmRuntime.runtime,
-            mode: .enabled
-        )
+            )
 
-        _ = try await runner.runPendingBackfill(for: makeInputs())
-
-        let windows = try await store.fetchAdWindows(assetId: "asset-runner")
-        #expect(windows.isEmpty, "enabled mode must not yet write AdWindows")
-        let scans = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")
-        #expect(!scans.isEmpty, "FM must still run and persist results in fallback")
+            #expect(!result.scanResultIds.isEmpty, "\(mode.rawValue) should persist FM output")
+            #expect(await fmRuntime.coarseCallCount >= 1, "\(mode.rawValue) should run FM")
+            let windows = try await store.fetchAdWindows(assetId: assetId)
+            #expect(windows.isEmpty, "\(mode.rawValue) must not write AdWindows directly")
+        }
     }
 
     // MARK: - R7-Fix11: scan id / job id hashing

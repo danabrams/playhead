@@ -124,7 +124,7 @@ enum RegionShadowPhase {
             // playhead-xba follow-up: FM windows are now plumbed through
             // `RunResult.fmRefinementWindows` → `AdDetectionService` →
             // `RegionShadowPhase.Input.fmWindows`. Empty when shadow FM
-            // was not run (disabled mode, no factory, or zero spans).
+            // was not run (off mode, no factory, or zero spans).
             fmWindows: input.fmWindows
         )
 

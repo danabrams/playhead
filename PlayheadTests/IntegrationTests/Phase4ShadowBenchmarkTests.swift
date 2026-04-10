@@ -307,7 +307,7 @@ struct Phase4ShadowBenchmarkTests {
             suppressionThreshold: 0.25,
             hotPathLookahead: 90.0,
             detectorVersion: "phase4-bench",
-            fmBackfillMode: .disabled
+            fmBackfillMode: .off
         )
 
         let detector = AdDetectionService(
@@ -505,7 +505,7 @@ struct Phase4ShadowBenchmarkTests {
             suppressionThreshold: 0.25,
             hotPathLookahead: 90.0,
             detectorVersion: "phase4-bench-real",
-            fmBackfillMode: .disabled
+            fmBackfillMode: .off
         )
 
         let detector = AdDetectionService(

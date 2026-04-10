@@ -33,8 +33,8 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        // Reaches v4 (current).
-        #expect(try await store.schemaVersion() == 4)
+        // Reaches v5 (current).
+        #expect(try await store.schemaVersion() == 5)
 
         // analysis_sessions has the camelCase column (H10).
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
@@ -46,15 +46,17 @@ struct MigrationLadderTests {
 
         // bd-m8k planner state table exists (created via the v4 chain).
         #expect(try probeTableExists(in: dir, table: "podcast_planner_state"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "evidenceSources"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "eligibilityGate"))
 
         // Rev3-M5 phase columns present.
         #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "runMode"))
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "runMode"))
     }
 
-    // MARK: - H11: seeded v1 → v4 ladder runs all V*IfNeeded blocks
+    // MARK: - H11: seeded v1 → v5 ladder runs all V*IfNeeded blocks
 
-    @Test("H11: v1 → v4 migration chain reaches current schema")
+    @Test("H11: v1 → v5 migration chain reaches current schema")
     func seededV1ChainsToCurrent() async throws {
         let dir = try freshTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -65,7 +67,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 4)
+        #expect(try await store.schemaVersion() == 5)
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "shadowRetryPodcastId"))
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
@@ -76,6 +78,8 @@ struct MigrationLadderTests {
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "runMode"))
         #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "runMode"))
         #expect(try probeTableExists(in: dir, table: "podcast_planner_state"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "evidenceSources"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "eligibilityGate"))
 
         // Migration is committed and the store is usable.
         try await store.insertAsset(
@@ -95,7 +99,7 @@ struct MigrationLadderTests {
         )
     }
 
-    @Test("H11: v2 → v4 chains both v3 and v4 changes")
+    @Test("H11: v2 → v5 chains v3, v4, and v5 changes")
     func seededV2ChainsToCurrent() async throws {
         let dir = try freshTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -106,7 +110,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 4)
+        #expect(try await store.schemaVersion() == 5)
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "shadowRetryPodcastId"))
@@ -117,9 +121,11 @@ struct MigrationLadderTests {
         #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "runMode"))
         // H10 camelCase rename — the snake_case column must NOT linger.
         #expect(!(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needs_shadow_retry")))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "evidenceSources"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "eligibilityGate"))
     }
 
-    @Test("H11: v3 → v4 adds shadow retry columns and planner state table")
+    @Test("H11: v3 → v5 adds shadow retry columns, planner state table, and ad-window prep")
     func seededV3ChainsToCurrent() async throws {
         let dir = try freshTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -130,7 +136,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 4)
+        #expect(try await store.schemaVersion() == 5)
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "shadowRetryPodcastId"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_sessions_shadow_retry"))
@@ -138,6 +144,8 @@ struct MigrationLadderTests {
         // Cycle 4 H2: phase columns must survive the v3 rebuild.
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "runMode"))
         #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "runMode"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "evidenceSources"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "eligibilityGate"))
     }
 
     // MARK: - Cycle 4 H1: isolated migration ladder (bypasses createTables)
@@ -151,7 +159,7 @@ struct MigrationLadderTests {
     /// the time the ladder ran. This test exercises the ladder in
     /// isolation via `migrateOnlyForTesting()` so the V*IfNeeded blocks
     /// have to do real work, and asserts the final v4 shape emerges.
-    @Test("Cycle 4 H1: v1-shape DB climbs to v4 via migrateOnlyForTesting (no createTables)")
+    @Test("Cycle 4 H1: v1-shape DB climbs to v5 via migrateOnlyForTesting (no createTables)")
     func isolatedLadderFromV1() async throws {
         let dir = try freshTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -164,8 +172,8 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrateOnlyForTesting()
 
-        // V2 → v3 → v4 ladder must have run, reaching the target version.
-        #expect(try await store.schemaVersion() == 4)
+        // V2 → v3 → v4 → v5 ladder must have run, reaching the target version.
+        #expect(try await store.schemaVersion() == 5)
         // V3 added transcriptVersion to evidence_events.
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
         // V4 added needsShadowRetry + shadowRetryPodcastId + the partial
@@ -176,6 +184,8 @@ struct MigrationLadderTests {
         // The tail-of-migrate() addColumnIfNeeded for `phase` is mirrored
         // in migrateOnlyForTesting, so the phase column must land.
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "runMode"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "evidenceSources"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "eligibilityGate"))
         // NOTE: `podcast_planner_state` is NOT asserted here. Both V4
         // migration blocks guard on `schemaVersion < 4`, and
         // `migrateAnalysisSessionsShadowRetryV4IfNeeded` runs first and
@@ -188,7 +198,7 @@ struct MigrationLadderTests {
         // test fails only on the bugs it was designed to catch.
     }
 
-    @Test("Cycle 4 H1: v2-seeded DB climbs to v4 via isolated ladder")
+    @Test("Cycle 4 H1: v2-seeded DB climbs to v5 via isolated ladder")
     func isolatedLadderFromV2() async throws {
         let dir = try freshTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -203,13 +213,15 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrateOnlyForTesting()
 
-        #expect(try await store.schemaVersion() == 4)
+        #expect(try await store.schemaVersion() == 5)
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "runMode"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "evidenceSources"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "eligibilityGate"))
     }
 
-    @Test("Cycle 4 H1: v3-seeded DB climbs to v4 via isolated ladder")
+    @Test("Cycle 4 H1: v3-seeded DB climbs to v5 via isolated ladder")
     func isolatedLadderFromV3() async throws {
         let dir = try freshTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -221,11 +233,11 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrateOnlyForTesting()
 
-        #expect(try await store.schemaVersion() == 4)
+        #expect(try await store.schemaVersion() == 5)
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "shadowRetryPodcastId"))
-        // See note in isolatedLadderFromV1 about why planner_state is
-        // intentionally not asserted in the isolated-ladder path.
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "evidenceSources"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "eligibilityGate"))
     }
 
     // MARK: - H11: idempotence
@@ -245,7 +257,7 @@ struct MigrationLadderTests {
         let v2 = try await store.schemaVersion()
 
         #expect(v1 == v2)
-        #expect(v2 == 4)
+        #expect(v2 == 5)
     }
 
     // MARK: - C6: seeded v4 _meta-less data path
@@ -255,7 +267,7 @@ struct MigrationLadderTests {
         let dir = try freshTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        // First, run a real migrate so the v4 tables exist on disk.
+        // First, run a real migrate so the v5 tables exist on disk.
         AnalysisStore.resetMigratedPathsForTesting()
         let bootstrap = try AnalysisStore(directory: dir)
         try await bootstrap.migrate()
@@ -275,8 +287,10 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 4)
+        #expect(try await store.schemaVersion() == 5)
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "evidenceSources"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "eligibilityGate"))
     }
 
     // MARK: - H10 repair: pre-rename column gets renamed in place

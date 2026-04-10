@@ -31,6 +31,10 @@ struct AdDetectionConfig: Sendable {
     /// FM runs and persists results, but never influences skip cues. See
     /// `FMBackfillMode` for the full contract.
     let fmBackfillMode: FMBackfillMode
+    /// Upper bound for FM scanning work per backfill run.
+    let fmScanBudgetSeconds: TimeInterval
+    /// Minimum overlapping FM windows needed to count as consensus.
+    let fmConsensusThreshold: Int
 
     init(
         candidateThreshold: Double,
@@ -38,7 +42,9 @@ struct AdDetectionConfig: Sendable {
         suppressionThreshold: Double,
         hotPathLookahead: TimeInterval,
         detectorVersion: String,
-        fmBackfillMode: FMBackfillMode = .shadow
+        fmBackfillMode: FMBackfillMode = .shadow,
+        fmScanBudgetSeconds: TimeInterval = 300,
+        fmConsensusThreshold: Int = 2
     ) {
         self.candidateThreshold = candidateThreshold
         self.confirmationThreshold = confirmationThreshold
@@ -46,6 +52,8 @@ struct AdDetectionConfig: Sendable {
         self.hotPathLookahead = hotPathLookahead
         self.detectorVersion = detectorVersion
         self.fmBackfillMode = fmBackfillMode
+        self.fmScanBudgetSeconds = fmScanBudgetSeconds
+        self.fmConsensusThreshold = fmConsensusThreshold
     }
 
     static let `default` = AdDetectionConfig(
@@ -54,7 +62,9 @@ struct AdDetectionConfig: Sendable {
         suppressionThreshold: 0.25,
         hotPathLookahead: 90.0,
         detectorVersion: "detection-v1",
-        fmBackfillMode: .shadow
+        fmBackfillMode: .shadow,
+        fmScanBudgetSeconds: 300,
+        fmConsensusThreshold: 2
     )
 }
 
@@ -142,7 +152,7 @@ actor AdDetectionService {
     private let metadataExtractor: MetadataExtractor
     private let config: AdDetectionConfig
     /// Optional factory that returns a `BackfillJobRunner` for the FM shadow
-    /// phase. When `nil`, FM is skipped entirely (equivalent to .disabled).
+    /// phase. When `nil`, FM is skipped entirely (equivalent to .off).
     /// Tests inject a deterministic runner; production wiring lives in
     /// `PlayheadRuntime`.
     private let backfillJobRunnerFactory: (@Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner)?
@@ -450,7 +460,7 @@ actor AdDetectionService {
         // decisions are still untouched — nothing downstream of step 9
         // reads AdWindow rows from these windows.
         var shadowFMWindows: [FMRefinementWindowOutput] = []
-        if config.fmBackfillMode != .disabled {
+        if config.fmBackfillMode != .off {
             if podcastId.isEmpty {
                 logger.info("Skipping shadow FM phase: missing podcastId for asset \(analysisAssetId)")
             } else {
@@ -669,7 +679,7 @@ actor AdDetectionService {
         podcastId: String,
         sessionIdOverride: String? = nil
     ) async -> ShadowFMPhaseResult {
-        guard config.fmBackfillMode != .disabled else { return .skipped }
+        guard config.fmBackfillMode != .off else { return .skipped }
 
         guard let factory = backfillJobRunnerFactory else {
             logger.debug("Shadow FM phase skipped: no runner factory injected")
