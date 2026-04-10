@@ -258,9 +258,10 @@ struct DecisionMapper: Sendable {
     }
 
     /// Quorum check for spans anchored by fmAcousticCorroborated only.
-    /// Needs external corroboration from lexical, catalog, or acoustic sources.
+    /// Needs external corroboration from any non-FM source: classifier, lexical, catalog, or acoustic.
+    /// Classifier is included because it is an independent, non-FM signal that provides corroboration.
     private func quorumGateForFMAcoustic() -> SkipEligibilityGate {
-        let externalSources: Set<EvidenceSourceType> = [.lexical, .catalog, .acoustic]
+        let externalSources: Set<EvidenceSourceType> = [.classifier, .lexical, .catalog, .acoustic]
         let hasExternalCorroboration = ledger.contains { externalSources.contains($0.source) }
         return hasExternalCorroboration ? .eligible : .blockedByEvidenceQuorum
     }
