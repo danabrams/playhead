@@ -16,6 +16,26 @@ import CoreMedia
 import Foundation
 import OSLog
 
+// MARK: - Future Contract Scaffold
+
+/// Phase 6 contract scaffold introduced by bead 6.7 so the pending
+/// AdDecisionResult-based tests compile against the planned production
+/// symbol names before bead 6.4 wires the real behavior.
+enum AdDecisionEligibilityGate: String, Sendable {
+    case eligible
+    case blocked
+}
+
+struct AdDecisionResult: Sendable {
+    let id: String
+    let analysisAssetId: String
+    let startTime: Double
+    let endTime: Double
+    let skipConfidence: Double
+    let eligibilityGate: AdDecisionEligibilityGate
+    let recomputationRevision: Int
+}
+
 // MARK: - Skip Decision State
 
 /// Lifecycle of an AdWindow through the skip orchestrator.
@@ -321,6 +341,15 @@ actor SkipOrchestrator {
 
         // Re-evaluate all windows and push updated cues.
         evaluateAndPush()
+    }
+
+    /// Phase 6 contract scaffold only. Bead 6.4 will replace this
+    /// logging no-op placeholder with the real AdDecisionResult path.
+    func receiveAdDecisionResults(_ results: [AdDecisionResult]) async {
+        guard !results.isEmpty else { return }
+        logger.warning(
+            "Ignoring \(results.count, privacy: .public) AdDecisionResult value(s) until playhead-4my.6.4 wires the contract"
+        )
     }
 
     // MARK: - Playback State Updates
