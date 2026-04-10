@@ -31,6 +31,9 @@ enum SemanticScanStatus: String, Codable, Sendable, Hashable, CaseIterable {
     case permissiveRefusal = "permissive_refusal"
     case permissiveDecodingFailure = "permissive_decoding_failure"
     case permissiveContextOverflow = "permissive_context_overflow"
+    // H1-FM: eu1 permissive retry succeeded but returned no ad spans.
+    // Recorded so callers can account for every window in the plan.
+    case noAds = "no_ads"
 
     /// Documents the recovery path for each status so backfill and future
     /// persistence code can make the same retry decision everywhere.
@@ -61,6 +64,8 @@ enum SemanticScanStatus: String, Codable, Sendable, Hashable, CaseIterable {
         // transition, same as standard `.refusal`.
         case .permissiveRefusal, .permissiveDecodingFailure, .permissiveContextOverflow:
             .persistFailure
+        case .noAds:
+            .none
         }
     }
 

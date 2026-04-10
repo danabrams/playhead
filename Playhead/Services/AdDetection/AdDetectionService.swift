@@ -489,6 +489,13 @@ actor AdDetectionService {
         // non-nil `phase5ProjectorObserver` (DEBUG-only injection pattern,
         // same contract as `regionShadowObserver`). Failures are logged and
         // swallowed. No AdWindow rows or skip cues are touched.
+        //
+        // Design note: the `!shadowBundles.isEmpty` guard is intentional.
+        // Phase 5's evidence catalog requires FM regions sourced from Phase 4
+        // bundles to produce anchored atoms; with zero bundles there are no
+        // regions to project against, so running the phase would be a no-op.
+        // Revisit this gate if Phase 5 ever needs to operate independently
+        // of Phase 4 (e.g. lexical-only projection without FM evidence).
         if let p5observer = phase5ProjectorObserver, !shadowBundles.isEmpty {
             await runPhase5ProjectorPhase(
                 observer: p5observer,
@@ -606,7 +613,14 @@ actor AdDetectionService {
         let decoder = MinimalContiguousSpanDecoder()
         let spans = decoder.decode(atoms: evidence, assetId: analysisAssetId)
 
-        // Record results in observer.
+        // Persist to SQLite so TranscriptPeekView can read them.
+        do {
+            try await store.upsertDecodedSpans(spans)
+        } catch {
+            logger.error("Phase 5 projector: failed to persist decoded spans for asset \(analysisAssetId): \(error)")
+        }
+
+        // Record results in observer (DEBUG diagnostics).
         await observer.record(assetId: analysisAssetId, spans: spans, evidence: evidence)
 
         logger.info(

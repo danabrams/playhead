@@ -229,6 +229,80 @@ struct DecodedSpanPersistenceTests {
         #expect(fetched[0].anchorProvenance.isEmpty)
     }
 
+    @Test("Mixed anchor provenance round-trips all types and values (M3-UI decode-failure guard)")
+    func mixedAnchorProvenanceRoundTrips() async throws {
+        let store = try await makeStore()
+        let assetId = "mixed-prov-asset"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let evidenceEntry = EvidenceEntry(
+            evidenceRef: 99,
+            category: .url,
+            matchedText: "sponsor.example.com/offer",
+            normalizedText: "sponsor.example.com",
+            atomOrdinal: 12,
+            startTime: 12.0,
+            endTime: 12.8
+        )
+        let provenance: [AnchorRef] = [
+            .fmConsensus(regionId: "rgn-alpha", consensusStrength: 0.85),
+            .fmAcousticCorroborated(regionId: "rgn-beta", breakStrength: 0.42),
+            .evidenceCatalog(entry: evidenceEntry),
+            .fmConsensus(regionId: "rgn-gamma", consensusStrength: 1.0),
+        ]
+
+        let span = makeSpan(
+            id: DecodedSpan.makeId(assetId: assetId, firstAtomOrdinal: 10, lastAtomOrdinal: 35),
+            assetId: assetId,
+            firstOrdinal: 10,
+            lastOrdinal: 35,
+            startTime: 10.0,
+            endTime: 35.0,
+            provenance: provenance
+        )
+
+        try await store.upsertDecodedSpans([span])
+        let fetched = try await store.fetchDecodedSpans(assetId: assetId)
+
+        #expect(fetched.count == 1)
+        let fetchedProv = fetched[0].anchorProvenance
+        #expect(fetchedProv.count == provenance.count, "Anchor count must survive round-trip — silent decode failures drop entries")
+
+        // Verify each entry by index to catch ordering or type corruption.
+        if case .fmConsensus(let rid, let str) = fetchedProv[0] {
+            #expect(rid == "rgn-alpha")
+            #expect(str == 0.85)
+        } else {
+            Issue.record("Expected fmConsensus at index 0, got \(fetchedProv[0])")
+        }
+
+        if case .fmAcousticCorroborated(let rid, let str) = fetchedProv[1] {
+            #expect(rid == "rgn-beta")
+            #expect(str == 0.42)
+        } else {
+            Issue.record("Expected fmAcousticCorroborated at index 1, got \(fetchedProv[1])")
+        }
+
+        if case .evidenceCatalog(let entry) = fetchedProv[2] {
+            #expect(entry.evidenceRef == 99)
+            #expect(entry.matchedText == "sponsor.example.com/offer")
+            #expect(entry.normalizedText == "sponsor.example.com")
+            #expect(entry.category == .url)
+            #expect(entry.atomOrdinal == 12)
+            #expect(entry.startTime == 12.0)
+            #expect(entry.endTime == 12.8)
+        } else {
+            Issue.record("Expected evidenceCatalog at index 2, got \(fetchedProv[2])")
+        }
+
+        if case .fmConsensus(let rid, let str) = fetchedProv[3] {
+            #expect(rid == "rgn-gamma")
+            #expect(str == 1.0)
+        } else {
+            Issue.record("Expected fmConsensus at index 3, got \(fetchedProv[3])")
+        }
+    }
+
     @Test("Evidencecatalog provenance entry round-trips via JSON")
     func evidenceCatalogProvenanceRoundTrips() async throws {
         let store = try await makeStore()

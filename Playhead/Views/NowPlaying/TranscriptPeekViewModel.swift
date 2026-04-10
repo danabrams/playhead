@@ -21,6 +21,10 @@ final class TranscriptPeekViewModel {
     /// Phase 5 decoded spans for the new overlay rendering.
     private(set) var decodedSpans: [DecodedSpan] = []
 
+    /// Pre-computed mapping from chunk index to overlapping decoded spans.
+    /// Rebuilt each refresh cycle so per-row lookups are O(1).
+    private var spansByChunkIndex: [Int: [DecodedSpan]] = [:]
+
     /// Index of the chunk containing the current playback position, or nil.
     private(set) var activeChunkIndex: Int?
 
@@ -125,7 +129,14 @@ final class TranscriptPeekViewModel {
         return overlapping.map(\.confidence).max()
     }
 
+    /// Returns all Phase 5 decoded spans overlapping the chunk at `chunkIndex`.
+    /// Uses the pre-computed mapping built during refresh() for O(1) lookup.
+    func decodedSpansOverlapping(chunkIndex: Int) -> [DecodedSpan] {
+        spansByChunkIndex[chunkIndex] ?? []
+    }
+
     /// Returns all Phase 5 decoded spans overlapping the given time range.
+    /// Retained for callers that don't have a chunk index handy.
     func decodedSpansOverlapping(startTime: Double, endTime: Double) -> [DecodedSpan] {
         decodedSpans.filter { span in
             span.startTime < endTime && span.endTime > startTime
@@ -196,6 +207,21 @@ final class TranscriptPeekViewModel {
 
     // MARK: - Private
 
+    /// Rebuild the chunk-index → overlapping-spans lookup table.
+    /// Called once per refresh cycle so per-row view queries are O(1).
+    private func rebuildSpansByChunkIndex() {
+        var mapping: [Int: [DecodedSpan]] = [:]
+        for (idx, chunk) in chunks.enumerated() {
+            let overlapping = decodedSpans.filter { span in
+                span.startTime < chunk.endTime && span.endTime > chunk.startTime
+            }
+            if !overlapping.isEmpty {
+                mapping[idx] = overlapping
+            }
+        }
+        spansByChunkIndex = mapping
+    }
+
     private func refresh() async {
         do {
             let freshChunks = try await store.fetchTranscriptChunks(assetId: analysisAssetId)
@@ -213,6 +239,7 @@ final class TranscriptPeekViewModel {
             chunks = deduped
             adWindows = freshAds
             decodedSpans = freshSpans
+            rebuildSpansByChunkIndex()
             await updateDebugStats()
         } catch {
             logger.error("Failed to refresh transcript chunks: \(error)")

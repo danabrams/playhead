@@ -3932,6 +3932,7 @@ actor AnalysisStore {
                       let decoded = try? decoder.decode([AnchorRef].self, from: data) {
                 provenance = decoded
             } else {
+                logger.warning("fetchDecodedSpans: failed to decode anchorProvenanceJSON for span \(id, privacy: .public) asset \(aid, privacy: .public)")
                 provenance = []
             }
 

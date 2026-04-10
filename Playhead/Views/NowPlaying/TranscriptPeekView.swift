@@ -176,6 +176,13 @@ private extension TranscriptPeekView {
                     proxy.scrollTo(targetId, anchor: .center)
                 }
             }
+            .popover(item: $selectedDecodedSpan) { span in
+                AdRegionPopover(
+                    span: span,
+                    correctionStore: correctionStore,
+                    onDismiss: { selectedDecodedSpan = nil }
+                )
+            }
         }
     }
 
@@ -195,10 +202,7 @@ private extension TranscriptPeekView {
         )
 
         // Phase 5 decoded spans overlapping this chunk
-        let overlappingSpans = peekViewModel.decodedSpansOverlapping(
-            startTime: chunk.startTime,
-            endTime: chunk.endTime
-        )
+        let overlappingSpans = peekViewModel.decodedSpansOverlapping(chunkIndex: index)
         let isDecodedAd = !overlappingSpans.isEmpty
         // Use the first overlapping span for the popover tap target
         let primarySpan = overlappingSpans.first
@@ -228,10 +232,8 @@ private extension TranscriptPeekView {
                     let isFirstChunkOfSpan: Bool = {
                         guard isDecodedAd else { return false }
                         guard index > 0 else { return true }
-                        let prevChunk = peekViewModel.chunks[index - 1]
                         let prevSpanIds = Set(peekViewModel.decodedSpansOverlapping(
-                            startTime: prevChunk.startTime,
-                            endTime: prevChunk.endTime
+                            chunkIndex: index - 1
                         ).map(\.id))
                         let currentSpanIds = Set(overlappingSpans.map(\.id))
                         return currentSpanIds.isDisjoint(with: prevSpanIds)
@@ -276,16 +278,6 @@ private extension TranscriptPeekView {
             if let span = primarySpan {
                 selectedDecodedSpan = span
             }
-        }
-        .popover(item: Binding(
-            get: { selectedDecodedSpan.flatMap { s in overlappingSpans.first(where: { $0.id == s.id }) } },
-            set: { selectedDecodedSpan = $0 }
-        )) { span in
-            AdRegionPopover(
-                span: span,
-                correctionStore: correctionStore,
-                onDismiss: { selectedDecodedSpan = nil }
-            )
         }
         .animation(Motion.quick, value: isActive)
         .accessibilityElement(children: .combine)

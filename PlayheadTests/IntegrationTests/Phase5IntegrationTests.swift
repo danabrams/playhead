@@ -6,7 +6,7 @@
 //   1. Ad-second coverage improves over the Phase 4 baseline (15% → >= 30%).
 //   2. Spans are contiguous (no micro-fragments < 5s).
 //   3. Duration constraints prevent implausible spans (no span > 180s).
-//   4. decode(decode(x)) == decode(x) idempotency holds.
+//   4. decode(decode(x)) == decode(x) determinism holds.
 //   5. No-ad episode → zero spans.
 //   6. Adversarial high-noise no-anchor episode → zero spans.
 
@@ -219,10 +219,10 @@ struct Phase5IntegrationTests {
         }
     }
 
-    // MARK: - Idempotency
+    // MARK: - Determinism
 
-    @Test("decode(decode(x)) == decode(x) integration idempotency on Conan fixture")
-    func phase5IdempotencyOnConanFixture() async throws {
+    @Test("decode(decode(x)) == decode(x) integration determinism on Conan fixture")
+    func phase5DeterminismOnConanFixture() async throws {
         let chunks = ConanFanhausenRevisitedFixture.parseChunks()
         let assetId = ConanFanhausenRevisitedFixture.assetId
 

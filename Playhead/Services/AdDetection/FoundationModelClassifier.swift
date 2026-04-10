@@ -343,6 +343,11 @@ struct FMCoarseScanOutput: Sendable, Equatable {
     /// is abandoned by the smart-shrink retry loop but the rest of the
     /// pass continues. Empty when every window succeeded or when the
     /// pass aborted on a non-recoverable failure.
+    ///
+    /// Note: includes non-failure statuses like `.noAds` for accounting
+    /// completeness — `windows.count + failedWindowStatuses.count` must
+    /// equal the number of zoom plans attempted. A `.noAds` entry means
+    /// the window succeeded with a no-ad result, not that it failed.
     let failedWindowStatuses: [SemanticScanStatus]
 
     /// Cycle 2 C2: per-reason counts of permissive bypass failures
@@ -543,6 +548,11 @@ struct FMRefinementScanOutput: Sendable {
     /// exhaustion) but the rest of the pass continues. Empty when every
     /// window succeeded or when the pass aborted on a non-recoverable
     /// failure. Mirrors `FMCoarseScanOutput.failedWindowStatuses`.
+    ///
+    /// Note: includes non-failure statuses like `.noAds` for accounting
+    /// completeness — `windows.count + failedWindowStatuses.count` must
+    /// equal the number of zoom plans attempted. A `.noAds` entry means
+    /// the window succeeded with a no-ad result, not that it failed.
     let failedWindowStatuses: [SemanticScanStatus]
 
     /// Cycle 2 C2: per-reason permissive bypass failure tally for the
@@ -1718,9 +1728,13 @@ struct FoundationModelClassifier: Sendable {
                             """
                         )
                         if permissiveSpans.isEmpty {
-                            // `.noAd` from the focused refinement — drop
-                            // the window cleanly. Do not record as a
-                            // failure.
+                            // `.noAds` is semantically a success (zero ads
+                            // found), not a failure. It lives in
+                            // failedWindowStatuses solely for accounting
+                            // completeness: windows.count +
+                            // failedWindowStatuses.count == zoomPlans.count.
+                            // TODO: separate tracking array (deferrable).
+                            failedWindowStatuses.append(.noAds)
                             continue
                         }
                         windows.append(
@@ -1830,7 +1844,13 @@ struct FoundationModelClassifier: Sendable {
                             """
                         )
                         if permissiveSpans.isEmpty {
-                            // `.noAd` from focused refinement — drop cleanly.
+                            // `.noAds` is semantically a success (zero ads
+                            // found), not a failure. It lives in
+                            // failedWindowStatuses solely for accounting
+                            // completeness: windows.count +
+                            // failedWindowStatuses.count == zoomPlans.count.
+                            // TODO: separate tracking array (deferrable).
+                            failedWindowStatuses.append(.noAds)
                             continue
                         }
                         windows.append(
@@ -4019,6 +4039,7 @@ final actor SessionBox {
 @available(iOS 26.0, *)
 final actor LiveSessionActor {
     private let session: LanguageModelSession
+    private let schemaLessExperiment: Bool
 
     // playhead-994 experiment: env var gate for the
     // `includeSchemaInPrompt: false` + one-shot example path.
@@ -4050,7 +4071,9 @@ final actor LiveSessionActor {
         """
 
     init() {
-        if Self.schemaLessExperimentEnabled() {
+        let schemaLess = Self.schemaLessExperimentEnabled()
+        self.schemaLessExperiment = schemaLess
+        if schemaLess {
             // playhead-994: create the session with one-shot example
             // instructions so the model understands the output format
             // even when the framework-injected schema text is suppressed.
@@ -4077,7 +4100,7 @@ final actor LiveSessionActor {
     }
 
     func respondRefinement(_ prompt: String, maximumResponseTokens: Int) async throws -> RefinementWindowSchema {
-        if Self.schemaLessExperimentEnabled() {
+        if schemaLessExperiment {
             // playhead-994 experiment: pass includeSchemaInPrompt: false to
             // suppress the framework-injected schema text from the augmented
             // input. The hypothesis (from the FoundationModels expert, 2026-04-08)

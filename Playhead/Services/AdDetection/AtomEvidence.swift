@@ -93,7 +93,12 @@ struct AtomEvidence: Sendable {
     let isAnchored: Bool
     /// Which upstream signals caused isAnchored == true.
     let anchorProvenance: [AnchorRef]
-    /// True if this atom is covered by an .acoustic-origin Phase 4 region.
+    /// True if this atom's ordinal falls within an acoustic-origin region's
+    /// `firstAtomOrdinal...lastAtomOrdinal` range — **not** necessarily at an
+    /// actual acoustic break timestamp. Use A (boundary snap) and Use B
+    /// (anti-merge) consume this as a coarse coverage flag; Use C break
+    /// proximity checks use the separate `allAcousticBreaks` list which
+    /// carries actual break timestamps mapped to ordinals.
     let hasAcousticBreakHint: Bool
     /// User correction override. Stable across transcript versions (keyed by ordinal).
     let correctionMask: CorrectionState

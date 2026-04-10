@@ -1,6 +1,6 @@
 // MinimalContiguousSpanDecoderTests.swift
 // Phase 5 (playhead-4my.5.2): Unit tests for MinimalContiguousSpanDecoder.
-// Covers all 5.2 acceptance criteria including Use A/B, idempotency, and robustness.
+// Covers all 5.2 acceptance criteria including Use A/B, determinism, and robustness.
 
 import Foundation
 import Testing
@@ -255,12 +255,125 @@ struct MinimalContiguousSpanDecoderTests {
         #expect(spans[0].startTime == 0.0)
     }
 
-    // MARK: - Idempotency
+    // MARK: - Overlap resolution (Step 4b)
 
-    @Test("decode(decode(x)) == decode(x) — idempotency")
-    func decoderIsIdempotent() {
+    @Test("Step 4b: boundary snap overlap is resolved — adjacent spans do not overlap after decode")
+    func boundarySnapOverlapResolved() {
+        // Two anchored runs separated by a gap of exactly MERGE_GAP_ATOMS (3),
+        // so they do NOT merge (gap must be strictly < 3). The gap atoms have
+        // acoustic break hints which (a) block merge via Use B and (b) attract
+        // Use A boundary snap from both sides, causing the spans to expand into
+        // each other's territory.
+        //
+        // Layout (18 atoms, 1s each):
+        //   [0..1]  — unanchored filler
+        //   [2..7]  — Run A (anchored, 6s >= MIN_DURATION)
+        //   [8..10] — gap (acoustic breaks, gap == 3 so no merge)
+        //   [11..16] — Run B (anchored, 6s >= MIN_DURATION)
+        //   [17]    — unanchored filler
+        //
+        // Use A snap:
+        //   Run A right edge (7): scans [4..10], picks LAST break → ordinal 10
+        //   Run B left edge (11): scans [8..14], picks FIRST break → ordinal 8
+        //   Pre-resolution: Run A ends at 10, Run B starts at 8 → overlap!
+        //
+        // Step 4b must clip so spans do not overlap.
+
+        let atoms: [AtomEvidence] = (0 ..< 18).map { i in
+            let isAnchored = (i >= 2 && i <= 7) || (i >= 11 && i <= 16)
+            let hasBreak = i >= 8 && i <= 10  // gap atoms are acoustic breaks
+            return makeEvidence(
+                ordinal: i,
+                startTime: Double(i),
+                endTime: Double(i) + 1.0,
+                isAnchored: isAnchored,
+                hasAcousticBreakHint: hasBreak
+            )
+        }
+
+        let spans = decoder.decode(atoms: atoms, assetId: "overlap-test")
+
+        // Must produce exactly two spans (not merged into one).
+        #expect(spans.count == 2, "Expected two separate spans, got \(spans.count)")
+
+        // Spans must not overlap in ordinal space.
+        #expect(
+            spans[0].lastAtomOrdinal < spans[1].firstAtomOrdinal,
+            "Ordinal overlap: span[0].last=\(spans[0].lastAtomOrdinal) >= span[1].first=\(spans[1].firstAtomOrdinal)"
+        )
+
+        // Spans must not overlap in time space.
+        #expect(
+            spans[0].endTime <= spans[1].startTime,
+            "Time overlap: span[0].end=\(spans[0].endTime) > span[1].start=\(spans[1].startTime)"
+        )
+    }
+
+    @Test("Step 4b: cascading 3-span overlap is resolved — all three spans non-overlapping after decode")
+    func cascadingOverlapResolved() {
+        // Three anchored runs, each separated by a gap of exactly MERGE_GAP_ATOMS (3),
+        // so they do NOT merge. Gap atoms have acoustic break hints which attract
+        // Use A boundary snap from both sides. Because spans are close together,
+        // clipping span 0/1 overlap can push span 1 into span 2's territory,
+        // requiring cascading resolution.
+        //
+        // Layout (36 atoms, 1s each):
+        //   [0..1]   — unanchored filler
+        //   [2..11]  — Run A (anchored, 10s >= MIN_DURATION)
+        //   [12..14] — gap (acoustic breaks, gap == 3 so no merge)
+        //   [15..24] — Run B (anchored, 10s >= MIN_DURATION)
+        //   [25..27] — gap (acoustic breaks, gap == 3 so no merge)
+        //   [28..37] — Run C (anchored, 10s >= MIN_DURATION)
+        //   [38..39] — unanchored filler
+        //
+        // Use A snap expands each run's edges into the gap, causing:
+        //   Run A right edge snaps into gap 1 → overlaps Run B
+        //   Run B left edge snaps into gap 1 → overlap with Run A
+        //   Run B right edge snaps into gap 2 → overlaps Run C
+        //   Run C left edge snaps into gap 2 → overlap with Run B
+        //
+        // Step 4b must clip cascadingly so no spans overlap.
+
+        let atoms: [AtomEvidence] = (0 ..< 40).map { i in
+            let isAnchored = (i >= 2 && i <= 11) || (i >= 15 && i <= 24) || (i >= 28 && i <= 37)
+            let hasBreak = (i >= 12 && i <= 14) || (i >= 25 && i <= 27)
+            return makeEvidence(
+                ordinal: i,
+                startTime: Double(i),
+                endTime: Double(i) + 1.0,
+                isAnchored: isAnchored,
+                hasAcousticBreakHint: hasBreak
+            )
+        }
+
+        let spans = decoder.decode(atoms: atoms, assetId: "cascading-overlap-test")
+
+        // Must produce exactly three spans (not merged).
+        #expect(spans.count == 3, "Expected three separate spans, got \(spans.count)")
+
+        // All adjacent pairs must not overlap in ordinal space.
+        for j in 0 ..< spans.count - 1 {
+            #expect(
+                spans[j].lastAtomOrdinal < spans[j + 1].firstAtomOrdinal,
+                "Ordinal overlap: span[\(j)].last=\(spans[j].lastAtomOrdinal) >= span[\(j + 1)].first=\(spans[j + 1].firstAtomOrdinal)"
+            )
+        }
+
+        // All adjacent pairs must not overlap in time space.
+        for j in 0 ..< spans.count - 1 {
+            #expect(
+                spans[j].endTime <= spans[j + 1].startTime,
+                "Time overlap: span[\(j)].end=\(spans[j].endTime) > span[\(j + 1)].start=\(spans[j + 1].startTime)"
+            )
+        }
+    }
+
+    // MARK: - Determinism
+
+    @Test("decode(decode(x)) == decode(x) — determinism")
+    func decoderIsDeterministic() {
         // Use Phase 5 observer to project atoms, then decode twice.
-        // We test structural idempotency directly with AtomEvidence.
+        // We test structural determinism directly with AtomEvidence.
         let atoms: [AtomEvidence] = (0 ..< 15).map { i in
             makeEvidence(
                 ordinal: i,
@@ -269,10 +382,10 @@ struct MinimalContiguousSpanDecoderTests {
                 isAnchored: i >= 2 && i <= 12
             )
         }
-        let firstPass = decoder.decode(atoms: atoms, assetId: "idempotency-test")
+        let firstPass = decoder.decode(atoms: atoms, assetId: "determinism-test")
         // Re-build AtomEvidence from the decoded spans (simulate re-decode)
-        // For idempotency: feeding the same [AtomEvidence] array twice should give same output.
-        let secondPass = decoder.decode(atoms: atoms, assetId: "idempotency-test")
+        // For determinism: feeding the same [AtomEvidence] array twice should give same output.
+        let secondPass = decoder.decode(atoms: atoms, assetId: "determinism-test")
 
         #expect(firstPass.count == secondPass.count)
         for (a, b) in zip(firstPass, secondPass) {

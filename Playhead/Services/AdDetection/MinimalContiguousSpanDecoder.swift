@@ -1,7 +1,7 @@
 // MinimalContiguousSpanDecoder.swift
 // Phase 5 (playhead-4my.5.2): Converts [AtomEvidence] into [DecodedSpan].
 //
-// Algorithm (rule order is pinned — must stay in this order for idempotency):
+// Algorithm (rule order is pinned — must stay in this order for determinism):
 //   1. FORM RUNS: contiguous anchored + non-vetoed atoms → candidate spans
 //   2. MERGE: adjacent candidates with gap < MERGE_GAP_ATOMS (no veto, no acoustic break in gap)
 //   3. SPLIT: spans > MAX_DURATION → split at longest internal gap (recurse)
@@ -12,7 +12,7 @@
 //   • No span without an upstream anchor.
 //   • .userVetoed atoms are excluded from all candidate sets.
 //   • .userConfirmed atoms do NOT create spans on their own (no anchor = no span).
-//   • decode(decode(x)) == decode(x) (idempotency guaranteed by fixed rule order).
+//   • decode(atoms, id) == decode(atoms, id) (determinism guaranteed by fixed rule order).
 //
 // All constants are in DecoderConstants (universal, not per-show).
 
@@ -37,11 +37,11 @@ struct MinimalContiguousSpanDecoder {
     ///   - assetId: The analysis asset ID (used for DecodedSpan.id computation).
     /// - Returns: Decoded ad spans, sorted by startTime.
     ///
-    // Idempotency note: decode(atoms, id) == decode(atoms, id) when given identical AtomEvidence
-    // input — verified by tests. Full-pipeline idempotency (project → decode → re-project → decode)
+    // Determinism note: decode(atoms, id) == decode(atoms, id) when given identical AtomEvidence
+    // input — verified by tests. Full-pipeline determinism (project → decode → re-project → decode)
     // is NOT guaranteed if span boundary ordinals are fed back as inputs to a second projection,
     // because Use A can expand boundaries beyond the original anchored range. Phase 6 must not
-    // assume re-projection is idempotent across boundary changes. Tracked as known risk in the
+    // assume re-projection is deterministic across boundary changes. Tracked as known risk in the
     // Phase 5 design doc (docs/plans/2026-04-09-phase-5-design.md).
     func decode(atoms: [AtomEvidence], assetId: String) -> [DecodedSpan] {
         guard !atoms.isEmpty else { return [] }
@@ -52,17 +52,28 @@ struct MinimalContiguousSpanDecoder {
         let candidates = formRuns(sortedAtoms)
         guard !candidates.isEmpty else { return [] }
 
+        // Shared lookup — built once, used by steps 2–4b.
+        let atomsByOrdinal = Dictionary(uniqueKeysWithValues: sortedAtoms.map {
+            ($0.atomOrdinal, $0)
+        })
+
         // Step 2: MERGE
-        let merged = mergeAdjacentCandidates(candidates, allAtoms: sortedAtoms)
+        let merged = mergeAdjacentCandidates(candidates, atomsByOrdinal: atomsByOrdinal)
 
         // Step 3: SPLIT
-        let split = merged.flatMap { splitIfNeeded($0, allAtoms: sortedAtoms) }
+        let split = merged.flatMap { splitIfNeeded($0, allAtoms: sortedAtoms, atomsByOrdinal: atomsByOrdinal) }
 
         // Step 4: USE A — boundary snap
-        let snapped = split.map { applyBoundarySnap($0, allAtoms: sortedAtoms) }
+        let snapped = split.map { applyBoundarySnap($0, allAtoms: sortedAtoms, atomsByOrdinal: atomsByOrdinal) }
+
+        // Step 4b: Resolve overlaps introduced by boundary snap.
+        // After snap, adjacent spans may overlap. Clip the later span's start
+        // to the earlier span's end so downstream skip/banner logic never sees
+        // overlapping time ranges.
+        let resolved = resolveOverlaps(snapped, atomsByOrdinal: atomsByOrdinal)
 
         // Step 5: DROP — remove micro-fragments
-        let kept = snapped.filter { $0.duration >= DecoderConstants.minDurationSeconds }
+        let kept = resolved.filter { $0.duration >= DecoderConstants.minDurationSeconds }
 
         // Build DecodedSpans from surviving candidates.
         let spans = kept.map { candidate -> DecodedSpan in
@@ -112,14 +123,18 @@ struct MinimalContiguousSpanDecoder {
             let participates = atom.isAnchored && atom.correctionMask != .userVetoed
 
             if participates {
-                if var span = current {
-                    // Extend the current run (atoms are sorted, so this is contiguous).
+                if var span = current, atom.atomOrdinal == span.lastOrdinal + 1 {
+                    // Extend the current run (ordinal is contiguous with previous atom).
                     span.lastOrdinal = atom.atomOrdinal
                     span.endTime = atom.endTime
                     // Merge anchor provenance, dedup by content.
                     span.anchorProvenance = mergeProvenance(span.anchorProvenance, atom.anchorProvenance)
                     current = span
                 } else {
+                    // Close current run if open (ordinal gap or first atom).
+                    if let span = current {
+                        result.append(span)
+                    }
                     // Start a new run.
                     current = CandidateSpan(
                         firstOrdinal: atom.atomOrdinal,
@@ -154,13 +169,9 @@ struct MinimalContiguousSpanDecoder {
     ///   3. No atom in the gap has hasAcousticBreakHint (Use B anti-merge)
     private func mergeAdjacentCandidates(
         _ candidates: [CandidateSpan],
-        allAtoms: [AtomEvidence]
+        atomsByOrdinal: [Int: AtomEvidence]
     ) -> [CandidateSpan] {
         guard candidates.count > 1 else { return candidates }
-
-        let atomsByOrdinal = Dictionary(uniqueKeysWithValues: allAtoms.map {
-            ($0.atomOrdinal, $0)
-        })
 
         var result: [CandidateSpan] = [candidates[0]]
 
@@ -198,12 +209,12 @@ struct MinimalContiguousSpanDecoder {
     // MARK: - Step 3: SPLIT
 
     /// Recursively split any span above MAX_DURATION at its longest internal gap.
-    private func splitIfNeeded(_ span: CandidateSpan, allAtoms: [AtomEvidence]) -> [CandidateSpan] {
+    private func splitIfNeeded(
+        _ span: CandidateSpan,
+        allAtoms: [AtomEvidence],
+        atomsByOrdinal: [Int: AtomEvidence]
+    ) -> [CandidateSpan] {
         guard span.duration > DecoderConstants.maxDurationSeconds else { return [span] }
-
-        let atomsByOrdinal = Dictionary(uniqueKeysWithValues: allAtoms.map {
-            ($0.atomOrdinal, $0)
-        })
 
         // Find atoms in this span range.
         let spanAtoms = (span.firstOrdinal ... span.lastOrdinal)
@@ -268,7 +279,7 @@ struct MinimalContiguousSpanDecoder {
                 endTime: last.endTime,
                 anchorProvenance: leftAtoms.flatMap(\.anchorProvenance).uniqued()
             )
-            results.append(contentsOf: splitIfNeeded(left, allAtoms: allAtoms))
+            results.append(contentsOf: splitIfNeeded(left, allAtoms: allAtoms, atomsByOrdinal: atomsByOrdinal))
         }
 
         if let first = rightAtoms.first, let last = rightAtoms.last {
@@ -279,7 +290,7 @@ struct MinimalContiguousSpanDecoder {
                 endTime: last.endTime,
                 anchorProvenance: rightAtoms.flatMap(\.anchorProvenance).uniqued()
             )
-            results.append(contentsOf: splitIfNeeded(right, allAtoms: allAtoms))
+            results.append(contentsOf: splitIfNeeded(right, allAtoms: allAtoms, atomsByOrdinal: atomsByOrdinal))
         }
 
         return results.isEmpty ? [span] : results
@@ -294,11 +305,7 @@ struct MinimalContiguousSpanDecoder {
 
     /// Snap span boundaries to nearby acoustic break atoms (±BOUNDARY_SNAP_RADIUS_ATOMS).
     /// Use A only adjusts edges — never creates spans.
-    private func applyBoundarySnap(_ span: CandidateSpan, allAtoms: [AtomEvidence]) -> CandidateSpan {
-        let atomsByOrdinal = Dictionary(uniqueKeysWithValues: allAtoms.map {
-            ($0.atomOrdinal, $0)
-        })
-
+    private func applyBoundarySnap(_ span: CandidateSpan, allAtoms: [AtomEvidence], atomsByOrdinal: [Int: AtomEvidence]) -> CandidateSpan {
         let radius = DecoderConstants.boundarySnapRadiusAtoms
         var result = span
 
@@ -325,6 +332,34 @@ struct MinimalContiguousSpanDecoder {
         }
 
         return result
+    }
+
+    // MARK: - Step 4b: Overlap Resolution
+
+    /// After boundary snap, adjacent spans may have expanded into each other's
+    /// territory. This clips later spans so no two spans overlap in time.
+    private func resolveOverlaps(_ spans: [CandidateSpan], atomsByOrdinal: [Int: AtomEvidence]) -> [CandidateSpan] {
+        guard spans.count > 1 else { return spans }
+
+        var sorted = spans.sorted { $0.firstOrdinal < $1.firstOrdinal }
+        for i in 1 ..< sorted.count {
+            if sorted[i].firstOrdinal <= sorted[i - 1].lastOrdinal {
+                // Clip later span's start to one past the earlier span's end.
+                sorted[i].firstOrdinal = sorted[i - 1].lastOrdinal + 1
+                // Find the atom for the new start ordinal to update startTime.
+                // If the clip collapses the span (firstOrdinal > lastOrdinal),
+                // it will be dropped by the MIN_DURATION filter in Step 5.
+                if sorted[i].firstOrdinal <= sorted[i].lastOrdinal {
+                    if let atom = atomsByOrdinal[sorted[i].firstOrdinal] {
+                        sorted[i].startTime = atom.startTime
+                    } else {
+                        sorted[i].startTime = sorted[i - 1].endTime
+                    }
+                }
+            }
+        }
+        // Drop any spans that were fully consumed by clipping.
+        return sorted.filter { $0.firstOrdinal <= $0.lastOrdinal }
     }
 
     // MARK: - Helpers

@@ -144,6 +144,10 @@ actor AtomEvidenceProjector {
         }
 
         // Which atom ordinals are covered by acoustic-origin regions?
+        // Note: this is region-range membership, not break-timestamp proximity.
+        // An ordinal lands here if it falls anywhere inside an acoustic region's
+        // firstAtomOrdinal...lastAtomOrdinal span, even if no actual acoustic
+        // break timestamp falls within that atom's time range.
         var acousticCoveredOrdinals = Set<Int>()
         for bundle in acousticRegions {
             let r = bundle.region
