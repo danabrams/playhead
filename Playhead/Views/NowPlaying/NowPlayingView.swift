@@ -77,6 +77,27 @@ struct NowPlayingView: View {
                 queue: bannerQueue,
                 onListen: { item in
                     viewModel.handleListenRewind(item: item)
+                },
+                // Phase 7.2: "Not an ad" correction from the banner.
+                // Uses the current analysis asset ID from the runtime. If the
+                // episode changed between skip and tap, the veto silently drops
+                // (assetId is nil) — acceptable for this UI path.
+                onNotAnAd: { item in
+                    guard let assetId = runtime.currentAnalysisAssetId else { return }
+                    let correctionStore = runtime.correctionStore
+                    Task {
+                        let event = CorrectionEvent(
+                            analysisAssetId: assetId,
+                            scope: CorrectionScope.exactSpan(
+                                assetId: assetId,
+                                ordinalRange: 0...Int.max
+                            ).serialized,
+                            createdAt: Date().timeIntervalSince1970,
+                            source: .manualVeto,
+                            podcastId: item.podcastId
+                        )
+                        try? await correctionStore.record(event)
+                    }
                 }
             )
         }
@@ -101,7 +122,10 @@ struct NowPlayingView: View {
                         analysisAssetId: assetId,
                         store: runtime.analysisStore
                     ),
-                    currentTime: viewModel.currentTime
+                    currentTime: viewModel.currentTime,
+                    // Phase 7.2: inject the persistent correction store so the
+                    // "This isn't an ad" gesture writes through to SQLite.
+                    correctionStore: runtime.correctionStore
                 )
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)

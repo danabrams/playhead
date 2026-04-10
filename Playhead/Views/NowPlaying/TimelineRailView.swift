@@ -15,6 +15,16 @@ struct TimelineRailView: View {
     /// Called when the user scrubs to a new position (fraction 0...1).
     let onSeek: (Double) -> Void
 
+    // Phase 7.2: tap-to-explain for ad segments.
+    // Called with the fractional index of the tapped segment when the user
+    // taps inside an ad block. The caller maps the index to a DecodedSpan
+    // and presents AdRegionPopover.
+    // Phase 7.3 NOTE: full AdRegionPopover wiring requires the caller to
+    // vend a DecodedSpan for the tapped segment (by matching adSegments[index]
+    // to the corresponding DecodedSpan via NowPlayingViewModel). Until that
+    // ViewModel method exists, the caller should present a fallback or skip.
+    var onAdSegmentTap: ((Int) -> Void)?
+
     /// Injected haptic player — defaults to `SystemHapticPlayer` in
     /// production, tests swap in a `RecordingHapticPlayer`. See
     /// `NowPlayingBar` for the canonical seam pattern.
@@ -66,12 +76,20 @@ struct TimelineRailView: View {
                     .frame(height: railHeight)
 
                 // MARK: Ad Segments (recessed charcoal blocks)
-                ForEach(Array(adSegments.enumerated()), id: \.offset) { _, segment in
+                ForEach(Array(adSegments.enumerated()), id: \.offset) { index, segment in
                     let x = segment.lowerBound * width
                     let w = (segment.upperBound - segment.lowerBound) * width
 
                     adSegmentBlock(width: max(w, 2))
                         .offset(x: x)
+                        // Phase 7.2: tap gesture on each ad block to surface AdRegionPopover.
+                        // Uses a tap target at least 44pt tall (inherited from parent frame).
+                        .onTapGesture {
+                            onAdSegmentTap?(index)
+                        }
+                        .accessibilityLabel("Ad segment \(index + 1) of \(adSegments.count)")
+                        .accessibilityHint("Tap to see details about this ad segment")
+                        .accessibilityAddTraits(.isButton)
                 }
 
                 // MARK: Elapsed Fill

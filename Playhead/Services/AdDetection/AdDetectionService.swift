@@ -208,6 +208,12 @@ actor AdDetectionService {
     /// to assert that results flow through; nil suppresses the forwarding call.
     private let skipOrchestrator: SkipOrchestrator?
 
+    /// Phase 7.2: optional correction store. When non-nil, `runBackfill` pre-computes
+    /// a per-span correction factor by querying the store's weighted corrections for
+    /// the asset. The factor is passed to `DecisionMapper` so correction-suppressed
+    /// spans gate to `.blockedByUserCorrection` without making the struct async.
+    var correctionStore: (any UserCorrectionStore)?
+
     // MARK: - Cached State
 
     /// Scanner is recreated per-episode when profile changes.
@@ -265,6 +271,14 @@ actor AdDetectionService {
         backfillJobRunnerFactory
     }
     #endif
+
+    // MARK: - Phase 7.2: Correction Store Injection
+
+    /// Set the user correction store. Called from PlayheadRuntime after init
+    /// (actor property writes must be asynchronous from an init context).
+    func setUserCorrectionStore(_ store: any UserCorrectionStore) {
+        self.correctionStore = store
+    }
 
     // MARK: - Profile Update
 
@@ -542,6 +556,16 @@ actor AdDetectionService {
         // Phase 6.5 (playhead-4my.16): accumulate AdDecisionResult for step 17 forwarding.
         var fusionDecisionResults: [AdDecisionResult] = []
 
+        // Phase 7.2: pre-compute correction factor for this asset (actor-context query).
+        // 1.0 = no suppression; < 1.0 = correction(s) exist and reduce effective confidence.
+        // Queried once per backfill run (not per span) for performance.
+        let assetCorrectionFactor: Double
+        if let correctionStore {
+            assetCorrectionFactor = await correctionStore.correctionWeight(for: analysisAssetId)
+        } else {
+            assetCorrectionFactor = 1.0
+        }
+
         for span in decodedSpans {
             try Task.checkCancellation()
 
@@ -577,7 +601,8 @@ actor AdDetectionService {
                 span: refinedSpan,
                 ledger: ledger,
                 config: fusionConfig,
-                transcriptQuality: transcriptQuality
+                transcriptQuality: transcriptQuality,
+                correctionFactor: assetCorrectionFactor
             )
             let decision = mapper.map()
 

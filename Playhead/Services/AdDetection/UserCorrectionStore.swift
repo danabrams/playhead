@@ -130,6 +130,17 @@ protocol UserCorrectionStore: Sendable {
 
     /// Append a fully-formed correction event to the store.
     func record(_ event: CorrectionEvent) async throws
+
+    /// Phase 7.2: Return an aggregate correction suppression factor for the
+    /// given analysis asset. The factor is in [0.0, 1.0]:
+    ///   - 1.0 means no active corrections (no suppression)
+    ///   - < 1.0 means one or more corrections exist; the minimum decay-weighted
+    ///     correction weight from the store reduces effective confidence.
+    ///
+    /// Callers (AdDetectionService) pre-compute this value from an actor context
+    /// and pass it to the pure-value `DecisionMapper` to avoid making the
+    /// mapper async.
+    func correctionWeight(for analysisAssetId: String) async -> Double
 }
 
 // MARK: - NoOpUserCorrectionStore
@@ -143,6 +154,11 @@ struct NoOpUserCorrectionStore: UserCorrectionStore {
 
     func record(_ event: CorrectionEvent) async throws {
         // No-op.
+    }
+
+    func correctionWeight(for analysisAssetId: String) async -> Double {
+        // No active corrections — no suppression.
+        return 1.0
     }
 }
 
@@ -225,6 +241,31 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
     /// Persist a fully-formed correction event.
     func record(_ event: CorrectionEvent) async throws {
         try await store.appendCorrectionEvent(event)
+    }
+
+    // MARK: - Protocol: correctionWeight
+
+    /// Returns the minimum decay-weighted correction factor for the given asset.
+    ///
+    /// If no corrections exist, returns 1.0 (no suppression). If corrections exist,
+    /// returns `1.0 - maxWeight` where maxWeight is the highest decay-weighted
+    /// correction seen — i.e. the most-recent correction has the most influence.
+    /// Result is clamped to [0.0, 1.0].
+    func correctionWeight(for analysisAssetId: String) async -> Double {
+        let weighted: [(CorrectionEvent, Double)]
+        do {
+            weighted = try await weightedCorrections(for: analysisAssetId)
+        } catch {
+            logger.warning(
+                "correctionWeight: failed to load corrections for \(analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return 1.0
+        }
+        guard !weighted.isEmpty else { return 1.0 }
+        // The strongest (most-recent) correction has the highest weight (close to 1.0).
+        // We convert to a suppression factor: 1.0 = no suppression, 0.0 = full suppression.
+        let maxCorrectionWeight = weighted.map(\.1).max() ?? 0.0
+        return max(0.0, 1.0 - maxCorrectionWeight)
     }
 
     // MARK: - Query

@@ -137,6 +137,10 @@ struct AdBannerView: View {
     /// Called when the user taps "Listen" to jump back to the skipped ad.
     var onListen: ((AdSkipBannerItem) -> Void)?
 
+    /// Phase 7.2: Called when the user taps "Not an ad" to record a correction.
+    /// When nil, the button is hidden.
+    var onNotAnAd: ((AdSkipBannerItem) -> Void)?
+
     /// Injected haptic player — defaults to `SystemHapticPlayer` in
     /// production, tests swap in a `RecordingHapticPlayer`.
     var hapticPlayer: any HapticPlaying = SystemHapticPlayer()
@@ -245,6 +249,21 @@ struct AdBannerView: View {
 
             // Bottom line: actions
             HStack {
+                // Phase 7.2: "Not an ad" correction button (leading, muted).
+                if let onNotAnAd {
+                    Button {
+                        onNotAnAd(item)
+                        queue.dismiss()
+                    } label: {
+                        Text("Not an ad")
+                            .font(AppTypography.sans(size: 12, weight: .regular))
+                            .foregroundStyle(boneText.opacity(0.5))
+                    }
+                    .buttonStyle(BannerButtonStyle())
+                    .accessibilityLabel("Mark as not an ad")
+                    .accessibilityHint("Records that this segment was not an advertisement")
+                }
+
                 Spacer()
 
                 // Listen button — copper accent
