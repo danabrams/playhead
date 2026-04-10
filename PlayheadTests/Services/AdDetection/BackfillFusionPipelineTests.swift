@@ -567,19 +567,18 @@ struct BackfillOrchestratorWiringTests {
             episodeDuration: 90.0
         )
 
-        // The orchestrator decision log should be populated if the pipeline produced
-        // confirmed windows that step 17 forwarded. Shadow mode (the default when
-        // no TrustScoringService is wired) means windows arrive as .confirmed, not
-        // .applied — but they ARE logged.
-        let log = await orchestrator.getDecisionLog()
-        // We can only assert the log is non-empty if the pipeline produced spans.
-        // The ad-signal chunks used here should trigger the lexical → classifier → fusion
-        // path and produce at least one confirmed window. The primary assertion: no crash.
-        // Secondary: if spans were produced, the orchestrator received them.
+        // The ad-signal chunks contain "brought to you by Squarespace" — a strong
+        // lexical signal that reliably triggers the classifier and fusion pipeline.
+        // We assert that at least one window was produced (hard-fail if not, since
+        // that would indicate a broader pipeline regression, not just a step-17 issue).
         let fusionWindows = try await store.fetchAdWindows(assetId: assetId)
-        if !fusionWindows.isEmpty {
-            #expect(!log.isEmpty, "Orchestrator decision log must be populated when fusion windows were produced (step 17 check)")
-        }
+        #expect(!fusionWindows.isEmpty, "Ad-signal chunks must produce at least one fusion window — pipeline regression if zero")
+
+        // With windows produced, step 17 must have forwarded them to the orchestrator.
+        // Shadow mode (no TrustScoringService) means windows arrive as .confirmed and
+        // are logged but not applied as skip cues — the decision log is the observable.
+        let log = await orchestrator.getDecisionLog()
+        #expect(!log.isEmpty, "Orchestrator decision log must be populated after step-17 forwarding (wiring regression check)")
     }
 
     @Test("runBackfill with nil orchestrator completes without step 17 (nil guard)")

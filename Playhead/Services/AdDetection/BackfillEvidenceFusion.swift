@@ -225,6 +225,9 @@ struct DecisionMapper: Sendable {
     private func calibrate(_ raw: Double) -> Double {
         // Guard non-finite values first: NaN/Inf propagate through max/min in Swift
         // (IEEE 754 fmax semantics), so an explicit .isFinite check is required.
+        // Both NaN and Inf return 0.0 (no confidence) rather than 1.0 for Inf:
+        // a computationally overflowed ledger is a data integrity error, so we
+        // err on the conservative side (don't promote a span with invalid evidence).
         guard raw.isFinite else { return 0.0 }
         return max(0.0, min(1.0, raw))
     }
