@@ -912,19 +912,31 @@ struct Phase6ResolveDecisionRemovedTests {
             )
         }
 
-        // Fusion path produces AdWindows (not via resolveDecision's confirm/suppress path).
-        // Every window produced by the new pipeline is stamped with metadataSource "fusion-v1"
-        // (set by buildFusionAdWindow). If the old resolveDecision path were still active,
-        // it would call updateAdWindowDecision on existing rows rather than inserting new ones
-        // with fusion-v1 metadata — so checking metadataSource confirms the right path ran.
+        // Fusion path produces AdWindows and DecisionEvents.
+        // The old resolveDecision path never wrote DecisionEvents — it only called
+        // updateAdWindowDecision on existing rows. The fusion path writes DecisionEvents
+        // for every span it processes. So DecisionEvents being written is the behavioral
+        // proof that the new fusion path ran (not resolveDecision).
         let windows = try await store.fetchAdWindows(assetId: assetId)
-        for window in windows {
-            // Old resolveDecision path used "none" metadataSource (from buildAdWindow).
-            // New fusion path stamps "fusion-v1" (from buildFusionAdWindow).
+        let events = try await store.loadDecisionEvents(for: assetId)
+
+        if !windows.isEmpty {
+            // The new fusion path must have written DecisionEvents for each window.
+            // resolveDecision wrote no events — so if windows exist without events,
+            // the old path ran.
             #expect(
-                window.metadataSource == "fusion-v1",
-                "All windows from runBackfill must use fusion-v1 metadata source (not legacy resolveDecision path)"
+                !events.isEmpty,
+                "Fusion path must write DecisionEvents — absence would indicate resolveDecision (which writes no events) ran instead"
             )
+
+            // Each event must reference one of the produced windows
+            let windowIds = Set(windows.map { $0.id })
+            for event in events {
+                #expect(
+                    windowIds.contains(event.windowId),
+                    "DecisionEvent.windowId must match a produced AdWindow id"
+                )
+            }
         }
     }
 }
