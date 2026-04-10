@@ -1,0 +1,586 @@
+// BackfillEvidenceFusionTests.swift
+// Tests for EvidenceLedgerEntry, BackfillEvidenceFusion, and DecisionMapper.
+//
+// TDD: these tests were written first to specify the contract before implementation.
+
+import Foundation
+import Testing
+@testable import Playhead
+
+@Suite("BackfillEvidenceFusion")
+struct BackfillEvidenceFusionTests {
+
+    // MARK: - Helpers
+
+    private func makeSpan(
+        assetId: String = "asset-1",
+        startTime: Double = 10.0,
+        endTime: Double = 40.0,
+        anchorProvenance: [AnchorRef] = []
+    ) -> DecodedSpan {
+        let first = 100
+        let last = 200
+        return DecodedSpan(
+            id: DecodedSpan.makeId(assetId: assetId, firstAtomOrdinal: first, lastAtomOrdinal: last),
+            assetId: assetId,
+            firstAtomOrdinal: first,
+            lastAtomOrdinal: last,
+            startTime: startTime,
+            endTime: endTime,
+            anchorProvenance: anchorProvenance
+        )
+    }
+
+    private func makeSpanWithFMConsensus(startTime: Double = 10.0, endTime: Double = 40.0) -> DecodedSpan {
+        makeSpan(
+            startTime: startTime,
+            endTime: endTime,
+            anchorProvenance: [.fmConsensus(regionId: "r1", consensusStrength: 0.9)]
+        )
+    }
+
+    private func makeSpanWithFMAcoustic(startTime: Double = 10.0, endTime: Double = 40.0) -> DecodedSpan {
+        makeSpan(
+            startTime: startTime,
+            endTime: endTime,
+            anchorProvenance: [.fmAcousticCorroborated(regionId: "r2", breakStrength: 0.7)]
+        )
+    }
+
+    private func defaultConfig() -> FusionWeightConfig {
+        FusionWeightConfig()
+    }
+
+    // MARK: - EvidenceLedgerEntry
+
+    @Test("EvidenceLedgerEntry captures source, weight, and detail")
+    func ledgerEntryFields() {
+        let entry = EvidenceLedgerEntry(
+            source: .fm,
+            weight: 0.35,
+            detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1")
+        )
+        #expect(entry.source == .fm)
+        #expect(entry.weight == 0.35)
+        if case .fm(let disp, let band, let label) = entry.detail {
+            #expect(disp == .containsAd)
+            #expect(band == .strong)
+            #expect(label == "v1")
+        } else {
+            Issue.record("Expected .fm detail")
+        }
+    }
+
+    @Test("EvidenceLedgerDetail has all required source-specific variants")
+    func ledgerDetailVariants() {
+        // classifier
+        let c = EvidenceLedgerDetail.classifier(score: 0.8)
+        if case .classifier(let s) = c { #expect(s == 0.8) } else { Issue.record("bad classifier") }
+
+        // fm
+        let fm = EvidenceLedgerDetail.fm(disposition: .containsAd, band: .moderate, cohortPromptLabel: "lbl")
+        if case .fm(let d, let b, let l) = fm {
+            #expect(d == .containsAd)
+            #expect(b == .moderate)
+            #expect(l == "lbl")
+        } else { Issue.record("bad fm") }
+
+        // lexical
+        let lex = EvidenceLedgerDetail.lexical(matchedCategories: ["url", "promoCode"])
+        if case .lexical(let cats) = lex { #expect(cats == ["url", "promoCode"]) } else { Issue.record("bad lexical") }
+
+        // acoustic
+        let ac = EvidenceLedgerDetail.acoustic(breakStrength: 0.85)
+        if case .acoustic(let s) = ac { #expect(s == 0.85) } else { Issue.record("bad acoustic") }
+
+        // catalog
+        let cat = EvidenceLedgerDetail.catalog(entryCount: 3)
+        if case .catalog(let n) = cat { #expect(n == 3) } else { Issue.record("bad catalog") }
+    }
+
+    // MARK: - SkipEligibilityGate
+
+    @Test("SkipEligibilityGate has all four required cases")
+    func eligibilityGateCases() {
+        let cases: [SkipEligibilityGate] = [
+            .eligible,
+            .blockedByEvidenceQuorum,
+            .blockedByPolicy,
+            .blockedByUserCorrection
+        ]
+        #expect(cases.count == 4)
+
+        // Codable round-trip
+        for gate in cases {
+            let encoded = try? JSONEncoder().encode(gate)
+            #expect(encoded != nil)
+            if let data = encoded {
+                let decoded = try? JSONDecoder().decode(SkipEligibilityGate.self, from: data)
+                #expect(decoded == gate)
+            }
+        }
+    }
+
+    // MARK: - FusionWeightConfig
+
+    @Test("FusionWeightConfig defaults match spec")
+    func weightConfigDefaults() {
+        let config = FusionWeightConfig()
+        #expect(config.fmCap == 0.4)
+        #expect(config.classifierCap == 0.3)
+        #expect(config.lexicalCap == 0.2)
+        #expect(config.acousticCap == 0.2)
+        #expect(config.catalogCap == 0.2)
+    }
+
+    // MARK: - BackfillEvidenceFusion — basic ledger accumulation
+
+    @Test("Fusion accumulates classifier entry when mode is .off")
+    func classifierEntryInOffMode() {
+        let span = makeSpan()
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.75,
+            fmEntries: [],
+            lexicalEntries: [],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .off,
+            config: defaultConfig()
+        )
+        let ledger = fusion.buildLedger()
+        let classifierEntries = ledger.filter { $0.source == .classifier }
+        #expect(classifierEntries.count == 1)
+        #expect(classifierEntries[0].weight <= 0.3)
+    }
+
+    @Test("Fusion includes FM entries when mode is .full")
+    func fmEntriesInFullMode() {
+        let span = makeSpan()
+        let fmEntry = EvidenceLedgerEntry(
+            source: .fm,
+            weight: 0.35,
+            detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1")
+        )
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.6,
+            fmEntries: [fmEntry],
+            lexicalEntries: [],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .full,
+            config: defaultConfig()
+        )
+        let ledger = fusion.buildLedger()
+        let fmEntries = ledger.filter { $0.source == .fm }
+        #expect(fmEntries.count == 1)
+    }
+
+    @Test("Fusion excludes FM entries when mode is .off")
+    func fmEntriesExcludedInOffMode() {
+        let span = makeSpan()
+        let fmEntry = EvidenceLedgerEntry(
+            source: .fm,
+            weight: 0.35,
+            detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1")
+        )
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.6,
+            fmEntries: [fmEntry],
+            lexicalEntries: [],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .off,
+            config: defaultConfig()
+        )
+        let ledger = fusion.buildLedger()
+        let fmEntries = ledger.filter { $0.source == .fm }
+        #expect(fmEntries.isEmpty)
+    }
+
+    @Test("Fusion excludes FM entries from decision ledger when mode is .shadow")
+    func fmEntriesExcludedInShadowMode() {
+        let span = makeSpan()
+        let fmEntry = EvidenceLedgerEntry(
+            source: .fm,
+            weight: 0.35,
+            detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1")
+        )
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.6,
+            fmEntries: [fmEntry],
+            lexicalEntries: [],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .shadow,
+            config: defaultConfig()
+        )
+        let ledger = fusion.buildLedger()
+        let fmEntries = ledger.filter { $0.source == .fm }
+        #expect(fmEntries.isEmpty)
+    }
+
+    @Test("FM entries join existing candidates ledger in .rescoreOnly mode")
+    func fmEntriesInRescoreOnlyMode() {
+        let span = makeSpan()
+        let fmEntry = EvidenceLedgerEntry(
+            source: .fm,
+            weight: 0.3,
+            detail: .fm(disposition: .containsAd, band: .moderate, cohortPromptLabel: "v1")
+        )
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.5,
+            fmEntries: [fmEntry],
+            lexicalEntries: [],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .rescoreOnly,
+            config: defaultConfig()
+        )
+        let ledger = fusion.buildLedger()
+        let fmEntries = ledger.filter { $0.source == .fm }
+        #expect(fmEntries.count == 1)
+    }
+
+    @Test("Lexical and acoustic entries are always included for eligible modes")
+    func lexicalAndAcousticAlwaysIncluded() {
+        let span = makeSpan()
+        let lexEntry = EvidenceLedgerEntry(
+            source: .lexical,
+            weight: 0.18,
+            detail: .lexical(matchedCategories: ["url"])
+        )
+        let acEntry = EvidenceLedgerEntry(
+            source: .acoustic,
+            weight: 0.15,
+            detail: .acoustic(breakStrength: 0.7)
+        )
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.5,
+            fmEntries: [],
+            lexicalEntries: [lexEntry],
+            acousticEntries: [acEntry],
+            catalogEntries: [],
+            mode: .off,
+            config: defaultConfig()
+        )
+        let ledger = fusion.buildLedger()
+        #expect(ledger.filter { $0.source == .lexical }.count == 1)
+        #expect(ledger.filter { $0.source == .acoustic }.count == 1)
+    }
+
+    // MARK: - Weight capping
+
+    @Test("FM entries are capped at fmCap")
+    func fmWeightCap() {
+        let span = makeSpan()
+        let fmEntry = EvidenceLedgerEntry(
+            source: .fm,
+            weight: 0.9, // exceeds cap
+            detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1")
+        )
+        let config = FusionWeightConfig()
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.0,
+            fmEntries: [fmEntry],
+            lexicalEntries: [],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .full,
+            config: config
+        )
+        let ledger = fusion.buildLedger()
+        let fmEntries = ledger.filter { $0.source == .fm }
+        #expect(fmEntries.allSatisfy { $0.weight <= config.fmCap })
+    }
+
+    @Test("Classifier entries are capped at classifierCap")
+    func classifierWeightCap() {
+        let span = makeSpan()
+        let config = FusionWeightConfig()
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 1.0, // raw score that produces high weight
+            fmEntries: [],
+            lexicalEntries: [],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .off,
+            config: config
+        )
+        let ledger = fusion.buildLedger()
+        let classifierEntries = ledger.filter { $0.source == .classifier }
+        #expect(classifierEntries.allSatisfy { $0.weight <= config.classifierCap })
+    }
+
+    // MARK: - DecisionMapper
+
+    @Test("DecisionMapper produces proposalConfidence capped at 1.0")
+    func proposalConfidenceCap() {
+        let span = makeSpanWithFMConsensus()
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .fm, weight: 0.4, detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1")),
+            .init(source: .classifier, weight: 0.3, detail: .classifier(score: 0.9)),
+            .init(source: .lexical, weight: 0.2, detail: .lexical(matchedCategories: ["url"])),
+            .init(source: .acoustic, weight: 0.2, detail: .acoustic(breakStrength: 0.8)),
+            .init(source: .catalog, weight: 0.2, detail: .catalog(entryCount: 2))
+        ]
+        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig())
+        let result = mapper.map()
+        #expect(result.proposalConfidence <= 1.0)
+        #expect(result.proposalConfidence >= 0.0)
+    }
+
+    @Test("DecisionMapper skipConfidence is in 0–1 range")
+    func skipConfidenceRange() {
+        let span = makeSpanWithFMConsensus()
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .classifier, weight: 0.25, detail: .classifier(score: 0.7))
+        ]
+        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig())
+        let result = mapper.map()
+        #expect(result.skipConfidence >= 0.0)
+        #expect(result.skipConfidence <= 1.0)
+    }
+
+    @Test("DecisionMapper produces eligible gate for span with fmConsensus and sufficient evidence")
+    func eligibleGateWithFMConsensus() {
+        // fmConsensus + 2 distinct kinds + good quality + valid duration (10–40s)
+        let span = makeSpanWithFMConsensus(startTime: 10.0, endTime: 40.0)
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .fm, weight: 0.4, detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1")),
+            .init(source: .lexical, weight: 0.18, detail: .lexical(matchedCategories: ["url"])),
+            .init(source: .acoustic, weight: 0.15, detail: .acoustic(breakStrength: 0.7))
+        ]
+        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig(), transcriptQuality: .good)
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .eligible)
+    }
+
+    @Test("DecisionMapper blocks by quorum when only fmAcousticCorroborated and no external corroboration")
+    func blockedByQuorumFMAcousticOnly() {
+        let span = makeSpanWithFMAcoustic(startTime: 10.0, endTime: 40.0)
+        // Only FM evidence — no lexical/catalog/acoustic to corroborate
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .fm, weight: 0.35, detail: .fm(disposition: .containsAd, band: .moderate, cohortPromptLabel: "v1"))
+        ]
+        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig(), transcriptQuality: .good)
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .blockedByEvidenceQuorum)
+    }
+
+    @Test("DecisionMapper allows fmAcousticCorroborated when external corroboration present")
+    func fmAcousticCorroboratedWithExternalEvidence() {
+        let span = makeSpanWithFMAcoustic(startTime: 10.0, endTime: 40.0)
+        // External corroboration from lexical
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .fm, weight: 0.35, detail: .fm(disposition: .containsAd, band: .moderate, cohortPromptLabel: "v1")),
+            .init(source: .lexical, weight: 0.18, detail: .lexical(matchedCategories: ["url"]))
+        ]
+        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig(), transcriptQuality: .good)
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .eligible)
+    }
+
+    @Test("DecisionMapper blocks by quorum for fmConsensus with too-short span")
+    func blockedByQuorumShortSpan() {
+        // Span < 5s
+        let span = makeSpanWithFMConsensus(startTime: 10.0, endTime: 13.0)
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .fm, weight: 0.4, detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1")),
+            .init(source: .lexical, weight: 0.18, detail: .lexical(matchedCategories: ["url"])),
+            .init(source: .acoustic, weight: 0.15, detail: .acoustic(breakStrength: 0.7))
+        ]
+        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig(), transcriptQuality: .good)
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .blockedByEvidenceQuorum)
+    }
+
+    @Test("DecisionMapper blocks by quorum for fmConsensus with too-long span")
+    func blockedByQuorumLongSpan() {
+        // Span > 180s
+        let span = makeSpanWithFMConsensus(startTime: 0.0, endTime: 181.0)
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .fm, weight: 0.4, detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1")),
+            .init(source: .lexical, weight: 0.18, detail: .lexical(matchedCategories: ["url"])),
+            .init(source: .acoustic, weight: 0.15, detail: .acoustic(breakStrength: 0.7))
+        ]
+        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig(), transcriptQuality: .good)
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .blockedByEvidenceQuorum)
+    }
+
+    @Test("DecisionMapper blocks by quorum for fmConsensus with degraded transcript")
+    func blockedByQuorumDegradedTranscript() {
+        let span = makeSpanWithFMConsensus(startTime: 10.0, endTime: 40.0)
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .fm, weight: 0.4, detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1")),
+            .init(source: .lexical, weight: 0.18, detail: .lexical(matchedCategories: ["url"])),
+            .init(source: .acoustic, weight: 0.15, detail: .acoustic(breakStrength: 0.7))
+        ]
+        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig(), transcriptQuality: .degraded)
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .blockedByEvidenceQuorum)
+    }
+
+    @Test("Gate blocks action without clamping skip confidence")
+    func gateDoesNotClampSkipConfidence() {
+        // fmAcousticCorroborated only — should block by quorum but keep honest score
+        let span = makeSpanWithFMAcoustic(startTime: 10.0, endTime: 40.0)
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .fm, weight: 0.4, detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1")),
+            .init(source: .classifier, weight: 0.3, detail: .classifier(score: 0.9))
+        ]
+        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig(), transcriptQuality: .good)
+        let result = mapper.map()
+        // Gate blocks but score should remain > 0
+        #expect(result.eligibilityGate == .blockedByEvidenceQuorum)
+        #expect(result.skipConfidence > 0.0, "Score should be honest even when gate blocks")
+    }
+
+    @Test("Non-FM span has no quorum check applied (gate is eligible when score is sufficient)")
+    func nonFMSpanNoQuorumCheck() {
+        // Span with no FM provenance — quorum not applicable
+        let span = makeSpan(anchorProvenance: [
+            .evidenceCatalog(entry: EvidenceEntry(
+                evidenceRef: 0,
+                category: .url,
+                matchedText: "example.com",
+                normalizedText: "example.com",
+                atomOrdinal: 100,
+                startTime: 10.0,
+                endTime: 11.0
+            ))
+        ])
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .classifier, weight: 0.25, detail: .classifier(score: 0.7)),
+            .init(source: .lexical, weight: 0.18, detail: .lexical(matchedCategories: ["url"]))
+        ]
+        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig(), transcriptQuality: .good)
+        let result = mapper.map()
+        // No FM provenance means quorum check is not applicable — should not block by quorum
+        #expect(result.eligibilityGate != .blockedByEvidenceQuorum)
+    }
+
+    // MARK: - FM Positive-Only Rule
+
+    @Test("FM noAds disposition does not produce ledger entries in BackfillEvidenceFusion")
+    func fmNoAdsDoesNotContributeToLedger() {
+        // This test verifies the caller contract: noAds entries should not be in fmEntries
+        // BackfillEvidenceFusion itself enforces this by filtering
+        let span = makeSpan()
+        let noAdsEntry = EvidenceLedgerEntry(
+            source: .fm,
+            weight: 0.1,
+            detail: .fm(disposition: .noAds, band: .weak, cohortPromptLabel: "v1")
+        )
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.3,
+            fmEntries: [noAdsEntry],
+            lexicalEntries: [],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .full,
+            config: defaultConfig()
+        )
+        let ledger = fusion.buildLedger()
+        let fmEntries = ledger.filter { $0.source == .fm }
+        #expect(fmEntries.isEmpty, "noAds FM entries must not appear in decision ledger")
+    }
+
+    @Test("FM abstain disposition does not produce ledger entries")
+    func fmAbstainDoesNotContributeToLedger() {
+        let span = makeSpan()
+        let abstainEntry = EvidenceLedgerEntry(
+            source: .fm,
+            weight: 0.1,
+            detail: .fm(disposition: .abstain, band: .weak, cohortPromptLabel: "v1")
+        )
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.3,
+            fmEntries: [abstainEntry],
+            lexicalEntries: [],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .full,
+            config: defaultConfig()
+        )
+        let ledger = fusion.buildLedger()
+        let fmEntries = ledger.filter { $0.source == .fm }
+        #expect(fmEntries.isEmpty, "abstain FM entries must not appear in decision ledger")
+    }
+
+    @Test("FM uncertain disposition does not produce ledger entries")
+    func fmUncertainDoesNotContributeToLedger() {
+        let span = makeSpan()
+        let uncertainEntry = EvidenceLedgerEntry(
+            source: .fm,
+            weight: 0.2,
+            detail: .fm(disposition: .uncertain, band: .weak, cohortPromptLabel: "v1")
+        )
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.3,
+            fmEntries: [uncertainEntry],
+            lexicalEntries: [],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .full,
+            config: defaultConfig()
+        )
+        let ledger = fusion.buildLedger()
+        let fmEntries = ledger.filter { $0.source == .fm }
+        #expect(fmEntries.isEmpty, "uncertain FM entries must not appear in decision ledger")
+    }
+
+    // MARK: - DecisionResult
+
+    @Test("DecisionResult is Sendable and carries all three outputs")
+    func decisionResultFields() {
+        let span = makeSpanWithFMConsensus()
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .classifier, weight: 0.25, detail: .classifier(score: 0.7))
+        ]
+        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig())
+        let result = mapper.map()
+        // Can access all fields
+        _ = result.proposalConfidence
+        _ = result.skipConfidence
+        _ = result.eligibilityGate
+    }
+
+    // MARK: - proposalConfidence accumulation
+
+    @Test("proposalConfidence is sum of all weights capped at 1.0")
+    func proposalConfidenceIsSum() {
+        let span = makeSpanWithFMConsensus()
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .fm, weight: 0.3, detail: .fm(disposition: .containsAd, band: .moderate, cohortPromptLabel: "v1")),
+            .init(source: .classifier, weight: 0.2, detail: .classifier(score: 0.6))
+        ]
+        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig(), transcriptQuality: .good)
+        let result = mapper.map()
+        let expectedRaw = min(1.0, 0.3 + 0.2)
+        #expect(abs(result.proposalConfidence - expectedRaw) < 0.001)
+    }
+
+    // MARK: - FusionWeightConfig custom values
+
+    @Test("FusionWeightConfig custom caps are respected")
+    func customWeightCaps() {
+        let config = FusionWeightConfig(fmCap: 0.5, classifierCap: 0.4, lexicalCap: 0.3, acousticCap: 0.3, catalogCap: 0.25)
+        #expect(config.fmCap == 0.5)
+        #expect(config.classifierCap == 0.4)
+        #expect(config.lexicalCap == 0.3)
+        #expect(config.acousticCap == 0.3)
+        #expect(config.catalogCap == 0.25)
+    }
+}

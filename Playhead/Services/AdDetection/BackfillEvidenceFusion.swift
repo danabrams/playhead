@@ -1,0 +1,267 @@
+// BackfillEvidenceFusion.swift
+// Phase 6 (playhead-4my.6.1): Evidence ledger accumulation and decision mapping.
+//
+// Design:
+//   • BackfillEvidenceFusion: pure value type, accumulates per-source evidence
+//     into an EvidenceLedgerEntry ledger controlled by FMBackfillMode.
+//   • DecisionMapper: pure value type, converts the ledger into a DecisionResult
+//     carrying proposalConfidence, skipConfidence, and eligibilityGate.
+//   • FM Positive-Only Rule: noAds/abstain/uncertain FM entries are silently dropped
+//     regardless of mode — they affect scheduling/telemetry only, not the ledger.
+//   • Gate blocks action at decision level; score is never clamped by the gate.
+
+import Foundation
+
+// MARK: - FusionWeightConfig
+
+/// Per-source weight caps for evidence fusion. v1 defaults reflect initial calibration.
+/// All caps are configurable to allow future tuning without changing fusion logic.
+struct FusionWeightConfig: Sendable {
+    /// Maximum weight contribution from a single FM entry.
+    let fmCap: Double
+    /// Maximum weight contribution from the classifier score entry.
+    let classifierCap: Double
+    /// Maximum weight contribution from a single lexical entry.
+    let lexicalCap: Double
+    /// Maximum weight contribution from a single acoustic entry.
+    let acousticCap: Double
+    /// Maximum weight contribution from a single catalog entry.
+    let catalogCap: Double
+
+    init(
+        fmCap: Double = 0.4,
+        classifierCap: Double = 0.3,
+        lexicalCap: Double = 0.2,
+        acousticCap: Double = 0.2,
+        catalogCap: Double = 0.2
+    ) {
+        self.fmCap = fmCap
+        self.classifierCap = classifierCap
+        self.lexicalCap = lexicalCap
+        self.acousticCap = acousticCap
+        self.catalogCap = catalogCap
+    }
+}
+
+// MARK: - BackfillEvidenceFusion
+
+/// Accumulates evidence from all sources into a ledger of `EvidenceLedgerEntry` items.
+///
+/// FM mode gating:
+///   - `.off` / `.shadow`    → FM entries excluded from decision ledger
+///   - `.rescoreOnly`        → FM entries join ledger for existing candidates
+///   - `.proposalOnly`       → FM can propose new regions; rescoring follows .off semantics
+///   - `.full`               → all FM entries join ledger
+///
+/// FM Positive-Only Rule: only `containsAd` disposition entries contribute. Entries
+/// with `.noAds`, `.uncertain`, or `.abstain` dispositions are silently dropped
+/// regardless of mode — they affect scheduling and diagnostics only.
+struct BackfillEvidenceFusion: Sendable {
+    let span: DecodedSpan
+    /// Raw classifier score (0–1). Converted to a capped weight and added as a `.classifier` entry.
+    let classifierScore: Double
+    /// Pre-constructed FM ledger entries (caller's responsibility to create from FM scan results).
+    let fmEntries: [EvidenceLedgerEntry]
+    /// Pre-constructed lexical ledger entries.
+    let lexicalEntries: [EvidenceLedgerEntry]
+    /// Pre-constructed acoustic ledger entries.
+    let acousticEntries: [EvidenceLedgerEntry]
+    /// Pre-constructed catalog ledger entries.
+    let catalogEntries: [EvidenceLedgerEntry]
+    let mode: FMBackfillMode
+    let config: FusionWeightConfig
+
+    /// Build the decision ledger for this span.
+    ///
+    /// Always includes: classifier, lexical, acoustic, catalog entries.
+    /// Conditionally includes FM entries based on `mode.contributesToExistingCandidateLedger`.
+    func buildLedger() -> [EvidenceLedgerEntry] {
+        var ledger: [EvidenceLedgerEntry] = []
+
+        // Classifier entry: always included (it's the old legacy path, always present)
+        let classifierWeight = min(classifierScore * config.classifierCap, config.classifierCap)
+        ledger.append(EvidenceLedgerEntry(
+            source: .classifier,
+            weight: classifierWeight,
+            detail: .classifier(score: classifierScore)
+        ))
+
+        // FM entries: gated by mode, filtered to containsAd only (Positive-Only Rule)
+        if mode.contributesToExistingCandidateLedger {
+            let positiveOnlyFMEntries = fmEntries.filter { entry in
+                guard case .fm(let disposition, _, _) = entry.detail else { return false }
+                return disposition == .containsAd
+            }
+            for entry in positiveOnlyFMEntries {
+                let capped = EvidenceLedgerEntry(
+                    source: .fm,
+                    weight: min(entry.weight, config.fmCap),
+                    detail: entry.detail
+                )
+                ledger.append(capped)
+            }
+        }
+
+        // Lexical entries: always included
+        for entry in lexicalEntries {
+            let capped = EvidenceLedgerEntry(
+                source: .lexical,
+                weight: min(entry.weight, config.lexicalCap),
+                detail: entry.detail
+            )
+            ledger.append(capped)
+        }
+
+        // Acoustic entries: always included
+        for entry in acousticEntries {
+            let capped = EvidenceLedgerEntry(
+                source: .acoustic,
+                weight: min(entry.weight, config.acousticCap),
+                detail: entry.detail
+            )
+            ledger.append(capped)
+        }
+
+        // Catalog entries: always included
+        for entry in catalogEntries {
+            let capped = EvidenceLedgerEntry(
+                source: .catalog,
+                weight: min(entry.weight, config.catalogCap),
+                detail: entry.detail
+            )
+            ledger.append(capped)
+        }
+
+        return ledger
+    }
+}
+
+// MARK: - DecisionResult
+
+/// The output of `DecisionMapper`: three orthogonal decision signals.
+///
+/// `eligibilityGate` can block action without affecting the honesty of `skipConfidence`.
+struct DecisionResult: Sendable {
+    /// Raw confidence estimate from summing all ledger entry weights, capped at 1.0.
+    let proposalConfidence: Double
+    /// Calibrated score for SkipOrchestrator (0–1 scale). Derived from proposalConfidence
+    /// via a linear map. Not clamped by the eligibility gate.
+    let skipConfidence: Double
+    /// Whether this span is actionable. A blocked gate does not reduce the score.
+    let eligibilityGate: SkipEligibilityGate
+}
+
+// MARK: - DecisionMapper
+
+/// Converts an accumulated evidence ledger into a `DecisionResult`.
+///
+/// Quorum check reads `anchorProvenance` from the span — does NOT re-derive
+/// multi-window consensus. The quorum rules are:
+///
+/// **fmConsensus provenance:**
+/// Multi-window consensus is already satisfied. Remaining checks:
+///   - 2+ distinct evidence kinds in ledger
+///   - transcript quality == .good
+///   - span duration in [5s, 180s]
+///
+/// **fmAcousticCorroborated provenance:**
+/// Single-window FM + acoustic co-location. Needs external corroboration:
+///   - at least one lexical, catalog, or acoustic entry in ledger
+///
+/// **No FM provenance:**
+/// Quorum check is not applicable. Gate defaults to `.eligible` if score > 0.
+struct DecisionMapper: Sendable {
+    let span: DecodedSpan
+    let ledger: [EvidenceLedgerEntry]
+    let config: FusionWeightConfig
+    let transcriptQuality: TranscriptQuality
+
+    init(
+        span: DecodedSpan,
+        ledger: [EvidenceLedgerEntry],
+        config: FusionWeightConfig,
+        transcriptQuality: TranscriptQuality = .good
+    ) {
+        self.span = span
+        self.ledger = ledger
+        self.config = config
+        self.transcriptQuality = transcriptQuality
+    }
+
+    func map() -> DecisionResult {
+        let proposalConfidence = min(1.0, ledger.reduce(0.0) { $0 + $1.weight })
+        let skipConfidence = calibrate(proposalConfidence)
+        let gate = computeGate()
+
+        return DecisionResult(
+            proposalConfidence: proposalConfidence,
+            skipConfidence: skipConfidence,
+            eligibilityGate: gate
+        )
+    }
+
+    // MARK: - Private
+
+    /// Linear calibration from proposalConfidence to skipConfidence.
+    /// v1: identity mapping (direct pass-through). Configurable in future via config.
+    private func calibrate(_ raw: Double) -> Double {
+        // Clamp to [0, 1] as a safety measure; identity map for v1.
+        max(0.0, min(1.0, raw))
+    }
+
+    /// Determine the eligibility gate by reading `anchorProvenance` directly.
+    /// Score is computed independently — gate NEVER modifies it.
+    private func computeGate() -> SkipEligibilityGate {
+        let provenance = span.anchorProvenance
+
+        // Classify FM provenance type from anchorProvenance
+        let hasFMConsensus = provenance.contains {
+            if case .fmConsensus = $0 { return true }
+            return false
+        }
+        let hasFMAcoustic = provenance.contains {
+            if case .fmAcousticCorroborated = $0 { return true }
+            return false
+        }
+
+        if hasFMConsensus {
+            return quorumGateForFMConsensus()
+        } else if hasFMAcoustic {
+            return quorumGateForFMAcoustic()
+        } else {
+            // No FM provenance — quorum not applicable
+            return .eligible
+        }
+    }
+
+    /// Quorum check for spans anchored by fmConsensus.
+    /// Multi-window consensus is already satisfied; checks remaining requirements.
+    private func quorumGateForFMConsensus() -> SkipEligibilityGate {
+        // Check span duration [5s, 180s]
+        let duration = span.duration
+        guard duration >= 5.0 && duration <= 180.0 else {
+            return .blockedByEvidenceQuorum
+        }
+
+        // Check transcript quality
+        guard transcriptQuality == .good else {
+            return .blockedByEvidenceQuorum
+        }
+
+        // Check 2+ distinct evidence kinds in ledger
+        let distinctKinds = Set(ledger.map { $0.source })
+        guard distinctKinds.count >= 2 else {
+            return .blockedByEvidenceQuorum
+        }
+
+        return .eligible
+    }
+
+    /// Quorum check for spans anchored by fmAcousticCorroborated only.
+    /// Needs external corroboration from lexical, catalog, or acoustic sources.
+    private func quorumGateForFMAcoustic() -> SkipEligibilityGate {
+        let externalSources: Set<EvidenceSourceType> = [.lexical, .catalog, .acoustic]
+        let hasExternalCorroboration = ledger.contains { externalSources.contains($0.source) }
+        return hasExternalCorroboration ? .eligible : .blockedByEvidenceQuorum
+    }
+}
