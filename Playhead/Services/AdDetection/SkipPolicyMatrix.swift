@@ -16,11 +16,12 @@ enum SkipPolicyAction: String, Sendable, Codable, Hashable, CaseIterable {
 
 /// Maps (CommercialIntent, AdOwnership) → SkipPolicyAction.
 ///
-/// v1: spans with (.unknown, .unknown) → .detectOnly (banner, no auto-skip) so Phase 7
-/// (UserCorrections) has banner impressions to correct against. Unknown intent with a
-/// known ownership still falls through to .logOnly. Phase 8 (SponsorKnowledgeStore) will
-/// populate intent/ownership for full matrix evaluation.
-/// FM does NOT classify commercial intent in Phase 6.
+/// Phase 6.5 (playhead-4my.16): (.unknown, .unknown) → .detectOnly (banner, no auto-skip)
+/// so Phase 7 (UserCorrections) has banner impressions to correct against.
+/// Unknown intent with a known (non-unknown) ownership still returns .logOnly —
+/// insufficient signal to act. Phase 8 (SponsorKnowledgeStore) will populate
+/// intent/ownership for full matrix evaluation. FM does NOT classify commercial
+/// intent in Phases 6–7.
 struct SkipPolicyMatrix: Sendable {
 
     static let defaultAction: SkipPolicyAction = .logOnly

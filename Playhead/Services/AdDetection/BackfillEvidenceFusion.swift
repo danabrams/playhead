@@ -79,18 +79,33 @@ struct BackfillEvidenceFusion: Sendable {
         var ledger: [EvidenceLedgerEntry] = []
 
         // Classifier entry: always included (it's the old legacy path, always present)
-        let classifierWeight = min(classifierScore * config.classifierCap, config.classifierCap)
+        // Clamp to [0, cap]: adProbability is documented as [0,1] but defensive clamping prevents
+        // a negative classifier score from producing a negative ledger weight.
+        let classifierWeight = min(max(0.0, classifierScore) * config.classifierCap, config.classifierCap)
         ledger.append(EvidenceLedgerEntry(
             source: .classifier,
             weight: classifierWeight,
             detail: .classifier(score: classifierScore)
         ))
 
-        // FM entries: gated by mode, filtered to containsAd only (Positive-Only Rule)
+        // FM entries: gated by mode, filtered to containsAd only (Positive-Only Rule).
+        // Non-positive dispositions (noAds/uncertain/abstain) are intentionally dropped;
+        // they inform scheduling and telemetry only, not the ledger.
         if mode.contributesToExistingCandidateLedger {
-            let positiveOnlyFMEntries = fmEntries.filter { entry in
+            let allFMEntries = fmEntries.filter { entry in
+                guard case .fm = entry.detail else { return false }
+                return true
+            }
+            let positiveOnlyFMEntries = allFMEntries.filter { entry in
                 guard case .fm(let disposition, _, _) = entry.detail else { return false }
                 return disposition == .containsAd
+            }
+            let droppedCount = allFMEntries.count - positiveOnlyFMEntries.count
+            if droppedCount > 0 {
+                // Log so callers can observe the Positive-Only Rule in action.
+                // Use print for now; structured logging requires an injected logger.
+                // TODO(playhead-4my.7): inject OSLog Logger into BackfillEvidenceFusion.
+                print("[BackfillEvidenceFusion] FM Positive-Only Rule dropped \(droppedCount)/\(allFMEntries.count) FM entries (non-containsAd dispositions).")
             }
             for entry in positiveOnlyFMEntries {
                 let capped = EvidenceLedgerEntry(
@@ -189,6 +204,9 @@ struct DecisionMapper: Sendable {
     }
 
     func map() -> DecisionResult {
+        // proposalConfidence is already capped at 1.0 here; calibrate() applies an
+        // additional clamp as a safety belt in case a future non-identity mapping
+        // produces a value outside [0,1]. The redundancy is intentional.
         let proposalConfidence = min(1.0, ledger.reduce(0.0) { $0 + $1.weight })
         let skipConfidence = calibrate(proposalConfidence)
         let gate = computeGate()
@@ -205,8 +223,10 @@ struct DecisionMapper: Sendable {
     /// Linear calibration from proposalConfidence to skipConfidence.
     /// v1: identity mapping (direct pass-through). Configurable in future via config.
     private func calibrate(_ raw: Double) -> Double {
-        // Clamp to [0, 1] as a safety measure; identity map for v1.
-        max(0.0, min(1.0, raw))
+        // Guard non-finite values first: NaN/Inf propagate through max/min in Swift
+        // (IEEE 754 fmax semantics), so an explicit .isFinite check is required.
+        guard raw.isFinite else { return 0.0 }
+        return max(0.0, min(1.0, raw))
     }
 
     /// Determine the eligibility gate by reading `anchorProvenance` directly.

@@ -45,7 +45,19 @@ struct SkipPolicyMatrixTests {
     @Test("unknown intent + known ownership → logOnly (ownership known but intent unclear)", arguments: AdOwnership.allCases.filter { $0 != .unknown })
     func unknownIntentWithKnownOwnershipIsLogOnly(ownership: AdOwnership) {
         // Unknown intent with a known (non-unknown) ownership: insufficient to act.
+        // Covers: .thirdParty, .show, .network, .guest — all return .logOnly.
+        // Note: (.unknown, .guest) → .logOnly even though (.paid, .guest) → .detectOnly,
+        // because without intent we can't determine whether a guest endorsement is paid.
         #expect(SkipPolicyMatrix.action(for: .unknown, ownership: ownership) == .logOnly)
+    }
+
+    @Test("unknown intent + guest ownership → logOnly (guest endorsement with no intent data)")
+    func unknownIntentGuestOwnershipIsLogOnly() {
+        // Explicit test for the .guest case: a guest endorsement where FM has not
+        // classified commercial intent. We can't distinguish organic mention from paid
+        // deal without intent signal, so .logOnly is correct.
+        // Contrast: (.paid, .guest) → .detectOnly (intent is known).
+        #expect(SkipPolicyMatrix.action(for: .unknown, ownership: .guest) == .logOnly)
     }
 
     @Test("paid/owned + unknown ownership → logOnly (ownership needed for decision)")

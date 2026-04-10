@@ -594,6 +594,7 @@ actor AdDetectionService {
             let policyAction: SkipPolicyAction
             if (rawPolicyAction == .detectOnly || rawPolicyAction == .logOnly),
                decision.eligibilityGate == .eligible,
+               decision.skipConfidence.isFinite,
                decision.skipConfidence >= autoSkipThreshold {
                 policyAction = .autoSkipEligible
                 logger.debug(
@@ -652,9 +653,10 @@ actor AdDetectionService {
         }
 
         // ── Step 15: MetadataExtractor ────────────────────────────────────────
-        // Extract metadata for windows that will be visible to the user (not suppressed).
-        let confirmedWindows = fusionWindows.filter { $0.decisionState != AdDecisionState.suppressed.rawValue }
-        for window in confirmedWindows {
+        // Extract metadata for windows visible to the user (confirmed + candidate, not suppressed).
+        // This set is also used by updatePriors and the coverage watermark below.
+        let nonSuppressedWindows = fusionWindows.filter { $0.decisionState != AdDecisionState.suppressed.rawValue }
+        for window in nonSuppressedWindows {
             try Task.checkCancellation()
             await extractAndPersistMetadata(window: window, chunks: chunks)
         }
@@ -686,12 +688,12 @@ actor AdDetectionService {
         } else {
             try await updatePriors(
                 podcastId: podcastId,
-                confirmedWindows: confirmedWindows,
+                nonSuppressedWindows: nonSuppressedWindows,
                 episodeDuration: episodeDuration
             )
         }
 
-        if let maxEnd = confirmedWindows.map(\.endTime).max() {
+        if let maxEnd = nonSuppressedWindows.map(\.endTime).max() {
             try await store.updateConfirmedAdCoverage(
                 id: analysisAssetId,
                 endTime: maxEnd
@@ -909,8 +911,10 @@ actor AdDetectionService {
         policyAction: SkipPolicyAction,
         analysisAssetId: String
     ) -> AdWindow {
-        // Map fusion gate + policy to AdDecisionState.
-        // v1: all spans produce .confirmed for logOnly (data preserved for Phase 7+).
+        // Map fusion policy action + gate to AdDecisionState for persistence.
+        // autoSkipEligible: confirmed when gate passes, candidate otherwise.
+        // detectOnly/logOnly: always confirmed (banner shown; data preserved for Phase 7).
+        // suppress: always suppressed (never shown to user).
         let decisionState: AdDecisionState
         switch policyAction {
         case .autoSkipEligible:
@@ -1550,15 +1554,15 @@ actor AdDetectionService {
     /// Learns ad slot positions and sponsor names over time.
     private func updatePriors(
         podcastId: String,
-        confirmedWindows: [AdWindow],
+        nonSuppressedWindows: [AdWindow],
         episodeDuration: Double
     ) async throws {
-        guard !confirmedWindows.isEmpty, episodeDuration > 0 else { return }
+        guard !nonSuppressedWindows.isEmpty, episodeDuration > 0 else { return }
 
         let existingProfile = try await store.fetchProfile(podcastId: podcastId)
 
         // Compute normalized ad slot positions from confirmed windows.
-        let newSlotPositions = confirmedWindows.map { window in
+        let newSlotPositions = nonSuppressedWindows.map { window in
             let center = (window.startTime + window.endTime) / 2.0
             return center / episodeDuration
         }
@@ -1585,7 +1589,7 @@ actor AdDetectionService {
         }
 
         // Collect advertiser names from confirmed windows with metadata.
-        let newSponsors = confirmedWindows
+        let newSponsors = nonSuppressedWindows
             .compactMap(\.advertiser)
             .map { $0.lowercased() }
 

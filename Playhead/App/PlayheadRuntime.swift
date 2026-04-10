@@ -320,6 +320,13 @@ final class PlayheadRuntime {
             }
         }
 
+        // Phase 6.5 (playhead-4my.16): skipOrchestrator is constructed before
+        // adDetectionService so it can be injected for step-17 forwarding.
+        // The orchestrator is otherwise wired identically to before this change.
+        self.skipOrchestrator = SkipOrchestrator(
+            store: analysisStore,
+            trustService: trustService
+        )
         self.adDetectionService = AdDetectionService(
             store: analysisStore,
             metadataExtractor: FallbackExtractor(),
@@ -340,11 +347,10 @@ final class PlayheadRuntime {
             // Phase 5 projector wire-up: hand the DEBUG-only projector
             // observer to the service. In release builds this is `nil`,
             // which makes the Phase 5 atom evidence projector a no-op.
-            phase5ProjectorObserver: phase5ProjectorObserver
-        )
-        self.skipOrchestrator = SkipOrchestrator(
-            store: analysisStore,
-            trustService: trustService
+            phase5ProjectorObserver: phase5ProjectorObserver,
+            // Phase 6.5 (playhead-4my.16): forward eligible fusion decisions
+            // to the orchestrator after each backfill run (step 17).
+            skipOrchestrator: skipOrchestrator
         )
         self.downloadManager = DownloadManager()
         self.analysisCoordinator = AnalysisCoordinator(
