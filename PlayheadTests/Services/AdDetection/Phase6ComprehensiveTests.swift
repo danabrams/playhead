@@ -601,20 +601,21 @@ struct Phase6FullBackfillIntegrationTests {
             episodeDuration: 60.0
         )
 
-        let events = try await store.loadDecisionEvents(for: assetId)
-        // If spans were produced, events must be written. If no spans (empty pipeline),
-        // events may be empty — but when windows exist, events must too.
+        // The fusion path must produce at least one AdWindow for the ad-signal transcript.
+        // This is an unconditional guard — if it fails, the pipeline regressed.
         let windows = try await store.fetchAdWindows(assetId: assetId)
-        if !windows.isEmpty {
-            #expect(!events.isEmpty, "When AdWindows are produced, DecisionEvents must be written too")
+        #expect(!windows.isEmpty, "Full pipeline with ad-signal transcript must produce at least one AdWindow (fusion path regression)")
 
-            for event in events {
-                #expect(!event.windowId.isEmpty, "DecisionEvent must reference a non-empty windowId")
-                #expect(!event.eligibilityGate.isEmpty, "DecisionEvent must have non-empty eligibilityGate")
-                #expect(!event.policyAction.isEmpty, "DecisionEvent must have non-empty policyAction")
-                #expect(event.proposalConfidence >= 0 && event.proposalConfidence <= 1.0)
-                #expect(event.skipConfidence >= 0 && event.skipConfidence <= 1.0)
-            }
+        let events = try await store.loadDecisionEvents(for: assetId)
+        #expect(!events.isEmpty, "Fusion path must write DecisionEvents for every span produced")
+        #expect(events.count == windows.count, "One DecisionEvent per AdWindow")
+
+        for event in events {
+            #expect(!event.windowId.isEmpty, "DecisionEvent must reference a non-empty windowId")
+            #expect(!event.eligibilityGate.isEmpty, "DecisionEvent must have non-empty eligibilityGate")
+            #expect(!event.policyAction.isEmpty, "DecisionEvent must have non-empty policyAction")
+            #expect(event.proposalConfidence >= 0 && event.proposalConfidence <= 1.0)
+            #expect(event.skipConfidence >= 0 && event.skipConfidence <= 1.0)
         }
     }
 }
