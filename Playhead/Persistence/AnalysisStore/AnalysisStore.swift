@@ -387,6 +387,25 @@ actor AnalysisStore {
         self.db = handle
     }
 
+    /// Open a database at an explicit SQLite path, including `:memory:` for
+    /// ephemeral in-memory databases (useful in unit tests). Call ``migrate()``
+    /// after construction to create tables.
+    init(path: String) throws {
+        // `:memory:` is a special SQLite path — no directory setup needed.
+        self.databaseURL = path == ":memory:"
+            ? URL(fileURLWithPath: path)
+            : URL(fileURLWithPath: path)
+
+        var handle: OpaquePointer?
+        let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX
+        let rc = sqlite3_open_v2(path, &handle, flags, nil)
+        guard rc == SQLITE_OK, let handle else {
+            let msg = handle.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
+            throw AnalysisStoreError.openFailed(code: rc, message: msg)
+        }
+        self.db = handle
+    }
+
     /// Convenience factory that opens the database and runs migrations in one
     /// call. Preferred entry point for production use.
     static func open(directory: URL? = nil) async throws -> AnalysisStore {
@@ -914,6 +933,48 @@ actor AnalysisStore {
             column: "eligibilityGate",
             definition: "TEXT"
         )
+
+        // Phase 6 decision tables (playhead-4my.6.3) — same v5 batch
+        try exec("""
+            CREATE TABLE IF NOT EXISTS ad_decision_results (
+                id                  TEXT PRIMARY KEY,
+                analysisAssetId     TEXT NOT NULL,
+                decisionCohortJSON  TEXT NOT NULL,
+                inputArtifactRefs   TEXT NOT NULL,
+                decisionJSON        TEXT NOT NULL,
+                createdAt           REAL NOT NULL
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_adr_asset ON ad_decision_results(analysisAssetId)")
+
+        try exec("""
+            CREATE TABLE IF NOT EXISTS decision_events (
+                id                  TEXT PRIMARY KEY,
+                analysisAssetId     TEXT NOT NULL,
+                eventType           TEXT NOT NULL,
+                windowId            TEXT NOT NULL,
+                proposalConfidence  REAL NOT NULL,
+                skipConfidence      REAL NOT NULL,
+                eligibilityGate     TEXT NOT NULL,
+                policyAction        TEXT NOT NULL,
+                decisionCohortJSON  TEXT NOT NULL,
+                createdAt           REAL NOT NULL
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_de_asset ON decision_events(analysisAssetId)")
+
+        try exec("""
+            CREATE TABLE IF NOT EXISTS correction_events (
+                id                  TEXT PRIMARY KEY,
+                analysisAssetId     TEXT NOT NULL,
+                correctionScope     TEXT NOT NULL,
+                atomOrdinalRange    TEXT NOT NULL,
+                evidenceJSON        TEXT NOT NULL,
+                createdAt           REAL NOT NULL
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_ce_asset ON correction_events(analysisAssetId)")
+
         try setSchemaVersion(5)
     }
 
@@ -4028,5 +4089,126 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, assetId)
         try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    // MARK: - CRUD: ad_decision_results (Phase 6, playhead-4my.6.3)
+
+    /// Upsert — a new cohort produces an updated decision for the same asset.
+    func saveDecisionResultArtifact(_ result: DecisionResultArtifact) throws {
+        let sql = """
+            INSERT OR REPLACE INTO ad_decision_results
+            (id, analysisAssetId, decisionCohortJSON, inputArtifactRefs, decisionJSON, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, result.id)
+        bind(stmt, 2, result.analysisAssetId)
+        bind(stmt, 3, result.decisionCohortJSON)
+        bind(stmt, 4, result.inputArtifactRefs)
+        bind(stmt, 5, result.decisionJSON)
+        bind(stmt, 6, result.createdAt)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func loadDecisionResultArtifact(for analysisAssetId: String) throws -> DecisionResultArtifact? {
+        let sql = "SELECT id, analysisAssetId, decisionCohortJSON, inputArtifactRefs, decisionJSON, createdAt FROM ad_decision_results WHERE analysisAssetId = ? ORDER BY createdAt DESC LIMIT 1"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return DecisionResultArtifact(
+            id: text(stmt, 0),
+            analysisAssetId: text(stmt, 1),
+            decisionCohortJSON: text(stmt, 2),
+            inputArtifactRefs: text(stmt, 3),
+            decisionJSON: text(stmt, 4),
+            createdAt: sqlite3_column_double(stmt, 5)
+        )
+    }
+
+    // MARK: - CRUD: decision_events (append-only)
+
+    func appendDecisionEvent(_ event: DecisionEvent) throws {
+        let sql = """
+            INSERT INTO decision_events
+            (id, analysisAssetId, eventType, windowId, proposalConfidence, skipConfidence,
+             eligibilityGate, policyAction, decisionCohortJSON, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, event.id)
+        bind(stmt, 2, event.analysisAssetId)
+        bind(stmt, 3, event.eventType)
+        bind(stmt, 4, event.windowId)
+        bind(stmt, 5, event.proposalConfidence)
+        bind(stmt, 6, event.skipConfidence)
+        bind(stmt, 7, event.eligibilityGate)
+        bind(stmt, 8, event.policyAction)
+        bind(stmt, 9, event.decisionCohortJSON)
+        bind(stmt, 10, event.createdAt)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func loadDecisionEvents(for analysisAssetId: String) throws -> [DecisionEvent] {
+        let sql = "SELECT id, analysisAssetId, eventType, windowId, proposalConfidence, skipConfidence, eligibilityGate, policyAction, decisionCohortJSON, createdAt FROM decision_events WHERE analysisAssetId = ? ORDER BY createdAt"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        var results: [DecisionEvent] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(DecisionEvent(
+                id: text(stmt, 0),
+                analysisAssetId: text(stmt, 1),
+                eventType: text(stmt, 2),
+                windowId: text(stmt, 3),
+                proposalConfidence: sqlite3_column_double(stmt, 4),
+                skipConfidence: sqlite3_column_double(stmt, 5),
+                eligibilityGate: text(stmt, 6),
+                policyAction: text(stmt, 7),
+                decisionCohortJSON: text(stmt, 8),
+                createdAt: sqlite3_column_double(stmt, 9)
+            ))
+        }
+        return results
+    }
+
+    // MARK: - CRUD: correction_events (append-only; schema owned here, Phase 7 writes)
+
+    func appendCorrectionEvent(_ event: CorrectionEvent) throws {
+        let sql = """
+            INSERT INTO correction_events
+            (id, analysisAssetId, correctionScope, atomOrdinalRange, evidenceJSON, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, event.id)
+        bind(stmt, 2, event.analysisAssetId)
+        bind(stmt, 3, event.correctionScope)
+        bind(stmt, 4, event.atomOrdinalRange)
+        bind(stmt, 5, event.evidenceJSON)
+        bind(stmt, 6, event.createdAt)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func loadCorrectionEvents(for analysisAssetId: String) throws -> [CorrectionEvent] {
+        let sql = "SELECT id, analysisAssetId, correctionScope, atomOrdinalRange, evidenceJSON, createdAt FROM correction_events WHERE analysisAssetId = ? ORDER BY createdAt"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        var results: [CorrectionEvent] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(CorrectionEvent(
+                id: text(stmt, 0),
+                analysisAssetId: text(stmt, 1),
+                correctionScope: text(stmt, 2),
+                atomOrdinalRange: text(stmt, 3),
+                evidenceJSON: text(stmt, 4),
+                createdAt: sqlite3_column_double(stmt, 5)
+            ))
+        }
+        return results
     }
 }
