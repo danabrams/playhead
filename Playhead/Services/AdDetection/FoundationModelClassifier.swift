@@ -507,6 +507,30 @@ struct FMRefinementWindowOutput: Sendable {
     let lineRefs: [Int]
     let spans: [RefinedAdSpan]
     let latencyMillis: Double
+    /// playhead-eu1: true when the @Generable default path refused and
+    /// the permissive path was used as a fallback for this window.
+    let usedPermissiveFallback: Bool
+    /// Model-generated explanation from `Refusal.explanation` at the time the permissive
+    /// fallback was triggered. `nil` if explanation was unavailable or the fallback was not used.
+    let permissiveFallbackReason: String?
+
+    init(
+        windowIndex: Int,
+        sourceWindowIndex: Int,
+        lineRefs: [Int],
+        spans: [RefinedAdSpan],
+        latencyMillis: Double,
+        usedPermissiveFallback: Bool = false,
+        permissiveFallbackReason: String? = nil
+    ) {
+        self.windowIndex = windowIndex
+        self.sourceWindowIndex = sourceWindowIndex
+        self.lineRefs = lineRefs
+        self.spans = spans
+        self.latencyMillis = latencyMillis
+        self.usedPermissiveFallback = usedPermissiveFallback
+        self.permissiveFallbackReason = permissiveFallbackReason
+    }
 }
 
 struct FMRefinementScanOutput: Sendable {
@@ -575,7 +599,12 @@ struct FoundationModelClassifier: Sendable {
 
     private enum RefinementResponseOutcome {
         case success(plan: RefinementWindowPlan, schema: RefinementWindowSchema)
-        case failure(SemanticScanStatus)
+        /// playhead-36t/eu1: refusalExplanation is populated (possibly nil)
+        /// when the status is `.refusal` — it carries the model-generated
+        /// explanation text from `GenerationError.Refusal.explanation` so
+        /// the eu1 permissive-retry path can surface it in diagnostics and
+        /// `SemanticScanResult`.
+        case failure(SemanticScanStatus, refusalExplanation: String? = nil)
     }
 
     struct Config: Sendable {
@@ -742,6 +771,13 @@ struct FoundationModelClassifier: Sendable {
         let contextDebugDescription: String
         let recordReflect: String
         let promptPreview: String
+        /// playhead-36t: model-generated explanation text from
+        /// `LanguageModelSession.GenerationError.Refusal.explanation`.
+        /// Populated asynchronously when available; nil when the async
+        /// fetch fails, times out, or the FoundationModels framework is
+        /// absent. The field is diagnostic-only — it does not affect
+        /// routing or persistence.
+        let refusalExplanation: String?
     }
 
     /// Internal test hook so unit tests can observe refinement refusal
@@ -1751,7 +1787,87 @@ struct FoundationModelClassifier: Sendable {
             case let .success(plan, schema):
                 effectivePlan = plan
                 response = schema
-            case let .failure(status):
+            case let .failure(status, refusalExplanation):
+                // playhead-eu1: when the @Generable default path refuses AND
+                // a permissive classifier is available, auto-retry via the
+                // permissive string path instead of recording a failed window.
+                // This is the correctness gate the SensitiveWindowRouter cannot
+                // be — the router only fires on known-vocabulary triggers, but
+                // the Kelly Ripa #1 mystery shows Apple's guardrails can refuse
+                // content that has zero pharma vocabulary in the visible prompt.
+                if status == .refusal, let permissive = permissiveClassifier {
+                    let windowSegments = plan.lineRefs.compactMap { lineRefLookup[$0] }
+                    logger.notice(
+                        """
+                        fm.classifier.refinement_pass_eu1_fallback \
+                        window=\(plan.windowIndex, privacy: .public) \
+                        sourceWindow=\(plan.sourceWindowIndex, privacy: .public) \
+                        firstLineRef=\(plan.lineRefs.first ?? -1, privacy: .public) \
+                        lastLineRef=\(plan.lineRefs.last ?? -1, privacy: .public) \
+                        refusalExplanation=\(refusalExplanation ?? "<none>", privacy: .public)
+                        """
+                    )
+                    do {
+                        let permissiveResult = try await permissive.refine(
+                            window: windowSegments,
+                            focusLineRefs: plan.focusLineRefs,
+                            focusClusters: plan.focusClusters,
+                            maximumSpans: config.maximumRefinementSpansPerWindow
+                        )
+                        let permissiveSpans = permissiveResult.refinedSpans(
+                            for: plan,
+                            lineRefLookup: lineRefLookup
+                        )
+                        let permissiveLatency = Self.latencyMillis(since: windowStart, clock: clock)
+                        logger.notice(
+                            """
+                            fm.classifier.refinement_pass_eu1_fallback_success \
+                            window=\(plan.windowIndex, privacy: .public) \
+                            sourceWindow=\(plan.sourceWindowIndex, privacy: .public) \
+                            result=\(permissiveResult.description, privacy: .public) \
+                            spans=\(permissiveSpans.count, privacy: .public) \
+                            latencyMillis=\(permissiveLatency, privacy: .public)
+                            """
+                        )
+                        if permissiveSpans.isEmpty {
+                            // `.noAd` from focused refinement — drop cleanly.
+                            continue
+                        }
+                        windows.append(
+                            FMRefinementWindowOutput(
+                                windowIndex: plan.windowIndex,
+                                sourceWindowIndex: plan.sourceWindowIndex,
+                                lineRefs: plan.lineRefs,
+                                spans: permissiveSpans,
+                                latencyMillis: permissiveLatency,
+                                usedPermissiveFallback: true,
+                                permissiveFallbackReason: refusalExplanation
+                            )
+                        )
+                    } catch let error as PermissiveClassificationError {
+                        // eu1 permissive retry also failed — record as a
+                        // permissive failure and continue to sibling windows.
+                        let permStatus = Self.permissiveStatus(for: error.reason)
+                        failedWindowStatuses.append(permStatus)
+                        permissiveCounts.increment(reason: error.reason)
+                        logger.error(
+                            """
+                            fm.classifier.refinement_pass_eu1_fallback_failed \
+                            window=\(plan.windowIndex, privacy: .public) \
+                            sourceWindow=\(plan.sourceWindowIndex, privacy: .public) \
+                            reason=\(error.reason.rawValue, privacy: .public) \
+                            status=\(permStatus.rawValue, privacy: .public)
+                            """
+                        )
+                    } catch {
+                        failedWindowStatuses.append(.permissiveRefusal)
+                        permissiveCounts.increment(reason: .permissiveRefusal)
+                        logger.error(
+                            "fm.classifier.refinement_pass_eu1_fallback_unexpected window=\(plan.windowIndex, privacy: .public) error=\(String(describing: error), privacy: .private)"
+                        )
+                    }
+                    continue
+                }
                 // R6-Fix1 / bd-ih3: refinement per-window failures that can
                 // be tolerated without aborting the entire pass. The
                 // diagnostic and feedback-store hooks have already fired
@@ -3015,7 +3131,9 @@ struct FoundationModelClassifier: Sendable {
             // otherwise. Must happen before the per-window session goes
             // out of scope so the model state at the moment of refusal is
             // captured.
-            reportRefinementPassRefusalDetailIfNeeded(plan: plan, error: error)
+            // playhead-36t: now async; returns the explanation text (may be
+            // nil) for propagation into RefinementResponseOutcome.
+            let explanation = await reportRefinementPassRefusalDetailIfNeeded(plan: plan, error: error)
             // bd-fmfb: capture an Apple `logFeedbackAttachment` blob for any
             // refinement decode failure or refusal. Same rationale as the
             // coarse-pass call site — must happen before the per-window
@@ -3033,7 +3151,7 @@ struct FoundationModelClassifier: Sendable {
                     from: plan,
                     lineRefLookup: lineRefLookup
                 ) else {
-                    return .failure(status)
+                    return .failure(status, refusalExplanation: explanation)
                 }
                 let retrySessionBox = await makePrewarmedSessionBox(promptPrefix: Self.refinementPromptPrefix)
                 do {
@@ -3047,7 +3165,7 @@ struct FoundationModelClassifier: Sendable {
                         status: retryStatus,
                         retryStage: .shrinkRetry
                     )
-                    reportRefinementPassRefusalDetailIfNeeded(plan: retryPlan, error: error)
+                    let retryExplanation = await reportRefinementPassRefusalDetailIfNeeded(plan: retryPlan, error: error)
                     await captureFeedbackForRefinementErrorIfNeeded(
                         status: retryStatus,
                         error: error,
@@ -3055,7 +3173,7 @@ struct FoundationModelClassifier: Sendable {
                         plan: retryPlan,
                         stage: .shrinkRetry
                     )
-                    return .failure(retryStatus)
+                    return .failure(retryStatus, refusalExplanation: retryExplanation)
                 }
             case .backoffAndRetry:
                 try? await Task.sleep(nanoseconds: 50_000_000)
@@ -3071,7 +3189,7 @@ struct FoundationModelClassifier: Sendable {
                         status: retryStatus,
                         retryStage: .backoffRetry
                     )
-                    reportRefinementPassRefusalDetailIfNeeded(plan: plan, error: error)
+                    let retryExplanation = await reportRefinementPassRefusalDetailIfNeeded(plan: plan, error: error)
                     await captureFeedbackForRefinementErrorIfNeeded(
                         status: retryStatus,
                         error: error,
@@ -3079,10 +3197,10 @@ struct FoundationModelClassifier: Sendable {
                         plan: plan,
                         stage: .backoffRetry
                     )
-                    return .failure(retryStatus)
+                    return .failure(retryStatus, refusalExplanation: retryExplanation)
                 }
             default:
-                return .failure(status)
+                return .failure(status, refusalExplanation: explanation)
             }
         }
     }
@@ -3152,16 +3270,30 @@ struct FoundationModelClassifier: Sendable {
     /// Console.app without a new build. Logs at `.notice` so production
     /// users hitting this surface see it without enabling debug filters.
     /// No-ops for any other error type.
+    ///
+    /// playhead-36t: now async so `refusal.explanation` (a model-generated
+    /// `Response<String>`) can be captured without a nested task. Returns
+    /// the explanation text for wiring into `SemanticScanResult`; returns
+    /// nil for any non-refusal error or when the explanation fetch fails.
+    @discardableResult
     private func reportRefinementPassRefusalDetailIfNeeded(
         plan: RefinementWindowPlan,
         error: Error
-    ) {
+    ) async -> String? {
         #if canImport(FoundationModels)
-        guard #available(iOS 26.0, *) else { return }
+        guard #available(iOS 26.0, *) else { return nil }
         guard let generationError = error as? LanguageModelSession.GenerationError,
               case let .refusal(refusal, context) = generationError else {
-            return
+            return nil
         }
+
+        // playhead-36t: capture the model-generated explanation. This is
+        // an async call to `LanguageModelSession.GenerationError.Refusal.explanation`
+        // which generates a plain-text description of why the safety
+        // classifier refused. `try?` swallows fetch failures so the
+        // diagnostic path never blocks the caller on a secondary FM error.
+        let explanation = try? await refusal.explanation
+        let explanationText = explanation?.content
 
         let refusalReflect = String(reflecting: refusal)
         let contextDebugDescription = context.debugDescription
@@ -3176,7 +3308,8 @@ struct FoundationModelClassifier: Sendable {
             promptTokenCount: plan.promptTokenCount,
             contextDebugDescription: contextDebugDescription,
             recordReflect: refusalReflect,
-            promptPreview: preview
+            promptPreview: preview,
+            refusalExplanation: explanationText
         )
 
         logger.notice(
@@ -3191,11 +3324,15 @@ struct FoundationModelClassifier: Sendable {
             promptTokens=\(plan.promptTokenCount, privacy: .public) \
             contextDebugDescription=\(contextDebugDescription, privacy: .public) \
             recordReflect=\(refusalReflect, privacy: .public) \
+            refusalExplanation=\(explanationText ?? "<none>", privacy: .public) \
             promptPreview=\(preview, privacy: .public)
             """
         )
 
         Self.refinementRefusalDiagnosticObserver?(diagnostic)
+        return explanationText
+        #else
+        return nil
         #endif
     }
 
@@ -3883,8 +4020,47 @@ final actor SessionBox {
 final actor LiveSessionActor {
     private let session: LanguageModelSession
 
+    // playhead-994 experiment: env var gate for the
+    // `includeSchemaInPrompt: false` + one-shot example path.
+    // Set `PLAYHEAD_FM_994_SCHEMA_LESS=1` before running the on-device
+    // smoke test to A/B test whether stripping the framework-injected
+    // schema text removes the hidden surface that trips Apple's safety
+    // classifier on the Kelly Ripa #1 refinement window.
+    //
+    // When the flag is set the session is created with `Instructions`
+    // containing a concrete one-shot example of the desired output format
+    // (Apple's documented pattern for `includeSchemaInPrompt: false` use).
+    // The `respondRefinement` method then passes `includeSchemaInPrompt: false`
+    // to `session.respond(to:generating:includeSchemaInPrompt:options:)`.
+    //
+    // API note: `session.respond(to:generating:includeSchemaInPrompt:options:)`
+    // is confirmed available in the FoundationModels framework
+    // (verified via .swiftinterface symbol inspection, 2026-04-09).
+    private static func schemaLessExperimentEnabled() -> Bool {
+        ProcessInfo.processInfo.environment["PLAYHEAD_FM_994_SCHEMA_LESS"] == "1"
+    }
+
+    private static let schemaLessOneShotExample = """
+        You are a transcript span extractor. Return only the ad-span line ranges that appear in the transcript window.
+
+        Example output format (do not echo this — it shows the expected JSON shape):
+        {"spans":[{"commercialIntent":"paid","ownership":"thirdParty","firstLineRef":4,"lastLineRef":5,"certainty":"strong","boundaryPrecision":"usable","evidenceAnchors":[]}]}
+
+        If there are no ads, return: {"spans":[]}
+        """
+
     init() {
-        self.session = LanguageModelSession(model: SystemLanguageModel.default)
+        if Self.schemaLessExperimentEnabled() {
+            // playhead-994: create the session with one-shot example
+            // instructions so the model understands the output format
+            // even when the framework-injected schema text is suppressed.
+            self.session = LanguageModelSession(
+                model: SystemLanguageModel.default,
+                instructions: Instructions { Self.schemaLessOneShotExample }
+            )
+        } else {
+            self.session = LanguageModelSession(model: SystemLanguageModel.default)
+        }
     }
 
     func prewarm(_ promptPrefix: String) {
@@ -3901,6 +4077,25 @@ final actor LiveSessionActor {
     }
 
     func respondRefinement(_ prompt: String, maximumResponseTokens: Int) async throws -> RefinementWindowSchema {
+        if Self.schemaLessExperimentEnabled() {
+            // playhead-994 experiment: pass includeSchemaInPrompt: false to
+            // suppress the framework-injected schema text from the augmented
+            // input. The hypothesis (from the FoundationModels expert, 2026-04-08)
+            // is that the hidden schema surface is what tips Apple's safety
+            // classifier over the line on the Kelly Ripa #1 refinement window —
+            // a benign cross-promo that has zero pharma vocabulary in the
+            // visible prompt but still refuses every run with
+            // contextDebugDescription="May contain sensitive content".
+            // The one-shot example in the session instructions replaces the
+            // schema as the model's guide to output format.
+            let response = try await session.respond(
+                to: prompt,
+                generating: RefinementWindowSchema.self,
+                includeSchemaInPrompt: false,
+                options: GenerationOptions(maximumResponseTokens: maximumResponseTokens)
+            )
+            return response.content
+        }
         let response = try await session.respond(
             to: prompt,
             generating: RefinementWindowSchema.self,

@@ -276,3 +276,46 @@ This avoids chasing undocumented classifier boundaries with lexicons.
 ### Expert's bottom line
 
 > The second mystery is not really "Why does Kelly Ripa trigger a hidden celebrity classifier?" It is "Why are you still treating `plan.prompt` as the full guarded input on guided generation?" Once you account for the framework-added schema/instruction surface, the behavior stops being mysterious and starts looking like a false positive on the augmented prompt.
+
+---
+
+## Implementation (2026-04-09) — playhead-994, playhead-36t, playhead-eu1
+
+Three beads landed on `feature/kelly-ripa` in response to the expert recommendations above.
+
+### playhead-994: `includeSchemaInPrompt: false` experiment
+
+`FoundationModelClassifier.LiveSessionActor` now has a flag-gated path activated by the environment variable `PLAYHEAD_FM_994_SCHEMA_LESS=1`. When set:
+
+- `LanguageModelSession` is initialised with a one-shot example in its `Instructions` block instead of relying on the default framework-injected schema text.
+- `session.respond(to:generating:includeSchemaInPrompt:options:)` is called with `includeSchemaInPrompt: false`.
+
+**What to expect on device:** If the Kelly Ripa refusal disappears when running with the flag set, the hidden schema/instruction surface was the extra signal triggering Apple's guardrails. If it persists, the flag alone is not sufficient and the permissive fallback path (eu1) is the correct long-term fix.
+
+**How to run:** Set `PLAYHEAD_FM_994_SCHEMA_LESS=1` in the Playhead scheme's environment variables in Xcode and exercise the Kelly Ripa fixture through the app.
+
+### playhead-36t: capture `refusal.explanation`
+
+`reportRefinementPassRefusalDetailIfNeeded` in `FoundationModelClassifier` is now `async`. When a refinement window refuses, it calls `try? await refusal.explanation` (a model-generated `Response<String>`) and:
+
+- logs the explanation via `OSLog` alongside the existing diagnostic
+- adds it to `RefinementPassRefusalDiagnostic.refusalExplanation: String?`
+- propagates it through `RefinementResponseOutcome.failure(_, refusalExplanation:)` and into `SemanticScanResult.refusalExplanation: String?`
+
+The field is nil for successful scans, for non-refusal failures, and whenever the async explanation fetch fails (permissive paths included). It is diagnostic-only and does not affect routing or persistence schema.
+
+### playhead-eu1: auto-retry refusals via permissive path
+
+When `refinePassB` receives a `.failure(.refusal, ...)` outcome for a window **and** a `PermissiveAdClassifier` is available, it now automatically retries via `permissive.refine(window:...)` instead of recording a failed window. If the permissive retry produces spans, the window is appended to output with `usedPermissiveFallback: true` and `permissiveFallbackReason` set to the refusal explanation (may be nil). If the permissive retry also fails or produces no spans, the window is dropped cleanly.
+
+New fields:
+- `FMRefinementWindowOutput.usedPermissiveFallback: Bool` (default `false`)
+- `FMRefinementWindowOutput.permissiveFallbackReason: String?` (default `nil`)
+- `SemanticScanResult.usedPermissiveFallback: Bool` (default `false`)
+- `SemanticScanResult.permissiveFallbackReason: String?` (default `nil`)
+
+`BackfillJobRunner.makeRefinementScanResult` propagates both fields from the window output to the persistence row.
+
+This eu1 gate is vocabulary-independent — it fires on any `@Generable` refusal, including the Kelly Ripa false-positive pattern. The `SensitiveWindowRouter` path (vocabulary-triggered, pre-empts the `@Generable` call entirely) is unchanged.
+
+**Test coverage:** `PlayheadTests/Services/AdDetection/KellyRipaFMSafetyTests.swift` — 9 tests across two `@Suite` structs (`PlayheadRefusalExplanationTests` for 36t, `PlayheadEu1AutoRetryTests` for eu1). All pass on simulator.

@@ -2023,7 +2023,12 @@ actor BackfillJobRunner {
             transcriptVersion: inputs.transcriptVersion,
             reuseScope: jobId,
             runMode: runMode,
-            jobPhase: jobPhase.rawValue
+            jobPhase: jobPhase.rawValue,
+            // playhead-eu1: propagate permissive-fallback diagnostics so
+            // callers (tests, telemetry) can observe which windows were
+            // recovered via the auto-retry path.
+            usedPermissiveFallback: windowOutput.usedPermissiveFallback,
+            permissiveFallbackReason: windowOutput.permissiveFallbackReason
         )
     }
 
