@@ -385,9 +385,9 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
             observations: 10
         )
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
-        let pushedCues = OSAllocatedUnfairLock(initialState: [CMTimeRange]())
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
         await orchestrator.setSkipCueHandler { ranges in
-            pushedCues.withLock { $0 = ranges }
+            pushedCues = ranges
         }
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
@@ -411,7 +411,7 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
 
         await orchestrator.receiveAdWindows([firstWindow, secondWindow])
 
-        let currentCues = pushedCues.withLock { $0 }
+        let currentCues = pushedCues
         #expect(currentCues.count == 1)
         if let mergedCue = currentCues.first {
             #expect(CMTimeGetSeconds(mergedCue.start) == 60)
@@ -431,9 +431,9 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
             observations: 10
         )
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
-        let pushedCues = OSAllocatedUnfairLock(initialState: [CMTimeRange]())
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
         await orchestrator.setSkipCueHandler { ranges in
-            pushedCues.withLock { $0 = ranges }
+            pushedCues = ranges
         }
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
@@ -457,7 +457,7 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
 
         await orchestrator.receiveAdWindows([firstWindow, secondWindow])
 
-        let currentCues = pushedCues.withLock { $0 }
+        let currentCues = pushedCues
         #expect(currentCues.count == 2)
         if currentCues.count == 2 {
             #expect(CMTimeGetSeconds(currentCues[0].start) == 60)
