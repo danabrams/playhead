@@ -362,6 +362,30 @@ struct SemanticScanPersistenceTests {
         #expect(fetched == [original, second])
     }
 
+    @Test("EvidenceEvent round-trips classifier source rows")
+    func evidenceEventClassifierSourceRoundTrip() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        let classifierEvent = EvidenceEvent(
+            id: "event-classifier",
+            analysisAssetId: "asset-1",
+            eventType: "scoreContribution",
+            sourceType: .classifier,
+            atomOrdinals: "[21,22,23]",
+            evidenceJSON: #"{"score":0.84,"reason":"legacy classifier prior"}"#,
+            scanCohortJSON: try makeScanCohortJSON(),
+            createdAt: 123
+        )
+
+        try await store.insertEvidenceEvent(classifierEvent)
+
+        let fetched = try await store.fetchEvidenceEvents(analysisAssetId: "asset-1")
+
+        #expect(fetched == [classifierEvent])
+        #expect(fetched.first?.sourceType == .classifier)
+    }
+
     // MARK: - New behaviour from review fixes
 
     @Test("H-2: evidence_events batches from different transcript versions coexist for audit")
