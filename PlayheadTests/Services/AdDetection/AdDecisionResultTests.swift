@@ -202,9 +202,7 @@ struct CorrectionEventPersistenceTests {
         CorrectionEvent(
             id: id,
             analysisAssetId: assetId,
-            correctionScope: "window",
-            atomOrdinalRange: "[10, 25]",
-            evidenceJSON: #"{"reason":"not_an_ad"}"#,
+            scope: CorrectionScope.exactSpan(assetId: assetId, ordinalRange: 10...25).serialized,
             createdAt: createdAt
         )
     }
@@ -212,9 +210,17 @@ struct CorrectionEventPersistenceTests {
     @Test("appendCorrectionEvent + loadCorrectionEvents round-trip")
     func roundTrip() async throws {
         let store = try await makeStore()
+        // Insert a parent asset first (FK constraint).
+        try await store.insertAsset(AnalysisAsset(
+            id: "asset1", episodeId: "ep1", assetFingerprint: "fp1",
+            weakFingerprint: nil, sourceURL: "file:///tmp/ep1.m4a",
+            featureCoverageEndTime: nil, fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil, analysisState: "new",
+            analysisVersion: 1, capabilitySnapshot: nil
+        ))
         let event = makeEvent()
         try await store.appendCorrectionEvent(event)
-        let loaded = try await store.loadCorrectionEvents(for: "asset1")
+        let loaded = try await store.loadCorrectionEvents(analysisAssetId: "asset1")
         #expect(loaded.count == 1)
         #expect(loaded[0] == event)
     }
@@ -222,9 +228,16 @@ struct CorrectionEventPersistenceTests {
     @Test("correction events are append-only — multiple preserved in order")
     func appendOnly() async throws {
         let store = try await makeStore()
+        try await store.insertAsset(AnalysisAsset(
+            id: "asset1", episodeId: "ep1", assetFingerprint: "fp1",
+            weakFingerprint: nil, sourceURL: "file:///tmp/ep1.m4a",
+            featureCoverageEndTime: nil, fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil, analysisState: "new",
+            analysisVersion: 1, capabilitySnapshot: nil
+        ))
         try await store.appendCorrectionEvent(makeEvent(id: "c1", createdAt: 1.0))
         try await store.appendCorrectionEvent(makeEvent(id: "c2", createdAt: 2.0))
-        let loaded = try await store.loadCorrectionEvents(for: "asset1")
+        let loaded = try await store.loadCorrectionEvents(analysisAssetId: "asset1")
         #expect(loaded.count == 2)
         #expect(loaded[0].id == "c1")
         #expect(loaded[1].id == "c2")
@@ -233,17 +246,26 @@ struct CorrectionEventPersistenceTests {
     @Test("loadCorrectionEvents returns empty for unknown asset")
     func unknownAssetEmpty() async throws {
         let store = try await makeStore()
-        let loaded = try await store.loadCorrectionEvents(for: "ghost")
+        let loaded = try await store.loadCorrectionEvents(analysisAssetId: "ghost")
         #expect(loaded.isEmpty)
     }
 
     @Test("CorrectionEvent asset isolation")
     func assetIsolation() async throws {
         let store = try await makeStore()
+        for assetId in ["asset-A", "asset-B"] {
+            try await store.insertAsset(AnalysisAsset(
+                id: assetId, episodeId: "ep-\(assetId)", assetFingerprint: "fp-\(assetId)",
+                weakFingerprint: nil, sourceURL: "file:///tmp/\(assetId).m4a",
+                featureCoverageEndTime: nil, fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil, analysisState: "new",
+                analysisVersion: 1, capabilitySnapshot: nil
+            ))
+        }
         try await store.appendCorrectionEvent(makeEvent(id: "cA", assetId: "asset-A"))
         try await store.appendCorrectionEvent(makeEvent(id: "cB", assetId: "asset-B"))
-        let eventsA = try await store.loadCorrectionEvents(for: "asset-A")
-        let eventsB = try await store.loadCorrectionEvents(for: "asset-B")
+        let eventsA = try await store.loadCorrectionEvents(analysisAssetId: "asset-A")
+        let eventsB = try await store.loadCorrectionEvents(analysisAssetId: "asset-B")
         #expect(eventsA.count == 1)
         #expect(eventsA[0].id == "cA")
         #expect(eventsB.count == 1)

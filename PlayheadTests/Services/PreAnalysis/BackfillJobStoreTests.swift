@@ -239,9 +239,9 @@ struct BackfillJobStoreTests {
     func testSchemaVersionRecorded() async throws {
         let store = try await makeTestStore()
         let version = try await store.schemaVersion()
-        // Current schema is v5, which layers the Phase 6 ad-window prep
-        // on top of the earlier v4 analysis/planner migrations.
-        #expect(version == 5)
+        // Current schema is v6, which adds source/podcastId columns to
+        // correction_events on top of the earlier Phase 6 ad-window prep.
+        #expect(version == 6)
     }
 
     @Test("M8: deleting an asset cascades to its backfill_jobs rows")

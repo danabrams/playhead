@@ -322,7 +322,7 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 5
+    nonisolated private static let currentSchemaVersion = 6
 
     /// bd-m8k / Cycle 2 C4: Maximum number of recent full-rescan **recall**
     /// samples retained for the `stable_recall_flag` ring. Must match the
@@ -479,6 +479,7 @@ actor AnalysisStore {
             try migrateAnalysisSessionsShadowRetryV4IfNeeded()
             try migratePodcastPlannerStateV4IfNeeded()
             try migrateAdWindowsPhase6PrepV5IfNeeded()
+            try migrateCorrectionEventsV6IfNeeded()
             // Cycle 8 reconciliation: both C4 (Rev3-M5 shadow/targeted) and
             // B6 (Rev3-M6 BackfillJobPhase.rawValue) added a `phase` column
             // for different semantic dimensions. Keep C4's `phase` column
@@ -553,6 +554,7 @@ actor AnalysisStore {
         try migrateAnalysisSessionsShadowRetryV4IfNeeded()
         try migratePodcastPlannerStateV4IfNeeded()
         try migrateAdWindowsPhase6PrepV5IfNeeded()
+        try migrateCorrectionEventsV6IfNeeded()
         // Mirror the belt-and-suspenders phase/jobPhase column re-adds
         // that `migrate()` performs after the v2/v3 evidence_events
         // rebuild (cycle-8 reconciliation: both columns coexist).
@@ -968,19 +970,35 @@ actor AnalysisStore {
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_de_asset ON decision_events(analysisAssetId)")
 
+        try setSchemaVersion(5)
+    }
+
+    /// Phase 7 (playhead-4my.7.1): add `source` and `podcastId` columns to
+    /// `correction_events`. Fresh databases get these columns via `createTables()`;
+    /// existing v5 databases pick them up here. Idempotent via `addColumnIfNeeded`.
+    private func migrateCorrectionEventsV6IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 6 else { return }
+
+        // Create the table on pre-v6 DBs that have never seen it.
         try exec("""
             CREATE TABLE IF NOT EXISTS correction_events (
-                id                  TEXT PRIMARY KEY,
-                analysisAssetId     TEXT NOT NULL,
-                correctionScope     TEXT NOT NULL,
-                atomOrdinalRange    TEXT NOT NULL,
-                evidenceJSON        TEXT NOT NULL,
-                createdAt           REAL NOT NULL
+                id               TEXT PRIMARY KEY,
+                analysisAssetId  TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                scope            TEXT NOT NULL,
+                createdAt        REAL NOT NULL,
+                source           TEXT,
+                podcastId        TEXT
             )
             """)
-        try exec("CREATE INDEX IF NOT EXISTS idx_ce_asset ON correction_events(analysisAssetId)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_correction_events_asset ON correction_events(analysisAssetId)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_correction_events_scope ON correction_events(scope)")
 
-        try setSchemaVersion(5)
+        // For DBs that already have the table but were seeded before v6 (unlikely in
+        // production, but guard against test databases that hand-build the schema).
+        try addColumnIfNeeded(table: "correction_events", column: "source", definition: "TEXT")
+        try addColumnIfNeeded(table: "correction_events", column: "podcastId", definition: "TEXT")
+
+        try setSchemaVersion(6)
     }
 
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
@@ -4193,41 +4211,70 @@ actor AnalysisStore {
         return results
     }
 
-    // MARK: - CRUD: correction_events (append-only; schema owned here, Phase 7 writes)
+    // MARK: - CRUD: correction_events (Phase 7, playhead-4my.7.1)
 
+    /// Persist a user correction event.
     func appendCorrectionEvent(_ event: CorrectionEvent) throws {
         let sql = """
-            INSERT INTO correction_events
-            (id, analysisAssetId, correctionScope, atomOrdinalRange, evidenceJSON, createdAt)
+            INSERT OR IGNORE INTO correction_events
+            (id, analysisAssetId, scope, createdAt, source, podcastId)
             VALUES (?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, event.id)
         bind(stmt, 2, event.analysisAssetId)
-        bind(stmt, 3, event.correctionScope)
-        bind(stmt, 4, event.atomOrdinalRange)
-        bind(stmt, 5, event.evidenceJSON)
-        bind(stmt, 6, event.createdAt)
+        bind(stmt, 3, event.scope)
+        bind(stmt, 4, event.createdAt)
+        bind(stmt, 5, event.source?.rawValue)
+        bind(stmt, 6, event.podcastId)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
-    func loadCorrectionEvents(for analysisAssetId: String) throws -> [CorrectionEvent] {
-        let sql = "SELECT id, analysisAssetId, correctionScope, atomOrdinalRange, evidenceJSON, createdAt FROM correction_events WHERE analysisAssetId = ? ORDER BY createdAt"
+    /// Load all correction events for an asset, ordered by createdAt ascending.
+    func loadCorrectionEvents(analysisAssetId: String) throws -> [CorrectionEvent] {
+        let sql = """
+            SELECT id, analysisAssetId, scope, createdAt, source, podcastId
+            FROM correction_events
+            WHERE analysisAssetId = ?
+            ORDER BY createdAt ASC
+            """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, analysisAssetId)
+
         var results: [CorrectionEvent] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            results.append(try CorrectionEvent(
-                id: requireText(stmt, 0),
-                analysisAssetId: requireText(stmt, 1),
-                correctionScope: requireText(stmt, 2),
-                atomOrdinalRange: requireText(stmt, 3),
-                evidenceJSON: requireText(stmt, 4),
-                createdAt: sqlite3_column_double(stmt, 5)
+            let id = text(stmt, 0)
+            let assetId = text(stmt, 1)
+            let scope = text(stmt, 2)
+            let createdAt = sqlite3_column_double(stmt, 3)
+            let sourceRaw = optionalText(stmt, 4)
+            let podcastId = optionalText(stmt, 5)
+            let source = sourceRaw.flatMap { CorrectionSource(rawValue: $0) }
+            results.append(CorrectionEvent(
+                id: id,
+                analysisAssetId: assetId,
+                scope: scope,
+                createdAt: createdAt,
+                source: source,
+                podcastId: podcastId
             ))
         }
         return results
+    }
+
+    /// Returns true if any correction event exists with the given scope string.
+    func hasAnyCorrectionEvent(withScope scope: String) throws -> Bool {
+        let sql = """
+            SELECT EXISTS(
+                SELECT 1 FROM correction_events WHERE scope = ? LIMIT 1
+            )
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, scope)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return false }
+        return sqlite3_column_int(stmt, 0) != 0
     }
 }

@@ -1374,7 +1374,7 @@ struct SemanticScanPersistenceTests {
         try await store.migrate()
         // Current schema is v5, which layers the Phase 6 ad-window prep on top
         // of the earlier v1→v4 migration chain.
-        #expect(try await store.schemaVersion() == 5)
+        #expect(try await store.schemaVersion() == 6)
 
         try await store.insertAsset(makePersistenceTestAsset())
 
@@ -1478,7 +1478,7 @@ struct SemanticScanPersistenceTests {
         try await store.migrate()
         // Current schema is v5, so the v2→v3→v4 ladder is followed by the
         // additive Phase 6 ad-window prep step.
-        #expect(try await store.schemaVersion() == 5)
+        #expect(try await store.schemaVersion() == 6)
 
         try await store.insertAsset(makePersistenceTestAsset())
 
