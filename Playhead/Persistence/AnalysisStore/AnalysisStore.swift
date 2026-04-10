@@ -391,10 +391,9 @@ actor AnalysisStore {
     /// ephemeral in-memory databases (useful in unit tests). Call ``migrate()``
     /// after construction to create tables.
     init(path: String) throws {
-        // `:memory:` is a special SQLite path — no directory setup needed.
-        self.databaseURL = path == ":memory:"
-            ? URL(fileURLWithPath: path)
-            : URL(fileURLWithPath: path)
+        // `:memory:` is a special SQLite URI handled by the C API directly (line below).
+        // databaseURL is metadata only; the DB opens via the raw path string.
+        self.databaseURL = URL(fileURLWithPath: path)
 
         var handle: OpaquePointer?
         let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX
@@ -920,6 +919,10 @@ actor AnalysisStore {
         }
     }
 
+    /// Called from BOTH `migrate()` and `migrateOnlyForTesting()`. The `schemaVersion() < 5`
+    /// guard makes it idempotent: the second call is a no-op. All DDL statements inside
+    /// use `IF NOT EXISTS` / `addColumnIfNeeded` which are also idempotent. Any future
+    /// non-idempotent step added here MUST be guarded by its own existence check.
     private func migrateAdWindowsPhase6PrepV5IfNeeded() throws {
         guard (try schemaVersion() ?? 1) < 5 else { return }
 
@@ -1893,6 +1896,12 @@ actor AnalysisStore {
     // MARK: - CRUD: ad_windows
 
     func insertAdWindow(_ ad: AdWindow) throws {
+        // Column positions (1-indexed): id=1 analysisAssetId=2 startTime=3 endTime=4
+        // confidence=5 boundaryState=6 decisionState=7 detectorVersion=8 advertiser=9
+        // product=10 adDescription=11 evidenceText=12 evidenceStartTime=13
+        // metadataSource=14 metadataConfidence=15 metadataPromptVersion=16 wasSkipped=17
+        // userDismissedBanner=18 evidenceSources=19 eligibilityGate=20
+        // Keep bind() call indices and this comment in sync when adding columns.
         let sql = """
             INSERT INTO ad_windows
             (id, analysisAssetId, startTime, endTime, confidence, boundaryState,
@@ -4096,6 +4105,12 @@ actor AnalysisStore {
     // MARK: - CRUD: ad_decision_results (Phase 6, playhead-4my.6.3)
 
     /// Upsert — a new cohort produces an updated decision for the same asset.
+    ///
+    /// The UNIQUE constraint on `analysisAssetId` means INSERT OR REPLACE overwrites the
+    /// previous artifact row. Any `decision_events` rows written for the old artifact remain
+    /// (append-only audit trail) and are now orphaned from the active artifact. This is
+    /// intentional: callers querying events for a historical cohort can still find them by
+    /// filtering on `decisionCohortJSON`. New-cohort callers should ignore old events.
     func saveDecisionResultArtifact(_ result: DecisionResultArtifact) throws {
         let sql = """
             INSERT OR REPLACE INTO ad_decision_results

@@ -79,8 +79,10 @@ struct TargetedWindowNarrowerTests {
             inputs: inputs,
             config: NarrowingConfig(perAnchorPaddingSegments: 5, maxNarrowedSegmentsPerPhase: 60)
         )
-        let lineRefs = (result.narrowedSegments ?? []).map(\.segmentIndex)
-        #expect(lineRefs == [24, 25, 26, 27, 28, 29])
+        let lineRefs = (result.narrowedSegments ?? []).map(\.segmentIndex).sorted()
+        // Anchor at 29: 20-atom lookback adds refs {9..28}, window [4..29] = 26 segs.
+        // Upper bound clips correctly at segment 29.
+        #expect(lineRefs == Array(4...29))
     }
 
     @Test("Cycle 2 C5: two anchors 100 segments apart produce two disjoint windows")
@@ -92,8 +94,10 @@ struct TargetedWindowNarrowerTests {
             config: NarrowingConfig(perAnchorPaddingSegments: 5, maxNarrowedSegmentsPerPhase: 60)
         )
         let lineRefs = (result.narrowedSegments ?? []).map(\.segmentIndex).sorted()
-        // Two windows of width 11 each (anchor ± 5).
-        #expect(lineRefs.count == 22)
+        // Anchor 10: 20-atom lookback capped at 0 → refs {0..10}, window [0..15] = 16 segs.
+        // Anchor 110: lookback {90..110}, window [85..115] = 31 segs.
+        // Total 47. Gap between 15 and 85 confirms the windows are disjoint.
+        #expect(lineRefs.count == 47)
         #expect(lineRefs.contains(10))
         #expect(lineRefs.contains(110))
         // Confirm there is a gap (the windows are not merged).
@@ -109,8 +113,10 @@ struct TargetedWindowNarrowerTests {
             config: NarrowingConfig(perAnchorPaddingSegments: 5, maxNarrowedSegmentsPerPhase: 60)
         )
         let lineRefs = (result.narrowedSegments ?? []).map(\.segmentIndex).sorted()
-        // Anchor 20 → [15..25], anchor 23 → [18..28], merged → [15..28] = 14 segs
-        #expect(lineRefs == Array(15...28))
+        // Anchor 20: lookback {0..19} → refs {0..20}, window [0..25].
+        // Anchor 23: lookback {3..22} → refs {3..23}, window [0..28].
+        // Merged: [0..28] = 29 segs.
+        #expect(lineRefs == Array(0...28))
     }
 
     @Test("Cycle 2 C5: too many anchors abort narrowing and return aborted=true")
@@ -205,7 +211,9 @@ struct TargetedWindowNarrowerTests {
             inputs: withoutBreaks
         ).narrowedSegments ?? []).map(\.segmentIndex)
         #expect(withBreaksRefs == withoutBreaksRefs)
-        #expect(withoutBreaksRefs == [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+        // Anchor at 10: 20-atom lookback adds refs {0..9}, window [0..15] = 16 segs.
+        // Break at 25s is too far from both edges to trigger any snap.
+        #expect(withoutBreaksRefs == Array(0...15))
     }
 
     @Test("playhead-7q3: narrowing with breaks is deterministic across repeated calls")
@@ -242,61 +250,33 @@ struct TargetedWindowNarrowerTests {
     func snapRespectsCapAbort() {
         // Exercises the genuinely interesting case: a merged input whose
         // pre-snap size is comfortably under the per-phase cap, but whose
-        // post-snap widening (driven by acoustic breaks placed OUTSIDE the
-        // existing merged edges) pushes the total over the cap.
+        // post-snap widening (driven by an acoustic break placed OUTSIDE the
+        // existing merged edge) pushes the total over the cap.
         //
-        // Setup (padding=5, cap=60, snap distance override=6.0):
-        //   - 5 anchors at [20, 50, 80, 110, 140] in a 200-segment episode.
-        //   - Pre-snap: 5 disjoint windows of width 11 ([15,25], [45,55],
-        //     [75,85], [105,115], [135,145]). Total = 55 < 60 cap, so
-        //     the same inputs WITHOUT breaks pass the cap check.
-        //   - Breaks are placed one per edge, 4.5s beyond each edge:
-        //       * left break at (lo-5).midpoint so snap pulls lo -> lo-5
-        //       * right break at (hi+5).midpoint so snap pushes hi -> hi+5
-        //     Each window widens from 11 to 21 segs. 5 * 21 = 105 > 60
-        //     → the cap check MUST fire AFTER snap and abort.
-        //
-        // Anchors are spaced far enough (30 segs) that neither the
-        // breaks nor the widened intervals bleed across anchors.
-        let anchors = [20, 50, 80, 110, 140]
-        let baseInputs = makeSyntheticInputs(segmentCount: 200, anchorIndices: anchors)
+        // Setup (padding=5, cap=27, snap distance=3.0):
+        //   - Single anchor at segment 20 in a 50-segment episode.
+        //   - 20-atom lookback → refs {0..20}, window [0..25] = 26 segs < 27 cap.
+        //   - A break at 27.5s sits in segment 27 (just beyond the right edge at 25).
+        //     distance = |25.0 - 27.5| = 2.5s < 3.0s snap distance ✓
+        //     snap drift = |25 - 27| = 2 ≤ padding(5) ✓
+        //   - Right edge snaps from 25 → 27 → window [0..27] = 28 > 27 cap → ABORTS.
+        let baseInputs = makeSyntheticInputs(segmentCount: 50, anchorIndices: [20])
+        let snapConfig = NarrowingConfig(
+            perAnchorPaddingSegments: 5,
+            maxNarrowedSegmentsPerPhase: 27,
+            acousticBreakSnapMaxDistanceSeconds: 3.0
+        )
 
-        // Sanity: without breaks the same config does NOT abort (55 < 60).
-        // This pins the "cap abort is snap-induced" claim.
+        // Sanity: without a break the baseline fits under the cap (26 < 27).
         let baselineResult = TargetedWindowNarrower.narrow(
             phase: .scanHarvesterProposals,
             inputs: baseInputs,
-            config: NarrowingConfig(
-                perAnchorPaddingSegments: 5,
-                maxNarrowedSegmentsPerPhase: 60,
-                acousticBreakSnapMaxDistanceSeconds: 6.0
-            )
+            config: snapConfig
         )
-        #expect(!baselineResult.aborted, "baseline without breaks must fit under the cap (55 < 60)")
-        #expect((baselineResult.narrowedSegments ?? []).count == 55)
+        #expect(!baselineResult.aborted, "baseline without breaks must fit under the cap (26 < 27)")
+        #expect((baselineResult.narrowedSegments ?? []).count == 26)
 
-        // Each anchor contributes two breaks placed at the midpoint of
-        // the segments that sit exactly `padding` (5) segs beyond the
-        // pre-snap edges. The synthetic segment `idx` spans [idx, idx+1],
-        // so the midpoint is `Double(idx) + 0.5`.
-        let breaks: [AcousticBreak] = anchors.flatMap { anchor -> [AcousticBreak] in
-            let lo = anchor - 5          // pre-snap left edge
-            let hi = anchor + 5          // pre-snap right edge
-            let leftTarget = Double(lo - 5) + 0.5   // midpoint of (lo-5)
-            let rightTarget = Double(hi + 5) + 0.5  // midpoint of (hi+5)
-            return [
-                AcousticBreak(
-                    time: leftTarget,
-                    breakStrength: 0.8,
-                    signals: [.energyDrop]
-                ),
-                AcousticBreak(
-                    time: rightTarget,
-                    breakStrength: 0.8,
-                    signals: [.energyRise]
-                )
-            ]
-        }
+        // Break at 27.5s snaps the right edge from 25 → 27, giving 28 > 27 cap.
         let withBreaks = TargetedWindowNarrower.Inputs(
             analysisAssetId: baseInputs.analysisAssetId,
             podcastId: baseInputs.podcastId,
@@ -305,18 +285,16 @@ struct TargetedWindowNarrowerTests {
             evidenceCatalog: baseInputs.evidenceCatalog,
             auditWindowSampleRate: baseInputs.auditWindowSampleRate,
             episodesSinceLastFullRescan: baseInputs.episodesSinceLastFullRescan,
-            acousticBreaks: breaks
+            acousticBreaks: [
+                AcousticBreak(time: 27.5, breakStrength: 0.8, signals: [.energyRise])
+            ]
         )
         let result = TargetedWindowNarrower.narrow(
             phase: .scanHarvesterProposals,
             inputs: withBreaks,
-            config: NarrowingConfig(
-                perAnchorPaddingSegments: 5,
-                maxNarrowedSegmentsPerPhase: 60,
-                acousticBreakSnapMaxDistanceSeconds: 6.0
-            )
+            config: snapConfig
         )
-        #expect(result.aborted, "snap widening should push merged total past cap (expected 105 > 60)")
+        #expect(result.aborted, "snap widening should push merged total past cap (28 > 27)")
         #expect(result.narrowedSegments == nil)
     }
 
@@ -327,15 +305,16 @@ struct TargetedWindowNarrowerTests {
         // (which is 2.0s, matching the FeatureWindow duration) will trip
         // this test by either failing to snap or snapping too aggressively.
         //
-        // Synthetic layout: 30 one-second segments; anchor at segment 10,
-        // default padding=5 → pre-snap window [5, 15]. Segment 5 spans
-        // [5.0, 6.0], so its startTime is 5.0. Place a break at 3.5s:
+        // Anchor at segment 30 (50-segment episode). 20-atom lookback gives
+        // refs {10..30}, window [5..35]. Segment 5 spans [5.0, 6.0], so its
+        // startTime is 5.0. Place a break at 3.5s:
         //   distance = |5.0 - 3.5| = 1.5s < 2.0s default ✓
         //   break time 3.5 falls inside segment 3 ([3.0, 4.0]) ✓
         //   snap drift = |5 - 3| = 2 ≤ padding(5) ✓
-        // Expected: left edge moves from 5 → 3. Right edge unchanged at 15
-        // (no nearby break).
-        let inputs = makeSyntheticInputs(segmentCount: 30, anchorIndices: [10])
+        // Expected: left edge moves from 5 → 3. Right edge unchanged at 35.
+        // (Anchor at 10 would give window [0..15] — edge at 0 — too far from
+        // break at 3.5 to demonstrate the 2.0s default threshold clearly.)
+        let inputs = makeSyntheticInputs(segmentCount: 50, anchorIndices: [30])
         let withBreaks = TargetedWindowNarrower.Inputs(
             analysisAssetId: inputs.analysisAssetId,
             podcastId: inputs.podcastId,
@@ -359,8 +338,8 @@ struct TargetedWindowNarrowerTests {
         )
         let lineRefs = (result.narrowedSegments ?? []).map(\.segmentIndex).sorted()
         #expect(lineRefs.first == 3, "default 2.0s snap should pull left edge from 5 to 3 (got \(lineRefs.first ?? -1))")
-        #expect(lineRefs.last == 15, "right edge should be unchanged (no nearby break)")
-        #expect(lineRefs == Array(3...15))
+        #expect(lineRefs.last == 35, "right edge should be unchanged (no nearby break)")
+        #expect(lineRefs == Array(3...35))
     }
 
     // MARK: - Cycle 2 H13: empty / wasEmpty

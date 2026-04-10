@@ -23,7 +23,7 @@ enum EvidenceCategory: String, Sendable, CaseIterable, Codable {
 }
 
 /// A single evidence entry in the catalog.
-struct EvidenceEntry: Sendable {
+struct EvidenceEntry: Sendable, Equatable {
     /// Stable integer ref for FM prompts: [E0], [E1], ...
     let evidenceRef: Int
     /// What kind of commercial signal this is.

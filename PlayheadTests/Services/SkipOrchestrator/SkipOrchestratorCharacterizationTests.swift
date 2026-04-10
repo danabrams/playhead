@@ -674,3 +674,166 @@ struct SkipOrchestratorAdDecisionContractTests {
         #expect(!manualConfirmed.isEmpty, "Manual mode must expose eligible AdDecisionResult spans as confirmed windows")
     }
 }
+
+// MARK: - Banner Item Stream Tests
+
+@Suite("SkipOrchestrator Banner Item Stream")
+struct SkipOrchestratorBannerItemStreamTests {
+
+    @Test("Confirmed window in shadow mode emits a banner item")
+    func confirmedWindowEmitsBanner() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        // Shadow mode is the default — windows reach .confirmed but not .applied.
+        let stream = await orchestrator.bannerItemStream()
+
+        let window = makeSkipTestAdWindow(
+            id: "ad-banner-1",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.80,
+            decisionState: "confirmed"
+        )
+        await orchestrator.receiveAdWindows([window])
+
+        // Collect one item from the stream with a bounded timeout.
+        nonisolated(unsafe) var received: AdSkipBannerItem?
+        let collectTask = Task {
+            for await item in stream {
+                received = item
+                break
+            }
+        }
+        // Give the actor time to process and emit.
+        try await Task.sleep(for: .milliseconds(100))
+        collectTask.cancel()
+
+        let item = try #require(received, "Expected a banner item for a confirmed window")
+        #expect(item.windowId == "ad-banner-1")
+        #expect(item.adStartTime == 60)
+        #expect(item.adEndTime == 120)
+        #expect(item.podcastId == "podcast-1")
+    }
+
+    @Test("Applied window in auto mode emits a banner item")
+    func appliedWindowEmitsBanner() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            podcastId: "podcast-2"
+        )
+
+        let stream = await orchestrator.bannerItemStream()
+
+        let window = makeSkipTestAdWindow(
+            id: "ad-banner-auto",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.85,
+            decisionState: "confirmed"
+        )
+        await orchestrator.receiveAdWindows([window])
+
+        nonisolated(unsafe) var received: AdSkipBannerItem?
+        let collectTask = Task {
+            for await item in stream {
+                received = item
+                break
+            }
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        collectTask.cancel()
+
+        let item = try #require(received, "Expected a banner item for an applied window")
+        #expect(item.windowId == "ad-banner-auto")
+        #expect(item.adStartTime == 60)
+        #expect(item.adEndTime == 120)
+        #expect(item.podcastId == "podcast-2")
+    }
+
+    @Test("Banner is emitted only once per window across repeated evaluations")
+    func bannerEmittedOnlyOnce() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        let stream = await orchestrator.bannerItemStream()
+
+        let window = makeSkipTestAdWindow(
+            id: "ad-once",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.80,
+            decisionState: "confirmed"
+        )
+
+        // Deliver the same window twice (simulates re-evaluation from detection).
+        await orchestrator.receiveAdWindows([window])
+        await orchestrator.receiveAdWindows([window])
+
+        // Collect up to two items, but expect exactly one.
+        nonisolated(unsafe) var count = 0
+        let collectTask = Task {
+            for await _ in stream {
+                count += 1
+                if count >= 2 { break }
+            }
+        }
+        try await Task.sleep(for: .milliseconds(150))
+        collectTask.cancel()
+
+        #expect(count == 1, "Banner must fire only once per window, got \(count)")
+    }
+
+    @Test("Suppressed window does not emit a banner")
+    func suppressedWindowNoBanner() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        let stream = await orchestrator.bannerItemStream()
+
+        // Low confidence — will be suppressed by skip policy.
+        let window = makeSkipTestAdWindow(
+            id: "ad-suppressed",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.2,
+            decisionState: "candidate"
+        )
+        await orchestrator.receiveAdWindows([window])
+
+        nonisolated(unsafe) var received: AdSkipBannerItem?
+        let collectTask = Task {
+            for await item in stream {
+                received = item
+                break
+            }
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        collectTask.cancel()
+
+        #expect(received == nil, "Suppressed windows must not emit banners")
+    }
+}

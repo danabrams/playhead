@@ -881,6 +881,13 @@ final class PlayheadRuntime {
         )
     }
 
+    func setShowSkipMode(_ mode: SkipMode, orchestrator: SkipOrchestrator) async {
+        if let podcastId = currentPodcastId {
+            await trustService.setUserOverride(podcastId: podcastId, mode: mode)
+        }
+        await orchestrator.setActiveSkipMode(mode)
+    }
+
 }
 
 /// Thread-safe holder for the lazily-initialized `ShadowRetryObserver`.

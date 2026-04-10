@@ -250,3 +250,64 @@ struct CorrectionEventPersistenceTests {
         #expect(eventsB[0].id == "cB")
     }
 }
+
+// MARK: - Migration Idempotency
+
+@Suite("AnalysisStore v5 migration idempotency")
+struct MigrationIdempotencyTests {
+
+    @Test("Calling migrate() twice on the same store is safe and does not corrupt tables")
+    func migrateIsIdempotent() async throws {
+        let store = try AnalysisStore(path: ":memory:")
+        // First migrate
+        try await store.migrate()
+        // Second migrate — must not throw or corrupt
+        try await store.migrate()
+
+        // The decision tables from v5 must still exist and be writable.
+        let result = DecisionResultArtifact(
+            id: "idempotency-test",
+            analysisAssetId: "asset-idem",
+            decisionCohortJSON: "{}",
+            inputArtifactRefs: "[]",
+            decisionJSON: "[]",
+            createdAt: 1.0
+        )
+        try await store.saveDecisionResultArtifact(result)
+        let loaded = try await store.loadDecisionResultArtifact(for: "asset-idem")
+        #expect(loaded?.id == "idempotency-test", "Double migration should not break table writes")
+    }
+
+    @Test("Second migrate() call on a fully migrated store is a no-op and does not corrupt ad_windows")
+    func doubleMigrateDoesNotCorruptAdWindows() async throws {
+        let store = try AnalysisStore(path: ":memory:")
+        try await store.migrate()
+        // Second call: schemaVersion >= 5 guards should all fire, making this a pure no-op.
+        try await store.migrate()
+
+        // Verify the v5 ad_windows columns (evidenceSources, eligibilityGate) are still writable.
+        let asset = AnalysisAsset(
+            id: "idem-asset", episodeId: "ep", assetFingerprint: "fp",
+            weakFingerprint: nil, sourceURL: "file:///tmp/test.m4a",
+            featureCoverageEndTime: nil, fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil, analysisState: "new", analysisVersion: 1,
+            capabilitySnapshot: nil
+        )
+        try await store.insertAsset(asset)
+        let window = AdWindow(
+            id: "w1", analysisAssetId: "idem-asset",
+            startTime: 10, endTime: 40, confidence: 0.8,
+            boundaryState: "acousticRefined", decisionState: "confirmed",
+            detectorVersion: "test-v1",
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: 10,
+            metadataSource: "fusion-v1", metadataConfidence: nil,
+            metadataPromptVersion: nil, wasSkipped: false, userDismissedBanner: false,
+            evidenceSources: "classifier,lexical", eligibilityGate: "eligible"
+        )
+        try await store.insertAdWindow(window)
+        let windows = try await store.fetchAdWindows(assetId: "idem-asset")
+        #expect(windows.count == 1)
+        #expect(windows[0].evidenceSources == "classifier,lexical")
+    }
+}

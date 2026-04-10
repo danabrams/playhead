@@ -34,6 +34,11 @@ struct AdSkipBannerItem: Identifiable, Equatable {
     let metadataSource: String
     /// The podcast ID, needed for trust scoring on revert.
     let podcastId: String
+    /// Evidence catalog entries associated with this ad window.
+    /// Used by Phase 7's UserCorrectionStore to infer correction scopes
+    /// (e.g. phraseOnShow) when the user taps "Listen" to revert a skip.
+    /// Empty when no catalog data is available — callers must handle [] gracefully.
+    let evidenceCatalogEntries: [EvidenceEntry]
 }
 
 // MARK: - Banner Queue (ViewModel)
@@ -324,7 +329,8 @@ private struct BannerButtonStyle: ButtonStyle {
                     adEndTime: 180.0,
                     metadataConfidence: 0.85,
                     metadataSource: "foundationModels",
-                    podcastId: "podcast-1"
+                    podcastId: "podcast-1",
+                    evidenceCatalogEntries: []
                 ))
                 return q
             }()
@@ -350,7 +356,8 @@ private struct BannerButtonStyle: ButtonStyle {
                     adEndTime: 345.0,
                     metadataConfidence: 0.3,
                     metadataSource: "foundationModels",
-                    podcastId: "podcast-1"
+                    podcastId: "podcast-1",
+                    evidenceCatalogEntries: []
                 ))
                 return q
             }()
@@ -376,7 +383,8 @@ private struct BannerButtonStyle: ButtonStyle {
                     adEndTime: 450.0,
                     metadataConfidence: nil,
                     metadataSource: "none",
-                    podcastId: "podcast-1"
+                    podcastId: "podcast-1",
+                    evidenceCatalogEntries: []
                 ))
                 return q
             }()

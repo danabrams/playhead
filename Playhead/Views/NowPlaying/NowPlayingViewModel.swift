@@ -23,6 +23,8 @@ final class NowPlayingViewModel {
     /// of the total episode duration. Updated in real-time as detection produces results.
     var adSegmentRanges: [ClosedRange<Double>] = []
 
+    var activeSkipMode: SkipMode = .shadow
+
     // MARK: - Derived
 
     var progress: Double {
@@ -44,6 +46,7 @@ final class NowPlayingViewModel {
     private let runtime: PlayheadRuntime
     private var observationTask: Task<Void, Never>?
     private var segmentObservationTask: Task<Void, Never>?
+    private var bannerObservationTask: Task<Void, Never>?
 
     init(runtime: PlayheadRuntime) {
         self.runtime = runtime
@@ -71,11 +74,17 @@ final class NowPlayingViewModel {
         observationTask?.cancel()
         observationTask = nil
         stopObservingAdSegments()
+        stopObservingBanners()
     }
 
     func stopObservingAdSegments() {
         segmentObservationTask?.cancel()
         segmentObservationTask = nil
+    }
+
+    func stopObservingBanners() {
+        bannerObservationTask?.cancel()
+        bannerObservationTask = nil
     }
 
     /// Begin observing ad segment updates from a SkipOrchestrator.
@@ -103,6 +112,32 @@ final class NowPlayingViewModel {
                     self.adSegmentRanges = ranges
                 }
             }
+        }
+    }
+
+    /// Begin observing banner items from a SkipOrchestrator.
+    /// Each item is enqueued into the provided AdBannerQueue on the MainActor.
+    func observeBanners(from orchestrator: SkipOrchestrator, into queue: AdBannerQueue) {
+        bannerObservationTask?.cancel()
+        bannerObservationTask = Task {
+            let stream = await orchestrator.bannerItemStream()
+            for await item in stream {
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    queue.enqueue(item)
+                }
+            }
+        }
+    }
+
+    func loadSkipMode(from orchestrator: SkipOrchestrator) async {
+        activeSkipMode = await orchestrator.currentSkipMode()
+    }
+
+    func setSkipMode(_ mode: SkipMode, orchestrator: SkipOrchestrator) {
+        activeSkipMode = mode
+        Task {
+            await runtime.setShowSkipMode(mode, orchestrator: orchestrator)
         }
     }
 

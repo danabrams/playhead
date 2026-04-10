@@ -83,12 +83,15 @@ struct NowPlayingView: View {
         .onAppear {
             viewModel.startObserving()
             viewModel.observeAdSegments(from: runtime.skipOrchestrator)
+            viewModel.observeBanners(from: runtime.skipOrchestrator, into: bannerQueue)
+            Task { await viewModel.loadSkipMode(from: runtime.skipOrchestrator) }
         }
         .onDisappear {
             if ownsViewModel {
                 viewModel.stopObserving()
             } else {
                 viewModel.stopObservingAdSegments()
+                viewModel.stopObservingBanners()
             }
         }
         .sheet(isPresented: $showTranscriptPeek) {
@@ -216,13 +219,41 @@ private extension NowPlayingView {
                 .foregroundStyle(AppColors.textPrimary)
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
+                .accessibilityAddTraits(.isHeader)
 
             Text(viewModel.podcastTitle)
                 .font(AppTypography.caption)
                 .foregroundStyle(AppColors.textSecondary)
                 .lineLimit(1)
+
+            skipModePill
         }
-        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    var skipModePill: some View {
+        if !viewModel.podcastTitle.isEmpty {
+            Menu {
+                ForEach(SkipMode.allCases, id: \.self) { mode in
+                    Button(mode.pillLabel) {
+                        viewModel.setSkipMode(mode, orchestrator: runtime.skipOrchestrator)
+                    }
+                }
+            } label: {
+                Text(viewModel.activeSkipMode.pillLabel)
+                    .font(AppTypography.sans(size: 10, weight: .semibold))
+                    .foregroundStyle(viewModel.activeSkipMode.pillForeground)
+                    .tracking(0.8)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(viewModel.activeSkipMode.pillBackground)
+                    .clipShape(Capsule())
+                    .contentShape(Rectangle().size(width: 80, height: 44))
+                    .frame(minWidth: 44, minHeight: 44)
+            }
+            .accessibilityLabel("Skip mode: \(viewModel.activeSkipMode.pillLabel)")
+            .accessibilityHint("Tap to change skip mode for this show")
+        }
     }
 
     // MARK: Timeline
@@ -307,6 +338,34 @@ private extension NowPlayingView {
             )
 
             Spacer()
+        }
+    }
+}
+
+// MARK: - SkipMode Pill Style
+
+private extension SkipMode {
+    var pillLabel: String {
+        switch self {
+        case .shadow: "Shadow"
+        case .manual: "Manual"
+        case .auto:   "Auto"
+        }
+    }
+
+    var pillForeground: Color {
+        switch self {
+        case .shadow: AppColors.textTertiary
+        case .manual: AppColors.textSecondary
+        case .auto:   AppColors.accent
+        }
+    }
+
+    var pillBackground: Color {
+        switch self {
+        case .shadow: AppColors.textTertiary.opacity(0.12)
+        case .manual: AppColors.textSecondary.opacity(0.12)
+        case .auto:   AppColors.accent.opacity(0.18)
         }
     }
 }

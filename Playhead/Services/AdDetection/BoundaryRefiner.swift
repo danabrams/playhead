@@ -14,16 +14,8 @@ enum BoundaryRefiner {
     ) -> (startAdjust: Double, endAdjust: Double) {
         guard windows.count >= 3 else { return (0.0, 0.0) }
 
-        let startAdj = findNearestTransition(
-            windows: windows,
-            anchor: candidateStart,
-            searchDirection: .backward
-        )
-        let endAdj = findNearestTransition(
-            windows: windows,
-            anchor: candidateEnd,
-            searchDirection: .forward
-        )
+        let startAdj = findNearestTransition(windows: windows, anchor: candidateStart)
+        let endAdj = findNearestTransition(windows: windows, anchor: candidateEnd)
 
         return (
             clamp(adjustment: startAdj),
@@ -35,16 +27,14 @@ enum BoundaryRefiner {
         max(-maxBoundaryAdjust, min(adjustment, maxBoundaryAdjust))
     }
 
-    private enum SearchDirection {
-        case forward
-        case backward
-    }
-
     private static func findNearestTransition(
         windows: [FeatureWindow],
-        anchor: Double,
-        searchDirection: SearchDirection
+        anchor: Double
     ) -> Double {
+        // Search all windows within maxBoundaryAdjust of the anchor. Acoustic
+        // transitions (RMS drops + spectral flux peaks) are direction-neutral —
+        // the best boundary snap is the strongest transition regardless of whether
+        // we are looking for a start or end edge.
         let nearbyWindows = windows.filter {
             abs(($0.startTime + $0.endTime) / 2.0 - anchor) <= maxBoundaryAdjust
         }
@@ -67,8 +57,6 @@ enum BoundaryRefiner {
         }
 
         guard bestDelta > minimumTransitionStrength else { return 0.0 }
-
-        _ = searchDirection
         return bestTime - anchor
     }
 }

@@ -21,6 +21,12 @@ import OSLog
 /// Phase 6 contract scaffold introduced by bead 6.7 so the pending
 /// AdDecisionResult-based tests compile against the planned production
 /// symbol names before bead 6.4 wires the real behavior.
+///
+/// Naming note: `AdDecisionResult` (this type) is the **runtime per-window decision**
+/// that `SkipOrchestrator` consumes during active playback. It is distinct from
+/// `DecisionResultArtifact` (in AdDecisionResult.swift), which is the SQLite persistence
+/// container that stores an array of these decisions as JSON. The separation is intentional:
+/// one type is optimized for live evaluation, the other for durable storage.
 enum AdDecisionEligibilityGate: String, Sendable {
     case eligible
     case blocked
@@ -179,6 +185,16 @@ actor SkipOrchestrator {
     /// Consumers receive the full set of applied segments whenever the set changes.
     private var segmentContinuations: [UUID: AsyncStream<[(start: Double, end: Double)]>.Continuation] = [:]
 
+    /// Continuation-backed stream of banner items.
+    /// Emits once per window the first time it reaches .confirmed or .applied state.
+    private var bannerContinuations: [UUID: AsyncStream<AdSkipBannerItem>.Continuation] = [:]
+
+    /// Window IDs for which a banner has already been emitted. Prevents re-fires.
+    private var banneredWindowIds: Set<String> = []
+
+    /// The podcast ID for the current episode. Needed to populate banner items.
+    private var activePodcastId: String?
+
     // MARK: - Init
 
     init(
@@ -219,6 +235,53 @@ actor SkipOrchestrator {
         segmentContinuations.removeValue(forKey: id)
     }
 
+    // MARK: - Banner Item Stream
+
+    /// Returns an AsyncStream that emits an AdSkipBannerItem the first time
+    /// each ad window transitions to .confirmed or .applied state.
+    /// Each window fires at most once per episode, regardless of subsequent state changes.
+    func bannerItemStream() -> AsyncStream<AdSkipBannerItem> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            self.bannerContinuations[id] = continuation
+            continuation.onTermination = { @Sendable _ in
+                Task { [weak self] in
+                    await self?.removeBannerContinuation(id: id)
+                }
+            }
+        }
+    }
+
+    private func removeBannerContinuation(id: UUID) {
+        bannerContinuations.removeValue(forKey: id)
+    }
+
+    /// Emit a banner item for the given managed window to all banner listeners.
+    private func emitBannerItem(for managed: ManagedWindow) {
+        guard !bannerContinuations.isEmpty else { return }
+        let adWindow = managed.adWindow
+        let podcastId = activePodcastId ?? ""
+        let item = AdSkipBannerItem(
+            id: UUID().uuidString,
+            windowId: adWindow.id,
+            advertiser: adWindow.advertiser,
+            product: adWindow.product,
+            adStartTime: managed.snappedStart,
+            adEndTime: managed.snappedEnd,
+            metadataConfidence: adWindow.metadataConfidence,
+            metadataSource: adWindow.metadataSource,
+            podcastId: podcastId,
+            // EvidenceCatalog entries are not carried on ManagedWindow/AdWindow today.
+            // Phase 7's UserCorrectionStore wires catalog data at the call site;
+            // until then the banner carries an empty array and correction inference
+            // falls back to windowId-scoped reverts.
+            evidenceCatalogEntries: []
+        )
+        for (_, continuation) in bannerContinuations {
+            continuation.yield(item)
+        }
+    }
+
     /// Broadcast the current set of applied segments to all listeners.
     private func broadcastAppliedSegments() {
         let applied = windows.values
@@ -239,11 +302,13 @@ actor SkipOrchestrator {
     func beginEpisode(analysisAssetId: String, podcastId: String? = nil) async {
         windows.removeAll()
         activeAssetId = analysisAssetId
+        activePodcastId = podcastId
         inAdState = false
         lastSeekTime = nil
         skipSuppressedAfterSeek = false
         currentPlayheadTime = 0
         decisionLog.removeAll()
+        banneredWindowIds.removeAll()
 
         // Load per-show trust mode.
         if let podcastId, let trustService {
@@ -298,8 +363,10 @@ actor SkipOrchestrator {
 
         windows.removeAll()
         activeAssetId = nil
+        activePodcastId = nil
         inAdState = false
         cachedFeatureWindows = []
+        banneredWindowIds.removeAll()
         pushSkipCues()
     }
 
@@ -506,6 +573,12 @@ actor SkipOrchestrator {
         activeSkipMode
     }
 
+    /// Override the active skip mode for the current episode and re-evaluate pending windows.
+    func setActiveSkipMode(_ mode: SkipMode) {
+        activeSkipMode = mode
+        evaluateAndPush()
+    }
+
     /// Windows in the confirmed state (available for manual skip UI).
     func confirmedWindows() -> [AdWindow] {
         windows.values
@@ -539,15 +612,28 @@ actor SkipOrchestrator {
                 || managed.decisionState == .reverted {
                 // Keep applied windows as active cues.
                 if managed.decisionState == .applied {
+                    // Emit a banner on first encounter (e.g. after applyManualSkip).
+                    if !banneredWindowIds.contains(managed.adWindow.id) {
+                        banneredWindowIds.insert(managed.adWindow.id)
+                        emitBannerItem(for: managed)
+                    }
                     eligible.append(managed)
                 }
                 continue
             }
 
+            let previousState = managed.decisionState
             let decision = evaluateWindow(&managed)
-            if decision != managed.decisionState {
+            if decision != previousState {
                 managed.decisionState = decision
                 windows[id] = managed
+            }
+
+            // Emit a banner the first time a window reaches .confirmed or .applied.
+            if (decision == .confirmed || decision == .applied),
+               !banneredWindowIds.contains(managed.adWindow.id) {
+                banneredWindowIds.insert(managed.adWindow.id)
+                emitBannerItem(for: managed)
             }
 
             if decision == .applied {

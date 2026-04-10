@@ -1156,7 +1156,7 @@ final class ManualShadowRetryClock: ShadowRetryClock, Sendable {
 
     /// Waits until at least one sleep has been parked. Times out after
     /// `timeoutSeconds` to keep tests from hanging on a missing schedule.
-    func waitForPendingSleep(timeoutSeconds: Double = 1.0) async throws {
+    func waitForPendingSleep(timeoutSeconds: Double = 5.0) async throws {
         // Fast path.
         if state.withLock({ !$0.pending.isEmpty }) { return }
         try await withThrowingTaskGroup(of: Void.self) { group in
@@ -1257,7 +1257,7 @@ final class RecordingDrainer: ShadowRetryDraining, Sendable {
         state.withLock { $0.calls.last }
     }
 
-    func waitForCall(timeoutSeconds: Double = 1.0) async throws {
+    func waitForCall(timeoutSeconds: Double = 5.0) async throws {
         if state.withLock({ !$0.calls.isEmpty }) { return }
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {

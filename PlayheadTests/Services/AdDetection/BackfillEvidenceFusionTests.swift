@@ -331,7 +331,7 @@ struct BackfillEvidenceFusionTests {
             .init(source: .acoustic, weight: 0.2, detail: .acoustic(breakStrength: 0.8)),
             .init(source: .catalog, weight: 0.2, detail: .catalog(entryCount: 2))
         ]
-        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig())
+        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig(), transcriptQuality: .good)
         let result = mapper.map()
         #expect(result.proposalConfidence <= 1.0)
         #expect(result.proposalConfidence >= 0.0)
@@ -343,7 +343,7 @@ struct BackfillEvidenceFusionTests {
         let entries: [EvidenceLedgerEntry] = [
             .init(source: .classifier, weight: 0.25, detail: .classifier(score: 0.7))
         ]
-        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig())
+        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig(), transcriptQuality: .good)
         let result = mapper.map()
         #expect(result.skipConfidence >= 0.0)
         #expect(result.skipConfidence <= 1.0)
@@ -564,7 +564,7 @@ struct BackfillEvidenceFusionTests {
         let entries: [EvidenceLedgerEntry] = [
             .init(source: .classifier, weight: 0.25, detail: .classifier(score: 0.7))
         ]
-        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig())
+        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig(), transcriptQuality: .good)
         let result = mapper.map()
         // Can access all fields
         _ = result.proposalConfidence
@@ -597,5 +597,64 @@ struct BackfillEvidenceFusionTests {
         #expect(config.lexicalCap == 0.3)
         #expect(config.acousticCap == 0.3)
         #expect(config.catalogCap == 0.25)
+    }
+}
+
+// MARK: - AdDetectionService.estimateTranscriptQuality threshold
+
+@Suite("estimateTranscriptQuality 30% threshold")
+struct EstimateTranscriptQualityTests {
+
+    private func makeAtom(ordinal: Int, anchored: Bool) -> AtomEvidence {
+        AtomEvidence(
+            atomOrdinal: ordinal,
+            startTime: Double(ordinal) * 2,
+            endTime: Double(ordinal) * 2 + 2,
+            isAnchored: anchored,
+            anchorProvenance: [],
+            hasAcousticBreakHint: false,
+            correctionMask: .none
+        )
+    }
+
+    private func makeService() -> AdDetectionService {
+        let store = try! AnalysisStore(path: ":memory:")
+        return AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+    }
+
+    @Test("Empty atom list → degraded")
+    func emptyAtomsReturnsDegraded() async {
+        let service = makeService()
+        let quality = await service.estimateTranscriptQuality(atoms: [])
+        #expect(quality == .degraded)
+    }
+
+    @Test("29 of 100 anchored atoms (29%) → degraded (below 30% threshold)")
+    func twentyNinePercentReturnsDegraded() async {
+        let service = makeService()
+        let atoms = (0..<100).map { makeAtom(ordinal: $0, anchored: $0 < 29) }
+        let quality = await service.estimateTranscriptQuality(atoms: atoms)
+        #expect(quality == .degraded, "anchoredFraction=0.29 should be below the 30% threshold")
+    }
+
+    @Test("30 of 100 anchored atoms (30%) → degraded (threshold is strictly > 0.3)")
+    func exactlyThirtyPercentReturnsDegraded() async {
+        let service = makeService()
+        let atoms = (0..<100).map { makeAtom(ordinal: $0, anchored: $0 < 30) }
+        let quality = await service.estimateTranscriptQuality(atoms: atoms)
+        #expect(quality == .degraded, "anchoredFraction=0.30 is not > 0.30, so should be degraded")
+    }
+
+    @Test("31 of 100 anchored atoms (31%) → good (above 30% threshold)")
+    func thirtyOnePercentReturnsGood() async {
+        let service = makeService()
+        let atoms = (0..<100).map { makeAtom(ordinal: $0, anchored: $0 < 31) }
+        let quality = await service.estimateTranscriptQuality(atoms: atoms)
+        #expect(quality == .good, "anchoredFraction=0.31 should be above the 30% threshold")
     }
 }

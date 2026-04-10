@@ -1,0 +1,43 @@
+{
+  "configurations" : [
+    {
+      "id" : "722dd7f1-6a18-47ab-bc72-a0b2ebafbe81",
+      "name" : "Configuration 1",
+      "options" : {}
+    }
+  ],
+  "defaultOptions" : {},
+  "testTargets" : [
+    {
+      "skippedTests" : [
+        "CorpusPhase1TranscriptPipelineTests",
+        "CorpusLexicalScannerCoverageTests",
+        "CorpusEvidenceCatalogTests",
+        "CorpusFullPipelineTests",
+        "CorpusAcousticBreakTests",
+        "FoundationModelClassifierTests",
+        "FoundationModelShadowBenchmarkTests",
+        "Phase3ShadowReplayHarnessTests",
+        "Phase4ShadowBenchmarkTests",
+        "Phase5IntegrationTests",
+        "KnownAdsIntegrationTests",
+        "ScrubPastAdIntegrationTests",
+        "HighSpeedPlaybackIntegrationTests",
+        "CheckpointResumeIntegrationTests",
+        "FoundationModelsUnavailableTests",
+        "PreviewBudgetExhaustedTests",
+        "ReplaySimulatorE2ETests",
+        "TrustScoringLifecycleTests",
+        "CombinedTuningReplayTests",
+        "PreAnalysisIntegrationTests",
+        "RealEpisodeBenchmarkTests"
+      ],
+      "target" : {
+        "containerPath" : "container:Playhead.xcodeproj",
+        "identifier" : "PlayheadTests",
+        "name" : "PlayheadTests"
+      }
+    }
+  ],
+  "version" : 1
+}

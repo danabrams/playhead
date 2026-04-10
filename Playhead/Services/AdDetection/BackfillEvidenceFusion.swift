@@ -11,6 +11,7 @@
 //   • Gate blocks action at decision level; score is never clamped by the gate.
 
 import Foundation
+import OSLog
 
 // MARK: - FusionWeightConfig
 
@@ -57,6 +58,8 @@ struct FusionWeightConfig: Sendable {
 /// with `.noAds`, `.uncertain`, or `.abstain` dispositions are silently dropped
 /// regardless of mode — they affect scheduling and diagnostics only.
 struct BackfillEvidenceFusion: Sendable {
+    private static let logger = Logger(subsystem: "com.playhead", category: "BackfillEvidenceFusion")
+
     let span: DecodedSpan
     /// Raw classifier score (0–1). Converted to a capped weight and added as a `.classifier` entry.
     let classifierScore: Double
@@ -103,9 +106,7 @@ struct BackfillEvidenceFusion: Sendable {
             let droppedCount = allFMEntries.count - positiveOnlyFMEntries.count
             if droppedCount > 0 {
                 // Log so callers can observe the Positive-Only Rule in action.
-                // Use print for now; structured logging requires an injected logger.
-                // TODO(playhead-4my.7): inject OSLog Logger into BackfillEvidenceFusion.
-                print("[BackfillEvidenceFusion] FM Positive-Only Rule dropped \(droppedCount)/\(allFMEntries.count) FM entries (non-containsAd dispositions).")
+                Self.logger.info("FM Positive-Only Rule dropped \(droppedCount)/\(allFMEntries.count) FM entries (non-containsAd dispositions).")
             }
             for entry in positiveOnlyFMEntries {
                 let capped = EvidenceLedgerEntry(

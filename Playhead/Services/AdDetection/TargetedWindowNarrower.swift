@@ -259,11 +259,35 @@ enum TargetedWindowNarrower {
                 lineRefByAtomOrdinal[ordinal] = segment.segmentIndex
             }
         }
-        return Set(
+        let catalogRefs = Set(
             inputs.evidenceCatalog.entries.compactMap { entry in
                 lineRefByAtomOrdinal[entry.atomOrdinal]
             }
         )
+
+        // Expand backward from each catalog anchor to capture the pre-CTA product pitch.
+        // Evidence extraction (Phase 3 in EvidenceCatalogBuilder) only fires on atoms with
+        // explicit anchors (URLs, promo codes, disclosure phrases), which appear at the END
+        // of an ad. Without expansion, FM receives only the final 5–10s CTA slice and misses
+        // the preceding 20–30s product pitch entirely.
+        //
+        // Expansion is per-entry (not per-episode-minimum) so every ad in a multi-ad
+        // episode gets its own lookback, not just the first one.
+        // 20 atoms ≈ 40s at ~2s/atom — covers 30s ads fully and 60s ads partially.
+        // FM's own boundary detection corrects for any non-ad content included here.
+        guard !catalogRefs.isEmpty else { return catalogRefs }
+
+        let lookbackAtoms = 20
+        var preAnchorRefs = Set<Int>()
+        for entry in inputs.evidenceCatalog.entries {
+            let lookbackStart = max(0, entry.atomOrdinal - lookbackAtoms)
+            for ordinal in lookbackStart..<entry.atomOrdinal {
+                if let ref = lineRefByAtomOrdinal[ordinal] {
+                    preAnchorRefs.insert(ref)
+                }
+            }
+        }
+        return catalogRefs.union(preAnchorRefs)
     }
 
     private static func lexicalCandidateLineRefs(inputs: Inputs) -> Set<Int> {

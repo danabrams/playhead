@@ -8,10 +8,10 @@ enum AdOwnership: String, Sendable, Codable, Hashable, CaseIterable {
     case thirdParty // external advertiser
     case show       // show-produced
     case network    // network-produced
+    /// Guest mention/endorsement (e.g. host recommends a product in passing).
+    /// Phase 8 (SponsorKnowledgeStore) maps FoundationModelClassifier.Ownership.guest here.
+    /// Policy: .detectOnly — show a banner but never auto-skip; guest mentions are
+    /// ambiguous by nature and require user confirmation before any action.
+    case guest
     case unknown
-
-    // TODO(playhead-4my.8): FoundationModelClassifier.Ownership has a .guest case
-    // (for guest-mention/endorsement) that has no counterpart here. When Phase 8
-    // (SponsorKnowledgeStore) maps FM Ownership → AdOwnership, .guest will need
-    // an explicit mapping decision (likely .detectOnly or a new case).
 }
