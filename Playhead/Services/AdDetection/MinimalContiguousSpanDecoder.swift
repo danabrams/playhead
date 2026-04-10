@@ -287,6 +287,11 @@ struct MinimalContiguousSpanDecoder {
 
     // MARK: - Step 4: USE A — Boundary Snap
 
+    // Use A: snap to the OUTERMOST qualifying break within the radius window, not the nearest.
+    // Left edge: earliest break (furthest left) to maximize leftward expansion.
+    // Right edge: latest break (furthest right) to maximize rightward expansion.
+    // This differs from Use C (nearest-break) which identifies corroboration for a specific FM hit.
+
     /// Snap span boundaries to nearby acoustic break atoms (±BOUNDARY_SNAP_RADIUS_ATOMS).
     /// Use A only adjusts edges — never creates spans.
     private func applyBoundarySnap(_ span: CandidateSpan, allAtoms: [AtomEvidence]) -> CandidateSpan {
@@ -298,25 +303,23 @@ struct MinimalContiguousSpanDecoder {
         var result = span
 
         // Left edge: look in [firstOrdinal - radius, firstOrdinal + radius]
-        // Select the nearest break atom to firstOrdinal (not first/last).
+        // Select the earliest (furthest left) break atom to maximize leftward expansion.
         let leftLow = max(span.firstOrdinal - radius, allAtoms.first?.atomOrdinal ?? 0)
         let leftHigh = min(span.firstOrdinal + radius, span.lastOrdinal)
         if let snapAtom = (leftLow ... leftHigh)
             .compactMap({ atomsByOrdinal[$0] })
-            .filter({ $0.hasAcousticBreakHint })
-            .min(by: { abs($0.atomOrdinal - span.firstOrdinal) < abs($1.atomOrdinal - span.firstOrdinal) }) {
+            .first(where: { $0.hasAcousticBreakHint }) {
             result.firstOrdinal = snapAtom.atomOrdinal
             result.startTime = snapAtom.startTime
         }
 
         // Right edge: look in [lastOrdinal - radius, lastOrdinal + radius]
-        // Select the nearest break atom to lastOrdinal (not first/last).
+        // Select the latest (furthest right) break atom to maximize rightward expansion.
         let rightLow = max(span.lastOrdinal - radius, result.firstOrdinal)
         let rightHigh = min(span.lastOrdinal + radius, allAtoms.last?.atomOrdinal ?? span.lastOrdinal)
         if let snapAtom = (rightLow ... rightHigh)
             .compactMap({ atomsByOrdinal[$0] })
-            .filter({ $0.hasAcousticBreakHint })
-            .min(by: { abs($0.atomOrdinal - span.lastOrdinal) < abs($1.atomOrdinal - span.lastOrdinal) }) {
+            .last(where: { $0.hasAcousticBreakHint }) {
             result.lastOrdinal = snapAtom.atomOrdinal
             result.endTime = snapAtom.endTime
         }
