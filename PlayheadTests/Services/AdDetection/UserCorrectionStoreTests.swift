@@ -406,6 +406,54 @@ final class UserCorrectionStoreTests: XCTestCase {
         XCTAssertEqual(deserialized, scope, "campaignOnShow with multiple colons in campaign must round-trip")
     }
 
+    // MARK: - correctionPassthroughFactor
+
+    func testCorrectionPassthroughFactorFreshCorrectionReturnsZero() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-fresh-factor"))
+
+        let event = CorrectionEvent(
+            analysisAssetId: "asset-fresh-factor",
+            scope: CorrectionScope.exactSpan(assetId: "asset-fresh-factor", ordinalRange: 0...5).serialized,
+            createdAt: Date().timeIntervalSince1970,
+            source: .manualVeto
+        )
+        try await correctionStore.record(event)
+
+        let factor = await correctionStore.correctionPassthroughFactor(for: "asset-fresh-factor")
+        // Fresh correction: decayWeight ~ 1.0, so factor = 1.0 - 1.0 = 0.0 (full suppression).
+        XCTAssertEqual(factor, 0.0, accuracy: 0.01)
+    }
+
+    func testCorrectionPassthroughFactor180DayOldReturnsApproximatelyPointNine() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-old-factor"))
+
+        let createdAt = Date().addingTimeInterval(-180 * 86400)
+        let event = CorrectionEvent(
+            analysisAssetId: "asset-old-factor",
+            scope: CorrectionScope.exactSpan(assetId: "asset-old-factor", ordinalRange: 0...5).serialized,
+            createdAt: createdAt.timeIntervalSince1970,
+            source: .manualVeto
+        )
+        try await correctionStore.record(event)
+
+        let factor = await correctionStore.correctionPassthroughFactor(for: "asset-old-factor")
+        // 180-day-old correction: decayWeight = max(0.1, 1.0 - 180/180) = 0.1, factor = 1.0 - 0.1 = 0.9.
+        XCTAssertEqual(factor, 0.9, accuracy: 0.01)
+    }
+
+    func testCorrectionPassthroughFactorNoCorrectionReturnsOne() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+
+        let factor = await correctionStore.correctionPassthroughFactor(for: "nonexistent-asset")
+        // No corrections → 1.0 (no suppression).
+        XCTAssertEqual(factor, 1.0, accuracy: 1e-9)
+    }
+
     // MARK: - recordVeto: brandSpan evidence writes sponsorOnShow
 
     func testRecordVetoWithBrandSpanWritesTwoEvents() async throws {

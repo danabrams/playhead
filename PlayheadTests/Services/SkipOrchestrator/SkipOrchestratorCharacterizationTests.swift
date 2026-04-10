@@ -468,6 +468,66 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
     }
 }
 
+// MARK: - Phase 7.2: User Correction Store Wiring
+
+@Suite("SkipOrchestrator - recordListenRevert writes CorrectionEvent")
+struct SkipOrchestratorCorrectionStoreTests {
+
+    @Test("recordListenRevert persists a listenRevert CorrectionEvent")
+    func recordListenRevertWritesCorrectionEvent() async throws {
+        let analysisStore = try await makeTestStore()
+        try await analysisStore.insertAsset(makeSkipTestAnalysisAsset())
+
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let orchestrator = SkipOrchestrator(
+            store: analysisStore,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        // Feed a confirmed window so recordListenRevert has something to revert.
+        let ad = makeSkipTestAdWindow(
+            id: "ad-correction",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.85,
+            decisionState: "confirmed"
+        )
+        try await analysisStore.insertAdWindow(ad)
+        await orchestrator.receiveAdWindows([ad])
+
+        // Revert the skip — this should write a CorrectionEvent.
+        await orchestrator.recordListenRevert(
+            windowId: "ad-correction",
+            podcastId: "podcast-1"
+        )
+
+        // The correction store write happens in a fire-and-forget Task.
+        // Poll briefly to let it complete.
+        let found = try await pollUntil(timeout: .seconds(5)) {
+            let events = try await correctionStore.activeCorrections(for: "asset-1")
+            return !events.isEmpty
+        }
+        #expect(found, "Expected a CorrectionEvent to be written after recordListenRevert")
+
+        let events = try await correctionStore.activeCorrections(for: "asset-1")
+        #expect(events.count == 1)
+        let event = events[0]
+        #expect(event.source == .listenRevert)
+        #expect(event.podcastId == "podcast-1")
+        #expect(event.analysisAssetId == "asset-1")
+    }
+}
+
 @Suite("SkipOrchestrator Characterization - Boundary Snapping")
 struct SkipOrchestratorCharacterizationSnappingTests {
 

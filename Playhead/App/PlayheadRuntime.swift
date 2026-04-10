@@ -443,6 +443,10 @@ final class PlayheadRuntime {
         // Phase 7.2: inject the correction store into adDetectionService.
         // SkipOrchestrator receives it at init (see above); AdDetectionService
         // is an actor so the mutable property is set via an async Task.
+        // Race note: this Task may execute after the first backfill run starts.
+        // Until it completes, adDetectionService.correctionStore is nil, so
+        // correctionPassthroughFactor defaults to 1.0 (no suppression) — the safe
+        // default, since it means "no corrections loaded yet, don't suppress anything."
         Task { [adDetectionService, correctionStore] in
             await adDetectionService.setUserCorrectionStore(correctionStore)
         }

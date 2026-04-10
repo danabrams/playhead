@@ -212,7 +212,7 @@ actor AdDetectionService {
     /// a per-span correction factor by querying the store's weighted corrections for
     /// the asset. The factor is passed to `DecisionMapper` so correction-suppressed
     /// spans gate to `.blockedByUserCorrection` without making the struct async.
-    var correctionStore: (any UserCorrectionStore)?
+    private(set) var correctionStore: (any UserCorrectionStore)?
 
     // MARK: - Cached State
 
@@ -561,7 +561,7 @@ actor AdDetectionService {
         // Queried once per backfill run (not per span) for performance.
         let assetCorrectionFactor: Double
         if let correctionStore {
-            assetCorrectionFactor = await correctionStore.correctionWeight(for: analysisAssetId)
+            assetCorrectionFactor = await correctionStore.correctionPassthroughFactor(for: analysisAssetId)
         } else {
             assetCorrectionFactor = 1.0
         }

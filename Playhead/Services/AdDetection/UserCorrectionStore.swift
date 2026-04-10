@@ -140,7 +140,7 @@ protocol UserCorrectionStore: Sendable {
     /// Callers (AdDetectionService) pre-compute this value from an actor context
     /// and pass it to the pure-value `DecisionMapper` to avoid making the
     /// mapper async.
-    func correctionWeight(for analysisAssetId: String) async -> Double
+    func correctionPassthroughFactor(for analysisAssetId: String) async -> Double
 }
 
 // MARK: - NoOpUserCorrectionStore
@@ -156,7 +156,7 @@ struct NoOpUserCorrectionStore: UserCorrectionStore {
         // No-op.
     }
 
-    func correctionWeight(for analysisAssetId: String) async -> Double {
+    func correctionPassthroughFactor(for analysisAssetId: String) async -> Double {
         // No active corrections — no suppression.
         return 1.0
     }
@@ -243,7 +243,7 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
         try await store.appendCorrectionEvent(event)
     }
 
-    // MARK: - Protocol: correctionWeight
+    // MARK: - Protocol: correctionPassthroughFactor
 
     /// Returns the minimum decay-weighted correction factor for the given asset.
     ///
@@ -251,13 +251,13 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
     /// returns `1.0 - maxWeight` where maxWeight is the highest decay-weighted
     /// correction seen — i.e. the most-recent correction has the most influence.
     /// Result is clamped to [0.0, 1.0].
-    func correctionWeight(for analysisAssetId: String) async -> Double {
+    func correctionPassthroughFactor(for analysisAssetId: String) async -> Double {
         let weighted: [(CorrectionEvent, Double)]
         do {
             weighted = try await weightedCorrections(for: analysisAssetId)
         } catch {
             logger.warning(
-                "correctionWeight: failed to load corrections for \(analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                "correctionPassthroughFactor: failed to load corrections for \(analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
             )
             return 1.0
         }

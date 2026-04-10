@@ -150,7 +150,7 @@ actor SkipOrchestrator {
 
     /// Injected by PlayheadRuntime after init. Fire-and-forget writes; never throws.
     /// Optional so existing test setups that don't inject the store remain unaffected.
-    var correctionStore: (any UserCorrectionStore)?
+    private(set) var correctionStore: (any UserCorrectionStore)?
 
     // MARK: - State
 
