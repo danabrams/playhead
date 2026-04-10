@@ -630,7 +630,7 @@ struct TimelineRailAdSegmentTapTests {
     }
 }
 
-// MARK: - Test Helpers (shared with UserCorrectionStoreTests)
+// MARK: - Test Helpers (local to this file)
 
 private func makeTestAsset(id: String) -> AnalysisAsset {
     AnalysisAsset(
@@ -646,79 +646,4 @@ private func makeTestAsset(id: String) -> AnalysisAsset {
         analysisVersion: 1,
         capabilitySnapshot: nil
     )
-}
-
-// Orchestrator test helpers (re-use the same factory functions from characterization tests).
-
-private func makeSkipTestAnalysisAsset(
-    id: String = "asset-1",
-    episodeId: String = "ep-1"
-) -> AnalysisAsset {
-    AnalysisAsset(
-        id: id,
-        episodeId: episodeId,
-        assetFingerprint: "fp-\(id)",
-        weakFingerprint: nil,
-        sourceURL: "file:///test/\(id).m4a",
-        featureCoverageEndTime: nil,
-        fastTranscriptCoverageEndTime: nil,
-        confirmedAdCoverageEndTime: nil,
-        analysisState: "new",
-        analysisVersion: 1,
-        capabilitySnapshot: nil
-    )
-}
-
-private func makeSkipTestAdWindow(
-    id: String = "ad-1",
-    assetId: String = "asset-1",
-    startTime: Double = 60,
-    endTime: Double = 120,
-    confidence: Double = 0.75,
-    decisionState: String = "confirmed"
-) -> AdWindow {
-    AdWindow(
-        id: id,
-        analysisAssetId: assetId,
-        startTime: startTime,
-        endTime: endTime,
-        confidence: confidence,
-        boundaryState: "lexical",
-        decisionState: decisionState,
-        detectorVersion: "detection-v1",
-        advertiser: nil,
-        product: nil,
-        adDescription: nil,
-        evidenceText: "brought to you by",
-        evidenceStartTime: startTime,
-        metadataSource: "none",
-        metadataConfidence: nil,
-        metadataPromptVersion: nil,
-        wasSkipped: false,
-        userDismissedBanner: false
-    )
-}
-
-private func makeSkipTestTrustService(
-    mode: String,
-    trustScore: Double,
-    observations: Int,
-    falseSignals: Int = 0
-) async throws -> TrustScoringService {
-    let trustStore = try await makeTestStore()
-    try await trustStore.upsertProfile(
-        PodcastProfile(
-            podcastId: "podcast-1",
-            sponsorLexicon: nil,
-            normalizedAdSlotPriors: nil,
-            repeatedCTAFragments: nil,
-            jingleFingerprints: nil,
-            implicitFalsePositiveCount: 0,
-            skipTrustScore: trustScore,
-            observationCount: observations,
-            mode: mode,
-            recentFalseSkipSignals: falseSignals
-        )
-    )
-    return TrustScoringService(store: trustStore)
 }

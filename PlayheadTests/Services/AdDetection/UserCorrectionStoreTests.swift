@@ -45,6 +45,16 @@ final class UserCorrectionStoreTests: XCTestCase {
         XCTAssertNil(CorrectionScope.deserialize("exactSpan:asset:notAnInt:10"))
     }
 
+    func testEmptyAssetIdRoundTrips() {
+        // Empty assetId serializes to "exactSpan::0:5". The split with
+        // omittingEmptySubsequences: false preserves the empty string,
+        // so this round-trips correctly.
+        let original = CorrectionScope.exactSpan(assetId: "", ordinalRange: 0...5)
+        let deserialized = CorrectionScope.deserialize(original.serialized)
+        XCTAssertEqual(deserialized, original,
+            "Empty assetId should round-trip through serialization")
+    }
+
     func testExactSpanSerializedFormat() {
         let scope = CorrectionScope.exactSpan(assetId: "my-asset", ordinalRange: 0...5)
         XCTAssertEqual(scope.serialized, "exactSpan:my-asset:0:5")
@@ -94,6 +104,34 @@ final class UserCorrectionStoreTests: XCTestCase {
     func testDecayWeightNeverDropsBelowMinimum() {
         let weight = correctionDecayWeight(ageDays: 10_000)
         XCTAssertGreaterThanOrEqual(weight, 0.1)
+    }
+
+    func testDecayWeightNegativeAgeDaysReturnsAboveOne() {
+        // Negative ageDays (clock skew: correction has future createdAt) yields weight > 1.0.
+        // Callers (correctionPassthroughFactor) are responsible for clamping.
+        let weight = correctionDecayWeight(ageDays: -30)
+        // 1.0 - (-30/180) = 1.0 + 0.167 ≈ 1.167
+        XCTAssertGreaterThan(weight, 1.0)
+    }
+
+    func testCorrectionPassthroughFactorClampsFutureDatedCorrection() async throws {
+        // A correction with a future createdAt (clock skew) should yield
+        // passthrough factor = 0.0 (full suppression), not a negative value.
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-future"))
+
+        let futureCreatedAt = Date().addingTimeInterval(30 * 86400) // 30 days in future
+        let event = CorrectionEvent(
+            analysisAssetId: "asset-future",
+            scope: CorrectionScope.exactSpan(assetId: "asset-future", ordinalRange: 0...5).serialized,
+            createdAt: futureCreatedAt.timeIntervalSince1970
+        )
+        try await correctionStore.record(event)
+
+        let factor = await correctionStore.correctionPassthroughFactor(for: "asset-future")
+        XCTAssertGreaterThanOrEqual(factor, 0.0, "Factor must not go negative even with future-dated corrections")
+        XCTAssertEqual(factor, 0.0, accuracy: 0.001, "Future-dated correction should yield full suppression (0.0)")
     }
 
     // MARK: - NoOpUserCorrectionStore
@@ -309,6 +347,113 @@ final class UserCorrectionStoreTests: XCTestCase {
         XCTAssertTrue(try probeColumnExists(in: dir, table: "correction_events", column: "podcastId"))
     }
 
+    /// Exercises the real v5→v6 upgrade path where the old-schema correction_events
+    /// table (with correctionScope, atomOrdinalRange, evidenceJSON columns) already
+    /// exists on disk. Verifies that the migration rebuilds the table, migrates data
+    /// from correctionScope → scope, and that CRUD works on the new schema.
+    func testSchemaV5WithOldCorrectionEventsTableUpgradesToV6() async throws {
+        let dir = try makeTempDir(prefix: "UserCorrectionStoreTests")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Seed v5 schema version and the old-schema correction_events table.
+        try seedSchemaVersion(5, in: dir)
+        try seedOldCorrectionEventsTable(in: dir)
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+
+        // Schema should be at v6.
+        let version = try await store.schemaVersion()
+        XCTAssertEqual(version, 6)
+
+        // The new `scope` column must exist; the old `correctionScope` must not.
+        XCTAssertTrue(try probeColumnExists(in: dir, table: "correction_events", column: "scope"))
+        XCTAssertTrue(try probeColumnExists(in: dir, table: "correction_events", column: "source"))
+        XCTAssertTrue(try probeColumnExists(in: dir, table: "correction_events", column: "podcastId"))
+        XCTAssertFalse(try probeColumnExists(in: dir, table: "correction_events", column: "correctionScope"),
+                       "Old correctionScope column must be removed after table rebuild")
+        XCTAssertFalse(try probeColumnExists(in: dir, table: "correction_events", column: "atomOrdinalRange"),
+                       "Old atomOrdinalRange column must be removed after table rebuild")
+        XCTAssertFalse(try probeColumnExists(in: dir, table: "correction_events", column: "evidenceJSON"),
+                       "Old evidenceJSON column must be removed after table rebuild")
+
+        // Verify the pre-existing row's data was migrated (correctionScope → scope).
+        let loaded = try await store.loadCorrectionEvents(analysisAssetId: "asset-old-v5")
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertEqual(loaded[0].id, "old-event-1")
+        XCTAssertEqual(loaded[0].scope, "exactSpan:asset-old-v5:10:25")
+        // source and podcastId were not in v5, so they should be nil.
+        XCTAssertNil(loaded[0].source)
+        XCTAssertNil(loaded[0].podcastId)
+    }
+
+    /// Verifies CRUD round-trips on a database upgraded from old-schema correction_events.
+    func testCRUDWorksAfterOldSchemaUpgrade() async throws {
+        let dir = try makeTempDir(prefix: "UserCorrectionStoreTests")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try seedSchemaVersion(5, in: dir)
+        try seedOldCorrectionEventsTable(in: dir)
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+
+        // Insert a parent asset so the FK holds.
+        try await store.insertAsset(makeTestAsset(id: "asset-crud-upgrade"))
+
+        // Write a new event using the v6 API.
+        let event = CorrectionEvent(
+            analysisAssetId: "asset-crud-upgrade",
+            scope: CorrectionScope.exactSpan(assetId: "asset-crud-upgrade", ordinalRange: 0...5).serialized,
+            source: .manualVeto,
+            podcastId: "pod-upgrade"
+        )
+        try await store.appendCorrectionEvent(event)
+
+        // Read it back.
+        let loaded = try await store.loadCorrectionEvents(analysisAssetId: "asset-crud-upgrade")
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertEqual(loaded[0].scope, "exactSpan:asset-crud-upgrade:0:5")
+        XCTAssertEqual(loaded[0].source, .manualVeto)
+        XCTAssertEqual(loaded[0].podcastId, "pod-upgrade")
+
+        // hasAnyCorrectionEvent should find it.
+        let found = try await store.hasAnyCorrectionEvent(
+            withScope: CorrectionScope.exactSpan(assetId: "asset-crud-upgrade", ordinalRange: 0...5).serialized
+        )
+        XCTAssertTrue(found)
+    }
+
+    /// Verifies the v5→v6 migration succeeds when old correction_events rows
+    /// reference an analysisAssetId that no longer exists in analysis_assets.
+    /// Orphaned rows must be silently discarded (not cause an FK violation crash).
+    func testSchemaV5UpgradeDiscardsOrphanedCorrectionEvents() async throws {
+        let dir = try makeTempDir(prefix: "UserCorrectionStoreTests")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try seedSchemaVersion(5, in: dir)
+        try seedOldCorrectionEventsTableWithOrphan(in: dir)
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        // This must not crash with an FK constraint violation.
+        try await store.migrate()
+
+        let version = try await store.schemaVersion()
+        XCTAssertEqual(version, 6)
+
+        // The valid row (referencing "asset-valid") should survive.
+        let valid = try await store.loadCorrectionEvents(analysisAssetId: "asset-valid")
+        XCTAssertEqual(valid.count, 1, "Valid correction event must survive migration")
+        XCTAssertEqual(valid[0].id, "valid-event")
+
+        // The orphaned row (referencing "asset-deleted") should be discarded.
+        let orphaned = try await store.loadCorrectionEvents(analysisAssetId: "asset-deleted")
+        XCTAssertEqual(orphaned.count, 0, "Orphaned correction event must be discarded during migration")
+    }
+
     func testFreshDatabaseReachesV6() async throws {
         let dir = try makeTempDir(prefix: "UserCorrectionStoreTests")
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -387,6 +532,12 @@ final class UserCorrectionStoreTests: XCTestCase {
     }
 
     // MARK: - CorrectionScope: colon-in-value round-trip
+
+    func testExactSpanWithColonInAssetIdRoundTrip() {
+        let scope = CorrectionScope.exactSpan(assetId: "asset:with:colons", ordinalRange: 10...25)
+        let deserialized = CorrectionScope.deserialize(scope.serialized)
+        XCTAssertEqual(deserialized, scope, "exactSpan with colons in assetId must round-trip")
+    }
 
     func testSponsorWithColonSerializationRoundTrip() {
         let scope = CorrectionScope.sponsorOnShow(podcastId: "pod-123", sponsor: "Squarespace: Build It")
@@ -511,6 +662,32 @@ final class UserCorrectionStoreTests: XCTestCase {
         let loaded = try await correctionStore.activeCorrections(for: "asset-idem")
         XCTAssertEqual(loaded.count, 1)
     }
+
+    // MARK: - CASCADE delete
+
+    func testDeletingAssetCascadesCorrections() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-cascade"))
+
+        let event = CorrectionEvent(
+            analysisAssetId: "asset-cascade",
+            scope: CorrectionScope.exactSpan(assetId: "asset-cascade", ordinalRange: 0...5).serialized,
+            source: .manualVeto
+        )
+        try await correctionStore.record(event)
+
+        // Verify the event exists.
+        let before = try await correctionStore.activeCorrections(for: "asset-cascade")
+        XCTAssertEqual(before.count, 1)
+
+        // Delete the parent asset.
+        try await analysisStore.deleteAsset(id: "asset-cascade")
+
+        // Correction events should be cascade-deleted.
+        let after = try await correctionStore.activeCorrections(for: "asset-cascade")
+        XCTAssertEqual(after.count, 0, "Correction events must be cascade-deleted when the parent asset is removed")
+    }
 }
 
 // MARK: - Test Helpers
@@ -529,6 +706,145 @@ private func makeTestAsset(id: String) -> AnalysisAsset {
         analysisVersion: 1,
         capabilitySnapshot: nil
     )
+}
+
+/// Seeds the old-schema correction_events table (as shipped in 0.6) with a sample row.
+/// Used to test the v5→v6 migration path where the table already exists with
+/// the `correctionScope`, `atomOrdinalRange`, and `evidenceJSON` columns.
+private func seedOldCorrectionEventsTable(in directory: URL) throws {
+    let dbURL = directory.appendingPathComponent("analysis.sqlite")
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
+        throw NSError(domain: "SeedOldCorrectionEvents", code: 1)
+    }
+    defer { sqlite3_close_v2(db) }
+
+    // Create the parent table so FKs can be satisfied later.
+    let createAssets = """
+        CREATE TABLE IF NOT EXISTS analysis_assets (
+            id TEXT PRIMARY KEY,
+            episodeId TEXT NOT NULL,
+            assetFingerprint TEXT NOT NULL,
+            weakFingerprint TEXT,
+            sourceURL TEXT NOT NULL,
+            featureCoverageEndTime REAL,
+            fastTranscriptCoverageEndTime REAL,
+            confirmedAdCoverageEndTime REAL,
+            analysisState TEXT NOT NULL,
+            analysisVersion INTEGER NOT NULL,
+            capabilitySnapshot TEXT
+        )
+        """
+    guard sqlite3_exec(db, createAssets, nil, nil, nil) == SQLITE_OK else {
+        throw NSError(domain: "SeedOldCorrectionEvents", code: 2)
+    }
+
+    // Insert a parent asset row.
+    let insertAsset = """
+        INSERT OR IGNORE INTO analysis_assets
+        (id, episodeId, assetFingerprint, sourceURL, analysisState, analysisVersion)
+        VALUES ('asset-old-v5', 'ep-old-v5', 'fp-old-v5', 'file:///tmp/old.m4a', 'new', 1)
+        """
+    guard sqlite3_exec(db, insertAsset, nil, nil, nil) == SQLITE_OK else {
+        throw NSError(domain: "SeedOldCorrectionEvents", code: 3)
+    }
+
+    // Create the OLD-schema correction_events table (matching 0.6 release).
+    let createOldTable = """
+        CREATE TABLE IF NOT EXISTS correction_events (
+            id                  TEXT PRIMARY KEY,
+            analysisAssetId     TEXT NOT NULL,
+            correctionScope     TEXT NOT NULL,
+            atomOrdinalRange    TEXT NOT NULL,
+            evidenceJSON        TEXT NOT NULL,
+            createdAt           REAL NOT NULL
+        )
+        """
+    guard sqlite3_exec(db, createOldTable, nil, nil, nil) == SQLITE_OK else {
+        throw NSError(domain: "SeedOldCorrectionEvents", code: 4)
+    }
+    guard sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_ce_asset ON correction_events(analysisAssetId)", nil, nil, nil) == SQLITE_OK else {
+        throw NSError(domain: "SeedOldCorrectionEvents", code: 5)
+    }
+
+    // Insert a sample row in the old format.
+    let insertOldRow = """
+        INSERT INTO correction_events
+        (id, analysisAssetId, correctionScope, atomOrdinalRange, evidenceJSON, createdAt)
+        VALUES ('old-event-1', 'asset-old-v5', 'exactSpan:asset-old-v5:10:25', '[10, 25]', '{"reason":"not_an_ad"}', 1712700000.0)
+        """
+    guard sqlite3_exec(db, insertOldRow, nil, nil, nil) == SQLITE_OK else {
+        throw NSError(domain: "SeedOldCorrectionEvents", code: 6)
+    }
+}
+
+/// Seeds an old-schema correction_events table with one valid row and one orphaned row
+/// (whose analysisAssetId does not exist in analysis_assets).
+private func seedOldCorrectionEventsTableWithOrphan(in directory: URL) throws {
+    let dbURL = directory.appendingPathComponent("analysis.sqlite")
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
+        throw NSError(domain: "SeedOldCorrectionEventsOrphan", code: 1)
+    }
+    defer { sqlite3_close_v2(db) }
+
+    // Create parent table and insert only one asset ("asset-valid").
+    guard sqlite3_exec(db, """
+        CREATE TABLE IF NOT EXISTS analysis_assets (
+            id TEXT PRIMARY KEY,
+            episodeId TEXT NOT NULL,
+            assetFingerprint TEXT NOT NULL,
+            weakFingerprint TEXT,
+            sourceURL TEXT NOT NULL,
+            featureCoverageEndTime REAL,
+            fastTranscriptCoverageEndTime REAL,
+            confirmedAdCoverageEndTime REAL,
+            analysisState TEXT NOT NULL,
+            analysisVersion INTEGER NOT NULL,
+            capabilitySnapshot TEXT
+        )
+        """, nil, nil, nil) == SQLITE_OK else {
+        throw NSError(domain: "SeedOldCorrectionEventsOrphan", code: 2)
+    }
+    guard sqlite3_exec(db, """
+        INSERT OR IGNORE INTO analysis_assets
+        (id, episodeId, assetFingerprint, sourceURL, analysisState, analysisVersion)
+        VALUES ('asset-valid', 'ep-valid', 'fp-valid', 'file:///tmp/valid.m4a', 'new', 1)
+        """, nil, nil, nil) == SQLITE_OK else {
+        throw NSError(domain: "SeedOldCorrectionEventsOrphan", code: 3)
+    }
+
+    // Create old-schema correction_events (no FK constraint, matching 0.6).
+    guard sqlite3_exec(db, """
+        CREATE TABLE IF NOT EXISTS correction_events (
+            id                  TEXT PRIMARY KEY,
+            analysisAssetId     TEXT NOT NULL,
+            correctionScope     TEXT NOT NULL,
+            atomOrdinalRange    TEXT NOT NULL,
+            evidenceJSON        TEXT NOT NULL,
+            createdAt           REAL NOT NULL
+        )
+        """, nil, nil, nil) == SQLITE_OK else {
+        throw NSError(domain: "SeedOldCorrectionEventsOrphan", code: 4)
+    }
+
+    // Valid row: references "asset-valid" which exists.
+    guard sqlite3_exec(db, """
+        INSERT INTO correction_events
+        (id, analysisAssetId, correctionScope, atomOrdinalRange, evidenceJSON, createdAt)
+        VALUES ('valid-event', 'asset-valid', 'exactSpan:asset-valid:5:15', '[5, 15]', '{}', 1712700000.0)
+        """, nil, nil, nil) == SQLITE_OK else {
+        throw NSError(domain: "SeedOldCorrectionEventsOrphan", code: 5)
+    }
+
+    // Orphaned row: references "asset-deleted" which does NOT exist in analysis_assets.
+    guard sqlite3_exec(db, """
+        INSERT INTO correction_events
+        (id, analysisAssetId, correctionScope, atomOrdinalRange, evidenceJSON, createdAt)
+        VALUES ('orphan-event', 'asset-deleted', 'exactSpan:asset-deleted:0:10', '[0, 10]', '{}', 1712700000.0)
+        """, nil, nil, nil) == SQLITE_OK else {
+        throw NSError(domain: "SeedOldCorrectionEventsOrphan", code: 6)
+    }
 }
 
 private func makeTestSpan(

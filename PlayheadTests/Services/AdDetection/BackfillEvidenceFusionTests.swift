@@ -506,6 +506,30 @@ struct BackfillEvidenceFusionTests {
         #expect(result.skipConfidence < 0.40)
     }
 
+    @Test("Negative correctionFactor clamps to zero and gates as blockedByUserCorrection")
+    func negativeCorrectionFactorClampsToZero() {
+        // correctionFactor = -0.5 is theoretically impossible from the store,
+        // but map() defensively applies max(0.0, correctionFactor).
+        // With rawSkipConfidence ~0.45 and effective factor 0.0 → effective = 0.0 → blocked.
+        let span = makeSpan()
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .classifier, weight: 0.25, detail: .classifier(score: 0.7)),
+            .init(source: .lexical, weight: 0.20, detail: .lexical(matchedCategories: ["url"])),
+        ]
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: entries,
+            config: defaultConfig(),
+            transcriptQuality: .good,
+            correctionFactor: -0.5
+        )
+        let result = mapper.map()
+        #expect(result.skipConfidence < 1e-9,
+                "Negative correctionFactor clamped to 0 should yield ~0.0 effective confidence")
+        #expect(result.eligibilityGate == .blockedByUserCorrection,
+                "Effective confidence of 0.0 must gate as blockedByUserCorrection")
+    }
+
     @Test("correctionFactor = 1.0 does not alter gate (no suppression)")
     func correctionFactorOneDoesNotAlterGate() {
         // Same ledger as above but factor = 1.0 → no suppression

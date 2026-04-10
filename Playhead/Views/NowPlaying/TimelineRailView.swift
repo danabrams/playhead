@@ -81,9 +81,13 @@ struct TimelineRailView: View {
                     let w = (segment.upperBound - segment.lowerBound) * width
 
                     adSegmentBlock(width: max(w, 2))
+                        // Expand the tap target to 44pt while keeping the visual block at 4pt.
+                        // The block itself stays railHeight-tall; the frame + contentShape
+                        // widen the hit-testable area so users don't need pixel-perfect aim.
+                        .frame(height: touchTargetHeight)
+                        .contentShape(Rectangle())
                         .offset(x: x)
                         // Phase 7.2: tap gesture on each ad block to surface AdRegionPopover.
-                        // Uses a tap target at least 44pt tall (inherited from parent frame).
                         .onTapGesture {
                             onAdSegmentTap?(index)
                         }

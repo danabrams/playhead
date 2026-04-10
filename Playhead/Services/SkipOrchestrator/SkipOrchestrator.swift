@@ -557,7 +557,12 @@ actor SkipOrchestrator {
             )
             let store = correctionStore
             Task {
-                try? await store.record(event)
+                do {
+                    try await store.record(event)
+                } catch {
+                    Logger(subsystem: "com.playhead", category: "SkipOrchestrator")
+                        .warning("Failed to record listen-revert correction: \(error)")
+                }
             }
         }
 

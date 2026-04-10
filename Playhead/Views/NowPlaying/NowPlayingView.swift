@@ -3,6 +3,7 @@
 // full-width timeline rail, transport controls, speed selector.
 // "Quiet Instrument" aesthetic — precise, minimal chrome, typographic hierarchy.
 
+import OSLog
 import SwiftUI
 
 // MARK: - NowPlayingView
@@ -96,7 +97,12 @@ struct NowPlayingView: View {
                             source: .manualVeto,
                             podcastId: item.podcastId
                         )
-                        try? await correctionStore.record(event)
+                        do {
+                            try await correctionStore.record(event)
+                        } catch {
+                            Logger(subsystem: "com.playhead", category: "NowPlayingView")
+                                .warning("Failed to record manual-veto correction: \(error)")
+                        }
                     }
                 }
             )

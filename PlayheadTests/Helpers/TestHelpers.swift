@@ -260,6 +260,83 @@ func probeTableExists(in directory: URL, table: String) throws -> Bool {
     return sqlite3_step(stmt) == SQLITE_ROW
 }
 
+// MARK: - Skip Orchestrator Test Helpers
+
+/// Shared factory for SkipOrchestrator tests. Used by both
+/// SkipOrchestratorCharacterizationTests and CorrectionSuppressionTests.
+func makeSkipTestAnalysisAsset(
+    id: String = "asset-1",
+    episodeId: String = "ep-1"
+) -> AnalysisAsset {
+    AnalysisAsset(
+        id: id,
+        episodeId: episodeId,
+        assetFingerprint: "fp-\(id)",
+        weakFingerprint: nil,
+        sourceURL: "file:///test/\(id).m4a",
+        featureCoverageEndTime: nil,
+        fastTranscriptCoverageEndTime: nil,
+        confirmedAdCoverageEndTime: nil,
+        analysisState: "new",
+        analysisVersion: 1,
+        capabilitySnapshot: nil
+    )
+}
+
+func makeSkipTestAdWindow(
+    id: String = "ad-1",
+    assetId: String = "asset-1",
+    startTime: Double = 60,
+    endTime: Double = 120,
+    confidence: Double = 0.75,
+    decisionState: String = "confirmed"
+) -> AdWindow {
+    AdWindow(
+        id: id,
+        analysisAssetId: assetId,
+        startTime: startTime,
+        endTime: endTime,
+        confidence: confidence,
+        boundaryState: "lexical",
+        decisionState: decisionState,
+        detectorVersion: "detection-v1",
+        advertiser: nil,
+        product: nil,
+        adDescription: nil,
+        evidenceText: "brought to you by",
+        evidenceStartTime: startTime,
+        metadataSource: "none",
+        metadataConfidence: nil,
+        metadataPromptVersion: nil,
+        wasSkipped: false,
+        userDismissedBanner: false
+    )
+}
+
+func makeSkipTestTrustService(
+    mode: String,
+    trustScore: Double,
+    observations: Int,
+    falseSignals: Int = 0
+) async throws -> TrustScoringService {
+    let trustStore = try await makeTestStore()
+    try await trustStore.upsertProfile(
+        PodcastProfile(
+            podcastId: "podcast-1",
+            sponsorLexicon: nil,
+            normalizedAdSlotPriors: nil,
+            repeatedCTAFragments: nil,
+            jingleFingerprints: nil,
+            implicitFalsePositiveCount: 0,
+            skipTrustScore: trustScore,
+            observationCount: observations,
+            mode: mode,
+            recentFalseSkipSignals: falseSignals
+        )
+    )
+    return TrustScoringService(store: trustStore)
+}
+
 // MARK: - AnalysisShard Factory
 
 /// Creates a test AnalysisShard with sensible defaults. Silence samples are used

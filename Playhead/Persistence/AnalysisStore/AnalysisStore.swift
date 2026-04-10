@@ -973,28 +973,73 @@ actor AnalysisStore {
         try setSchemaVersion(5)
     }
 
-    /// Phase 7 (playhead-4my.7.1): add `source` and `podcastId` columns to
-    /// `correction_events`. Fresh databases get these columns via `createTables()`;
-    /// existing v5 databases pick them up here. Idempotent via `addColumnIfNeeded`.
+    /// Phase 7 (playhead-4my.7.1 / 7.3-fix): Migrate `correction_events` to v6 schema.
+    ///
+    /// Handles three upgrade paths:
+    ///   1. **No table exists** (fresh DB or v4 that never reached v5 correction_events):
+    ///      CREATE TABLE with the v6 schema directly.
+    ///   2. **Old-schema table exists** (0.6 shipped v5 with `correctionScope`,
+    ///      `atomOrdinalRange`, `evidenceJSON` columns): Rebuild the table to gain
+    ///      the new `scope` column, FK constraint, and drop dead columns. Old row
+    ///      data is migrated: `correctionScope` → `scope`.
+    ///   3. **v6-schema table already exists** (test DBs or re-run): No-op via
+    ///      `addColumnIfNeeded` guards.
+    ///
+    /// The table rebuild in path (2) is necessary because SQLite cannot add FK
+    /// constraints or NOT NULL columns (without DEFAULT) via ALTER TABLE.
     private func migrateCorrectionEventsV6IfNeeded() throws {
         guard (try schemaVersion() ?? 1) < 6 else { return }
 
-        // Create the table on pre-v6 DBs that have never seen it.
-        try exec("""
-            CREATE TABLE IF NOT EXISTS correction_events (
-                id               TEXT PRIMARY KEY,
-                analysisAssetId  TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
-                scope            TEXT NOT NULL,
-                createdAt        REAL NOT NULL,
-                source           TEXT,
-                podcastId        TEXT
-            )
-            """)
+        // Detect whether the old-schema table exists by checking for the
+        // `correctionScope` column (present in 0.6, absent in v6 schema).
+        let hasOldSchema = try columnExists(table: "correction_events", column: "correctionScope")
+
+        if hasOldSchema {
+            // Path 2: Rebuild the table from old schema to v6.
+            // Copy existing rows, mapping correctionScope → scope.
+            // source and podcastId did not exist in v5 — they default to NULL.
+            try exec("""
+                CREATE TABLE correction_events_v6 (
+                    id               TEXT PRIMARY KEY,
+                    analysisAssetId  TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                    scope            TEXT NOT NULL,
+                    createdAt        REAL NOT NULL,
+                    source           TEXT,
+                    podcastId        TEXT
+                )
+                """)
+            // Filter to rows with a valid parent (FK is enforced via PRAGMA
+            // foreign_keys = ON). Orphaned rows whose analysisAssetId was already
+            // deleted are silently discarded — they are unreachable anyway.
+            try exec("""
+                INSERT INTO correction_events_v6 (id, analysisAssetId, scope, createdAt)
+                SELECT id, analysisAssetId, correctionScope, createdAt
+                FROM correction_events
+                WHERE analysisAssetId IN (SELECT id FROM analysis_assets)
+                """)
+            try exec("DROP TABLE correction_events")
+            try exec("ALTER TABLE correction_events_v6 RENAME TO correction_events")
+            // Drop the old index (now orphaned by the table rebuild).
+            try exec("DROP INDEX IF EXISTS idx_ce_asset")
+        } else {
+            // Path 1 or 3: Create the table if it doesn't exist yet.
+            try exec("""
+                CREATE TABLE IF NOT EXISTS correction_events (
+                    id               TEXT PRIMARY KEY,
+                    analysisAssetId  TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                    scope            TEXT NOT NULL,
+                    createdAt        REAL NOT NULL,
+                    source           TEXT,
+                    podcastId        TEXT
+                )
+                """)
+        }
+
         try exec("CREATE INDEX IF NOT EXISTS idx_correction_events_asset ON correction_events(analysisAssetId)")
         try exec("CREATE INDEX IF NOT EXISTS idx_correction_events_scope ON correction_events(scope)")
 
-        // For DBs that already have the table but were seeded before v6 (unlikely in
-        // production, but guard against test databases that hand-build the schema).
+        // Belt-and-suspenders: ensure source/podcastId exist even if a test DB
+        // hand-built the table without them.
         try addColumnIfNeeded(table: "correction_events", column: "source", definition: "TEXT")
         try addColumnIfNeeded(table: "correction_events", column: "podcastId", definition: "TEXT")
 
@@ -4268,7 +4313,7 @@ actor AnalysisStore {
     func hasAnyCorrectionEvent(withScope scope: String) throws -> Bool {
         let sql = """
             SELECT EXISTS(
-                SELECT 1 FROM correction_events WHERE scope = ? LIMIT 1
+                SELECT 1 FROM correction_events WHERE scope = ?
             )
             """
         let stmt = try prepare(sql)
