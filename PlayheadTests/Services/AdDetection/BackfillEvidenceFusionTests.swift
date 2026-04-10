@@ -483,6 +483,73 @@ struct BackfillEvidenceFusionTests {
         #expect(result.eligibilityGate != .blockedByEvidenceQuorum)
     }
 
+    // MARK: - DecisionMapper: correctionFactor suppression (Phase 7.2)
+
+    @Test("correctionFactor < 1.0 gates span as blockedByUserCorrection when effective confidence < 0.40")
+    func correctionFactorBlocksLowEffectiveConfidence() {
+        // rawSkipConfidence = 0.50, correctionFactor = 0.3 → effective = 0.15 < 0.40 → blocked
+        let span = makeSpan()
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .classifier, weight: 0.25, detail: .classifier(score: 0.7)),
+            .init(source: .lexical, weight: 0.20, detail: .lexical(matchedCategories: ["url"])),
+        ]
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: entries,
+            config: defaultConfig(),
+            transcriptQuality: .good,
+            correctionFactor: 0.3
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .blockedByUserCorrection,
+                "correctionFactor=0.3 with rawSkipConfidence ~0.45 should block")
+        #expect(result.skipConfidence < 0.40)
+    }
+
+    @Test("correctionFactor = 1.0 does not alter gate (no suppression)")
+    func correctionFactorOneDoesNotAlterGate() {
+        // Same ledger as above but factor = 1.0 → no suppression
+        let span = makeSpan()
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .classifier, weight: 0.25, detail: .classifier(score: 0.7)),
+            .init(source: .lexical, weight: 0.20, detail: .lexical(matchedCategories: ["url"])),
+        ]
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: entries,
+            config: defaultConfig(),
+            transcriptQuality: .good,
+            correctionFactor: 1.0
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate != .blockedByUserCorrection,
+                "correctionFactor=1.0 must not trigger correction blocking")
+    }
+
+    @Test("correctionFactor that leaves effectiveConfidence >= 0.40 does not block")
+    func correctionFactorHighEnoughDoesNotBlock() {
+        // Arrange ledger to produce rawSkipConfidence ~ 0.9 (many sources)
+        // correctionFactor = 0.6 → effective = 0.54 >= 0.40 → no block
+        let span = makeSpan()
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .classifier, weight: 0.30, detail: .classifier(score: 1.0)),
+            .init(source: .lexical, weight: 0.20, detail: .lexical(matchedCategories: ["url"])),
+            .init(source: .acoustic, weight: 0.20, detail: .acoustic(breakStrength: 0.9)),
+            .init(source: .catalog, weight: 0.20, detail: .catalog(entryCount: 3)),
+        ]
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: entries,
+            config: defaultConfig(),
+            transcriptQuality: .good,
+            correctionFactor: 0.6
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate != .blockedByUserCorrection,
+                "effectiveConfidence >= 0.40 must not be blocked by correction factor")
+        #expect(result.skipConfidence >= 0.40)
+    }
+
     // MARK: - FM Positive-Only Rule
 
     @Test("FM noAds disposition does not produce ledger entries in BackfillEvidenceFusion")

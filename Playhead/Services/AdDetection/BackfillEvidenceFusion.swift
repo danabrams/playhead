@@ -191,26 +191,45 @@ struct DecisionMapper: Sendable {
     let ledger: [EvidenceLedgerEntry]
     let config: FusionWeightConfig
     let transcriptQuality: TranscriptQuality
+    /// Phase 7.2: Correction suppression factor pre-computed by the caller (actor context).
+    /// A value < 1.0 reduces effective confidence for spans with active user corrections.
+    /// Default of 1.0 means no suppression (no active corrections).
+    let correctionFactor: Double
 
     init(
         span: DecodedSpan,
         ledger: [EvidenceLedgerEntry],
         config: FusionWeightConfig,
-        transcriptQuality: TranscriptQuality = .good
+        transcriptQuality: TranscriptQuality = .good,
+        correctionFactor: Double = 1.0
     ) {
         self.span = span
         self.ledger = ledger
         self.config = config
         self.transcriptQuality = transcriptQuality
+        self.correctionFactor = correctionFactor
     }
 
     func map() -> DecisionResult {
         // proposalConfidence is already capped at 1.0 here; calibrate() applies an
         // additional clamp as a safety belt in case a future non-identity mapping
         // produces a value outside [0,1]. The redundancy is intentional.
-        let proposalConfidence = min(1.0, ledger.reduce(0.0) { $0 + $1.weight })
-        let skipConfidence = calibrate(proposalConfidence)
-        let gate = computeGate()
+        let rawProposalConfidence = min(1.0, ledger.reduce(0.0) { $0 + $1.weight })
+        let proposalConfidence = rawProposalConfidence
+
+        // Phase 7.2: apply correction suppression factor to skipConfidence.
+        // The factor is pre-computed by the caller (AdDetectionService, an actor)
+        // from PersistentUserCorrectionStore. If effectiveConfidence falls below
+        // 0.40, gate the span as blockedByUserCorrection.
+        let rawSkipConfidence = calibrate(proposalConfidence)
+        let effectiveConfidence = rawSkipConfidence * max(0.0, correctionFactor)
+        let gate: SkipEligibilityGate
+        if correctionFactor < 1.0 && effectiveConfidence < 0.40 {
+            gate = .blockedByUserCorrection
+        } else {
+            gate = computeGate()
+        }
+        let skipConfidence = effectiveConfidence
 
         return DecisionResult(
             proposalConfidence: proposalConfidence,

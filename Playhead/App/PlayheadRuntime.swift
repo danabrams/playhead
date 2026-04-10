@@ -38,6 +38,11 @@ final class PlayheadRuntime {
     let analysisWorkScheduler: AnalysisWorkScheduler
     let analysisJobReconciler: AnalysisJobReconciler
 
+    /// Phase 7.2: Shared user correction store. Wired to `PersistentUserCorrectionStore`
+    /// in production; views (TranscriptPeekView, AdBannerView callback) consume this
+    /// to persist vetoes and listen-reverts without knowing the concrete type.
+    let correctionStore: any UserCorrectionStore
+
     /// bd-fmfb: DEBUG-only sink for `LanguageModelSession.logFeedbackAttachment`
     /// payloads. Apple's iOS 26.4 on-device safety classifier rejects benign
     /// podcast advertising; we capture machine-readable feedback so the
@@ -320,12 +325,19 @@ final class PlayheadRuntime {
             }
         }
 
+        // Phase 7.2: construct the correction store before the skip orchestrator
+        // and ad detection service so it can be injected into both.
+        // PersistentUserCorrectionStore only needs the AnalysisStore (already initialized).
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        self.correctionStore = correctionStore
+
         // Phase 6.5 (playhead-4my.16): skipOrchestrator is constructed before
         // adDetectionService so it can be injected for step-17 forwarding.
         // The orchestrator is otherwise wired identically to before this change.
         self.skipOrchestrator = SkipOrchestrator(
             store: analysisStore,
-            trustService: trustService
+            trustService: trustService,
+            correctionStore: correctionStore
         )
         self.adDetectionService = AdDetectionService(
             store: analysisStore,
@@ -427,6 +439,17 @@ final class PlayheadRuntime {
         }
 
         Task { await capabilitiesService.startObserving() }
+
+        // Phase 7.2: inject the correction store into adDetectionService.
+        // SkipOrchestrator receives it at init (see above); AdDetectionService
+        // is an actor so the mutable property is set via an async Task.
+        // Race note: this Task may execute after the first backfill run starts.
+        // Until it completes, adDetectionService.correctionStore is nil, so
+        // correctionPassthroughFactor defaults to 1.0 (no suppression) — the safe
+        // default, since it means "no corrections loaded yet, don't suppress anything."
+        Task { [adDetectionService, correctionStore] in
+            await adDetectionService.setUserCorrectionStore(correctionStore)
+        }
 
         Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService] in
             // Migrate the analysis store before any component queries its tables.

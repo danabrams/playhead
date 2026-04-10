@@ -146,6 +146,12 @@ actor SkipOrchestrator {
     private let config: SkipPolicyConfig
     private let trustService: TrustScoringService?
 
+    // MARK: - Phase 7.2: User Correction Store
+
+    /// Injected by PlayheadRuntime after init. Fire-and-forget writes; never throws.
+    /// Optional so existing test setups that don't inject the store remain unaffected.
+    private(set) var correctionStore: (any UserCorrectionStore)?
+
     // MARK: - State
 
     /// All managed windows for the current episode, keyed by adWindowId.
@@ -200,11 +206,13 @@ actor SkipOrchestrator {
     init(
         store: AnalysisStore,
         config: SkipPolicyConfig = .default,
-        trustService: TrustScoringService? = nil
+        trustService: TrustScoringService? = nil,
+        correctionStore: (any UserCorrectionStore)? = nil
     ) {
         self.store = store
         self.config = config
         self.trustService = trustService
+        self.correctionStore = correctionStore
     }
 
     // MARK: - Configuration
@@ -529,6 +537,28 @@ actor SkipOrchestrator {
         // Signal the trust engine about the false skip.
         if let podcastId, let trustService {
             await trustService.recordFalseSkipSignal(podcastId: podcastId)
+        }
+
+        // Phase 7.2: persist a listenRevert CorrectionEvent (fire-and-forget).
+        if let correctionStore {
+            let assetId = managed.adWindow.analysisAssetId
+            let scope = CorrectionScope.exactSpan(
+                assetId: assetId,
+                // AdWindow does not carry atom ordinals; use the widest plausible range
+                // as a conservative veto. Phase 7.3 can narrow this when ordinals are available.
+                ordinalRange: 0...Int.max
+            )
+            let event = CorrectionEvent(
+                analysisAssetId: assetId,
+                scope: scope.serialized,
+                createdAt: Date().timeIntervalSince1970,
+                source: .listenRevert,
+                podcastId: podcastId
+            )
+            let store = correctionStore
+            Task {
+                try? await store.record(event)
+            }
         }
 
         // Remove the cue and re-push.
