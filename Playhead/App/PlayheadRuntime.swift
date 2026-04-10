@@ -64,6 +64,16 @@ final class PlayheadRuntime {
     let regionShadowObserver: RegionShadowObserver? = nil
     #endif
 
+    /// Phase 5 DEBUG-only observation sink for `AtomEvidenceProjector` output.
+    /// The `AdDetectionService` backfill path writes into this observer only
+    /// when it is non-nil, so release builds skip the Phase 5 projector phase
+    /// entirely. This mirrors the `regionShadowObserver` injection pattern.
+    #if DEBUG
+    let phase5ProjectorObserver: Phase5ProjectorObserver?
+    #else
+    let phase5ProjectorObserver: Phase5ProjectorObserver? = nil
+    #endif
+
     private let isPreviewRuntime: Bool
     private let logger = Logger(subsystem: "com.playhead", category: "Runtime")
     @ObservationIgnored
@@ -186,6 +196,16 @@ final class PlayheadRuntime {
         self.regionShadowObserver = regionShadowObserver
         #else
         let regionShadowObserver: RegionShadowObserver? = nil
+        #endif
+
+        // Phase 5 DEBUG-only projector observer. Release builds leave the
+        // stored property nil so the backfill skips the Phase 5 atom
+        // evidence projector entirely. Mirrors RegionShadowObserver pattern.
+        #if DEBUG
+        let phase5ProjectorObserver = Phase5ProjectorObserver()
+        self.phase5ProjectorObserver = phase5ProjectorObserver
+        #else
+        let phase5ProjectorObserver: Phase5ProjectorObserver? = nil
         #endif
 
         // HIGH-1: round-2's M-B hoist shared one AdmissionController across
@@ -316,7 +336,11 @@ final class PlayheadRuntime {
             // playhead-xba (Phase 4 shadow wire-up): hand the DEBUG-only
             // region observer to the service. In release builds this is
             // `nil`, which makes the Phase 4 shadow phase a no-op.
-            regionShadowObserver: regionShadowObserver
+            regionShadowObserver: regionShadowObserver,
+            // Phase 5 projector wire-up: hand the DEBUG-only projector
+            // observer to the service. In release builds this is `nil`,
+            // which makes the Phase 5 atom evidence projector a no-op.
+            phase5ProjectorObserver: phase5ProjectorObserver
         )
         self.skipOrchestrator = SkipOrchestrator(
             store: analysisStore,

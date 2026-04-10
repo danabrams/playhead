@@ -176,6 +176,13 @@ actor AdDetectionService {
     /// pipeline produced bundles.
     private let regionShadowObserver: RegionShadowObserver?
 
+    /// playhead-4my.5 (Phase 5): optional observer for the AtomEvidenceProjector
+    /// + MinimalContiguousSpanDecoder pipeline. When nil, step 11 is a no-op.
+    /// Production release builds never inject this (DEBUG-only pattern, same as
+    /// `regionShadowObserver`). Tests inject a live observer to assert Phase 5
+    /// output without affecting live AdWindow or skip-cue decisions.
+    private let phase5ProjectorObserver: Phase5ProjectorObserver?
+
     // MARK: - Cached State
 
     /// Scanner is recreated per-episode when profile changes.
@@ -202,7 +209,8 @@ actor AdDetectionService {
         backfillJobRunnerFactory: (@Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner)? = nil,
         canUseFoundationModelsProvider: @escaping @Sendable () async -> Bool = { true },
         shadowSkipMarker: @escaping @Sendable (_ sessionId: String, _ podcastId: String) async -> Void = { _, _ in },
-        regionShadowObserver: RegionShadowObserver? = nil
+        regionShadowObserver: RegionShadowObserver? = nil,
+        phase5ProjectorObserver: Phase5ProjectorObserver? = nil
     ) {
         self.store = store
         self.classifier = classifier
@@ -215,6 +223,7 @@ actor AdDetectionService {
         self.canUseFoundationModelsProvider = canUseFoundationModelsProvider
         self.shadowSkipMarker = shadowSkipMarker
         self.regionShadowObserver = regionShadowObserver
+        self.phase5ProjectorObserver = phase5ProjectorObserver
     }
 
     #if DEBUG
@@ -462,6 +471,7 @@ actor AdDetectionService {
         // used for `FoundationModelsFeedbackStore`. Nothing here can affect
         // AdWindow rows, skip cues, or metadata; the only side effect is a
         // write into an in-memory actor. Failures are logged and swallowed.
+        var shadowBundles: [RegionFeatureBundle] = []
         if let observer = regionShadowObserver {
             await runRegionShadowPhase(
                 observer: observer,
@@ -470,6 +480,21 @@ actor AdDetectionService {
                 episodeDuration: episodeDuration,
                 lexicalCandidates: lexicalCandidates,
                 fmWindows: shadowFMWindows
+            )
+            shadowBundles = (await observer.latestBundles(for: analysisAssetId)) ?? []
+        }
+
+        // 11. playhead-4my.5 (Phase 5 projector): run AtomEvidenceProjector +
+        // MinimalContiguousSpanDecoder on the Phase 4 bundles. Gated on a
+        // non-nil `phase5ProjectorObserver` (DEBUG-only injection pattern,
+        // same contract as `regionShadowObserver`). Failures are logged and
+        // swallowed. No AdWindow rows or skip cues are touched.
+        if let p5observer = phase5ProjectorObserver, !shadowBundles.isEmpty {
+            await runPhase5ProjectorPhase(
+                observer: p5observer,
+                bundles: shadowBundles,
+                chunks: chunks,
+                analysisAssetId: analysisAssetId
             )
         }
     }
@@ -533,6 +558,60 @@ actor AdDetectionService {
         )
         let bundles = RegionShadowPhase.run(input)
         await observer.record(assetId: analysisAssetId, bundles: bundles)
+    }
+
+    // MARK: - Phase 5 Projector Phase (playhead-4my.5)
+
+    /// Runs AtomEvidenceProjector + MinimalContiguousSpanDecoder on the Phase 4
+    /// bundles and records the resulting decoded spans in the injected observer.
+    /// Failures are logged and swallowed — shadow telemetry must never affect
+    /// user-visible behavior.
+    private func runPhase5ProjectorPhase(
+        observer: Phase5ProjectorObserver,
+        bundles: [RegionFeatureBundle],
+        chunks: [TranscriptChunk],
+        analysisAssetId: String
+    ) async {
+        guard !chunks.isEmpty else { return }
+
+        // Atomize the same transcript the Phase 4 shadow phase used.
+        let (atoms, _) = TranscriptAtomizer.atomize(
+            chunks: chunks.filter { $0.pass == "final" }.isEmpty ? chunks : chunks.filter { $0.pass == "final" },
+            analysisAssetId: analysisAssetId,
+            normalizationHash: "norm-v1",
+            sourceHash: "asr-v1"
+        )
+        guard !atoms.isEmpty else {
+            logger.warning("Phase 5 projector: no atoms produced for asset \(analysisAssetId)")
+            return
+        }
+
+        // Build the evidence catalog.
+        let catalog = EvidenceCatalogBuilder.build(
+            atoms: atoms,
+            analysisAssetId: analysisAssetId,
+            transcriptVersion: atoms[0].atomKey.transcriptVersion
+        )
+
+        // Project atoms.
+        let projector = AtomEvidenceProjector()
+        let evidence = await projector.project(
+            regions: bundles,
+            catalog: catalog,
+            atoms: atoms,
+            correctionMaskProvider: NoCorrectionMaskProvider()
+        )
+
+        // Decode spans.
+        let decoder = MinimalContiguousSpanDecoder()
+        let spans = decoder.decode(atoms: evidence, assetId: analysisAssetId)
+
+        // Record results in observer.
+        await observer.record(assetId: analysisAssetId, spans: spans, evidence: evidence)
+
+        logger.info(
+            "Phase 5 projector: asset=\(analysisAssetId) atoms=\(atoms.count) anchored=\(evidence.filter(\.isAnchored).count) spans=\(spans.count)"
+        )
     }
 
     // MARK: - Shadow FM Phase

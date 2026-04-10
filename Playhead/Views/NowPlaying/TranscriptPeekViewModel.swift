@@ -15,8 +15,11 @@ final class TranscriptPeekViewModel {
     /// Transcript chunks sorted by startTime, fast-pass included.
     private(set) var chunks: [TranscriptChunk] = []
 
-    /// Ad windows for visual muting of ad segments.
+    /// Ad windows for visual muting of ad segments (legacy Phase 2 path).
     private(set) var adWindows: [AdWindow] = []
+
+    /// Phase 5 decoded spans for the new overlay rendering.
+    private(set) var decodedSpans: [DecodedSpan] = []
 
     /// Index of the chunk containing the current playback position, or nil.
     private(set) var activeChunkIndex: Int?
@@ -107,19 +110,26 @@ final class TranscriptPeekViewModel {
         }
     }
 
-    /// Returns true if the given time falls within any known ad window.
+    /// Returns true if the given time falls within any known ad window (legacy path).
     func isAdSegment(startTime: Double, endTime: Double) -> Bool {
         adWindows.contains { ad in
             ad.startTime < endTime && ad.endTime > startTime
         }
     }
 
-    /// Returns the highest ad confidence score overlapping this chunk, or nil.
+    /// Returns the highest ad confidence score overlapping this chunk, or nil (legacy path).
     func adConfidence(startTime: Double, endTime: Double) -> Double? {
         let overlapping = adWindows.filter { ad in
             ad.startTime < endTime && ad.endTime > startTime
         }
         return overlapping.map(\.confidence).max()
+    }
+
+    /// Returns all Phase 5 decoded spans overlapping the given time range.
+    func decodedSpansOverlapping(startTime: Double, endTime: Double) -> [DecodedSpan] {
+        decodedSpans.filter { span in
+            span.startTime < endTime && span.endTime > startTime
+        }
     }
 
     /// Debug stats summary for TestFlight diagnostics.
@@ -190,6 +200,7 @@ final class TranscriptPeekViewModel {
         do {
             let freshChunks = try await store.fetchTranscriptChunks(assetId: analysisAssetId)
             let freshAds = try await store.fetchAdWindows(assetId: analysisAssetId)
+            let freshSpans = try await store.fetchDecodedSpans(assetId: analysisAssetId)
 
             // Deduplicate: if both fast and final exist for the same segment,
             // prefer final. Group by chunkIndex, keep final if available.
@@ -201,6 +212,7 @@ final class TranscriptPeekViewModel {
 
             chunks = deduped
             adWindows = freshAds
+            decodedSpans = freshSpans
             await updateDebugStats()
         } catch {
             logger.error("Failed to refresh transcript chunks: \(error)")
