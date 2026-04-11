@@ -40,11 +40,11 @@ struct TimelineRailView: View {
     /// Task for resetting the glide state after animation settles.
     @State private var glideResetTask: Task<Void, Never>?
 
-    private let railHeight: CGFloat = 4
-    private let touchTargetHeight: CGFloat = 44
+    let railHeight: CGFloat = 4
+    let touchTargetHeight: CGFloat = 44
 
     /// Threshold for detecting a skip jump (vs normal playback advance).
-    private let skipJumpThreshold: Double = 0.02
+    let skipJumpThreshold: Double = 0.02
 
     private var effectiveProgress: Double {
         isDragging ? dragProgress : progress
@@ -78,9 +78,11 @@ struct TimelineRailView: View {
                 // MARK: Ad Segments (recessed charcoal blocks)
                 ForEach(Array(adSegments.enumerated()), id: \.offset) { index, segment in
                     let x = segment.lowerBound * width
-                    let w = (segment.upperBound - segment.lowerBound) * width
+                    let segWidth = Self.clampedSegmentWidth(
+                        segmentRange: segment, totalWidth: width
+                    )
 
-                    adSegmentBlock(width: max(w, 2))
+                    adSegmentBlock(width: segWidth)
                         // Expand the tap target to 44pt while keeping the visual block at 4pt.
                         // The block itself stays railHeight-tall; the frame + contentShape
                         // widen the hit-testable area so users don't need pixel-perfect aim.
@@ -162,6 +164,18 @@ struct TimelineRailView: View {
             }
             previousProgress = newValue
         }
+    }
+
+    // MARK: - Segment Geometry
+
+    /// Returns the clamped width for an ad segment block.
+    /// Ensures tiny segments remain tappable by enforcing a 2pt floor.
+    static func clampedSegmentWidth(
+        segmentRange: ClosedRange<Double>,
+        totalWidth: CGFloat
+    ) -> CGFloat {
+        let w = (segmentRange.upperBound - segmentRange.lowerBound) * totalWidth
+        return max(w, 2)
     }
 
     // MARK: - Skip Glide Animation

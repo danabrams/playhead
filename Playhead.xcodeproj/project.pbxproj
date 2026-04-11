@@ -48,6 +48,7 @@
 		26DB8785D5DE340B0B112C79 /* SpeedSelectorCycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7ED471E586517339EA621BC2 /* SpeedSelectorCycleTests.swift */; };
 		DC9982CDB6AD3A97962A72E1 /* LibraryViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 468B77C51592EED3B5949E1B /* LibraryViewTests.swift */; };
 		16436A482FD3906765AF4F2B /* TrustScoringServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C088315362D4161754AFC069 /* TrustScoringServiceTests.swift */; };
+		93F241B5852A1141EF8B8B34 /* TimelineRailViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 390D048FDC5E42F4522C110C /* TimelineRailViewTests.swift */; };
 		2934CB0BDEFD261C285BD3AC /* WithTestRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = D67C09F0363077895699D073 /* WithTestRuntime.swift */; };
 		29786647F005F38FF92188E1 /* TransportButtonHapticTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BCF9000BF2F687523E430FF /* TransportButtonHapticTests.swift */; };
 		2A2DBC03BB0DAEC911D16F40 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = D233B118794A3B07AB2E70FC /* Theme.swift */; };
@@ -364,6 +365,7 @@
 		795E3F027D5E0A871EAE1110 /* NowPlayingViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingViewModel.swift; sourceTree = "<group>"; };
 		468B77C51592EED3B5949E1B /* LibraryViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryViewTests.swift; sourceTree = "<group>"; };
 		C088315362D4161754AFC069 /* TrustScoringServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrustScoringServiceTests.swift; sourceTree = "<group>"; };
+		390D048FDC5E42F4522C110C /* TimelineRailViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineRailViewTests.swift; sourceTree = "<group>"; };
 		7AA4CA298756A753F5DF63A1 /* DesignTokenTypographyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignTokenTypographyTests.swift; sourceTree = "<group>"; };
 		7C6F8F0E7BFB155645261D54 /* TimelineRailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineRailView.swift; sourceTree = "<group>"; };
 		7D08053BA32F9F2DCBB3AE58 /* InstrumentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstrumentationTests.swift; sourceTree = "<group>"; };
@@ -1039,6 +1041,7 @@
 				7ED471E586517339EA621BC2 /* SpeedSelectorCycleTests.swift */,
 				D9A8C0B59DC7925F56ADC713 /* SpeedSelectorHapticTests.swift */,
 				E9AE0D38CFEE9289D6BFC8E6 /* TimelineRailHapticTests.swift */,
+				390D048FDC5E42F4522C110C /* TimelineRailViewTests.swift */,
 				3BCF9000BF2F687523E430FF /* TransportButtonHapticTests.swift */,
 			);
 			path = NowPlaying;
@@ -1516,6 +1519,7 @@
 				2AFEBC16762D1A2321E0E142 /* TestFixtureValidationTests.swift in Sources */,
 				B5429AA526891A3F746344EE /* TestHelpers.swift in Sources */,
 				62864235FF613942304BFF80 /* TimelineRailHapticTests.swift in Sources */,
+				93F241B5852A1141EF8B8B34 /* TimelineRailViewTests.swift in Sources */,
 				2B13973F376F6DA284AFC87D /* TranscriptEngineTests.swift in Sources */,
 				E9F167C2AE2D9AC65CF1C870 /* TranscriptIdentityTests.swift in Sources */,
 				29786647F005F38FF92188E1 /* TransportButtonHapticTests.swift in Sources */,
