@@ -587,6 +587,35 @@ struct CollectSegmentsPartialPromotionTests {
         let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
         #expect(segments.isEmpty)
     }
+
+    @Test("Empty final clears a preceding partial")
+    func emptyFinalClearsPartial() async throws {
+        let stream = snapshotStream([
+            makeSnapshot(isFinal: false, text: "Speculative", startTime: 0, endTime: 1),
+            makeSnapshot(isFinal: true, text: "", startTime: 0, endTime: 1),
+        ])
+        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        #expect(segments.isEmpty, "Empty final retracts the preceding partial")
+    }
+
+    @Test("Multi-shard sequence: final, partial, final, trailing partial")
+    func multiShardSequence() async throws {
+        let stream = snapshotStream([
+            // Shard 1: partial then final
+            makeSnapshot(isFinal: false, text: "Hel", startTime: 0, endTime: 0.5),
+            makeSnapshot(isFinal: true, text: "Hello world", startTime: 0, endTime: 1),
+            // Shard 2: partial then final
+            makeSnapshot(isFinal: false, text: "How", startTime: 1, endTime: 1.5),
+            makeSnapshot(isFinal: true, text: "How are you", startTime: 1, endTime: 2),
+            // Shard 3: only a trailing partial (shard boundary truncation)
+            makeSnapshot(isFinal: false, text: "I am fi", startTime: 2, endTime: 2.5),
+        ])
+        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        #expect(segments.count == 3, "Two finals + one promoted trailing partial")
+        #expect(segments[0].text == "Hello world")
+        #expect(segments[1].text == "How are you")
+        #expect(segments[2].text == "I am fi", "Trailing partial from shard 3 should be promoted")
+    }
 }
 
 #endif
