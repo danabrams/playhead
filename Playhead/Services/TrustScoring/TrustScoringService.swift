@@ -276,6 +276,46 @@ actor TrustScoringService {
         logger.info("User override \(podcastId): mode=\(mode.rawValue)")
     }
 
+    // MARK: - False-Negative Signals
+
+    /// Record a false-negative signal (user reported a missed ad).
+    /// Increments trust score slightly — the model was conservative but not wrong
+    /// in the dangerous direction. A false negative means the user is engaged
+    /// enough to provide feedback and ads do exist in this show.
+    func recordFalseNegativeSignal(podcastId: String) async {
+        let profile: PodcastProfile?
+        do {
+            profile = try await store.fetchProfile(podcastId: podcastId)
+        } catch {
+            logger.warning("Failed to fetch profile for false-negative signal on \(podcastId): \(error.localizedDescription)")
+            return
+        }
+        guard let profile else { return }
+
+        // False negatives slightly boost trust — the model is being conservative,
+        // which is safer than false positives. Apply half the normal observation bonus.
+        let newTrust = min(1.0, profile.skipTrustScore + config.correctObservationBonus * 0.5)
+
+        let updated = PodcastProfile(
+            podcastId: profile.podcastId,
+            sponsorLexicon: profile.sponsorLexicon,
+            normalizedAdSlotPriors: profile.normalizedAdSlotPriors,
+            repeatedCTAFragments: profile.repeatedCTAFragments,
+            jingleFingerprints: profile.jingleFingerprints,
+            implicitFalsePositiveCount: profile.implicitFalsePositiveCount,
+            skipTrustScore: newTrust,
+            observationCount: profile.observationCount,
+            mode: profile.mode,
+            recentFalseSkipSignals: profile.recentFalseSkipSignals
+        )
+        do {
+            try await store.upsertProfile(updated)
+        } catch {
+            logger.warning("Failed to upsert profile for \(podcastId) after false-negative signal: \(error.localizedDescription)")
+        }
+        logger.info("False-negative signal for \(podcastId): trust=\(newTrust, format: .fixed(precision: 2))")
+    }
+
     // MARK: - Reset
 
     /// Reset recent false-skip signals for a podcast (called after a
