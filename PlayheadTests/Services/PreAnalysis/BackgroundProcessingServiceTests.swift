@@ -107,14 +107,15 @@ struct BackfillTaskHandlerTests {
         #expect(task.completedSuccess == false)
     }
 
-    @Test("Backfill handler invokes real work method, not start")
+    @Test("Backfill handler invokes real work method, not startCapabilityObserver")
     func backfillInvokesRealWorkMethod() async throws {
-        // Regression: handleBackfillTask used to call coordinator.start(),
-        // which is a sync lifecycle-init that just spawns the capability
-        // observer and returns. The BGProcessingTask was being marked
-        // successful in microseconds without any backfill work happening,
-        // and iOS reclaimed the granted background time. This test pins
-        // the contract that handleBackfillTask invokes runPendingBackfill.
+        // Regression: handleBackfillTask used to call the coordinator's
+        // capability-observer setup (now startCapabilityObserver()), which
+        // is a sync lifecycle-init that just spawns the capability observer
+        // and returns. The BGProcessingTask was being marked successful in
+        // microseconds without any backfill work happening, and iOS
+        // reclaimed the granted background time. This test pins the
+        // contract that handleBackfillTask invokes runPendingBackfill.
         let coordinator = StubAnalysisCoordinator()
         let (bps, _, _, _) = makeBPS(coordinator: coordinator)
         let task = StubBackgroundTask()
@@ -123,11 +124,11 @@ struct BackfillTaskHandlerTests {
         try await waitForCompletion(of: task)
 
         #expect(coordinator.runPendingBackfillCallCount >= 1,
-                "handleBackfillTask must invoke runPendingBackfill, not start()")
-        // start() is the capability-observer lifecycle entry point and must
-        // not be called from the background task handler.
-        #expect(coordinator.startCallCount == 0,
-                "handleBackfillTask must not call start() — that path was the bug")
+                "handleBackfillTask must invoke runPendingBackfill, not startCapabilityObserver()")
+        // startCapabilityObserver() is the capability-observer lifecycle entry
+        // point and must not be called from the background task handler.
+        #expect(coordinator.startCapabilityObserverCallCount == 0,
+                "handleBackfillTask must not call startCapabilityObserver() — that path was the bug")
         #expect(task.completedSuccess == true)
     }
 
@@ -199,8 +200,8 @@ struct ContinuedProcessingHandlerTests {
         // the backfill drain. See git history around commit 740f727.
         #expect(coordinator.runPendingBackfillCallCount == 0,
                 "handleContinuedProcessingTask must not call runPendingBackfill — that is handleBackfillTask's job")
-        #expect(coordinator.startCallCount == 0,
-                "handleContinuedProcessingTask must not call start() either")
+        #expect(coordinator.startCapabilityObserverCallCount == 0,
+                "handleContinuedProcessingTask must not call startCapabilityObserver() either")
     }
 }
 
@@ -297,9 +298,10 @@ struct HotPathControlTests {
         await bps.playbackDidStart()
 
         #expect(await bps.isHotPathActive() == true)
-        // Coordinator.start() is called via a detached Task, give it a moment.
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(coordinator.startCallCount >= 1)
+        // playbackDidStart no longer calls coordinator.startCapabilityObserver() —
+        // the observer is started once by BPS.start() at launch and survives
+        // stop() calls. playbackDidStart only flips the hotPathActive flag.
+        #expect(coordinator.startCapabilityObserverCallCount == 0)
     }
 
     @Test("playbackDidStart deferred when all analysis paused")
@@ -316,16 +318,11 @@ struct HotPathControlTests {
         await bps.playbackDidStart()
 
         #expect(await bps.isHotPathActive() == false)
-        // Coordinator.start() should have been called by handleCapabilityUpdate? No --
-        // handleCapabilityUpdate with critical calls coordinator.stop(). The playbackDidStart
-        // should NOT call coordinator.start() because allAnalysisPaused is true.
-        // The stop from handleCapabilityUpdate counts, but start from playbackDidStart should not.
-        // We need to check that no NEW start was issued after the pause.
+        // playbackDidStart no longer calls coordinator.startCapabilityObserver()
+        // at all — the observer is started once by BPS.start() and survives
+        // stop() calls. Verify it was not called here.
         try await Task.sleep(for: .milliseconds(50))
-        // stop was called once (from handleCapabilityUpdate), start should be 0 from playbackDidStart.
-        // But coordinator.start may have been called 0 times from playbackDidStart.
-        // (handleCapabilityUpdate calls coordinator.stop(), not start().)
-        #expect(coordinator.startCallCount == 0)
+        #expect(coordinator.startCapabilityObserverCallCount == 0)
     }
 
     @Test("playbackDidStop deactivates and schedules backfill")
@@ -372,7 +369,6 @@ struct ThermalManagementTests {
         // Activate hot-path first.
         await bps.playbackDidStart()
         try await Task.sleep(for: .milliseconds(50))
-        let startCountAfterPlay = coordinator.startCallCount
 
         // Apply serious thermal -- should NOT pause all (only critical does).
         let seriousSnapshot = makeCapabilitySnapshot(thermalState: .serious)
@@ -385,28 +381,32 @@ struct ThermalManagementTests {
         #expect(coordinator.stopCallCount == 0)
     }
 
-    @Test("Recovery from critical thermal resumes hot-path")
-    func recoveryFromCriticalResumesHotPath() async throws {
+    @Test("Recovery from critical thermal lifts pause flag")
+    func recoveryFromCriticalLiftsPause() async throws {
         let (bps, coordinator, _, _) = makeBPS()
 
         // Activate hot-path.
         await bps.playbackDidStart()
         try await Task.sleep(for: .milliseconds(50))
-        let startCountAfterPlay = coordinator.startCallCount
 
         // Go critical -- pauses all.
         let criticalSnapshot = makeCapabilitySnapshot(thermalState: .critical)
         await bps.handleCapabilityUpdate(criticalSnapshot)
         try await Task.sleep(for: .milliseconds(50))
         #expect(coordinator.stopCallCount >= 1)
+        #expect(await bps.isHotPathActive() == false)
 
-        // Recover to nominal -- should resume hot-path since playback was active.
+        // Recover to nominal -- pause flag should be lifted.
+        // The coordinator's capability observer survives stop() calls,
+        // so handleCapabilityUpdate does not need to re-start it.
         let nominalSnapshot = makeCapabilitySnapshot(thermalState: .nominal)
         await bps.handleCapabilityUpdate(nominalSnapshot)
         try await Task.sleep(for: .milliseconds(50))
 
-        // A new coordinator.start() should have been issued on recovery.
-        #expect(coordinator.startCallCount > startCountAfterPlay)
+        // Hot-path should be active again (hotPathActive was true before pause).
+        #expect(await bps.isHotPathActive() == true)
+        // No new startCapabilityObserver() call — observer survives stop().
+        #expect(coordinator.startCapabilityObserverCallCount == 0)
     }
 }
 
@@ -461,8 +461,6 @@ struct BatteryManagementTests {
         try await Task.sleep(for: .milliseconds(50))
         #expect(coordinator.stopCallCount >= 1)
 
-        let startCountBeforeRecovery = coordinator.startCallCount
-
         // Recover battery.
         battery.level = 0.50
         let snapshot2 = makeCapabilitySnapshot(thermalState: .nominal)
@@ -470,7 +468,10 @@ struct BatteryManagementTests {
         try await Task.sleep(for: .milliseconds(50))
 
         // Hot-path should resume since playback was active.
-        #expect(coordinator.startCallCount > startCountBeforeRecovery)
+        // The coordinator's capability observer survives stop() calls,
+        // so no new startCapabilityObserver() call is needed.
+        #expect(await bps.isHotPathActive() == true)
+        #expect(coordinator.startCapabilityObserverCallCount == 0)
     }
 }
 

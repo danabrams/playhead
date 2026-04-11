@@ -191,7 +191,15 @@ actor AnalysisCoordinator {
     // MARK: - Lifecycle
 
     /// Start observing capability changes. Call once at app launch.
-    func start() {
+    ///
+    /// The observer is a long-lived monitoring concern that survives
+    /// ``stop()`` calls. ``stop()`` cancels active pipeline work but
+    /// leaves this observer alive so it does not need to be re-started
+    /// after thermal/battery recovery. The observer's handler
+    /// (``handleCapabilityChange``) is purely diagnostic logging and
+    /// does not start work, so leaving it alive during a stopped state
+    /// is safe.
+    func startCapabilityObserver() {
         // Clear any prior stop request so a stop/start cycle re-enables the
         // polling loop in runPendingBackfill.
         stopRequested = false
@@ -207,12 +215,18 @@ actor AnalysisCoordinator {
         logger.info("AnalysisCoordinator started")
     }
 
-    /// Stop all work and clean up.
+    /// Stop all active work and clean up pipeline state.
+    ///
+    /// The capability observer started by ``startCapabilityObserver()``
+    /// is intentionally left alive. It is a lightweight monitoring task
+    /// whose handler (``handleCapabilityChange``) only logs — it never
+    /// starts work. Keeping it alive means callers do not need to
+    /// re-start the observer after thermal/battery recovery, which
+    /// eliminates a class of lifecycle coupling bugs between
+    /// ``BackgroundProcessingService`` and this coordinator.
     func stop() async {
         stopRequested = true
         await cancelPipeline()
-        capabilityObserverTask?.cancel()
-        capabilityObserverTask = nil
         activeSessionId = nil
         activeAssetId = nil
         activeEpisodeId = nil
