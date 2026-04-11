@@ -52,7 +52,10 @@ extension BGTaskScheduler: BackgroundTaskScheduling {}
 
 /// Abstracts the analysis coordinator for testability.
 protocol AnalysisCoordinating: Sendable {
-    func start() async
+    /// Start the long-lived capability observer. Call once at launch.
+    /// The observer survives ``stop()`` calls — see
+    /// ``AnalysisCoordinator.startCapabilityObserver()`` for rationale.
+    func startCapabilityObserver() async
     func stop() async
     /// Drain any pending analysis backfill work for the duration of a
     /// BGProcessingTask window. Must respect `Task.isCancelled` and return
@@ -284,8 +287,18 @@ actor BackgroundProcessingService {
 
     /// Start observing capability changes and battery state.
     /// Call once after registration.
+    ///
+    /// Starts the coordinator's capability observer once here at launch.
+    /// The observer survives ``coordinator.stop()`` calls, so neither
+    /// ``playbackDidStart()`` nor ``handleCapabilityUpdate(_:)`` need to
+    /// re-start it — eliminating a class of lifecycle coupling bugs.
     func start() async {
         await updateBatteryState()
+
+        // Start the coordinator's long-lived capability observer once.
+        // It survives stop() calls and does not need to be re-started
+        // on thermal/battery recovery.
+        await coordinator.startCapabilityObserver()
 
         capabilityObserverTask?.cancel()
         capabilityObserverTask = Task { [weak self] in
@@ -325,8 +338,6 @@ actor BackgroundProcessingService {
 
         hotPathActive = true
         logger.info("Hot-path active")
-
-        Task { await coordinator.start() }
     }
 
     /// Signal that audio playback has stopped. Deactivates hot-path analysis,
@@ -448,10 +459,11 @@ actor BackgroundProcessingService {
             // to wake on its own timer.
             //
             // NOTE: this is the actual work payload — the previous version of
-            // this handler called coordinator.start(), which is a fire-and-
-            // forget capability-observer setup that returned in microseconds
-            // and let iOS reclaim the granted background time without any
-            // analysis happening. See git blame for context.
+            // this handler called coordinator.startCapabilityObserver() (then
+            // named start()), which is a fire-and-forget capability-observer
+            // setup that returned in microseconds and let iOS reclaim the
+            // granted background time without any analysis happening.
+            // See git blame for context.
             await self.analysisWorkScheduler?.wake()
             await self.coordinator.runPendingBackfill()
 
@@ -544,11 +556,10 @@ actor BackgroundProcessingService {
         if !shouldPauseAll && allAnalysisPaused {
             allAnalysisPaused = false
             logger.info("Analysis pause lifted (thermal=\(snapshot.thermalState.rawValue))")
-
-            // Re-activate hot-path if playback is active.
-            if hotPathActive {
-                Task { await coordinator.start() }
-            }
+            // The coordinator's capability observer survives stop() calls,
+            // so no need to re-start it here. Hot-path work will resume
+            // naturally on the next playback event or capability change
+            // processed by the coordinator's own observer.
         }
 
         // Pause/resume backfill independently.
