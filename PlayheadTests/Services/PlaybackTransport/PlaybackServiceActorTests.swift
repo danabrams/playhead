@@ -34,14 +34,22 @@ struct PlaybackServiceActorIsolationTests {
 
     @Test("PlaybackService methods are callable from PlaybackServiceActor")
     func basicActorAccess() async {
-        let service = await PlaybackService()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
         let snapshot = await service.snapshot()
         #expect(snapshot.status == .idle)
     }
 
     @Test("State observation stream yields from actor without assertion")
     func stateObservation() async {
-        let service = await PlaybackService()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
         let stream = await service.observeStates()
 
         // Consume the initial yield (immediate hydration).
@@ -56,7 +64,11 @@ struct PlaybackServiceActorIsolationTests {
 
     @Test("Concurrent snapshot calls don't trigger executor assertion")
     func concurrentSnapshots() async {
-        let service = await PlaybackService()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
 
         // Simulate rapid concurrent access like KVO callbacks during Siri.
         await withTaskGroup(of: PlaybackState.self) { group in
@@ -79,7 +91,11 @@ struct ProgressiveLoaderDecouplingTests {
 
     @Test("loadItem accepts externally-created player item")
     func loadItemAcceptsExternalItem() async {
-        let service = await PlaybackService()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
 
         // Create a player item outside the actor — same pattern as the runtime.
         let asset = AVURLAsset(url: URL(string: "playhead-progressive://audio/test.mp3")!)
@@ -123,7 +139,11 @@ struct ProgressiveLoaderDecouplingTests {
         let item = AVPlayerItem(asset: asset)
 
         // Hand the item to PlaybackService — loader stays outside the actor.
-        let service = await PlaybackService()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
         await service.loadItem(item)
 
         // No actor assertion should fire. The loader's delegate callbacks
@@ -148,7 +168,11 @@ struct ProgressiveLoaderDecouplingTests {
         )
         let loaderDriver = LoaderDriver(loader: loader)
 
-        let service = await PlaybackService()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
 
         // Run loader operations and actor operations concurrently.
         // This simulates the Siri scenario: AVFoundation fires delegate
@@ -185,7 +209,12 @@ struct PlaybackServiceCallbackIsolationTests {
 
     @Test("setNowPlayingMetadata with artwork doesn't crash from actor")
     func setNowPlayingMetadataWithArtwork() async {
-        let service = await PlaybackService()
+        let nowPlaying = FakeNowPlayingInfoProvider()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: nowPlaying,
+            notificationCenter: NotificationCenter()
+        )
         let image = Self.testImage
 
         // The MPMediaItemArtwork closure must be non-isolated; if it were
@@ -198,16 +227,20 @@ struct PlaybackServiceCallbackIsolationTests {
             artworkImage: image
         )
 
-        // Verify the title was actually written to Now Playing info.
-        let title: String? = await MainActor.run {
-            MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String
-        }
+        // Verify the title was written to the injected fake, not the real
+        // MPNowPlayingInfoCenter.default().
+        let title = nowPlaying.info?[MPMediaItemPropertyTitle] as? String
         #expect(title == "Test Episode")
     }
 
     @Test("MPMediaItemArtwork provider callable from main thread")
     func artworkProviderCallableFromMain() async {
-        let service = await PlaybackService()
+        let nowPlaying = FakeNowPlayingInfoProvider()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: nowPlaying,
+            notificationCenter: NotificationCenter()
+        )
         let image = Self.testImage
 
         // Set metadata so the artwork provider closure is installed.
@@ -216,20 +249,25 @@ struct PlaybackServiceCallbackIsolationTests {
             artworkImage: image
         )
 
-        // Read back the artwork and invoke its image(at:) from MainActor,
-        // exactly as MediaPlayer does when rendering the lock screen.
-        // This is the exact scenario that crashed before the fix.
+        // Read back the artwork from the injected fake and invoke its
+        // image(at:) from MainActor, exactly as MediaPlayer does when
+        // rendering the lock screen. This is the exact scenario that
+        // crashed before the fix.
         let rendered: UIImage? = await MainActor.run {
-            let info = MPNowPlayingInfoCenter.default().nowPlayingInfo
-            let artwork = info?[MPMediaItemPropertyArtwork] as? MPMediaItemArtwork
+            let artwork = nowPlaying.info?[MPMediaItemPropertyArtwork] as? MPMediaItemArtwork
             return artwork?.image(at: CGSize(width: 1, height: 1))
         }
         #expect(rendered != nil)
+        _ = service
     }
 
     @Test("loadItem triggers KVO without executor assertion")
     func loadItemKVOSafe() async throws {
-        let service = await PlaybackService()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
 
         // Create a player item from a progressive URL. The asset won't load
         // real audio, but AVPlayerItem will still fire status KVO (to .unknown
@@ -250,7 +288,12 @@ struct PlaybackServiceCallbackIsolationTests {
 
     @Test("State updates after play don't crash")
     func stateUpdatesAfterPlay() async {
-        let service = await PlaybackService()
+        let nowPlaying = FakeNowPlayingInfoProvider()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: nowPlaying,
+            notificationCenter: NotificationCenter()
+        )
 
         // Inject a playing state so play() has a playerItem-like path to
         // exercise. _testingInjectState bypasses AVPlayer so we can test
@@ -264,9 +307,9 @@ struct PlaybackServiceCallbackIsolationTests {
         )
         await service._testingInjectState(playingState)
 
-        // play() calls updateNowPlayingInfo which touches
-        // MPNowPlayingInfoCenter — if any closure in that path is
-        // actor-tainted and called from the wrong executor, we crash.
+        // play() calls updateNowPlayingInfo which writes to the now-playing
+        // seam — if any closure in that path is actor-tainted and called from
+        // the wrong executor, we crash.
         await service.play()
 
         let snapshot = await service.snapshot()
@@ -275,7 +318,11 @@ struct PlaybackServiceCallbackIsolationTests {
 
     @Test("Concurrent metadata and snapshot access")
     func concurrentMetadataAndSnapshot() async {
-        let service = await PlaybackService()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
         let image = Self.testImage
 
         await withTaskGroup(of: Void.self) { group in

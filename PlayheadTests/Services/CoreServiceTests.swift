@@ -1589,7 +1589,11 @@ struct PlaybackObserverHydrationTests {
 
     @Test("Late subscribers receive the current playback snapshot immediately")
     func lateSubscribersReceiveCurrentState() async {
-        let service = PlaybackService()
+        let service = PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
         let expected = PlaybackState(
             status: .playing,
             currentTime: 42,
@@ -1615,7 +1619,11 @@ struct PlaybackStateSynchronizationTests {
 
     @Test("ready to play does not overwrite an existing playing state")
     func readyToPlayPreservesPlayingIntent() async {
-        let service = PlaybackService()
+        let service = PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
 
         await service._testingInjectState(
             PlaybackState(
@@ -1637,7 +1645,11 @@ struct PlaybackStateSynchronizationTests {
 
     @Test("observed rate changes keep playback status in sync")
     func observedRateChangesSyncStatus() async {
-        let service = PlaybackService()
+        let service = PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
 
         await service._testingInjectState(
             PlaybackState(
