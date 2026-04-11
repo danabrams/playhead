@@ -125,7 +125,8 @@ final class UserCorrectionStoreTests: XCTestCase {
         let event = CorrectionEvent(
             analysisAssetId: "asset-future",
             scope: CorrectionScope.exactSpan(assetId: "asset-future", ordinalRange: 0...5).serialized,
-            createdAt: futureCreatedAt.timeIntervalSince1970
+            createdAt: futureCreatedAt.timeIntervalSince1970,
+            source: .manualVeto  // must be false positive to affect passthrough
         )
         try await correctionStore.record(event)
 

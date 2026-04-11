@@ -219,18 +219,13 @@ struct FalseNegativePassthroughIndependenceTests {
         )
         try await correctionStore.record(event)
 
-        // The passthrough factor queries ALL corrections for the asset,
-        // including false negatives. This is by design — the passthrough
-        // factor is asset-scoped, not source-filtered. However, the boost
-        // factor is only derived from false negatives.
-        // Passthrough factor will still be affected since it counts all corrections.
-        // This test documents the current behavior.
         let passthrough = await correctionStore.correctionPassthroughFactor(for: "asset-indep")
         let boost = await correctionStore.correctionBoostFactor(for: "asset-indep")
 
-        // A false negative correction does affect passthrough (all corrections do).
-        // But the boost factor is specifically for false negatives only.
-        #expect(passthrough < 0.05, "Fresh correction (any type) suppresses passthrough")
+        // False negatives must NOT suppress passthrough — they are "missed ad" reports
+        // and suppressing detection is the opposite of what the user wants.
+        // Only false positive corrections (manualVeto, listenRevert) should suppress.
+        #expect(passthrough == 1.0, "False negative must not suppress passthrough; got \(passthrough)")
         #expect(boost > 1.9, "False negative yields boost")
     }
 }

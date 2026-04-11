@@ -276,10 +276,15 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
             )
             return 1.0
         }
-        guard !weighted.isEmpty else { return 1.0 }
+        // Filter to false positive corrections only — false negatives must not
+        // suppress detection (they should boost it, which is correctionBoostFactor's job).
+        let falsePositives = weighted.filter { event, _ in
+            event.source?.kind == .falsePositive
+        }
+        guard !falsePositives.isEmpty else { return 1.0 }
         // The strongest (most-recent) correction has the highest weight (close to 1.0).
         // We convert to a suppression factor: 1.0 = no suppression, 0.0 = full suppression.
-        let maxCorrectionWeight = weighted.map(\.1).max() ?? 0.0
+        let maxCorrectionWeight = falsePositives.map(\.1).max() ?? 0.0
         return max(0.0, 1.0 - maxCorrectionWeight)
     }
 

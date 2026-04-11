@@ -195,15 +195,15 @@ final class NowPlayingViewModel {
     /// Record a false negative correction — the user hears an ad that wasn't detected.
     /// Captures the current playback position as the correction timestamp.
     func reportHearingAd() {
-        let time = currentTime
         guard let assetId = runtime.currentAnalysisAssetId else { return }
         let correctionStore = runtime.correctionStore
         let podcastId = runtime.currentPodcastId
         Task {
             // Create a false negative correction at the current playback position.
-            // Scope uses a window around the current time — the system will
-            // expand to nearest acoustic breaks when available (future refinement).
-            // For now, use a placeholder ordinal range covering the approximate area.
+            // Whole-asset scope (0...Int.max) is intentional: mapping playback time
+            // to an atom ordinal requires the atom index, which isn't available here.
+            // This conservative scope ensures the correction applies until per-atom
+            // wiring is added.
             let event = CorrectionEvent(
                 analysisAssetId: assetId,
                 scope: CorrectionScope.exactSpan(

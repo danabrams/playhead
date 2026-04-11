@@ -21,6 +21,13 @@ struct TranscriptPeekView: View {
     /// Defaults to no-op; Phase 7 injects a real store via PlayheadRuntime.
     var correctionStore: any UserCorrectionStore = NoOpUserCorrectionStore()
 
+    /// Trust scoring service for recording false negative signals.
+    /// Injected from PlayheadRuntime at the call site.
+    var trustService: TrustScoringService?
+
+    /// Podcast ID for the current episode, used for trust signal recording.
+    var podcastId: String?
+
     /// Phase 5 (u4d): Which decoded span's popover is currently showing.
     @State private var selectedDecodedSpan: DecodedSpan? = nil
 
@@ -449,11 +456,18 @@ private extension TranscriptPeekView {
             source: .falseNegative,
             podcastId: nil
         )
+        let trustSvc = trustService
+        let pid = podcastId
         Task {
             do {
                 try await correctionStore.record(event)
             } catch {
                 // Best-effort — don't surface errors for corrections.
+            }
+
+            // Feed false-negative signal to TrustService (mirrors reportHearingAd).
+            if let pid, let trustSvc {
+                await trustSvc.recordFalseNegativeSignal(podcastId: pid)
             }
         }
     }

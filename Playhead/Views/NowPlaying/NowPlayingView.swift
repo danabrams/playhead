@@ -137,7 +137,9 @@ struct NowPlayingView: View {
                     currentTime: viewModel.currentTime,
                     // Phase 7.2: inject the persistent correction store so the
                     // "This isn't an ad" gesture writes through to SQLite.
-                    correctionStore: runtime.correctionStore
+                    correctionStore: runtime.correctionStore,
+                    trustService: runtime.trustService,
+                    podcastId: runtime.currentPodcastId
                 )
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
