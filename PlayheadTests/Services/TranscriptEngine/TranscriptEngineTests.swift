@@ -463,6 +463,163 @@ struct TranscriptEngineAssetSwitchingTests {
     }
 }
 
+// MARK: - Partial Result Promotion Tests (playhead-4ck)
+
+/// Helper: creates an AsyncThrowingStream from an array of RecognitionSnapshots.
+private func snapshotStream(
+    _ snapshots: [RecognitionSnapshot]
+) -> AsyncThrowingStream<RecognitionSnapshot, Error> {
+    AsyncThrowingStream { continuation in
+        for s in snapshots {
+            continuation.yield(s)
+        }
+        continuation.finish()
+    }
+}
+
+private func makeSnapshot(
+    isFinal: Bool,
+    text: String,
+    startTime: TimeInterval = 0,
+    endTime: TimeInterval = 1,
+    confidence: Float = 0.9
+) -> RecognitionSnapshot {
+    let words = text.isEmpty ? [] : [
+        TranscriptWord(text: text, startTime: startTime, endTime: endTime, confidence: confidence)
+    ]
+    return RecognitionSnapshot(
+        isFinal: isFinal,
+        text: text,
+        words: words,
+        startTime: startTime,
+        endTime: endTime
+    )
+}
+
+#if canImport(Speech)
+
+@Suite("collectSegmentsFromSnapshots – Partial Promotion")
+struct CollectSegmentsPartialPromotionTests {
+
+    @Test("Final results are collected normally")
+    func finalResultsCollected() async throws {
+        let stream = snapshotStream([
+            makeSnapshot(isFinal: true, text: "Hello world", startTime: 0, endTime: 1),
+            makeSnapshot(isFinal: true, text: "Second segment", startTime: 1, endTime: 2),
+        ])
+        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        #expect(segments.count == 2)
+        #expect(segments[0].text == "Hello world")
+        #expect(segments[1].text == "Second segment")
+    }
+
+    @Test("Trailing partial is promoted when stream ends without final")
+    func trailingPartialPromoted() async throws {
+        let stream = snapshotStream([
+            makeSnapshot(isFinal: true, text: "First sentence", startTime: 0, endTime: 1),
+            makeSnapshot(isFinal: false, text: "Trailing partial", startTime: 1, endTime: 2),
+        ])
+        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        #expect(segments.count == 2, "Trailing partial should be promoted to a segment")
+        #expect(segments[1].text == "Trailing partial")
+    }
+
+    @Test("Partial superseded by final is not duplicated")
+    func partialSupersededByFinal() async throws {
+        let stream = snapshotStream([
+            makeSnapshot(isFinal: false, text: "Partial attempt", startTime: 0, endTime: 1),
+            makeSnapshot(isFinal: true, text: "Final version", startTime: 0, endTime: 1),
+        ])
+        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        #expect(segments.count == 1, "Superseded partial must not be double-counted")
+        #expect(segments[0].text == "Final version")
+    }
+
+    @Test("Only the latest partial is promoted (earlier partials are overwritten)")
+    func onlyLatestPartialPromoted() async throws {
+        let stream = snapshotStream([
+            makeSnapshot(isFinal: true, text: "Finalized", startTime: 0, endTime: 1),
+            makeSnapshot(isFinal: false, text: "Partial v1", startTime: 1, endTime: 2),
+            makeSnapshot(isFinal: false, text: "Partial v2", startTime: 1, endTime: 2.5),
+        ])
+        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        #expect(segments.count == 2)
+        #expect(segments[1].text == "Partial v2", "Only the latest partial should be promoted")
+    }
+
+    @Test("Empty partial is not promoted")
+    func emptyPartialNotPromoted() async throws {
+        let stream = snapshotStream([
+            makeSnapshot(isFinal: true, text: "Content", startTime: 0, endTime: 1),
+            makeSnapshot(isFinal: false, text: "", startTime: 1, endTime: 2),
+        ])
+        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        #expect(segments.count == 1, "Empty trailing partial should not be promoted")
+    }
+
+    @Test("All-partial stream promotes only the last one")
+    func allPartialStream() async throws {
+        let stream = snapshotStream([
+            makeSnapshot(isFinal: false, text: "Partial 1", startTime: 0, endTime: 1),
+            makeSnapshot(isFinal: false, text: "Partial 2", startTime: 0, endTime: 1.5),
+            makeSnapshot(isFinal: false, text: "Partial 3", startTime: 0, endTime: 2),
+        ])
+        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        #expect(segments.count == 1, "Only the last partial should survive")
+        #expect(segments[0].text == "Partial 3")
+    }
+
+    @Test("Segments are sorted by startTime after partial promotion")
+    func sortedAfterPromotion() async throws {
+        let stream = snapshotStream([
+            makeSnapshot(isFinal: true, text: "Later segment", startTime: 5, endTime: 6),
+            makeSnapshot(isFinal: false, text: "Earlier partial", startTime: 2, endTime: 3),
+        ])
+        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        #expect(segments.count == 2)
+        #expect(segments[0].text == "Earlier partial", "Promoted partial should be sorted by startTime")
+        #expect(segments[1].text == "Later segment")
+    }
+
+    @Test("Empty stream produces no segments")
+    func emptyStream() async throws {
+        let stream = snapshotStream([])
+        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        #expect(segments.isEmpty)
+    }
+
+    @Test("Empty final clears a preceding partial")
+    func emptyFinalClearsPartial() async throws {
+        let stream = snapshotStream([
+            makeSnapshot(isFinal: false, text: "Speculative", startTime: 0, endTime: 1),
+            makeSnapshot(isFinal: true, text: "", startTime: 0, endTime: 1),
+        ])
+        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        #expect(segments.isEmpty, "Empty final retracts the preceding partial")
+    }
+
+    @Test("Multi-shard sequence: final, partial, final, trailing partial")
+    func multiShardSequence() async throws {
+        let stream = snapshotStream([
+            // Shard 1: partial then final
+            makeSnapshot(isFinal: false, text: "Hel", startTime: 0, endTime: 0.5),
+            makeSnapshot(isFinal: true, text: "Hello world", startTime: 0, endTime: 1),
+            // Shard 2: partial then final
+            makeSnapshot(isFinal: false, text: "How", startTime: 1, endTime: 1.5),
+            makeSnapshot(isFinal: true, text: "How are you", startTime: 1, endTime: 2),
+            // Shard 3: only a trailing partial (shard boundary truncation)
+            makeSnapshot(isFinal: false, text: "I am fi", startTime: 2, endTime: 2.5),
+        ])
+        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        #expect(segments.count == 3, "Two finals + one promoted trailing partial")
+        #expect(segments[0].text == "Hello world")
+        #expect(segments[1].text == "How are you")
+        #expect(segments[2].text == "I am fi", "Trailing partial from shard 3 should be promoted")
+    }
+}
+
+#endif
+
 // MARK: - StreamingAudioDecoder Tests
 
 @Suite("StreamingAudioDecoder")

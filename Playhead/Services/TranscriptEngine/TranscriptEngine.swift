@@ -50,6 +50,19 @@ enum TranscriptPassType: String, Sendable, Codable {
     case final_ = "final"
 }
 
+// MARK: - Recognition Snapshot
+
+/// Lightweight, framework-agnostic snapshot of a speech recognition result.
+/// Used to decouple the partial-promotion logic from Apple's SpeechTranscriber
+/// types so it can be unit-tested without a live SpeechAnalyzer session.
+struct RecognitionSnapshot: Sendable {
+    let isFinal: Bool
+    let text: String
+    let words: [TranscriptWord]
+    let startTime: TimeInterval
+    let endTime: TimeInterval
+}
+
 // MARK: - VAD Types
 
 /// Voice Activity Detection result for a chunk of audio.
@@ -550,37 +563,80 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         from results: S
     ) async throws -> [TranscriptSegment]
     where S: AsyncSequence, S.Element == SpeechTranscriber.Result, S.Failure == Error {
-        var segments: [TranscriptSegment] = []
-        var nextId = 0
-
-        for try await result in results {
-            guard result.isFinal else { continue }
+        // Map Apple Speech results to lightweight snapshots, then delegate to
+        // the testable helper that handles partial-result promotion.
+        let snapshots = results.map { result -> RecognitionSnapshot in
             let fullText = String(result.text.characters)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !fullText.isEmpty else { continue }
-
             let words = Self.extractWords(from: result)
             let startTime = words.first?.startTime ?? Self.seconds(from: result.range.start)
             let endTime = words.last?.endTime ?? Self.seconds(from: CMTimeAdd(result.range.start, result.range.duration))
-            let avgConf = words.isEmpty
-                ? Float(1.0)
-                : words.map(\.confidence).reduce(0, +) / Float(words.count)
-
-            segments.append(TranscriptSegment(
-                id: nextId,
-                words: words.isEmpty
-                    ? [TranscriptWord(text: fullText, startTime: startTime, endTime: endTime, confidence: avgConf)]
-                    : words,
+            return RecognitionSnapshot(
+                isFinal: result.isFinal,
                 text: fullText,
+                words: words,
                 startTime: startTime,
-                endTime: endTime,
-                avgConfidence: avgConf,
-                passType: .fast
-            ))
-            nextId += 1
+                endTime: endTime
+            )
         }
+        return try await collectSegmentsFromSnapshots(snapshots)
+    }
+
+    /// Builds transcript segments from a stream of recognition snapshots,
+    /// promoting the last partial result when the stream ends without a
+    /// superseding final result. This prevents tail-audio truncation at
+    /// shard boundaries (playhead-4ck).
+    static func collectSegmentsFromSnapshots<S>(
+        _ snapshots: S
+    ) async throws -> [TranscriptSegment]
+    where S: AsyncSequence, S.Element == RecognitionSnapshot, S.Failure == Error {
+        var segments: [TranscriptSegment] = []
+        var nextId = 0
+        var latestPartial: RecognitionSnapshot?
+
+        for try await snapshot in snapshots {
+            if snapshot.isFinal {
+                // Final result supersedes any tracked partial.
+                latestPartial = nil
+
+                guard !snapshot.text.isEmpty else { continue }
+                segments.append(Self.buildSegment(from: snapshot, id: &nextId))
+            } else {
+                // Track the latest partial; it will be promoted if no final
+                // result supersedes it before the stream ends.
+                latestPartial = snapshot
+            }
+        }
+
+        // Promote the trailing partial if it was never superseded.
+        if let partial = latestPartial, !partial.text.isEmpty {
+            segments.append(Self.buildSegment(from: partial, id: &nextId))
+        }
+
         segments.sort { $0.startTime < $1.startTime }
         return segments
+    }
+
+    private static func buildSegment(
+        from snapshot: RecognitionSnapshot,
+        id nextId: inout Int
+    ) -> TranscriptSegment {
+        let avgConf = snapshot.words.isEmpty
+            ? Float(1.0)
+            : snapshot.words.map(\.confidence).reduce(0, +) / Float(snapshot.words.count)
+        let segment = TranscriptSegment(
+            id: nextId,
+            words: snapshot.words.isEmpty
+                ? [TranscriptWord(text: snapshot.text, startTime: snapshot.startTime, endTime: snapshot.endTime, confidence: avgConf)]
+                : snapshot.words,
+            text: snapshot.text,
+            startTime: snapshot.startTime,
+            endTime: snapshot.endTime,
+            avgConfidence: avgConf,
+            passType: .fast
+        )
+        nextId += 1
+        return segment
     }
 
     private static func extractWords(from result: SpeechTranscriber.Result) -> [TranscriptWord] {
