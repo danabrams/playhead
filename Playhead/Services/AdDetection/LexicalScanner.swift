@@ -137,11 +137,16 @@ struct LexicalScanner: Sendable {
     /// Empty array when no profile is available.
     private let showSponsorPatterns: [NSRegularExpression]
 
+    /// Pre-compiled patterns from active SponsorKnowledgeStore entries.
+    /// Nil when no knowledge store is available for this scan session.
+    private let compiledLexicon: CompiledSponsorLexicon?
+
     // MARK: - Init
 
     init(
         config: LexicalScannerConfig = .default,
-        podcastProfile: PodcastProfile? = nil
+        podcastProfile: PodcastProfile? = nil,
+        compiledLexicon: CompiledSponsorLexicon? = nil
     ) {
         self.config = config
         self.patternGroups = Self.compileBuiltInPatterns()
@@ -149,6 +154,7 @@ struct LexicalScanner: Sendable {
         self.showSponsorPatterns = Self.compileSponsorLexicon(
             from: podcastProfile
         )
+        self.compiledLexicon = compiledLexicon
     }
 
     // MARK: - Public API
@@ -291,6 +297,31 @@ struct LexicalScanner: Sendable {
                     endTime: endTime,
                     weight: 1.5 // Boosted: known sponsor for this show
                 ))
+            }
+        }
+
+        // Scan compiled sponsor knowledge patterns (boosted weight) over
+        // normalized text. These come from active SponsorKnowledgeStore
+        // entries and coexist with the per-show showSponsorPatterns above.
+        if let lexicon = compiledLexicon {
+            for pattern in lexicon.patterns {
+                let matches = pattern.matches(in: normalizedText, range: normalizedRange)
+                for match in matches {
+                    let matchedText = normalizedNS.substring(with: match.range)
+                    let (startTime, endTime) = interpolateTiming(
+                        matchRange: match.range,
+                        textLength: normalizedNS.length,
+                        chunkStart: chunk.startTime,
+                        chunkEnd: chunk.endTime
+                    )
+                    hits.append(LexicalHit(
+                        category: .sponsor,
+                        matchedText: matchedText,
+                        startTime: startTime,
+                        endTime: endTime,
+                        weight: 1.5 // Boosted: known sponsor from knowledge store
+                    ))
+                }
             }
         }
 
