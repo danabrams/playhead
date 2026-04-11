@@ -217,15 +217,25 @@ struct MinimalContiguousSpanDecoderTests {
 
     @Test("Use B: two near-adjacent spans do NOT merge when acoustic break atom sits in gap")
     func useBAntiMergeBlocksMergeOnAcousticBreak() {
-        // Anchored: [0..4], gap: [5] with acoustic break, anchored: [6..10]
-        // Gap has acoustic break → must NOT merge
-        let atoms: [AtomEvidence] = (0 ..< 11).map { i in
+        // Two anchored runs separated by a gap with acoustic break.
+        // Runs must be long enough (>= MIN_DURATION) and far enough apart
+        // that Use A boundary snap + overlap resolution doesn't collapse them.
+        //
+        // Layout (80 atoms, 1s each):
+        //   [0..24]  — Run A (anchored, 25s >= MIN_DURATION)
+        //   [25]     — gap with acoustic break → Use B blocks merge
+        //   [26..50] — Run B (anchored, 25s >= MIN_DURATION)
+        //   [51..79] — unanchored filler
+        //
+        // Gap has acoustic break → must NOT merge.
+        // Each run is 25s, well above MIN_DURATION even after overlap clip.
+        let atoms: [AtomEvidence] = (0 ..< 80).map { i in
             makeEvidence(
                 ordinal: i,
                 startTime: Double(i),
                 endTime: Double(i) + 1.0,
-                isAnchored: i != 5,
-                hasAcousticBreakHint: i == 5  // acoustic break in the gap
+                isAnchored: (i >= 0 && i <= 24) || (i >= 26 && i <= 50),
+                hasAcousticBreakHint: i == 25  // acoustic break in the gap
             )
         }
         let spans = decoder.decode(atoms: atoms, assetId: "test")
@@ -235,24 +245,103 @@ struct MinimalContiguousSpanDecoderTests {
 
     // MARK: - Use A boundary snap
 
-    @Test("Use A: boundary snap to acoustic break within ±3 atoms")
+    @Test("Use A: boundary snap to acoustic break within ±15 atoms")
     func useABoundarySnapApplied() {
-        // Span anchored at [3..8], acoustic break at ordinal 0
-        // Left edge snap: 0 is within ±3 of 3 → should snap left edge to ordinal 0
-        let atoms: [AtomEvidence] = (0 ..< 12).map { i in
+        // Span anchored at [20..40], acoustic break at ordinal 5
+        // Left edge snap: 5 is within ±15 of 20 → should snap left edge to ordinal 5
+        let atoms: [AtomEvidence] = (0 ..< 45).map { i in
             makeEvidence(
                 ordinal: i,
                 startTime: Double(i),
                 endTime: Double(i) + 1.0,
-                isAnchored: i >= 3 && i <= 8,
-                hasAcousticBreakHint: i == 0  // acoustic break 3 atoms before the span start
+                isAnchored: i >= 20 && i <= 40,
+                hasAcousticBreakHint: i == 5  // acoustic break 15 atoms before the span start
             )
         }
         let spans = decoder.decode(atoms: atoms, assetId: "test")
         #expect(spans.count == 1)
-        // Left edge should have snapped from ordinal 3 to ordinal 0 (within ±3)
-        #expect(spans[0].firstAtomOrdinal == 0)
-        #expect(spans[0].startTime == 0.0)
+        // Left edge should have snapped from ordinal 20 to ordinal 5 (within ±15)
+        #expect(spans[0].firstAtomOrdinal == 5)
+        #expect(spans[0].startTime == 5.0)
+    }
+
+    @Test("Use A: break at old ±3 radius still snaps (regression)")
+    func useAOldRadiusStillSnaps() {
+        // Span anchored at [20..40], acoustic break at ordinal 17
+        // 17 is 3 atoms before 20 — would have been the limit under old ±3 radius,
+        // must still snap under ±15.
+        let atoms: [AtomEvidence] = (0 ..< 45).map { i in
+            makeEvidence(
+                ordinal: i,
+                startTime: Double(i),
+                endTime: Double(i) + 1.0,
+                isAnchored: i >= 20 && i <= 40,
+                hasAcousticBreakHint: i == 17
+            )
+        }
+        let spans = decoder.decode(atoms: atoms, assetId: "test")
+        #expect(spans.count == 1)
+        #expect(spans[0].firstAtomOrdinal == 17)
+        #expect(spans[0].startTime == 17.0)
+    }
+
+    @Test("Use A: break beyond old ±3 but within ±15 snaps (wider radius regression)")
+    func useAWiderRadiusSnaps() {
+        // Span anchored at [20..40], acoustic break at ordinal 10
+        // 10 is 10 atoms before 20 — too far for old ±3, reachable under ±15.
+        let atoms: [AtomEvidence] = (0 ..< 45).map { i in
+            makeEvidence(
+                ordinal: i,
+                startTime: Double(i),
+                endTime: Double(i) + 1.0,
+                isAnchored: i >= 20 && i <= 40,
+                hasAcousticBreakHint: i == 10
+            )
+        }
+        let spans = decoder.decode(atoms: atoms, assetId: "test")
+        #expect(spans.count == 1)
+        // Left edge should snap from ordinal 20 to ordinal 10 (10 atoms away, within ±15)
+        #expect(spans[0].firstAtomOrdinal == 10)
+        #expect(spans[0].startTime == 10.0)
+    }
+
+    @Test("Use A: break beyond ±15 does NOT snap (boundary respected)")
+    func useABreakBeyondRadiusDoesNotSnap() {
+        // Span anchored at [20..40], acoustic break at ordinal 3
+        // 3 is 17 atoms before 20 — beyond ±15 radius, must NOT snap.
+        let atoms: [AtomEvidence] = (0 ..< 45).map { i in
+            makeEvidence(
+                ordinal: i,
+                startTime: Double(i),
+                endTime: Double(i) + 1.0,
+                isAnchored: i >= 20 && i <= 40,
+                hasAcousticBreakHint: i == 3
+            )
+        }
+        let spans = decoder.decode(atoms: atoms, assetId: "test")
+        #expect(spans.count == 1)
+        // Left edge must remain at ordinal 20 (break at 3 is out of range)
+        #expect(spans[0].firstAtomOrdinal == 20)
+    }
+
+    @Test("Use A: wider radius prefers earliest break on left edge")
+    func useAWiderRadiusPrefersEarliestBreak() {
+        // Span anchored at [20..40], breaks at ordinals 8, 13, and 17.
+        // All within ±15 of 20. Left edge should snap to earliest (8).
+        let atoms: [AtomEvidence] = (0 ..< 45).map { i in
+            makeEvidence(
+                ordinal: i,
+                startTime: Double(i),
+                endTime: Double(i) + 1.0,
+                isAnchored: i >= 20 && i <= 40,
+                hasAcousticBreakHint: i == 8 || i == 13 || i == 17
+            )
+        }
+        let spans = decoder.decode(atoms: atoms, assetId: "test")
+        #expect(spans.count == 1)
+        // Should snap to the earliest break (ordinal 8)
+        #expect(spans[0].firstAtomOrdinal == 8)
+        #expect(spans[0].startTime == 8.0)
     }
 
     // MARK: - Overlap resolution (Step 4b)
@@ -265,23 +354,23 @@ struct MinimalContiguousSpanDecoderTests {
         // Use A boundary snap from both sides, causing the spans to expand into
         // each other's territory.
         //
-        // Layout (18 atoms, 1s each):
-        //   [0..1]  — unanchored filler
-        //   [2..7]  — Run A (anchored, 6s >= MIN_DURATION)
-        //   [8..10] — gap (acoustic breaks, gap == 3 so no merge)
-        //   [11..16] — Run B (anchored, 6s >= MIN_DURATION)
-        //   [17]    — unanchored filler
+        // Layout (70 atoms, 1s each):
+        //   [0..1]   — unanchored filler
+        //   [2..31]  — Run A (anchored, 30s >= MIN_DURATION)
+        //   [32..34] — gap (acoustic breaks, gap == 3 so no merge)
+        //   [35..64] — Run B (anchored, 30s >= MIN_DURATION)
+        //   [65..69] — unanchored filler
         //
-        // Use A snap:
-        //   Run A right edge (7): scans [4..10], picks LAST break → ordinal 10
-        //   Run B left edge (11): scans [8..14], picks FIRST break → ordinal 8
-        //   Pre-resolution: Run A ends at 10, Run B starts at 8 → overlap!
+        // Use A snap (±15 radius):
+        //   Run A right edge (31): scans [16..46], picks LAST break → ordinal 34
+        //   Run B left edge (35): scans [20..50], picks FIRST break → ordinal 32
+        //   Pre-resolution: Run A ends at 34, Run B starts at 32 → overlap!
         //
         // Step 4b must clip so spans do not overlap.
 
-        let atoms: [AtomEvidence] = (0 ..< 18).map { i in
-            let isAnchored = (i >= 2 && i <= 7) || (i >= 11 && i <= 16)
-            let hasBreak = i >= 8 && i <= 10  // gap atoms are acoustic breaks
+        let atoms: [AtomEvidence] = (0 ..< 70).map { i in
+            let isAnchored = (i >= 2 && i <= 31) || (i >= 35 && i <= 64)
+            let hasBreak = i >= 32 && i <= 34  // gap atoms are acoustic breaks
             return makeEvidence(
                 ordinal: i,
                 startTime: Double(i),
@@ -317,26 +406,21 @@ struct MinimalContiguousSpanDecoderTests {
         // clipping span 0/1 overlap can push span 1 into span 2's territory,
         // requiring cascading resolution.
         //
-        // Layout (36 atoms, 1s each):
-        //   [0..1]   — unanchored filler
-        //   [2..11]  — Run A (anchored, 10s >= MIN_DURATION)
-        //   [12..14] — gap (acoustic breaks, gap == 3 so no merge)
-        //   [15..24] — Run B (anchored, 10s >= MIN_DURATION)
-        //   [25..27] — gap (acoustic breaks, gap == 3 so no merge)
-        //   [28..37] — Run C (anchored, 10s >= MIN_DURATION)
-        //   [38..39] — unanchored filler
+        // Layout (105 atoms, 1s each):
+        //   [0..1]    — unanchored filler
+        //   [2..31]   — Run A (anchored, 30s >= MIN_DURATION)
+        //   [32..34]  — gap 1 (acoustic breaks, gap == 3 so no merge)
+        //   [35..64]  — Run B (anchored, 30s >= MIN_DURATION)
+        //   [65..67]  — gap 2 (acoustic breaks, gap == 3 so no merge)
+        //   [68..97]  — Run C (anchored, 30s >= MIN_DURATION)
+        //   [98..104] — unanchored filler
         //
-        // Use A snap expands each run's edges into the gap, causing:
-        //   Run A right edge snaps into gap 1 → overlaps Run B
-        //   Run B left edge snaps into gap 1 → overlap with Run A
-        //   Run B right edge snaps into gap 2 → overlaps Run C
-        //   Run C left edge snaps into gap 2 → overlap with Run B
-        //
-        // Step 4b must clip cascadingly so no spans overlap.
+        // Use A snap (±15 radius) expands each run's edges into the gap, causing
+        // overlaps that Step 4b must clip cascadingly.
 
-        let atoms: [AtomEvidence] = (0 ..< 40).map { i in
-            let isAnchored = (i >= 2 && i <= 11) || (i >= 15 && i <= 24) || (i >= 28 && i <= 37)
-            let hasBreak = (i >= 12 && i <= 14) || (i >= 25 && i <= 27)
+        let atoms: [AtomEvidence] = (0 ..< 105).map { i in
+            let isAnchored = (i >= 2 && i <= 31) || (i >= 35 && i <= 64) || (i >= 68 && i <= 97)
+            let hasBreak = (i >= 32 && i <= 34) || (i >= 65 && i <= 67)
             return makeEvidence(
                 ordinal: i,
                 startTime: Double(i),
