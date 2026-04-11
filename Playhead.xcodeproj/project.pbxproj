@@ -51,6 +51,7 @@
 		93F241B5852A1141EF8B8B34 /* TimelineRailViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 390D048FDC5E42F4522C110C /* TimelineRailViewTests.swift */; };
 		22A524C389B96C4F7E7EA3B2 /* AdBannerQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E84273A8BE2864C02C1EAAA7 /* AdBannerQueueTests.swift */; };
 		3F0F8160121BFC0FAE15C14A /* EpisodeListViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B192A170335F238D45F67 /* EpisodeListViewTests.swift */; };
+		39CFF9CDA6B5890562DC294A /* AppNavigationStructureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3754D36CCCA4C878D0551C61 /* AppNavigationStructureTests.swift */; };
 		2934CB0BDEFD261C285BD3AC /* WithTestRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = D67C09F0363077895699D073 /* WithTestRuntime.swift */; };
 		29786647F005F38FF92188E1 /* TransportButtonHapticTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BCF9000BF2F687523E430FF /* TransportButtonHapticTests.swift */; };
 		2A2DBC03BB0DAEC911D16F40 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = D233B118794A3B07AB2E70FC /* Theme.swift */; };
@@ -370,6 +371,7 @@
 		390D048FDC5E42F4522C110C /* TimelineRailViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineRailViewTests.swift; sourceTree = "<group>"; };
 		E84273A8BE2864C02C1EAAA7 /* AdBannerQueueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdBannerQueueTests.swift; sourceTree = "<group>"; };
 		5A1B192A170335F238D45F67 /* EpisodeListViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EpisodeListViewTests.swift; sourceTree = "<group>"; };
+		3754D36CCCA4C878D0551C61 /* AppNavigationStructureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppNavigationStructureTests.swift; sourceTree = "<group>"; };
 		7AA4CA298756A753F5DF63A1 /* DesignTokenTypographyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignTokenTypographyTests.swift; sourceTree = "<group>"; };
 		7C6F8F0E7BFB155645261D54 /* TimelineRailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineRailView.swift; sourceTree = "<group>"; };
 		7D08053BA32F9F2DCBB3AE58 /* InstrumentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstrumentationTests.swift; sourceTree = "<group>"; };
@@ -949,6 +951,7 @@
 		A92C96E6D8404D7B9F4195E9 /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				3754D36CCCA4C878D0551C61 /* AppNavigationStructureTests.swift */,
 				6E109D30A17A3C38D60147E0 /* Components */,
 				EE25475386C2123CFBA62523 /* Library */,
 				C0570164C3EAC29B0E288016 /* NowPlaying */,
@@ -1415,6 +1418,7 @@
 			files = (
 				B203E5DFDFB80AA441D2B89A /* AdBannerViewHapticTests.swift in Sources */,
 				22A524C389B96C4F7E7EA3B2 /* AdBannerQueueTests.swift in Sources */,
+				39CFF9CDA6B5890562DC294A /* AppNavigationStructureTests.swift in Sources */,
 				E4BEE03F420932581B081221 /* AdDecisionResultTests.swift in Sources */,
 				B9A665EEBF95298E6EDFAE6E /* AdDetectionConfigTests.swift in Sources */,
 				B4F7A58DDC21F3215ED15F7F /* AdDetectionServiceShadowModeTests.swift in Sources */,
