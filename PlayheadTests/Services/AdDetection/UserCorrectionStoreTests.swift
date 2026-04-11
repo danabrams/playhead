@@ -323,7 +323,7 @@ final class UserCorrectionStoreTests: XCTestCase {
         try await store.migrate()
 
         let version = try await store.schemaVersion()
-        XCTAssertEqual(version, 6)
+        XCTAssertGreaterThanOrEqual(version ?? 0, 6)
         XCTAssertTrue(try probeTableExists(in: dir, table: "correction_events"))
         XCTAssertTrue(try probeColumnExists(in: dir, table: "correction_events", column: "source"))
         XCTAssertTrue(try probeColumnExists(in: dir, table: "correction_events", column: "podcastId"))
@@ -342,7 +342,7 @@ final class UserCorrectionStoreTests: XCTestCase {
         try await store.migrate()
 
         let version = try await store.schemaVersion()
-        XCTAssertEqual(version, 6)
+        XCTAssertGreaterThanOrEqual(version ?? 0, 6)
         XCTAssertTrue(try probeTableExists(in: dir, table: "correction_events"))
         XCTAssertTrue(try probeColumnExists(in: dir, table: "correction_events", column: "source"))
         XCTAssertTrue(try probeColumnExists(in: dir, table: "correction_events", column: "podcastId"))
@@ -364,9 +364,9 @@ final class UserCorrectionStoreTests: XCTestCase {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        // Schema should be at v6.
+        // Schema should be at v6 or later (v7 adds sponsor knowledge tables).
         let version = try await store.schemaVersion()
-        XCTAssertEqual(version, 6)
+        XCTAssertGreaterThanOrEqual(version ?? 0, 6)
 
         // The new `scope` column must exist; the old `correctionScope` must not.
         XCTAssertTrue(try probeColumnExists(in: dir, table: "correction_events", column: "scope"))
@@ -443,7 +443,7 @@ final class UserCorrectionStoreTests: XCTestCase {
         try await store.migrate()
 
         let version = try await store.schemaVersion()
-        XCTAssertEqual(version, 6)
+        XCTAssertGreaterThanOrEqual(version ?? 0, 6)
 
         // The valid row (referencing "asset-valid") should survive.
         let valid = try await store.loadCorrectionEvents(analysisAssetId: "asset-valid")
@@ -455,7 +455,7 @@ final class UserCorrectionStoreTests: XCTestCase {
         XCTAssertEqual(orphaned.count, 0, "Orphaned correction event must be discarded during migration")
     }
 
-    func testFreshDatabaseReachesV6() async throws {
+    func testFreshDatabaseReachesLatestSchemaVersion() async throws {
         let dir = try makeTempDir(prefix: "UserCorrectionStoreTests")
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -464,7 +464,7 @@ final class UserCorrectionStoreTests: XCTestCase {
         try await store.migrate()
 
         let version = try await store.schemaVersion()
-        XCTAssertEqual(version, 6)
+        XCTAssertGreaterThanOrEqual(version ?? 0, 7)
     }
 
     // MARK: - CorrectionEvent source and podcastId round-trip

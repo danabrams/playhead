@@ -505,6 +505,7 @@ actor AnalysisStore {
                 column: "jobPhase",
                 definition: "TEXT NOT NULL DEFAULT 'shadow'"
             )
+            try migrateSponsorKnowledgeV7IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -1044,6 +1045,56 @@ actor AnalysisStore {
         try addColumnIfNeeded(table: "correction_events", column: "podcastId", definition: "TEXT")
 
         try setSchemaVersion(6)
+    }
+
+    // MARK: - V7: Sponsor Knowledge Tables (Phase 8, playhead-4my.8.1)
+
+    private func migrateSponsorKnowledgeV7IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 7 else { return }
+
+        // Table 1: sponsor_knowledge_entries — lifecycle-managed sponsor entities.
+        try exec("""
+            CREATE TABLE IF NOT EXISTS sponsor_knowledge_entries (
+                id                TEXT PRIMARY KEY,
+                podcastId         TEXT NOT NULL,
+                entityType        TEXT NOT NULL,
+                entityValue       TEXT NOT NULL,
+                normalizedValue   TEXT NOT NULL,
+                state             TEXT NOT NULL DEFAULT 'candidate',
+                confirmationCount INTEGER NOT NULL DEFAULT 0,
+                rollbackCount     INTEGER NOT NULL DEFAULT 0,
+                firstSeenAt       REAL NOT NULL,
+                lastConfirmedAt   REAL,
+                lastRollbackAt    REAL,
+                decayedAt         REAL,
+                blockedAt         REAL,
+                aliases           TEXT,
+                metadata          TEXT,
+                UNIQUE(podcastId, entityType, normalizedValue)
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_ske_podcast ON sponsor_knowledge_entries(podcastId)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_ske_state ON sponsor_knowledge_entries(state)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_ske_podcast_state ON sponsor_knowledge_entries(podcastId, state)")
+
+        // Table 2: knowledge_candidate_events — append-only provenance log.
+        try exec("""
+            CREATE TABLE IF NOT EXISTS knowledge_candidate_events (
+                id                  TEXT PRIMARY KEY,
+                analysisAssetId     TEXT NOT NULL,
+                entityType          TEXT NOT NULL,
+                entityValue         TEXT NOT NULL,
+                sourceAtomOrdinals  TEXT NOT NULL,
+                transcriptVersion   TEXT NOT NULL,
+                confidence          REAL NOT NULL,
+                scanCohortJSON      TEXT,
+                createdAt           REAL NOT NULL
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_kce_asset ON knowledge_candidate_events(analysisAssetId)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_kce_created ON knowledge_candidate_events(createdAt)")
+
+        try setSchemaVersion(7)
     }
 
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
@@ -4321,5 +4372,232 @@ actor AnalysisStore {
         bind(stmt, 1, scope)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return false }
         return sqlite3_column_int(stmt, 0) != 0
+    }
+
+    // MARK: - CRUD: sponsor_knowledge_entries (Phase 8, playhead-4my.8.1)
+
+    /// Upsert a sponsor knowledge entry. Uses INSERT OR REPLACE on the
+    /// natural key (podcastId, entityType, normalizedValue).
+    func upsertKnowledgeEntry(_ entry: SponsorKnowledgeEntry) throws {
+        let sql = """
+            INSERT INTO sponsor_knowledge_entries
+            (id, podcastId, entityType, entityValue, normalizedValue, state,
+             confirmationCount, rollbackCount, firstSeenAt, lastConfirmedAt,
+             lastRollbackAt, decayedAt, blockedAt, aliases, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(podcastId, entityType, normalizedValue) DO UPDATE SET
+                entityValue = excluded.entityValue,
+                state = excluded.state,
+                confirmationCount = excluded.confirmationCount,
+                rollbackCount = excluded.rollbackCount,
+                lastConfirmedAt = excluded.lastConfirmedAt,
+                lastRollbackAt = excluded.lastRollbackAt,
+                decayedAt = excluded.decayedAt,
+                blockedAt = excluded.blockedAt,
+                aliases = excluded.aliases,
+                metadata = excluded.metadata
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, entry.id)
+        bind(stmt, 2, entry.podcastId)
+        bind(stmt, 3, entry.entityType.rawValue)
+        bind(stmt, 4, entry.entityValue)
+        bind(stmt, 5, entry.normalizedValue)
+        bind(stmt, 6, entry.state.rawValue)
+        bind(stmt, 7, entry.confirmationCount)
+        bind(stmt, 8, entry.rollbackCount)
+        bind(stmt, 9, entry.firstSeenAt)
+        bind(stmt, 10, entry.lastConfirmedAt)
+        bind(stmt, 11, entry.lastRollbackAt)
+        bind(stmt, 12, entry.decayedAt)
+        bind(stmt, 13, entry.blockedAt)
+        let aliasesJSON = try encodeJSONString(entry.aliases)
+        bind(stmt, 14, aliasesJSON)
+        let metadataJSON = try encodeJSONString(entry.metadata)
+        bind(stmt, 15, metadataJSON)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Load a single knowledge entry by its natural key.
+    func loadKnowledgeEntry(
+        podcastId: String,
+        entityType: KnowledgeEntityType,
+        normalizedValue: String
+    ) throws -> SponsorKnowledgeEntry? {
+        let sql = """
+            SELECT id, podcastId, entityType, entityValue, normalizedValue, state,
+                   confirmationCount, rollbackCount, firstSeenAt, lastConfirmedAt,
+                   lastRollbackAt, decayedAt, blockedAt, aliases, metadata
+            FROM sponsor_knowledge_entries
+            WHERE podcastId = ? AND entityType = ? AND normalizedValue = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, podcastId)
+        bind(stmt, 2, entityType.rawValue)
+        bind(stmt, 3, normalizedValue)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return try readKnowledgeEntry(stmt)
+    }
+
+    /// Load all knowledge entries for a podcast with a given state.
+    func loadKnowledgeEntries(
+        podcastId: String,
+        state: KnowledgeState
+    ) throws -> [SponsorKnowledgeEntry] {
+        let sql = """
+            SELECT id, podcastId, entityType, entityValue, normalizedValue, state,
+                   confirmationCount, rollbackCount, firstSeenAt, lastConfirmedAt,
+                   lastRollbackAt, decayedAt, blockedAt, aliases, metadata
+            FROM sponsor_knowledge_entries
+            WHERE podcastId = ? AND state = ?
+            ORDER BY firstSeenAt ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, podcastId)
+        bind(stmt, 2, state.rawValue)
+        var results: [SponsorKnowledgeEntry] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(try readKnowledgeEntry(stmt))
+        }
+        return results
+    }
+
+    /// Load all knowledge entries for a podcast regardless of state.
+    func loadAllKnowledgeEntries(podcastId: String) throws -> [SponsorKnowledgeEntry] {
+        let sql = """
+            SELECT id, podcastId, entityType, entityValue, normalizedValue, state,
+                   confirmationCount, rollbackCount, firstSeenAt, lastConfirmedAt,
+                   lastRollbackAt, decayedAt, blockedAt, aliases, metadata
+            FROM sponsor_knowledge_entries
+            WHERE podcastId = ?
+            ORDER BY firstSeenAt ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, podcastId)
+        var results: [SponsorKnowledgeEntry] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(try readKnowledgeEntry(stmt))
+        }
+        return results
+    }
+
+    /// Read a SponsorKnowledgeEntry from the current row of a prepared statement.
+    private func readKnowledgeEntry(_ stmt: OpaquePointer?) throws -> SponsorKnowledgeEntry {
+        let id = text(stmt, 0)
+        let podcastId = text(stmt, 1)
+        let entityTypeRaw = text(stmt, 2)
+        let entityValue = text(stmt, 3)
+        let normalizedValue = text(stmt, 4)
+        let stateRaw = text(stmt, 5)
+        let confirmationCount = Int(sqlite3_column_int(stmt, 6))
+        let rollbackCount = Int(sqlite3_column_int(stmt, 7))
+        let firstSeenAt = sqlite3_column_double(stmt, 8)
+        let lastConfirmedAt = optionalDouble(stmt, 9)
+        let lastRollbackAt = optionalDouble(stmt, 10)
+        let decayedAt = optionalDouble(stmt, 11)
+        let blockedAt = optionalDouble(stmt, 12)
+        let aliasesJSON = optionalText(stmt, 13)
+        let metadataJSON = optionalText(stmt, 14)
+
+        guard let entityType = KnowledgeEntityType(rawValue: entityTypeRaw) else {
+            throw AnalysisStoreError.queryFailed("Invalid entityType: \(entityTypeRaw)")
+        }
+        guard let state = KnowledgeState(rawValue: stateRaw) else {
+            throw AnalysisStoreError.queryFailed("Invalid KnowledgeState: \(stateRaw)")
+        }
+
+        let aliases: [String] = try decodeJSON([String].self, from: aliasesJSON) ?? []
+        let metadata: [String: String]? = try decodeJSON([String: String].self, from: metadataJSON)
+
+        return SponsorKnowledgeEntry(
+            id: id,
+            podcastId: podcastId,
+            entityType: entityType,
+            entityValue: entityValue,
+            normalizedValue: normalizedValue,
+            state: state,
+            confirmationCount: confirmationCount,
+            rollbackCount: rollbackCount,
+            firstSeenAt: firstSeenAt,
+            lastConfirmedAt: lastConfirmedAt,
+            lastRollbackAt: lastRollbackAt,
+            decayedAt: decayedAt,
+            blockedAt: blockedAt,
+            aliases: aliases,
+            metadata: metadata
+        )
+    }
+
+    // MARK: - CRUD: knowledge_candidate_events (Phase 8, playhead-4my.8.1)
+
+    /// Append a knowledge candidate event (provenance log).
+    func appendKnowledgeCandidateEvent(_ event: KnowledgeCandidateEvent) throws {
+        let sql = """
+            INSERT OR IGNORE INTO knowledge_candidate_events
+            (id, analysisAssetId, entityType, entityValue, sourceAtomOrdinals,
+             transcriptVersion, confidence, scanCohortJSON, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, event.id)
+        bind(stmt, 2, event.analysisAssetId)
+        bind(stmt, 3, event.entityType.rawValue)
+        bind(stmt, 4, event.entityValue)
+        let ordinalsJSON = try encodeJSONString(event.sourceAtomOrdinals)
+        bind(stmt, 5, ordinalsJSON)
+        bind(stmt, 6, event.transcriptVersion)
+        bind(stmt, 7, event.confidence)
+        bind(stmt, 8, event.scanCohortJSON)
+        bind(stmt, 9, event.createdAt)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Load all candidate events for a given analysis asset, ordered by createdAt.
+    func loadKnowledgeCandidateEvents(analysisAssetId: String) throws -> [KnowledgeCandidateEvent] {
+        let sql = """
+            SELECT id, analysisAssetId, entityType, entityValue, sourceAtomOrdinals,
+                   transcriptVersion, confidence, scanCohortJSON, createdAt
+            FROM knowledge_candidate_events
+            WHERE analysisAssetId = ?
+            ORDER BY createdAt ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        var results: [KnowledgeCandidateEvent] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id = text(stmt, 0)
+            let assetId = text(stmt, 1)
+            let entityTypeRaw = text(stmt, 2)
+            let entityValue = text(stmt, 3)
+            let ordinalsJSON = text(stmt, 4)
+            let transcriptVersion = text(stmt, 5)
+            let confidence = sqlite3_column_double(stmt, 6)
+            let scanCohortJSON = optionalText(stmt, 7)
+            let createdAt = sqlite3_column_double(stmt, 8)
+
+            guard let entityType = KnowledgeEntityType(rawValue: entityTypeRaw) else {
+                throw AnalysisStoreError.queryFailed("Invalid entityType in candidate event: \(entityTypeRaw)")
+            }
+            let ordinals: [Int] = try decodeJSON([Int].self, from: ordinalsJSON) ?? []
+
+            results.append(KnowledgeCandidateEvent(
+                id: id,
+                analysisAssetId: assetId,
+                entityType: entityType,
+                entityValue: entityValue,
+                sourceAtomOrdinals: ordinals,
+                transcriptVersion: transcriptVersion,
+                confidence: confidence,
+                scanCohortJSON: scanCohortJSON,
+                createdAt: createdAt
+            ))
+        }
+        return results
     }
 }
