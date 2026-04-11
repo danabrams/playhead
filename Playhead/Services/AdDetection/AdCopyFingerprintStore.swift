@@ -8,7 +8,7 @@
 //   - FingerprintEntry: per-podcast fingerprint with lifecycle state
 //   - FingerprintSourceEvent: append-only provenance log
 //   - FingerprintPromotionThresholds: lifecycle transition constants
-//   - AdCopyFingerprintStore (actor): lifecycle management + query APIs
+//   - AdCopyFingerprintStore (struct): lifecycle management + query APIs
 //   - Reuses KnowledgeState enum from SponsorKnowledgeStore
 //   - Only active entries are surfaced to matcher queries
 
@@ -117,14 +117,15 @@ enum FingerprintPromotionThresholds {
 // MARK: - MinHash Constants
 
 /// Constants for MinHash fingerprint generation.
-private enum MinHashConfig {
+enum MinHashConfig {
     /// Number of hash functions used for MinHash signature.
     static let hashCount = 128
     /// Size of character n-grams for feature extraction.
     static let ngramSize = 4
-    /// Filler words removed during text normalization.
+    /// Filler words removed during text normalization (single-word only;
+    /// multi-word phrases can't be matched by the per-word filter).
     static let fillerWords: Set<String> = [
-        "um", "uh", "like", "you know", "i mean", "so", "well",
+        "um", "uh", "like", "so", "well",
         "basically", "actually", "literally", "right", "okay"
     ]
     /// Minimum Jaccard similarity for a near-duplicate match.
@@ -250,10 +251,11 @@ enum MinHashUtilities {
 
 // MARK: - AdCopyFingerprintStore
 
-/// Actor-backed fingerprint store with quarantine lifecycle.
-/// Delegates SQLite persistence to AnalysisStore and exposes lifecycle
-/// management + query APIs for AdCopyFingerprintMatcher.
-actor AdCopyFingerprintStore {
+/// Fingerprint store with quarantine lifecycle. Delegates all SQLite
+/// persistence to AnalysisStore (which is itself an actor providing
+/// serialized DB access). This type holds no mutable state — lifecycle
+/// promotion/demotion logic is pure computation on values.
+struct AdCopyFingerprintStore: Sendable {
 
     private let store: AnalysisStore
     private let logger = Logger(subsystem: "com.playhead", category: "AdCopyFingerprintStore")
@@ -268,6 +270,10 @@ actor AdCopyFingerprintStore {
     /// entry if one doesn't exist for this (podcastId, fingerprintHash), or
     /// increments the confirmation count on the existing one.
     /// Also appends a FingerprintSourceEvent for provenance.
+    ///
+    /// The load → promote → upsert cycle runs inside a single
+    /// `AnalysisStore.atomicConfirmFingerprint` call, eliminating any
+    /// TOCTOU race between concurrent callers.
     func recordCandidate(
         podcastId: String,
         text: String,
@@ -288,149 +294,55 @@ actor AdCopyFingerprintStore {
 
         let fingerprintHash = MinHashUtilities.generateFingerprint(from: text)
 
-        // Append the provenance event.
+        // Pre-decode the new signature for near-duplicate comparison.
+        let decodedNew = MinHashUtilities.decodeSignature(fingerprintHash)
+        if decodedNew == nil {
+            logger.warning("recordCandidate: self-generated hash failed decode — skipping near-duplicate check")
+        }
+
+        // Atomic load → promote → upsert inside the AnalysisStore actor.
+        let (resolvedHash, _) = try await store.atomicConfirmFingerprint(
+            podcastId: podcastId,
+            fingerprintHash: fingerprintHash,
+            normalizedText: normalizedText,
+            promote: { current, confirmations, rollbacks in
+                stablePromoteState(current: current, confirmationCount: confirmations, rollbackCount: rollbacks)
+            },
+            nearDuplicateCheck: { newHash, existingHash in
+                guard let decodedNew else { return false }
+                guard let decodedExisting = MinHashUtilities.decodeSignature(existingHash) else { return false }
+                return MinHashUtilities.jaccardSimilarity(decodedNew, decodedExisting) >= MinHashConfig.matchThreshold
+            }
+        )
+
+        // Append the provenance event with the resolved hash so it
+        // correlates to the actual stored entry (not the raw input hash
+        // which may differ for near-duplicate matches).
         let event = FingerprintSourceEvent(
             analysisAssetId: analysisAssetId,
-            fingerprintHash: fingerprintHash,
+            fingerprintHash: resolvedHash,
             sourceAdWindowId: sourceAdWindowId,
             confidence: confidence
         )
         try await store.appendFingerprintSourceEvent(event)
-
-        // Try to load existing entry.
-        if let existing = try await store.loadFingerprintEntry(
-            podcastId: podcastId,
-            fingerprintHash: fingerprintHash
-        ) {
-            // Increment confirmation count and apply promotion rules.
-            let newCount = existing.confirmationCount + 1
-            let now = Date().timeIntervalSince1970
-            let newState = stablePromoteState(
-                current: existing.state,
-                confirmationCount: newCount,
-                rollbackCount: existing.rollbackCount
-            )
-            let updated = FingerprintEntry(
-                id: existing.id,
-                podcastId: existing.podcastId,
-                fingerprintHash: existing.fingerprintHash,
-                normalizedText: existing.normalizedText,
-                state: newState,
-                confirmationCount: newCount,
-                rollbackCount: existing.rollbackCount,
-                firstSeenAt: existing.firstSeenAt,
-                lastConfirmedAt: now,
-                lastRollbackAt: existing.lastRollbackAt,
-                decayedAt: newState == .decayed ? now : existing.decayedAt,
-                blockedAt: newState == .blocked ? now : existing.blockedAt,
-                metadata: existing.metadata
-            )
-            try await store.upsertFingerprintEntry(updated)
-        } else {
-            // Check if there's a near-duplicate fingerprint already stored.
-            // If so, update the existing entry rather than creating a new one.
-            let allEntries = try await store.loadAllFingerprintEntries(podcastId: podcastId)
-            let decodedNew = MinHashUtilities.decodeSignature(fingerprintHash)
-            var matched = false
-
-            if let decodedNew {
-                for entry in allEntries {
-                    if let decodedExisting = MinHashUtilities.decodeSignature(entry.fingerprintHash) {
-                        let similarity = MinHashUtilities.jaccardSimilarity(decodedNew, decodedExisting)
-                        if similarity >= MinHashConfig.matchThreshold {
-                            // Near-duplicate found — update existing entry.
-                            let newCount = entry.confirmationCount + 1
-                            let now = Date().timeIntervalSince1970
-                            let newState = stablePromoteState(
-                                current: entry.state,
-                                confirmationCount: newCount,
-                                rollbackCount: entry.rollbackCount
-                            )
-                            let updated = FingerprintEntry(
-                                id: entry.id,
-                                podcastId: entry.podcastId,
-                                fingerprintHash: entry.fingerprintHash,
-                                normalizedText: entry.normalizedText,
-                                state: newState,
-                                confirmationCount: newCount,
-                                rollbackCount: entry.rollbackCount,
-                                firstSeenAt: entry.firstSeenAt,
-                                lastConfirmedAt: now,
-                                lastRollbackAt: entry.lastRollbackAt,
-                                decayedAt: newState == .decayed ? now : entry.decayedAt,
-                                blockedAt: newState == .blocked ? now : entry.blockedAt,
-                                metadata: entry.metadata
-                            )
-                            try await store.upsertFingerprintEntry(updated)
-                            matched = true
-                            break
-                        }
-                    }
-                }
-            }
-
-            if !matched {
-                // Create new candidate entry and apply initial promotion.
-                let initialState = stablePromoteState(
-                    current: .candidate,
-                    confirmationCount: 1,
-                    rollbackCount: 0
-                )
-                let now = Date().timeIntervalSince1970
-                let entry = FingerprintEntry(
-                    podcastId: podcastId,
-                    fingerprintHash: fingerprintHash,
-                    normalizedText: normalizedText,
-                    state: initialState,
-                    confirmationCount: 1,
-                    firstSeenAt: now,
-                    lastConfirmedAt: now
-                )
-                try await store.upsertFingerprintEntry(entry)
-            }
-        }
     }
 
     // MARK: - Write: Record Rollback
 
     /// Record a rollback against a fingerprint entry.
     /// Increments rollback count and may demote the entry.
+    /// Uses atomic load → demote → upsert to prevent TOCTOU races.
     func recordRollback(
         podcastId: String,
         fingerprintHash: String
     ) async throws {
-        guard let existing = try await store.loadFingerprintEntry(
+        try await store.atomicRollbackFingerprint(
             podcastId: podcastId,
-            fingerprintHash: fingerprintHash
-        ) else {
-            logger.debug("recordRollback: no entry found for hash on podcast '\(podcastId)'")
-            return
-        }
-
-        let now = Date().timeIntervalSince1970
-        let newRollbackCount = existing.rollbackCount + 1
-        let newState = demoteState(
-            current: existing.state,
-            confirmationCount: existing.confirmationCount,
-            rollbackCount: newRollbackCount
+            fingerprintHash: fingerprintHash,
+            demote: { current, confirmations, rollbacks in
+                demoteState(current: current, confirmationCount: confirmations, rollbackCount: rollbacks)
+            }
         )
-
-        let updated = FingerprintEntry(
-            id: existing.id,
-            podcastId: existing.podcastId,
-            fingerprintHash: existing.fingerprintHash,
-            normalizedText: existing.normalizedText,
-            state: newState,
-            confirmationCount: existing.confirmationCount,
-            rollbackCount: newRollbackCount,
-            firstSeenAt: existing.firstSeenAt,
-            lastConfirmedAt: existing.lastConfirmedAt,
-            lastRollbackAt: now,
-            decayedAt: newState == .decayed ? now : existing.decayedAt,
-            blockedAt: newState == .blocked ? now : existing.blockedAt,
-            metadata: existing.metadata
-        )
-        try await store.upsertFingerprintEntry(updated)
     }
 
     // MARK: - Query: Active Entries for Matcher

@@ -80,7 +80,7 @@ enum AdCopyFingerprintMatcher {
                 }
 
                 let similarity = MinHashUtilities.jaccardSimilarity(windowSignature, entrySignature)
-                if similarity >= 0.6 {
+                if similarity >= MinHashConfig.matchThreshold {
                     let match = FingerprintMatch(
                         firstAtomOrdinal: windowAtoms.first!.atomKey.atomOrdinal,
                         lastAtomOrdinal: windowAtoms.last!.atomKey.atomOrdinal,

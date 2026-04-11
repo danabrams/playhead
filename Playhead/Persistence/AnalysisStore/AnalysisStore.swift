@@ -4838,6 +4838,116 @@ actor AnalysisStore {
         )
     }
 
+    // MARK: - Atomic confirm/rollback (Phase 9)
+
+    /// Atomically load → increment confirmation → promote → upsert a fingerprint
+    /// entry. Returns the resolved (podcastId, fingerprintHash) so the caller can
+    /// log provenance against the correct stored hash. Because this runs inside a
+    /// single actor-isolated call, no TOCTOU race is possible.
+    func atomicConfirmFingerprint(
+        podcastId: String,
+        fingerprintHash: String,
+        normalizedText: String,
+        promote: (_ current: KnowledgeState, _ confirmations: Int, _ rollbacks: Int) -> KnowledgeState,
+        nearDuplicateCheck: (_ newHash: String, _ existingHash: String) -> Bool
+    ) throws -> (resolvedHash: String, entry: FingerprintEntry) {
+        // 1. Exact match?
+        if let existing = try loadFingerprintEntry(podcastId: podcastId, fingerprintHash: fingerprintHash) {
+            let newCount = existing.confirmationCount + 1
+            let now = Date().timeIntervalSince1970
+            let newState = promote(existing.state, newCount, existing.rollbackCount)
+            let updated = FingerprintEntry(
+                id: existing.id,
+                podcastId: existing.podcastId,
+                fingerprintHash: existing.fingerprintHash,
+                normalizedText: existing.normalizedText,
+                state: newState,
+                confirmationCount: newCount,
+                rollbackCount: existing.rollbackCount,
+                firstSeenAt: existing.firstSeenAt,
+                lastConfirmedAt: now,
+                lastRollbackAt: existing.lastRollbackAt,
+                decayedAt: newState == .decayed ? now : existing.decayedAt,
+                blockedAt: newState == .blocked ? now : existing.blockedAt,
+                metadata: existing.metadata
+            )
+            try upsertFingerprintEntry(updated)
+            return (fingerprintHash, updated)
+        }
+
+        // 2. Near-duplicate match?
+        let allEntries = try loadAllFingerprintEntries(podcastId: podcastId)
+        for entry in allEntries {
+            if nearDuplicateCheck(fingerprintHash, entry.fingerprintHash) {
+                let newCount = entry.confirmationCount + 1
+                let now = Date().timeIntervalSince1970
+                let newState = promote(entry.state, newCount, entry.rollbackCount)
+                let updated = FingerprintEntry(
+                    id: entry.id,
+                    podcastId: entry.podcastId,
+                    fingerprintHash: entry.fingerprintHash,
+                    normalizedText: entry.normalizedText,
+                    state: newState,
+                    confirmationCount: newCount,
+                    rollbackCount: entry.rollbackCount,
+                    firstSeenAt: entry.firstSeenAt,
+                    lastConfirmedAt: now,
+                    lastRollbackAt: entry.lastRollbackAt,
+                    decayedAt: newState == .decayed ? now : entry.decayedAt,
+                    blockedAt: newState == .blocked ? now : entry.blockedAt,
+                    metadata: entry.metadata
+                )
+                try upsertFingerprintEntry(updated)
+                return (entry.fingerprintHash, updated)
+            }
+        }
+
+        // 3. New entry.
+        let now = Date().timeIntervalSince1970
+        let initialState = promote(.candidate, 1, 0)
+        let newEntry = FingerprintEntry(
+            podcastId: podcastId,
+            fingerprintHash: fingerprintHash,
+            normalizedText: normalizedText,
+            state: initialState,
+            confirmationCount: 1,
+            firstSeenAt: now,
+            lastConfirmedAt: now
+        )
+        try upsertFingerprintEntry(newEntry)
+        return (fingerprintHash, newEntry)
+    }
+
+    /// Atomically load → increment rollback → demote → upsert a fingerprint entry.
+    func atomicRollbackFingerprint(
+        podcastId: String,
+        fingerprintHash: String,
+        demote: (_ current: KnowledgeState, _ confirmations: Int, _ rollbacks: Int) -> KnowledgeState
+    ) throws {
+        guard let existing = try loadFingerprintEntry(podcastId: podcastId, fingerprintHash: fingerprintHash) else {
+            return
+        }
+        let now = Date().timeIntervalSince1970
+        let newRollbackCount = existing.rollbackCount + 1
+        let newState = demote(existing.state, existing.confirmationCount, newRollbackCount)
+        let updated = FingerprintEntry(
+            id: existing.id,
+            podcastId: existing.podcastId,
+            fingerprintHash: existing.fingerprintHash,
+            normalizedText: existing.normalizedText,
+            state: newState,
+            confirmationCount: existing.confirmationCount,
+            rollbackCount: newRollbackCount,
+            firstSeenAt: existing.firstSeenAt,
+            lastConfirmedAt: existing.lastConfirmedAt,
+            lastRollbackAt: now,
+            decayedAt: newState == .decayed ? now : existing.decayedAt,
+            blockedAt: newState == .blocked ? now : existing.blockedAt,
+            metadata: existing.metadata
+        )
+        try upsertFingerprintEntry(updated)
+    }
+
     // MARK: - CRUD: fingerprint_source_events (Phase 9, playhead-4my.9.1)
 
     /// Append a fingerprint source event (provenance log).

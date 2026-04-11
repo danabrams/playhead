@@ -142,6 +142,28 @@ struct FingerprintGenerationTests {
         let normalized = MinHashUtilities.normalizeText("   ")
         #expect(normalized.isEmpty)
     }
+
+    @Test("decodeSignature rejects wrong-length hex")
+    func decodeWrongLength() {
+        #expect(MinHashUtilities.decodeSignature("deadbeef") == nil)
+        #expect(MinHashUtilities.decodeSignature("") == nil)
+    }
+
+    @Test("decodeSignature rejects non-hex characters")
+    func decodeInvalidHex() {
+        // Build a string of the right length (128 * 16 = 2048) but with invalid chars.
+        let badHex = String(repeating: "zzzzzzzzzzzzzzzz", count: 128)
+        #expect(MinHashUtilities.decodeSignature(badHex) == nil)
+    }
+
+    @Test("decodeSignature accepts valid hex of correct length")
+    func decodeValidHex() {
+        let validHex = String(repeating: "0000000000000000", count: 128)
+        let decoded = MinHashUtilities.decodeSignature(validHex)
+        #expect(decoded != nil)
+        #expect(decoded?.count == 128)
+        #expect(decoded?.allSatisfy { $0 == 0 } == true)
+    }
 }
 
 // MARK: - Near-Duplicate Matching
@@ -394,6 +416,88 @@ struct LifecycleTransitionTests {
 
         let entries = try await store.allEntries(forPodcast: "pod-lc")
         #expect(entries.isEmpty, "Low confidence should not create an entry")
+    }
+
+    @Test("Rollback on nonexistent entry is a no-op")
+    func rollbackNonexistent() async throws {
+        let analysisStore = try await makeTestStore()
+        let store = AdCopyFingerprintStore(store: analysisStore)
+
+        // Should not throw or create any side effects.
+        try await store.recordRollback(
+            podcastId: "pod-noexist",
+            fingerprintHash: "nonexistent-hash"
+        )
+
+        let entries = try await store.allEntries(forPodcast: "pod-noexist")
+        #expect(entries.isEmpty, "Rollback on nonexistent entry should not create entries")
+    }
+
+    @Test("Near-duplicate ad reads coalesce into one entry")
+    func nearDuplicateCoalescing() async throws {
+        let analysisStore = try await makeTestStore()
+        let store = AdCopyFingerprintStore(store: analysisStore)
+
+        // Two slightly different reads of the same ad script.
+        let text1 = "squarespace is the all in one website platform for entrepreneurs to stand out online and grow your business visit squarespace dot com"
+        let text2 = "squarespace is the all in one website platform for creators to stand out online and grow their business visit squarespace dot com"
+
+        try await store.recordCandidate(
+            podcastId: "pod-dup",
+            text: text1,
+            analysisAssetId: "asset-1",
+            sourceAdWindowId: "window-1",
+            confidence: 0.9
+        )
+        try await store.recordCandidate(
+            podcastId: "pod-dup",
+            text: text2,
+            analysisAssetId: "asset-2",
+            sourceAdWindowId: "window-2",
+            confidence: 0.9
+        )
+
+        let entries = try await store.allEntries(forPodcast: "pod-dup")
+        #expect(entries.count == 1, "Near-duplicate texts should coalesce into one entry, got \(entries.count)")
+        #expect(entries[0].confirmationCount == 2, "Coalesced entry should have 2 confirmations")
+    }
+
+    @Test("Near-duplicate provenance events use resolved hash")
+    func nearDuplicateProvenanceHash() async throws {
+        let analysisStore = try await makeTestStore()
+        let store = AdCopyFingerprintStore(store: analysisStore)
+
+        let text1 = "squarespace is the all in one website platform for entrepreneurs to stand out online and grow your business visit squarespace dot com"
+        let text2 = "squarespace is the all in one website platform for creators to stand out online and grow their business visit squarespace dot com"
+
+        try await store.recordCandidate(
+            podcastId: "pod-prov-dup",
+            text: text1,
+            analysisAssetId: "asset-prov-1",
+            sourceAdWindowId: "window-prov-1",
+            confidence: 0.9
+        )
+        try await store.recordCandidate(
+            podcastId: "pod-prov-dup",
+            text: text2,
+            analysisAssetId: "asset-prov-2",
+            sourceAdWindowId: "window-prov-2",
+            confidence: 0.9
+        )
+
+        let entries = try await store.allEntries(forPodcast: "pod-prov-dup")
+        #expect(entries.count == 1)
+        let storedHash = entries[0].fingerprintHash
+
+        // Both provenance events should reference the stored entry's hash.
+        let events1 = try await store.sourceEvents(forAsset: "asset-prov-1")
+        let events2 = try await store.sourceEvents(forAsset: "asset-prov-2")
+        #expect(events1.count == 1)
+        #expect(events2.count == 1)
+        #expect(events1[0].fingerprintHash == storedHash,
+                "First event hash should match stored entry")
+        #expect(events2[0].fingerprintHash == storedHash,
+                "Near-duplicate event hash should match stored entry, not raw input hash")
     }
 }
 
@@ -662,6 +766,81 @@ struct MatcherIntegrationTests {
         )
         #expect(matches.isEmpty)
     }
+
+    @Test("Corrupt fingerprint hash in store is skipped without crash")
+    func corruptHashResilience() async throws {
+        let analysisStore = try await makeTestStore()
+        let fpStore = AdCopyFingerprintStore(store: analysisStore)
+
+        // Insert a valid active entry.
+        let adScript = "squarespace is the all in one website platform for entrepreneurs to stand out online and grow your business visit squarespace dot com slash podcast"
+        for i in 1...2 {
+            try await fpStore.recordCandidate(
+                podcastId: "pod-corrupt",
+                text: adScript,
+                analysisAssetId: "asset-\(i)",
+                sourceAdWindowId: "window-\(i)",
+                confidence: 0.9
+            )
+        }
+
+        // Directly insert a corrupt entry into the store.
+        let corruptEntry = FingerprintEntry(
+            podcastId: "pod-corrupt",
+            fingerprintHash: "not-valid-hex-garbage",
+            normalizedText: "corrupt",
+            state: .active,
+            confirmationCount: 5
+        )
+        try await analysisStore.upsertFingerprintEntry(corruptEntry)
+
+        // Matcher should skip the corrupt entry and still find the valid one.
+        let words = adScript.split(separator: " ").map(String.init)
+        let atoms = words.enumerated().map { (i, word) in
+            makeAtom(ordinal: i, text: word, startTime: Double(i), endTime: Double(i + 1))
+        }
+        let matches = try await AdCopyFingerprintMatcher.match(
+            atoms: atoms,
+            podcastId: "pod-corrupt",
+            fingerprintStore: fpStore
+        )
+        // Should not crash, and should still find the valid entry.
+        #expect(!matches.isEmpty, "Valid fingerprint should still match despite corrupt sibling entry")
+    }
+
+    @Test("Overlapping windows for same fingerprint are merged")
+    func overlappingWindowsMerge() async throws {
+        let analysisStore = try await makeTestStore()
+        let fpStore = AdCopyFingerprintStore(store: analysisStore)
+
+        // Build a long ad script and promote to active.
+        let adWords = (0..<60).map { "word\($0)" }
+        let adScript = adWords.joined(separator: " ")
+        for i in 1...2 {
+            try await fpStore.recordCandidate(
+                podcastId: "pod-merge",
+                text: adScript,
+                analysisAssetId: "asset-merge-\(i)",
+                sourceAdWindowId: "window-merge-\(i)",
+                confidence: 0.9
+            )
+        }
+
+        // Build atoms with the same text.
+        let atoms = adWords.enumerated().map { (i, word) in
+            makeAtom(ordinal: i, text: word, startTime: Double(i), endTime: Double(i + 1))
+        }
+        let matches = try await AdCopyFingerprintMatcher.match(
+            atoms: atoms,
+            podcastId: "pod-merge",
+            fingerprintStore: fpStore
+        )
+
+        // Multiple sliding windows should match and merge into fewer contiguous spans.
+        // With 60 atoms, window=30, stride=10 → 4 windows, all matching the same
+        // fingerprint. After merge, they should collapse to 1 contiguous match.
+        #expect(matches.count == 1, "Overlapping windows for same fingerprint should merge to 1: got \(matches.count)")
+    }
 }
 
 // MARK: - Evidence Integration
@@ -701,17 +880,17 @@ struct EvidenceIntegrationTests {
             detail: .fingerprint(matchCount: 2, averageSimilarity: 0.8)
         )
 
-        var fusion = BackfillEvidenceFusion(
+        let fusion = BackfillEvidenceFusion(
             span: span,
             classifierScore: 0.0,
             fmEntries: [],
             lexicalEntries: [],
             acousticEntries: [],
             catalogEntries: [],
+            fingerprintEntries: [fpEntry],
             mode: .off,
             config: FusionWeightConfig()
         )
-        fusion.fingerprintEntries = [fpEntry]
 
         let ledger = fusion.buildLedger()
         let fpLedgerEntries = ledger.filter { $0.source == .fingerprint }
@@ -751,17 +930,17 @@ struct EvidenceIntegrationTests {
             detail: .fingerprint(matchCount: 1, averageSimilarity: 0.7)
         )
 
-        var fusion = BackfillEvidenceFusion(
+        let fusion = BackfillEvidenceFusion(
             span: span,
             classifierScore: 0.5,
             fmEntries: [],
             lexicalEntries: [],
             acousticEntries: [],
             catalogEntries: [],
+            fingerprintEntries: [fpEntry],
             mode: .off,
             config: FusionWeightConfig()
         )
-        fusion.fingerprintEntries = [fpEntry]
 
         let ledger = fusion.buildLedger()
         let mapper = DecisionMapper(span: span, ledger: ledger, config: FusionWeightConfig())
@@ -782,17 +961,17 @@ struct EvidenceIntegrationTests {
             detail: .fingerprint(matchCount: 1, averageSimilarity: 0.7)
         )
 
-        var fusion = BackfillEvidenceFusion(
+        let fusion = BackfillEvidenceFusion(
             span: span,
             classifierScore: 0.0,
             fmEntries: [],
             lexicalEntries: [],
             acousticEntries: [],
             catalogEntries: [],
+            fingerprintEntries: [fpEntry],
             mode: .off,
             config: FusionWeightConfig()
         )
-        fusion.fingerprintEntries = [fpEntry]
 
         let ledger = fusion.buildLedger()
         let mapper = DecisionMapper(span: span, ledger: ledger, config: FusionWeightConfig())
@@ -843,6 +1022,56 @@ struct RollbackDecayCrossEpisodeTests {
         let active = try await fpStore.activeEntries(forPodcast: "pod-cross")
         #expect(active.isEmpty, "Decayed entry should not appear in active entries")
     }
+
+    @Test("Decayed entry blocks after further rollbacks")
+    func decayedToBlocked() async throws {
+        let analysisStore = try await makeTestStore()
+        let fpStore = AdCopyFingerprintStore(store: analysisStore)
+
+        let adText = "squarespace is the all in one website platform for entrepreneurs to stand out online and grow your business visit squarespace dot com"
+
+        // Build to active (2 confirmations).
+        for ep in 1...2 {
+            try await fpStore.recordCandidate(
+                podcastId: "pod-block",
+                text: adText,
+                analysisAssetId: "block-ep-\(ep)",
+                sourceAdWindowId: "block-win-\(ep)",
+                confidence: 0.9
+            )
+        }
+        let entry = try await fpStore.allEntries(forPodcast: "pod-block")[0]
+        #expect(entry.state == .active)
+
+        // Decay it: 3 rollbacks → RR = 3/5 = 0.6 > 0.5 → decayed.
+        for _ in 1...3 {
+            try await fpStore.recordRollback(
+                podcastId: "pod-block",
+                fingerprintHash: entry.fingerprintHash
+            )
+        }
+        let decayed = try await fpStore.allEntries(forPodcast: "pod-block")[0]
+        #expect(decayed.state == .decayed)
+
+        // Further rollback while decayed: RR = 4/6 = 0.67 > 0.5 → blocked.
+        try await fpStore.recordRollback(
+            podcastId: "pod-block",
+            fingerprintHash: entry.fingerprintHash
+        )
+        let blocked = try await fpStore.allEntries(forPodcast: "pod-block")[0]
+        #expect(blocked.state == .blocked, "Decayed entry should block after further rollbacks: got \(blocked.state)")
+
+        // Blocked is terminal — more confirmations don't change state.
+        try await fpStore.recordCandidate(
+            podcastId: "pod-block",
+            text: adText,
+            analysisAssetId: "block-ep-3",
+            sourceAdWindowId: "block-win-3",
+            confidence: 0.9
+        )
+        let stillBlocked = try await fpStore.allEntries(forPodcast: "pod-block")[0]
+        #expect(stillBlocked.state == .blocked, "Blocked state should be terminal")
+    }
 }
 
 // MARK: - Promotion Thresholds
@@ -865,19 +1094,19 @@ struct PromotionThresholdTests {
         let store = AdCopyFingerprintStore(store: analysisStore)
 
         // candidate → quarantined (1 conf)
-        let nextFromCandidate = await store.promoteState(
+        let nextFromCandidate = store.promoteState(
             current: .candidate, confirmationCount: 1, rollbackCount: 0
         )
         #expect(nextFromCandidate == .quarantined)
 
         // quarantined → active (2+ conf, RR <= 0.3)
-        let nextFromQuarantined = await store.promoteState(
+        let nextFromQuarantined = store.promoteState(
             current: .quarantined, confirmationCount: 2, rollbackCount: 0
         )
         #expect(nextFromQuarantined == .active)
 
         // quarantined stays quarantined (only 1 conf)
-        let staysQuarantined = await store.promoteState(
+        let staysQuarantined = store.promoteState(
             current: .quarantined, confirmationCount: 1, rollbackCount: 0
         )
         #expect(staysQuarantined == .quarantined)
@@ -889,46 +1118,22 @@ struct PromotionThresholdTests {
         let store = AdCopyFingerprintStore(store: analysisStore)
 
         // active → decayed (RR > 0.5)
-        let demotedFromActive = await store.demoteState(
+        let demotedFromActive = store.demoteState(
             current: .active, confirmationCount: 2, rollbackCount: 3
         )
         #expect(demotedFromActive == .decayed)
 
         // decayed → blocked (RR > 0.5)
-        let demotedFromDecayed = await store.demoteState(
+        let demotedFromDecayed = store.demoteState(
             current: .decayed, confirmationCount: 2, rollbackCount: 3
         )
         #expect(demotedFromDecayed == .blocked)
 
         // blocked stays blocked
-        let staysBlocked = await store.demoteState(
+        let staysBlocked = store.demoteState(
             current: .blocked, confirmationCount: 2, rollbackCount: 3
         )
         #expect(staysBlocked == .blocked)
-    }
-}
-
-// MARK: - Backfill-Only Structural Guarantee
-
-@Suite("Phase 9 — Backfill-Only Structural")
-struct BackfillOnlyTests {
-
-    @Test("Legacy stub returns empty — hot path cannot produce fingerprint evidence")
-    func stubReturnsEmpty() {
-        let atoms = (0..<10).map { i in
-            makeAtom(ordinal: i, text: "word\(i)", startTime: Double(i), endTime: Double(i + 1))
-        }
-        let result = AdCopyFingerprintMatcher.match(atoms: atoms)
-        #expect(result.isEmpty, "Hot-path stub must return empty — fingerprints are backfill-only")
-    }
-
-    @Test("Store-backed overload requires async context — structurally unavailable in sync hot-path")
-    func storeOverloadIsAsync() {
-        // The store-backed match() is `async throws` — it cannot be called from sync code.
-        // This structural guarantee means it's only usable in backfill (which is async).
-        // Verified by compilation: if someone tries to call it from sync code, it won't compile.
-        // This test documents the architectural invariant.
-        #expect(Bool(true), "Store-backed match is async throws — structurally backfill-only")
     }
 }
 
@@ -963,13 +1168,14 @@ struct FingerprintEntryTests {
 
     @Test("FingerprintEntry is Equatable and Sendable")
     func conformances() {
+        let now = Date().timeIntervalSince1970
         let a = FingerprintEntry(
             id: "id-1", podcastId: "pod", fingerprintHash: "hash",
-            normalizedText: "text", confirmationCount: 1
+            normalizedText: "text", confirmationCount: 1, firstSeenAt: now
         )
         let b = FingerprintEntry(
             id: "id-1", podcastId: "pod", fingerprintHash: "hash",
-            normalizedText: "text", confirmationCount: 1
+            normalizedText: "text", confirmationCount: 1, firstSeenAt: now
         )
         #expect(a == b)
     }
