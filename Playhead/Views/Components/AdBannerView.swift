@@ -172,11 +172,11 @@ struct AdBannerView: View {
 
     /// Minimum metadata confidence required to surface advertiser/product.
     /// Below this, the banner falls back to generic "Skipped sponsor segment".
-    private static let metadataConfidenceThreshold: Double = 0.60
+    static let metadataConfidenceThreshold: Double = 0.60
 
     /// Resolve the banner copy line from metadata, applying strict
     /// evidence-bound rules. Never surfaces a brand solely from a model guess.
-    private static func bannerCopy(for item: AdSkipBannerItem) -> BannerCopyLine {
+    static func bannerCopy(for item: AdSkipBannerItem) -> BannerCopyLine {
         // Only surface specific copy when:
         // 1. metadataSource is not "none" (metadata was actually extracted)
         // 2. metadataConfidence exceeds the threshold
@@ -206,7 +206,7 @@ struct AdBannerView: View {
     }
 
     /// Template-driven banner copy. Never free-form.
-    private struct BannerCopyLine: Equatable {
+    struct BannerCopyLine: Equatable {
         let prefix: String
         let advertiser: String?
         let detail: String?
