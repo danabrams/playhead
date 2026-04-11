@@ -196,7 +196,7 @@ actor BackfillJobRunner {
         admissionController: AdmissionController,
         classifier: FoundationModelClassifier,
         coveragePlanner: CoveragePlanner = CoveragePlanner(),
-        mode: FMBackfillMode = .shadow,
+        mode: FMBackfillMode = .full,
         capabilitySnapshotProvider: @escaping @Sendable () async -> CapabilitySnapshot,
         batteryLevelProvider: @escaping @Sendable () async -> Float,
         scanCohortJSON: String,
