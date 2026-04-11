@@ -25,6 +25,10 @@ final class NowPlayingViewModel {
 
     var activeSkipMode: SkipMode = .shadow
 
+    /// Debounce guard for the "Hearing an ad" button — prevents duplicate reports
+    /// within a 5-second window from rapid taps.
+    private var lastHearingAdReportTime: Date?
+
     // MARK: - Derived
 
     var progress: Double {
@@ -196,6 +200,13 @@ final class NowPlayingViewModel {
     /// Captures the current playback position as the correction timestamp.
     func reportHearingAd() {
         guard let assetId = runtime.currentAnalysisAssetId else { return }
+        // Debounce: ignore taps within 5 seconds of the last report.
+        // Also allow reports when clock jumps backward (negative interval).
+        if let last = lastHearingAdReportTime {
+            let interval = Date().timeIntervalSince(last)
+            if interval >= 0 && interval < 5.0 { return }
+        }
+        lastHearingAdReportTime = Date()
         let correctionStore = runtime.correctionStore
         let podcastId = runtime.currentPodcastId
         Task {

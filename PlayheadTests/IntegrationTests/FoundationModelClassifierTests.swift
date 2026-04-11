@@ -2229,6 +2229,9 @@ struct FoundationModelClassifierTests {
     // Uses `refinementPreambleParts(for:)` directly so the test does NOT
     // depend on env-var state and runs deterministically alongside the
     // other prompt-variant tests.
+    // NOTE: This tests dead code — refinementPreambleParts is no longer called from
+    // buildRefinementPrompt after playhead-cay. Retained to pin the function's output
+    // in case it is re-activated for taxonomy experiments.
     @Test("bd-1en taxonomy variant rewrites the refinement preamble too")
     func taxonomyVariantWiresIntoRefinementPreamble() {
         let classificationParts = FoundationModelClassifier.refinementPreambleParts(for: .classification)

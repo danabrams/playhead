@@ -944,7 +944,7 @@ struct FoundationModelClassifier: Sendable {
         // on-device benchmark log unambiguously confirms whether the
         // PLAYHEAD_FM_DROP_PREAMBLE switch took effect for this run.
         if !Self.injectionPreambleEnabled() {
-            logger.debug("PLAYHEAD_FM_DROP_PREAMBLE active — coarse and refinement preambles disabled")
+            logger.debug("PLAYHEAD_FM_DROP_PREAMBLE active — coarse preamble disabled (refinement preamble unconditionally removed)")
         }
         // bd-34e Hypothesis F: announce the prompt-variant flag at construction
         // so the on-device shadow benchmark log unambiguously confirms which
@@ -2162,6 +2162,8 @@ struct FoundationModelClassifier: Sendable {
         }
     }
 
+    /// DEAD CODE after playhead-cay: buildRefinementPrompt no longer uses a preamble.
+    /// Retained for potential future taxonomy experiments on the refinement pass.
     /// bd-1en: refinement-pass parts for each variant. Refinement uses a
     /// slightly different prefix verb than coarse for `classification`
     /// (`refinementPromptPrefix == "Refine ad spans."`) but reuses the

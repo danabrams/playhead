@@ -278,8 +278,10 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
         }
         // Filter to false positive corrections only — false negatives must not
         // suppress detection (they should boost it, which is correctionBoostFactor's job).
+        // Legacy corrections (source == nil) predate the false-negative feature and are
+        // all false-positive vetoes — treat them as such to preserve pre-existing behavior.
         let falsePositives = weighted.filter { event, _ in
-            event.source?.kind == .falsePositive
+            event.source?.kind == .falsePositive || event.source == nil
         }
         guard !falsePositives.isEmpty else { return 1.0 }
         // The strongest (most-recent) correction has the highest weight (close to 1.0).

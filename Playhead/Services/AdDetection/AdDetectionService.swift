@@ -557,11 +557,15 @@ actor AdDetectionService {
         var fusionDecisionResults: [AdDecisionResult] = []
 
         // Phase 7.2: pre-compute correction factor for this asset (actor-context query).
-        // 1.0 = no suppression; < 1.0 = correction(s) exist and reduce effective confidence.
+        // Combines passthrough (false-positive suppression, [0.0, 1.0]) and boost
+        // (false-negative amplification, [1.0, 2.0]) into a single multiplier.
+        // Result: 1.0 = no correction effect; < 1.0 = FP suppression; > 1.0 = FN boost.
         // Queried once per backfill run (not per span) for performance.
         let assetCorrectionFactor: Double
         if let correctionStore {
-            assetCorrectionFactor = await correctionStore.correctionPassthroughFactor(for: analysisAssetId)
+            let passthrough = await correctionStore.correctionPassthroughFactor(for: analysisAssetId)
+            let boost = await correctionStore.correctionBoostFactor(for: analysisAssetId)
+            assetCorrectionFactor = passthrough * boost
         } else {
             assetCorrectionFactor = 1.0
         }

@@ -191,9 +191,10 @@ struct DecisionMapper: Sendable {
     let ledger: [EvidenceLedgerEntry]
     let config: FusionWeightConfig
     let transcriptQuality: TranscriptQuality
-    /// Phase 7.2: Correction suppression factor pre-computed by the caller (actor context).
-    /// A value < 1.0 reduces effective confidence for spans with active user corrections.
-    /// Default of 1.0 means no suppression (no active corrections).
+    /// Phase 7.2: Combined correction factor pre-computed by the caller (actor context).
+    /// < 1.0 = false-positive suppression (user said "not an ad").
+    /// > 1.0 = false-negative boost (user said "hearing an ad").
+    /// Default of 1.0 means no active corrections.
     let correctionFactor: Double
 
     init(
@@ -217,12 +218,14 @@ struct DecisionMapper: Sendable {
         let rawProposalConfidence = min(1.0, ledger.reduce(0.0) { $0 + $1.weight })
         let proposalConfidence = rawProposalConfidence
 
-        // Phase 7.2: apply correction suppression factor to skipConfidence.
+        // Phase 7.2: apply combined correction factor to skipConfidence.
         // The factor is pre-computed by the caller (AdDetectionService, an actor)
-        // from PersistentUserCorrectionStore. If effectiveConfidence falls below
-        // 0.40, gate the span as blockedByUserCorrection.
+        // from PersistentUserCorrectionStore.
+        // < 1.0 = false-positive suppression; if effective confidence drops below 0.40,
+        //         gate the span as blockedByUserCorrection.
+        // > 1.0 = false-negative boost; caps at 1.0 to avoid over-confident decisions.
         let rawSkipConfidence = calibrate(proposalConfidence)
-        let effectiveConfidence = rawSkipConfidence * max(0.0, correctionFactor)
+        let effectiveConfidence = min(1.0, rawSkipConfidence * max(0.0, correctionFactor))
         let gate: SkipEligibilityGate
         if correctionFactor < 1.0 && effectiveConfidence < 0.40 {
             gate = .blockedByUserCorrection

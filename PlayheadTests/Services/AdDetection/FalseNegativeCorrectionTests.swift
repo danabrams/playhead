@@ -230,6 +230,86 @@ struct FalseNegativePassthroughIndependenceTests {
     }
 }
 
+// MARK: - Legacy nil-source corrections
+
+@Suite("Legacy nil-source corrections — Passthrough/Boost interaction")
+struct LegacyNilSourceCorrectionTests {
+
+    @Test("nil-source corrections count as false positives in passthrough factor")
+    func nilSourceIncludedInPassthrough() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-legacy"))
+
+        // Record a correction with nil source (legacy pre-false-negative feature).
+        let event = CorrectionEvent(
+            analysisAssetId: "asset-legacy",
+            scope: CorrectionScope.exactSpan(
+                assetId: "asset-legacy",
+                ordinalRange: 0...50
+            ).serialized,
+            createdAt: Date().timeIntervalSince1970,
+            source: nil
+        )
+        try await correctionStore.record(event)
+
+        let passthrough = await correctionStore.correctionPassthroughFactor(for: "asset-legacy")
+        let boost = await correctionStore.correctionBoostFactor(for: "asset-legacy")
+
+        // Legacy corrections must suppress (passthrough < 1.0) — they were all false-positive vetoes.
+        #expect(passthrough < 0.1, "nil-source legacy correction must suppress; got \(passthrough)")
+        // Legacy corrections must NOT boost — they are not false negatives.
+        #expect(boost == 1.0, "nil-source must not boost; got \(boost)")
+    }
+}
+
+// MARK: - Combined passthrough * boost
+
+@Suite("Combined correction factor — passthrough * boost")
+struct CombinedCorrectionFactorTests {
+
+    @Test("Mixed FP + FN corrections produce combined factor")
+    func mixedCorrectionsProduceCombinedFactor() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-mixed"))
+
+        // Record a false positive correction (suppression).
+        let fpEvent = CorrectionEvent(
+            analysisAssetId: "asset-mixed",
+            scope: CorrectionScope.exactSpan(
+                assetId: "asset-mixed",
+                ordinalRange: 0...50
+            ).serialized,
+            createdAt: Date().timeIntervalSince1970,
+            source: .manualVeto
+        )
+        try await correctionStore.record(fpEvent)
+
+        // Record a false negative correction (boost).
+        let fnEvent = CorrectionEvent(
+            analysisAssetId: "asset-mixed",
+            scope: CorrectionScope.exactSpan(
+                assetId: "asset-mixed",
+                ordinalRange: 0...100
+            ).serialized,
+            createdAt: Date().timeIntervalSince1970,
+            source: .falseNegative
+        )
+        try await correctionStore.record(fnEvent)
+
+        let passthrough = await correctionStore.correctionPassthroughFactor(for: "asset-mixed")
+        let boost = await correctionStore.correctionBoostFactor(for: "asset-mixed")
+        let combined = passthrough * boost
+
+        // Both factors are active independently.
+        #expect(passthrough < 0.1, "FP correction must suppress; got \(passthrough)")
+        #expect(boost > 1.9, "FN correction must boost; got \(boost)")
+        // Combined factor: near 0 * near 2 ≈ near 0. FP suppression dominates.
+        #expect(combined < 0.2, "Combined factor should be suppression-dominated; got \(combined)")
+    }
+}
+
 // MARK: - Test Helpers (local to this file)
 
 private func makeTestAsset(id: String) -> AnalysisAsset {

@@ -427,34 +427,24 @@ private extension TranscriptPeekView {
     }
 
     /// Submit the marked chunks as a false negative correction.
-    /// Maps selected chunk indices to atom ordinal ranges (approximated from chunk indices)
-    /// and creates a CorrectionEvent with source .falseNegative.
+    /// Uses whole-asset scope (0...Int.max) because chunks don't carry atom ordinals
+    /// and using chunk indices as ordinal proxies would produce semantically wrong
+    /// scope data that breaks when per-span scope matching is added.
     func submitMarkedChunks() {
-        let sortedIndices = markedChunkIndices.sorted()
-        guard !sortedIndices.isEmpty else { return }
-
-        let chunks = peekViewModel.chunks
-        guard !chunks.isEmpty else { return }
-
-        // Map chunk indices to the ordinal range.
-        // Chunks don't carry atom ordinals directly, so we use the chunk indices
-        // as a proxy for ordinal ranges. The first selected chunk index is the
-        // lower bound and the last selected chunk index is the upper bound.
-        let firstIndex = sortedIndices.first!
-        let lastIndex = sortedIndices.last!
+        guard !markedChunkIndices.isEmpty else { return }
 
         let assetId = peekViewModel.analysisAssetId
 
         let scope = CorrectionScope.exactSpan(
             assetId: assetId,
-            ordinalRange: firstIndex...lastIndex
+            ordinalRange: 0...Int.max
         )
         let event = CorrectionEvent(
             analysisAssetId: assetId,
             scope: scope.serialized,
             createdAt: Date().timeIntervalSince1970,
             source: .falseNegative,
-            podcastId: nil
+            podcastId: podcastId
         )
         let trustSvc = trustService
         let pid = podcastId
