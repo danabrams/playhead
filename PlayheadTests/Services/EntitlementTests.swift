@@ -196,35 +196,10 @@ struct PreviewBudgetConsumptionTests {
 @Suite("PreviewBudgetStore - Grace Window Edge Cases")
 struct PreviewBudgetGraceEdgeCaseTests {
 
-    @Test("Grace at exactly one second below base budget")
-    func graceAtOneSecondBelow() async throws {
-        let store = try await makeTestStore()
-        let budgetStore = PreviewBudgetStore(analysisStore: store)
-
-        _ = await budgetStore.consumeBudget(for: "ep-1", seconds: 719)
-
-        // 1s remaining in base budget. Headroom = 1200 - 719 = 481.
-        let grace = await budgetStore.graceAllowance(
-            for: "ep-1", adBreakDuration: 120
-        )
-        #expect(grace == 120.0,
-                "Full ad break should be allowed when headroom exceeds duration")
-    }
-
-    @Test("Grace window with very large ad break is capped at headroom")
-    func graceCapToHeadroom() async throws {
-        let store = try await makeTestStore()
-        let budgetStore = PreviewBudgetStore(analysisStore: store)
-
-        // Consume 1190s (10s from absolute cap).
-        // But wait — 1190 > 720 base budget, so grace should be denied.
-        _ = await budgetStore.consumeBudget(for: "ep-1", seconds: 1190)
-        let grace = await budgetStore.graceAllowance(
-            for: "ep-1", adBreakDuration: 600
-        )
-        #expect(grace == 0,
-                "No grace when consumed >= baseBudgetSeconds")
-    }
+    // NOTE: "Grace at exactly one second below base budget" and
+    // "Grace window with very large ad break is capped at headroom" are
+    // covered by oneBelowBoundary() and noGracePastBudget() in
+    // CoreServiceTests.swift and are intentionally not duplicated here.
 
     @Test("Grace for zero-duration ad break returns zero")
     func zeroDurationAdBreak() async throws {
@@ -253,20 +228,9 @@ struct PreviewBudgetGraceEdgeCaseTests {
                 "Grace should be granted on fresh episode (consumed < base)")
     }
 
-    @Test("Grace headroom capped at maxBudgetWithGraceSeconds minus consumed")
-    func graceHeadroomCap() async throws {
-        let store = try await makeTestStore()
-        let budgetStore = PreviewBudgetStore(analysisStore: store)
-
-        // Consume 710s. Headroom = 1200 - 710 = 490.
-        // Request grace for 500s ad break — should be capped at 490.
-        _ = await budgetStore.consumeBudget(for: "ep-1", seconds: 710)
-        let grace = await budgetStore.graceAllowance(
-            for: "ep-1", adBreakDuration: 500
-        )
-        #expect(grace == 490.0,
-                "Grace must be capped at remaining headroom under absolute cap")
-    }
+    // NOTE: "Grace headroom capped at maxBudgetWithGraceSeconds minus consumed"
+    // is covered by graceWindowCapped() in CoreServiceTests.swift (identical
+    // inputs: 710s consumed, ad break exceeding headroom, expects 490s).
 }
 
 // MARK: - PreviewBudgetStore: Constants
