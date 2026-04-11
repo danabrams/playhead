@@ -141,6 +141,16 @@ protocol UserCorrectionStore: Sendable {
     /// and pass it to the pure-value `DecisionMapper` to avoid making the
     /// mapper async.
     func correctionPassthroughFactor(for analysisAssetId: String) async -> Double
+
+    /// Return an aggregate correction boost factor for the given analysis asset,
+    /// derived from false negative (missed ad) reports. The factor is in [1.0, 2.0]:
+    ///   - 1.0 means no active false negative corrections (no boost)
+    ///   - > 1.0 means one or more false negative reports exist; the strongest
+    ///     decay-weighted correction boosts effective confidence for nearby windows.
+    ///
+    /// Counterpart to `correctionPassthroughFactor` — where passthrough suppresses,
+    /// boost amplifies.
+    func correctionBoostFactor(for analysisAssetId: String) async -> Double
 }
 
 // MARK: - NoOpUserCorrectionStore
@@ -158,6 +168,11 @@ struct NoOpUserCorrectionStore: UserCorrectionStore {
 
     func correctionPassthroughFactor(for analysisAssetId: String) async -> Double {
         // No active corrections — no suppression.
+        return 1.0
+    }
+
+    func correctionBoostFactor(for analysisAssetId: String) async -> Double {
+        // No active false negative corrections — no boost.
         return 1.0
     }
 }
@@ -261,11 +276,43 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
             )
             return 1.0
         }
-        guard !weighted.isEmpty else { return 1.0 }
+        // Filter to false positive corrections only — false negatives must not
+        // suppress detection (they should boost it, which is correctionBoostFactor's job).
+        let falsePositives = weighted.filter { event, _ in
+            event.source?.kind == .falsePositive
+        }
+        guard !falsePositives.isEmpty else { return 1.0 }
         // The strongest (most-recent) correction has the highest weight (close to 1.0).
         // We convert to a suppression factor: 1.0 = no suppression, 0.0 = full suppression.
-        let maxCorrectionWeight = weighted.map(\.1).max() ?? 0.0
+        let maxCorrectionWeight = falsePositives.map(\.1).max() ?? 0.0
         return max(0.0, 1.0 - maxCorrectionWeight)
+    }
+
+    // MARK: - Protocol: correctionBoostFactor
+
+    /// Returns a boost factor derived from false negative corrections for the given asset.
+    ///
+    /// If no false negative corrections exist, returns 1.0 (no boost). If corrections exist,
+    /// returns `1.0 + maxWeight` where maxWeight is the highest decay-weighted false negative
+    /// correction seen — i.e. the most-recent false negative report has the most boost.
+    /// Result is clamped to [1.0, 2.0].
+    func correctionBoostFactor(for analysisAssetId: String) async -> Double {
+        let weighted: [(CorrectionEvent, Double)]
+        do {
+            weighted = try await weightedCorrections(for: analysisAssetId)
+        } catch {
+            logger.warning(
+                "correctionBoostFactor: failed to load corrections for \(analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return 1.0
+        }
+        // Filter to false negative corrections only.
+        let falseNegatives = weighted.filter { event, _ in
+            event.source?.kind == .falseNegative
+        }
+        guard !falseNegatives.isEmpty else { return 1.0 }
+        let maxCorrectionWeight = falseNegatives.map(\.1).max() ?? 0.0
+        return min(2.0, 1.0 + maxCorrectionWeight)
     }
 
     // MARK: - Query
