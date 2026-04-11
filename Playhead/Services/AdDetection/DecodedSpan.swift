@@ -47,7 +47,7 @@ enum DecoderConstants {
     /// Atom-count rather than seconds for transcript-density invariance.
     static let mergeGapAtoms: Int = 3
     /// Snap radius (atom count) for Use A boundary refinement.
-    static let boundarySnapRadiusAtoms: Int = 3
+    static let boundarySnapRadiusAtoms: Int = 15
 }
 
 // MARK: - AnchorRef Codable helpers
