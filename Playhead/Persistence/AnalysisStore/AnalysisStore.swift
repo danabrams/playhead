@@ -506,6 +506,7 @@ actor AnalysisStore {
                 definition: "TEXT NOT NULL DEFAULT 'shadow'"
             )
             try migrateSponsorKnowledgeV7IfNeeded()
+            try migrateFingerprintStoreV8IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -557,6 +558,7 @@ actor AnalysisStore {
         try migrateAdWindowsPhase6PrepV5IfNeeded()
         try migrateCorrectionEventsV6IfNeeded()
         try migrateSponsorKnowledgeV7IfNeeded()
+        try migrateFingerprintStoreV8IfNeeded()
         // Mirror the belt-and-suspenders phase/jobPhase column re-adds
         // that `migrate()` performs after the v2/v3 evidence_events
         // rebuild (cycle-8 reconciliation: both columns coexist).
@@ -1096,6 +1098,51 @@ actor AnalysisStore {
         try exec("CREATE INDEX IF NOT EXISTS idx_kce_created ON knowledge_candidate_events(createdAt)")
 
         try setSchemaVersion(7)
+    }
+
+    // MARK: - V8: Ad Copy Fingerprint Tables (Phase 9, playhead-4my.9.1)
+
+    private func migrateFingerprintStoreV8IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 8 else { return }
+
+        // Table 1: ad_copy_fingerprints — lifecycle-managed fingerprint entries.
+        try exec("""
+            CREATE TABLE IF NOT EXISTS ad_copy_fingerprints (
+                id                TEXT PRIMARY KEY,
+                podcastId         TEXT NOT NULL,
+                fingerprintHash   TEXT NOT NULL,
+                normalizedText    TEXT NOT NULL,
+                state             TEXT NOT NULL DEFAULT 'candidate',
+                confirmationCount INTEGER NOT NULL DEFAULT 0,
+                rollbackCount     INTEGER NOT NULL DEFAULT 0,
+                firstSeenAt       REAL NOT NULL,
+                lastConfirmedAt   REAL,
+                lastRollbackAt    REAL,
+                decayedAt         REAL,
+                blockedAt         REAL,
+                metadata          TEXT,
+                UNIQUE(podcastId, fingerprintHash)
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_acf_podcast ON ad_copy_fingerprints(podcastId)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_acf_state ON ad_copy_fingerprints(state)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_acf_podcast_state ON ad_copy_fingerprints(podcastId, state)")
+
+        // Table 2: fingerprint_source_events — append-only provenance log.
+        try exec("""
+            CREATE TABLE IF NOT EXISTS fingerprint_source_events (
+                id                TEXT PRIMARY KEY,
+                analysisAssetId   TEXT NOT NULL,
+                fingerprintHash   TEXT NOT NULL,
+                sourceAdWindowId  TEXT NOT NULL,
+                confidence        REAL NOT NULL,
+                createdAt         REAL NOT NULL
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_fse_asset ON fingerprint_source_events(analysisAssetId)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_fse_created ON fingerprint_source_events(createdAt)")
+
+        try setSchemaVersion(8)
     }
 
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
@@ -4629,6 +4676,214 @@ actor AnalysisStore {
                 transcriptVersion: transcriptVersion,
                 confidence: confidence,
                 scanCohortJSON: scanCohortJSON,
+                createdAt: createdAt
+            ))
+        }
+        return results
+    }
+
+    // MARK: - CRUD: ad_copy_fingerprints (Phase 9, playhead-4my.9.1)
+
+    /// Upsert a fingerprint entry. Uses INSERT OR REPLACE on the
+    /// natural key (podcastId, fingerprintHash).
+    func upsertFingerprintEntry(_ entry: FingerprintEntry) throws {
+        let sql = """
+            INSERT INTO ad_copy_fingerprints
+            (id, podcastId, fingerprintHash, normalizedText, state,
+             confirmationCount, rollbackCount, firstSeenAt, lastConfirmedAt,
+             lastRollbackAt, decayedAt, blockedAt, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(podcastId, fingerprintHash) DO UPDATE SET
+                normalizedText = excluded.normalizedText,
+                state = excluded.state,
+                confirmationCount = excluded.confirmationCount,
+                rollbackCount = excluded.rollbackCount,
+                lastConfirmedAt = excluded.lastConfirmedAt,
+                lastRollbackAt = excluded.lastRollbackAt,
+                decayedAt = excluded.decayedAt,
+                blockedAt = excluded.blockedAt,
+                metadata = excluded.metadata
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, entry.id)
+        bind(stmt, 2, entry.podcastId)
+        bind(stmt, 3, entry.fingerprintHash)
+        bind(stmt, 4, entry.normalizedText)
+        bind(stmt, 5, entry.state.rawValue)
+        bind(stmt, 6, entry.confirmationCount)
+        bind(stmt, 7, entry.rollbackCount)
+        bind(stmt, 8, entry.firstSeenAt)
+        bind(stmt, 9, entry.lastConfirmedAt)
+        bind(stmt, 10, entry.lastRollbackAt)
+        bind(stmt, 11, entry.decayedAt)
+        bind(stmt, 12, entry.blockedAt)
+        let metadataJSON = try encodeJSONString(entry.metadata)
+        bind(stmt, 13, metadataJSON)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Load a single fingerprint entry by its natural key.
+    func loadFingerprintEntry(
+        podcastId: String,
+        fingerprintHash: String
+    ) throws -> FingerprintEntry? {
+        let sql = """
+            SELECT id, podcastId, fingerprintHash, normalizedText, state,
+                   confirmationCount, rollbackCount, firstSeenAt, lastConfirmedAt,
+                   lastRollbackAt, decayedAt, blockedAt, metadata
+            FROM ad_copy_fingerprints
+            WHERE podcastId = ? AND fingerprintHash = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, podcastId)
+        bind(stmt, 2, fingerprintHash)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return try readFingerprintEntry(stmt)
+    }
+
+    /// Load all fingerprint entries for a podcast with a given state.
+    /// Rows with unrecognized enum values are skipped (logged) rather than
+    /// failing the entire batch.
+    func loadFingerprintEntries(
+        podcastId: String,
+        state: KnowledgeState
+    ) throws -> [FingerprintEntry] {
+        let sql = """
+            SELECT id, podcastId, fingerprintHash, normalizedText, state,
+                   confirmationCount, rollbackCount, firstSeenAt, lastConfirmedAt,
+                   lastRollbackAt, decayedAt, blockedAt, metadata
+            FROM ad_copy_fingerprints
+            WHERE podcastId = ? AND state = ?
+            ORDER BY firstSeenAt ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, podcastId)
+        bind(stmt, 2, state.rawValue)
+        var results: [FingerprintEntry] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            do {
+                results.append(try readFingerprintEntry(stmt))
+            } catch {
+                logger.warning("Skipping corrupt fingerprint entry: \(error.localizedDescription)")
+            }
+        }
+        return results
+    }
+
+    /// Load all fingerprint entries for a podcast regardless of state.
+    /// Rows with unrecognized enum values are skipped (logged) rather than
+    /// failing the entire batch.
+    func loadAllFingerprintEntries(podcastId: String) throws -> [FingerprintEntry] {
+        let sql = """
+            SELECT id, podcastId, fingerprintHash, normalizedText, state,
+                   confirmationCount, rollbackCount, firstSeenAt, lastConfirmedAt,
+                   lastRollbackAt, decayedAt, blockedAt, metadata
+            FROM ad_copy_fingerprints
+            WHERE podcastId = ?
+            ORDER BY firstSeenAt ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, podcastId)
+        var results: [FingerprintEntry] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            do {
+                results.append(try readFingerprintEntry(stmt))
+            } catch {
+                logger.warning("Skipping corrupt fingerprint entry: \(error.localizedDescription)")
+            }
+        }
+        return results
+    }
+
+    /// Read a FingerprintEntry from the current row of a prepared statement.
+    private func readFingerprintEntry(_ stmt: OpaquePointer?) throws -> FingerprintEntry {
+        let id = text(stmt, 0)
+        let podcastId = text(stmt, 1)
+        let fingerprintHash = text(stmt, 2)
+        let normalizedText = text(stmt, 3)
+        let stateRaw = text(stmt, 4)
+        let confirmationCount = Int(sqlite3_column_int(stmt, 5))
+        let rollbackCount = Int(sqlite3_column_int(stmt, 6))
+        let firstSeenAt = sqlite3_column_double(stmt, 7)
+        let lastConfirmedAt = optionalDouble(stmt, 8)
+        let lastRollbackAt = optionalDouble(stmt, 9)
+        let decayedAt = optionalDouble(stmt, 10)
+        let blockedAt = optionalDouble(stmt, 11)
+        let metadataJSON = optionalText(stmt, 12)
+
+        guard let state = KnowledgeState(rawValue: stateRaw) else {
+            throw AnalysisStoreError.queryFailed("Invalid KnowledgeState: \(stateRaw)")
+        }
+
+        let metadata: [String: String]? = try decodeJSON([String: String].self, from: metadataJSON)
+
+        return FingerprintEntry(
+            id: id,
+            podcastId: podcastId,
+            fingerprintHash: fingerprintHash,
+            normalizedText: normalizedText,
+            state: state,
+            confirmationCount: confirmationCount,
+            rollbackCount: rollbackCount,
+            firstSeenAt: firstSeenAt,
+            lastConfirmedAt: lastConfirmedAt,
+            lastRollbackAt: lastRollbackAt,
+            decayedAt: decayedAt,
+            blockedAt: blockedAt,
+            metadata: metadata
+        )
+    }
+
+    // MARK: - CRUD: fingerprint_source_events (Phase 9, playhead-4my.9.1)
+
+    /// Append a fingerprint source event (provenance log).
+    func appendFingerprintSourceEvent(_ event: FingerprintSourceEvent) throws {
+        let sql = """
+            INSERT OR IGNORE INTO fingerprint_source_events
+            (id, analysisAssetId, fingerprintHash, sourceAdWindowId, confidence, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, event.id)
+        bind(stmt, 2, event.analysisAssetId)
+        bind(stmt, 3, event.fingerprintHash)
+        bind(stmt, 4, event.sourceAdWindowId)
+        bind(stmt, 5, event.confidence)
+        bind(stmt, 6, event.createdAt)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Load all source events for a given analysis asset, ordered by createdAt.
+    func loadFingerprintSourceEvents(analysisAssetId: String) throws -> [FingerprintSourceEvent] {
+        let sql = """
+            SELECT id, analysisAssetId, fingerprintHash, sourceAdWindowId, confidence, createdAt
+            FROM fingerprint_source_events
+            WHERE analysisAssetId = ?
+            ORDER BY createdAt ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        var results: [FingerprintSourceEvent] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id = text(stmt, 0)
+            let assetId = text(stmt, 1)
+            let fpHash = text(stmt, 2)
+            let windowId = text(stmt, 3)
+            let confidence = sqlite3_column_double(stmt, 4)
+            let createdAt = sqlite3_column_double(stmt, 5)
+
+            results.append(FingerprintSourceEvent(
+                id: id,
+                analysisAssetId: assetId,
+                fingerprintHash: fpHash,
+                sourceAdWindowId: windowId,
+                confidence: confidence,
                 createdAt: createdAt
             ))
         }

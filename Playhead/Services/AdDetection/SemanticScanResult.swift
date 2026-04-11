@@ -179,6 +179,7 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
     case acoustic
     case catalog
     case classifier
+    case fingerprint
 }
 
 struct EvidenceEvent: Sendable, Equatable {

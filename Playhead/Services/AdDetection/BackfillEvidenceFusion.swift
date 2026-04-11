@@ -28,19 +28,23 @@ struct FusionWeightConfig: Sendable {
     let acousticCap: Double
     /// Maximum weight contribution from a single catalog entry.
     let catalogCap: Double
+    /// Maximum weight contribution from fingerprint evidence.
+    let fingerprintCap: Double
 
     init(
         fmCap: Double = 0.4,
         classifierCap: Double = 0.3,
         lexicalCap: Double = 0.2,
         acousticCap: Double = 0.2,
-        catalogCap: Double = 0.2
+        catalogCap: Double = 0.2,
+        fingerprintCap: Double = 0.25
     ) {
         self.fmCap = fmCap
         self.classifierCap = classifierCap
         self.lexicalCap = lexicalCap
         self.acousticCap = acousticCap
         self.catalogCap = catalogCap
+        self.fingerprintCap = fingerprintCap
     }
 }
 
@@ -71,6 +75,8 @@ struct BackfillEvidenceFusion: Sendable {
     let acousticEntries: [EvidenceLedgerEntry]
     /// Pre-constructed catalog ledger entries.
     let catalogEntries: [EvidenceLedgerEntry]
+    /// Pre-constructed fingerprint ledger entries (Phase 9).
+    var fingerprintEntries: [EvidenceLedgerEntry] = []
     let mode: FMBackfillMode
     let config: FusionWeightConfig
 
@@ -143,6 +149,16 @@ struct BackfillEvidenceFusion: Sendable {
             let capped = EvidenceLedgerEntry(
                 source: .catalog,
                 weight: min(entry.weight, config.catalogCap),
+                detail: entry.detail
+            )
+            ledger.append(capped)
+        }
+
+        // Fingerprint entries: always included (Phase 9)
+        for entry in fingerprintEntries {
+            let capped = EvidenceLedgerEntry(
+                source: .fingerprint,
+                weight: min(entry.weight, config.fingerprintCap),
                 detail: entry.detail
             )
             ledger.append(capped)
@@ -307,7 +323,7 @@ struct DecisionMapper: Sendable {
     /// Needs external corroboration from any non-FM source: classifier, lexical, catalog, or acoustic.
     /// Classifier is included because it is an independent, non-FM signal that provides corroboration.
     private func quorumGateForFMAcoustic() -> SkipEligibilityGate {
-        let externalSources: Set<EvidenceSourceType> = [.classifier, .lexical, .catalog, .acoustic]
+        let externalSources: Set<EvidenceSourceType> = [.classifier, .lexical, .catalog, .acoustic, .fingerprint]
         let hasExternalCorroboration = ledger.contains { externalSources.contains($0.source) }
         return hasExternalCorroboration ? .eligible : .blockedByEvidenceQuorum
     }

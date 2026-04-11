@@ -60,6 +60,14 @@ enum RegionShadowPhase {
         /// wired, or runner produced nothing).
         let fmWindows: [FMRefinementWindowOutput]
 
+        /// Phase 9 (playhead-4my.9.1): optional fingerprint store for
+        /// store-backed fingerprint matching. When nil, falls back to the
+        /// legacy stub that returns empty results.
+        let fingerprintStore: AdCopyFingerprintStore?
+        /// Phase 9 (playhead-4my.9.1): podcast identifier for fingerprint
+        /// store queries. Required when fingerprintStore is non-nil.
+        let podcastId: String?
+
         init(
             analysisAssetId: String,
             chunks: [TranscriptChunk],
@@ -68,7 +76,9 @@ enum RegionShadowPhase {
             episodeDuration: Double,
             priors: ShowPriors,
             podcastProfile: PodcastProfile? = nil,
-            fmWindows: [FMRefinementWindowOutput] = []
+            fmWindows: [FMRefinementWindowOutput] = [],
+            fingerprintStore: AdCopyFingerprintStore? = nil,
+            podcastId: String? = nil
         ) {
             self.analysisAssetId = analysisAssetId
             self.chunks = chunks
@@ -78,6 +88,8 @@ enum RegionShadowPhase {
             self.priors = priors
             self.podcastProfile = podcastProfile
             self.fmWindows = fmWindows
+            self.fingerprintStore = fingerprintStore
+            self.podcastId = podcastId
         }
     }
 
@@ -88,7 +100,7 @@ enum RegionShadowPhase {
     /// `RegionProposalBuilder.build` and `RegionFeatureExtractor.extract`
     /// as of playhead-xba. Prior to this wire-up, both types were reachable
     /// only from their own unit tests.
-    static func run(_ input: Input) -> [RegionFeatureBundle] {
+    static func run(_ input: Input) async throws -> [RegionFeatureBundle] {
         guard !input.chunks.isEmpty else { return [] }
 
         // Reuse the same atomization call shape as `runShadowFMPhase`. The
@@ -109,11 +121,22 @@ enum RegionShadowPhase {
         // types — no persistence, no side effects.
         let acousticBreaks = AcousticBreakDetector.detectBreaks(in: input.featureWindows)
 
-        // Stub matchers (Phases 8 & 9). Both return `[]` today; including
-        // them keeps the call sites live so that when the stores land, the
-        // Phase 4 shadow output immediately starts reflecting them.
+        // Phase 8 sponsor matcher: stub (returns []) when no store provided.
         let sponsorMatches = SponsorKnowledgeMatcher.match(atoms: atoms)
-        let fingerprintMatches = AdCopyFingerprintMatcher.match(atoms: atoms)
+
+        // Phase 9 fingerprint matcher: use store-backed overload when both
+        // a fingerprintStore and podcastId are provided; otherwise fall back
+        // to the legacy stub that returns [].
+        let fingerprintMatches: [FingerprintMatch]
+        if let fpStore = input.fingerprintStore, let podcastId = input.podcastId {
+            fingerprintMatches = try await AdCopyFingerprintMatcher.match(
+                atoms: atoms,
+                podcastId: podcastId,
+                fingerprintStore: fpStore
+            )
+        } else {
+            fingerprintMatches = AdCopyFingerprintMatcher.match(atoms: atoms)
+        }
 
         let proposalInput = RegionProposalInput(
             atoms: atoms,

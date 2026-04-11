@@ -221,7 +221,7 @@ struct RegionShadowPhaseIntegrationTests {
     }
 
     @Test("RegionShadowPhase.run threads FM refinement windows through RegionProposalBuilder")
-    func regionShadowPhaseRunExposesFMOriginWhenWindowsProvided() throws {
+    func regionShadowPhaseRunExposesFMOriginWhenWindowsProvided() async throws {
         // playhead-xba follow-up: pins the end-to-end property that
         // `RegionShadowPhase.Input.fmWindows` (threaded from
         // `BackfillJobRunner.RunResult.fmRefinementWindows` through
@@ -346,7 +346,7 @@ struct RegionShadowPhaseIntegrationTests {
             )
         ]
 
-        let bundles = RegionShadowPhase.run(
+        let bundles = try await RegionShadowPhase.run(
             RegionShadowPhase.Input(
                 analysisAssetId: assetId,
                 chunks: chunks,
@@ -388,7 +388,7 @@ struct RegionShadowPhaseIntegrationTests {
     }
 
     @Test("RegionShadowPhase.run produces uniform feature bundles from synthetic inputs")
-    func regionShadowPhaseRunDirect() throws {
+    func regionShadowPhaseRunDirect() async throws {
         // Unit-level pin on the composition helper itself: given a known
         // lexical candidate and feature windows, `RegionShadowPhase.run`
         // must return at least one bundle whose region pulls in the
@@ -451,7 +451,7 @@ struct RegionShadowPhaseIntegrationTests {
             t += 2.0
         }
 
-        let bundles = RegionShadowPhase.run(
+        let bundles = try await RegionShadowPhase.run(
             RegionShadowPhase.Input(
                 analysisAssetId: assetId,
                 chunks: chunks,
@@ -469,7 +469,7 @@ struct RegionShadowPhaseIntegrationTests {
     }
 
     @Test("RegionShadowPhase.run consults podcastProfile for per-show sponsor rescoring")
-    func regionShadowPhasePodcastProfilePlumbing() throws {
+    func regionShadowPhasePodcastProfilePlumbing() async throws {
         // playhead-8n1: pins the end-to-end property that
         // `RegionShadowPhase.Input.podcastProfile` reaches the
         // `LexicalScanner` that `RegionFeatureExtractor` constructs to
@@ -582,8 +582,8 @@ struct RegionShadowPhaseIntegrationTests {
             )
         }
 
-        let bundlesWithoutProfile = RegionShadowPhase.run(makeInput(profile: nil))
-        let bundlesWithProfile = RegionShadowPhase.run(makeInput(profile: profile))
+        let bundlesWithoutProfile = try await RegionShadowPhase.run(makeInput(profile: nil))
+        let bundlesWithProfile = try await RegionShadowPhase.run(makeInput(profile: profile))
 
         #expect(!bundlesWithoutProfile.isEmpty, "baseline run (nil profile) should still produce bundles")
         #expect(

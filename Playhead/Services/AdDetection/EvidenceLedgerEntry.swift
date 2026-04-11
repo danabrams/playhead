@@ -39,6 +39,8 @@ enum EvidenceLedgerDetail: Sendable {
     case acoustic(breakStrength: Double)
     /// Catalog entries matched for this span.
     case catalog(entryCount: Int)
+    /// Ad copy fingerprint matches for this span.
+    case fingerprint(matchCount: Int, averageSimilarity: Double)
 }
 
 // MARK: - EvidenceLedgerEntry

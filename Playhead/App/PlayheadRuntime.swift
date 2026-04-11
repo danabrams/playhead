@@ -329,6 +329,11 @@ final class PlayheadRuntime {
         let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
         self.correctionStore = correctionStore
 
+        // Phase 9 (playhead-4my.9.1): construct the fingerprint store before
+        // AdDetectionService so it can be injected for backfill-path fingerprint
+        // matching. Mirrors SponsorKnowledgeStore instantiation pattern.
+        let fingerprintStore = AdCopyFingerprintStore(store: analysisStore)
+
         // Phase 6.5 (playhead-4my.16): skipOrchestrator is constructed before
         // adDetectionService so it can be injected for step-17 forwarding.
         // The orchestrator is otherwise wired identically to before this change.
@@ -360,7 +365,10 @@ final class PlayheadRuntime {
             phase5ProjectorObserver: phase5ProjectorObserver,
             // Phase 6.5 (playhead-4my.16): forward eligible fusion decisions
             // to the orchestrator after each backfill run (step 17).
-            skipOrchestrator: skipOrchestrator
+            skipOrchestrator: skipOrchestrator,
+            // Phase 9 (playhead-4my.9.1): inject the fingerprint store for
+            // backfill-path fingerprint matching and evidence contribution.
+            fingerprintStore: fingerprintStore
         )
         self.downloadManager = DownloadManager()
         self.analysisCoordinator = AnalysisCoordinator(
