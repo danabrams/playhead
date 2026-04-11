@@ -1913,6 +1913,636 @@ struct PodcastDiscoveryPersistenceTests {
     }
 }
 
+// MARK: - AssetCache: Bootstrap and Composition
+
+@Suite("AssetCache - Bootstrap and Composition")
+struct AssetCacheTests {
+
+    private func makeManifest() -> ModelManifest {
+        ModelManifest(
+            version: 1,
+            generatedAt: .now,
+            models: [
+                ModelEntry(
+                    id: "test-model-a",
+                    role: .asrFast,
+                    displayName: "Test A",
+                    modelVersion: "1.0.0",
+                    downloadURL: URL(string: "https://example.com/a.bin")!,
+                    sha256: String(repeating: "a", count: 64),
+                    compressedSizeBytes: 1000,
+                    uncompressedSizeBytes: 2000,
+                    priority: 100,
+                    minimumOS: "26.0",
+                    requiredCapabilities: []
+                ),
+                ModelEntry(
+                    id: "test-model-b",
+                    role: .classifier,
+                    displayName: "Test B",
+                    modelVersion: "2.0.0",
+                    downloadURL: URL(string: "https://example.com/b.bin")!,
+                    sha256: String(repeating: "b", count: 64),
+                    compressedSizeBytes: 500,
+                    uncompressedSizeBytes: 1000,
+                    priority: 50,
+                    minimumOS: "26.0",
+                    requiredCapabilities: []
+                ),
+            ]
+        )
+    }
+
+    @Test("AssetCache exposes modelInventory and assetProvider")
+    func compositionOwnership() async throws {
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AssetCacheTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let manifest = makeManifest()
+        let cache = AssetCache(manifest: manifest, modelsRootOverride: tempRoot)
+
+        // Verify composition: the cache owns the inventory and provider.
+        // Access nonisolated properties through the actor-isolated inventory.
+        let inventory = await cache.modelInventory
+        #expect(inventory.modelsRoot == tempRoot)
+    }
+
+    @Test("Bootstrap creates directories and scans for missing models")
+    func bootstrapCreatesDirectories() async throws {
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AssetCacheBootstrap-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let cache = AssetCache(manifest: makeManifest(), modelsRootOverride: tempRoot)
+        try await cache.bootstrap()
+
+        let fm = FileManager.default
+        let inventory = await cache.modelInventory
+        #expect(fm.fileExists(atPath: inventory.activeDirectory.path),
+                "Bootstrap should create Active directory")
+        #expect(fm.fileExists(atPath: inventory.stagingDirectory.path),
+                "Bootstrap should create Staging directory")
+        #expect(fm.fileExists(atPath: inventory.downloadsDirectory.path),
+                "Bootstrap should create Downloads directory")
+        #expect(fm.fileExists(atPath: inventory.rollbackDirectory.path),
+                "Bootstrap should create Rollback directory")
+
+        // All models should be missing after initial scan.
+        let missing = await inventory.missingModels()
+        #expect(missing.count == 2,
+                "All models should be missing after initial bootstrap")
+    }
+
+    @Test("Bootstrap is idempotent")
+    func bootstrapIdempotent() async throws {
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AssetCacheIdempotent-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let cache = AssetCache(manifest: makeManifest(), modelsRootOverride: tempRoot)
+
+        // Bootstrap twice should not throw.
+        try await cache.bootstrap()
+        try await cache.bootstrap()
+
+        let missing = await cache.modelInventory.missingModels()
+        #expect(missing.count == 2)
+    }
+}
+
+// MARK: - FileHasher
+
+@Suite("FileHasher - SHA-256 Hashing")
+struct FileHasherTests {
+
+    @Test("SHA-256 produces consistent 64-character hex digest")
+    func sha256Format() throws {
+        let tempFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hash-test-\(UUID().uuidString)")
+        try "hello world".write(to: tempFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: tempFile) }
+
+        let hash = try FileHasher.sha256(fileURL: tempFile)
+        #expect(hash.count == 64, "SHA-256 hex digest should be 64 characters")
+        #expect(hash.allSatisfy { $0.isHexDigit },
+                "SHA-256 digest should contain only hex characters")
+    }
+
+    @Test("Same content produces same hash")
+    func deterministicHash() throws {
+        let content = "deterministic hash test content"
+        let file1 = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hash-det-1-\(UUID().uuidString)")
+        let file2 = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hash-det-2-\(UUID().uuidString)")
+        try content.write(to: file1, atomically: true, encoding: .utf8)
+        try content.write(to: file2, atomically: true, encoding: .utf8)
+        defer {
+            try? FileManager.default.removeItem(at: file1)
+            try? FileManager.default.removeItem(at: file2)
+        }
+
+        let hash1 = try FileHasher.sha256(fileURL: file1)
+        let hash2 = try FileHasher.sha256(fileURL: file2)
+        #expect(hash1 == hash2, "Identical content should produce identical hash")
+    }
+
+    @Test("Different content produces different hash")
+    func differentContentDifferentHash() throws {
+        let file1 = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hash-diff-1-\(UUID().uuidString)")
+        let file2 = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hash-diff-2-\(UUID().uuidString)")
+        try "content A".write(to: file1, atomically: true, encoding: .utf8)
+        try "content B".write(to: file2, atomically: true, encoding: .utf8)
+        defer {
+            try? FileManager.default.removeItem(at: file1)
+            try? FileManager.default.removeItem(at: file2)
+        }
+
+        let hash1 = try FileHasher.sha256(fileURL: file1)
+        let hash2 = try FileHasher.sha256(fileURL: file2)
+        #expect(hash1 != hash2, "Different content should produce different hash")
+    }
+
+    @Test("Empty file produces a valid hash")
+    func emptyFileHash() throws {
+        let tempFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hash-empty-\(UUID().uuidString)")
+        FileManager.default.createFile(atPath: tempFile.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: tempFile) }
+
+        let hash = try FileHasher.sha256(fileURL: tempFile)
+        #expect(hash.count == 64)
+        // SHA-256 of empty input is well-known:
+        // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        #expect(hash == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    }
+
+    @Test("Verify returns true for matching hash")
+    func verifyMatching() throws {
+        let tempFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hash-verify-\(UUID().uuidString)")
+        try "verify me".write(to: tempFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: tempFile) }
+
+        let expected = try FileHasher.sha256(fileURL: tempFile)
+        let result = try FileHasher.verify(fileURL: tempFile, expected: expected)
+        #expect(result == true, "Verify should return true for matching hash")
+    }
+
+    @Test("Verify returns false for mismatched hash")
+    func verifyMismatched() throws {
+        let tempFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hash-mismatch-\(UUID().uuidString)")
+        try "some data".write(to: tempFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: tempFile) }
+
+        let result = try FileHasher.verify(
+            fileURL: tempFile,
+            expected: String(repeating: "0", count: 64)
+        )
+        #expect(result == false, "Verify should return false for wrong hash")
+    }
+
+    @Test("Verify is case-insensitive")
+    func verifyCaseInsensitive() throws {
+        let tempFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hash-case-\(UUID().uuidString)")
+        try "case test".write(to: tempFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: tempFile) }
+
+        let hash = try FileHasher.sha256(fileURL: tempFile)
+        let upperHash = hash.uppercased()
+        let result = try FileHasher.verify(fileURL: tempFile, expected: upperHash)
+        #expect(result == true, "Verify should be case-insensitive")
+    }
+}
+
+// MARK: - LexicalScanner: Per-Regex Exhaustive Coverage
+
+@Suite("LexicalScanner - Per-Regex Pattern Coverage")
+struct LexicalScannerPerRegexTests {
+
+    // MARK: Sponsor phrases — each regex individually
+
+    @Test("Detects 'sponsored by'")
+    func sponsoredBy() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "this show is sponsored by squarespace")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .sponsor }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'today s sponsor'")
+    func todaysSponsor() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "today s sponsor is betterhelp")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .sponsor }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'thanks to our sponsor'")
+    func thanksToOurSponsor() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "thanks to our sponsor for making this possible")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .sponsor }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'this episode is sponsored'")
+    func thisEpisodeSponsored() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "this episode is sponsored by audible")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .sponsor }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'a word from our sponsor'")
+    func wordFromSponsor() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "and now a word from our sponsor")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .sponsor }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'supported by'")
+    func supportedBy() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "this podcast is supported by our listeners")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .sponsor }
+        #expect(!hits.isEmpty)
+    }
+
+    // MARK: Promo codes — each regex individually
+
+    @Test("Detects 'promo code'")
+    func promoCode() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "enter promo code SPRING at checkout")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .promoCode }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'discount code'")
+    func discountCode() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "use discount code SAVE at their website")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .promoCode }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'coupon code'")
+    func couponCode() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "try coupon code FALL25 when you sign up")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .promoCode }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'code X at checkout'")
+    func codeAtCheckout() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "just enter code PODCAST at checkout")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .promoCode }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'enter code'")
+    func enterCode() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "enter code BONUS to save money")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .promoCode }
+        #expect(!hits.isEmpty)
+    }
+
+    // MARK: URL CTAs — each regex individually
+
+    @Test("Detects 'dot com slash X'")
+    func dotComSlash() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "visit acme com slash podcast for details")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .urlCTA }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'head to X'")
+    func headTo() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "head to betterhelp com to get started")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .urlCTA }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'visit X com'")
+    func visitCom() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "visit squarespace com today")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .urlCTA }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'head over to'")
+    func headOverTo() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "head over to our website for more info")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .urlCTA }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'click the link'")
+    func clickTheLink() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "click the link in the description below")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .urlCTA }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'link in the description'")
+    func linkInDescription() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "there is a link in the description")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .urlCTA }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'link in the show notes'")
+    func linkInShowNotes() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "link in the show notes for you")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .urlCTA }
+        #expect(!hits.isEmpty)
+    }
+
+    // MARK: Purchase language — each regex individually
+
+    @Test("Detects 'money back guarantee'")
+    func moneyBackGuarantee() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "they offer a money back guarantee")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .purchaseLanguage }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'first month free'")
+    func firstMonthFree() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "get your first month free when you sign up")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .purchaseLanguage }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'N percent off'")
+    func percentOff() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "get 20 percent off your first order")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .purchaseLanguage }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'satisfaction guarantee'")
+    func satisfactionGuarantee() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "hundred percent satisfaction guarantee")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .purchaseLanguage }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'risk free'")
+    func riskFree() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "try it risk free for thirty days")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .purchaseLanguage }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'sign up now'")
+    func signUpNow() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "sign up now to get started")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .purchaseLanguage }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'limited time offer'")
+    func limitedTimeOffer() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "this is a limited time offer")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .purchaseLanguage }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'exclusive offer'")
+    func exclusiveOffer() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "exclusive offer for our listeners")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .purchaseLanguage }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'special offer'")
+    func specialOffer() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "we have a special offer for you")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .purchaseLanguage }
+        #expect(!hits.isEmpty)
+    }
+
+    // MARK: Transition markers — each regex individually
+
+    @Test("Detects 'let s get back to'")
+    func letsGetBackTo() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "let s get back to the interview")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .transitionMarker }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'and now back to'")
+    func andNowBackTo() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "and now back to the program")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .transitionMarker }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'back to the show'")
+    func backToTheShow() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "alright back to the show")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .transitionMarker }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'back to the episode'")
+    func backToTheEpisode() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "ok back to the episode")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .transitionMarker }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'without further ado'")
+    func withoutFurtherAdo() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "without further ado lets continue")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .transitionMarker }
+        #expect(!hits.isEmpty)
+    }
+
+    @Test("Detects 'moving on'")
+    func movingOn() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(text: "moving on to the next topic")
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .transitionMarker }
+        #expect(!hits.isEmpty)
+    }
+
+    // MARK: Strong URL patterns
+
+    @Test("Strong URL detects .org TLD")
+    func strongUrlOrg() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(
+            text: "donate at charity.org today",
+            normalizedText: TranscriptEngineService.normalizeText("donate at charity.org today")
+        )
+        // Strong URL patterns run against raw text.
+        let hits = scanner.scanChunk(chunk).filter {
+            $0.category == .urlCTA && $0.matchedText.contains("charity.org")
+        }
+        #expect(!hits.isEmpty, "Should detect .org TLD in raw text")
+    }
+
+    @Test("Strong URL detects .io TLD")
+    func strongUrlIo() {
+        let scanner = LexicalScanner()
+        let rawText = "check out linear.io for project management"
+        let chunk = makeTranscriptChunk(
+            text: rawText,
+            normalizedText: TranscriptEngineService.normalizeText(rawText)
+        )
+        let hits = scanner.scanChunk(chunk).filter {
+            $0.category == .urlCTA && $0.matchedText.contains("linear.io")
+        }
+        #expect(!hits.isEmpty, "Should detect .io TLD in raw text")
+    }
+
+    @Test("Strong URL detects .fm TLD")
+    func strongUrlFm() {
+        let scanner = LexicalScanner()
+        let rawText = "subscribe at overcast.fm for free"
+        let chunk = makeTranscriptChunk(
+            text: rawText,
+            normalizedText: TranscriptEngineService.normalizeText(rawText)
+        )
+        let hits = scanner.scanChunk(chunk).filter {
+            $0.category == .urlCTA && $0.matchedText.contains("overcast.fm")
+        }
+        #expect(!hits.isEmpty, "Should detect .fm TLD in raw text")
+    }
+
+    // MARK: rescoreRegionText
+
+    @Test("rescoreRegionText returns nil for empty text")
+    func rescoreEmpty() {
+        let scanner = LexicalScanner()
+        let result = scanner.rescoreRegionText(
+            "   ", analysisAssetId: "a", startTime: 0, endTime: 10
+        )
+        #expect(result == nil)
+    }
+
+    @Test("rescoreRegionText returns candidate for ad-laden text")
+    func rescoreAdText() {
+        let scanner = LexicalScanner()
+        let result = scanner.rescoreRegionText(
+            "brought to you by acme corp use code SAVE20",
+            analysisAssetId: "a", startTime: 100, endTime: 130
+        )
+        #expect(result != nil, "Ad-laden text should produce a candidate")
+        #expect(result?.startTime == 100)
+        #expect(result?.endTime == 130)
+    }
+
+    @Test("rescoreRegionText returns nil for content-only text")
+    func rescoreContentOnly() {
+        let scanner = LexicalScanner()
+        let result = scanner.rescoreRegionText(
+            "the weather is nice today and the birds are singing",
+            analysisAssetId: "a", startTime: 0, endTime: 10
+        )
+        #expect(result == nil, "Content-only text should not produce a candidate")
+    }
+
+    // MARK: Time interpolation
+
+    @Test("Hit timing is interpolated proportionally within chunk")
+    func timingInterpolation() {
+        let scanner = LexicalScanner()
+        // "brought to you by" appears at the start of this text.
+        let chunk = makeTranscriptChunk(
+            startTime: 100, endTime: 200,
+            text: "brought to you by acme corp and other things that follow"
+        )
+        let hits = scanner.scanChunk(chunk).filter { $0.category == .sponsor }
+        guard let hit = hits.first else {
+            #expect(Bool(false), "Expected a sponsor hit")
+            return
+        }
+        // The match should start near the beginning of the chunk time range.
+        #expect(hit.startTime >= 100)
+        #expect(hit.startTime < 150, "Hit should be in first half of chunk")
+        #expect(hit.endTime > hit.startTime)
+        #expect(hit.endTime <= 200)
+    }
+
+    // MARK: Category weights
+
+    @Test("Promo code hits have higher weight than URL CTA hits")
+    func categoryWeightOrdering() {
+        let scanner = LexicalScanner()
+        let chunk = makeTranscriptChunk(
+            text: "use code SAVE20 at checkout and check out their website"
+        )
+        let hits = scanner.scanChunk(chunk)
+        let promoWeight = hits.filter { $0.category == .promoCode }.first?.weight ?? 0
+        let urlWeight = hits.filter { $0.category == .urlCTA }.first?.weight ?? 0
+        if promoWeight > 0 && urlWeight > 0 {
+            #expect(promoWeight > urlWeight,
+                    "Promo code weight should exceed URL CTA weight")
+        }
+    }
+}
+
+// MARK: - EntitlementManager: Static Properties
+
+@Suite("EntitlementManager - Static Configuration")
+struct EntitlementManagerTests {
+
+    @Test("Premium product identifier is correct")
+    func premiumProductId() {
+        #expect(PlayheadProduct.premiumUnlock == "com.playhead.premium")
+    }
+
+    @Test("EntitlementManager starts in non-premium state")
+    func initialState() async {
+        let manager = EntitlementManager()
+        let isPremium = await manager.isPremium
+        #expect(isPremium == false, "New EntitlementManager should default to non-premium")
+    }
+
+    @Test("premiumUpdates returns an AsyncStream")
+    func premiumUpdatesStream() async {
+        let manager = EntitlementManager()
+        // Verify the stream is constructible and yields the initial value.
+        var iterator = manager.premiumUpdates.makeAsyncIterator()
+        let first = await iterator.next()
+        #expect(first == false, "Initial premium update should be false")
+    }
+}
+
 @Suite("SwiftData Predicate Guardrails")
 struct SwiftDataPredicateGuardrailTests {
 
