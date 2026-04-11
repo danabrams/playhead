@@ -329,11 +329,6 @@ final class PlayheadRuntime {
         let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
         self.correctionStore = correctionStore
 
-        // Phase 9 (playhead-4my.9.1): construct the fingerprint store before
-        // AdDetectionService so it can be injected for backfill-path fingerprint
-        // matching. Mirrors SponsorKnowledgeStore instantiation pattern.
-        let fingerprintStore = AdCopyFingerprintStore(store: analysisStore)
-
         // Phase 6.5 (playhead-4my.16): skipOrchestrator is constructed before
         // adDetectionService so it can be injected for step-17 forwarding.
         // The orchestrator is otherwise wired identically to before this change.
@@ -365,10 +360,7 @@ final class PlayheadRuntime {
             phase5ProjectorObserver: phase5ProjectorObserver,
             // Phase 6.5 (playhead-4my.16): forward eligible fusion decisions
             // to the orchestrator after each backfill run (step 17).
-            skipOrchestrator: skipOrchestrator,
-            // Phase 9 (playhead-4my.9.1): inject the fingerprint store for
-            // backfill-path fingerprint matching and evidence contribution.
-            fingerprintStore: fingerprintStore
+            skipOrchestrator: skipOrchestrator
         )
         self.downloadManager = DownloadManager()
         self.analysisCoordinator = AnalysisCoordinator(
@@ -846,14 +838,35 @@ final class PlayheadRuntime {
     }
 
     func recordListenRewind(windowId: String, podcastId: String) async {
-        do {
-            try await adDetectionService.recordListenRewind(
-                windowId: windowId,
-                podcastId: podcastId
-            )
-        } catch {
-            // Rewinds are user-facing; trust scoring remains best-effort.
-        }
+        // Route through SkipOrchestrator which handles:
+        // - In-memory state revert (removes skip cue)
+        // - SQLite persistence
+        // - Trust scoring via TrustScoringService
+        // - CorrectionEvent recording
+        // - evaluateAndPush() to broadcast segment updates
+        await skipOrchestrator.recordListenRevert(
+            windowId: windowId,
+            podcastId: podcastId
+        )
+    }
+
+    /// Revert ad windows overlapping a time range. Used by "This isn't an ad"
+    /// popover path which identifies ads by span rather than window ID.
+    func revertAdWindowByTimeRange(start: Double, end: Double) async {
+        await skipOrchestrator.revertByTimeRange(
+            start: start,
+            end: end,
+            podcastId: currentPodcastId
+        )
+    }
+
+    /// Revert a specific ad window by ID without rewinding playback.
+    /// Used by the "Not an ad" banner path.
+    func revertAdWindow(windowId: String, podcastId: String) async {
+        await skipOrchestrator.revertWindow(
+            windowId: windowId,
+            podcastId: podcastId
+        )
     }
 
     func togglePlayPause(isPlaying: Bool) async {

@@ -13,6 +13,9 @@ struct AdRegionPopover: View {
 
     let span: DecodedSpan
     let correctionStore: any UserCorrectionStore
+    /// Callback to revert overlapping ad windows in the SkipOrchestrator.
+    /// Injected by the caller; defaults to no-op for backward compatibility.
+    var onRevertAdWindows: (DecodedSpan) async -> Void = { _ in }
     var onDismiss: () -> Void = {}
 
     @State private var showVetoConfirmation = false
@@ -36,6 +39,9 @@ struct AdRegionPopover: View {
             Button("Confirm", role: .destructive) {
                 Task {
                     await correctionStore.recordVeto(span: span)
+                    // Revert overlapping ad windows in the orchestrator so the
+                    // skip cue is removed and the timeline updates immediately.
+                    await onRevertAdWindows(span)
                     onDismiss()
                 }
             }

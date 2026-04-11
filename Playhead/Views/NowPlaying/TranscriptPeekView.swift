@@ -28,6 +28,10 @@ struct TranscriptPeekView: View {
     /// Podcast ID for the current episode, used for trust signal recording.
     var podcastId: String?
 
+    /// Callback to revert overlapping ad windows in the SkipOrchestrator.
+    /// Threaded through to AdRegionPopover for "This isn't an ad" gesture.
+    var onRevertAdWindows: (DecodedSpan) async -> Void = { _ in }
+
     /// Phase 5 (u4d): Which decoded span's popover is currently showing.
     @State private var selectedDecodedSpan: DecodedSpan? = nil
 
@@ -252,6 +256,7 @@ private extension TranscriptPeekView {
                 AdRegionPopover(
                     span: span,
                     correctionStore: correctionStore,
+                    onRevertAdWindows: onRevertAdWindows,
                     onDismiss: { selectedDecodedSpan = nil }
                 )
             }

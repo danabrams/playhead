@@ -570,6 +570,136 @@ actor SkipOrchestrator {
         evaluateAndPush()
     }
 
+    /// Revert all managed windows overlapping the given time range.
+    /// Used by the "Not an ad" banner and "This isn't an ad" popover paths,
+    /// which identify the ad by its time span rather than a specific windowId.
+    func revertByTimeRange(start: Double, end: Double, podcastId: String?) async {
+        var revertedAny = false
+
+        for (id, var managed) in windows {
+            // Skip already-terminal states that aren't active.
+            guard managed.decisionState != .reverted,
+                  managed.decisionState != .suppressed else { continue }
+
+            // Check overlap: window overlaps [start, end] if
+            // windowStart < end && windowEnd > start.
+            guard managed.snappedStart < end, managed.snappedEnd > start else { continue }
+
+            managed.decisionState = .reverted
+            managed.cueActive = false
+            windows[id] = managed
+            revertedAny = true
+
+            logDecision(
+                managed: managed,
+                decision: .reverted,
+                reason: "User correction: not an ad (time range)"
+            )
+
+            // Persist decision state change.
+            do {
+                try await store.updateAdWindowDecision(
+                    id: id,
+                    decisionState: SkipDecisionState.reverted.rawValue
+                )
+            } catch {
+                logger.warning("Failed to persist revert for \(id): \(error.localizedDescription)")
+            }
+
+            // Persist a manualVeto CorrectionEvent.
+            if let correctionStore {
+                let assetId = managed.adWindow.analysisAssetId
+                let scope = CorrectionScope.exactSpan(
+                    assetId: assetId,
+                    ordinalRange: 0...Int.max
+                )
+                let event = CorrectionEvent(
+                    analysisAssetId: assetId,
+                    scope: scope.serialized,
+                    createdAt: Date().timeIntervalSince1970,
+                    source: .manualVeto,
+                    podcastId: podcastId
+                )
+                let store = correctionStore
+                Task {
+                    do {
+                        try await store.record(event)
+                    } catch {
+                        Logger(subsystem: "com.playhead", category: "SkipOrchestrator")
+                            .warning("Failed to record manual-veto correction: \(error)")
+                    }
+                }
+            }
+        }
+
+        if revertedAny {
+            // Signal trust engine once per user correction, not per window.
+            if let podcastId, let trustService {
+                await trustService.recordFalseSkipSignal(podcastId: podcastId)
+            }
+            evaluateAndPush()
+        }
+    }
+
+    /// Revert a specific window by ID using the manualVeto source.
+    /// Same as recordListenRevert but uses .manualVeto correction source
+    /// and does not imply a playback rewind.
+    func revertWindow(windowId: String, podcastId: String? = nil) async {
+        guard var managed = windows[windowId] else { return }
+
+        managed.decisionState = .reverted
+        managed.cueActive = false
+        windows[windowId] = managed
+
+        logDecision(
+            managed: managed,
+            decision: .reverted,
+            reason: "User correction: not an ad (banner)"
+        )
+
+        // Persist decision state change.
+        do {
+            try await store.updateAdWindowDecision(
+                id: windowId,
+                decisionState: SkipDecisionState.reverted.rawValue
+            )
+        } catch {
+            logger.warning("Failed to persist revert for \(windowId): \(error.localizedDescription)")
+        }
+
+        // Signal the trust engine about the false skip.
+        if let podcastId, let trustService {
+            await trustService.recordFalseSkipSignal(podcastId: podcastId)
+        }
+
+        // Persist a manualVeto CorrectionEvent.
+        if let correctionStore {
+            let assetId = managed.adWindow.analysisAssetId
+            let scope = CorrectionScope.exactSpan(
+                assetId: assetId,
+                ordinalRange: 0...Int.max
+            )
+            let event = CorrectionEvent(
+                analysisAssetId: assetId,
+                scope: scope.serialized,
+                createdAt: Date().timeIntervalSince1970,
+                source: .manualVeto,
+                podcastId: podcastId
+            )
+            let store = correctionStore
+            Task {
+                do {
+                    try await store.record(event)
+                } catch {
+                    Logger(subsystem: "com.playhead", category: "SkipOrchestrator")
+                        .warning("Failed to record manual-veto correction: \(error)")
+                }
+            }
+        }
+
+        evaluateAndPush()
+    }
+
     /// User tapped "Skip Ad" in manual mode. Promotes a confirmed window
     /// to applied and fires the skip cue.
     func applyManualSkip(windowId: String) async {
