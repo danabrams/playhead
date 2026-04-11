@@ -429,9 +429,9 @@ struct FoundationModelClassifierTests {
         )
 
         let recorder = RuntimeRecorder(
-            // H14: bumped by preamble overhead (16 tokens = 4 added wrap lines * 4 tokens/line).
-            // bd-34e Fix B: bumped further to keep the refinement prompt under
-            // the halved effective ceiling.
+            // playhead-cay: preamble removed from buildRefinementPrompt.
+            // Prompt = segments + evidence + "Return" line.
+            // Budget = min((160-8-10-4)/2, 160/2) = 69. Prompt easily fits.
             contextSize: 160,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
@@ -532,12 +532,14 @@ struct FoundationModelClassifierTests {
             prewarmHit: false
         )
         let recorder = RuntimeRecorder(
-            // H14: bumped by preamble overhead (16 tokens = 4 added wrap lines * 4 tokens/line).
-            // bd-34e Fix B: bumped again for the halved estimator-safe ceiling.
-            // Budget = min((88-8-10-4)/2, 88/2) = min(33, 44) = 33. Single focus
-            // line refinement prompt = 32 tokens (fits); full window = 48 tokens
-            // (does not fit) — exercises the focus-shrink path as before.
-            contextSize: 88,
+            // playhead-cay: preamble removed from buildRefinementPrompt.
+            // Prompt is now just transcript lines + "Return up to N spans."
+            // Expanded window [2,3,4] = 4 lines * 4 = 16 tokens.
+            // Focus-only [2] = 2 lines * 4 = 8 tokens.
+            // Budget = min((46-8-10-4)/2, 46/2) = min(12, 23) = 12.
+            // Focus fits (8 ≤ 12), expanded does not (16 > 12) — exercises
+            // the focus-shrink path.
+            contextSize: 46,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -570,8 +572,8 @@ struct FoundationModelClassifierTests {
         #expect(zoomPlans[0].focusLineRefs == [2])
         #expect(zoomPlans[0].lineRefs == [2])
         #expect(zoomPlans[0].stopReason == .tokenBudget)
-        // H14: refinement prompt = (7 wrap lines + 1 segment) * 4 tokens/line = 32.
-        #expect(zoomPlans[0].promptTokenCount == 32)
+        // playhead-cay: focus-only prompt = (1 segment + 1 "Return" line) * 4 = 8.
+        #expect(zoomPlans[0].promptTokenCount == 8)
         #expect(zoomPlans[0].prompt.contains("L2> \"Visit example.com for the limited-time deal.\""))
         #expect(!zoomPlans[0].prompt.contains("L1> \"The host sets up the offer.\""))
         #expect(!zoomPlans[0].prompt.contains("L3> \"The host repeats the offer details.\""))
@@ -609,10 +611,12 @@ struct FoundationModelClassifierTests {
             prewarmHit: false
         )
         let recorder = RuntimeRecorder(
-            // Budget = min((80-8-10-4)/2, 80/2) = 29. The focus-only prompt
-            // still costs 32 tokens, so the planner must preserve the plan
-            // instead of throwing and let pass B persist the failure.
-            contextSize: 80,
+            // playhead-cay: preamble removed from buildRefinementPrompt.
+            // Focus-only prompt = 2 lines * 4 = 8 tokens.
+            // Budget = min((28-8-10-4)/2, 28/2) = min(3, 14) = 3.
+            // 8 > 3 — focus-only prompt overflows, planner preserves
+            // the plan so pass B can record a failure row.
+            contextSize: 28,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
             tokenCountRule: { prompt in
@@ -641,7 +645,7 @@ struct FoundationModelClassifierTests {
             )
         )
         let budget = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
-            contextSize: 80,
+            contextSize: 28,
             schemaTokens: 8,
             maximumResponseTokens: 10,
             safetyMarginTokens: 4
@@ -650,7 +654,8 @@ struct FoundationModelClassifierTests {
         #expect(zoomPlans.count == 1)
         #expect(zoomPlans[0].lineRefs == [2])
         #expect(zoomPlans[0].stopReason == .tokenBudget)
-        #expect(zoomPlans[0].promptTokenCount == 32)
+        // playhead-cay: focus-only = (1 segment + 1 "Return" line) * 4 = 8.
+        #expect(zoomPlans[0].promptTokenCount == 8)
         #expect(zoomPlans[0].promptTokenCount > budget)
     }
 
@@ -2261,6 +2266,109 @@ struct FoundationModelClassifierTests {
         #expect(taxonomyParts.preamble != classificationParts.preamble)
         #expect(taxonomyParts.prefix != classificationParts.prefix)
         #endif
+    }
+
+    // playhead-cay: the refinement prompt must NOT contain any preamble
+    // framing or schema field descriptions. The one-shot example in the
+    // session Instructions block provides format guidance, and
+    // `includeSchemaInPrompt: false` suppresses the framework-injected
+    // schema text. Any preamble text in the visible prompt is redundant
+    // and increases the hidden augmented input surface that triggers
+    // Apple's safety classifier false positives.
+    @Test("playhead-cay: refinement prompt contains no preamble or schema field descriptions")
+    func refinementPromptContainsNoPreambleOrSchemaFieldDescriptions() async throws {
+        let segments = [
+            makeSegment(index: 0, startTime: 0, endTime: 5, text: "Opening host banter."),
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Visit example.com for the deal."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Back to the main topic.")
+        ]
+        let evidenceCatalog = EvidenceCatalog(
+            analysisAssetId: "asset-cay",
+            transcriptVersion: "transcript-v1",
+            entries: [
+                EvidenceEntry(
+                    evidenceRef: 1,
+                    category: .url,
+                    matchedText: "example.com",
+                    normalizedText: "example.com",
+                    atomOrdinal: 1,
+                    startTime: 5,
+                    endTime: 10
+                )
+            ]
+        )
+        let coarse = FMCoarseScanOutput(
+            status: .success,
+            windows: [
+                FMCoarseWindowOutput(
+                    windowIndex: 0,
+                    lineRefs: [0, 1, 2],
+                    startTime: 0,
+                    endTime: 15,
+                    transcriptQuality: .good,
+                    screening: CoarseScreeningSchema(
+                        disposition: .containsAd,
+                        support: CoarseSupportSchema(
+                            supportLineRefs: [1],
+                            certainty: .strong
+                        )
+                    ),
+                    latencyMillis: 5
+                )
+            ],
+            latencyMillis: 5,
+            prewarmHit: false
+        )
+        let recorder = RuntimeRecorder(
+            contextSize: 1024,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count
+            }
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(
+                safetyMarginTokens: 4,
+                coarseMaximumResponseTokens: 6,
+                refinementMaximumResponseTokens: 10,
+                zoomAmbiguityBudget: 0,
+                minimumZoomSpanLines: 2,
+                maximumRefinementSpansPerWindow: 2
+            )
+        )
+
+        let zoomPlans = try await classifier.planAdaptiveZoom(
+            coarse: coarse,
+            segments: segments,
+            evidenceCatalog: evidenceCatalog
+        )
+
+        #expect(!zoomPlans.isEmpty, "planner must produce at least one refinement plan")
+        let prompt = zoomPlans[0].prompt
+
+        // The prompt must contain the transcript content and evidence.
+        #expect(prompt.contains("L1>"))
+        #expect(prompt.contains("example.com"))
+        #expect(prompt.contains("Evidence catalog:"))
+        #expect(prompt.contains("Return up to"))
+
+        // playhead-cay: the prompt must NOT contain any preamble framing.
+        #expect(!prompt.contains("Refine ad spans"), "preamble prefix must not appear in refinement prompt")
+        #expect(!prompt.contains("Classify whether"), "injection preamble must not appear in refinement prompt")
+        #expect(!prompt.contains("advertising or promotional content"), "injection preamble text must not appear")
+        #expect(!prompt.contains("<<<TRANSCRIPT>>>"), "transcript fences must not appear in refinement prompt")
+        #expect(!prompt.contains("<<<END TRANSCRIPT>>>"), "transcript fences must not appear in refinement prompt")
+        #expect(!prompt.contains("Transcript:"), "transcript label must not appear in refinement prompt")
+
+        // Schema field descriptions must not appear — the one-shot example
+        // and includeSchemaInPrompt:false handle format guidance.
+        #expect(!prompt.contains("commercialIntent"), "schema field name must not appear in prompt")
+        #expect(!prompt.contains("firstLineRef"), "schema field name must not appear in prompt")
+        #expect(!prompt.contains("lastLineRef"), "schema field name must not appear in prompt")
+        #expect(!prompt.contains("boundaryPrecision"), "schema field name must not appear in prompt")
+        #expect(!prompt.contains("evidenceAnchors"), "schema field name must not appear in prompt")
     }
 
     // bd-1en: golden / structural test for the taxonomy coarse preamble.

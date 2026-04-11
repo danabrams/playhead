@@ -2237,37 +2237,24 @@ struct FoundationModelClassifier: Sendable {
         maximumSpans: Int,
         redactor: PromptRedactor = .noop
     ) -> String {
-        // bd-34e: same flag as `buildPrompt(for:)` — drop the H14 framing
-        // (prefix, injection preamble, line-ref instruction, fences) when the
-        // experiment switch is set.
-        let preambleActive = injectionPreambleEnabled()
+        // playhead-cay: the preamble (prefix, injectionPreamble,
+        // lineRefInstruction, "Transcript:", fences) has been removed.
+        // Root cause (playhead-994): framework-injected schema text plus
+        // our manual schema preamble was tipping Apple's safety classifier
+        // over its threshold on benign content (e.g. Kelly Ripa #1).
+        // `includeSchemaInPrompt: false` suppresses the framework-injected
+        // schema, and the one-shot example in the session Instructions
+        // block provides reliable format guidance. The preamble framing
+        // is therefore redundant and removing it further reduces the
+        // hidden augmented input surface that triggers false positives.
         var lines: [String] = []
-        if preambleActive {
-            // bd-1en: refinement preamble is now variant-aware so the
-            // taxonomy variant changes BOTH coarse and refinement framing
-            // with one env-var flip. The default branch returns the same
-            // (refinementPromptPrefix, injectionPreamble, lineRefInstruction)
-            // triple as before, so behavior is unchanged for the
-            // production `classification` variant.
-            let parts = refinementPreambleParts(for: coarsePromptVariant())
-            lines.append(contentsOf: [
-                parts.prefix,
-                parts.preamble,
-                parts.lineRef,
-                "Transcript:",
-                transcriptOpenFence
-            ])
-        }
-        // bd-1en: see `buildPrompt(for:redactor:)` — redaction is applied
-        // to the visible segment text only; the L<n>> prefix is preserved
-        // so the runner's downstream lineRef → segment mapping is intact.
+        // bd-1en: redaction is applied to the visible segment text only;
+        // the L<n>> prefix is preserved so the runner's downstream
+        // lineRef → segment mapping is intact.
         lines.append(contentsOf: segments.map { segment in
             let redacted = redactor.redact(line: segment.text)
             return "L\(segment.segmentIndex)> \"\(escapedLine(redacted))\""
         })
-        if preambleActive {
-            lines.append(transcriptCloseFence)
-        }
         if !promptEvidence.isEmpty {
             lines.append("Evidence catalog:")
             // Cycle 2 C3: pipe each entry's matchedText through the
