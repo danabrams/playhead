@@ -214,7 +214,7 @@ actor SponsorKnowledgeStore {
                 current: existing.state,
                 confirmationCount: newCount,
                 rollbackCount: existing.rollbackCount,
-                hasActiveCorrection: false  // checked below
+                hasActiveCorrection: false  // corrections applied at query time via activeEntriesWithNegativeMemory
             )
             var updated = SponsorKnowledgeEntry(
                 id: existing.id,
@@ -264,6 +264,7 @@ actor SponsorKnowledgeStore {
                 rollbackCount: 0,
                 hasActiveCorrection: false
             )
+            let now = Date().timeIntervalSince1970
             let entry = SponsorKnowledgeEntry(
                 podcastId: podcastId,
                 entityType: entityType,
@@ -271,8 +272,8 @@ actor SponsorKnowledgeStore {
                 normalizedValue: normalized,
                 state: initialState,
                 confirmationCount: 1,
-                firstSeenAt: Date().timeIntervalSince1970,
-                lastConfirmedAt: Date().timeIntervalSince1970
+                firstSeenAt: now,
+                lastConfirmedAt: now
             )
             try await store.upsertKnowledgeEntry(entry)
         }
@@ -397,30 +398,32 @@ actor SponsorKnowledgeStore {
     /// Returns active entries for a podcast, filtering out any that are
     /// negated by corrections in the AnalysisStore's correction_events table.
     /// Sponsor-type entries are checked against sponsorOnShow correction scopes.
+    /// Note: corrections are queried from the same AnalysisStore that backs
+    /// this knowledge store, since both tables share a single SQLite database.
     func activeEntriesWithNegativeMemory(
-        forPodcast podcastId: String,
-        correctionStore: UserCorrectionStore? = nil
+        forPodcast podcastId: String
     ) async throws -> [SponsorKnowledgeEntry] {
         let entries = try await activeEntries(forPodcast: podcastId)
 
-        var filtered: [SponsorKnowledgeEntry] = []
-        for entry in entries {
-            guard entry.entityType == .sponsor else {
-                // Only sponsor entities can be negated by sponsorOnShow corrections.
-                filtered.append(entry)
-                continue
-            }
+        // Collect all sponsor correction scopes in one pass, then batch-check
+        // the DB in a single query instead of O(n) individual lookups.
+        let sponsorEntries = entries.filter { $0.entityType == .sponsor }
+        let scopeStrings = sponsorEntries.map { entry in
+            CorrectionScope.sponsorOnShow(
+                podcastId: podcastId,
+                sponsor: entry.normalizedValue
+            ).serialized
+        }
+        let blockedScopes = try await store.correctionScopesPresent(from: scopeStrings)
+
+        return entries.filter { entry in
+            guard entry.entityType == .sponsor else { return true }
             let scope = CorrectionScope.sponsorOnShow(
                 podcastId: podcastId,
                 sponsor: entry.normalizedValue
-            )
-            // Query the underlying AnalysisStore directly for correction scope existence.
-            let hasCorrection = try await store.hasAnyCorrectionEvent(withScope: scope.serialized)
-            if !hasCorrection {
-                filtered.append(entry)
-            }
+            ).serialized
+            return !blockedScopes.contains(scope)
         }
-        return filtered
     }
 
     // MARK: - Promotion Logic

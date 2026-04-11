@@ -556,6 +556,7 @@ actor AnalysisStore {
         try migratePodcastPlannerStateV4IfNeeded()
         try migrateAdWindowsPhase6PrepV5IfNeeded()
         try migrateCorrectionEventsV6IfNeeded()
+        try migrateSponsorKnowledgeV7IfNeeded()
         // Mirror the belt-and-suspenders phase/jobPhase column re-adds
         // that `migrate()` performs after the v2/v3 evidence_events
         // rebuild (cycle-8 reconciliation: both columns coexist).
@@ -4374,6 +4375,24 @@ actor AnalysisStore {
         return sqlite3_column_int(stmt, 0) != 0
     }
 
+    /// Batch check: returns the set of scopes (from the input) that have at
+    /// least one correction event. Single round-trip instead of N queries.
+    func correctionScopesPresent(from scopes: [String]) throws -> Set<String> {
+        guard !scopes.isEmpty else { return [] }
+        let placeholders = scopes.map { _ in "?" }.joined(separator: ", ")
+        let sql = "SELECT DISTINCT scope FROM correction_events WHERE scope IN (\(placeholders))"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        for (i, scope) in scopes.enumerated() {
+            bind(stmt, Int32(i + 1), scope)
+        }
+        var result = Set<String>()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            result.insert(text(stmt, 0))
+        }
+        return result
+    }
+
     // MARK: - CRUD: sponsor_knowledge_entries (Phase 8, playhead-4my.8.1)
 
     /// Upsert a sponsor knowledge entry. Uses INSERT OR REPLACE on the
@@ -4442,6 +4461,8 @@ actor AnalysisStore {
     }
 
     /// Load all knowledge entries for a podcast with a given state.
+    /// Rows with unrecognized enum values are skipped (logged) rather than
+    /// failing the entire batch, so one corrupt row doesn't break queries.
     func loadKnowledgeEntries(
         podcastId: String,
         state: KnowledgeState
@@ -4460,12 +4481,18 @@ actor AnalysisStore {
         bind(stmt, 2, state.rawValue)
         var results: [SponsorKnowledgeEntry] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            results.append(try readKnowledgeEntry(stmt))
+            do {
+                results.append(try readKnowledgeEntry(stmt))
+            } catch {
+                logger.warning("Skipping corrupt knowledge entry: \(error.localizedDescription)")
+            }
         }
         return results
     }
 
     /// Load all knowledge entries for a podcast regardless of state.
+    /// Rows with unrecognized enum values are skipped (logged) rather than
+    /// failing the entire batch.
     func loadAllKnowledgeEntries(podcastId: String) throws -> [SponsorKnowledgeEntry] {
         let sql = """
             SELECT id, podcastId, entityType, entityValue, normalizedValue, state,
@@ -4480,7 +4507,11 @@ actor AnalysisStore {
         bind(stmt, 1, podcastId)
         var results: [SponsorKnowledgeEntry] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            results.append(try readKnowledgeEntry(stmt))
+            do {
+                results.append(try readKnowledgeEntry(stmt))
+            } catch {
+                logger.warning("Skipping corrupt knowledge entry: \(error.localizedDescription)")
+            }
         }
         return results
     }
@@ -4558,6 +4589,8 @@ actor AnalysisStore {
     }
 
     /// Load all candidate events for a given analysis asset, ordered by createdAt.
+    /// Rows with unrecognized enum values are skipped (logged) rather than
+    /// failing the entire batch.
     func loadKnowledgeCandidateEvents(analysisAssetId: String) throws -> [KnowledgeCandidateEvent] {
         let sql = """
             SELECT id, analysisAssetId, entityType, entityValue, sourceAtomOrdinals,
@@ -4582,9 +4615,10 @@ actor AnalysisStore {
             let createdAt = sqlite3_column_double(stmt, 8)
 
             guard let entityType = KnowledgeEntityType(rawValue: entityTypeRaw) else {
-                throw AnalysisStoreError.queryFailed("Invalid entityType in candidate event: \(entityTypeRaw)")
+                logger.warning("Skipping candidate event with invalid entityType: \(entityTypeRaw)")
+                continue
             }
-            let ordinals: [Int] = try decodeJSON([Int].self, from: ordinalsJSON) ?? []
+            let ordinals: [Int] = (try? decodeJSON([Int].self, from: ordinalsJSON)) ?? []
 
             results.append(KnowledgeCandidateEvent(
                 id: id,

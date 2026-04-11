@@ -500,8 +500,7 @@ struct SponsorKnowledgeStoreNegativeMemoryTests {
 
         // Query with negative memory applied.
         let filtered = try await knowledgeStore.activeEntriesWithNegativeMemory(
-            forPodcast: "pod-neg",
-            correctionStore: correctionStore
+            forPodcast: "pod-neg"
         )
         #expect(filtered.count == 1, "Corrected sponsor should be filtered out")
         #expect(filtered[0].normalizedValue == "goodsponsor")
@@ -538,8 +537,7 @@ struct SponsorKnowledgeStoreNegativeMemoryTests {
         try await correctionStore.record(event)
 
         let filtered = try await knowledgeStore.activeEntriesWithNegativeMemory(
-            forPodcast: "pod-ns",
-            correctionStore: correctionStore
+            forPodcast: "pod-ns"
         )
         #expect(filtered.count == 1, "URL entries are not filtered by sponsorOnShow corrections")
     }
@@ -839,5 +837,95 @@ struct SponsorKnowledgeStorePromotionTests {
             rollbackCount: 2
         )
         #expect(result == .blocked)
+    }
+
+    @Test("stablePromoteState: candidate with >=2 confirmations jumps to active in one call")
+    func stablePromoteMultiStep() async throws {
+        let store = SponsorKnowledgeStore(store: try await makeTestStore())
+        let result = await store.stablePromoteState(
+            current: .candidate,
+            confirmationCount: 2,
+            rollbackCount: 0,
+            hasActiveCorrection: false
+        )
+        // candidate -> quarantined -> active in one bounded loop
+        #expect(result == .active)
+    }
+
+    @Test("promoteState: quarantined with exactly boundary rollback rate (0.3) still promotes")
+    func promoteBoundaryRollbackRate() async throws {
+        let store = SponsorKnowledgeStore(store: try await makeTestStore())
+        // 2 confirmations, 0 rollbacks but let's test exact boundary:
+        // 7 confirmations + 3 rollbacks = 0.3 rollback rate exactly
+        let result = await store.promoteState(
+            current: .quarantined,
+            confirmationCount: 7,
+            rollbackCount: 3,
+            hasActiveCorrection: false
+        )
+        // rollbackRate == 0.3 which is <= 0.3 threshold, so should promote
+        #expect(result == .active)
+    }
+}
+
+// MARK: - Concurrent Access
+
+@Suite("SponsorKnowledgeStore — Concurrency")
+struct SponsorKnowledgeStoreConcurrencyTests {
+
+    @Test("Concurrent recordCandidate + recordRollback serializes correctly")
+    func concurrentRecordAndRollback() async throws {
+        let analysisStore = try await makeTestStore()
+        let knowledgeStore = SponsorKnowledgeStore(store: analysisStore)
+
+        // Seed an entry with enough confirmations to be active.
+        for i in 0..<3 {
+            try await knowledgeStore.recordCandidate(
+                podcastId: "pod-conc",
+                entityType: .sponsor,
+                entityValue: "ConcurrentSponsor",
+                analysisAssetId: "asset-conc-\(i)",
+                sourceAtomOrdinals: [0],
+                transcriptVersion: "tv-1",
+                confidence: 0.9
+            )
+        }
+
+        // Fire concurrent recordCandidate + recordRollback from a TaskGroup.
+        await withTaskGroup(of: Void.self) { group in
+            for i in 0..<10 {
+                group.addTask {
+                    try? await knowledgeStore.recordCandidate(
+                        podcastId: "pod-conc",
+                        entityType: .sponsor,
+                        entityValue: "ConcurrentSponsor",
+                        analysisAssetId: "asset-conc-burst-\(i)",
+                        sourceAtomOrdinals: [0],
+                        transcriptVersion: "tv-1",
+                        confidence: 0.9
+                    )
+                }
+                group.addTask {
+                    try? await knowledgeStore.recordRollback(
+                        podcastId: "pod-conc",
+                        entityType: .sponsor,
+                        entityValue: "ConcurrentSponsor"
+                    )
+                }
+            }
+        }
+
+        // The entry should exist and have consistent counts (no crashes,
+        // no data corruption from concurrent access).
+        let entry = try await knowledgeStore.entry(
+            podcastId: "pod-conc",
+            entityType: .sponsor,
+            normalizedValue: "concurrentsponsor"
+        )
+        #expect(entry != nil, "Entry must survive concurrent access")
+        // 3 seed + up to 10 concurrent = at most 13 confirmations
+        // (some may interleave with rollbacks but counts must be >= initial)
+        #expect(entry!.confirmationCount >= 3, "Seed confirmations must survive")
+        #expect(entry!.confirmationCount + entry!.rollbackCount >= 3, "Total observations must be >= seed")
     }
 }

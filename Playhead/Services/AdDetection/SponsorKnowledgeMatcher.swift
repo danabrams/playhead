@@ -45,7 +45,6 @@ enum SponsorKnowledgeMatcher {
     ///   - atoms: Transcript atoms to scan.
     ///   - podcastId: The podcast to look up knowledge for.
     ///   - knowledgeStore: The sponsor knowledge store.
-    ///   - correctionStore: The user correction store for negative memory.
     /// - Returns: Sponsor matches from active knowledge entries.
     static func match(
         atoms: [TranscriptAtom],
@@ -59,39 +58,59 @@ enum SponsorKnowledgeMatcher {
         )
         guard !entries.isEmpty else { return [] }
 
-        // Build a lookup set of normalized values + aliases for each entry.
-        var matchTargets: [(entry: SponsorKnowledgeEntry, terms: Set<String>)] = []
+        // Build word-boundary regex patterns for each entry's normalized
+        // value and aliases, matching CompiledSponsorLexicon's semantics.
+        var matchTargets: [(entry: SponsorKnowledgeEntry, patterns: [NSRegularExpression])] = []
         for entry in entries {
             var terms: Set<String> = [entry.normalizedValue]
             for alias in entry.aliases {
-                terms.insert(alias.lowercased().trimmingCharacters(in: .whitespaces))
+                let normalized = alias.lowercased().trimmingCharacters(in: .whitespaces)
+                if !normalized.isEmpty {
+                    terms.insert(normalized)
+                }
             }
-            matchTargets.append((entry, terms))
+            var patterns: [NSRegularExpression] = []
+            for term in terms {
+                let escaped = NSRegularExpression.escapedPattern(for: term)
+                if let regex = try? NSRegularExpression(
+                    pattern: #"\b"# + escaped + #"\b"#,
+                    options: [.caseInsensitive]
+                ) {
+                    patterns.append(regex)
+                }
+            }
+            matchTargets.append((entry, patterns))
         }
 
         var matches: [SponsorMatch] = []
 
-        // Sliding window match: for each atom, check if the normalized text
-        // contains any known entity term. This is a simple substring match;
-        // Phase 8.2 (CompiledSponsorLexicon) will replace this with a proper
-        // lexical scanner.
+        // Word-boundary match: for each atom, check if any known entity
+        // term appears as a whole word. Uses \b...\b regex matching,
+        // consistent with CompiledSponsorLexicon's approach.
         for atom in atoms {
             let normalizedText = atom.text.lowercased()
-            for (entry, terms) in matchTargets {
-                for term in terms where !term.isEmpty {
-                    if normalizedText.contains(term) {
+            let nsText = normalizedText as NSString
+            let range = NSRange(location: 0, length: nsText.length)
+            for (entry, patterns) in matchTargets {
+                var matched = false
+                for pattern in patterns {
+                    if pattern.firstMatch(in: normalizedText, range: range) != nil {
                         let match = SponsorMatch(
                             firstAtomOrdinal: atom.atomKey.atomOrdinal,
                             lastAtomOrdinal: atom.atomKey.atomOrdinal,
                             entityName: entry.entityValue,
+                            // Graduated confidence: active entries have >=2
+                            // confirmations (min 0.667), reaching 1.0 at 3+.
                             confidence: min(1.0, Double(entry.confirmationCount) / 3.0),
                             startTime: atom.startTime,
                             endTime: atom.endTime
                         )
                         matches.append(match)
+                        matched = true
                         break // One match per atom per entry is sufficient.
                     }
                 }
+                if matched { break }
             }
         }
 
@@ -108,6 +127,8 @@ enum SponsorKnowledgeMatcher {
 
         var current = sorted[0]
         for next in sorted.dropFirst() {
+            // Gap of 1 atom allowed: e.g. "Squarespace" at atom 5, filler at 6,
+            // "Squarespace dot com" at atom 7 should merge into one span.
             if next.entityName == current.entityName
                 && next.firstAtomOrdinal <= current.lastAtomOrdinal + 2
             {

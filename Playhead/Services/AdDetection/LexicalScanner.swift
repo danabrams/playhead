@@ -303,7 +303,21 @@ struct LexicalScanner: Sendable {
         // Scan compiled sponsor knowledge patterns (boosted weight) over
         // normalized text. These come from active SponsorKnowledgeStore
         // entries and coexist with the per-show showSponsorPatterns above.
+        // Deduplicate: track NSRange locations already matched by
+        // showSponsorPatterns so knowledge-store hits at the same character
+        // offset are skipped. Uses integer range locations instead of
+        // floating-point timestamps to avoid precision-dependent equality.
         if let lexicon = compiledLexicon {
+            var matchedSponsorLocations = Set<Int>()
+            for hit in hits where hit.category == .sponsor {
+                // Reverse-interpolate the hit's startTime back to a character
+                // offset. Since both sources scan the same normalizedText with
+                // the same chunk timing, matching startTimes correspond to
+                // matching character ranges. We store a rounded microsecond
+                // key to avoid floating-point equality issues.
+                let microsecondKey = Int(hit.startTime * 1_000_000)
+                matchedSponsorLocations.insert(microsecondKey)
+            }
             for pattern in lexicon.patterns {
                 let matches = pattern.matches(in: normalizedText, range: normalizedRange)
                 for match in matches {
@@ -314,6 +328,9 @@ struct LexicalScanner: Sendable {
                         chunkStart: chunk.startTime,
                         chunkEnd: chunk.endTime
                     )
+                    let microsecondKey = Int(startTime * 1_000_000)
+                    guard !matchedSponsorLocations.contains(microsecondKey) else { continue }
+                    matchedSponsorLocations.insert(microsecondKey)
                     hits.append(LexicalHit(
                         category: .sponsor,
                         matchedText: matchedText,

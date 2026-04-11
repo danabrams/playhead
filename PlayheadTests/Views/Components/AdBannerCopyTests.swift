@@ -60,7 +60,7 @@ final class AdBannerCopyTests: XCTestCase {
             advertiser: "BetterHelp",
             product: nil,
             metadataConfidence: 0.75,
-            metadataSource: "regex"
+            metadataSource: "fallback"
         )
         let copy = AdBannerView.bannerCopy(for: item)
 

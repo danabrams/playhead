@@ -33,6 +33,27 @@ private func makeChunk(
     )
 }
 
+private func makeAtom(
+    assetId: String = "asset-test",
+    ordinal: Int,
+    text: String,
+    startTime: Double,
+    endTime: Double
+) -> TranscriptAtom {
+    TranscriptAtom(
+        atomKey: TranscriptAtomKey(
+            analysisAssetId: assetId,
+            transcriptVersion: "tv-test",
+            atomOrdinal: ordinal
+        ),
+        contentHash: "deadbeef",
+        startTime: startTime,
+        endTime: endTime,
+        text: text,
+        chunkIndex: ordinal
+    )
+}
+
 // MARK: - Full Pipeline Integration
 
 @Suite("Phase 8 Integration — Full Pipeline")
@@ -173,6 +194,10 @@ struct Phase8FullPipelineTests {
 
         let candidates = scanner.scan(chunks: chunks, analysisAssetId: "asset-batch-scan")
         #expect(!candidates.isEmpty, "Compiled lexicon + built-in patterns should produce candidates")
+
+        // Verify at least one candidate references the expected time range.
+        let hasExpectedRange = candidates.contains { $0.startTime >= 0.0 && $0.endTime <= 15.0 }
+        #expect(hasExpectedRange, "Candidate should fall within the chunk's time range")
     }
 }
 
@@ -274,8 +299,7 @@ struct Phase8NegativeMemoryTests {
 
         // Build lexicon from negative-memory-filtered entries.
         let filtered = try await knowledgeStore.activeEntriesWithNegativeMemory(
-            forPodcast: "pod-neg-int",
-            correctionStore: correctionStore
+            forPodcast: "pod-neg-int"
         )
         let lexicon = CompiledSponsorLexicon(entries: filtered)
         #expect(lexicon.entryCount == 1, "Only non-corrected sponsor should remain")
@@ -718,5 +742,143 @@ struct Phase8LifecycleRoundTripTests {
             $0.category == .sponsor && $0.matchedText.lowercased().contains("decaytarget")
         }
         #expect(decayHits.isEmpty, "Decayed entry should not produce scanner hits")
+    }
+}
+
+// MARK: - Deduplication & Edge Cases
+
+@Suite("Phase 8 Integration — Dedup & Edge Cases")
+struct Phase8DedupTests {
+
+    @Test("Same sponsor in showSponsorPatterns and compiledLexicon produces no duplicate hits")
+    func overlappingSponsorSourcesDedup() async throws {
+        let analysisStore = try await makeTestStore()
+        let knowledgeStore = SponsorKnowledgeStore(store: analysisStore)
+
+        // Promote "Squarespace" to active in the knowledge store.
+        for i in 1...2 {
+            try await knowledgeStore.recordCandidate(
+                podcastId: "pod-dedup",
+                entityType: .sponsor,
+                entityValue: "Squarespace",
+                analysisAssetId: "asset-dedup-\(i)",
+                sourceAtomOrdinals: [0],
+                transcriptVersion: "tv-1",
+                confidence: 0.9
+            )
+        }
+
+        let entries = try await knowledgeStore.activeEntries(forPodcast: "pod-dedup")
+        let lexicon = CompiledSponsorLexicon(entries: entries)
+
+        // Also put "squarespace" in the podcast profile's sponsorLexicon.
+        let profile = PodcastProfile(
+            podcastId: "pod-dedup",
+            sponsorLexicon: "squarespace",
+            normalizedAdSlotPriors: nil,
+            repeatedCTAFragments: nil,
+            jingleFingerprints: nil,
+            implicitFalsePositiveCount: 0,
+            skipTrustScore: 1.0,
+            observationCount: 5,
+            mode: "normal",
+            recentFalseSkipSignals: 0
+        )
+
+        let scanner = LexicalScanner(
+            podcastProfile: profile,
+            compiledLexicon: lexicon
+        )
+        let chunk = makeChunk(
+            text: "This episode is brought to you by Squarespace",
+            startTime: 0.0,
+            endTime: 10.0
+        )
+        let hits = scanner.scanChunk(chunk)
+        let sponsorHits = hits.filter {
+            $0.category == .sponsor && $0.matchedText.lowercased().contains("squarespace")
+        }
+        // Should be exactly 1 hit, not 2.
+        #expect(sponsorHits.count == 1, "Duplicate sponsor hits should be deduplicated; got \(sponsorHits.count)")
+    }
+}
+
+// MARK: - Matcher Merge Logic
+
+@Suite("SponsorKnowledgeMatcher — Merge Adjacent Matches")
+struct MatcherMergeTests {
+
+    @Test("Adjacent atom matches (gap=1) merge into one span")
+    func adjacentMatchesMerge() async throws {
+        let analysisStore = try await makeTestStore()
+        let knowledgeStore = SponsorKnowledgeStore(store: analysisStore)
+
+        // Promote "TestSponsor" to active.
+        for i in 1...2 {
+            try await knowledgeStore.recordCandidate(
+                podcastId: "pod-merge",
+                entityType: .sponsor,
+                entityValue: "TestSponsor",
+                analysisAssetId: "asset-merge-\(i)",
+                sourceAtomOrdinals: [0],
+                transcriptVersion: "tv-1",
+                confidence: 0.9
+            )
+        }
+
+        // Create atoms: ordinals 5, 6 (filler), 7 — gap of 1 should merge.
+        let atoms = [
+            makeAtom(assetId: "asset-m", ordinal: 5, text: "testsponsor is great", startTime: 10.0, endTime: 12.0),
+            makeAtom(assetId: "asset-m", ordinal: 6, text: "you should check it out", startTime: 12.0, endTime: 14.0),
+            makeAtom(assetId: "asset-m", ordinal: 7, text: "use code testsponsor for a discount", startTime: 14.0, endTime: 16.0),
+        ]
+
+        let matches = try await SponsorKnowledgeMatcher.match(
+            atoms: atoms,
+            podcastId: "pod-merge",
+            knowledgeStore: knowledgeStore
+        )
+
+        // Atoms 5 and 7 match "testsponsor"; gap of 1 (atom 6) should merge.
+        #expect(matches.count == 1, "Adjacent matches with gap=1 should merge into one span")
+        #expect(matches[0].firstAtomOrdinal == 5)
+        #expect(matches[0].lastAtomOrdinal == 7)
+    }
+
+    @Test("Non-adjacent atom matches (gap=2) stay separate")
+    func nonAdjacentMatchesSplit() async throws {
+        let analysisStore = try await makeTestStore()
+        let knowledgeStore = SponsorKnowledgeStore(store: analysisStore)
+
+        for i in 1...2 {
+            try await knowledgeStore.recordCandidate(
+                podcastId: "pod-split",
+                entityType: .sponsor,
+                entityValue: "SplitSponsor",
+                analysisAssetId: "asset-split-\(i)",
+                sourceAtomOrdinals: [0],
+                transcriptVersion: "tv-1",
+                confidence: 0.9
+            )
+        }
+
+        // Atoms at ordinals 0 and 3: gap of 2 atoms, should NOT merge.
+        let atoms = [
+            makeAtom(assetId: "asset-s", ordinal: 0, text: "splitsponsor mentioned here", startTime: 0.0, endTime: 5.0),
+            makeAtom(assetId: "asset-s", ordinal: 1, text: "some other topic", startTime: 5.0, endTime: 10.0),
+            makeAtom(assetId: "asset-s", ordinal: 2, text: "still talking about something else", startTime: 10.0, endTime: 15.0),
+            makeAtom(assetId: "asset-s", ordinal: 3, text: "splitsponsor again later", startTime: 15.0, endTime: 20.0),
+        ]
+
+        let matches = try await SponsorKnowledgeMatcher.match(
+            atoms: atoms,
+            podcastId: "pod-split",
+            knowledgeStore: knowledgeStore
+        )
+
+        // Ordinals 0 and 3 have a gap of 2 atoms — should be 2 separate spans.
+        #expect(matches.count == 2, "Non-adjacent matches (gap=2) should not merge; got \(matches.count)")
+        #expect(matches[0].firstAtomOrdinal == 0)
+        #expect(matches[1].firstAtomOrdinal == 3)
     }
 }

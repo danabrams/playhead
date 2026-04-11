@@ -1537,7 +1537,7 @@ actor AdDetectionService {
 
     // MARK: - Metadata Extraction
 
-    /// Extract metadata for a confirmed window and persist to SQLite.
+    /// Extract metadata for a non-suppressed window (confirmed or candidate) and persist to SQLite.
     private func extractAndPersistMetadata(
         window: AdWindow,
         chunks: [TranscriptChunk]

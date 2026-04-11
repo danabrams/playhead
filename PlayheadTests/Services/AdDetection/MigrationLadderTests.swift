@@ -34,7 +34,7 @@ struct MigrationLadderTests {
         try await store.migrate()
 
         // Reaches v5 (current).
-        #expect(try await store.schemaVersion() == 6)
+        #expect(try await store.schemaVersion() == 7)
 
         // analysis_sessions has the camelCase column (H10).
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
@@ -52,6 +52,10 @@ struct MigrationLadderTests {
         // Rev3-M5 phase columns present.
         #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "runMode"))
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "runMode"))
+
+        // V7 sponsor knowledge tables (Phase 8).
+        #expect(try probeTableExists(in: dir, table: "sponsor_knowledge_entries"))
+        #expect(try probeTableExists(in: dir, table: "knowledge_candidate_events"))
     }
 
     // MARK: - H11: seeded v1 → v5 ladder runs all V*IfNeeded blocks
@@ -67,7 +71,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 6)
+        #expect(try await store.schemaVersion() == 7)
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "shadowRetryPodcastId"))
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
@@ -110,7 +114,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 6)
+        #expect(try await store.schemaVersion() == 7)
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "shadowRetryPodcastId"))
@@ -136,7 +140,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 6)
+        #expect(try await store.schemaVersion() == 7)
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "shadowRetryPodcastId"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_sessions_shadow_retry"))
@@ -173,7 +177,7 @@ struct MigrationLadderTests {
         try await store.migrateOnlyForTesting()
 
         // V2 → v3 → v4 → v5 ladder must have run, reaching the target version.
-        #expect(try await store.schemaVersion() == 6)
+        #expect(try await store.schemaVersion() == 7)
         // V3 added transcriptVersion to evidence_events.
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
         // V4 added needsShadowRetry + shadowRetryPodcastId + the partial
@@ -213,7 +217,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrateOnlyForTesting()
 
-        #expect(try await store.schemaVersion() == 6)
+        #expect(try await store.schemaVersion() == 7)
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "runMode"))
@@ -233,7 +237,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrateOnlyForTesting()
 
-        #expect(try await store.schemaVersion() == 6)
+        #expect(try await store.schemaVersion() == 7)
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "shadowRetryPodcastId"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "evidenceSources"))
@@ -257,7 +261,7 @@ struct MigrationLadderTests {
         let v2 = try await store.schemaVersion()
 
         #expect(v1 == v2)
-        #expect(v2 == 6)
+        #expect(v2 == 7)
     }
 
     // MARK: - C6: seeded v4 _meta-less data path
@@ -287,7 +291,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 6)
+        #expect(try await store.schemaVersion() == 7)
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "evidenceSources"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "eligibilityGate"))

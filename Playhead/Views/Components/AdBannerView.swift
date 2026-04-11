@@ -30,7 +30,7 @@ struct AdSkipBannerItem: Identifiable, Equatable {
     let adEndTime: Double
     /// Confidence of the metadata extraction (nil = no metadata).
     let metadataConfidence: Double?
-    /// Where the metadata came from (e.g. "foundationModels", "regex", "none").
+    /// Where the metadata came from. Known values: "foundationModels", "fallback", "none".
     let metadataSource: String
     /// The podcast ID, needed for trust scoring on revert.
     let podcastId: String
