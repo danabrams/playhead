@@ -27,8 +27,8 @@ struct AdDetectionConfig: Sendable {
     let hotPathLookahead: TimeInterval
     /// Detector version tag written to each AdWindow.
     let detectorVersion: String
-    /// Phase 3 Foundation Model backfill toggle. Defaults to `.shadow`:
-    /// FM runs and persists results, but never influences skip cues. See
+    /// Phase 3 Foundation Model backfill toggle. Defaults to `.full`:
+    /// FM runs, persists results, and contributes to the decision ledger. See
     /// `FMBackfillMode` for the full contract.
     let fmBackfillMode: FMBackfillMode
     /// Upper bound for FM scanning work per backfill run.
@@ -47,7 +47,7 @@ struct AdDetectionConfig: Sendable {
         suppressionThreshold: Double,
         hotPathLookahead: TimeInterval,
         detectorVersion: String,
-        fmBackfillMode: FMBackfillMode = .shadow,
+        fmBackfillMode: FMBackfillMode = .full,
         fmScanBudgetSeconds: TimeInterval = 300,
         fmConsensusThreshold: Int = 2,
         autoSkipConfidenceThreshold: Double = 0.75
@@ -69,7 +69,7 @@ struct AdDetectionConfig: Sendable {
         suppressionThreshold: 0.25,
         hotPathLookahead: 90.0,
         detectorVersion: "detection-v1",
-        fmBackfillMode: .shadow,
+        fmBackfillMode: .full,
         fmScanBudgetSeconds: 300,
         fmConsensusThreshold: 2,
         autoSkipConfidenceThreshold: 0.75

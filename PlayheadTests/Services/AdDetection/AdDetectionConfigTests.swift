@@ -9,10 +9,10 @@ import Testing
 @Suite("AdDetectionConfig")
 struct AdDetectionConfigTests {
 
-    @Test("default config opts into shadow-mode FM backfill with Phase 6 defaults")
+    @Test("default config opts into full-mode FM backfill with Phase 6 defaults")
     func defaultConfigCarriesPhase6Defaults() {
         let config = AdDetectionConfig.default
-        #expect(config.fmBackfillMode == .shadow)
+        #expect(config.fmBackfillMode == .full)
         #expect(config.fmScanBudgetSeconds == 300)
         #expect(config.fmConsensusThreshold == 2)
     }
@@ -43,6 +43,26 @@ struct AdDetectionConfigTests {
     func fmBackfillModeCases() {
         let cases = Set(FMBackfillMode.allCases)
         #expect(cases == [.off, .shadow, .rescoreOnly, .proposalOnly, .full])
+    }
+
+    @Test("AdDetectionConfig.init default parameter is .full")
+    func initDefaultParameterIsFull() {
+        let config = AdDetectionConfig(
+            candidateThreshold: 0.5,
+            confirmationThreshold: 0.8,
+            suppressionThreshold: 0.3,
+            hotPathLookahead: 60,
+            detectorVersion: "test-v1"
+        )
+        #expect(config.fmBackfillMode == .full,
+                "init default parameter must be .full so callers that omit fmBackfillMode get full mode")
+    }
+
+    @Test("full mode contributes to decision ledger and proposes new regions")
+    func fullModeCapabilities() {
+        #expect(FMBackfillMode.full.runsFoundationModels)
+        #expect(FMBackfillMode.full.contributesToExistingCandidateLedger)
+        #expect(FMBackfillMode.full.canProposeNewRegions)
     }
 
     @Test("FMBackfillMode helper flags match the Phase 6 ledger contract")
