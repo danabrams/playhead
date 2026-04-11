@@ -24,6 +24,15 @@ struct TranscriptPeekView: View {
     /// Phase 5 (u4d): Which decoded span's popover is currently showing.
     @State private var selectedDecodedSpan: DecodedSpan? = nil
 
+    /// False negative marking mode: when true, tapping chunks selects/deselects them for ad marking.
+    @State private var isMarkingMode = false
+
+    /// Indices of chunks selected as ad content in marking mode.
+    @State private var markedChunkIndices: Set<Int> = []
+
+    /// Confirmation alert for submitting marked chunks as false negative.
+    @State private var showMarkConfirmation = false
+
     var body: some View {
         VStack(spacing: 0) {
             grabHandle
@@ -87,8 +96,65 @@ private extension TranscriptPeekView {
             if peekViewModel.chunks.contains(where: { $0.pass == "fast" }) {
                 liveIndicator
             }
+
+            // Mark-as-ad mode toggle
+            markModeToggle
         }
         .accessibilityElement(children: .combine)
+    }
+
+    var markModeToggle: some View {
+        Button {
+            if isMarkingMode {
+                // Exiting marking mode — if chunks are selected, show confirmation
+                if !markedChunkIndices.isEmpty {
+                    showMarkConfirmation = true
+                } else {
+                    isMarkingMode = false
+                }
+            } else {
+                isMarkingMode = true
+                markedChunkIndices = []
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: isMarkingMode
+                    ? (markedChunkIndices.isEmpty ? "xmark" : "checkmark")
+                    : "hand.tap"
+                )
+                .font(.system(size: 11, weight: .semibold))
+                Text(isMarkingMode
+                    ? (markedChunkIndices.isEmpty ? "Cancel" : "Done")
+                    : "Mark ad"
+                )
+                .font(AppTypography.sans(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(isMarkingMode ? AppColors.accent : AppColors.textSecondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule()
+                    .fill((isMarkingMode ? AppColors.accent : AppColors.textSecondary).opacity(0.12))
+            )
+        }
+        .frame(minWidth: 44, minHeight: 44)
+        .accessibilityLabel(isMarkingMode ? "Finish marking" : "Mark sentences as ad")
+        .accessibilityHint(isMarkingMode
+            ? "Tap to submit selected sentences as an ad"
+            : "Enter selection mode to tap sentences that are ads"
+        )
+        .alert("Mark as ad?", isPresented: $showMarkConfirmation) {
+            Button("Cancel", role: .cancel) {
+                // Stay in marking mode so user can adjust selection
+            }
+            Button("Report missed ad", role: .destructive) {
+                submitMarkedChunks()
+                isMarkingMode = false
+                markedChunkIndices = []
+            }
+        } message: {
+            Text("\(markedChunkIndices.count) sentence\(markedChunkIndices.count == 1 ? "" : "s") will be reported as a missed ad.")
+        }
     }
 
     var liveIndicator: some View {
@@ -275,10 +341,37 @@ private extension TranscriptPeekView {
         .background(isDecodedAd ? AppColors.accentSubtle : Color.clear)
         .contentShape(Rectangle())
         .onTapGesture {
-            if let span = primarySpan {
+            if isMarkingMode {
+                // Toggle selection in marking mode
+                if markedChunkIndices.contains(index) {
+                    markedChunkIndices.remove(index)
+                } else {
+                    markedChunkIndices.insert(index)
+                }
+            } else if let span = primarySpan {
                 selectedDecodedSpan = span
             }
         }
+        // Visual selection indicator in marking mode
+        .overlay(alignment: .trailing) {
+            if isMarkingMode {
+                Image(systemName: markedChunkIndices.contains(index)
+                    ? "checkmark.circle.fill"
+                    : "circle"
+                )
+                .font(.system(size: 18))
+                .foregroundStyle(markedChunkIndices.contains(index)
+                    ? AppColors.accent
+                    : AppColors.textTertiary.opacity(0.4)
+                )
+                .padding(.trailing, Spacing.xs)
+            }
+        }
+        .background(
+            markedChunkIndices.contains(index)
+                ? AppColors.accent.opacity(0.08)
+                : Color.clear
+        )
         .animation(Motion.quick, value: isActive)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel(
@@ -324,6 +417,45 @@ private extension TranscriptPeekView {
         }
 
         return "\(ts): \(chunk.text)"
+    }
+
+    /// Submit the marked chunks as a false negative correction.
+    /// Maps selected chunk indices to atom ordinal ranges (approximated from chunk indices)
+    /// and creates a CorrectionEvent with source .falseNegative.
+    func submitMarkedChunks() {
+        let sortedIndices = markedChunkIndices.sorted()
+        guard !sortedIndices.isEmpty else { return }
+
+        let chunks = peekViewModel.chunks
+        guard !chunks.isEmpty else { return }
+
+        // Map chunk indices to the ordinal range.
+        // Chunks don't carry atom ordinals directly, so we use the chunk indices
+        // as a proxy for ordinal ranges. The first selected chunk index is the
+        // lower bound and the last selected chunk index is the upper bound.
+        let firstIndex = sortedIndices.first!
+        let lastIndex = sortedIndices.last!
+
+        let assetId = peekViewModel.analysisAssetId
+
+        let scope = CorrectionScope.exactSpan(
+            assetId: assetId,
+            ordinalRange: firstIndex...lastIndex
+        )
+        let event = CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: scope.serialized,
+            createdAt: Date().timeIntervalSince1970,
+            source: .falseNegative,
+            podcastId: nil
+        )
+        Task {
+            do {
+                try await correctionStore.record(event)
+            } catch {
+                // Best-effort — don't surface errors for corrections.
+            }
+        }
     }
 
     private func provenanceSummary(_ refs: [AnchorRef]) -> String {

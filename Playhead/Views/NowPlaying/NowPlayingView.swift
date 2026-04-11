@@ -67,6 +67,12 @@ struct NowPlayingView: View {
 
                 Spacer(minLength: Spacing.md)
 
+                // MARK: Hearing an Ad
+                if analysisAssetId != nil {
+                    hearingAdButton
+                        .padding(.horizontal, Spacing.md)
+                }
+
                 // MARK: Speed
                 speedSection
                     .padding(.horizontal, Spacing.md)
@@ -352,6 +358,33 @@ private extension NowPlayingView {
 
             Spacer()
         }
+    }
+
+    // MARK: Hearing an Ad
+
+    var hearingAdButton: some View {
+        Button {
+            viewModel.reportHearingAd()
+        } label: {
+            HStack(spacing: Spacing.xs) {
+                Image(systemName: "ear.fill")
+                    .font(.system(size: 13, weight: .medium))
+                Text("Hearing an ad")
+                    .font(AppTypography.sans(size: 13, weight: .medium))
+            }
+            .foregroundStyle(AppColors.textSecondary)
+            .padding(.horizontal, Spacing.sm)
+            .padding(.vertical, Spacing.xs)
+            .background(
+                Capsule()
+                    .fill(AppColors.textSecondary.opacity(0.10))
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(TransportButtonStyle())
+        .frame(minWidth: 44, minHeight: 44)
+        .accessibilityLabel("Hearing an ad")
+        .accessibilityHint("Reports that you are currently hearing an ad that was not detected")
     }
 
     // MARK: Speed

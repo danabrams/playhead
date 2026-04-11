@@ -46,6 +46,31 @@ enum CorrectionSource: String, Sendable, Codable {
     case listenRevert
     /// User explicitly vetoed a span via "This isn't an ad".
     case manualVeto
+    /// User reported a missed ad (false negative) — "Hearing an ad" button or transcript tap-to-mark.
+    case falseNegative
+}
+
+// MARK: - CorrectionKind
+
+/// Distinguishes whether a correction is a false positive ("not an ad") or
+/// false negative ("is an ad") report. Derived from the CorrectionSource.
+enum CorrectionKind: Sendable {
+    /// User says the system incorrectly flagged content as an ad.
+    case falsePositive
+    /// User says the system missed an ad that is currently playing.
+    case falseNegative
+}
+
+extension CorrectionSource {
+    /// The semantic kind of correction this source represents.
+    var kind: CorrectionKind {
+        switch self {
+        case .listenRevert, .manualVeto:
+            return .falsePositive
+        case .falseNegative:
+            return .falseNegative
+        }
+    }
 }
 
 // MARK: - CorrectionEvent

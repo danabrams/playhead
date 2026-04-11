@@ -33,7 +33,7 @@ final class TranscriptPeekViewModel {
 
     // MARK: - Configuration
 
-    private let analysisAssetId: String
+    let analysisAssetId: String
     private let store: AnalysisStore
     private let logger = Logger(subsystem: "com.playhead", category: "TranscriptPeek")
 

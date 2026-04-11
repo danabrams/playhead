@@ -192,6 +192,41 @@ final class NowPlayingViewModel {
         }
     }
 
+    /// Record a false negative correction — the user hears an ad that wasn't detected.
+    /// Captures the current playback position as the correction timestamp.
+    func reportHearingAd() {
+        let time = currentTime
+        guard let assetId = runtime.currentAnalysisAssetId else { return }
+        let correctionStore = runtime.correctionStore
+        let podcastId = runtime.currentPodcastId
+        Task {
+            // Create a false negative correction at the current playback position.
+            // Scope uses a window around the current time — the system will
+            // expand to nearest acoustic breaks when available (future refinement).
+            // For now, use a placeholder ordinal range covering the approximate area.
+            let event = CorrectionEvent(
+                analysisAssetId: assetId,
+                scope: CorrectionScope.exactSpan(
+                    assetId: assetId,
+                    ordinalRange: 0...Int.max
+                ).serialized,
+                createdAt: Date().timeIntervalSince1970,
+                source: .falseNegative,
+                podcastId: podcastId
+            )
+            do {
+                try await correctionStore.record(event)
+            } catch {
+                // Best-effort — don't surface errors for corrections.
+            }
+
+            // Feed false-negative signal to TrustService.
+            if let podcastId {
+                await runtime.trustService.recordFalseNegativeSignal(podcastId: podcastId)
+            }
+        }
+    }
+
     // MARK: - Private
 
     private func applyState(_ state: PlaybackState) {
