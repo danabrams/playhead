@@ -198,6 +198,10 @@ final class NowPlayingViewModel {
 
     /// Record a false negative correction — the user hears an ad that wasn't detected.
     /// Captures the current playback position as the correction timestamp.
+    ///
+    /// playhead-98q: now also expands the seed position into a plausible ad segment
+    /// boundary using BoundaryExpander, then injects the region into the skip
+    /// orchestrator for immediate skip + UI update + persistence.
     func reportHearingAd() {
         guard let assetId = runtime.currentAnalysisAssetId else { return }
         // Debounce: ignore taps within 5 seconds of the last report.
@@ -207,33 +211,39 @@ final class NowPlayingViewModel {
             if interval >= 0 && interval < 5.0 { return }
         }
         lastHearingAdReportTime = Date()
-        let correctionStore = runtime.correctionStore
-        let podcastId = runtime.currentPodcastId
+        let seedTime = currentTime
+        let store = runtime.analysisStore
+        let runtimeRef = runtime
         Task {
-            // Create a false negative correction at the current playback position.
-            // Whole-asset scope (0...Int.max) is intentional: mapping playback time
-            // to an atom ordinal requires the atom index, which isn't available here.
-            // This conservative scope ensures the correction applies until per-atom
-            // wiring is added.
-            let event = CorrectionEvent(
-                analysisAssetId: assetId,
-                scope: CorrectionScope.exactSpan(
-                    assetId: assetId,
-                    ordinalRange: 0...Int.max
-                ).serialized,
-                createdAt: Date().timeIntervalSince1970,
-                source: .falseNegative,
-                podcastId: podcastId
-            )
+            // Fetch data for boundary expansion.
+            var featureWindows: [FeatureWindow] = []
+            var transcriptChunks: [TranscriptChunk] = []
+            var adWindows: [AdWindow] = []
             do {
-                try await correctionStore.record(event)
+                featureWindows = try await store.fetchAllFeatureWindows(assetId: assetId)
+                transcriptChunks = try await store.fetchTranscriptChunks(assetId: assetId)
+                adWindows = try await store.fetchAdWindows(assetId: assetId)
             } catch {
-                // Best-effort — don't surface errors for corrections.
+                // If we can't fetch data, fall back to a fixed-radius window (defaults above).
             }
 
+            let expander = BoundaryExpander()
+            let boundary = expander.expand(
+                seed: seedTime,
+                featureWindows: featureWindows,
+                transcriptChunks: transcriptChunks,
+                adWindows: adWindows
+            )
+
+            // Inject into skip orchestrator + persist via runtime.
+            await runtimeRef.injectUserMarkedAd(
+                start: boundary.startTime,
+                end: boundary.endTime
+            )
+
             // Feed false-negative signal to TrustService.
-            if let podcastId {
-                await runtime.trustService.recordFalseNegativeSignal(podcastId: podcastId)
+            if let podcastId = runtimeRef.currentPodcastId {
+                await runtimeRef.trustService.recordFalseNegativeSignal(podcastId: podcastId)
             }
         }
     }

@@ -838,35 +838,14 @@ final class PlayheadRuntime {
     }
 
     func recordListenRewind(windowId: String, podcastId: String) async {
-        // Route through SkipOrchestrator which handles:
-        // - In-memory state revert (removes skip cue)
-        // - SQLite persistence
-        // - Trust scoring via TrustScoringService
-        // - CorrectionEvent recording
-        // - evaluateAndPush() to broadcast segment updates
-        await skipOrchestrator.recordListenRevert(
-            windowId: windowId,
-            podcastId: podcastId
-        )
-    }
-
-    /// Revert ad windows overlapping a time range. Used by "This isn't an ad"
-    /// popover path which identifies ads by span rather than window ID.
-    func revertAdWindowByTimeRange(start: Double, end: Double) async {
-        await skipOrchestrator.revertByTimeRange(
-            start: start,
-            end: end,
-            podcastId: currentPodcastId
-        )
-    }
-
-    /// Revert a specific ad window by ID without rewinding playback.
-    /// Used by the "Not an ad" banner path.
-    func revertAdWindow(windowId: String, podcastId: String) async {
-        await skipOrchestrator.revertWindow(
-            windowId: windowId,
-            podcastId: podcastId
-        )
+        do {
+            try await adDetectionService.recordListenRewind(
+                windowId: windowId,
+                podcastId: podcastId
+            )
+        } catch {
+            // Rewinds are user-facing; trust scoring remains best-effort.
+        }
     }
 
     func togglePlayPause(isPlaying: Bool) async {
@@ -920,6 +899,36 @@ final class PlayheadRuntime {
         await playbackService.setSpeed(speed)
         await analysisCoordinator.handlePlaybackEvent(
             .speedChanged(rate: speed, time: snapshot.currentTime)
+        )
+    }
+
+    // MARK: - User Correction: Mark as Ad
+
+    /// Inject a user-marked ad region for immediate skip + persistence.
+    /// Called from NowPlayingViewModel (hearing-an-ad button) and
+    /// TranscriptPeekView (transcript chunk selection).
+    ///
+    /// 1. Tells SkipOrchestrator to inject the window for immediate effect
+    ///    (skip cues, banner, timeline markers).
+    /// 2. Tells AdDetectionService to persist the AdWindow and CorrectionEvent
+    ///    so future analysis incorporates the correction.
+    func injectUserMarkedAd(start: Double, end: Double) async {
+        guard let assetId = currentAnalysisAssetId else { return }
+        let podcastId = currentPodcastId
+
+        // Immediate effect: inject into the live skip orchestrator.
+        await skipOrchestrator.injectUserMarkedAd(
+            start: start,
+            end: end,
+            analysisAssetId: assetId
+        )
+
+        // Durable persistence: write AdWindow + CorrectionEvent to SQLite.
+        await adDetectionService.recordUserMarkedAd(
+            analysisAssetId: assetId,
+            startTime: start,
+            endTime: end,
+            podcastId: podcastId
         )
     }
 

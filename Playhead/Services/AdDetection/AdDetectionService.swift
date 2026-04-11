@@ -214,11 +214,6 @@ actor AdDetectionService {
     /// spans gate to `.blockedByUserCorrection` without making the struct async.
     private(set) var correctionStore: (any UserCorrectionStore)?
 
-    /// Phase 9 (playhead-4my.9.1): optional fingerprint store. When non-nil,
-    /// fingerprint matching is threaded into RegionShadowPhase and fingerprint
-    /// evidence contributes to the fusion ledger. Nil suppresses both paths.
-    private let fingerprintStore: AdCopyFingerprintStore?
-
     // MARK: - Cached State
 
     /// Scanner is recreated per-episode when profile changes.
@@ -247,8 +242,7 @@ actor AdDetectionService {
         shadowSkipMarker: @escaping @Sendable (_ sessionId: String, _ podcastId: String) async -> Void = { _, _ in },
         regionShadowObserver: RegionShadowObserver? = nil,
         phase5ProjectorObserver: Phase5ProjectorObserver? = nil,
-        skipOrchestrator: SkipOrchestrator? = nil,
-        fingerprintStore: AdCopyFingerprintStore? = nil
+        skipOrchestrator: SkipOrchestrator? = nil
     ) {
         self.store = store
         self.classifier = classifier
@@ -263,7 +257,6 @@ actor AdDetectionService {
         self.regionShadowObserver = regionShadowObserver
         self.phase5ProjectorObserver = phase5ProjectorObserver
         self.skipOrchestrator = skipOrchestrator
-        self.fingerprintStore = fingerprintStore
     }
 
     #if DEBUG
@@ -285,6 +278,61 @@ actor AdDetectionService {
     /// (actor property writes must be asynchronous from an init context).
     func setUserCorrectionStore(_ store: any UserCorrectionStore) {
         self.correctionStore = store
+    }
+
+    // MARK: - User Correction Persistence
+
+    /// Persist a user-marked ad region as an AdWindow and CorrectionEvent.
+    /// Called from PlayheadRuntime when the user reports hearing an ad that
+    /// the detector missed (false negative correction).
+    func recordUserMarkedAd(
+        analysisAssetId: String,
+        startTime: Double,
+        endTime: Double,
+        podcastId: String?
+    ) async {
+        let windowId = UUID().uuidString
+        let adWindow = AdWindow(
+            id: windowId,
+            analysisAssetId: analysisAssetId,
+            startTime: startTime,
+            endTime: endTime,
+            confidence: 1.0,
+            boundaryState: "userMarked",
+            decisionState: AdDecisionState.confirmed.rawValue,
+            detectorVersion: "userCorrection",
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: startTime,
+            metadataSource: "userCorrection",
+            metadataConfidence: nil, metadataPromptVersion: nil,
+            wasSkipped: false, userDismissedBanner: false
+        )
+
+        do {
+            try await store.insertAdWindow(adWindow)
+        } catch {
+            logger.warning("Failed to persist user-marked ad window: \(error.localizedDescription)")
+        }
+
+        // Record a false-negative correction event for the trust/learning pipeline.
+        if let correctionStore {
+            let scope = CorrectionScope.exactSpan(
+                assetId: analysisAssetId,
+                ordinalRange: 0...Int.max
+            )
+            let event = CorrectionEvent(
+                analysisAssetId: analysisAssetId,
+                scope: scope.serialized,
+                createdAt: Date().timeIntervalSince1970,
+                source: .falseNegative,
+                podcastId: podcastId
+            )
+            do {
+                try await correctionStore.record(event)
+            } catch {
+                logger.warning("Failed to record user-marked ad correction: \(error.localizedDescription)")
+            }
+        }
     }
 
     // MARK: - Profile Update
@@ -501,9 +549,7 @@ actor AdDetectionService {
             episodeDuration: episodeDuration,
             priors: showPriors,
             podcastProfile: currentPodcastProfile,
-            fmWindows: fmRefinementWindows,
-            fingerprintStore: fingerprintStore,
-            podcastId: podcastId
+            fmWindows: fmRefinementWindows
         )
         let regionBundles = try await RegionShadowPhase.run(regionInput)
 
@@ -607,8 +653,7 @@ actor AdDetectionService {
                 featureWindows: featureWindows,
                 catalogEntries: evidenceCatalog.entries,
                 semanticScanResults: semanticScanResults,
-                fusionConfig: fusionConfig,
-                regionBundles: regionBundles
+                fusionConfig: fusionConfig
             )
 
             let mapper = DecisionMapper(
@@ -760,8 +805,7 @@ actor AdDetectionService {
         featureWindows: [FeatureWindow],
         catalogEntries: [EvidenceEntry],
         semanticScanResults: [SemanticScanResult],
-        fusionConfig: FusionWeightConfig,
-        regionBundles: [RegionFeatureBundle] = []
+        fusionConfig: FusionWeightConfig
     ) -> [EvidenceLedgerEntry] {
         // Classifier entry: find the best-matching ClassifierResult for this span.
         let classifierScore = bestClassifierScore(
@@ -798,14 +842,6 @@ actor AdDetectionService {
             fusionConfig: fusionConfig
         )
 
-        // Fingerprint entries: from RegionFeatureBundle fingerprint matches
-        // overlapping the span (Phase 9).
-        let fingerprintLedgerEntries = buildFingerprintLedgerEntries(
-            span: span,
-            regionBundles: regionBundles,
-            fusionConfig: fusionConfig
-        )
-
         let fusion = BackfillEvidenceFusion(
             span: span,
             classifierScore: classifierScore,
@@ -813,7 +849,6 @@ actor AdDetectionService {
             lexicalEntries: lexicalEntries,
             acousticEntries: acousticEntries,
             catalogEntries: catalogLedgerEntries,
-            fingerprintEntries: fingerprintLedgerEntries,
             mode: config.fmBackfillMode,
             config: fusionConfig
         )
@@ -940,32 +975,6 @@ actor AdDetectionService {
             source: .catalog,
             weight: weight,
             detail: .catalog(entryCount: overlapping.count)
-        )]
-    }
-
-    /// Build fingerprint ledger entries from RegionFeatureBundle fingerprint matches
-    /// overlapping the span (Phase 9).
-    private func buildFingerprintLedgerEntries(
-        span: DecodedSpan,
-        regionBundles: [RegionFeatureBundle],
-        fusionConfig: FusionWeightConfig
-    ) -> [EvidenceLedgerEntry] {
-        // Collect fingerprint matches from all region bundles that overlap this span.
-        var overlappingMatches: [FingerprintMatch] = []
-        for bundle in regionBundles {
-            let matches = bundle.region.fingerprintMatches.filter { match in
-                match.startTime < span.endTime && match.endTime > span.startTime
-            }
-            overlappingMatches.append(contentsOf: matches)
-        }
-        guard !overlappingMatches.isEmpty else { return [] }
-
-        let avgSimilarity = overlappingMatches.reduce(0.0) { $0 + $1.similarity } / Double(overlappingMatches.count)
-        let weight = min(avgSimilarity * fusionConfig.fingerprintCap, fusionConfig.fingerprintCap)
-        return [EvidenceLedgerEntry(
-            source: .fingerprint,
-            weight: weight,
-            detail: .fingerprint(matchCount: overlappingMatches.count, averageSimilarity: avgSimilarity)
         )]
     }
 

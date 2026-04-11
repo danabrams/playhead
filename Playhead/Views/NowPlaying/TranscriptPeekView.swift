@@ -28,9 +28,12 @@ struct TranscriptPeekView: View {
     /// Podcast ID for the current episode, used for trust signal recording.
     var podcastId: String?
 
-    /// Callback to revert overlapping ad windows in the SkipOrchestrator.
-    /// Threaded through to AdRegionPopover for "This isn't an ad" gesture.
-    var onRevertAdWindows: (DecodedSpan) async -> Void = { _ in }
+    /// Callback to revert ad windows for a decoded span (gpi: "not an ad" flow).
+    var onRevertAdWindows: ((DecodedSpan) async -> Void)?
+
+    /// Runtime reference for injecting user-marked ad corrections.
+    /// Optional so existing callers (previews, tests) don't need to provide it.
+    var runtime: PlayheadRuntime?
 
     /// Phase 5 (u4d): Which decoded span's popover is currently showing.
     @State private var selectedDecodedSpan: DecodedSpan? = nil
@@ -43,6 +46,15 @@ struct TranscriptPeekView: View {
 
     /// Confirmation alert for submitting marked chunks as false negative.
     @State private var showMarkConfirmation = false
+
+    /// "Not an ad" marking mode: when true, tapping chunks selects/deselects them for veto.
+    @State private var isNotAdMarkingMode = false
+
+    /// Indices of chunks selected as "not an ad" in not-ad marking mode.
+    @State private var notAdMarkedChunkIndices: Set<Int> = []
+
+    /// Confirmation alert for submitting not-ad chunks.
+    @State private var showNotAdConfirmation = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -108,10 +120,69 @@ private extension TranscriptPeekView {
                 liveIndicator
             }
 
+            // "Not an ad" mode toggle
+            notAdModeToggle
+
             // Mark-as-ad mode toggle
             markModeToggle
         }
         .accessibilityElement(children: .combine)
+    }
+
+    var notAdModeToggle: some View {
+        Button {
+            if isNotAdMarkingMode {
+                // Exiting not-ad mode — if chunks are selected, show confirmation
+                if !notAdMarkedChunkIndices.isEmpty {
+                    showNotAdConfirmation = true
+                } else {
+                    isNotAdMarkingMode = false
+                }
+            } else {
+                // Enter not-ad mode, exit mark-ad mode if active
+                isMarkingMode = false
+                markedChunkIndices = []
+                isNotAdMarkingMode = true
+                notAdMarkedChunkIndices = []
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: isNotAdMarkingMode
+                    ? (notAdMarkedChunkIndices.isEmpty ? "xmark" : "checkmark")
+                    : "hand.raised"
+                )
+                .font(.system(size: 11, weight: .semibold))
+                Text(isNotAdMarkingMode
+                    ? (notAdMarkedChunkIndices.isEmpty ? "Cancel" : "Done")
+                    : "Not ad"
+                )
+                .font(AppTypography.sans(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(isNotAdMarkingMode ? AppColors.textPrimary : AppColors.textSecondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule()
+                    .fill((isNotAdMarkingMode ? AppColors.textPrimary : AppColors.textSecondary).opacity(0.12))
+            )
+        }
+        .frame(minWidth: 44, minHeight: 44)
+        .accessibilityLabel(isNotAdMarkingMode ? "Finish not-ad marking" : "Mark sentences as not an ad")
+        .accessibilityHint(isNotAdMarkingMode
+            ? "Tap to submit selected sentences as not an ad"
+            : "Enter selection mode to tap sentences that are not ads"
+        )
+        .alert("Mark as not an ad?", isPresented: $showNotAdConfirmation) {
+            Button("Cancel", role: .cancel) {
+                // Stay in marking mode so user can adjust selection
+            }
+            Button("Dismiss ad", role: .destructive) {
+                submitNotAdChunks()
+                isNotAdMarkingMode = false
+            }
+        } message: {
+            Text("\(notAdMarkedChunkIndices.count) sentence\(notAdMarkedChunkIndices.count == 1 ? "" : "s") will be marked as not an ad. Any overlapping ad detections will be dismissed.")
+        }
     }
 
     var markModeToggle: some View {
@@ -124,6 +195,9 @@ private extension TranscriptPeekView {
                     isMarkingMode = false
                 }
             } else {
+                // Enter mark-ad mode, exit not-ad mode if active
+                isNotAdMarkingMode = false
+                notAdMarkedChunkIndices = []
                 isMarkingMode = true
                 markedChunkIndices = []
             }
@@ -256,7 +330,6 @@ private extension TranscriptPeekView {
                 AdRegionPopover(
                     span: span,
                     correctionStore: correctionStore,
-                    onRevertAdWindows: onRevertAdWindows,
                     onDismiss: { selectedDecodedSpan = nil }
                 )
             }
@@ -353,11 +426,18 @@ private extension TranscriptPeekView {
         .contentShape(Rectangle())
         .onTapGesture {
             if isMarkingMode {
-                // Toggle selection in marking mode
+                // Toggle selection in mark-ad mode
                 if markedChunkIndices.contains(index) {
                     markedChunkIndices.remove(index)
                 } else {
                     markedChunkIndices.insert(index)
+                }
+            } else if isNotAdMarkingMode {
+                // Toggle selection in not-ad mode
+                if notAdMarkedChunkIndices.contains(index) {
+                    notAdMarkedChunkIndices.remove(index)
+                } else {
+                    notAdMarkedChunkIndices.insert(index)
                 }
             } else if let span = primarySpan {
                 selectedDecodedSpan = span
@@ -376,12 +456,25 @@ private extension TranscriptPeekView {
                     : AppColors.textTertiary.opacity(0.4)
                 )
                 .padding(.trailing, Spacing.xs)
+            } else if isNotAdMarkingMode {
+                Image(systemName: notAdMarkedChunkIndices.contains(index)
+                    ? "checkmark.circle.fill"
+                    : "circle"
+                )
+                .font(.system(size: 18))
+                .foregroundStyle(notAdMarkedChunkIndices.contains(index)
+                    ? AppColors.textPrimary
+                    : AppColors.textTertiary.opacity(0.4)
+                )
+                .padding(.trailing, Spacing.xs)
             }
         }
         .background(
             markedChunkIndices.contains(index)
                 ? AppColors.accent.opacity(0.08)
-                : Color.clear
+                : (notAdMarkedChunkIndices.contains(index)
+                    ? AppColors.textPrimary.opacity(0.06)
+                    : Color.clear)
         )
         .animation(Motion.quick, value: isActive)
         .accessibilityElement(children: .combine)
@@ -431,9 +524,11 @@ private extension TranscriptPeekView {
     }
 
     /// Submit the marked chunks as a false negative correction.
-    /// Uses whole-asset scope (0...Int.max) because chunks don't carry atom ordinals
-    /// and using chunk indices as ordinal proxies would produce semantically wrong
-    /// scope data that breaks when per-span scope matching is added.
+    ///
+    /// playhead-98q: in addition to recording the CorrectionEvent, now also
+    /// injects the selected chunk range into the skip orchestrator for
+    /// immediate skip + UI update + persistence. The chunks already carry
+    /// startTime/endTime, so no BoundaryExpander is needed.
     func submitMarkedChunks() {
         guard !markedChunkIndices.isEmpty else { return }
 
@@ -441,10 +536,58 @@ private extension TranscriptPeekView {
         // if the alert action fires more than once.
         let selectedIndices = markedChunkIndices
         markedChunkIndices = []
-        _ = selectedIndices // indices captured for future per-atom scope wiring
 
+        let chunks = peekViewModel.chunks
+        let selectedChunks = selectedIndices.compactMap { idx -> TranscriptChunk? in
+            guard idx < chunks.count else { return nil }
+            return chunks[idx]
+        }
+        guard !selectedChunks.isEmpty else { return }
+
+        // Derive the time range from the selected chunks' min start / max end.
+        let startTime = selectedChunks.map(\.startTime).min() ?? 0
+        let endTime = selectedChunks.map(\.endTime).max() ?? 0
+
+        let trustSvc = trustService
+        let pid = podcastId
+        let runtimeRef = runtime
+        Task {
+            // Inject the user-marked ad region for immediate skip + persistence.
+            // PlayheadRuntime.injectUserMarkedAd handles both the orchestrator
+            // injection and the AdWindow + CorrectionEvent persistence.
+            if let runtimeRef {
+                await runtimeRef.injectUserMarkedAd(start: startTime, end: endTime)
+            }
+
+            // Feed false-negative signal to TrustService (mirrors reportHearingAd).
+            if let pid, let trustSvc {
+                await trustSvc.recordFalseNegativeSignal(podcastId: pid)
+            }
+        }
+    }
+
+    /// Submit the not-ad marked chunks as a manual veto correction.
+    /// Records a .manualVeto CorrectionEvent and calls onRevertAdWindows
+    /// with a synthetic DecodedSpan covering the selected time range.
+    func submitNotAdChunks() {
+        guard !notAdMarkedChunkIndices.isEmpty else { return }
+
+        // Capture and clear selection immediately.
+        let selectedIndices = notAdMarkedChunkIndices
+        notAdMarkedChunkIndices = []
+
+        let chunks = peekViewModel.chunks
+        let selectedChunks = selectedIndices.compactMap { idx -> TranscriptChunk? in
+            guard idx < chunks.count else { return nil }
+            return chunks[idx]
+        }
+        guard !selectedChunks.isEmpty else { return }
+
+        let startTime = selectedChunks.map(\.startTime).min() ?? 0
+        let endTime = selectedChunks.map(\.endTime).max() ?? 0
         let assetId = peekViewModel.analysisAssetId
 
+        // Record CorrectionEvent with .manualVeto source.
         let scope = CorrectionScope.exactSpan(
             assetId: assetId,
             ordinalRange: 0...Int.max
@@ -453,21 +596,44 @@ private extension TranscriptPeekView {
             analysisAssetId: assetId,
             scope: scope.serialized,
             createdAt: Date().timeIntervalSince1970,
-            source: .falseNegative,
+            source: .manualVeto,
             podcastId: podcastId
         )
+
+        // Build a synthetic DecodedSpan covering the selected range.
+        let syntheticSpan = DecodedSpan(
+            id: DecodedSpan.makeId(assetId: assetId, firstAtomOrdinal: 0, lastAtomOrdinal: Int.max),
+            assetId: assetId,
+            firstAtomOrdinal: 0,
+            lastAtomOrdinal: Int.max,
+            startTime: startTime,
+            endTime: endTime,
+            anchorProvenance: []
+        )
+
         let trustSvc = trustService
         let pid = podcastId
+        let revertCallback = onRevertAdWindows
+        let store = correctionStore
         Task {
+            // Persist the veto event.
             do {
-                try await correctionStore.record(event)
+                try await store.record(event)
             } catch {
                 // Best-effort — don't surface errors for corrections.
             }
 
-            // Feed false-negative signal to TrustService (mirrors reportHearingAd).
+            // Also call recordVeto for sponsor-level corrections.
+            await store.recordVeto(span: syntheticSpan)
+
+            // Revert overlapping ad windows via the orchestrator callback.
+            if let revertCallback {
+                await revertCallback(syntheticSpan)
+            }
+
+            // Feed false-positive (false skip) signal to TrustService.
             if let pid, let trustSvc {
-                await trustSvc.recordFalseNegativeSignal(podcastId: pid)
+                await trustSvc.recordFalseSkipSignal(podcastId: pid)
             }
         }
     }

@@ -1010,6 +1010,58 @@ actor SkipOrchestrator {
         skipCueHandler?(cues)
     }
 
+    // MARK: - User Correction Injection
+
+    /// Inject a user-marked ad segment immediately into the skip orchestrator.
+    /// Creates a ManagedWindow with confidence=1.0 and .confirmed state, then
+    /// evaluates and pushes skip cues so the segment takes effect in real time.
+    ///
+    /// Called from PlayheadRuntime when the user taps "Hearing an ad" or marks
+    /// transcript chunks as an ad.
+    func injectUserMarkedAd(start: Double, end: Double, analysisAssetId: String) {
+        // Synthesize an AdWindow for the user-marked region.
+        let windowId = UUID().uuidString
+        let adWindow = AdWindow(
+            id: windowId,
+            analysisAssetId: analysisAssetId,
+            startTime: start,
+            endTime: end,
+            confidence: 1.0,
+            boundaryState: "userMarked",
+            decisionState: AdDecisionState.confirmed.rawValue,
+            detectorVersion: "userCorrection",
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: start,
+            metadataSource: "userCorrection",
+            metadataConfidence: nil, metadataPromptVersion: nil,
+            wasSkipped: false, userDismissedBanner: false
+        )
+
+        let snappedStart = snapBoundary(time: start, direction: .start)
+        let snappedEnd = snapBoundary(time: end, direction: .end)
+        let key = idempotencyKey(assetId: analysisAssetId, windowId: windowId)
+
+        let managed = ManagedWindow(
+            adWindow: adWindow,
+            decisionState: .confirmed,
+            snappedStart: snappedStart,
+            snappedEnd: snappedEnd,
+            idempotencyKey: key,
+            cueActive: false
+        )
+        windows[windowId] = managed
+
+        // Emit banner before evaluateAndPush so listeners see the banner
+        // even in shadow/manual mode where evaluateAndPush may not promote
+        // to .applied.
+        if !banneredWindowIds.contains(windowId) {
+            banneredWindowIds.insert(windowId)
+            emitBannerItem(for: managed)
+        }
+
+        evaluateAndPush()
+    }
+
     // MARK: - Idempotency
 
     /// Build the idempotency key for a skip decision.

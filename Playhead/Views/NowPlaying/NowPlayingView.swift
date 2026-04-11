@@ -90,14 +90,25 @@ struct NowPlayingView: View {
                 // episode changed between skip and tap, the veto silently drops
                 // (assetId is nil) — acceptable for this UI path.
                 onNotAnAd: { item in
-                    // Revert the ad window in the orchestrator. This handles
-                    // in-memory state, SQLite persistence, trust scoring,
-                    // CorrectionEvent recording, and UI segment broadcast.
+                    guard let assetId = runtime.currentAnalysisAssetId else { return }
+                    let correctionStore = runtime.correctionStore
                     Task {
-                        await runtime.revertAdWindow(
-                            windowId: item.windowId,
+                        let event = CorrectionEvent(
+                            analysisAssetId: assetId,
+                            scope: CorrectionScope.exactSpan(
+                                assetId: assetId,
+                                ordinalRange: 0...Int.max
+                            ).serialized,
+                            createdAt: Date().timeIntervalSince1970,
+                            source: .manualVeto,
                             podcastId: item.podcastId
                         )
+                        do {
+                            try await correctionStore.record(event)
+                        } catch {
+                            Logger(subsystem: "com.playhead", category: "NowPlayingView")
+                                .warning("Failed to record manual-veto correction: \(error)")
+                        }
                     }
                 }
             )
@@ -129,14 +140,7 @@ struct NowPlayingView: View {
                     correctionStore: runtime.correctionStore,
                     trustService: runtime.trustService,
                     podcastId: runtime.currentPodcastId,
-                    // Revert overlapping ad windows in the orchestrator when
-                    // the user confirms "This isn't an ad" from the popover.
-                    onRevertAdWindows: { span in
-                        await runtime.revertAdWindowByTimeRange(
-                            start: span.startTime,
-                            end: span.endTime
-                        )
-                    }
+                    runtime: runtime
                 )
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
