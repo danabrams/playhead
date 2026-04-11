@@ -194,6 +194,29 @@ struct CorrectionBoostFactorTests {
         let factor = await store.correctionBoostFactor(for: "any-asset")
         #expect(factor == 1.0)
     }
+
+    @Test("Future-dated false negative correction clamps boost to 2.0")
+    func futureDatedFalseNegativeClampsBoost() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-future-fn"))
+
+        // Record a false negative with a future createdAt (clock skew).
+        let futureDate = Date().addingTimeInterval(30 * 86400) // 30 days in the future
+        let event = CorrectionEvent(
+            analysisAssetId: "asset-future-fn",
+            scope: CorrectionScope.exactSpan(
+                assetId: "asset-future-fn",
+                ordinalRange: 0...50
+            ).serialized,
+            createdAt: futureDate.timeIntervalSince1970,
+            source: .falseNegative
+        )
+        try await correctionStore.record(event)
+
+        let factor = await correctionStore.correctionBoostFactor(for: "asset-future-fn")
+        #expect(factor == 2.0, "Future-dated correction with weight=1.0 should produce max boost of 2.0; got \(factor)")
+    }
 }
 
 // MARK: - False Negative + Passthrough Factor Independence
@@ -310,20 +333,4 @@ struct CombinedCorrectionFactorTests {
     }
 }
 
-// MARK: - Test Helpers (local to this file)
-
-private func makeTestAsset(id: String) -> AnalysisAsset {
-    AnalysisAsset(
-        id: id,
-        episodeId: "ep-\(id)",
-        assetFingerprint: "fp-\(id)",
-        weakFingerprint: nil,
-        sourceURL: "file:///tmp/\(id).m4a",
-        featureCoverageEndTime: nil,
-        fastTranscriptCoverageEndTime: nil,
-        confirmedAdCoverageEndTime: nil,
-        analysisState: "new",
-        analysisVersion: 1,
-        capabilitySnapshot: nil
-    )
-}
+// makeTestAsset(id:) is defined in TestHelpers.swift

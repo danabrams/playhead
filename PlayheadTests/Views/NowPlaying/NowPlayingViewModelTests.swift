@@ -92,4 +92,16 @@ final class NowPlayingViewModelTests: XCTestCase {
         let vm = NowPlayingViewModel(runtime: PlayheadRuntime(isPreviewRuntime: true))
         XCTAssertFalse(vm.isPlaying)
     }
+
+    // MARK: - reportHearingAd Guard
+
+    func testReportHearingAdNoOpsWithoutAnalysisAssetId() {
+        // Preview runtime has nil currentAnalysisAssetId.
+        let vm = NowPlayingViewModel(runtime: PlayheadRuntime(isPreviewRuntime: true))
+
+        // Should not throw or crash — early return because assetId is nil.
+        vm.reportHearingAd()
+        // Call again to verify debounce path is also safe with nil assetId.
+        vm.reportHearingAd()
+    }
 }

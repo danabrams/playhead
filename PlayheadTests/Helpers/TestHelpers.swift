@@ -260,6 +260,27 @@ func probeTableExists(in directory: URL, table: String) throws -> Bool {
     return sqlite3_step(stmt) == SQLITE_ROW
 }
 
+// MARK: - Correction Test Helpers
+
+/// Creates a minimal AnalysisAsset for correction store tests.
+/// Shared across FalseNegativeCorrectionTests, UserCorrectionStoreTests,
+/// and CorrectionSuppressionTests.
+func makeTestAsset(id: String) -> AnalysisAsset {
+    AnalysisAsset(
+        id: id,
+        episodeId: "ep-\(id)",
+        assetFingerprint: "fp-\(id)",
+        weakFingerprint: nil,
+        sourceURL: "file:///tmp/\(id).m4a",
+        featureCoverageEndTime: nil,
+        fastTranscriptCoverageEndTime: nil,
+        confirmedAdCoverageEndTime: nil,
+        analysisState: "new",
+        analysisVersion: 1,
+        capabilitySnapshot: nil
+    )
+}
+
 // MARK: - Skip Orchestrator Test Helpers
 
 /// Shared factory for SkipOrchestrator tests. Used by both

@@ -35,10 +35,7 @@ struct AdRegionPopover: View {
             Button("Cancel", role: .cancel) {}
             Button("Confirm", role: .destructive) {
                 Task {
-                    await correctionStore.recordVeto(
-                        span: span,
-                        timeRange: span.startTime ... span.endTime
-                    )
+                    await correctionStore.recordVeto(span: span)
                     onDismiss()
                 }
             }

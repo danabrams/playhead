@@ -70,20 +70,4 @@ final class SpeedSelectorCycleTests: XCTestCase {
         }
     }
 
-    // MARK: - Format
-
-    func testFormatSpeedWholeNumber() {
-        // Verify formatting for whole numbers uses no decimal (e.g., "1x", "2x", "3x")
-        var chosen: Float?
-        let view = SpeedSelectorView(
-            currentSpeed: 1.0,
-            onSpeedChanged: { chosen = $0 },
-            hapticPlayer: RecordingHapticPlayer()
-        )
-        // The accessibility label includes the formatted speed string.
-        // We can verify indirectly by ensuring the view constructs without crash
-        // and the cycle logic itself is correct (covered above).
-        _ = view.body
-        XCTAssertNotNil(chosen ?? 0) // force view evaluation
-    }
 }

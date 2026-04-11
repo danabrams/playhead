@@ -106,12 +106,12 @@ final class UserCorrectionStoreTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(weight, 0.1)
     }
 
-    func testDecayWeightNegativeAgeDaysReturnsAboveOne() {
-        // Negative ageDays (clock skew: correction has future createdAt) yields weight > 1.0.
-        // Callers (correctionPassthroughFactor) are responsible for clamping.
+    func testDecayWeightNegativeAgeDaysClampedToOne() {
+        // Negative ageDays (clock skew: correction has future createdAt) is
+        // clamped to 1.0 at the source to prevent downstream over-weighting.
         let weight = correctionDecayWeight(ageDays: -30)
-        // 1.0 - (-30/180) = 1.0 + 0.167 ≈ 1.167
-        XCTAssertGreaterThan(weight, 1.0)
+        XCTAssertEqual(weight, 1.0, accuracy: 0.001,
+            "Negative ageDays must be clamped to 1.0, not exceed it")
     }
 
     func testCorrectionPassthroughFactorClampsFutureDatedCorrection() async throws {
@@ -141,7 +141,7 @@ final class UserCorrectionStoreTests: XCTestCase {
         let noop = NoOpUserCorrectionStore()
         let span = makeTestSpan()
         // Must not throw or crash.
-        await noop.recordVeto(span: span, timeRange: 0.0...30.0)
+        await noop.recordVeto(span: span)
     }
 
     func testNoOpRecordDoesNotThrow() async throws {
@@ -523,7 +523,7 @@ final class UserCorrectionStoreTests: XCTestCase {
             endTime: 40.0,
             anchorProvenance: []
         )
-        await correctionStore.recordVeto(span: span, timeRange: 10.0...40.0)
+        await correctionStore.recordVeto(span: span)
 
         let events = try await correctionStore.activeCorrections(for: "asset-veto")
         XCTAssertEqual(events.count, 1)
@@ -631,7 +631,7 @@ final class UserCorrectionStoreTests: XCTestCase {
             endTime: 40.0,
             anchorProvenance: [.evidenceCatalog(entry: brandEntry)]
         )
-        await correctionStore.recordVeto(span: span, timeRange: 10.0...40.0)
+        await correctionStore.recordVeto(span: span)
 
         let events = try await correctionStore.activeCorrections(for: "asset-brand")
         XCTAssertEqual(events.count, 2, "recordVeto must write exactSpan + sponsorOnShow when brandSpan evidence is present")
@@ -693,21 +693,7 @@ final class UserCorrectionStoreTests: XCTestCase {
 
 // MARK: - Test Helpers
 
-private func makeTestAsset(id: String) -> AnalysisAsset {
-    AnalysisAsset(
-        id: id,
-        episodeId: "ep-\(id)",
-        assetFingerprint: "fp-\(id)",
-        weakFingerprint: nil,
-        sourceURL: "file:///tmp/\(id).m4a",
-        featureCoverageEndTime: nil,
-        fastTranscriptCoverageEndTime: nil,
-        confirmedAdCoverageEndTime: nil,
-        analysisState: "new",
-        analysisVersion: 1,
-        capabilitySnapshot: nil
-    )
-}
+// makeTestAsset(id:) is defined in TestHelpers.swift
 
 /// Seeds the old-schema correction_events table (as shipped in 0.6) with a sample row.
 /// Used to test the v5→v6 migration path where the table already exists with

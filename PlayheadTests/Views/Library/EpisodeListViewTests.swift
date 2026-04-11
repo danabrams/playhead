@@ -229,10 +229,9 @@ final class EpisodeListViewTests: XCTestCase {
         let context = container.mainContext
         let podcast = makePodcast(in: context)
 
-        // Verify the view can be constructed — the Query predicate
-        // filters episodes by podcast.persistentModelID.
-        let view = EpisodeListView(podcast: podcast)
-        XCTAssertNotNil(view, "EpisodeListView must construct with a podcast")
+        // Verify the view can be constructed without trapping — the Query
+        // predicate filters episodes by podcast.persistentModelID.
+        let _ = EpisodeListView(podcast: podcast)
     }
 
     // MARK: - Progress bar guard

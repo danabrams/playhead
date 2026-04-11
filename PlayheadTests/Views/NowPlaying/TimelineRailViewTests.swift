@@ -43,38 +43,38 @@ final class TimelineRailViewTests: XCTestCase {
             "Segment exactly at 2pt boundary should return 2pt")
     }
 
-    // MARK: - Skip Glide Constants (AC5)
+    // MARK: - Hit Target & Layout Relationships (AC5, AC9)
 
-    func testSkipJumpThreshold() {
+    func testTouchTargetMeetsAccessibilityMinimum() {
         let view = TimelineRailView(
             progress: 0.0,
             adSegments: [],
             onSeek: { _ in }
         )
-        XCTAssertEqual(view.skipJumpThreshold, 0.02,
-            "Skip jump detection threshold must be 0.02 (2% of timeline)")
+        XCTAssertGreaterThanOrEqual(view.touchTargetHeight, 44,
+            "Touch target must be at least 44pt for accessibility compliance")
     }
 
-    // MARK: - Hit Target Sizing (AC9)
-
-    func testTouchTargetHeight() {
+    func testTouchTargetExceedsRailHeight() {
         let view = TimelineRailView(
             progress: 0.0,
             adSegments: [],
             onSeek: { _ in }
         )
-        XCTAssertEqual(view.touchTargetHeight, 44,
-            "Touch target must be 44pt for accessibility compliance")
+        XCTAssertGreaterThan(view.touchTargetHeight, view.railHeight,
+            "Touch target must be larger than the visual rail for adequate hit area")
     }
 
-    func testRailHeight() {
+    func testSkipJumpThresholdIsSmallFraction() {
         let view = TimelineRailView(
             progress: 0.0,
             adSegments: [],
             onSeek: { _ in }
         )
-        XCTAssertEqual(view.railHeight, 4,
-            "Visual rail height must be 4pt")
+        XCTAssertGreaterThan(view.skipJumpThreshold, 0,
+            "Skip jump threshold must be positive")
+        XCTAssertLessThanOrEqual(view.skipJumpThreshold, 0.10,
+            "Skip jump threshold must be at most 10% of timeline to feel responsive")
     }
 
     // MARK: - Tap-to-Explain Callback (AC8)

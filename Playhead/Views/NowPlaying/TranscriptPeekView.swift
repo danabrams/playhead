@@ -157,7 +157,6 @@ private extension TranscriptPeekView {
             Button("Report missed ad", role: .destructive) {
                 submitMarkedChunks()
                 isMarkingMode = false
-                markedChunkIndices = []
             }
         } message: {
             Text("\(markedChunkIndices.count) sentence\(markedChunkIndices.count == 1 ? "" : "s") will be reported as a missed ad.")
@@ -432,6 +431,12 @@ private extension TranscriptPeekView {
     /// scope data that breaks when per-span scope matching is added.
     func submitMarkedChunks() {
         guard !markedChunkIndices.isEmpty else { return }
+
+        // Clear selection immediately to prevent duplicate submissions
+        // if the alert action fires more than once.
+        let selectedIndices = markedChunkIndices
+        markedChunkIndices = []
+        _ = selectedIndices // indices captured for future per-atom scope wiring
 
         let assetId = peekViewModel.analysisAssetId
 

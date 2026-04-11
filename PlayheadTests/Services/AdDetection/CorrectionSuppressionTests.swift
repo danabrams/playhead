@@ -227,6 +227,60 @@ struct CorrectionSuppressionTests {
         #expect(result.skipConfidence >= 0.40)
     }
 
+    // MARK: - Boost path (correctionFactor > 1.0)
+
+    @Test("correctionFactor 1.5 boosts moderate confidence and does NOT trigger blockedByUserCorrection")
+    func boostFactorIncreasesConfidence() {
+        let span = makeSpan()
+
+        // Moderate evidence + boost factor 1.5
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: moderateEvidenceLedger(),
+            config: defaultConfig(),
+            transcriptQuality: .good,
+            correctionFactor: 1.5
+        )
+        let result = mapper.map()
+
+        // The gate condition is `correctionFactor < 1.0 && ...`, so boost must NOT block.
+        #expect(result.eligibilityGate != .blockedByUserCorrection,
+                "correctionFactor > 1.0 must never trigger blockedByUserCorrection")
+
+        // Compute expected: raw confidence boosted by 1.5, then clamped to 1.0.
+        // We just verify it is higher than the unboosted value.
+        let unboostedMapper = DecisionMapper(
+            span: span,
+            ledger: moderateEvidenceLedger(),
+            config: defaultConfig(),
+            transcriptQuality: .good,
+            correctionFactor: 1.0
+        )
+        let unboostedResult = unboostedMapper.map()
+        #expect(result.skipConfidence > unboostedResult.skipConfidence,
+                "Boosted confidence (\(result.skipConfidence)) must exceed unboosted (\(unboostedResult.skipConfidence))")
+    }
+
+    @Test("correctionFactor 2.0 caps skipConfidence at 1.0")
+    func boostFactorCapsAtOne() {
+        let span = makeSpan()
+
+        // Strong evidence (~0.90) + max boost (2.0) → raw = ~1.80, clamped to 1.0
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: strongEvidenceLedger(),
+            config: defaultConfig(),
+            transcriptQuality: .good,
+            correctionFactor: 2.0
+        )
+        let result = mapper.map()
+
+        #expect(result.skipConfidence <= 1.0,
+                "Boosted confidence must be clamped to 1.0, got \(result.skipConfidence)")
+        #expect(result.eligibilityGate != .blockedByUserCorrection,
+                "correctionFactor > 1.0 must never trigger blockedByUserCorrection")
+    }
+
     // MARK: - End-to-end: PersistentUserCorrectionStore → DecisionMapper pipeline
 
     @Test("End-to-end: store correction → query factor → DecisionMapper blocks → decays → allows")
@@ -630,20 +684,4 @@ struct TimelineRailAdSegmentTapTests {
     }
 }
 
-// MARK: - Test Helpers (local to this file)
-
-private func makeTestAsset(id: String) -> AnalysisAsset {
-    AnalysisAsset(
-        id: id,
-        episodeId: "ep-\(id)",
-        assetFingerprint: "fp-\(id)",
-        weakFingerprint: nil,
-        sourceURL: "file:///tmp/\(id).m4a",
-        featureCoverageEndTime: nil,
-        fastTranscriptCoverageEndTime: nil,
-        confirmedAdCoverageEndTime: nil,
-        analysisState: "new",
-        analysisVersion: 1,
-        capabilitySnapshot: nil
-    )
-}
+// makeTestAsset(id:) is defined in TestHelpers.swift

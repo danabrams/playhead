@@ -99,21 +99,20 @@ enum CorrectionScope: Sendable, Equatable {
 /// Returns 1.0 at 0 days, decays linearly to 0.1 at 180 days, and is clamped
 /// to a minimum of 0.1 for corrections older than 180 days.
 ///
-///   weight = max(0.1, 1.0 - (ageDays / 180.0))
+///   weight = min(1.0, max(0.1, 1.0 - (ageDays / 180.0)))
 ///
-/// - Note: ageDays < 0 returns weight > 1.0; caller is responsible for clamping.
+/// Result is clamped to [0.1, 1.0]. Negative ageDays (future-dated corrections
+/// from clock skew) are clamped to 1.0 rather than exceeding it.
 func correctionDecayWeight(ageDays: Double) -> Double {
-    max(0.1, 1.0 - (ageDays / 180.0))
+    min(1.0, max(0.1, 1.0 - (ageDays / 180.0)))
 }
 
 // MARK: - DecodedSpan + ordinalRange helper
 
 extension DecodedSpan {
-    /// Return the full atom ordinal range of the span.
-    ///
-    /// Since atom-level timing isn't carried on DecodedSpan, we use the full
-    /// ordinal extent for conservative (wider) veto coverage.
-    func ordinalRange(for timeRange: ClosedRange<Double>) -> ClosedRange<Int> {
+    /// Full atom ordinal range of the span, used for conservative (wider)
+    /// veto coverage. Per-atom time mapping is not available on DecodedSpan.
+    var fullOrdinalRange: ClosedRange<Int> {
         firstAtomOrdinal...lastAtomOrdinal
     }
 }
@@ -126,7 +125,7 @@ protocol UserCorrectionStore: Sendable {
     ///
     /// Implementations should infer one or more `CorrectionScope` values from
     /// the span's metadata and persist a `CorrectionEvent` for each.
-    func recordVeto(span: DecodedSpan, timeRange: ClosedRange<Double>) async
+    func recordVeto(span: DecodedSpan) async
 
     /// Append a fully-formed correction event to the store.
     func record(_ event: CorrectionEvent) async throws
@@ -158,7 +157,7 @@ protocol UserCorrectionStore: Sendable {
 /// No-op implementation. Discards all corrections silently.
 /// Used in release builds and contexts that have not yet wired up persistence.
 struct NoOpUserCorrectionStore: UserCorrectionStore {
-    func recordVeto(span: DecodedSpan, timeRange: ClosedRange<Double>) async {
+    func recordVeto(span: DecodedSpan) async {
         // No-op.
     }
 
@@ -199,8 +198,8 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
     /// name and the span's `assetId` as a proxy for show identity (the
     /// podcastId is not carried on DecodedSpan; Phase 7.2 can supply it via
     /// `record(_:)` directly when available).
-    func recordVeto(span: DecodedSpan, timeRange: ClosedRange<Double>) async {
-        let ordinals = span.ordinalRange(for: timeRange)
+    func recordVeto(span: DecodedSpan) async {
+        let ordinals = span.fullOrdinalRange
         let now = Date().timeIntervalSince1970
 
         // Always record the exact span scope.

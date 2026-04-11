@@ -179,14 +179,6 @@ final class LibraryViewTests: XCTestCase {
 
     // MARK: - AC5: Empty State
 
-    func testEmptyStateLiteral() {
-        // Verify the exact string used in the empty state matches the AC.
-        // This is a compile-time + literal-match guard.
-        let expected = "No Podcasts Yet"
-        XCTAssertEqual(expected, "No Podcasts Yet",
-            "Empty state must display 'No Podcasts Yet'")
-    }
-
     func testEmptyStateShownWhenNoPodcasts() throws {
         let container = try makeInMemoryContainer()
         let context = container.mainContext

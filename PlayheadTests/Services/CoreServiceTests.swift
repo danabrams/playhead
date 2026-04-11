@@ -2519,7 +2519,7 @@ struct LexicalScannerPerRegexTests {
 // MARK: - EntitlementManager: Static Properties
 
 @Suite("EntitlementManager - Static Configuration")
-struct EntitlementManagerTests {
+struct EntitlementManagerStaticConfigTests {
 
     @Test("Premium product identifier is correct")
     func premiumProductId() {

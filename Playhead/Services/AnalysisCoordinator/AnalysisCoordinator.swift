@@ -163,7 +163,7 @@ actor AnalysisCoordinator {
     /// so that a coordinator stop initiated mid-backfill (e.g. thermal=critical
     /// triggering `BackgroundProcessingService.handleCapabilityUpdate`) tears
     /// down the polling loop promptly instead of spinning for up to 25 minutes.
-    /// Reset in `start()`.
+    /// Reset in ``startCapabilityObserver()`` and ``runPendingBackfill()``.
     private var stopRequested = false
 
     // MARK: - Init
@@ -253,6 +253,12 @@ actor AnalysisCoordinator {
     /// Returns when no more work is pending, or when `Task.isCancelled`
     /// becomes true (i.e. iOS expired the background window).
     func runPendingBackfill() async {
+        // Clear any prior stop request. stop() sets this flag to break the
+        // polling loop in a previous backfill run, but a NEW backfill invocation
+        // (from a fresh BGProcessingTask) must be allowed to run. Without this
+        // reset, a thermal-critical stop() would permanently disable backfill
+        // until the next app restart.
+        stopRequested = false
         logger.info("runPendingBackfill: draining pending analysis jobs")
 
         // Maximum lifetime cap so we never spin forever inside one BG window

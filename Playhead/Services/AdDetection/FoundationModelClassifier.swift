@@ -2164,6 +2164,7 @@ struct FoundationModelClassifier: Sendable {
 
     /// DEAD CODE after playhead-cay: buildRefinementPrompt no longer uses a preamble.
     /// Retained for potential future taxonomy experiments on the refinement pass.
+    ///
     /// bd-1en: refinement-pass parts for each variant. Refinement uses a
     /// slightly different prefix verb than coarse for `classification`
     /// (`refinementPromptPrefix == "Refine ad spans."`) but reuses the
@@ -2174,6 +2175,7 @@ struct FoundationModelClassifier: Sendable {
     /// windows 2 and 7). Other variants currently fall through to the
     /// classification refinement preamble (bd-34e never wired
     /// `extract`/`neutral` into refinement either).
+    @available(*, deprecated, message: "Dead code after playhead-cay preamble removal")
     static func refinementPreambleParts(
         for variant: CoarsePromptVariant
     ) -> (prefix: String, preamble: String, lineRef: String) {

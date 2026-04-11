@@ -95,7 +95,7 @@
 		4A56D13F5CC414BBB9DD2668 /* PreAnalysisInstrumentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0B876D178EC599BB89B294 /* PreAnalysisInstrumentation.swift */; };
 		4DC06394677343B09C11640C /* BackfillProgressCursorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE5DD1A344E740FC5E1E183E /* BackfillProgressCursorTests.swift */; };
 		4DED404CA8DA6CB03E68C389 /* RecordingHapticPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E49D1669EAD58498336A5C36 /* RecordingHapticPlayer.swift */; };
-		4F2AB6C812ED1A4E66AD1B11 /* EntitlementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA2CC7B2E2FC4652B94C4528 /* EntitlementTests.swift */; };
+
 		4F3CF6320318B8440247F559 /* NowPlayingBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8792CA543BEDF713F5610776 /* NowPlayingBar.swift */; };
 		4F5E09BFA5B52064442FD65F /* SkipPolicyMatrixTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6622C018C02F6E699C98715C /* SkipPolicyMatrixTests.swift */; };
 		5351A6C78A7255E7FE3F0C1E /* PlayheadRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 909D938B43C190CAB79EB70C /* PlayheadRuntime.swift */; };
@@ -458,7 +458,7 @@
 		D508BCA6030C4D8FCBEEC51D /* LexicalScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LexicalScanner.swift; sourceTree = "<group>"; };
 		D67C09F0363077895699D073 /* WithTestRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WithTestRuntime.swift; sourceTree = "<group>"; };
 		D9A8C0B59DC7925F56ADC713 /* SpeedSelectorHapticTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeedSelectorHapticTests.swift; sourceTree = "<group>"; };
-		DA2CC7B2E2FC4652B94C4528 /* EntitlementTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EntitlementTests.swift; sourceTree = "<group>"; };
+
 		DB7F419EC55BC570404E69EA /* DesignTokenInventory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignTokenInventory.swift; sourceTree = "<group>"; };
 		DC91A4E5E30798EB9DBF0857 /* PlaybackTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackTransport.swift; sourceTree = "<group>"; };
 		DCAE6DF40B51FB007DAA00EC /* BrowseViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowseViewModel.swift; sourceTree = "<group>"; };
@@ -565,7 +565,6 @@
 				98C8FC376788DF3455C4CFF1 /* CoreServiceTests.swift */,
 				CF2B9A86A2390399DEE7F612 /* CueHarvesterTests.swift */,
 				77A412E64F59F07032AA34CB /* EntitlementTests.swift */,
-				DA2CC7B2E2FC4652B94C4528 /* EntitlementTests.swift */,
 				2E8A5824372D1170DE380892 /* Phase2VerificationTests.swift */,
 				D1D7A3B2DDDAC397BAE34835 /* RunnerMaterializerRegressionTests.swift */,
 				D32B071AEFF7831785C2EEAD /* TranscriptIdentityTests.swift */,
@@ -580,6 +579,7 @@
 				2987C40702B65A17A6E8D618 /* ReplaySimulator */,
 				CA71A41DA4F93B7A0AB234DC /* SkipOrchestrator */,
 				C1A4A606D0BF09E2BB158671 /* TranscriptEngine */,
+				AAFF000001000001AAFF0001 /* TrustScoring */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -1025,6 +1025,13 @@
 			isa = PBXGroup;
 			children = (
 				B540ECDE12AFC60BBC272DC8 /* TrustScoringService.swift */,
+			);
+			path = TrustScoring;
+			sourceTree = "<group>";
+		};
+		AAFF000001000001AAFF0001 /* TrustScoring */ = {
+			isa = PBXGroup;
+			children = (
 				C088315362D4161754AFC069 /* TrustScoringServiceTests.swift */,
 			);
 			path = TrustScoring;
@@ -1473,7 +1480,6 @@
 				D802325D82C83EF76D60152A /* DownloadManagerPreAnalysisTests.swift in Sources */,
 				FE094685E4D4030EAC60F3DE /* DownloadManagerTests.swift in Sources */,
 				36750CBD14D5A0E9BDEED28B /* EmbeddedCorpusAnnotations.swift in Sources */,
-				4F2AB6C812ED1A4E66AD1B11 /* EntitlementTests.swift in Sources */,
 				13BBFACFBB1D34D9A3CBFF8B /* EpisodeListViewHapticTests.swift in Sources */,
 				3F0F8160121BFC0FAE15C14A /* EpisodeListViewTests.swift in Sources */,
 				DC9982CDB6AD3A97962A72E1 /* LibraryViewTests.swift in Sources */,

@@ -593,3 +593,72 @@ struct TrustScoringServiceTests {
         #expect(profile?.mode == SkipMode.shadow.rawValue)
     }
 }
+
+// MARK: - False-Negative Signals
+
+@Suite("TrustScoring — False-Negative Signals")
+struct TrustScoringFalseNegativeTests {
+
+    @Test("recordFalseNegativeSignal increments trust by half the observation bonus")
+    func falseNegativeIncrementsTrustByHalfBonus() async throws {
+        let initialTrust = 0.50
+        let seed = makeProfile(mode: SkipMode.auto.rawValue, trustScore: initialTrust, observations: 5)
+        let (sut, store) = try await makeSUT(seedProfile: seed)
+
+        await sut.recordFalseNegativeSignal(podcastId: testPodcastId)
+
+        let profile = try await store.fetchProfile(podcastId: testPodcastId)
+        // Default correctObservationBonus = 0.10, half = 0.05
+        let expected = initialTrust + TrustScoringConfig.default.correctObservationBonus * 0.5
+        expectScore(profile?.skipTrustScore, equals: expected)
+    }
+
+    @Test("recordFalseNegativeSignal caps trust at 1.0")
+    func falseNegativeCapsAtOne() async throws {
+        let seed = makeProfile(mode: SkipMode.auto.rawValue, trustScore: 0.98, observations: 10)
+        let (sut, store) = try await makeSUT(seedProfile: seed)
+
+        await sut.recordFalseNegativeSignal(podcastId: testPodcastId)
+
+        let profile = try await store.fetchProfile(podcastId: testPodcastId)
+        expectScore(profile?.skipTrustScore, equals: 1.0)
+    }
+
+    @Test("recordFalseNegativeSignal does not change mode")
+    func falseNegativeDoesNotChangeMode() async throws {
+        let seed = makeProfile(mode: SkipMode.manual.rawValue, trustScore: 0.50, observations: 5)
+        let (sut, store) = try await makeSUT(seedProfile: seed)
+
+        await sut.recordFalseNegativeSignal(podcastId: testPodcastId)
+
+        let profile = try await store.fetchProfile(podcastId: testPodcastId)
+        #expect(profile?.mode == SkipMode.manual.rawValue,
+                "False-negative signal must not change mode")
+    }
+
+    @Test("recordFalseNegativeSignal preserves observationCount and recentFalseSkipSignals")
+    func falseNegativePreservesCounters() async throws {
+        let seed = makeProfile(mode: SkipMode.auto.rawValue, trustScore: 0.50,
+                               observations: 42, falseSignals: 3)
+        let (sut, store) = try await makeSUT(seedProfile: seed)
+
+        await sut.recordFalseNegativeSignal(podcastId: testPodcastId)
+
+        let profile = try await store.fetchProfile(podcastId: testPodcastId)
+        #expect(profile?.observationCount == 42,
+                "observationCount must not change on false-negative signal")
+        #expect(profile?.recentFalseSkipSignals == 3,
+                "recentFalseSkipSignals must not change on false-negative signal")
+    }
+
+    @Test("recordFalseNegativeSignal no-ops when profile does not exist")
+    func falseNegativeNoOpsForMissingProfile() async throws {
+        let (sut, store) = try await makeSUT()
+
+        // Should not throw or crash
+        await sut.recordFalseNegativeSignal(podcastId: "nonexistent-podcast")
+
+        let profile = try await store.fetchProfile(podcastId: "nonexistent-podcast")
+        #expect(profile == nil, "No profile should be created for nonexistent podcast")
+    }
+}
