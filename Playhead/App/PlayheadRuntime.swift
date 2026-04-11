@@ -175,10 +175,8 @@ final class PlayheadRuntime {
         //   • UIDeviceBatteryProvider for battery level (same source as BPS)
         //   • ScanCohort.productionJSON() as the reuse-cache key
         // When AdDetectionConfig.fmBackfillMode == .off, the factory is
-        // never invoked. When .shadow (default), FM runs and writes telemetry
-        // to semantic_scan_results / evidence_events but never influences
-        // AdWindow rows (shadow invariant pinned by
-        // AdDetectionServiceShadowModeTests).
+        // never invoked. When .full (default), FM runs, writes telemetry,
+        // and contributes to the decision ledger.
         let capabilitiesServiceForFactory = capabilitiesService
         let batteryProvider = UIDeviceBatteryProvider()
 
