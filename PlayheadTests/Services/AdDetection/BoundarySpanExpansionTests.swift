@@ -336,11 +336,11 @@ struct BoundarySpanExpansionTests {
         // Scenario: 40-segment fixture, support=[15], base plan [15..19]
         // returns a boundary span that triggers expansion. Context size
         // is deliberately tight: the base 5-segment refinement window
-        // fits (prompt ~= 5 lines × 8 words ≈ 40 tokens + preamble
-        // ≈ 200 tokens); the full 10-segment expansion to [10..19]
-        // would push prompt past the refinement budget (≈ 400+ tokens),
-        // but the trim fallback drops the added lowerAdd from 5 to 1
-        // and retries with [14..19] which DOES fit.
+        // fits (prompt ~= 5 transcript lines + 1 "Return" line);
+        // the full 10-segment expansion to [10..19] would push the
+        // prompt past the refinement budget, but the trim fallback
+        // drops the added lowerAdd from 5 to 1 and retries with
+        // [14..19] which DOES fit.
         //
         // Before the Failure 3 fix this case recorded
         // `expansion-truncated iterations=0` and bumped the
