@@ -110,7 +110,7 @@ struct SpanHypothesis: Sendable, Equatable {
         score(at: lastEvidenceTime)
     }
 
-    func score(at time: Double, decayRate: Double = SpanHypothesisEngine.defaultDecayRate) -> Double {
+    func anchorEvidenceScore(at time: Double, decayRate: Double = SpanHypothesisEngine.defaultDecayRate) -> Double {
         let seedScore = Self.weightedContribution(
             weight: seedAnchor.weight,
             timestamp: seedAnchor.endTime,
@@ -125,6 +125,11 @@ struct SpanHypothesis: Sendable, Equatable {
                 decayRate: decayRate
             )
         }
+        return seedScore + supportingScore
+    }
+
+    func score(at time: Double, decayRate: Double = SpanHypothesisEngine.defaultDecayRate) -> Double {
+        let anchorScore = anchorEvidenceScore(at: time, decayRate: decayRate)
         let bodyScore = bodyEvidence.reduce(0) { partial, item in
             partial + Self.weightedContribution(
                 weight: item.weight,
@@ -133,7 +138,7 @@ struct SpanHypothesis: Sendable, Equatable {
                 decayRate: decayRate
             )
         }
-        return seedScore + supportingScore + bodyScore
+        return anchorScore + bodyScore
     }
 
     mutating func absorb(anchor: AnchorEvent) {
@@ -516,14 +521,14 @@ struct SpanHypothesisEngine: Sendable {
 
     private func hypothesis(_ lhs: SpanHypothesis, isBetterMatchThan rhs: SpanHypothesis, for event: AnchorEvent) -> Bool {
         if prefersPlausibilityRanking(for: event) {
-            let lhsScore = lhs.score(at: event.endTime)
-            let rhsScore = rhs.score(at: event.endTime)
+            let lhsScore = terminalAnchorOwnershipScore(for: lhs, event: event)
+            let rhsScore = terminalAnchorOwnershipScore(for: rhs, event: event)
             if lhsScore != rhsScore {
                 return lhsScore > rhsScore
             }
 
-            let lhsGap = abs(lhs.lastEvidenceTime - event.startTime)
-            let rhsGap = abs(rhs.lastEvidenceTime - event.startTime)
+            let lhsGap = max(0, event.startTime - lhs.lastEvidenceTime)
+            let rhsGap = max(0, event.startTime - rhs.lastEvidenceTime)
             if lhsGap != rhsGap {
                 return lhsGap < rhsGap
             }
@@ -540,6 +545,17 @@ struct SpanHypothesisEngine: Sendable {
 
     private func prefersPlausibilityRanking(for event: AnchorEvent) -> Bool {
         event.sponsorEntity == nil && (event.anchorType.isExplicitCloseAnchor || event.isExplicitReturnMarker)
+    }
+
+    private func terminalAnchorOwnershipScore(for hypothesis: SpanHypothesis, event: AnchorEvent) -> Double {
+        switch event.anchorType {
+        case .promoCode, .url:
+            return hypothesis.score(at: event.endTime)
+        case .transitionMarker:
+            return hypothesis.anchorEvidenceScore(at: event.endTime)
+        case .disclosure, .sponsorLexicon, .fmPositive:
+            return hypothesis.score(at: event.endTime)
+        }
     }
 
     private func eventFallsWithinWindow(_ hypothesis: SpanHypothesis, event: AnchorEvent) -> Bool {
