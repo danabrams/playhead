@@ -124,6 +124,14 @@ struct FeatureExtractionCheckpoint: Sendable, Equatable {
     let featureVersion: Int
 }
 
+struct FeatureWindowSpeakerChangeProxyUpdate: Sendable, Equatable {
+    let assetId: String
+    let startTime: Double
+    let endTime: Double
+    let featureVersion: Int
+    let speakerChangeProxyScore: Double
+}
+
 struct TranscriptChunk: Sendable {
     let id: String
     let analysisAssetId: String
@@ -384,6 +392,14 @@ actor AnalysisStore {
     /// `stable_precision_flag` is permitted to be true. Mirrors
     /// `CoveragePlanner.defaultColdStartEpisodeThreshold`.
     nonisolated static let plannerStableObservedEpisodeFloor = 5
+
+    #if DEBUG
+    enum FeatureBatchPersistenceFaultInjection: Equatable {
+        case afterCoverageUpdateBeforeCommit
+    }
+
+    private var featureBatchPersistenceFaultInjection: FeatureBatchPersistenceFaultInjection?
+    #endif
 
     /// bd-1tl: dedicated logger for store-level diagnostics that should
     /// reach Console.app on real devices without test scaffolding.
@@ -2046,6 +2062,51 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    func persistFeatureExtractionBatch(
+        assetId: String,
+        windows: [FeatureWindow],
+        priorWindowUpdate: FeatureWindowSpeakerChangeProxyUpdate?,
+        checkpoint: FeatureExtractionCheckpoint?,
+        coverageEndTime: Double?
+    ) throws {
+        guard priorWindowUpdate != nil || !windows.isEmpty || checkpoint != nil || coverageEndTime != nil else {
+            return
+        }
+
+        try exec("BEGIN TRANSACTION")
+        do {
+            if let priorWindowUpdate {
+                try updateFeatureWindowSpeakerChangeProxyScore(
+                    assetId: priorWindowUpdate.assetId,
+                    startTime: priorWindowUpdate.startTime,
+                    endTime: priorWindowUpdate.endTime,
+                    featureVersion: priorWindowUpdate.featureVersion,
+                    speakerChangeProxyScore: priorWindowUpdate.speakerChangeProxyScore
+                )
+            }
+
+            for window in windows {
+                try insertFeatureWindow(window)
+            }
+
+            if let checkpoint {
+                try upsertFeatureExtractionCheckpoint(checkpoint)
+            }
+
+            if let coverageEndTime {
+                try updateFeatureCoverage(id: assetId, endTime: coverageEndTime)
+                #if DEBUG
+                try triggerFeatureBatchPersistenceFaultIfNeeded(.afterCoverageUpdateBeforeCommit)
+                #endif
+            }
+
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
     func upsertFeatureExtractionCheckpoint(_ checkpoint: FeatureExtractionCheckpoint) throws {
         let sql = """
             INSERT INTO feature_extraction_state
@@ -2098,6 +2159,18 @@ actor AnalysisStore {
         guard abs(checkpoint.lastWindowEndTime - endTime) <= 1e-6 else { return nil }
         return checkpoint
     }
+
+    #if DEBUG
+    private func triggerFeatureBatchPersistenceFaultIfNeeded(
+        _ injection: FeatureBatchPersistenceFaultInjection
+    ) throws {
+        guard featureBatchPersistenceFaultInjection == injection else { return }
+        featureBatchPersistenceFaultInjection = nil
+        throw AnalysisStoreError.insertFailed(
+            "Injected feature extraction batch persistence failure at \(injection)"
+        )
+    }
+    #endif
 
     #if DEBUG
     /// Test-only call log of `fetchFeatureWindows` invocations, captured as
@@ -3552,6 +3625,12 @@ actor AnalysisStore {
     /// call this; it bypasses every validator the store enforces.
     func execForTesting(_ sql: String) throws {
         try exec(sql)
+    }
+
+    func setFeatureBatchPersistenceFaultInjectionForTesting(
+        _ injection: FeatureBatchPersistenceFaultInjection?
+    ) {
+        featureBatchPersistenceFaultInjection = injection
     }
     #endif
 

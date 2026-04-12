@@ -507,14 +507,6 @@ actor FeatureExtractionService {
             extractionState = extractionResult.state
 
             if let priorWindowUpdate = extractionResult.priorWindowUpdate {
-                try await store.updateFeatureWindowSpeakerChangeProxyScore(
-                    assetId: analysisAssetId,
-                    startTime: priorWindowUpdate.startTime,
-                    endTime: priorWindowUpdate.endTime,
-                    featureVersion: config.featureVersion,
-                    speakerChangeProxyScore: priorWindowUpdate.speakerChangeProxyScore
-                )
-
                 if let lastIndex = allWindows.lastIndex(where: {
                     abs($0.startTime - priorWindowUpdate.startTime) <= 1e-6 &&
                     abs($0.endTime - priorWindowUpdate.endTime) <= 1e-6
@@ -529,23 +521,32 @@ actor FeatureExtractionService {
 
             guard !windows.isEmpty else { continue }
 
-            // Persist batch to SQLite.
-            try await store.insertFeatureWindows(windows)
-
-            // Update coverage watermark.
-            if let lastWindow = windows.last {
-                effectiveCoverage = lastWindow.endTime
-                try await store.updateFeatureCoverage(
-                    id: analysisAssetId,
-                    endTime: lastWindow.endTime
+            let checkpoint = makeCheckpoint(
+                analysisAssetId: analysisAssetId,
+                state: extractionState
+            )
+            let priorWindowStoreUpdate = extractionResult.priorWindowUpdate.map { priorWindowUpdate in
+                FeatureWindowSpeakerChangeProxyUpdate(
+                    assetId: analysisAssetId,
+                    startTime: priorWindowUpdate.startTime,
+                    endTime: priorWindowUpdate.endTime,
+                    featureVersion: config.featureVersion,
+                    speakerChangeProxyScore: priorWindowUpdate.speakerChangeProxyScore
                 )
             }
 
-            if let checkpoint = makeCheckpoint(
-                analysisAssetId: analysisAssetId,
-                state: extractionState
-            ) {
-                try await store.upsertFeatureExtractionCheckpoint(checkpoint)
+            // Persist the batch atomically so coverage never advances beyond
+            // the checkpoint required to resume seam-aware smoothing.
+            try await store.persistFeatureExtractionBatch(
+                assetId: analysisAssetId,
+                windows: windows,
+                priorWindowUpdate: priorWindowStoreUpdate,
+                checkpoint: checkpoint,
+                coverageEndTime: windows.last?.endTime
+            )
+
+            if let lastWindow = windows.last {
+                effectiveCoverage = lastWindow.endTime
             }
 
             allWindows.append(contentsOf: windows)

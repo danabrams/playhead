@@ -385,6 +385,93 @@ struct FeatureExtractionSignalTests {
         assertMatchesWholeBufferReference(extracted: fetched, reference: reference)
     }
 
+    @Test("extractAndPersist rolls back seam batch when persistence fails after coverage update")
+    func extractAndPersistRollsBackFailedSeamBatch() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAnalysisAsset())
+
+        let firstShardSamples = Array(repeating: Float(0.001), count: 32)
+        let secondShardSamples = Array(repeating: Float(0.45), count: 32)
+        let config = makeFeatureExtractionConfig()
+        let timelineBuilder = makeShardAwareTimelineBuilder(
+            firstShardSamples: firstShardSamples,
+            secondShardSamples: secondShardSamples
+        )
+        let service = FeatureExtractionService(
+            store: store,
+            config: config,
+            musicProbabilityTimelineBuilder: timelineBuilder
+        )
+        let reference = await service.extract(
+            from: firstShardSamples + secondShardSamples,
+            startTime: 0,
+            analysisAssetId: "asset-1"
+        )
+
+        let firstBatch = try await service.extractAndPersist(
+            shards: [
+                AnalysisShard(
+                    id: 0,
+                    episodeID: "ep-1",
+                    startTime: 0,
+                    duration: 4,
+                    samples: firstShardSamples
+                )
+            ],
+            analysisAssetId: "asset-1",
+            existingCoverage: 0
+        )
+
+        await store.setFeatureBatchPersistenceFaultInjectionForTesting(.afterCoverageUpdateBeforeCommit)
+        await #expect(throws: AnalysisStoreError.self) {
+            try await service.extractAndPersist(
+                shards: [
+                    AnalysisShard(
+                        id: 1,
+                        episodeID: "ep-1",
+                        startTime: 4,
+                        duration: 4,
+                        samples: secondShardSamples
+                    )
+                ],
+                analysisAssetId: "asset-1",
+                existingCoverage: 4
+            )
+        }
+
+        let assetAfterFailure = try await store.fetchAsset(id: "asset-1")
+        let windowsAfterFailure = try await store.fetchFeatureWindows(assetId: "asset-1", from: 0, to: 8)
+        let checkpointAfterFailure = try await store.fetchFeatureExtractionCheckpoint(
+            assetId: "asset-1",
+            featureVersion: config.featureVersion,
+            endingAt: 4
+        )
+
+        #expect(firstBatch.count == 2)
+        #expect(assetAfterFailure?.featureCoverageEndTime == 4)
+        #expect(windowsAfterFailure.count == firstBatch.count)
+        #expect(checkpointAfterFailure != nil)
+        assertMatchesWholeBufferReference(extracted: windowsAfterFailure, reference: firstBatch)
+
+        let retriedSecondBatch = try await service.extractAndPersist(
+            shards: [
+                AnalysisShard(
+                    id: 1,
+                    episodeID: "ep-1",
+                    startTime: 4,
+                    duration: 4,
+                    samples: secondShardSamples
+                )
+            ],
+            analysisAssetId: "asset-1",
+            existingCoverage: assetAfterFailure?.featureCoverageEndTime ?? 0
+        )
+        let fetched = try await store.fetchFeatureWindows(assetId: "asset-1", from: 0, to: 8)
+
+        #expect(retriedSecondBatch.count == 2)
+        assertMatchesWholeBufferReference(extracted: fetched, reference: reference)
+    }
+
     @Test("extractAndPersist rewinds stale feature coverage and replaces older-version rows")
     func extractAndPersistReplacesStaleFeatureVersionRows() async throws {
         let store = try await makeTestStore()
