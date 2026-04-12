@@ -648,7 +648,8 @@ actor AnalysisCoordinator {
             await transcriptEngine.startTranscription(
                 shards: shards,
                 analysisAssetId: assetId,
-                snapshot: snapshot
+                snapshot: snapshot,
+                podcastId: activePodcastId
             )
         } else {
             logger.warning("FeaturesReady: no shards or snapshot available — skipping transcription")

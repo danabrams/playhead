@@ -129,7 +129,8 @@ actor AnalysisJobRunner {
         await transcriptEngine.startTranscription(
             shards: shards,
             analysisAssetId: assetId,
-            snapshot: snapshot
+            snapshot: snapshot,
+            podcastId: request.podcastId
         )
 
         // Observe the event stream for completion, with a 5-minute timeout

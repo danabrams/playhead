@@ -158,7 +158,9 @@ final class PlayheadRuntime {
 
         self.audioService = AnalysisAudioService()
 
-        let speechService = SpeechService()
+        let speechService = SpeechService(
+            vocabularyProvider: ASRVocabularyProvider(store: analysisStore)
+        )
 
         self.featureService = FeatureExtractionService(store: analysisStore)
         self.transcriptEngine = TranscriptEngineService(

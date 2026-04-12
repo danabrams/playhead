@@ -30,7 +30,7 @@ final class MockSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
         loaded
     }
 
-    func transcribe(shard: AnalysisShard) async throws -> [TranscriptSegment] {
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
         guard loaded else { throw TranscriptEngineError.modelNotLoaded }
         if shouldThrow { throw TranscriptEngineError.transcriptionFailed("mock error") }
         transcribeCallCount += 1
@@ -229,7 +229,7 @@ struct StubSpeechRecognizerTests {
     func stubTranscribe() async throws {
         let stub = StubSpeechRecognizer()
         try await stub.loadModel(from: URL(fileURLWithPath: "/tmp/model"))
-        let result = try await stub.transcribe(shard: makeShard())
+        let result = try await stub.transcribe(shard: makeShard(), podcastId: nil)
         #expect(result.isEmpty)
     }
 
@@ -237,7 +237,7 @@ struct StubSpeechRecognizerTests {
     func stubThrowsUnloaded() async {
         let stub = StubSpeechRecognizer()
         await #expect(throws: TranscriptEngineError.self) {
-            try await stub.transcribe(shard: makeShard())
+            try await stub.transcribe(shard: makeShard(), podcastId: nil)
         }
     }
 
@@ -282,6 +282,117 @@ struct TranscriptTypeTests {
     }
 }
 
+// MARK: - ASRVocabularyProvider Tests
+
+@Suite("ASRVocabularyProvider")
+struct ASRVocabularyProviderTests {
+
+    @Test("Compiled entries keep active sponsor knowledge ahead of podcast lexicon")
+    func prioritizesActiveSponsorKnowledge() {
+        let activeEntries = [
+            SponsorKnowledgeEntry(
+                podcastId: "pod-1",
+                entityType: .sponsor,
+                entityValue: "Alpha",
+                state: .active,
+                aliases: ["Alpha Plus"]
+            ),
+            SponsorKnowledgeEntry(
+                podcastId: "pod-1",
+                entityType: .sponsor,
+                entityValue: "Beta",
+                state: .active
+            )
+        ]
+
+        let compiled = ASRVocabularyProvider.compiledEntries(
+            activeSponsorEntries: activeEntries,
+            sponsorLexicon: "Gamma, Beta, Delta"
+        )
+
+        #expect(compiled.map(\.text) == ["Alpha", "Alpha Plus", "Beta", "Gamma", "Delta"])
+        #expect(compiled.map(\.source) == [
+            .activeSponsorKnowledge,
+            .activeSponsorKnowledge,
+            .activeSponsorKnowledge,
+            .podcastSponsorLexicon,
+            .podcastSponsorLexicon
+        ])
+    }
+
+    @Test("Domain lexicon terms expand to spoken URL templates")
+    func parsesDomainTermsToSpokenTemplates() {
+        let expanded = ASRVocabularyProvider.parseSponsorLexicon(
+            "example.com, https://my-site.com/podcast"
+        )
+
+        #expect(expanded == [
+            "example.com",
+            "example dot com",
+            "https://my-site.com/podcast",
+            "my site dot com",
+            "my site dot com slash podcast"
+        ])
+    }
+
+    @Test("Empty inputs compile to an empty vocabulary")
+    func emptyInputs() {
+        let compiled = ASRVocabularyProvider.compiledEntries(
+            activeSponsorEntries: [],
+            sponsorLexicon: nil
+        )
+        #expect(compiled.isEmpty)
+        #expect(ASRVocabularyProvider.parseSponsorLexicon(nil).isEmpty)
+    }
+
+    @Test("Store-backed provider builds ordered AnalysisContext contextual strings")
+    func analysisContextWiring() async throws {
+        let store = try await makeTestStore()
+        try await store.upsertProfile(
+            PodcastProfile(
+                podcastId: "pod-1",
+                sponsorLexicon: "Gamma, Delta",
+                normalizedAdSlotPriors: nil,
+                repeatedCTAFragments: nil,
+                jingleFingerprints: nil,
+                implicitFalsePositiveCount: 0,
+                skipTrustScore: 1.0,
+                observationCount: 1,
+                mode: "active",
+                recentFalseSkipSignals: 0
+            )
+        )
+        try await store.upsertKnowledgeEntry(
+            SponsorKnowledgeEntry(
+                podcastId: "pod-1",
+                entityType: .sponsor,
+                entityValue: "Alpha",
+                state: .active,
+                aliases: ["Alpha Plus"]
+            )
+        )
+        try await store.upsertKnowledgeEntry(
+            SponsorKnowledgeEntry(
+                podcastId: "pod-1",
+                entityType: .sponsor,
+                entityValue: "Beta",
+                state: .active
+            )
+        )
+
+        let provider = ASRVocabularyProvider(store: store)
+        let strings = await provider.contextualStrings(forPodcastId: "pod-1")
+        #expect(strings == ["Alpha", "Alpha Plus", "Beta", "Gamma", "Delta"])
+
+        #if canImport(Speech)
+        if #available(iOS 26.0, *) {
+            let context = await provider.analysisContext(forPodcastId: "pod-1")
+            #expect(context?.contextualStrings[.general] == ["Alpha", "Alpha Plus", "Beta", "Gamma", "Delta"])
+        }
+        #endif
+    }
+}
+
 // MARK: - Tracking Recognizer
 
 /// Mock recognizer that records which shard IDs were transcribed.
@@ -294,7 +405,7 @@ private final class TrackingRecognizer: SpeechRecognizer, @unchecked Sendable {
     func unloadModel() async { loaded = false }
     func isModelLoaded() async -> Bool { loaded }
 
-    func transcribe(shard: AnalysisShard) async throws -> [TranscriptSegment] {
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
         guard loaded else { throw TranscriptEngineError.modelNotLoaded }
         _shardIds.withLock { $0.append(shard.id) }
 

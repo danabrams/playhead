@@ -96,7 +96,8 @@ protocol SpeechRecognizer: Sendable {
     /// Transcribe a single shard of 16 kHz mono Float32 audio.
     /// Returns segments with word-level timestamps.
     func transcribe(
-        shard: AnalysisShard
+        shard: AnalysisShard,
+        podcastId: String?
     ) async throws -> [TranscriptSegment]
 
     /// Run VAD on a shard to detect speech boundaries.
@@ -130,8 +131,8 @@ actor SpeechService {
 
     // MARK: - Init
 
-    init() {
-        self.recognizer = makeDefaultSpeechRecognizer()
+    init(vocabularyProvider: ASRVocabularyProvider? = nil) {
+        self.recognizer = makeDefaultSpeechRecognizer(vocabularyProvider: vocabularyProvider)
 
         let (stream, continuation) = AsyncStream<TranscriptSegment>.makeStream()
         self.segmentStream = stream
@@ -187,7 +188,7 @@ actor SpeechService {
 
     /// Transcribe a shard and yield segments through the stream.
     /// Caller decides which pass type to tag based on which model is loaded.
-    func transcribe(shard: AnalysisShard) async throws -> [TranscriptSegment] {
+    func transcribe(shard: AnalysisShard, podcastId: String? = nil) async throws -> [TranscriptSegment] {
         guard await recognizer.isModelLoaded() else {
             throw TranscriptEngineError.modelNotLoaded
         }
@@ -205,7 +206,7 @@ actor SpeechService {
             episode=\(shard.episodeID)]
             """)
         let start = ContinuousClock.now
-        let rawSegments = try await recognizer.transcribe(shard: shard)
+        let rawSegments = try await recognizer.transcribe(shard: shard, podcastId: podcastId)
         let elapsed = ContinuousClock.now - start
         logger.info("Shard \(shard.id) transcribed in \(elapsed) → \(rawSegments.count) segments")
 
@@ -308,7 +309,7 @@ final class StubSpeechRecognizer: SpeechRecognizer, Sendable {
         _loaded.withLock { $0 }
     }
 
-    func transcribe(shard: AnalysisShard) async throws -> [TranscriptSegment] {
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
         guard _loaded.withLock({ $0 }) else { throw TranscriptEngineError.modelNotLoaded }
         // Stub: return empty transcript.
         return []
@@ -328,7 +329,9 @@ final class StubSpeechRecognizer: SpeechRecognizer, Sendable {
 
 // MARK: - Default Recognizer Factory
 
-private func makeDefaultSpeechRecognizer() -> any SpeechRecognizer {
+private func makeDefaultSpeechRecognizer(
+    vocabularyProvider: ASRVocabularyProvider? = nil
+) -> any SpeechRecognizer {
 #if canImport(Speech)
     let env = ProcessInfo.processInfo.environment
     let shouldUseStub =
@@ -337,7 +340,7 @@ private func makeDefaultSpeechRecognizer() -> any SpeechRecognizer {
         env["PLAYHEAD_USE_STUB_SPEECH"] == "1"
 
     if !shouldUseStub {
-        return AppleSpeechRecognizer()
+        return AppleSpeechRecognizer(vocabularyProvider: vocabularyProvider)
     }
 #endif
 
@@ -354,9 +357,14 @@ private func makeDefaultSpeechRecognizer() -> any SpeechRecognizer {
 /// No microphone or speech recognition permission required.
 actor AppleSpeechRecognizer: SpeechRecognizer {
     private let logger = Logger(subsystem: "com.playhead", category: "AppleSpeechRecognizer")
+    private let vocabularyProvider: ASRVocabularyProvider?
     private var selectedLocale: Locale?
     private var analyzerFormat: AVAudioFormat?
     private var prepared = false
+
+    init(vocabularyProvider: ASRVocabularyProvider? = nil) {
+        self.vocabularyProvider = vocabularyProvider
+    }
 
     // MARK: - Model Lifecycle
 
@@ -409,7 +417,7 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
 
     // MARK: - Transcription
 
-    func transcribe(shard: AnalysisShard) async throws -> [TranscriptSegment] {
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
         guard let locale = selectedLocale, let targetFormat = analyzerFormat else {
             throw TranscriptEngineError.modelNotLoaded
         }
@@ -424,9 +432,19 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         }
 
         let transcriber = SpeechTranscriber(locale: locale, preset: .timeIndexedProgressiveTranscription)
-        let analyzer = SpeechAnalyzer(
+        let analysisContext = await Self.makeAnalysisContext(
+            podcastId: podcastId,
+            vocabularyProvider: vocabularyProvider
+        )
+
+        let analysisAudioURL = try Self.makeAnalysisAudioFile(from: analyzerBuffer, format: targetFormat)
+        defer { try? FileManager.default.removeItem(at: analysisAudioURL) }
+        let analysisInputFile = try AVAudioFile(forReading: analysisAudioURL)
+        let analyzer = try await SpeechAnalyzer(
+            inputAudioFile: analysisInputFile,
             modules: [transcriber],
-            options: .init(priority: .utility, modelRetention: .lingering)
+            options: .init(priority: .utility, modelRetention: .lingering),
+            analysisContext: analysisContext
         )
 
         logger.debug("Preparing SpeechAnalyzer for shard \(shard.id)")
@@ -482,7 +500,11 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         let analyzerBuffer = try Self.convert(sourceBuffer, to: targetFormat)
 
         let detector = SpeechDetector()
-        let analyzer = SpeechAnalyzer(
+        let analysisAudioURL = try Self.makeAnalysisAudioFile(from: analyzerBuffer, format: targetFormat)
+        defer { try? FileManager.default.removeItem(at: analysisAudioURL) }
+        let analysisInputFile = try AVAudioFile(forReading: analysisAudioURL)
+        let analyzer = try await SpeechAnalyzer(
+            inputAudioFile: analysisInputFile,
             modules: [detector],
             options: .init(priority: .utility, modelRetention: .lingering)
         )
@@ -511,6 +533,23 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
             collector.cancel()
             throw error
         }
+    }
+
+    @available(iOS 26.0, *)
+    private static func makeAnalysisContext(
+        podcastId: String?,
+        vocabularyProvider: ASRVocabularyProvider?
+    ) async -> AnalysisContext {
+        let context = AnalysisContext()
+        guard let podcastId, let vocabularyProvider else { return context }
+
+        let contextualStrings = await vocabularyProvider.contextualStrings(forPodcastId: podcastId)
+        if !contextualStrings.isEmpty {
+            context.contextualStrings[.general] = contextualStrings
+            Logger(subsystem: "com.playhead", category: "AppleSpeechRecognizer")
+                .debug("Applied \(contextualStrings.count) ASR contextual strings for podcast \(podcastId, privacy: .public)")
+        }
+        return context
     }
 
     // MARK: - Format Conversion
@@ -762,6 +801,18 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         }
 
         return buffer
+    }
+
+    private static func makeAnalysisAudioFile(
+        from buffer: AVAudioPCMBuffer,
+        format: AVAudioFormat
+    ) throws -> URL {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("playhead-transcript-\(UUID().uuidString).caf")
+
+        let file = try AVAudioFile(forWriting: fileURL, settings: format.settings)
+        try file.write(from: buffer)
+        return fileURL
     }
 }
 

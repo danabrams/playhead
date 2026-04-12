@@ -103,6 +103,10 @@ actor TranscriptEngineService {
     /// The analysis asset ID currently being processed.
     private var activeAssetId: String?
 
+    /// The podcast ID currently being processed, used for ASR vocabulary
+    /// biasing on the SpeechAnalyzer path.
+    private var activePodcastId: String?
+
     /// Last known playback snapshot for priority computation.
     private var latestSnapshot: PlaybackSnapshot?
 
@@ -147,7 +151,8 @@ actor TranscriptEngineService {
     func startTranscription(
         shards: [AnalysisShard],
         analysisAssetId: String,
-        snapshot: PlaybackSnapshot
+        snapshot: PlaybackSnapshot,
+        podcastId: String? = nil
     ) {
         // Cancel any existing work — we're starting fresh or reprioritizing.
         activeTask?.cancel()
@@ -160,6 +165,7 @@ actor TranscriptEngineService {
         appendedShards = []
 
         activeAssetId = analysisAssetId
+        activePodcastId = podcastId
         latestSnapshot = snapshot
 
         activeTask = Task { [weak self] in
@@ -183,7 +189,8 @@ actor TranscriptEngineService {
         startTranscription(
             shards: shards,
             analysisAssetId: analysisAssetId,
-            snapshot: snapshot
+            snapshot: snapshot,
+            podcastId: activePodcastId
         )
     }
 
@@ -199,7 +206,8 @@ actor TranscriptEngineService {
         startTranscription(
             shards: shards,
             analysisAssetId: analysisAssetId,
-            snapshot: snapshot
+            snapshot: snapshot,
+            podcastId: activePodcastId
         )
     }
 
@@ -248,6 +256,7 @@ actor TranscriptEngineService {
         activeTask?.cancel()
         activeTask = nil
         activeAssetId = nil
+        activePodcastId = nil
         latestSnapshot = nil
         chunkCounter = 0
         appendedShards = []
@@ -408,7 +417,7 @@ actor TranscriptEngineService {
         try Task.checkCancellation()
 
         // Run Apple Speech transcription.
-        let segments = try await speechService.transcribe(shard: shard)
+        let segments = try await speechService.transcribe(shard: shard, podcastId: activePodcastId)
 
         guard !segments.isEmpty else {
             logger.debug("No segments from shard \(shard.id) — silence or noise")
