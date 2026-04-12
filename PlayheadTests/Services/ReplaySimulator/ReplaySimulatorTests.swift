@@ -308,9 +308,11 @@ struct ReplaySimulatorConditionTests {
 
     private func makeConfig(
         speed: Float = 1.0,
-        interactions: [SimulatedInteraction] = []
+        interactions: [SimulatedInteraction] = [],
+        groundTruth: [GroundTruthAdSegment]? = nil,
+        duration: TimeInterval = 600
     ) -> ReplayConfiguration {
-        let gt = [
+        let gt = groundTruth ?? [
             GroundTruthAdSegment(
                 startTime: 60, endTime: 120,
                 advertiser: "Squarespace", product: "Website Builder",
@@ -319,14 +321,14 @@ struct ReplaySimulatorConditionTests {
             ),
         ]
 
-        let chunks = stride(from: 0.0, to: 600, by: 10.0).map { start in
+        let chunks = stride(from: 0.0, to: duration, by: 10.0).map { start in
             TranscriptChunk(
                 id: "chunk-\(Int(start))",
                 analysisAssetId: "test-episode-cond",
                 segmentFingerprint: "fp-\(Int(start))",
                 chunkIndex: Int(start / 10),
                 startTime: start,
-                endTime: min(start + 10, 600),
+                endTime: min(start + 10, duration),
                 text: "Simulated text.",
                 normalizedText: "simulated text",
                 pass: "fast",
@@ -340,7 +342,7 @@ struct ReplaySimulatorConditionTests {
             episodeId: "test-episode-cond",
             episodeTitle: "Test Episode: Conditions",
             podcastId: "test-podcast-cond",
-            episodeDuration: 600,
+            episodeDuration: duration,
             condition: SimulationCondition(
                 audioMode: .cached,
                 playbackSpeed: speed,
@@ -409,6 +411,57 @@ struct ReplaySimulatorConditionTests {
         // before t=125. Either way, the metric should be computable.
         #expect(overrides.overrideRate >= 0, "Override rate should be computable")
         _ = reverts // suppress unused warning
+    }
+
+    @Test("Delivery-style rewind metrics are sliced by the skipped ad")
+    func deliveryStyleRewindMetricsAreSliced() {
+        let groundTruth = [
+            GroundTruthAdSegment(
+                startTime: 60, endTime: 90,
+                advertiser: "Host Sponsor", product: "Host Product",
+                adType: .midRoll,
+                deliveryStyle: .hostRead
+            ),
+            GroundTruthAdSegment(
+                startTime: 120, endTime: 150,
+                advertiser: "Dynamic Sponsor", product: "Dynamic Product",
+                adType: .midRoll,
+                deliveryStyle: .dynamicInsertion
+            ),
+        ]
+        let config = makeConfig(
+            interactions: [
+                SimulatedInteraction(type: .scrub, atTime: 95, targetTime: 55, newSpeed: nil),
+                SimulatedInteraction(type: .scrub, atTime: 155, targetTime: 115, newSpeed: nil),
+            ],
+            groundTruth: groundTruth,
+            duration: 240
+        )
+        let driver = SimulatedPlaybackDriver(config: config, rng: MaxRandomNumberGenerator())
+        _ = driver.runReplay()
+
+        let report = driver.buildReport(replayDuration: 1.0)
+        let corpus = CorpusReplayReport.aggregate(from: [report])
+        let hostReadMetrics = report.deliveryStyleMetrics.first {
+            $0.style == GroundTruthAdSegment.DeliveryStyle.hostRead
+        }
+        let dynamicMetrics = report.deliveryStyleMetrics.first {
+            $0.style == GroundTruthAdSegment.DeliveryStyle.dynamicInsertion
+        }
+        let hostReadSlice = corpus.slices.first {
+            $0.dimension == MetricSliceDimension.deliveryStyle
+                && $0.value == GroundTruthAdSegment.DeliveryStyle.hostRead.rawValue
+        }
+        let dynamicSlice = corpus.slices.first {
+            $0.dimension == MetricSliceDimension.deliveryStyle
+                && $0.value == GroundTruthAdSegment.DeliveryStyle.dynamicInsertion.rawValue
+        }
+
+        #expect(report.userOverrides.rewindAfterSkipCount == 2)
+        #expect(hostReadMetrics?.userOverrides.rewindAfterSkipCount == 1)
+        #expect(dynamicMetrics?.userOverrides.rewindAfterSkipCount == 1)
+        #expect(hostReadSlice?.userOverrides.rewindAfterSkipCount == 1)
+        #expect(dynamicSlice?.userOverrides.rewindAfterSkipCount == 1)
     }
 
     @Test("Speed change mid-episode is recorded")
@@ -681,6 +734,109 @@ struct ReplaySimulatorAggregationTests {
 
         #expect(abs(corpus.aggregateDetectionQuality.seedRecall - 0.25) < 0.0001)
         #expect(abs((hostReadSlice?.detectionQuality.seedRecall ?? -1) - 0.25) < 0.0001)
+    }
+
+    @Test("Seed recall aggregation ignores legacy ratios when count-bearing reports are present")
+    func seedRecallAggregationIgnoresLegacyRatiosWhenCountsPresent() {
+        let weightedGroundTruth = (0..<4).map { index in
+            GroundTruthAdSegment(
+                startTime: Double(index * 30),
+                endTime: Double(index * 30 + 15),
+                advertiser: "Weighted \(index)",
+                product: "Product \(index)",
+                adType: .midRoll,
+                deliveryStyle: .hostRead
+            )
+        }
+        let weightedDetected = weightedGroundTruth.enumerated().map { index, segment in
+            AdWindow(
+                id: "weighted-window-\(index)",
+                analysisAssetId: "ep-weighted",
+                startTime: segment.startTime,
+                endTime: segment.endTime,
+                confidence: 0.9,
+                boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                decisionState: AdDecisionState.candidate.rawValue,
+                detectorVersion: "sim-v1",
+                advertiser: segment.advertiser,
+                product: segment.product,
+                adDescription: nil,
+                evidenceText: nil,
+                evidenceStartTime: segment.startTime,
+                metadataSource: "test",
+                metadataConfidence: 0.9,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false
+            )
+        }
+
+        let weightedReport = EpisodeReplayReport(
+            episodeId: "ep-weighted",
+            episodeTitle: "Weighted Episode",
+            podcastId: "pod-mixed-legacy",
+            condition: SimulationCondition(
+                audioMode: .cached,
+                playbackSpeed: 1.0,
+                interactions: [],
+                analysisPath: .live
+            ),
+            deliveryStyles: [.hostRead],
+            detectionQuality: ReplayMetricsComputation.detectionQuality(
+                groundTruth: weightedGroundTruth,
+                detected: weightedDetected,
+                episodeDuration: 180,
+                seededGroundTruthIndices: [0]
+            ),
+            boundaryQuality: BoundaryQualityMetrics(),
+            latency: LatencyMetrics(),
+            userOverrides: UserOverrideMetrics(listenTapCount: 0, rewindAfterSkipCount: 0, overrideRate: 0),
+            samples: [],
+            simulatorVersion: EpisodeReplayReport.currentSimulatorVersion,
+            generatedAt: Date(),
+            replayDurationSeconds: 1.0
+        )
+
+        let legacyReport = EpisodeReplayReport(
+            episodeId: "ep-legacy-seed",
+            episodeTitle: "Legacy Seed Episode",
+            podcastId: "pod-mixed-legacy",
+            condition: SimulationCondition(
+                audioMode: .cached,
+                playbackSpeed: 1.0,
+                interactions: [],
+                analysisPath: .live
+            ),
+            detectionQuality: DetectionQualityMetrics(
+                falsePositiveSkipSeconds: 0,
+                falseNegativeAdSeconds: 0,
+                seedRecall: 1,
+                precision: 1,
+                recall: 1,
+                f1Score: 1,
+                missedSegmentCount: 0,
+                spuriousSegmentCount: 0
+            ),
+            boundaryQuality: BoundaryQualityMetrics(),
+            latency: LatencyMetrics(),
+            userOverrides: UserOverrideMetrics(listenTapCount: 0, rewindAfterSkipCount: 0, overrideRate: 0),
+            samples: [],
+            simulatorVersion: EpisodeReplayReport.currentSimulatorVersion,
+            generatedAt: Date(),
+            replayDurationSeconds: 1.0
+        )
+
+        let corpus = CorpusReplayReport.aggregate(from: [weightedReport, legacyReport])
+        let podcastSlice = corpus.slices.first {
+            $0.dimension == .podcast && $0.value == "pod-mixed-legacy"
+        }
+
+        #expect(abs(corpus.aggregateDetectionQuality.seedRecall - 0.25) < 0.0001)
+        #expect(corpus.aggregateDetectionQuality.seededSegmentCount == 1)
+        #expect(corpus.aggregateDetectionQuality.groundTruthSegmentCount == 4)
+        #expect(abs((podcastSlice?.detectionQuality.seedRecall ?? -1) - 0.25) < 0.0001)
+        #expect(podcastSlice?.detectionQuality.seededSegmentCount == 1)
+        #expect(podcastSlice?.detectionQuality.groundTruthSegmentCount == 4)
     }
 
     @Test("Delivery-style slices aggregate per-style metrics instead of whole-episode copies")

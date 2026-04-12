@@ -352,15 +352,24 @@ enum ReplayMetricsComputation {
 }
 
 private func aggregatedSeedCounts(from inputs: [MetricAggregateInput]) -> (seededSegmentCount: Int, groundTruthSegmentCount: Int)? {
-    guard inputs.allSatisfy({
-        $0.detectionQuality.seededSegmentCount != nil
-            && $0.detectionQuality.groundTruthSegmentCount != nil
-    }) else {
+    let countBearingInputs = inputs.compactMap { input -> (seededSegmentCount: Int, groundTruthSegmentCount: Int)? in
+        guard let seededSegmentCount = input.detectionQuality.seededSegmentCount,
+            let groundTruthSegmentCount = input.detectionQuality.groundTruthSegmentCount else {
+            return nil
+        }
+
+        return (
+            seededSegmentCount: seededSegmentCount,
+            groundTruthSegmentCount: groundTruthSegmentCount
+        )
+    }
+
+    guard !countBearingInputs.isEmpty else {
         return nil
     }
 
-    let totalSeeded = inputs.compactMap(\.detectionQuality.seededSegmentCount).reduce(0, +)
-    let totalGroundTruth = inputs.compactMap(\.detectionQuality.groundTruthSegmentCount).reduce(0, +)
+    let totalSeeded = countBearingInputs.map(\.seededSegmentCount).reduce(0, +)
+    let totalGroundTruth = countBearingInputs.map(\.groundTruthSegmentCount).reduce(0, +)
     return (seededSegmentCount: totalSeeded, groundTruthSegmentCount: totalGroundTruth)
 }
 

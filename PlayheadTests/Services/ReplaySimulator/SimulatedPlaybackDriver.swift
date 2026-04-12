@@ -162,6 +162,7 @@ final class SimulatedPlaybackDriver {
     private var confirmationObservations: [ConfirmationObservation] = []
     private var bannerObservations: [BannerObservation] = []
     private var appliedSkipObservations: [AppliedSkipObservation] = []
+    private var rewindObservations: [RewindObservation] = []
     private var detectedWindowGroundTruthIndices: [String: Int] = [:]
 
     /// Random number generator (injectable for deterministic tests).
@@ -197,6 +198,7 @@ final class SimulatedPlaybackDriver {
         confirmationObservations.removeAll()
         bannerObservations.removeAll()
         appliedSkipObservations.removeAll()
+        rewindObservations.removeAll()
         detectedWindowGroundTruthIndices.removeAll()
         currentTime = 0
         nextInteractionIndex = 0
@@ -409,6 +411,17 @@ final class SimulatedPlaybackDriver {
             case .scrub:
                 let target = interaction.targetTime ?? time
                 events.append(.scrubPerformed(from: time, to: target))
+                if target < time,
+                    let lastAppliedSkip = appliedSkipObservations.last,
+                    let groundTruthIndex = lastAppliedSkip.groundTruthIndex,
+                    target <= config.groundTruthSegments[groundTruthIndex].startTime {
+                    rewindObservations.append(
+                        RewindObservation(
+                            time: time,
+                            groundTruthIndex: groundTruthIndex
+                        )
+                    )
+                }
                 currentTime = target
 
             case .skipForward:
@@ -538,15 +551,7 @@ final class SimulatedPlaybackDriver {
         }
         let relevantWindowIds = Set(relevantSkips.map(\.windowId))
         let listenTaps = revertedSkips.filter { relevantWindowIds.contains($0) }.count
-        let rewinds: Int
-        if indices.count == config.groundTruthSegments.count {
-            rewinds = events.filter {
-                if case .scrubPerformed = $0 { return true }
-                return false
-            }.count
-        } else {
-            rewinds = 0
-        }
+        let rewinds = rewindObservations.filter { indices.contains($0.groundTruthIndex) }.count
         let totalApplied = relevantSkips.count
         let overrideRate = totalApplied > 0 ? Double(listenTaps + rewinds) / Double(totalApplied) : 0
 
@@ -610,4 +615,9 @@ private struct AppliedSkipObservation {
     let windowId: String
     let time: Double
     let groundTruthIndex: Int?
+}
+
+private struct RewindObservation {
+    let time: Double
+    let groundTruthIndex: Int
 }
