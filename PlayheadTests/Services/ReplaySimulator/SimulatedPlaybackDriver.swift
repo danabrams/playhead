@@ -32,13 +32,37 @@ struct GroundTruthAdSegment: Sendable, Codable {
     let advertiser: String?
     let product: String?
     let adType: AdSegmentType
+    let deliveryStyle: DeliveryStyle
 
-    enum AdSegmentType: String, Sendable, Codable {
+    init(
+        startTime: Double,
+        endTime: Double,
+        advertiser: String?,
+        product: String?,
+        adType: AdSegmentType,
+        deliveryStyle: DeliveryStyle = .hostRead
+    ) {
+        self.startTime = startTime
+        self.endTime = endTime
+        self.advertiser = advertiser
+        self.product = product
+        self.adType = adType
+        self.deliveryStyle = deliveryStyle
+    }
+
+    enum AdSegmentType: String, Sendable, Codable, Hashable {
         case preRoll
         case midRoll
         case postRoll
         case hostRead
         case dynamicInsertion
+    }
+
+    enum DeliveryStyle: String, Sendable, Codable, Hashable {
+        case dynamicInsertion
+        case hostRead
+        case blendedHostRead
+        case producedSegment
     }
 }
 
@@ -48,6 +72,7 @@ struct GroundTruthAdSegment: Sendable, Codable {
 struct ReplayConfiguration: Sendable {
     let episodeId: String
     let episodeTitle: String
+    let podcastId: String
     let episodeDuration: TimeInterval
     let condition: SimulationCondition
     let groundTruthSegments: [GroundTruthAdSegment]
@@ -61,6 +86,30 @@ struct ReplayConfiguration: Sendable {
     let timeStep: TimeInterval
 
     static let defaultTimeStep: TimeInterval = 0.25
+
+    init(
+        episodeId: String,
+        episodeTitle: String,
+        podcastId: String = "",
+        episodeDuration: TimeInterval,
+        condition: SimulationCondition,
+        groundTruthSegments: [GroundTruthAdSegment],
+        transcriptChunks: [TranscriptChunk],
+        featureWindows: [FeatureWindow],
+        dynamicAdVariants: [DynamicAdVariant],
+        timeStep: TimeInterval
+    ) {
+        self.episodeId = episodeId
+        self.episodeTitle = episodeTitle
+        self.podcastId = podcastId
+        self.episodeDuration = episodeDuration
+        self.condition = condition
+        self.groundTruthSegments = groundTruthSegments
+        self.transcriptChunks = transcriptChunks
+        self.featureWindows = featureWindows
+        self.dynamicAdVariants = dynamicAdVariants
+        self.timeStep = timeStep
+    }
 
     struct DynamicAdVariant: Sendable {
         let variantId: String
@@ -97,6 +146,7 @@ struct SeededRandomNumberGenerator: RandomNumberGenerator {
 /// Single-threaded simulation driver. Not safe for concurrent access.
 /// All mutable state is accessed only from the synchronous `runReplay()` call chain.
 final class SimulatedPlaybackDriver {
+    private static let confirmationThreshold = 0.65
 
     private let config: ReplayConfiguration
     private var currentTime: TimeInterval = 0
@@ -104,9 +154,15 @@ final class SimulatedPlaybackDriver {
     private var events: [SimulatedEvent] = []
     private var pipelineLatencies: [Double] = []
     private var bannerLatencies: [Double] = []
-    private var appliedSkips: [(windowId: String, start: Double, end: Double)] = []
+    private var appliedSkips: [(windowId: String, appliedAt: Double, start: Double, end: Double)] = []
     private var revertedSkips: [String] = []
     private var detectedWindows: [AdWindow] = []
+    private var deliveredChunkIds: Set<String> = []
+    private var seededGroundTruthIndices: Set<Int> = []
+    private var confirmationObservations: [ConfirmationObservation] = []
+    private var bannerObservations: [BannerObservation] = []
+    private var appliedSkipObservations: [AppliedSkipObservation] = []
+    private var detectedWindowGroundTruthIndices: [String: Int] = [:]
 
     /// Random number generator (injectable for deterministic tests).
     private var rng: any RandomNumberGenerator
@@ -136,6 +192,12 @@ final class SimulatedPlaybackDriver {
         appliedSkips.removeAll()
         revertedSkips.removeAll()
         detectedWindows.removeAll()
+        deliveredChunkIds.removeAll()
+        seededGroundTruthIndices.removeAll()
+        confirmationObservations.removeAll()
+        bannerObservations.removeAll()
+        appliedSkipObservations.removeAll()
+        detectedWindowGroundTruthIndices.removeAll()
         currentTime = 0
         nextInteractionIndex = 0
         currentSpeed = config.condition.playbackSpeed
@@ -162,6 +224,11 @@ final class SimulatedPlaybackDriver {
                     // Simulate banner latency.
                     let bannerDelay = Double.random(in: 50...300, using: &rng)
                     bannerLatencies.append(bannerDelay)
+                    if let groundTruthIndex = detectedWindowGroundTruthIndices[window.id] {
+                        bannerObservations.append(
+                            BannerObservation(latencyMs: bannerDelay, groundTruthIndex: groundTruthIndex)
+                        )
+                    }
                     events.append(.bannerShown(windowId: window.id, latencyMs: bannerDelay))
                 }
 
@@ -186,131 +253,30 @@ final class SimulatedPlaybackDriver {
 
     /// Compute detection quality metrics by comparing detected windows to ground truth.
     func computeDetectionQuality() -> DetectionQualityMetrics {
-        let groundTruth = config.groundTruthSegments
-        let detected = detectedWindows
-
-        // Compute overlap-based metrics at 0.1s resolution.
-        let resolution = 0.1
-        let totalSamples = Int(config.episodeDuration / resolution)
-
-        var gtMask = [Bool](repeating: false, count: totalSamples)
-        var detMask = [Bool](repeating: false, count: totalSamples)
-
-        for seg in groundTruth {
-            let startIdx = max(0, Int(seg.startTime / resolution))
-            let endIdx = min(totalSamples, Int(seg.endTime / resolution))
-            for i in startIdx..<endIdx { gtMask[i] = true }
-        }
-
-        for win in detected {
-            let startIdx = max(0, Int(win.startTime / resolution))
-            let endIdx = min(totalSamples, Int(win.endTime / resolution))
-            for i in startIdx..<endIdx { detMask[i] = true }
-        }
-
-        var truePos = 0, falsePos = 0, falseNeg = 0
-        for i in 0..<totalSamples {
-            if detMask[i] && gtMask[i] { truePos += 1 }
-            if detMask[i] && !gtMask[i] { falsePos += 1 }
-            if !detMask[i] && gtMask[i] { falseNeg += 1 }
-        }
-
-        let fpSeconds = Double(falsePos) * resolution
-        let fnSeconds = Double(falseNeg) * resolution
-        let precision = truePos + falsePos > 0 ? Double(truePos) / Double(truePos + falsePos) : 0
-        let recall = truePos + falseNeg > 0 ? Double(truePos) / Double(truePos + falseNeg) : 0
-        let f1 = (precision + recall) > 0 ? 2 * precision * recall / (precision + recall) : 0
-
-        // Count fully missed segments (zero overlap with any detection).
-        let missedCount = groundTruth.filter { seg in
-            !detected.contains { win in
-                max(seg.startTime, win.startTime) < min(seg.endTime, win.endTime)
-            }
-        }.count
-
-        // Count spurious detections (no overlap with any ground truth).
-        let spuriousCount = detected.filter { win in
-            !groundTruth.contains { seg in
-                max(seg.startTime, win.startTime) < min(seg.endTime, win.endTime)
-            }
-        }.count
-
-        return DetectionQualityMetrics(
-            falsePositiveSkipSeconds: fpSeconds,
-            falseNegativeAdSeconds: fnSeconds,
-            precision: precision,
-            recall: recall,
-            f1Score: f1,
-            missedSegmentCount: missedCount,
-            spuriousSegmentCount: spuriousCount
+        ReplayMetricsComputation.detectionQuality(
+            groundTruth: config.groundTruthSegments,
+            detected: detectedWindows,
+            episodeDuration: config.episodeDuration,
+            seededGroundTruthIndices: Array(seededGroundTruthIndices).sorted()
         )
     }
 
     /// Compute boundary quality metrics.
     func computeBoundaryQuality() -> BoundaryQualityMetrics {
-        let groundTruth = config.groundTruthSegments
-        var entryErrors: [Double] = []
-        var resumeErrors: [Double] = []
-
-        for win in detectedWindows {
-            // Find best-matching ground truth segment.
-            let bestMatch = groundTruth
-                .filter { max($0.startTime, win.startTime) < min($0.endTime, win.endTime) }
-                .max { a, b in
-                    let overlapA = min(a.endTime, win.endTime) - max(a.startTime, win.startTime)
-                    let overlapB = min(b.endTime, win.endTime) - max(b.startTime, win.startTime)
-                    return overlapA < overlapB
-                }
-
-            guard let gt = bestMatch else { continue }
-
-            // Entry error: positive = entered too late (speech cut), negative = too early.
-            let entryError = (win.startTime - gt.startTime) * 1000 // ms
-            entryErrors.append(abs(entryError))
-
-            // Resume error: positive = resumed too late (missed content), negative = too early (ad heard).
-            let resumeError = (win.endTime - gt.endTime) * 1000
-            resumeErrors.append(abs(resumeError))
-        }
-
-        return BoundaryQualityMetrics(
-            cutSpeechAtEntryMs: entryErrors,
-            cutSpeechAtResumeMs: resumeErrors,
-            p50EntryErrorMs: percentile(entryErrors, 0.50),
-            p95EntryErrorMs: percentile(entryErrors, 0.95),
-            p50ResumeErrorMs: percentile(resumeErrors, 0.50),
-            p95ResumeErrorMs: percentile(resumeErrors, 0.95)
+        ReplayMetricsComputation.boundaryQuality(
+            groundTruth: config.groundTruthSegments,
+            detected: detectedWindows
         )
     }
 
     /// Compute latency metrics.
     func computeLatencyMetrics() -> LatencyMetrics {
-        let firstSkipTime = appliedSkips.first.map(\.start)
-
-        return LatencyMetrics(
-            timeToFirstUsableSkip: firstSkipTime,
-            p50BannerLatencyMs: bannerLatencies.isEmpty ? nil : percentile(bannerLatencies, 0.50),
-            p95BannerLatencyMs: bannerLatencies.isEmpty ? nil : percentile(bannerLatencies, 0.95),
-            meanPipelineLatencyMs: pipelineLatencies.isEmpty ? 0 : pipelineLatencies.reduce(0, +) / Double(pipelineLatencies.count),
-            p95PipelineLatencyMs: pipelineLatencies.isEmpty ? 0 : percentile(pipelineLatencies, 0.95)
-        )
+        computeLatencyMetrics(forGroundTruthIndices: Set(config.groundTruthSegments.indices))
     }
 
     /// Compute user override metrics.
     func computeUserOverrideMetrics() -> UserOverrideMetrics {
-        let listenTaps = revertedSkips.count
-        let rewinds = events.filter {
-            if case .scrubPerformed = $0 { return true }
-            return false
-        }.count
-        let totalApplied = appliedSkips.count
-        let overrideRate = totalApplied > 0 ? Double(listenTaps + rewinds) / Double(totalApplied) : 0
-
-        return UserOverrideMetrics(
-            listenTapCount: listenTaps,
-            rewindAfterSkipCount: rewinds,
-            overrideRate: overrideRate
-        )
+        computeUserOverrideMetrics(forGroundTruthIndices: Set(config.groundTruthSegments.indices))
     }
 
     /// Build the complete episode replay report.
@@ -318,7 +284,12 @@ final class SimulatedPlaybackDriver {
         EpisodeReplayReport(
             episodeId: config.episodeId,
             episodeTitle: config.episodeTitle,
+            podcastId: config.podcastId,
             condition: config.condition,
+            deliveryStyles: Array(Set(config.groundTruthSegments.map(\.deliveryStyle))).sorted {
+                $0.rawValue < $1.rawValue
+            },
+            deliveryStyleMetrics: computeDeliveryStyleMetrics(),
             detectionQuality: computeDetectionQuality(),
             boundaryQuality: computeBoundaryQuality(),
             latency: computeLatencyMetrics(),
@@ -331,11 +302,6 @@ final class SimulatedPlaybackDriver {
     }
 
     // MARK: - Private Simulation Logic
-
-    /// Return transcript chunks whose startTime falls within the detection
-    /// lookahead window from the current playhead position. Each chunk is
-    /// returned only once.
-    private var deliveredChunkIds: Set<String> = []
 
     private func chunksAvailableAt(time: TimeInterval) -> [TranscriptChunk] {
         let lookahead = 90.0 // Match AdDetectionConfig.default.hotPathLookahead
@@ -357,12 +323,13 @@ final class SimulatedPlaybackDriver {
     private func simulateDetection(chunks: [TranscriptChunk], at time: TimeInterval) -> [AdWindow] {
         var windows: [AdWindow] = []
 
-        for gt in config.groundTruthSegments {
+        for (groundTruthIndex, gt) in config.groundTruthSegments.enumerated() {
             // Check if any delivered chunk overlaps this ground truth segment.
             let overlapping = chunks.filter { chunk in
                 chunk.startTime < gt.endTime && chunk.endTime > gt.startTime
             }
             guard !overlapping.isEmpty else { continue }
+            seededGroundTruthIndices.insert(groundTruthIndex)
 
             // Only emit once per ground truth segment.
             let existingOverlap = detectedWindows.contains { win in
@@ -395,6 +362,12 @@ final class SimulatedPlaybackDriver {
                 wasSkipped: false,
                 userDismissedBanner: false
             )
+            detectedWindowGroundTruthIndices[window.id] = groundTruthIndex
+            if confidence >= Self.confirmationThreshold {
+                confirmationObservations.append(
+                    ConfirmationObservation(time: time, groundTruthIndex: groundTruthIndex)
+                )
+            }
             windows.append(window)
         }
 
@@ -408,8 +381,15 @@ final class SimulatedPlaybackDriver {
             let alreadyReverted = revertedSkips.contains(window.id)
             guard !alreadyApplied, !alreadyReverted else { continue }
 
-            if time >= window.startTime && time < window.endTime && window.confidence >= 0.65 {
-                appliedSkips.append((windowId: window.id, start: window.startTime, end: window.endTime))
+            if time >= window.startTime && time < window.endTime && window.confidence >= Self.confirmationThreshold {
+                appliedSkips.append((windowId: window.id, appliedAt: time, start: window.startTime, end: window.endTime))
+                appliedSkipObservations.append(
+                    AppliedSkipObservation(
+                        windowId: window.id,
+                        time: time,
+                        groundTruthIndex: detectedWindowGroundTruthIndices[window.id]
+                    )
+                )
                 events.append(.skipApplied(windowId: window.id, from: time, to: window.endTime))
                 // Jump playhead to end of ad.
                 currentTime = window.endTime
@@ -453,7 +433,8 @@ final class SimulatedPlaybackDriver {
             case .lateDetection:
                 // Inject a detection that arrives after playhead has passed.
                 // This tests the "late detection" suppression path.
-                if let firstGT = config.groundTruthSegments.first(where: { $0.endTime < time }) {
+                if let firstMatch = config.groundTruthSegments.enumerated().first(where: { $0.element.endTime < time }) {
+                    let (groundTruthIndex, firstGT) = firstMatch
                     let lateWindow = AdWindow(
                         id: UUID().uuidString,
                         analysisAssetId: config.episodeId,
@@ -473,6 +454,11 @@ final class SimulatedPlaybackDriver {
                         metadataPromptVersion: nil,
                         wasSkipped: false,
                         userDismissedBanner: false
+                    )
+                    seededGroundTruthIndices.insert(groundTruthIndex)
+                    detectedWindowGroundTruthIndices[lateWindow.id] = groundTruthIndex
+                    confirmationObservations.append(
+                        ConfirmationObservation(time: time, groundTruthIndex: groundTruthIndex)
                     )
                     detectedWindows.append(lateWindow)
                     events.append(.lateDetectionInjected(lateWindow))
@@ -500,7 +486,7 @@ final class SimulatedPlaybackDriver {
                 name: "skip_applied",
                 value: skip.end - skip.start,
                 unit: .seconds,
-                timestamp: skip.start,
+                timestamp: skip.appliedAt,
                 context: ["windowId": skip.windowId]
             ))
         }
@@ -517,4 +503,111 @@ final class SimulatedPlaybackDriver {
 
         return samples
     }
+
+    private func computeLatencyMetrics(forGroundTruthIndices indices: Set<Int>) -> LatencyMetrics {
+        let firstConfirmation = confirmationObservations
+            .filter { indices.contains($0.groundTruthIndex) }
+            .min { lhs, rhs in lhs.time < rhs.time }
+        let firstAppliedSkip = appliedSkipObservations
+            .filter {
+                guard let groundTruthIndex = $0.groundTruthIndex else { return false }
+                return indices.contains(groundTruthIndex)
+            }
+            .min { lhs, rhs in lhs.time < rhs.time }
+        let firstConfirmationLeadTime = firstConfirmation.map {
+            config.groundTruthSegments[$0.groundTruthIndex].startTime - $0.time
+        }
+        let styleBannerLatencies = bannerObservations
+            .filter { indices.contains($0.groundTruthIndex) }
+            .map(\.latencyMs)
+        let bannerLatencySource =
+            indices.count == config.groundTruthSegments.count ? bannerLatencies : styleBannerLatencies
+
+        return ReplayMetricsComputation.latencyMetrics(
+            timeToFirstUsableSkip: firstAppliedSkip?.time,
+            leadTimeAtFirstConfirmationSeconds: firstConfirmationLeadTime,
+            pipelineLatencies: pipelineLatencies,
+            bannerLatencies: bannerLatencySource
+        )
+    }
+
+    private func computeUserOverrideMetrics(forGroundTruthIndices indices: Set<Int>) -> UserOverrideMetrics {
+        let relevantSkips = appliedSkipObservations.filter {
+            guard let groundTruthIndex = $0.groundTruthIndex else { return false }
+            return indices.contains(groundTruthIndex)
+        }
+        let relevantWindowIds = Set(relevantSkips.map(\.windowId))
+        let listenTaps = revertedSkips.filter { relevantWindowIds.contains($0) }.count
+        let rewinds: Int
+        if indices.count == config.groundTruthSegments.count {
+            rewinds = events.filter {
+                if case .scrubPerformed = $0 { return true }
+                return false
+            }.count
+        } else {
+            rewinds = 0
+        }
+        let totalApplied = relevantSkips.count
+        let overrideRate = totalApplied > 0 ? Double(listenTaps + rewinds) / Double(totalApplied) : 0
+
+        return UserOverrideMetrics(
+            listenTapCount: listenTaps,
+            rewindAfterSkipCount: rewinds,
+            overrideRate: overrideRate
+        )
+    }
+
+    private func computeDeliveryStyleMetrics() -> [DeliveryStyleMetricReport] {
+        let groupedByStyle = Dictionary(
+            grouping: Array(config.groundTruthSegments.enumerated()),
+            by: { $0.element.deliveryStyle }
+        )
+
+        return groupedByStyle.keys.sorted { $0.rawValue < $1.rawValue }.map { style in
+            let groupedSegments = (groupedByStyle[style] ?? []).sorted { $0.offset < $1.offset }
+            let originalIndices = groupedSegments.map(\.offset)
+            let groundTruth = groupedSegments.map(\.element)
+            let seededLocalIndices = groupedSegments.enumerated().compactMap { localIndex, entry in
+                seededGroundTruthIndices.contains(entry.offset) ? localIndex : nil
+            }
+            let detected = detectedWindows.filter { window in
+                groundTruth.contains { segment in
+                    max(segment.startTime, window.startTime) < min(segment.endTime, window.endTime)
+                }
+            }
+            let groundTruthIndexSet = Set(originalIndices)
+
+            return DeliveryStyleMetricReport(
+                style: style,
+                detectionQuality: ReplayMetricsComputation.detectionQuality(
+                    groundTruth: groundTruth,
+                    detected: detected,
+                    episodeDuration: config.episodeDuration,
+                    seededGroundTruthIndices: seededLocalIndices
+                ),
+                boundaryQuality: ReplayMetricsComputation.boundaryQuality(
+                    groundTruth: groundTruth,
+                    detected: detected
+                ),
+                latency: computeLatencyMetrics(forGroundTruthIndices: groundTruthIndexSet),
+                userOverrides: computeUserOverrideMetrics(forGroundTruthIndices: groundTruthIndexSet)
+            )
+        }
+    }
+}
+
+private struct ConfirmationObservation {
+    let time: Double
+    let groundTruthIndex: Int
+}
+
+private struct BannerObservation {
+    let latencyMs: Double
+    let groundTruthIndex: Int
+}
+
+private struct AppliedSkipObservation {
+    let windowId: String
+    let time: Double
+    let groundTruthIndex: Int?
 }

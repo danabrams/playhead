@@ -244,12 +244,23 @@ struct CorpusValidationEdgeCaseTests {
         let annotations = try loader.loadAllAnnotations()
         let first = annotations[0]
 
-        let condition = SimulationCondition(audioMode: .cached, playbackSpeed: 1.0, interactions: [])
+        let condition = SimulationCondition(
+            audioMode: .cached,
+            playbackSpeed: 1.0,
+            interactions: [],
+            analysisPath: .backfill
+        )
         let config = loader.makeReplayConfig(from: first, condition: condition)
 
         #expect(config.episodeId == first.episode.episodeId)
+        #expect(config.podcastId == first.podcast.podcastId)
         #expect(config.episodeDuration == first.episode.duration)
         #expect(config.groundTruthSegments.count == first.adSegments.count)
+        #expect(
+            config.groundTruthSegments.first?.deliveryStyle.rawValue
+                == first.adSegments.first?.deliveryStyle.rawValue
+        )
         #expect(!config.transcriptChunks.isEmpty, "Should generate synthetic transcript chunks")
+        #expect(config.condition.analysisPath == .backfill)
     }
 }
