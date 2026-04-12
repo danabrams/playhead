@@ -76,9 +76,51 @@ struct FeatureWindow: Sendable {
     let rms: Double
     let spectralFlux: Double
     let musicProbability: Double
+    let speakerChangeProxyScore: Double
+    let musicBedChangeScore: Double
     let pauseProbability: Double
     let speakerClusterId: Int?
     let jingleHash: String?
+    let featureVersion: Int
+
+    init(
+        analysisAssetId: String,
+        startTime: Double,
+        endTime: Double,
+        rms: Double,
+        spectralFlux: Double,
+        musicProbability: Double,
+        speakerChangeProxyScore: Double = 0,
+        musicBedChangeScore: Double = 0,
+        pauseProbability: Double,
+        speakerClusterId: Int?,
+        jingleHash: String?,
+        featureVersion: Int
+    ) {
+        self.analysisAssetId = analysisAssetId
+        self.startTime = startTime
+        self.endTime = endTime
+        self.rms = rms
+        self.spectralFlux = spectralFlux
+        self.musicProbability = musicProbability
+        self.speakerChangeProxyScore = speakerChangeProxyScore
+        self.musicBedChangeScore = musicBedChangeScore
+        self.pauseProbability = pauseProbability
+        self.speakerClusterId = speakerClusterId
+        self.jingleHash = jingleHash
+        self.featureVersion = featureVersion
+    }
+}
+
+struct FeatureExtractionCheckpoint: Sendable, Equatable {
+    let analysisAssetId: String
+    let lastWindowStartTime: Double
+    let lastWindowEndTime: Double
+    let lastRms: Double
+    let lastMusicProbability: Double
+    let lastRawSpeakerChangeProxyScore: Double
+    let penultimateRawSpeakerChangeProxyScore: Double?
+    let lastMagnitudes: [Float]
     let featureVersion: Int
 }
 
@@ -507,6 +549,16 @@ actor AnalysisStore {
             )
             try migrateSponsorKnowledgeV7IfNeeded()
             try migrateFingerprintStoreV8IfNeeded()
+            try addColumnIfNeeded(
+                table: "feature_windows",
+                column: "speakerChangeProxyScore",
+                definition: "REAL NOT NULL DEFAULT 0"
+            )
+            try addColumnIfNeeded(
+                table: "feature_windows",
+                column: "musicBedChangeScore",
+                definition: "REAL NOT NULL DEFAULT 0"
+            )
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -559,6 +611,46 @@ actor AnalysisStore {
         try migrateCorrectionEventsV6IfNeeded()
         try migrateSponsorKnowledgeV7IfNeeded()
         try migrateFingerprintStoreV8IfNeeded()
+        try exec("""
+            CREATE TABLE IF NOT EXISTS feature_windows (
+                analysisAssetId   TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                startTime         REAL NOT NULL,
+                endTime           REAL NOT NULL,
+                rms               REAL NOT NULL,
+                spectralFlux      REAL NOT NULL,
+                musicProbability  REAL NOT NULL,
+                speakerChangeProxyScore REAL NOT NULL DEFAULT 0,
+                musicBedChangeScore REAL NOT NULL DEFAULT 0,
+                pauseProbability  REAL NOT NULL,
+                speakerClusterId  INTEGER,
+                jingleHash        TEXT,
+                featureVersion    INTEGER NOT NULL,
+                PRIMARY KEY (analysisAssetId, startTime)
+            )
+            """)
+        try exec("""
+            CREATE TABLE IF NOT EXISTS feature_extraction_state (
+                analysisAssetId TEXT PRIMARY KEY REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                lastWindowStartTime REAL NOT NULL,
+                lastWindowEndTime REAL NOT NULL,
+                lastRms REAL NOT NULL,
+                lastMusicProbability REAL NOT NULL,
+                lastRawSpeakerChangeProxyScore REAL NOT NULL,
+                penultimateRawSpeakerChangeProxyScore REAL,
+                lastMagnitudesJSON TEXT NOT NULL,
+                featureVersion INTEGER NOT NULL
+            )
+            """)
+        try addColumnIfNeeded(
+            table: "feature_windows",
+            column: "speakerChangeProxyScore",
+            definition: "REAL NOT NULL DEFAULT 0"
+        )
+        try addColumnIfNeeded(
+            table: "feature_windows",
+            column: "musicBedChangeScore",
+            definition: "REAL NOT NULL DEFAULT 0"
+        )
         // Mirror the belt-and-suspenders phase/jobPhase column re-adds
         // that `migrate()` performs after the v2/v3 evidence_events
         // rebuild (cycle-8 reconciliation: both columns coexist).
@@ -1263,11 +1355,26 @@ actor AnalysisStore {
                 rms               REAL NOT NULL,
                 spectralFlux      REAL NOT NULL,
                 musicProbability  REAL NOT NULL,
+                speakerChangeProxyScore REAL NOT NULL DEFAULT 0,
+                musicBedChangeScore REAL NOT NULL DEFAULT 0,
                 pauseProbability  REAL NOT NULL,
                 speakerClusterId  INTEGER,
                 jingleHash        TEXT,
                 featureVersion    INTEGER NOT NULL,
                 PRIMARY KEY (analysisAssetId, startTime)
+            )
+            """)
+        try exec("""
+            CREATE TABLE IF NOT EXISTS feature_extraction_state (
+                analysisAssetId TEXT PRIMARY KEY REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                lastWindowStartTime REAL NOT NULL,
+                lastWindowEndTime REAL NOT NULL,
+                lastRms REAL NOT NULL,
+                lastMusicProbability REAL NOT NULL,
+                lastRawSpeakerChangeProxyScore REAL NOT NULL,
+                penultimateRawSpeakerChangeProxyScore REAL,
+                lastMagnitudesJSON TEXT NOT NULL,
+                featureVersion INTEGER NOT NULL
             )
             """)
 
@@ -1722,6 +1829,20 @@ actor AnalysisStore {
         )
     }
 
+    private func readFeatureExtractionCheckpoint(_ stmt: OpaquePointer?) throws -> FeatureExtractionCheckpoint {
+        FeatureExtractionCheckpoint(
+            analysisAssetId: text(stmt, 0),
+            lastWindowStartTime: sqlite3_column_double(stmt, 1),
+            lastWindowEndTime: sqlite3_column_double(stmt, 2),
+            lastRms: sqlite3_column_double(stmt, 3),
+            lastMusicProbability: sqlite3_column_double(stmt, 4),
+            lastRawSpeakerChangeProxyScore: sqlite3_column_double(stmt, 5),
+            penultimateRawSpeakerChangeProxyScore: optionalDouble(stmt, 6),
+            lastMagnitudes: try decodeMagnitudesJSON(text(stmt, 7)),
+            featureVersion: Int(sqlite3_column_int(stmt, 8))
+        )
+    }
+
     // MARK: - CRUD: analysis_sessions
 
     func insertSession(_ session: AnalysisSession) throws {
@@ -1880,10 +2001,11 @@ actor AnalysisStore {
 
     func insertFeatureWindow(_ fw: FeatureWindow) throws {
         let sql = """
-            INSERT INTO feature_windows
+            INSERT OR REPLACE INTO feature_windows
             (analysisAssetId, startTime, endTime, rms, spectralFlux,
-             musicProbability, pauseProbability, speakerClusterId, jingleHash, featureVersion)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             musicProbability, speakerChangeProxyScore, musicBedChangeScore,
+             pauseProbability, speakerClusterId, jingleHash, featureVersion)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -1893,11 +2015,88 @@ actor AnalysisStore {
         bind(stmt, 4, fw.rms)
         bind(stmt, 5, fw.spectralFlux)
         bind(stmt, 6, fw.musicProbability)
-        bind(stmt, 7, fw.pauseProbability)
-        bind(stmt, 8, fw.speakerClusterId)
-        bind(stmt, 9, fw.jingleHash)
-        bind(stmt, 10, fw.featureVersion)
+        bind(stmt, 7, fw.speakerChangeProxyScore)
+        bind(stmt, 8, fw.musicBedChangeScore)
+        bind(stmt, 9, fw.pauseProbability)
+        bind(stmt, 10, fw.speakerClusterId)
+        bind(stmt, 11, fw.jingleHash)
+        bind(stmt, 12, fw.featureVersion)
         try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func updateFeatureWindowSpeakerChangeProxyScore(
+        assetId: String,
+        startTime: Double,
+        endTime: Double,
+        featureVersion: Int,
+        speakerChangeProxyScore: Double
+    ) throws {
+        let sql = """
+            UPDATE feature_windows
+            SET speakerChangeProxyScore = ?
+            WHERE analysisAssetId = ? AND startTime = ? AND endTime = ? AND featureVersion = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, speakerChangeProxyScore)
+        bind(stmt, 2, assetId)
+        bind(stmt, 3, startTime)
+        bind(stmt, 4, endTime)
+        bind(stmt, 5, featureVersion)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func upsertFeatureExtractionCheckpoint(_ checkpoint: FeatureExtractionCheckpoint) throws {
+        let sql = """
+            INSERT INTO feature_extraction_state
+            (analysisAssetId, lastWindowStartTime, lastWindowEndTime, lastRms,
+             lastMusicProbability, lastRawSpeakerChangeProxyScore,
+             penultimateRawSpeakerChangeProxyScore, lastMagnitudesJSON, featureVersion)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(analysisAssetId) DO UPDATE SET
+                lastWindowStartTime = excluded.lastWindowStartTime,
+                lastWindowEndTime = excluded.lastWindowEndTime,
+                lastRms = excluded.lastRms,
+                lastMusicProbability = excluded.lastMusicProbability,
+                lastRawSpeakerChangeProxyScore = excluded.lastRawSpeakerChangeProxyScore,
+                penultimateRawSpeakerChangeProxyScore = excluded.penultimateRawSpeakerChangeProxyScore,
+                lastMagnitudesJSON = excluded.lastMagnitudesJSON,
+                featureVersion = excluded.featureVersion
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, checkpoint.analysisAssetId)
+        bind(stmt, 2, checkpoint.lastWindowStartTime)
+        bind(stmt, 3, checkpoint.lastWindowEndTime)
+        bind(stmt, 4, checkpoint.lastRms)
+        bind(stmt, 5, checkpoint.lastMusicProbability)
+        bind(stmt, 6, checkpoint.lastRawSpeakerChangeProxyScore)
+        bind(stmt, 7, checkpoint.penultimateRawSpeakerChangeProxyScore)
+        bind(stmt, 8, try encodeMagnitudesJSON(checkpoint.lastMagnitudes))
+        bind(stmt, 9, checkpoint.featureVersion)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func fetchFeatureExtractionCheckpoint(
+        assetId: String,
+        featureVersion: Int,
+        endingAt endTime: Double
+    ) throws -> FeatureExtractionCheckpoint? {
+        let sql = """
+            SELECT analysisAssetId, lastWindowStartTime, lastWindowEndTime, lastRms,
+                   lastMusicProbability, lastRawSpeakerChangeProxyScore,
+                   penultimateRawSpeakerChangeProxyScore, lastMagnitudesJSON, featureVersion
+            FROM feature_extraction_state
+            WHERE analysisAssetId = ? AND featureVersion = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        bind(stmt, 2, featureVersion)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let checkpoint = try readFeatureExtractionCheckpoint(stmt)
+        guard abs(checkpoint.lastWindowEndTime - endTime) <= 1e-6 else { return nil }
+        return checkpoint
     }
 
     #if DEBUG
@@ -1909,13 +2108,42 @@ actor AnalysisStore {
     var fetchFeatureWindowsCallLog: [(assetId: String, from: Double, to: Double)] = []
     #endif
 
-    func fetchFeatureWindows(assetId: String, from start: Double, to end: Double) throws -> [FeatureWindow] {
+    func earliestFeatureWindowStart(
+        assetId: String,
+        before end: Double,
+        earlierThanFeatureVersion version: Int
+    ) throws -> Double? {
+        let sql = """
+            SELECT MIN(startTime)
+            FROM feature_windows
+            WHERE analysisAssetId = ? AND endTime <= ? AND featureVersion < ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        bind(stmt, 2, end)
+        bind(stmt, 3, version)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        guard sqlite3_column_type(stmt, 0) != SQLITE_NULL else { return nil }
+        return sqlite3_column_double(stmt, 0)
+    }
+
+    func fetchFeatureWindows(
+        assetId: String,
+        from start: Double,
+        to end: Double,
+        minimumFeatureVersion: Int? = FeatureExtractionConfig.default.featureVersion
+    ) throws -> [FeatureWindow] {
         #if DEBUG
         fetchFeatureWindowsCallLog.append((assetId: assetId, from: start, to: end))
         #endif
+        let versionClause = minimumFeatureVersion == nil ? "" : "AND featureVersion >= ?"
         let sql = """
-            SELECT * FROM feature_windows
-            WHERE analysisAssetId = ? AND startTime >= ? AND endTime <= ?
+            SELECT analysisAssetId, startTime, endTime, rms, spectralFlux,
+                   musicProbability, speakerChangeProxyScore, musicBedChangeScore,
+                   pauseProbability, speakerClusterId, jingleHash, featureVersion
+            FROM feature_windows
+            WHERE analysisAssetId = ? AND startTime >= ? AND endTime <= ? \(versionClause)
             ORDER BY startTime
             """
         let stmt = try prepare(sql)
@@ -1923,20 +2151,12 @@ actor AnalysisStore {
         bind(stmt, 1, assetId)
         bind(stmt, 2, start)
         bind(stmt, 3, end)
+        if let minimumFeatureVersion {
+            bind(stmt, 4, minimumFeatureVersion)
+        }
         var results: [FeatureWindow] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            results.append(FeatureWindow(
-                analysisAssetId: text(stmt, 0),
-                startTime: sqlite3_column_double(stmt, 1),
-                endTime: sqlite3_column_double(stmt, 2),
-                rms: sqlite3_column_double(stmt, 3),
-                spectralFlux: sqlite3_column_double(stmt, 4),
-                musicProbability: sqlite3_column_double(stmt, 5),
-                pauseProbability: sqlite3_column_double(stmt, 6),
-                speakerClusterId: optionalInt(stmt, 7),
-                jingleHash: optionalText(stmt, 8),
-                featureVersion: Int(sqlite3_column_int(stmt, 9))
-            ))
+            results.append(readFeatureWindow(stmt))
         }
         return results
     }
@@ -2199,27 +2419,47 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
-    func fetchAllFeatureWindows(assetId: String) throws -> [FeatureWindow] {
-        let sql = "SELECT * FROM feature_windows WHERE analysisAssetId = ? ORDER BY startTime"
+    func fetchAllFeatureWindows(
+        assetId: String,
+        minimumFeatureVersion: Int? = FeatureExtractionConfig.default.featureVersion
+    ) throws -> [FeatureWindow] {
+        let versionClause = minimumFeatureVersion == nil ? "" : "AND featureVersion >= ?"
+        let sql = """
+            SELECT analysisAssetId, startTime, endTime, rms, spectralFlux,
+                   musicProbability, speakerChangeProxyScore, musicBedChangeScore,
+                   pauseProbability, speakerClusterId, jingleHash, featureVersion
+            FROM feature_windows
+            WHERE analysisAssetId = ? \(versionClause)
+            ORDER BY startTime
+            """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, assetId)
+        if let minimumFeatureVersion {
+            bind(stmt, 2, minimumFeatureVersion)
+        }
         var results: [FeatureWindow] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            results.append(FeatureWindow(
-                analysisAssetId: text(stmt, 0),
-                startTime: sqlite3_column_double(stmt, 1),
-                endTime: sqlite3_column_double(stmt, 2),
-                rms: sqlite3_column_double(stmt, 3),
-                spectralFlux: sqlite3_column_double(stmt, 4),
-                musicProbability: sqlite3_column_double(stmt, 5),
-                pauseProbability: sqlite3_column_double(stmt, 6),
-                speakerClusterId: optionalInt(stmt, 7),
-                jingleHash: optionalText(stmt, 8),
-                featureVersion: Int(sqlite3_column_int(stmt, 9))
-            ))
+            results.append(readFeatureWindow(stmt))
         }
         return results
+    }
+
+    private func readFeatureWindow(_ stmt: OpaquePointer?) -> FeatureWindow {
+        FeatureWindow(
+            analysisAssetId: text(stmt, 0),
+            startTime: sqlite3_column_double(stmt, 1),
+            endTime: sqlite3_column_double(stmt, 2),
+            rms: sqlite3_column_double(stmt, 3),
+            spectralFlux: sqlite3_column_double(stmt, 4),
+            musicProbability: sqlite3_column_double(stmt, 5),
+            speakerChangeProxyScore: sqlite3_column_double(stmt, 6),
+            musicBedChangeScore: sqlite3_column_double(stmt, 7),
+            pauseProbability: sqlite3_column_double(stmt, 8),
+            speakerClusterId: optionalInt(stmt, 9),
+            jingleHash: optionalText(stmt, 10),
+            featureVersion: Int(sqlite3_column_int(stmt, 11))
+        )
     }
 
     // MARK: - CRUD: skip_cues
@@ -4036,6 +4276,25 @@ actor AnalysisStore {
             scanCohortJSON: optionalText(stmt, 10),
             createdAt: sqlite3_column_double(stmt, 11)
         )
+    }
+
+    private func encodeMagnitudesJSON(_ magnitudes: [Float]) throws -> String {
+        let data = try JSONEncoder().encode(magnitudes)
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw AnalysisStoreError.insertFailed("Failed to encode feature extraction magnitudes as UTF-8")
+        }
+        return json
+    }
+
+    private func decodeMagnitudesJSON(_ json: String) throws -> [Float] {
+        guard let data = json.data(using: .utf8) else {
+            throw AnalysisStoreError.queryFailed("Feature extraction magnitudes JSON was not valid UTF-8")
+        }
+        do {
+            return try JSONDecoder().decode([Float].self, from: data)
+        } catch {
+            throw AnalysisStoreError.queryFailed("Failed to decode feature extraction magnitudes JSON: \(error)")
+        }
     }
 
     // MARK: - SQLite helpers
