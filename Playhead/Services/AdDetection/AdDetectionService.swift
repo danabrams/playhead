@@ -963,13 +963,16 @@ actor AdDetectionService {
     }
 
     /// Build catalog ledger entries from EvidenceEntry items overlapping the span.
-    private func buildCatalogLedgerEntries(
+    func buildCatalogLedgerEntries(
         span: DecodedSpan,
         entries: [EvidenceEntry],
         fusionConfig: FusionWeightConfig
     ) -> [EvidenceLedgerEntry] {
         let overlapping = entries.filter { entry in
-            entry.startTime < span.endTime && entry.endTime > span.startTime
+            // Repeated evidence expands its coverage window across the earliest
+            // and latest occurrence, while startTime/endTime remain the
+            // representative local hit used for display/fallback anchoring.
+            entry.coverageStartTime < span.endTime && entry.coverageEndTime > span.startTime
         }
         guard !overlapping.isEmpty else { return [] }
 

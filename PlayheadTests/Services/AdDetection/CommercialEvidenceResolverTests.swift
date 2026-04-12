@@ -723,6 +723,150 @@ struct EvidenceCatalogBuilderNormalizationTests {
     }
 }
 
+@Suite("EvidenceCatalogBuilder dedup")
+struct EvidenceCatalogBuilderDedupTests {
+
+    @Test("repeated evidence accumulates count and time span across dedup")
+    func repeatedEvidenceAccumulatesDensity() {
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 5, endTime: 8, text: "promo code SAVE10"),
+            makeAtom(ordinal: 1, startTime: 12, endTime: 16, text: "promo code SAVE10")
+        ]
+
+        let catalog = EvidenceCatalogBuilder.build(
+            atoms: atoms,
+            analysisAssetId: "asset-1",
+            transcriptVersion: "v1"
+        )
+
+        #expect(catalog.entries.count == 1)
+
+        let entry = catalog.entries[0]
+        #expect(entry.count == 2)
+        #expect(entry.atomOrdinal == 0)
+        #expect(entry.matchedText == "promo code SAVE10")
+        #expect(entry.startTime == 5)
+        #expect(entry.endTime == 8)
+        #expect(entry.firstTime == 5)
+        #expect(entry.lastTime == 16)
+
+        #expect(catalog.renderForPrompt() == "[E0] \"promo code SAVE10\" (promoCode, atom 0, ×2, 5s–16s)")
+        #expect(
+            PromptEvidenceEntry(entry: entry, lineRef: 7).renderForPrompt() ==
+                "[E0] \"promo code SAVE10\" (promoCode, line 7, ×2, 5s–16s)"
+        )
+    }
+
+    @Test("same-utterance overlapping url matches count once")
+    func overlappingURLMatchesDoNotInflateCount() throws {
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 5, endTime: 8, text: "Visit example.com for the offer")
+        ]
+
+        let catalog = EvidenceCatalogBuilder.build(
+            atoms: atoms,
+            analysisAssetId: "asset-1",
+            transcriptVersion: "v1"
+        )
+
+        let urlEntries = catalog.entries.filter { $0.category == .url }
+        #expect(urlEntries.count == 1)
+
+        let entry = try #require(urlEntries.first)
+        #expect(entry.matchedText == "example.com")
+        #expect(entry.count == 1)
+    }
+
+    @Test("same-utterance overlapping promo variants count once")
+    func overlappingPromoVariantsDoNotInflateCount() throws {
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 5, endTime: 8, text: "Use code SAVE20 at checkout.")
+        ]
+
+        let catalog = EvidenceCatalogBuilder.build(
+            atoms: atoms,
+            analysisAssetId: "asset-1",
+            transcriptVersion: "v1"
+        )
+
+        let promoEntries = catalog.entries.filter { $0.category == .promoCode }
+        #expect(promoEntries.count == 1)
+
+        let entry = try #require(promoEntries.first)
+        #expect(entry.count == 1)
+        #expect(entry.matchedText.contains("SAVE20"))
+    }
+
+    @Test("brand canonicalization preserves legitimate trailing today names")
+    func brandCanonicalizationPreservesLegitimateTodayNames() throws {
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 0, endTime: 4, text: "Sponsored by USA Today."),
+            makeAtom(ordinal: 1, startTime: 10, endTime: 14, text: "Sponsored by USA Today again.")
+        ]
+
+        let catalog = EvidenceCatalogBuilder.build(
+            atoms: atoms,
+            analysisAssetId: "asset-1",
+            transcriptVersion: "v1"
+        )
+
+        let entry = try #require(catalog.entries.first(where: { $0.category == .brandSpan }))
+        #expect(entry.normalizedText == "usa today")
+        #expect(entry.matchedText == "USA Today")
+        #expect(entry.count == 2)
+        #expect(entry.startTime >= 0)
+        #expect(entry.endTime <= 4)
+        #expect(entry.firstTime == entry.startTime)
+        #expect(entry.lastTime > entry.endTime)
+        #expect(catalog.entries.contains { $0.category == .brandSpan && $0.normalizedText == "usa today" })
+        #expect(!catalog.entries.contains { $0.category == .brandSpan && $0.normalizedText == "usa" })
+    }
+
+    @Test("single-occurrence evidence stays concise after dedup")
+    func singleOccurrenceEvidenceStaysConcise() {
+        let atoms = [
+            makeAtom(ordinal: 0, startTime: 9, endTime: 13, text: "promo code SAVE10")
+        ]
+
+        let catalog = EvidenceCatalogBuilder.build(
+            atoms: atoms,
+            analysisAssetId: "asset-1",
+            transcriptVersion: "v1"
+        )
+
+        #expect(catalog.entries.count == 1)
+
+        let entry = catalog.entries[0]
+        #expect(entry.count == 1)
+        #expect(entry.firstTime == 9)
+        #expect(entry.lastTime == 13)
+        #expect(catalog.renderForPrompt() == "[E0] \"promo code SAVE10\" (promoCode, atom 0)")
+        #expect(
+            PromptEvidenceEntry(entry: entry, lineRef: 4).renderForPrompt() ==
+                "[E0] \"promo code SAVE10\" (promoCode, line 4)"
+        )
+    }
+
+    private func makeAtom(
+        ordinal: Int,
+        startTime: Double,
+        endTime: Double,
+        text: String
+    ) -> TranscriptAtom {
+        TranscriptAtom(
+            atomKey: TranscriptAtomKey(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "v1",
+                atomOrdinal: ordinal
+            ),
+            contentHash: "h\(ordinal)",
+            startTime: startTime,
+            endTime: endTime,
+            text: text,
+            chunkIndex: ordinal
+        )
+    }
+}
 private func makeResolverSegment(
     index: Int,
     startTime: Double = 5,

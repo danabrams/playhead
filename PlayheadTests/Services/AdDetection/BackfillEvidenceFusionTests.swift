@@ -274,6 +274,43 @@ struct BackfillEvidenceFusionTests {
         #expect(ledger.filter { $0.source == .acoustic }.count == 1)
     }
 
+    @Test("Catalog overlap uses repeated evidence coverage window, not representative occurrence only")
+    func catalogOverlapUsesRepeatedCoverageWindow() async throws {
+        let store = try AnalysisStore(path: ":memory:")
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+        let span = makeSpan(startTime: 595.0, endTime: 605.0)
+        let repeatedEntry = EvidenceEntry(
+            evidenceRef: 0,
+            category: .promoCode,
+            matchedText: "promo code SAVE20",
+            normalizedText: "promo code save20",
+            atomOrdinal: 10,
+            startTime: 10.0,
+            endTime: 12.0,
+            count: 2,
+            firstTime: 10.0,
+            lastTime: 602.0
+        )
+
+        let ledger = await service.buildCatalogLedgerEntries(
+            span: span,
+            entries: [repeatedEntry],
+            fusionConfig: defaultConfig()
+        )
+
+        #expect(ledger.count == 1)
+        if case .catalog(let entryCount) = try #require(ledger.first).detail {
+            #expect(entryCount == 1)
+        } else {
+            Issue.record("Expected catalog ledger detail")
+        }
+    }
+
     // MARK: - Weight capping
 
     @Test("FM entries are capped at fmCap")

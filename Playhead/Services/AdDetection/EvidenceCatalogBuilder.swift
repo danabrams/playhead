@@ -38,6 +38,40 @@ struct EvidenceEntry: Sendable, Equatable {
     let startTime: Double
     /// Time position in episode audio.
     let endTime: Double
+    /// How many times this (category, normalizedText) pair appeared.
+    let count: Int
+    /// Time of the earliest occurrence in episode audio.
+    let firstTime: Double
+    /// Time of the latest occurrence in episode audio.
+    let lastTime: Double
+
+    /// Full coverage window for overlap/scoring consumers.
+    var coverageStartTime: Double { firstTime }
+    var coverageEndTime: Double { lastTime }
+
+    init(
+        evidenceRef: Int,
+        category: EvidenceCategory,
+        matchedText: String,
+        normalizedText: String,
+        atomOrdinal: Int,
+        startTime: Double,
+        endTime: Double,
+        count: Int = 1,
+        firstTime: Double? = nil,
+        lastTime: Double? = nil
+    ) {
+        self.evidenceRef = evidenceRef
+        self.category = category
+        self.matchedText = matchedText
+        self.normalizedText = normalizedText
+        self.atomOrdinal = atomOrdinal
+        self.startTime = startTime
+        self.endTime = endTime
+        self.count = count
+        self.firstTime = firstTime ?? startTime
+        self.lastTime = lastTime ?? endTime
+    }
 }
 
 /// The complete evidence catalog for a transcript version.
@@ -187,7 +221,7 @@ enum EvidenceCatalogBuilder {
                     } else {
                         matchedText = rawMatchedText
                     }
-                    let normalized = normalize(matchedText)
+                    let normalized = normalizedMatchText(matchedText, category: category)
                     guard !normalized.isEmpty else { continue }
 
                     let (startTime, endTime) = interpolateTiming(
@@ -384,6 +418,29 @@ enum EvidenceCatalogBuilder {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private static func normalizedMatchText(_ text: String, category: EvidenceCategory) -> String {
+        switch category {
+        case .promoCode:
+            promoCodeToken(from: text) ?? normalize(text)
+        default:
+            normalize(text)
+        }
+    }
+
+    private static func promoCodeToken(from text: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: #"\bcode\s+([A-Za-z0-9]+)\b"#,
+                                                   options: [.caseInsensitive]) else {
+            return nil
+        }
+        let nsText = text as NSString
+        let range = NSRange(location: 0, length: nsText.length)
+        guard let match = regex.firstMatch(in: text, range: range),
+              match.numberOfRanges > 1 else {
+            return nil
+        }
+        return normalize(nsText.substring(with: match.range(at: 1)))
+    }
+
     /// Cf (Format) category scalars include zero-width joiners, soft hyphens,
     /// directional marks, and the byte-order mark. CharacterSet doesn't expose
     /// the Cf category directly, so we test via the per-scalar Unicode property.
@@ -498,7 +555,10 @@ enum EvidenceCatalogBuilder {
         // Pre-sort to ensure dedup picks the earliest occurrence deterministically.
         let sorted = matches.sorted { a, b in
             if a.atomOrdinal != b.atomOrdinal { return a.atomOrdinal < b.atomOrdinal }
-            return a.matchOffset < b.matchOffset
+            if a.matchOffset != b.matchOffset { return a.matchOffset < b.matchOffset }
+            if a.matchLength != b.matchLength { return a.matchLength < b.matchLength }
+            if a.category != b.category { return a.category.rawValue < b.category.rawValue }
+            return a.normalizedText < b.normalizedText
         }
 
         // Collect all URL normalized texts (globally) to detect path-URL subsumption.
@@ -705,6 +765,104 @@ enum EvidenceCatalogBuilder {
         return words.joined(separator: " ")
     }
 
+    private static func canonicalizeBrandVariants(_ matches: [RawMatch]) -> [RawMatch] {
+        let brandTexts = Set(
+            matches
+                .filter { $0.category == .brandSpan }
+                .map(\.normalizedText)
+        )
+
+        var suffixesByPrefix: [String: Set<String>] = [:]
+        for text in brandTexts {
+            let words = text.split(separator: " ").map(String.init)
+            guard words.count >= 2, let suffix = words.last,
+                  disclosureTrailingBrandTokens.contains(suffix) else { continue }
+            let prefix = words.dropLast().joined(separator: " ")
+            suffixesByPrefix[prefix, default: []].insert(suffix)
+        }
+
+        let canonicalPrefixes = Set(
+            suffixesByPrefix.compactMap { prefix, suffixes in
+                if brandTexts.contains(prefix) || suffixes.count >= 2 {
+                    return prefix
+                }
+                return nil
+            }
+        )
+
+        return matches.map { match in
+            guard match.category == .brandSpan else { return match }
+
+            let words = match.normalizedText.split(separator: " ").map(String.init)
+            guard words.count >= 2, let suffix = words.last,
+                  disclosureTrailingBrandTokens.contains(suffix) else {
+                return match
+            }
+
+            let prefix = words.dropLast().joined(separator: " ")
+            guard canonicalPrefixes.contains(prefix) else { return match }
+
+            let rawWords = match.matchedText.split(separator: " ").map(String.init)
+            let canonicalMatchedText: String
+            if rawWords.count == words.count,
+               rawWords.last?.lowercased() == suffix {
+                canonicalMatchedText = rawWords.dropLast().joined(separator: " ")
+            } else {
+                canonicalMatchedText = match.matchedText
+            }
+
+            return RawMatch(
+                category: match.category,
+                matchedText: canonicalMatchedText,
+                normalizedText: prefix,
+                atomOrdinal: match.atomOrdinal,
+                startTime: match.startTime,
+                endTime: match.endTime,
+                matchOffset: match.matchOffset,
+                matchLength: match.matchLength
+            )
+        }
+    }
+
+    /// Collapse overlapping regex variants that point at the same mention within
+    /// one atom so repetition count reflects utterances, not pattern multiplicity.
+    /// Overlap is keyed by atom + category rather than normalizedText alone
+    /// because the same spoken mention can be captured by multiple patterns with
+    /// different normalized forms (for example "use code SAVE10" and
+    /// "code SAVE10 at checkout").
+    private static func collapseOverlappingOccurrences(_ matches: [RawMatch]) -> [RawMatch] {
+        var collapsed: [RawMatch] = []
+
+        for match in matches {
+            let hasOverlappingSibling = collapsed.contains { candidate in
+                candidate.category == match.category &&
+                candidate.atomOrdinal == match.atomOrdinal &&
+                rangesOverlap(
+                    startA: candidate.matchOffset,
+                    lengthA: candidate.matchLength,
+                    startB: match.matchOffset,
+                    lengthB: match.matchLength
+                )
+            }
+            if hasOverlappingSibling {
+                continue
+            }
+            collapsed.append(match)
+        }
+
+        return collapsed
+    }
+
+    private static func rangesOverlap(
+        startA: Int,
+        lengthA: Int,
+        startB: Int,
+        lengthB: Int
+    ) -> Bool {
+        let endA = startA + lengthA
+        let endB = startB + lengthB
+        return startA < endB && startB < endA
+    }
     /// Brand extraction patterns — case-insensitive, use capture groups.
     ///
     /// ASR output is typically lowercase, so these patterns do not rely on
