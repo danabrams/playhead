@@ -216,6 +216,61 @@ struct SpanHypothesisEngineTests {
         #expect(Set(engine.activeHypotheses.compactMap { $0.sponsorEntity?.value }) == Set(["betterhelp", "squarespace"]))
     }
 
+    @Test("sponsor-less close anchors prefer the older compatible hypothesis")
+    func sponsorlessCloseAnchorsAttachToOlderCompatibleSpan() throws {
+        var engine = SpanHypothesisEngine()
+        let analysisAssetId = "asset-span-engine"
+        let sponsorLexiconScanner = makeScanner(podcastSponsorLexicon: "BetterHelp, Squarespace")
+
+        let betterHelpDisclosure = try scanHit(
+            category: .sponsor,
+            text: "this episode is sponsored by betterhelp",
+            startTime: 0,
+            endTime: 1,
+            matching: { $0.matchedText == "sponsored by" }
+        )
+        _ = engine.ingest(betterHelpDisclosure, analysisAssetId: analysisAssetId)
+
+        let betterHelpLexicon = try scanHit(
+            scanner: sponsorLexiconScanner,
+            category: .sponsor,
+            text: "betterhelp can help you find a therapist",
+            startTime: 2,
+            endTime: 3,
+            matching: { $0.matchedText == "betterhelp" }
+        )
+        _ = engine.ingest(betterHelpLexicon, analysisAssetId: analysisAssetId)
+
+        let squarespaceLexicon = try scanHit(
+            scanner: sponsorLexiconScanner,
+            category: .sponsor,
+            text: "squarespace helps you publish online",
+            startTime: 8,
+            endTime: 9,
+            matching: { $0.matchedText == "squarespace" }
+        )
+        _ = engine.ingest(squarespaceLexicon, analysisAssetId: analysisAssetId)
+
+        #expect(engine.activeHypotheses.count == 2)
+        #expect(engine.activeHypotheses.map(\.sponsorEntity?.value) == ["betterhelp", "squarespace"])
+
+        let sponsorlessPromoClose = try scanHit(
+            category: .promoCode,
+            text: "use code save10 at checkout",
+            startTime: 12,
+            endTime: 13,
+            matching: { $0.matchedText == "use code save10" }
+        )
+        let closed = engine.ingest(sponsorlessPromoClose, analysisAssetId: analysisAssetId)
+
+        #expect(closed.count == 1)
+        #expect(closed[0].sponsorEntity?.value == "betterhelp")
+        #expect(engine.closedHypotheses.count == 1)
+        #expect(engine.closedHypotheses[0].sponsorEntity?.value == "betterhelp")
+        #expect(engine.activeHypotheses.count == 1)
+        #expect(engine.activeHypotheses[0].sponsorEntity?.value == "squarespace")
+    }
+
     @Test("orphan promo anchors seed hypotheses but do not emit skip-eligible spans")
     func orphanPromoCloseAnchorDoesNotEmit() throws {
         var engine = SpanHypothesisEngine()

@@ -459,7 +459,7 @@ struct SpanHypothesisEngine: Sendable {
         }
 
         let ordered = candidates.sorted { lhs, rhs in
-            lhs.element.lastEvidenceTime > rhs.element.lastEvidenceTime
+            hypothesis(lhs.element, isBetterMatchThan: rhs.element, for: event)
         }
         return ordered.first?.offset
     }
@@ -512,6 +512,26 @@ struct SpanHypothesisEngine: Sendable {
             return true
         }
         return hypothesisSponsor == eventSponsor
+    }
+
+    private func hypothesis(_ lhs: SpanHypothesis, isBetterMatchThan rhs: SpanHypothesis, for event: AnchorEvent) -> Bool {
+        if prefersEarliestCompatibleHypothesis(for: event) {
+            if lhs.seedAnchor.startTime != rhs.seedAnchor.startTime {
+                return lhs.seedAnchor.startTime < rhs.seedAnchor.startTime
+            }
+        } else if lhs.lastEvidenceTime != rhs.lastEvidenceTime {
+            return lhs.lastEvidenceTime > rhs.lastEvidenceTime
+        }
+
+        if lhs.lastEvidenceTime != rhs.lastEvidenceTime {
+            return lhs.lastEvidenceTime > rhs.lastEvidenceTime
+        }
+
+        return lhs.seedAnchor.startTime < rhs.seedAnchor.startTime
+    }
+
+    private func prefersEarliestCompatibleHypothesis(for event: AnchorEvent) -> Bool {
+        event.sponsorEntity == nil && (event.anchorType.isExplicitCloseAnchor || event.isExplicitReturnMarker)
     }
 
     private func eventFallsWithinWindow(_ hypothesis: SpanHypothesis, event: AnchorEvent) -> Bool {
