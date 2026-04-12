@@ -47,12 +47,20 @@ private func toGroundTruth(_ seg: TestAdSegment) -> GroundTruthAdSegment {
     case .preRoll: adType = .preRoll
     case .postRoll: adType = .postRoll
     }
+    let deliveryStyle: GroundTruthAdSegment.DeliveryStyle
+    switch seg.deliveryStyle {
+    case .dynamicInsertion: deliveryStyle = .dynamicInsertion
+    case .hostRead: deliveryStyle = .hostRead
+    case .blendedHostRead: deliveryStyle = .blendedHostRead
+    case .producedSegment: deliveryStyle = .producedSegment
+    }
     return GroundTruthAdSegment(
         startTime: seg.startTime,
         endTime: seg.endTime,
         advertiser: seg.advertiser,
         product: seg.product,
-        adType: adType
+        adType: adType,
+        deliveryStyle: deliveryStyle
     )
 }
 

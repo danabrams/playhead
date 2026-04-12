@@ -6,6 +6,10 @@ import Foundation
 import Testing
 @testable import Playhead
 
+private struct MaxRandomNumberGenerator: RandomNumberGenerator {
+    mutating func next() -> UInt64 { UInt64.max }
+}
+
 // MARK: - Replay Simulator Tests
 
 @Suite("ReplaySimulator – Basic Replay")
@@ -17,6 +21,8 @@ struct ReplaySimulatorBasicTests {
     private func makeConfig(
         speed: Float = 1.0,
         audioMode: SimulationCondition.AudioMode = .cached,
+        analysisPath: SimulationCondition.AnalysisPath = .live,
+        podcastId: String = "test-podcast",
         interactions: [SimulatedInteraction] = [],
         groundTruth: [GroundTruthAdSegment]? = nil,
         duration: TimeInterval = 3600
@@ -25,12 +31,14 @@ struct ReplaySimulatorBasicTests {
             GroundTruthAdSegment(
                 startTime: 120, endTime: 180,
                 advertiser: "Acme Corp", product: "Widget Pro",
-                adType: .midRoll
+                adType: .midRoll,
+                deliveryStyle: .hostRead
             ),
             GroundTruthAdSegment(
                 startTime: 1800, endTime: 1860,
                 advertiser: "BetterHelp", product: "Therapy",
-                adType: .midRoll
+                adType: .midRoll,
+                deliveryStyle: .blendedHostRead
             ),
         ]
 
@@ -55,12 +63,14 @@ struct ReplaySimulatorBasicTests {
         let condition = SimulationCondition(
             audioMode: audioMode,
             playbackSpeed: speed,
-            interactions: interactions
+            interactions: interactions,
+            analysisPath: analysisPath
         )
 
         return ReplayConfiguration(
             episodeId: "test-episode-001",
             episodeTitle: "Test Episode: Basic Replay",
+            podcastId: podcastId,
             episodeDuration: duration,
             condition: condition,
             groundTruthSegments: gt,
@@ -115,6 +125,106 @@ struct ReplaySimulatorBasicTests {
         #expect(boundary.p95ResumeErrorMs <= 600, "p95 resume error should be under 600ms")
     }
 
+    @Test("Boundary quality metrics include signed overlap and coverage fields")
+    func boundaryQualitySignedFields() {
+        let groundTruth = [
+            GroundTruthAdSegment(
+                startTime: 100, endTime: 200,
+                advertiser: "Acme", product: "Widget",
+                adType: .midRoll,
+                deliveryStyle: .producedSegment
+            )
+        ]
+        let detected = [
+            AdWindow(
+                id: "window-1",
+                analysisAssetId: "test-episode-001",
+                startTime: 80,
+                endTime: 240,
+                confidence: 0.9,
+                boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                decisionState: AdDecisionState.candidate.rawValue,
+                detectorVersion: "sim-v1",
+                advertiser: "Acme",
+                product: "Widget",
+                adDescription: nil,
+                evidenceText: nil,
+                evidenceStartTime: 100,
+                metadataSource: "test",
+                metadataConfidence: 0.9,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false
+            )
+        ]
+
+        let boundary = ReplayMetricsComputation.boundaryQuality(
+            groundTruth: groundTruth,
+            detected: detected
+        )
+
+        #expect(boundary.cutSpeechAtEntryMs == [20000])
+        #expect(boundary.cutSpeechAtResumeMs == [40000])
+        #expect(boundary.signedEntryErrorMs == [-20000])
+        #expect(boundary.signedResumeErrorMs == [40000])
+        #expect(abs((boundary.spanIoUs.first ?? 0) - 0.625) < 0.0001)
+        #expect(boundary.coverageRecalls == [1.0])
+        #expect(abs((boundary.coveragePrecisions.first ?? 0) - 0.625) < 0.0001)
+        #expect(boundary.medianSignedEntryErrorMs == -20000)
+        #expect(boundary.medianSignedResumeErrorMs == 40000)
+        #expect(boundary.medianSpanIoU > 0.6)
+    }
+
+    @Test("Seed recall requires explicit seed observations rather than span overlap")
+    func seedRecallRequiresExplicitSeeds() {
+        let groundTruth = [
+            GroundTruthAdSegment(
+                startTime: 100, endTime: 160,
+                advertiser: "Acme", product: "Widget",
+                adType: .midRoll,
+                deliveryStyle: .hostRead
+            )
+        ]
+        let detected = [
+            AdWindow(
+                id: "window-1",
+                analysisAssetId: "test-episode-001",
+                startTime: 100,
+                endTime: 160,
+                confidence: 0.9,
+                boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                decisionState: AdDecisionState.candidate.rawValue,
+                detectorVersion: "sim-v1",
+                advertiser: "Acme",
+                product: "Widget",
+                adDescription: nil,
+                evidenceText: nil,
+                evidenceStartTime: 100,
+                metadataSource: "test",
+                metadataConfidence: 0.9,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false
+            )
+        ]
+
+        let withoutSeed = ReplayMetricsComputation.detectionQuality(
+            groundTruth: groundTruth,
+            detected: detected,
+            episodeDuration: 200,
+            seededGroundTruthIndices: []
+        )
+        let withSeed = ReplayMetricsComputation.detectionQuality(
+            groundTruth: groundTruth,
+            detected: detected,
+            episodeDuration: 200,
+            seededGroundTruthIndices: [0]
+        )
+
+        #expect(withoutSeed.seedRecall == 0)
+        #expect(withSeed.seedRecall == 1)
+    }
+
     @Test("Latency metrics are populated")
     func latencyMetrics() {
         let config = makeConfig()
@@ -125,6 +235,47 @@ struct ReplaySimulatorBasicTests {
 
         #expect(latency.meanPipelineLatencyMs >= 0, "Pipeline latency should be non-negative")
         #expect(latency.p95BannerLatencyMs != nil, "Banner latency should be measured")
+    }
+
+    @Test("Latency metrics keep first applied skip time separate from first confirmation lead time")
+    func latencySeparatesSkipTimeFromConfirmationLeadTime() {
+        let groundTruth = [
+            GroundTruthAdSegment(
+                startTime: 120, endTime: 180,
+                advertiser: "Acme", product: "Widget",
+                adType: .midRoll,
+                deliveryStyle: .hostRead
+            )
+        ]
+        let config = makeConfig(groundTruth: groundTruth, duration: 240)
+        let driver = SimulatedPlaybackDriver(config: config, rng: MaxRandomNumberGenerator())
+        let events = driver.runReplay()
+
+        let latency = driver.computeLatencyMetrics()
+        let firstSkipTime = events.compactMap { event -> Double? in
+            guard case .skipApplied(_, let from, _) = event else { return nil }
+            return from
+        }.min()
+
+        #expect(abs((latency.timeToFirstUsableSkip ?? -1) - (firstSkipTime ?? -1)) < 0.001)
+        #expect(abs((latency.timeToFirstUsableSkip ?? -1) - 120.5) < 0.001)
+        #expect(abs((latency.leadTimeAtFirstConfirmationSeconds ?? -1) - 90.0) < 0.001)
+        #expect(latency.timeToFirstUsableSkip != latency.leadTimeAtFirstConfirmationSeconds)
+    }
+
+    @Test("Latency metrics retain lead time at first confirmation")
+    func latencyLeadTime() {
+        let latency = ReplayMetricsComputation.latencyMetrics(
+            timeToFirstUsableSkip: 12.5,
+            leadTimeAtFirstConfirmationSeconds: 3.25,
+            pipelineLatencies: [10, 20, 30],
+            bannerLatencies: [100, 150, 200]
+        )
+
+        #expect(latency.timeToFirstUsableSkip == 12.5)
+        #expect(latency.leadTimeAtFirstConfirmationSeconds == 3.25)
+        #expect(latency.meanPipelineLatencyMs == 20)
+        #expect(latency.p95BannerLatencyMs != nil)
     }
 
     @Test("Full report can be built and serialized to JSON")
@@ -147,6 +298,8 @@ struct ReplaySimulatorBasicTests {
         let decoded = try decoder.decode(EpisodeReplayReport.self, from: data)
         #expect(decoded.episodeId == "test-episode-001")
         #expect(decoded.simulatorVersion == EpisodeReplayReport.currentSimulatorVersion)
+        #expect(decoded.podcastId == "test-podcast")
+        #expect(decoded.deliveryStyles.contains(.blendedHostRead))
     }
 }
 
@@ -161,7 +314,8 @@ struct ReplaySimulatorConditionTests {
             GroundTruthAdSegment(
                 startTime: 60, endTime: 120,
                 advertiser: "Squarespace", product: "Website Builder",
-                adType: .preRoll
+                adType: .preRoll,
+                deliveryStyle: .dynamicInsertion
             ),
         ]
 
@@ -185,11 +339,13 @@ struct ReplaySimulatorConditionTests {
         return ReplayConfiguration(
             episodeId: "test-episode-cond",
             episodeTitle: "Test Episode: Conditions",
+            podcastId: "test-podcast-cond",
             episodeDuration: 600,
             condition: SimulationCondition(
                 audioMode: .cached,
                 playbackSpeed: speed,
-                interactions: interactions
+                interactions: interactions,
+                analysisPath: .backfill
             ),
             groundTruthSegments: gt,
             transcriptChunks: chunks,
@@ -297,7 +453,48 @@ struct ReplaySimulatorAggregationTests {
         let report1 = EpisodeReplayReport(
             episodeId: "ep-1",
             episodeTitle: "Episode 1",
-            condition: SimulationCondition(audioMode: .cached, playbackSpeed: 1.0, interactions: []),
+            podcastId: "pod-a",
+            condition: SimulationCondition(
+                audioMode: .cached,
+                playbackSpeed: 1.0,
+                interactions: [],
+                analysisPath: .live
+            ),
+            deliveryStyles: [.hostRead, .blendedHostRead],
+            deliveryStyleMetrics: [
+                DeliveryStyleMetricReport(
+                    style: .hostRead,
+                    detectionQuality: DetectionQualityMetrics(
+                        falsePositiveSkipSeconds: 2,
+                        falseNegativeAdSeconds: 4,
+                        seedRecall: 1,
+                        precision: 0.9,
+                        recall: 0.8,
+                        f1Score: 0.85,
+                        missedSegmentCount: 0,
+                        spuriousSegmentCount: 0
+                    ),
+                    boundaryQuality: BoundaryQualityMetrics(),
+                    latency: LatencyMetrics(timeToFirstUsableSkip: 5.0),
+                    userOverrides: UserOverrideMetrics(listenTapCount: 1, rewindAfterSkipCount: 0, overrideRate: 0.1)
+                ),
+                DeliveryStyleMetricReport(
+                    style: .blendedHostRead,
+                    detectionQuality: DetectionQualityMetrics(
+                        falsePositiveSkipSeconds: 3,
+                        falseNegativeAdSeconds: 6,
+                        seedRecall: 1,
+                        precision: 0.9,
+                        recall: 0.8,
+                        f1Score: 0.85,
+                        missedSegmentCount: 0,
+                        spuriousSegmentCount: 1
+                    ),
+                    boundaryQuality: BoundaryQualityMetrics(),
+                    latency: LatencyMetrics(timeToFirstUsableSkip: 5.0),
+                    userOverrides: UserOverrideMetrics(listenTapCount: 0, rewindAfterSkipCount: 0, overrideRate: 0)
+                ),
+            ],
             detectionQuality: DetectionQualityMetrics(
                 falsePositiveSkipSeconds: 5, falseNegativeAdSeconds: 10,
                 precision: 0.9, recall: 0.8, f1Score: 0.85,
@@ -325,7 +522,14 @@ struct ReplaySimulatorAggregationTests {
         let report2 = EpisodeReplayReport(
             episodeId: "ep-2",
             episodeTitle: "Episode 2",
-            condition: SimulationCondition(audioMode: .streamed, playbackSpeed: 1.5, interactions: []),
+            podcastId: "pod-b",
+            condition: SimulationCondition(
+                audioMode: .streamed,
+                playbackSpeed: 1.5,
+                interactions: [],
+                analysisPath: .backfill
+            ),
+            deliveryStyles: [.dynamicInsertion],
             detectionQuality: DetectionQualityMetrics(
                 falsePositiveSkipSeconds: 3, falseNegativeAdSeconds: 8,
                 precision: 0.85, recall: 0.75, f1Score: 0.80,
@@ -358,6 +562,204 @@ struct ReplaySimulatorAggregationTests {
         #expect(corpus.aggregateDetectionQuality.missedSegmentCount == 1) // 0 + 1
         #expect(corpus.aggregateUserOverrides.listenTapCount == 1) // 1 + 0
         #expect(corpus.aggregateUserOverrides.rewindAfterSkipCount == 1) // 0 + 1
+        #expect(corpus.slices.contains { $0.dimension == MetricSliceDimension.podcast && $0.value == "pod-a" })
+        #expect(corpus.slices.contains { $0.dimension == MetricSliceDimension.podcast && $0.value == "pod-b" })
+        #expect(corpus.slices.contains { $0.dimension == MetricSliceDimension.analysisPath && $0.value == "live" })
+        #expect(corpus.slices.contains { $0.dimension == MetricSliceDimension.analysisPath && $0.value == "backfill" })
+        #expect(corpus.slices.contains { $0.dimension == MetricSliceDimension.deliveryStyle && $0.value == "hostRead" })
+        #expect(corpus.slices.contains { $0.dimension == MetricSliceDimension.deliveryStyle && $0.value == "blendedHostRead" })
+        #expect(corpus.slices.contains { $0.dimension == MetricSliceDimension.deliveryStyle && $0.value == "dynamicInsertion" })
+    }
+
+    @Test("Seed recall aggregation uses seeded and ground-truth counts, not per-report means")
+    func seedRecallAggregationUsesCounts() {
+        func makeGroundTruth(
+            count: Int,
+            deliveryStyle: GroundTruthAdSegment.DeliveryStyle = .hostRead
+        ) -> [GroundTruthAdSegment] {
+            (0..<count).map { index in
+                let start = Double(index * 30)
+                return GroundTruthAdSegment(
+                    startTime: start,
+                    endTime: start + 15,
+                    advertiser: "Acme \(index)",
+                    product: "Widget \(index)",
+                    adType: .midRoll,
+                    deliveryStyle: deliveryStyle
+                )
+            }
+        }
+
+        func makeDetectedWindows(
+            episodeId: String,
+            from groundTruth: [GroundTruthAdSegment]
+        ) -> [AdWindow] {
+            groundTruth.enumerated().map { index, segment in
+                AdWindow(
+                    id: "\(episodeId)-window-\(index)",
+                    analysisAssetId: episodeId,
+                    startTime: segment.startTime,
+                    endTime: segment.endTime,
+                    confidence: 0.9,
+                    boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                    decisionState: AdDecisionState.candidate.rawValue,
+                    detectorVersion: "sim-v1",
+                    advertiser: segment.advertiser,
+                    product: segment.product,
+                    adDescription: nil,
+                    evidenceText: nil,
+                    evidenceStartTime: segment.startTime,
+                    metadataSource: "test",
+                    metadataConfidence: 0.9,
+                    metadataPromptVersion: nil,
+                    wasSkipped: false,
+                    userDismissedBanner: false
+                )
+            }
+        }
+
+        func makeReport(
+            episodeId: String,
+            podcastId: String,
+            groundTruth: [GroundTruthAdSegment],
+            seededGroundTruthIndices: [Int]
+        ) -> EpisodeReplayReport {
+            let detected = makeDetectedWindows(episodeId: episodeId, from: groundTruth)
+            return EpisodeReplayReport(
+                episodeId: episodeId,
+                episodeTitle: episodeId,
+                podcastId: podcastId,
+                condition: SimulationCondition(
+                    audioMode: .cached,
+                    playbackSpeed: 1.0,
+                    interactions: [],
+                    analysisPath: .live
+                ),
+                deliveryStyles: Array(Set(groundTruth.map(\.deliveryStyle))).sorted { $0.rawValue < $1.rawValue },
+                detectionQuality: ReplayMetricsComputation.detectionQuality(
+                    groundTruth: groundTruth,
+                    detected: detected,
+                    episodeDuration: 180,
+                    seededGroundTruthIndices: seededGroundTruthIndices
+                ),
+                boundaryQuality: ReplayMetricsComputation.boundaryQuality(
+                    groundTruth: groundTruth,
+                    detected: detected
+                ),
+                latency: LatencyMetrics(),
+                userOverrides: UserOverrideMetrics(listenTapCount: 0, rewindAfterSkipCount: 0, overrideRate: 0),
+                samples: [],
+                simulatorVersion: EpisodeReplayReport.currentSimulatorVersion,
+                generatedAt: Date(),
+                replayDurationSeconds: 1.0
+            )
+        }
+
+        let seededSingleAdReport = makeReport(
+            episodeId: "ep-seeded",
+            podcastId: "pod-a",
+            groundTruth: makeGroundTruth(count: 1),
+            seededGroundTruthIndices: [0]
+        )
+        let unseededThreeAdReport = makeReport(
+            episodeId: "ep-unseeded",
+            podcastId: "pod-b",
+            groundTruth: makeGroundTruth(count: 3),
+            seededGroundTruthIndices: []
+        )
+        let noAdReport = makeReport(
+            episodeId: "ep-no-ads",
+            podcastId: "pod-c",
+            groundTruth: [],
+            seededGroundTruthIndices: []
+        )
+
+        let corpus = CorpusReplayReport.aggregate(from: [seededSingleAdReport, unseededThreeAdReport, noAdReport])
+        let hostReadSlice = corpus.slices.first {
+            $0.dimension == .deliveryStyle && $0.value == GroundTruthAdSegment.DeliveryStyle.hostRead.rawValue
+        }
+
+        #expect(abs(corpus.aggregateDetectionQuality.seedRecall - 0.25) < 0.0001)
+        #expect(abs((hostReadSlice?.detectionQuality.seedRecall ?? -1) - 0.25) < 0.0001)
+    }
+
+    @Test("Delivery-style slices aggregate per-style metrics instead of whole-episode copies")
+    func deliveryStyleSlicesUseStyleSpecificMetrics() {
+        let report = EpisodeReplayReport(
+            episodeId: "ep-mixed",
+            episodeTitle: "Mixed Episode",
+            podcastId: "pod-mixed",
+            condition: SimulationCondition(
+                audioMode: .cached,
+                playbackSpeed: 1.0,
+                interactions: [],
+                analysisPath: .live
+            ),
+            deliveryStyles: [.hostRead, .dynamicInsertion],
+            deliveryStyleMetrics: [
+                DeliveryStyleMetricReport(
+                    style: .hostRead,
+                    detectionQuality: DetectionQualityMetrics(
+                        falsePositiveSkipSeconds: 0,
+                        falseNegativeAdSeconds: 0,
+                        seedRecall: 1,
+                        precision: 1,
+                        recall: 1,
+                        f1Score: 1,
+                        missedSegmentCount: 0,
+                        spuriousSegmentCount: 0
+                    ),
+                    boundaryQuality: BoundaryQualityMetrics(),
+                    latency: LatencyMetrics(timeToFirstUsableSkip: 10, leadTimeAtFirstConfirmationSeconds: 20),
+                    userOverrides: UserOverrideMetrics(listenTapCount: 0, rewindAfterSkipCount: 0, overrideRate: 0)
+                ),
+                DeliveryStyleMetricReport(
+                    style: .dynamicInsertion,
+                    detectionQuality: DetectionQualityMetrics(
+                        falsePositiveSkipSeconds: 0,
+                        falseNegativeAdSeconds: 30,
+                        seedRecall: 0,
+                        precision: 0,
+                        recall: 0,
+                        f1Score: 0,
+                        missedSegmentCount: 1,
+                        spuriousSegmentCount: 0
+                    ),
+                    boundaryQuality: BoundaryQualityMetrics(),
+                    latency: LatencyMetrics(),
+                    userOverrides: UserOverrideMetrics(listenTapCount: 0, rewindAfterSkipCount: 0, overrideRate: 0)
+                ),
+            ],
+            detectionQuality: DetectionQualityMetrics(
+                falsePositiveSkipSeconds: 0,
+                falseNegativeAdSeconds: 15,
+                seedRecall: 0.5,
+                precision: 1,
+                recall: 0.5,
+                f1Score: 2.0 / 3.0,
+                missedSegmentCount: 1,
+                spuriousSegmentCount: 0
+            ),
+            boundaryQuality: BoundaryQualityMetrics(),
+            latency: LatencyMetrics(timeToFirstUsableSkip: 10, leadTimeAtFirstConfirmationSeconds: 20),
+            userOverrides: UserOverrideMetrics(listenTapCount: 0, rewindAfterSkipCount: 0, overrideRate: 0),
+            samples: [],
+            simulatorVersion: EpisodeReplayReport.currentSimulatorVersion,
+            generatedAt: Date(),
+            replayDurationSeconds: 1.0
+        )
+
+        let corpus = CorpusReplayReport.aggregate(from: [report])
+        let hostRead = corpus.slices.first {
+            $0.dimension == .deliveryStyle && $0.value == GroundTruthAdSegment.DeliveryStyle.hostRead.rawValue
+        }
+        let dynamic = corpus.slices.first {
+            $0.dimension == .deliveryStyle && $0.value == GroundTruthAdSegment.DeliveryStyle.dynamicInsertion.rawValue
+        }
+
+        #expect(hostRead?.detectionQuality.recall == 1)
+        #expect(dynamic?.detectionQuality.recall == 0)
+        #expect(hostRead?.detectionQuality.recall != report.detectionQuality.recall)
     }
 
     @Test("Seeded RNG produces deterministic replay results")
@@ -409,5 +811,107 @@ struct ReplaySimulatorAggregationTests {
         #expect(percentile([1, 2, 3, 4, 5], 1.0) == 5)
         let p50 = percentile([1, 2, 3, 4, 5], 0.5)
         #expect(p50 == 3)
+    }
+
+    @Test("Older corpus report JSON decodes with defaults for A7 fields")
+    func oldCorpusReportDecodesWithDefaults() throws {
+        let json = """
+        {
+          "episodeReports": [
+            {
+              "condition": {
+                "audioMode": "cached",
+                "interactions": [],
+                "playbackSpeed": 1
+              },
+              "detectionQuality": {
+                "f1Score": 0.5,
+                "falseNegativeAdSeconds": 20,
+                "falsePositiveSkipSeconds": 5,
+                "missedSegmentCount": 1,
+                "precision": 0.5,
+                "recall": 0.5,
+                "spuriousSegmentCount": 0
+              },
+              "boundaryQuality": {
+                "cutSpeechAtEntryMs": [100],
+                "cutSpeechAtResumeMs": [200],
+                "p50EntryErrorMs": 100,
+                "p95EntryErrorMs": 100,
+                "p50ResumeErrorMs": 200,
+                "p95ResumeErrorMs": 200
+              },
+              "episodeId": "ep-legacy",
+              "episodeTitle": "Legacy Episode",
+              "generatedAt": "2026-04-12T00:00:00Z",
+              "latency": {
+                "meanPipelineLatencyMs": 10,
+                "p50BannerLatencyMs": 80,
+                "p95BannerLatencyMs": 120,
+                "p95PipelineLatencyMs": 20,
+                "timeToFirstUsableSkip": 12.5
+              },
+              "replayDurationSeconds": 1,
+              "samples": [],
+              "simulatorVersion": "replay-sim-v1",
+              "userOverrides": {
+                "listenTapCount": 0,
+                "overrideRate": 0,
+                "rewindAfterSkipCount": 0
+              }
+            }
+          ],
+          "aggregateDetectionQuality": {
+            "f1Score": 0.5,
+            "falseNegativeAdSeconds": 20,
+            "falsePositiveSkipSeconds": 5,
+            "missedSegmentCount": 1,
+            "precision": 0.5,
+            "recall": 0.5,
+            "spuriousSegmentCount": 0
+          },
+          "aggregateBoundaryQuality": {
+            "cutSpeechAtEntryMs": [100],
+            "cutSpeechAtResumeMs": [200],
+            "p50EntryErrorMs": 100,
+            "p95EntryErrorMs": 100,
+            "p50ResumeErrorMs": 200,
+            "p95ResumeErrorMs": 200
+          },
+          "aggregateLatency": {
+            "meanPipelineLatencyMs": 10,
+            "p50BannerLatencyMs": 80,
+            "p95BannerLatencyMs": 120,
+            "p95PipelineLatencyMs": 20,
+            "timeToFirstUsableSkip": 12.5
+          },
+          "aggregateUserOverrides": {
+            "listenTapCount": 0,
+            "overrideRate": 0,
+            "rewindAfterSkipCount": 0
+          },
+          "conditions": [
+            {
+              "audioMode": "cached",
+              "interactions": [],
+              "playbackSpeed": 1
+            }
+          ],
+          "generatedAt": "2026-04-12T00:00:00Z",
+          "simulatorVersion": "replay-sim-v1"
+        }
+        """
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(CorpusReplayReport.self, from: Data(json.utf8))
+
+        #expect(decoded.slices.isEmpty)
+        #expect(decoded.aggregateDetectionQuality.seedRecall == 0)
+        #expect(decoded.aggregateLatency.leadTimeAtFirstConfirmationSeconds == nil)
+        #expect(decoded.conditions.first?.analysisPath == .live)
+        #expect(decoded.episodeReports.first?.podcastId == "")
+        #expect(decoded.episodeReports.first?.deliveryStyles.isEmpty == true)
+        #expect(decoded.episodeReports.first?.deliveryStyleMetrics.isEmpty == true)
     }
 }

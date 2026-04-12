@@ -111,7 +111,8 @@ struct CorpusLoader {
                 endTime: seg.endTime,
                 advertiser: seg.advertiser,
                 product: seg.product,
-                adType: mapAdType(seg.adType)
+                adType: mapAdType(seg.adType),
+                deliveryStyle: mapDeliveryStyle(seg.deliveryStyle)
             )
         }
 
@@ -137,6 +138,7 @@ struct CorpusLoader {
         return ReplayConfiguration(
             episodeId: annotation.episode.episodeId,
             episodeTitle: annotation.episode.title,
+            podcastId: annotation.podcast.podcastId,
             episodeDuration: annotation.episode.duration,
             condition: condition,
             groundTruthSegments: groundTruth,
@@ -213,6 +215,15 @@ struct CorpusLoader {
         case .preRoll: .preRoll
         case .midRoll: .midRoll
         case .postRoll: .postRoll
+        }
+    }
+
+    private func mapDeliveryStyle(_ style: TestAdSegment.DeliveryStyle) -> GroundTruthAdSegment.DeliveryStyle {
+        switch style {
+        case .dynamicInsertion: .dynamicInsertion
+        case .hostRead: .hostRead
+        case .blendedHostRead: .blendedHostRead
+        case .producedSegment: .producedSegment
         }
     }
 }
