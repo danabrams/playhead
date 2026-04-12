@@ -550,7 +550,7 @@ struct SpanHypothesisEngine: Sendable {
     private func terminalAnchorOwnershipScore(for hypothesis: SpanHypothesis, event: AnchorEvent) -> Double {
         switch event.anchorType {
         case .promoCode, .url:
-            return hypothesis.score(at: event.endTime)
+            return hypothesis.anchorEvidenceScore(at: event.endTime)
         case .transitionMarker:
             return hypothesis.anchorEvidenceScore(at: event.endTime)
         case .disclosure, .sponsorLexicon, .fmPositive:
