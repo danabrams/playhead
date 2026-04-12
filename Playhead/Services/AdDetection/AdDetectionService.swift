@@ -551,7 +551,13 @@ actor AdDetectionService {
             podcastProfile: currentPodcastProfile,
             fmWindows: fmRefinementWindows
         )
-        let regionBundles = try await RegionShadowPhase.run(regionInput)
+        let regionBundles: [RegionFeatureBundle]
+        do {
+            regionBundles = try await RegionShadowPhase.run(regionInput)
+        } catch {
+            logger.warning("Backfill: RegionShadowPhase.run failed (continuing without region bundles): \(error.localizedDescription)")
+            regionBundles = []
+        }
 
         // Also feed the shadow observer for diagnostics (no-op when nil).
         if let observer = regionShadowObserver, episodeDuration > 0 {
@@ -1067,73 +1073,6 @@ actor AdDetectionService {
             wasSkipped: window.wasSkipped,
             userDismissedBanner: window.userDismissedBanner
         )
-    }
-
-    // MARK: - Region Shadow Phase (playhead-xba)
-
-    /// Runs `RegionShadowPhase.run` and records the resulting bundles in
-    /// the injected observer. Any failure fetching feature windows is
-    /// logged and the phase is skipped — shadow telemetry must never
-    /// affect user-visible behavior.
-    private func runRegionShadowPhase(
-        observer: RegionShadowObserver,
-        chunks: [TranscriptChunk],
-        analysisAssetId: String,
-        episodeDuration: Double,
-        lexicalCandidates: [LexicalCandidate],
-        fmWindows: [FMRefinementWindowOutput]
-    ) async {
-        // Defense-in-depth: `episodeDuration` must be supplied by the caller
-        // explicitly. Historically this read `self.episodeDuration`, an
-        // instance field mutated by `runBackfill` — a refactor that reordered
-        // assignment or added a new entry point could silently invoke shadow
-        // with a zero duration, causing a `from: 0, to: 0` fetch that bypasses
-        // the Phase 4 break detector entirely. Trip in DEBUG if that happens.
-        precondition(
-            episodeDuration > 0,
-            "runRegionShadowPhase requires a positive episodeDuration; received \(episodeDuration)"
-        )
-
-        // Fetch every feature window for the asset. The Phase 4 acoustic
-        // break detector expects a contiguous view of the episode; fetching
-        // a narrow sub-range would bias the break detector toward false
-        // positives at the slice edges.
-        let featureWindows: [FeatureWindow]
-        do {
-            featureWindows = try await store.fetchFeatureWindows(
-                assetId: analysisAssetId,
-                from: 0,
-                to: episodeDuration
-            )
-        } catch {
-            logger.warning("Region shadow phase: fetchFeatureWindows failed (skipping): \(error.localizedDescription)")
-            return
-        }
-
-        let input = RegionShadowPhase.Input(
-            analysisAssetId: analysisAssetId,
-            chunks: chunks,
-            lexicalCandidates: lexicalCandidates,
-            featureWindows: featureWindows,
-            episodeDuration: episodeDuration,
-            priors: showPriors,
-            // playhead-8n1: thread the cached PodcastProfile so the
-            // Phase 4 shadow phase's `RegionFeatureExtractor` can
-            // construct a `LexicalScanner` that actually consults
-            // the per-show sponsor lexicon. Prior to this change we
-            // hard-coded `nil`, silently skipping show-specific
-            // sponsor patterns in every shadow bundle.
-            podcastProfile: currentPodcastProfile,
-            fmWindows: fmWindows
-        )
-        let bundles: [RegionFeatureBundle]
-        do {
-            bundles = try await RegionShadowPhase.run(input)
-        } catch {
-            logger.warning("Region shadow phase: run failed (skipping): \(error.localizedDescription)")
-            return
-        }
-        await observer.record(assetId: analysisAssetId, bundles: bundles)
     }
 
     // MARK: - Phase 5 Projector Phase (playhead-4my.5)

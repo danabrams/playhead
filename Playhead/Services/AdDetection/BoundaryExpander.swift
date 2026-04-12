@@ -168,22 +168,39 @@ struct BoundaryExpander: Sendable {
 
         guard !containingWindows.isEmpty else { return nil }
 
-        // Only union windows that truly overlap or are contiguous (no gap).
-        // Sort by startTime and merge overlapping/touching windows.
+        // Standard interval union: sort by startTime and merge all overlapping
+        // or touching windows. Continue trying subsequent windows even after
+        // a gap — they may overlap later windows in the sorted sequence.
         let sorted = containingWindows.sorted { $0.startTime < $1.startTime }
-        var mergedStart = sorted[0].startTime
-        var mergedEnd = sorted[0].endTime
+        var intervals: [(start: Double, end: Double, maxConf: Double)] = []
+        var curStart = sorted[0].startTime
+        var curEnd = sorted[0].endTime
+        var curMaxConf = sorted[0].confidence
         for window in sorted.dropFirst() {
-            if window.startTime <= mergedEnd {
-                mergedEnd = max(mergedEnd, window.endTime)
+            if window.startTime <= curEnd {
+                curEnd = max(curEnd, window.endTime)
+                curMaxConf = max(curMaxConf, window.confidence)
+            } else {
+                intervals.append((curStart, curEnd, curMaxConf))
+                curStart = window.startTime
+                curEnd = window.endTime
+                curMaxConf = window.confidence
             }
-            // Non-overlapping windows are not unioned to avoid spanning gaps.
         }
+        intervals.append((curStart, curEnd, curMaxConf))
 
-        let relevantWindows = containingWindows
-        let startTime = mergedStart
-        let endTime = mergedEnd
-        let maxConfidence = relevantWindows.map(\.confidence).max()!
+        // Pick the interval that contains the seed. If the seed falls in a gap
+        // between intervals, pick the one whose nearest edge is closest.
+        guard let bestInterval = intervals.first(where: { seed >= $0.start && seed <= $0.end })
+            ?? intervals.min(by: {
+                let d0 = min(abs(seed - $0.start), abs(seed - $0.end))
+                let d1 = min(abs(seed - $1.start), abs(seed - $1.end))
+                return d0 < d1
+            })
+        else { return nil }
+        let startTime = bestInterval.start
+        let endTime = bestInterval.end
+        let maxConfidence = bestInterval.maxConf
 
         return ExpandedBoundary(
             startTime: startTime,

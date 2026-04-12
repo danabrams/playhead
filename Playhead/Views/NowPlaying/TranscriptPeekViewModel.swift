@@ -25,6 +25,10 @@ final class TranscriptPeekViewModel {
     /// Rebuilt each refresh cycle so per-row lookups are O(1).
     private var spansByChunkIndex: [Int: [DecodedSpan]] = [:]
 
+    /// Chunk indices that overlap a user-marked AdWindow (boundaryState "userMarked").
+    /// These get visual ad highlighting even without a corresponding DecodedSpan.
+    private var userMarkedChunkIndices: Set<Int> = []
+
     /// Index of the chunk containing the current playback position, or nil.
     private(set) var activeChunkIndex: Int?
 
@@ -135,6 +139,12 @@ final class TranscriptPeekViewModel {
         spansByChunkIndex[chunkIndex] ?? []
     }
 
+    /// Whether this chunk should receive ad highlighting (copper bar, background tint).
+    /// True if the chunk overlaps any DecodedSpan OR any user-marked AdWindow.
+    func isAdHighlighted(chunkIndex: Int) -> Bool {
+        (spansByChunkIndex[chunkIndex] != nil) || userMarkedChunkIndices.contains(chunkIndex)
+    }
+
     /// Returns all Phase 5 decoded spans overlapping the given time range.
     /// Retained for callers that don't have a chunk index handy.
     func decodedSpansOverlapping(startTime: Double, endTime: Double) -> [DecodedSpan] {
@@ -207,10 +217,15 @@ final class TranscriptPeekViewModel {
 
     // MARK: - Private
 
-    /// Rebuild the chunk-index → overlapping-spans lookup table.
+    /// Rebuild the chunk-index → overlapping-spans lookup table and
+    /// the user-marked chunk index set.
     /// Called once per refresh cycle so per-row view queries are O(1).
     private func rebuildSpansByChunkIndex() {
         var mapping: [Int: [DecodedSpan]] = [:]
+        var userMarked = Set<Int>()
+
+        let userMarkedWindows = adWindows.filter { $0.boundaryState == "userMarked" }
+
         for (idx, chunk) in chunks.enumerated() {
             let overlapping = decodedSpans.filter { span in
                 span.startTime < chunk.endTime && span.endTime > chunk.startTime
@@ -218,8 +233,15 @@ final class TranscriptPeekViewModel {
             if !overlapping.isEmpty {
                 mapping[idx] = overlapping
             }
+
+            if userMarkedWindows.contains(where: { ad in
+                ad.startTime < chunk.endTime && ad.endTime > chunk.startTime
+            }) {
+                userMarked.insert(idx)
+            }
         }
         spansByChunkIndex = mapping
+        userMarkedChunkIndices = userMarked
     }
 
     private func refresh() async {

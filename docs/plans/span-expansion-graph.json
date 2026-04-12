@@ -1,0 +1,308 @@
+{
+  "nodes": [
+    {
+      "key": "phase-a",
+      "title": "Phase A: Span Expansion \u2014 Fast, Low-Risk Wins",
+      "type": "epic",
+      "priority": 1,
+      "labels": [
+        "span-expansion",
+        "phase-a"
+      ],
+      "description": "Epic for Phase A of the span expansion initiative. The current ad detection pipeline seeds on strong CTA evidence (URLs, promo codes, disclosure phrases) and never grows that seed into the full ad span. Host-read ads commonly run 45\u201390s, but the 30s lexical merge window means the sponsor intro and CTA land in separate clusters \u2014 only the CTA cluster becomes a candidate. Result: detecting the last 10\u201320% of most host-read ads.\n\nPhase A fixes this with fast, low-risk wins: auto-expanding machine seeds, hypothesis-based span construction, ASR vocabulary biasing, seconds-based multi-cue snapping, and metrics to measure it all. Expert-reviewed design in docs/plans/2026-04-12-span-expansion-design.md.\n\nKey design principle: SpanHypothesisEngine is the single owner of provisional span boundaries. TimeBoundaryResolver is the only component allowed to snap."
+    },
+    {
+      "key": "phase-b",
+      "title": "Phase B: Span Expansion \u2014 Heavier Signal / Model Work",
+      "type": "epic",
+      "priority": 2,
+      "labels": [
+        "span-expansion",
+        "phase-b"
+      ],
+      "description": "Epic for Phase B of the span expansion initiative. Builds on Phase A's span construction with deeper signal and model improvements: validated speaker diarization, music-bed detection tuning, FM retasked from generic scanning to structured boundary extraction on suspicious regions, fingerprint full-span recovery via anchor-aware alignment, and selective typed redaction.\n\nPhase B items have higher implementation risk or depend on Phase A infrastructure being in place. Expert-reviewed design in docs/plans/2026-04-12-span-expansion-design.md."
+    },
+    {
+      "key": "a1-feature-window",
+      "title": "A1: Add speakerChangeProxyScore and music signals to FeatureWindow",
+      "type": "feature",
+      "priority": 1,
+      "parent": "phase-a",
+      "labels": [
+        "span-expansion",
+        "phase-a",
+        "audio-signals"
+      ],
+      "description": "## Background\nFeatureWindow currently has pauseProbability, rms, and spectralFlux but no speaker or music signals. Multi-cue boundary snapping (A5) and the SpanHypothesisEngine (A2) need these signals to find ad boundaries that don't start/end on silence.\n\n## What to build\nAdd four new fields to FeatureWindow:\n- `speakerId: Int?` \u2014 Optional, always nil in Phase A until speaker labels verified in Phase B\n- `speakerChangeProxyScore: Double` (0\u20131) \u2014 Acoustic turn-change proxy: pause + spectral shift + timbre change. Falls back gracefully when speakerId is nil.\n- `musicProbability: Double` (0\u20131) \u2014 From SoundAnalysis SNClassifySoundRequest with SNClassifierIdentifier.version1\n- `musicBedChangeScore: Double` (0\u20131) \u2014 Derivative of musicProbability; spikes on music onset/offset\n\n## Implementation notes\n- SoundAnalysis pass runs in parallel on the same audio buffer, on-device, no new dependencies\n- speakerChangeProxyScore smoothed \u00b11 window: 1.0 when speakerId differs (future), otherwise computed from acoustic features (pause probability spike + spectral flux spike + timbre shift)\n- musicBedChangeScore = |musicProbability[t] - musicProbability[t-1]| (or similar derivative)\n- Music is an AUXILIARY cue, not a primary boundary owner\n- All of Phase A must work when speakerId is nil\n\n## Acceptance criteria\n- FeatureWindow has all four new fields\n- SoundAnalysis pass populates musicProbability on real audio\n- musicBedChangeScore derivative computed correctly\n- speakerChangeProxyScore produces nonzero values from acoustic proxy\n- Existing tests still pass (FeatureWindow changes are additive)\n- Unit tests for acoustic proxy score computation\n- Unit tests for music derivative computation"
+    },
+    {
+      "key": "a2-hypothesis-engine",
+      "title": "A2: SpanHypothesisEngine \u2014 Core state machine with sponsor identity and polarity",
+      "type": "feature",
+      "priority": 1,
+      "labels": [
+        "span-expansion",
+        "phase-a",
+        "hypothesis-engine"
+      ],
+      "description": "## Background\nThis is the centerpiece of the span expansion work. Today, LexicalScanner merges hits within a fixed 30s gap and the pipeline only detects the CTA tail of host-read ads. SpanHypothesisEngine replaces this with an explicit hypothesis lifecycle that tracks sponsor identity, anchor polarity, idle gaps, and evidence decay.\n\n## What to build\nNew file: Playhead/Services/AdDetection/SpanHypothesisEngine.swift\n\nState machine: idle \u2192 seeded \u2192 accumulating \u2192 confirmed \u2192 closed\n\nAdHypothesis struct with:\n- seedAnchor, seedTime, anchorType\n- sponsorEntity: NormalizedSponsor? \u2014 extracted sponsor identity for entity-aware merging\n- polarity: AnchorPolarity (.startAnchored, .endAnchored, .neutral) \u2014 controls search direction\n- bodyEvidence: [BodyEvidenceItem] with timestamps and weights\n- closingAnchor, windowDuration, expandedBoundary\n- evidenceScore, confidence, lastEvidenceTime\n- startCandidateTime, endCandidateTime\n\nAnchorType enum: disclosure, sponsorLexicon, url, promoCode, fmPositive, transitionMarker\n\n## Key behaviors\n- Consumes LexicalHits (and later FM results, fingerprint matches)\n- Opens hypothesis on strong anchor (disclosure, sponsor lexicon, URL, promo code)\n- Polarity determines asymmetric search direction\n- maxIdleGapSeconds (default 20s): close if no evidence arrives\n- evidenceDecayRate (default 0.95/s): older evidence contributes less\n- Sponsor-entity compatibility: evidence mentioning a different sponsor does not contribute\n- Close explicitly on CTA/URL/promo hit \u2192 confirmed \u2192 snap \u2192 closed\n- Close on explicit return markers only ('back to the show', 'back to the episode'). Generic markers (anyway, moving on) are weak evidence, never close alone.\n- Close on timeout: only emit backfill-only candidate (never skip-eligible) unless evidenceScore > minConfirmedEvidence AND has plausible start+end\n- Close on idle gap\n- Overlapping hypotheses: merge only if sponsor entity matches OR one side lacks entity and overlap exceeds stricter threshold\n\n## Design principle\nSpanHypothesisEngine is the SINGLE OWNER of provisional span boundaries. No other component discovers or relocates boundaries.\n\n## Acceptance criteria\n- State machine transitions work correctly for all paths\n- Polarity correctly biases search direction\n- Sponsor entity tracking prevents cross-sponsor merging\n- Idle gap closes hypotheses appropriately\n- Evidence decay reduces stale evidence weight\n- Generic discourse markers don't close hypotheses alone\n- Timeout-only spans are never skip-eligible\n- Comprehensive unit tests for each state transition\n- Tests for overlapping hypothesis merging logic\n- Tests for sponsor-entity compatibility filtering",
+      "parent": "phase-a"
+    },
+    {
+      "key": "a2-hypothesis-config",
+      "title": "A2: SpanHypothesisConfig \u2014 Anchor-type-aware configuration",
+      "type": "task",
+      "priority": 1,
+      "labels": [
+        "span-expansion",
+        "phase-a",
+        "hypothesis-engine"
+      ],
+      "description": "## Background\nThe SpanHypothesisEngine needs configurable, anchor-type-aware parameters for rapid iteration. These were explicitly requested to live in a config struct rather than hardcoded.\n\n## What to build\nNew file: Playhead/Services/AdDetection/SpanHypothesisConfig.swift\n\nPer-anchor-type configuration:\n| Anchor Type | Polarity | Window Duration | Backward Search | Forward Search |\n|-------------|----------|----------------|-----------------|----------------|\n| disclosure / sponsorLexicon | startAnchored | 90s | 15s | 90s |\n| url / promoCode | endAnchored | 75s | 75s | 15s |\n| fmPositive | neutral | 60s | 30s | 30s |\n| transitionMarker | endAnchored | 60s | 60s | 5s |\n\nGlobal parameters:\n- maxIdleGapSeconds: 20s\n- evidenceDecayRate: 0.95/s\n- minConfirmedEvidence: 2.5\n- minBodyWeight: 1.5 (for timeout-emitted backfill candidates)\n\n## Acceptance criteria\n- All values configurable, not hardcoded\n- Default values match the design doc\n- SpanHypothesisEngine consumes this config\n- Unit test validates default config values",
+      "parent": "phase-a"
+    },
+    {
+      "key": "a3-hypothesis-window",
+      "title": "A3: Wire hypothesis windows into LexicalScanner output path",
+      "type": "feature",
+      "priority": 1,
+      "labels": [
+        "span-expansion",
+        "phase-a",
+        "hypothesis-engine"
+      ],
+      "description": "## Background\nLexicalScanner stays stateless \u2014 it keeps emitting LexicalHits. The 30s merge logic remains as a fallback for when no hypothesis is active. But the primary merge path now flows through SpanHypothesisEngine.\n\n## What to build\n\n### Hypothesis lifecycle wiring\n1. When LexicalScanner emits a hit with .sponsor, .disclosurePhrase, or sponsor lexicon match (weight 1.5), route it to SpanHypothesisEngine as a seed event\n2. While hypothesis is open, ALL incoming lexical hits contribute as body evidence \u2014 including weaker ones normally below the 2-hit minimum\n3. On closing anchor (CTA, URL, promo code): engine transitions to confirmed, calls BoundaryExpander.expand() with anchor-type-aware config, then TimeBoundaryResolver.snap() for final edges, emits CandidateAdSpan\n4. On explicit return marker: close immediately, snap backward\n5. On timeout/idle-gap: apply fallback rules from A2\n\n### Disclosure single-hit bypass\nWhen a disclosure phrase co-occurs with a sponsor lexicon match in the same hypothesis window, bypass the 2-hit minimum. This improves recall on sponsor intros that currently get dropped as isolated single hits.\n\n### Integration into AdDetectionService\nWire SpanHypothesisEngine into the backfill pipeline in AdDetectionService.swift. The engine sits between LexicalScanner output and MinimalContiguousSpanDecoder input.\n\n## Acceptance criteria\n- LexicalScanner output routes to SpanHypothesisEngine when hypothesis is active\n- 30s merge fallback still works when no hypothesis is active\n- Disclosure + sponsor lexicon bypass fires correctly\n- Body evidence accumulates during open windows\n- CandidateAdSpan emitted with correct boundaries\n- AdDetectionService pipeline wired correctly\n- Integration tests: synthetic episode with known sponsor intro \u2192 body \u2192 CTA pattern produces full-span detection\n- Regression tests: existing detection behavior preserved when no hypothesis fires",
+      "parent": "phase-a"
+    },
+    {
+      "key": "a3-auto-expand",
+      "title": "A3: Auto-apply BoundaryExpander to machine-found seeds",
+      "type": "feature",
+      "priority": 1,
+      "labels": [
+        "span-expansion",
+        "phase-a",
+        "boundary-expansion"
+      ],
+      "description": "## Background\nBoundaryExpander already has the logic to expand a single point into a fuller ad span using \u00b160s acoustic and \u00b190s lexical search. Today it only runs on user taps. The expert recommendation: whenever a strong anchor fires, treat it as a seed and immediately expand it. This is the lowest-hanging fruit \u2014 reusing existing code automatically.\n\n## What to build\nWhen SpanHypothesisEngine transitions to confirmed state, call BoundaryExpander.expand() with:\n- seed = the hypothesis's best start/end candidate time\n- Anchor-type-aware config overrides (from SpanHypothesisConfig)\n  - CTA/URL/promo seed: backward search radius > forward (endAnchored)\n  - Disclosure seed: forward search radius > backward (startAnchored)\n  - Transition marker: backward search > forward (endAnchored)\n\nModify BoundaryExpander.swift to accept anchor-type config overrides instead of using fixed 60s/90s radii.\n\n## Acceptance criteria\n- BoundaryExpander accepts configurable asymmetric search radii\n- SpanHypothesisEngine calls expand() on confirmed hypotheses\n- Expansion respects polarity (startAnchored searches forward, endAnchored searches backward)\n- Existing user-tap expansion still works (backwards compatible)\n- Unit tests for asymmetric expansion\n- Integration test: CTA-only seed expands backward to find sponsor intro",
+      "parent": "phase-a"
+    },
+    {
+      "key": "a4-asr-vocab",
+      "title": "A4: ASRVocabularyProvider \u2014 Sponsor vocabulary biasing for ASR",
+      "type": "feature",
+      "priority": 1,
+      "labels": [
+        "span-expansion",
+        "phase-a",
+        "asr-bias"
+      ],
+      "description": "## Background\nMany anchor misses are ASR misses \u2014 the speech recognizer doesn't know sponsor names, domain stems, or promo codes. Apple exposes contextualStrings on both the legacy SFSpeechRecognitionRequest path and the newer AnalysisContext path. This is one of the cheapest wins in the whole plan.\n\n## What to build\nNew file: Playhead/Services/TranscriptEngine/ASRVocabularyProvider.swift\n\nPulls vocabulary from knowledge stores and compiles into contextualStrings for the active ASR path. Abstract over both paths:\n- AnalysisContext.contextualStrings (SpeechAnalyzer / DictationTranscriber)\n- SFSpeechRecognitionRequest.contextualStrings (legacy)\n\nStrict priority budget (active sponsors first, in case Apple caps the number):\n1. Active sponsor names for this show (from SponsorKnowledgeStore)\n2. Current sponsor lexicon for this podcast (from PodcastProfile.sponsorLexicon)\n3. Domain stems and spoken URL templates ('betterhelp', 'betterhelp dot com slash podcast')\n4. Show title + host names (from PodcastProfile)\n5. Top historical sponsors only (from fingerprint store, capped)\n6. Promo-code templates (only when podcast-specific)\n\n## Integration\nASRVocabularyProvider is called before each SFSpeechRecognitionRequest to populate contextualStrings. TranscriptEngine.swift needs to wire this in.\n\n## Acceptance criteria\n- Provider compiles vocabulary from all listed sources\n- Priority ordering is correct (active sponsors first)\n- Both ASR paths supported\n- Integration with TranscriptEngine wired\n- Unit tests for vocabulary compilation and priority ordering\n- Test that empty knowledge stores produce empty vocabulary gracefully",
+      "parent": "phase-a"
+    },
+    {
+      "key": "a4-alternatives",
+      "title": "A4: Alternative transcript rescans for weak-anchor recovery",
+      "type": "feature",
+      "priority": 1,
+      "labels": [
+        "span-expansion",
+        "phase-a",
+        "asr-bias"
+      ],
+      "description": "## Background\nEven with vocabulary biasing, the top transcript may miss sponsor names. Apple exposes alternative transcriptions with per-word confidence. When the primary scan finds nothing but context suggests an ad (e.g., open hypothesis, sponsor neighborhood), rescanning alternatives can recover missed anchors.\n\n## What to build\n1. Add `alternatives: [(text: String, confidence: Double)]?` to TranscriptChunk from SFSpeechRecognitionResult\n2. Add `rescanAlternatives(chunks:nearTime:radius:)` method to LexicalScanner\n3. SpanHypothesisEngine calls rescanAlternatives() ONLY inside:\n   - Open confirmed hypotheses (looking for closing anchor)\n   - Sponsor/disclosure neighborhoods (looking for missed intro)\n   - Low-confidence likely-ad regions\n4. Never rescan alternatives globally \u2014 that would be expensive and noisy\n\n## Acceptance criteria\n- TranscriptChunk carries alternatives from ASR result\n- LexicalScanner rescanAlternatives() finds patterns in alternative texts\n- Rescans are scoped (not global)\n- SpanHypothesisEngine triggers rescans at appropriate moments\n- Unit tests for alternative rescan with synthetic chunks\n- Test that global rescan is not possible (scoping enforced)",
+      "parent": "phase-a"
+    },
+    {
+      "key": "a5-time-boundary",
+      "title": "A5: TimeBoundaryResolver \u2014 Multi-cue boundary snapping in seconds",
+      "type": "feature",
+      "priority": 1,
+      "labels": [
+        "span-expansion",
+        "phase-a",
+        "boundary-snapping"
+      ],
+      "description": "## Background\nCurrent boundary operations use atom counts (mergeGapAtoms=3, boundarySnapRadiusAtoms=15) which are unstable because atoms vary 1\u20135 per second. Boundary snapping also relies only on silence, but host-read ads often transition on speaker turns, music beds, or compression changes. TimeBoundaryResolver replaces all of this with seconds-based, multi-cue, distance-aware, asymmetric snapping.\n\n## What to build\nNew file: Playhead/Services/AdDetection/TimeBoundaryResolver.swift\n\nTimeBoundaryResolver is the ONLY component allowed to snap or relocate boundaries.\n\n### Boundary-type-aware scoring\nSeparate cue weights for .start and .end boundaries:\n\nScore formula:\n`score = cueBlend(boundaryType) - \u03bb * normalizedDistance + continuityBonus - contradictionPenalty`\n\nStart boundary weights:\n- Pause/VAD: 0.25, Speaker change proxy: 0.20, Music bed change: 0.15, Spectral change: 0.20, Lexical density delta: 0.20\n\nEnd boundary weights:\n- Pause/VAD: 0.25, Speaker change proxy: 0.20, Music bed change: 0.15, Spectral change: 0.15, Explicit return marker: 0.25\n\n### Distance penalty\n\u03bb * normalizedDistance ensures the resolver prefers the NEAREST plausible boundary, not the absolute best cue anywhere in the radius. Prevents snapping to unrelated speaker changes or pauses.\n\n### Asymmetric snap distance by anchor type\n| Anchor Type | Max Start Snap | Max End Snap |\n|-------------|----------------|---------------|\n| disclosure (startAnchored) | 5s | 15s |\n| CTA/URL (endAnchored) | 15s | 5s |\n| fmPositive (neutral) | 10s | 10s |\n\nConfigurable via maxSnapDistanceByAnchorType in BoundarySnappingConfig.\n\n### Algorithm\n1. Scan FeatureWindows within search radius\n2. Score each with boundary-type-aware objective + distance penalty\n3. Return nearest local maximum exceeding BOTH minBoundaryScore (0.3) AND minImprovementOverOriginal (0.1)\n4. If nothing qualifies, return original time unsnapped\n\n## Acceptance criteria\n- All boundary math in seconds, no atom counts\n- Separate start/end cue weights\n- Distance penalty prefers nearest boundary\n- Asymmetric snap distance by anchor type\n- minBoundaryScore and minImprovementOverOriginal thresholds enforced\n- Falls back to unsnapped when no good candidate\n- BoundarySnappingConfig struct with all tunable weights\n- Comprehensive unit tests for scoring formula\n- Tests for distance penalty behavior\n- Tests for asymmetric snap distances\n- Tests for fallback-to-original behavior",
+      "parent": "phase-a"
+    },
+    {
+      "key": "a5-wire-snapping",
+      "title": "A5: Wire TimeBoundaryResolver into existing components",
+      "type": "task",
+      "priority": 1,
+      "labels": [
+        "span-expansion",
+        "phase-a",
+        "boundary-snapping"
+      ],
+      "description": "## Background\nTimeBoundaryResolver replaces boundary logic in multiple existing components. This bead handles the wiring.\n\n## What to change\n\n### MinimalContiguousSpanDecoder.swift\n- Convert mergeGapAtoms (3) \u2192 mergeGapSeconds (config, default ~3s)\n- Convert boundarySnapRadiusAtoms (15) \u2192 snapRadiusSeconds (config, default ~8s)\n- No independent boundary snapping for hypothesis-owned spans\n- Becomes fallback reducer for legacy / non-hypothesis evidence only\n\n### SkipOrchestrator.swift\n- Remove snapBoundary() method entirely\n- Consume finalized spans only \u2014 does not discover or move boundaries\n\n### BoundaryExpander.swift\n- Delegate silence scoring (pause * 0.7 + rms * 0.3) to TimeBoundaryResolver.snap() with boundary type and distance penalty\n- Accept anchor-type config for asymmetric radii (overlap with A3 auto-expand)\n\n## Boundary ownership principle\n- SpanHypothesisEngine: owns provisional boundaries\n- TimeBoundaryResolver: only snapper\n- MinimalContiguousSpanDecoder: fallback reducer, no snapping\n- SkipOrchestrator: consumer only\n\n## Acceptance criteria\n- MinimalContiguousSpanDecoder uses seconds not atoms\n- SkipOrchestrator.snapBoundary() removed\n- BoundaryExpander delegates to TimeBoundaryResolver\n- Existing tests updated for new interfaces\n- No component other than TimeBoundaryResolver performs snapping\n- Regression tests: skip orchestrator still works with finalized spans",
+      "parent": "phase-a"
+    },
+    {
+      "key": "a6-evidence-repetition",
+      "title": "A6: Preserve repetition density in EvidenceCatalogBuilder",
+      "type": "feature",
+      "priority": 2,
+      "labels": [
+        "span-expansion",
+        "phase-a",
+        "evidence-catalog"
+      ],
+      "description": "## Background\nEvidenceCatalogBuilder currently deduplicates by (normalizedText, category) and keeps only the first occurrence. Later duplicates are discarded entirely \u2014 count and timestamps are lost. But repetition density is strongly ad-like (a brand mentioned 4 times across 60 seconds is very different from mentioned once). This signal is currently thrown away.\n\n## What to build\nModify EvidenceCatalogBuilder dedup logic to preserve:\n- count: Int \u2014 how many times this evidence appeared\n- firstTime: Double \u2014 earliest atom timestamp\n- lastTime: Double \u2014 latest atom timestamp\n\nAdd these fields to EvidenceEntry struct.\n\nOptionally include repetition info in FM prompt format, e.g.:\n`[E3] \"BetterHelp\" (\u00d74, 12s\u201367s)`\n\nThis gives the FM repetition density as an ad signal.\n\n## Acceptance criteria\n- EvidenceEntry has count, firstTime, lastTime fields\n- Dedup preserves first occurrence but accumulates count and time range\n- FM prompt rendering includes repetition info when count > 1\n- Unit tests for dedup with repeated evidence\n- Test that existing single-occurrence evidence is unaffected",
+      "parent": "phase-a"
+    },
+    {
+      "key": "a7-metrics",
+      "title": "A7: Span quality metrics + live lead-time metrics",
+      "type": "feature",
+      "priority": 2,
+      "labels": [
+        "span-expansion",
+        "phase-a",
+        "metrics"
+      ],
+      "description": "## Background\nCurrent metrics are binary hit/miss. This can't distinguish 'we found the ad but only covered the last 15%' from 'we missed it entirely.' The expert also flagged that offline IoU can improve without improving the live skip experience if lead time isn't measured.\n\n## What to build\n\n### Offline span quality metrics\n- Seed recall: % of ground-truth ads where at least one anchor fired\n- Span IoU: intersection-over-union between detected and ground-truth spans\n- Median start error: seconds between detected start and GT start\n- Median end error: seconds between detected end and GT end\n- Signed start bias: median(detectedStart - gtStart); positive = systematically late starts\n- Signed end bias: median(detectedEnd - gtEnd); negative = systematically early exits\n- Coverage recall: % of GT ad seconds covered by detected span\n- Coverage precision: % of detected ad seconds that lie inside GT\n\n### Live skip usefulness metrics\n- Lead time at first confirmation: seconds between first skip-eligible confirmation and GT ad start\n\n### Slicing\nAll metrics sliced by:\n- Ad format (host-read, produced / pre-roll, dynamic if applicable)\n- Podcast\n- Live path vs backfill path\n\n## Open question\nThe new metrics need labeled ad spans with start/end times (not just binary 'has ads'). Need to confirm we have this or build a labeling workflow.\n\n## Acceptance criteria\n- All listed metrics computed and reported\n- Slicing by format, podcast, path\n- Metrics integrate with existing evaluation harness\n- Unit tests for IoU, coverage, signed bias computation\n- Documentation of ground-truth format requirements",
+      "parent": "phase-a"
+    },
+    {
+      "key": "b7-speaker-diarization",
+      "title": "B7: Validated speaker-change proxy / diarization",
+      "type": "feature",
+      "priority": 2,
+      "labels": [
+        "span-expansion",
+        "phase-b",
+        "audio-signals"
+      ],
+      "description": "## Background\nPhase A uses an acoustic proxy for speaker change (pause + spectral shift + timbre). Phase B upgrades to validated speaker labels once availability is confirmed on iOS 26 target builds.\n\n## What to build\n1. Verify SFSpeechRecognitionResult.speechRecognitionMetadata.speakerLabels availability on iOS 26 beta\n2. If available: populate speakerId on TranscriptChunk/TranscriptAtom, replace acoustic proxy in speakerChangeProxyScore with validated labels\n3. If not available: evaluate offline diarization / speaker embedding change detectors as alternatives\n4. Phase A acoustic proxy continues as fallback regardless\n\n## Acceptance criteria\n- Speaker label availability verified on target builds\n- If available: speakerId populated, speakerChangeProxyScore upgraded\n- If not: alternative approach evaluated and documented\n- Acoustic proxy fallback still works\n- Tests for speaker change detection accuracy",
+      "parent": "phase-b"
+    },
+    {
+      "key": "b8-music-detection",
+      "title": "B8: Music-bed detection improvements",
+      "type": "feature",
+      "priority": 3,
+      "labels": [
+        "span-expansion",
+        "phase-b",
+        "audio-signals"
+      ],
+      "description": "## Background\nPhase A adds basic SoundAnalysis music detection. Phase B tunes it for podcast ad boundaries.\n\n## What to build\n1. Tune SNClassifySoundRequest window duration for podcast audio profiles\n2. Improve musicBedChangeScore to distinguish background music beds from foreground music segments\n3. Evaluate music onset/offset correlation with ad boundaries across podcast genres\n\n## Acceptance criteria\n- Music detection tuned for podcast audio\n- Background vs foreground music distinguished\n- Evaluation results documented\n- Tests for improved music classification",
+      "parent": "phase-b"
+    },
+    {
+      "key": "b9-fm-boundary",
+      "title": "B9: Retask FM into structured boundary extraction",
+      "type": "feature",
+      "priority": 1,
+      "labels": [
+        "span-expansion",
+        "phase-b",
+        "foundation-model"
+      ],
+      "description": "## Background\nCurrent FM usage: ~3,700 token overhead per call, 300s scan budget. Two generic passes (coarse yes/no, then refinement) over broad windows. Most budget confirms what lexical + acoustic already found. Expert recommendation: stop spending FM budget on generic classification; use it for targeted boundary extraction.\n\n## What to build\n\n### Remove generic FM scanning\n- coarsePassA() removed \u2014 suspicious regions now come from SpanHypothesisEngine\n- CoveragePlanner simplified \u2014 processes hypothesis-flagged regions only\n\n### New extractBoundaries() method\nFor each suspicious region:\n1. Pre-segment transcript into sentence-like / discourse units (2\u20138s each, pause- and punctuation-aware). NOT atom-level \u2014 atoms vary 1\u20135/s making hundreds of labels token-heavy.\n2. Ask FM to return 1..N contiguous labeled spans over those units\n3. Schema: FMBoundarySchema with spans array + explicit abstain: Bool\n4. SpanRole enum: show, adIntro, adBody, adCTA, returnToShow\n5. Each span includes evidenceRefs back to evidence catalog\n\n### Prompt design\n- 1 positive host-read ad example\n- 1 negative lookalike example (show recommendation / self-promo / content CTA)\n- Optionally 1 produced-ad example if budget allows\n- Exclude schema framing when examples present (saves ~3,500 tokens)\n- Prewarm session before extraction per Apple guidance\n\n### Budget reallocation\nFull 300s budget \u2192 fewer targeted calls on suspicious regions (~30\u2013120s each)\n\n### Guardrail\nIf FM span crosses strong contradiction from hypothesis engine, treat as uncertain.\n\n## Acceptance criteria\n- coarsePassA() removed, extractBoundaries() implemented\n- Pre-segmentation into discourse units (not atoms)\n- Explicit abstain path works\n- One-shot examples in prompt\n- FM contradiction guardrail implemented\n- Token budget stays within 300s allocation\n- Unit tests for discourse unit segmentation\n- Tests for FM schema parsing including abstain\n- Integration test with SpanHypothesisEngine suspicious regions",
+      "parent": "phase-b"
+    },
+    {
+      "key": "b10-fingerprint-spans",
+      "title": "B10: Fingerprint full-span recovery via anchor-aware local alignment",
+      "type": "feature",
+      "priority": 2,
+      "labels": [
+        "span-expansion",
+        "phase-b",
+        "fingerprinting"
+      ],
+      "description": "## Background\nAdCopyFingerprintStore stores only MinHash signature + normalized text. No span boundaries. Matches identify ~30-atom CTA fragments, not full ads. Expert recommendation: store span offsets AND anchor landmarks, then use anchor-aware alignment for robust transfer.\n\n## What to build\n\n### New fields on FingerprintEntry\n- spanStartOffset: Double \u2014 seconds from match start to full ad start\n- spanEndOffset: Double \u2014 seconds from match end to full ad end\n- spanDurationSeconds: Double \u2014 total ad duration when created\n- canonicalSponsorEntity: NormalizedSponsor? \u2014 for entity-aware matching\n- anchorLandmarks: [AnchorLandmark] \u2014 typed anchor positions within the ad\n\n### AnchorLandmark struct\n- type: AnchorType (disclosure, url, promoCode, etc.)\n- offsetSeconds: Double (from match start)\n- normalizedText: String? (e.g., 'betterhelp dot com')\n\n### Anchor-aware transfer logic\n- Strong match (Jaccard \u2265 0.8): transfer full boundaries ONLY after anchor-landmark alignment + TimeBoundaryResolver validation\n- Normal match (0.6\u20130.8): seed a hypothesis using matched fragment + landmark priors for SpanHypothesisEngine verification\n\n### User-marked ad fingerprint seeding\nWhen user marks an ad and BoundaryExpander produces span with confidence \u2265 0.7, seed fingerprint at candidate state. Normal trust lifecycle applies (candidate \u2192 quarantined \u2192 active).\n\n## Acceptance criteria\n- FingerprintEntry has span offsets, sponsor entity, anchor landmarks\n- Strong matches transfer with landmark validation\n- Normal matches seed hypotheses\n- User-marked ads can create fingerprint candidates\n- Landmark alignment handles host ad-lib variation\n- Unit tests for offset transfer\n- Tests for anchor-landmark alignment\n- Tests for user-marked fingerprint seeding lifecycle",
+      "parent": "phase-b"
+    },
+    {
+      "key": "b11-selective-redaction",
+      "title": "B11: Selective typed redaction fallback",
+      "type": "feature",
+      "priority": 3,
+      "labels": [
+        "span-expansion",
+        "phase-b",
+        "redaction"
+      ],
+      "description": "## Background\nCurrent redaction replaces all pharma/service/product names with generic placeholders like [DRUG], erasing distinctions the FM needs. But the FM is on-device \u2014 the legal requirement is 'no data leaves the phone,' not 'the local model can't see sponsor names.' Expert recommendation: minimal redaction by default, typed placeholders only for refusal-triggering categories.\n\n## What to build\n\n### Two-tier redaction policy\n1. Default path: minimal / no redaction for ordinary sponsor names in on-device FM calls\n2. Fallback path: typed placeholder redaction for categories that trigger FM refusals or when using permissive fallback\n\n### Typed placeholders (fallback tier only)\n- [DRUG] \u2192 [DRUG_A], [DRUG_B] (per unique original string)\n- [SERVICE] \u2192 [SERVICE_A], [SERVICE_B]\n- [PRODUCT], [CONDITION], [TEST] similarly\n\n### Assignment rule\nFirst unique original string in a category gets _A, second gets _B, etc. Deterministic (alphabetical by first-occurrence). Same string always maps to same ID within a pass.\n\n### Preserve sponsor identity\nMaintain internal sponsorEntityHandle outside redacted text so pipeline can reason about identity even when redaction is active.\n\n### Changes to PromptRedactor\n- Mapping ephemeral \u2014 rebuilt per pass\n- Trigger/cooccurrent gating unchanged\n- Two-tier policy configurable\n\n## Open question\nIs there a non-negotiable policy requiring all FM input be redacted? If so, typed placeholders + sponsorEntityHandle are the only path.\n\n## Acceptance criteria\n- Default path uses minimal redaction\n- Fallback path produces typed placeholders\n- Same entity gets consistent ID within a pass\n- sponsorEntityHandle preserved for pipeline identity reasoning\n- Unit tests for typed placeholder assignment\n- Tests for two-tier policy switching\n- Tests for sponsorEntityHandle preservation",
+      "parent": "phase-b"
+    }
+  ],
+  "edges": [
+    {
+      "from_key": "a2-hypothesis-engine",
+      "to_key": "a2-hypothesis-config"
+    },
+    {
+      "from_key": "a3-hypothesis-window",
+      "to_key": "a2-hypothesis-engine"
+    },
+    {
+      "from_key": "a3-hypothesis-window",
+      "to_key": "a1-feature-window"
+    },
+    {
+      "from_key": "a3-auto-expand",
+      "to_key": "a2-hypothesis-engine"
+    },
+    {
+      "from_key": "a3-auto-expand",
+      "to_key": "a5-time-boundary"
+    },
+    {
+      "from_key": "a4-alternatives",
+      "to_key": "a4-asr-vocab"
+    },
+    {
+      "from_key": "a4-alternatives",
+      "to_key": "a2-hypothesis-engine"
+    },
+    {
+      "from_key": "a5-wire-snapping",
+      "to_key": "a5-time-boundary"
+    },
+    {
+      "from_key": "a5-wire-snapping",
+      "to_key": "a2-hypothesis-engine"
+    },
+    {
+      "from_key": "a5-time-boundary",
+      "to_key": "a1-feature-window"
+    },
+    {
+      "from_key": "b7-speaker-diarization",
+      "to_key": "a1-feature-window"
+    },
+    {
+      "from_key": "b8-music-detection",
+      "to_key": "a1-feature-window"
+    },
+    {
+      "from_key": "b9-fm-boundary",
+      "to_key": "a2-hypothesis-engine"
+    },
+    {
+      "from_key": "b9-fm-boundary",
+      "to_key": "a5-time-boundary"
+    },
+    {
+      "from_key": "b9-fm-boundary",
+      "to_key": "a6-evidence-repetition"
+    },
+    {
+      "from_key": "b10-fingerprint-spans",
+      "to_key": "a2-hypothesis-engine"
+    },
+    {
+      "from_key": "b10-fingerprint-spans",
+      "to_key": "a5-time-boundary"
+    },
+    {
+      "from_key": "b11-selective-redaction",
+      "to_key": "b9-fm-boundary"
+    }
+  ]
+}

@@ -250,6 +250,51 @@ struct SkipOrchestratorRevertTests {
         #expect(log.isEmpty)
     }
 
+    @Test("revertWindow is idempotent — second call is a no-op")
+    func revertWindowIdempotent() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        await orchestrator.setSkipCueHandler { _ in }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        let ad = makeSkipTestAdWindow(
+            id: "ad-double-revert",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.85,
+            decisionState: "confirmed"
+        )
+        try await store.insertAdWindow(ad)
+        await orchestrator.receiveAdWindows([ad])
+
+        // First revert — should produce a decision log entry.
+        await orchestrator.revertWindow(windowId: "ad-double-revert", podcastId: "podcast-1")
+
+        let logAfterFirst = await orchestrator.getDecisionLog()
+        let revertedFirst = logAfterFirst.filter {
+            $0.decision == .reverted && $0.adWindowId == "ad-double-revert"
+        }
+        #expect(revertedFirst.count == 1)
+
+        // Second revert — guard should prevent duplicate log entry.
+        await orchestrator.revertWindow(windowId: "ad-double-revert", podcastId: "podcast-1")
+
+        let logAfterSecond = await orchestrator.getDecisionLog()
+        let revertedSecond = logAfterSecond.filter {
+            $0.decision == .reverted && $0.adWindowId == "ad-double-revert"
+        }
+        #expect(revertedSecond.count == 1, "Double revert should not produce duplicate decision log entries")
+    }
+
     // MARK: - Segment broadcast after revert
 
     @Test("revertByTimeRange broadcasts updated segments to listeners")

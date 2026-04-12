@@ -354,21 +354,23 @@ private extension TranscriptPeekView {
         // Phase 5 decoded spans overlapping this chunk
         let overlappingSpans = peekViewModel.decodedSpansOverlapping(chunkIndex: index)
         let isDecodedAd = !overlappingSpans.isEmpty
+        // Unified highlight: decoded spans OR user-marked AdWindows
+        let isHighlighted = peekViewModel.isAdHighlighted(chunkIndex: index)
         // Use the first overlapping span for the popover tap target
         let primarySpan = overlappingSpans.first
 
         return HStack(alignment: .top, spacing: 0) {
-            // Phase 5: Left-edge accent bar for decoded ad spans (z-order below active bar)
+            // Left-edge accent bar for ad regions (decoded spans or user-marked)
             // 3pt wide × full row height, Copper color
-            if isDecodedAd {
+            if isHighlighted {
                 Rectangle()
                     .fill(AppColors.accent)
                     .frame(width: 3)
             }
 
             HStack(alignment: .top, spacing: Spacing.xs) {
-                // Legacy Copper accent bar for active chunk (z-order above decoded-ad bar)
-                if isActive && !isDecodedAd {
+                // Legacy Copper accent bar for active chunk (z-order above ad bar)
+                if isActive && !isHighlighted {
                     RoundedRectangle(cornerRadius: 1.5)
                         .fill(AppColors.accent)
                         .frame(width: 3)
@@ -376,17 +378,21 @@ private extension TranscriptPeekView {
                 }
 
                 VStack(alignment: .leading, spacing: Spacing.xxs) {
-                    // Phase 5: AD badge only on the FIRST chunk of a decoded span.
-                    // A chunk is the first of its span when no previous chunk shares any
-                    // of the same overlapping span IDs.
+                    // AD badge on the first chunk of a decoded span, or on the
+                    // first chunk of a user-marked ad region.
                     let isFirstChunkOfSpan: Bool = {
-                        guard isDecodedAd else { return false }
+                        guard isHighlighted else { return false }
                         guard index > 0 else { return true }
-                        let prevSpanIds = Set(peekViewModel.decodedSpansOverlapping(
-                            chunkIndex: index - 1
-                        ).map(\.id))
-                        let currentSpanIds = Set(overlappingSpans.map(\.id))
-                        return currentSpanIds.isDisjoint(with: prevSpanIds)
+                        // For decoded spans: check if previous chunk shares span IDs
+                        if isDecodedAd {
+                            let prevSpanIds = Set(peekViewModel.decodedSpansOverlapping(
+                                chunkIndex: index - 1
+                            ).map(\.id))
+                            let currentSpanIds = Set(overlappingSpans.map(\.id))
+                            return currentSpanIds.isDisjoint(with: prevSpanIds)
+                        }
+                        // For user-marked: show badge if previous chunk is not highlighted
+                        return !peekViewModel.isAdHighlighted(chunkIndex: index - 1)
                     }()
                     if isFirstChunkOfSpan {
                         HStack(spacing: Spacing.xxs) {
@@ -415,14 +421,14 @@ private extension TranscriptPeekView {
                         .opacity(isAd ? 0.45 : 1.0)
                         .italic(isAd)
                 }
-                .padding(.leading, (isActive && !isDecodedAd) ? 0 : Spacing.xs)
+                .padding(.leading, (isActive && !isHighlighted) ? 0 : Spacing.xs)
             }
             .padding(.vertical, Spacing.xxs)
-            .padding(.leading, (isActive || isDecodedAd) ? 0 : 3 + Spacing.xs)
+            .padding(.leading, (isActive || isHighlighted) ? 0 : 3 + Spacing.xs)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        // Phase 5: Background tint for decoded ad rows
-        .background(isDecodedAd ? AppColors.accentSubtle : Color.clear)
+        // Background tint for ad rows (decoded spans or user-marked)
+        .background(isHighlighted ? AppColors.accentSubtle : Color.clear)
         .contentShape(Rectangle())
         .onTapGesture {
             if isMarkingMode {
@@ -587,22 +593,13 @@ private extension TranscriptPeekView {
         let endTime = selectedChunks.map(\.endTime).max() ?? 0
         let assetId = peekViewModel.analysisAssetId
 
-        // Record CorrectionEvent with .manualVeto source.
-        let scope = CorrectionScope.exactSpan(
-            assetId: assetId,
-            ordinalRange: 0...Int.max
-        )
-        let event = CorrectionEvent(
-            analysisAssetId: assetId,
-            scope: scope.serialized,
-            createdAt: Date().timeIntervalSince1970,
-            source: .manualVeto,
-            podcastId: podcastId
-        )
-
         // Build a synthetic DecodedSpan covering the selected range.
+        // Use a unique ID per veto to avoid collisions when the same asset
+        // has multiple not-ad corrections at different time ranges.
+        // Format times with fixed precision to avoid floating-point representation drift.
+        let vetoId = String(format: "%@-veto-%.3f-%.3f", assetId, startTime, endTime)
         let syntheticSpan = DecodedSpan(
-            id: DecodedSpan.makeId(assetId: assetId, firstAtomOrdinal: 0, lastAtomOrdinal: Int.max),
+            id: vetoId,
             assetId: assetId,
             firstAtomOrdinal: 0,
             lastAtomOrdinal: Int.max,
@@ -616,14 +613,9 @@ private extension TranscriptPeekView {
         let revertCallback = onRevertAdWindows
         let store = correctionStore
         Task {
-            // Persist the veto event.
-            do {
-                try await store.record(event)
-            } catch {
-                // Best-effort — don't surface errors for corrections.
-            }
-
-            // Also call recordVeto for sponsor-level corrections.
+            // recordVeto persists a CorrectionEvent internally (exactSpan scope
+            // + optional sponsorOnShow scope), so no separate store.record() call
+            // is needed — that was causing a double-write inflating correction factors.
             await store.recordVeto(span: syntheticSpan)
 
             // Revert overlapping ad windows via the orchestrator callback.

@@ -80,14 +80,17 @@ enum AdCopyFingerprintMatcher {
                 }
 
                 let similarity = MinHashUtilities.jaccardSimilarity(windowSignature, entrySignature)
-                if similarity >= MinHashConfig.matchThreshold {
+                if similarity >= MinHashConfig.matchThreshold,
+                   let firstAtom = windowAtoms.first,
+                   let lastAtom = windowAtoms.last
+                {
                     let match = FingerprintMatch(
-                        firstAtomOrdinal: windowAtoms.first!.atomKey.atomOrdinal,
-                        lastAtomOrdinal: windowAtoms.last!.atomKey.atomOrdinal,
+                        firstAtomOrdinal: firstAtom.atomKey.atomOrdinal,
+                        lastAtomOrdinal: lastAtom.atomKey.atomOrdinal,
                         fingerprintId: entry.id,
                         similarity: similarity,
-                        startTime: windowAtoms.first!.startTime,
-                        endTime: windowAtoms.last!.endTime
+                        startTime: firstAtom.startTime,
+                        endTime: lastAtom.endTime
                     )
                     matches.append(match)
                 }
@@ -101,31 +104,45 @@ enum AdCopyFingerprintMatcher {
     }
 
     /// Merge overlapping matches for the same fingerprint into contiguous spans.
+    /// Groups by fingerprintId first to avoid interleaving across different
+    /// fingerprints breaking the merge chain.
     private static func mergeOverlappingMatches(_ matches: [FingerprintMatch]) -> [FingerprintMatch] {
         guard !matches.isEmpty else { return [] }
 
-        let sorted = matches.sorted { $0.firstAtomOrdinal < $1.firstAtomOrdinal }
-        var merged: [FingerprintMatch] = []
-
-        var current = sorted[0]
-        for next in sorted.dropFirst() {
-            if next.fingerprintId == current.fingerprintId
-                && next.firstAtomOrdinal <= current.lastAtomOrdinal + 2
-            {
-                current = FingerprintMatch(
-                    firstAtomOrdinal: current.firstAtomOrdinal,
-                    lastAtomOrdinal: max(current.lastAtomOrdinal, next.lastAtomOrdinal),
-                    fingerprintId: current.fingerprintId,
-                    similarity: max(current.similarity, next.similarity),
-                    startTime: min(current.startTime, next.startTime),
-                    endTime: max(current.endTime, next.endTime)
-                )
-            } else {
-                merged.append(current)
-                current = next
-            }
+        // Group by fingerprint to merge each independently.
+        var grouped: [String: [FingerprintMatch]] = [:]
+        for match in matches {
+            grouped[match.fingerprintId, default: []].append(match)
         }
-        merged.append(current)
-        return merged
+
+        var merged: [FingerprintMatch] = []
+        for (_, group) in grouped {
+            let sorted = group.sorted { $0.firstAtomOrdinal < $1.firstAtomOrdinal }
+            var current = sorted[0]
+            for next in sorted.dropFirst() {
+                if next.firstAtomOrdinal <= current.lastAtomOrdinal + 2 {
+                    current = FingerprintMatch(
+                        firstAtomOrdinal: current.firstAtomOrdinal,
+                        lastAtomOrdinal: max(current.lastAtomOrdinal, next.lastAtomOrdinal),
+                        fingerprintId: current.fingerprintId,
+                        similarity: max(current.similarity, next.similarity),
+                        startTime: min(current.startTime, next.startTime),
+                        endTime: max(current.endTime, next.endTime)
+                    )
+                } else {
+                    merged.append(current)
+                    current = next
+                }
+            }
+            merged.append(current)
+        }
+        // Sort by ordinal (then fingerprintId for tie-breaking) for deterministic
+        // output regardless of dictionary iteration order.
+        return merged.sorted {
+            if $0.firstAtomOrdinal != $1.firstAtomOrdinal {
+                return $0.firstAtomOrdinal < $1.firstAtomOrdinal
+            }
+            return $0.fingerprintId < $1.fingerprintId
+        }
     }
 }

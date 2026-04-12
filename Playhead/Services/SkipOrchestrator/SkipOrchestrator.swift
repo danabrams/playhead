@@ -513,6 +513,8 @@ actor SkipOrchestrator {
     /// Also signals the trust engine (if wired) as a false-skip.
     func recordListenRevert(windowId: String, podcastId: String? = nil) async {
         guard var managed = windows[windowId] else { return }
+        guard managed.decisionState != .reverted,
+              managed.decisionState != .suppressed else { return }
 
         managed.decisionState = .reverted
         managed.cueActive = false
@@ -646,6 +648,8 @@ actor SkipOrchestrator {
     /// and does not imply a playback rewind.
     func revertWindow(windowId: String, podcastId: String? = nil) async {
         guard var managed = windows[windowId] else { return }
+        guard managed.decisionState != .reverted,
+              managed.decisionState != .suppressed else { return }
 
         managed.decisionState = .reverted
         managed.cueActive = false

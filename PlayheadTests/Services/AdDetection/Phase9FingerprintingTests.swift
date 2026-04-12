@@ -392,6 +392,57 @@ struct LifecycleTransitionTests {
         #expect(recovered.state == .active, "Decayed entry should recover to active: got \(recovered.state)")
     }
 
+    @Test("Blocked entry is skipped during near-duplicate and exact-match confirmation")
+    func blockedEntrySkippedOnConfirm() async throws {
+        let analysisStore = try await makeTestStore()
+        let store = AdCopyFingerprintStore(store: analysisStore)
+
+        let adText = "this is a premium ad for our sponsor acme widgets and more"
+
+        // Confirm once to create the entry as quarantined.
+        try await store.recordCandidate(
+            podcastId: "pod-blocked",
+            text: adText,
+            analysisAssetId: "asset-b1",
+            sourceAdWindowId: "window-b1",
+            confidence: 0.9
+        )
+
+        // Drive the entry to blocked via many rollbacks (spike > 0.5).
+        for i in 1...5 {
+            let entries = try await store.allEntries(forPodcast: "pod-blocked")
+            if let entry = entries.first {
+                try await store.recordRollback(
+                    podcastId: "pod-blocked",
+                    fingerprintHash: entry.fingerprintHash
+                )
+            }
+        }
+
+        let blockedEntries = try await store.allEntries(forPodcast: "pod-blocked")
+        #expect(blockedEntries.count == 1)
+        #expect(blockedEntries[0].state == .blocked, "Entry should be blocked after rollback spike")
+        let blockedCount = blockedEntries[0].confirmationCount
+
+        // Now re-confirm with the exact same text. The blocked entry should be
+        // returned as-is without incrementing confirmations — terminal states
+        // are inert.
+        try await store.recordCandidate(
+            podcastId: "pod-blocked",
+            text: adText,
+            analysisAssetId: "asset-b2",
+            sourceAdWindowId: "window-b2",
+            confidence: 0.9
+        )
+
+        let afterEntries = try await store.allEntries(forPodcast: "pod-blocked")
+        // Still just 1 entry — the blocked one, unchanged.
+        #expect(afterEntries.count == 1, "Blocked entry returned as-is: got \(afterEntries.count)")
+        #expect(afterEntries[0].state == .blocked)
+        #expect(afterEntries[0].confirmationCount == blockedCount,
+                "Blocked entry should not have accumulated extra confirmations")
+    }
+
     @Test("Empty store returns no matches")
     func emptyStoreNoMatches() async throws {
         let analysisStore = try await makeTestStore()
@@ -840,6 +891,53 @@ struct MatcherIntegrationTests {
         // With 60 atoms, window=30, stride=10 → 4 windows, all matching the same
         // fingerprint. After merge, they should collapse to 1 contiguous match.
         #expect(matches.count == 1, "Overlapping windows for same fingerprint should merge to 1: got \(matches.count)")
+    }
+
+    @Test("Interleaved matches from different fingerprints merge independently")
+    func interleavedFingerprintsMergeIndependently() async throws {
+        let analysisStore = try await makeTestStore()
+        let fpStore = AdCopyFingerprintStore(store: analysisStore)
+
+        // Create two very distinct ad scripts with no shared vocabulary.
+        let adWordsA = (0..<60).map { "xylophone\($0)aardvark" }
+        let adWordsB = (0..<60).map { "zeppelin\($0)butterfly" }
+
+        // Promote both to active with enough confirmations.
+        for i in 1...3 {
+            try await fpStore.recordCandidate(
+                podcastId: "pod-interleave",
+                text: adWordsA.joined(separator: " "),
+                analysisAssetId: "asset-il-a\(i)",
+                sourceAdWindowId: "window-il-a\(i)",
+                confidence: 0.9
+            )
+            try await fpStore.recordCandidate(
+                podcastId: "pod-interleave",
+                text: adWordsB.joined(separator: " "),
+                analysisAssetId: "asset-il-b\(i)",
+                sourceAdWindowId: "window-il-b\(i)",
+                confidence: 0.9
+            )
+        }
+
+        // Build atoms that contain both scripts back-to-back.
+        let allWords = adWordsA + adWordsB
+        let atoms = allWords.enumerated().map { (i, word) in
+            makeAtom(ordinal: i, text: word, startTime: Double(i), endTime: Double(i + 1))
+        }
+        let matches = try await AdCopyFingerprintMatcher.match(
+            atoms: atoms,
+            podcastId: "pod-interleave",
+            fingerprintStore: fpStore
+        )
+
+        // Each fingerprint's windows should merge independently.
+        // The grouping-by-fingerprintId fix ensures interleaving in the sorted
+        // list doesn't break the merge chain.
+        #expect(!matches.isEmpty, "Should produce at least one match")
+        let fingerprintIds = Set(matches.map(\.fingerprintId))
+        #expect(matches.count <= fingerprintIds.count,
+                "Each fingerprint should merge to at most 1 match: got \(matches.count) matches for \(fingerprintIds.count) fingerprints")
     }
 }
 

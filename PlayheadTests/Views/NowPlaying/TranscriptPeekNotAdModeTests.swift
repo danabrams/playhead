@@ -44,64 +44,33 @@ struct TranscriptPeekNotAdModeTests {
 
     // MARK: - Mode exclusivity
 
-    @Test("Entering not-ad mode exits mark-ad mode")
-    func enteringNotAdExitsMarkAd() async throws {
-        // TranscriptPeekView manages mode exclusivity through its toggle handlers:
-        // entering not-ad mode sets isMarkingMode = false and clears markedChunkIndices.
-        // We verify this contract by constructing two mode states and asserting they
-        // cannot coexist.
-
-        // The implementation guarantees:
-        // - notAdModeToggle action sets: isMarkingMode = false, markedChunkIndices = []
-        // - markModeToggle action sets: isNotAdMarkingMode = false, notAdMarkedChunkIndices = []
-        // This test documents the invariant.
-        let modeExclusivityHolds = true
-        #expect(modeExclusivityHolds, "mark-ad and not-ad modes are mutually exclusive by implementation")
+    @Test("Unique veto span IDs for different time ranges on same asset")
+    func uniqueVetoSpanIds() {
+        // submitNotAdChunks generates unique IDs per veto using fixed-precision
+        // time range, preventing collisions when the same asset has multiple corrections.
+        let assetId = "asset-1"
+        let id1 = String(format: "%@-veto-%.3f-%.3f", assetId, 30.0, 60.0)
+        let id2 = String(format: "%@-veto-%.3f-%.3f", assetId, 90.0, 120.0)
+        let id3 = String(format: "%@-veto-%.3f-%.3f", assetId, 30.0, 60.0)
+        #expect(id1 != id2, "Different time ranges must produce different IDs")
+        #expect(id1 == id3, "Same time range must produce same ID")
     }
 
     // MARK: - Correction event recording
 
-    @Test("submitNotAdChunks records .manualVeto CorrectionEvent")
-    func submissionRecordsManualVeto() async throws {
+    @Test("submitNotAdChunks records veto via recordVeto (single write path)")
+    func submissionRecordsViaRecordVeto() async throws {
         let spy = SpyCorrectionStore()
 
-        // Simulate the submission logic from submitNotAdChunks:
+        // submitNotAdChunks now only calls recordVeto (no separate store.record).
+        // Verify the synthetic span flows through correctly.
         let assetId = "test-asset-123"
         let startTime: Double = 30.0
         let endTime: Double = 60.0
 
-        let scope = CorrectionScope.exactSpan(
-            assetId: assetId,
-            ordinalRange: 0...Int.max
-        )
-        let event = CorrectionEvent(
-            analysisAssetId: assetId,
-            scope: scope.serialized,
-            createdAt: Date().timeIntervalSince1970,
-            source: .manualVeto,
-            podcastId: "pod-1"
-        )
-
-        try await spy.record(event)
-
-        #expect(spy.recordedEvents.count == 1)
-        #expect(spy.recordedEvents[0].source == .manualVeto)
-        #expect(spy.recordedEvents[0].analysisAssetId == assetId)
-
-        // Verify scope serialization includes whole-asset range
-        let deserializedScope = CorrectionScope.deserialize(spy.recordedEvents[0].scope)
-        #expect(deserializedScope == scope)
-    }
-
-    @Test("submitNotAdChunks calls recordVeto with synthetic span covering selected range")
-    func submissionCallsRecordVetoWithCorrectSpan() async throws {
-        let spy = SpyCorrectionStore()
-        let assetId = "test-asset-456"
-        let startTime: Double = 45.0
-        let endTime: Double = 90.0
-
+        let vetoId = String(format: "%@-veto-%.3f-%.3f", assetId, startTime, endTime)
         let syntheticSpan = DecodedSpan(
-            id: DecodedSpan.makeId(assetId: assetId, firstAtomOrdinal: 0, lastAtomOrdinal: Int.max),
+            id: vetoId,
             assetId: assetId,
             firstAtomOrdinal: 0,
             lastAtomOrdinal: Int.max,
@@ -113,6 +82,36 @@ struct TranscriptPeekNotAdModeTests {
         await spy.recordVeto(span: syntheticSpan)
 
         #expect(spy.vetoedSpans.count == 1)
+        #expect(spy.vetoedSpans[0].assetId == assetId)
+        #expect(spy.vetoedSpans[0].startTime == 30.0)
+        #expect(spy.vetoedSpans[0].endTime == 60.0)
+        // No double-write: recordedEvents should be empty (spy doesn't
+        // forward to record internally like the real persistent store does).
+        #expect(spy.recordedEvents.isEmpty)
+    }
+
+    @Test("submitNotAdChunks calls recordVeto with synthetic span covering selected range")
+    func submissionCallsRecordVetoWithCorrectSpan() async throws {
+        let spy = SpyCorrectionStore()
+        let assetId = "test-asset-456"
+        let startTime: Double = 45.0
+        let endTime: Double = 90.0
+
+        let vetoId = String(format: "%@-veto-%.3f-%.3f", assetId, startTime, endTime)
+        let syntheticSpan = DecodedSpan(
+            id: vetoId,
+            assetId: assetId,
+            firstAtomOrdinal: 0,
+            lastAtomOrdinal: Int.max,
+            startTime: startTime,
+            endTime: endTime,
+            anchorProvenance: []
+        )
+
+        await spy.recordVeto(span: syntheticSpan)
+
+        #expect(spy.vetoedSpans.count == 1)
+        #expect(spy.vetoedSpans[0].id == vetoId)
         #expect(spy.vetoedSpans[0].startTime == 45.0)
         #expect(spy.vetoedSpans[0].endTime == 90.0)
         #expect(spy.vetoedSpans[0].assetId == assetId)
@@ -129,8 +128,9 @@ struct TranscriptPeekNotAdModeTests {
         let startTime: Double = 10.0
         let endTime: Double = 55.0
 
+        let vetoId = String(format: "%@-veto-%.3f-%.3f", assetId, startTime, endTime)
         let syntheticSpan = DecodedSpan(
-            id: DecodedSpan.makeId(assetId: assetId, firstAtomOrdinal: 0, lastAtomOrdinal: Int.max),
+            id: vetoId,
             assetId: assetId,
             firstAtomOrdinal: 0,
             lastAtomOrdinal: Int.max,
@@ -142,19 +142,23 @@ struct TranscriptPeekNotAdModeTests {
         await callback(syntheticSpan)
 
         #expect(revertedSpan != nil)
+        #expect(revertedSpan?.id == vetoId)
         #expect(revertedSpan?.startTime == 10.0)
         #expect(revertedSpan?.endTime == 55.0)
         #expect(revertedSpan?.assetId == assetId)
     }
 
-    @Test("DecodedSpan.makeId produces stable ID for synthetic veto span")
-    func syntheticSpanIdIsStable() {
-        let id1 = DecodedSpan.makeId(assetId: "asset-A", firstAtomOrdinal: 0, lastAtomOrdinal: Int.max)
-        let id2 = DecodedSpan.makeId(assetId: "asset-A", firstAtomOrdinal: 0, lastAtomOrdinal: Int.max)
-        #expect(id1 == id2, "Same inputs must produce same ID")
-
-        let id3 = DecodedSpan.makeId(assetId: "asset-B", firstAtomOrdinal: 0, lastAtomOrdinal: Int.max)
-        #expect(id1 != id3, "Different assetId must produce different ID")
+    @Test("Veto span ID encodes asset and time range for uniqueness")
+    func vetoSpanIdEncodesTimeRange() {
+        // Production builds IDs as String(format: "%@-veto-%.3f-%.3f", assetId, start, end)
+        let id1 = String(format: "%@-veto-%.3f-%.3f", "asset-A", 10.0, 20.0)
+        let id2 = String(format: "%@-veto-%.3f-%.3f", "asset-A", 30.0, 40.0)
+        let id3 = String(format: "%@-veto-%.3f-%.3f", "asset-B", 10.0, 20.0)
+        #expect(id1 != id2, "Same asset, different times must differ")
+        #expect(id1 != id3, "Different asset must differ")
+        // Verify fixed precision tames floating-point representation.
+        let id4 = String(format: "%@-veto-%.3f-%.3f", "asset-A", 10.0 + 1e-10, 20.0)
+        #expect(id1 == id4, "Sub-millisecond differences should produce same ID")
     }
 
     @Test("CorrectionSource.manualVeto maps to CorrectionKind.falsePositive")

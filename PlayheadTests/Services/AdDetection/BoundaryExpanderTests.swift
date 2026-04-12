@@ -74,6 +74,31 @@ struct BoundaryExpanderTests {
         #expect(result.boundaryConfidence >= 0.8)
     }
 
+    @Test("seed in gap between two non-overlapping adjacent windows picks nearest")
+    func seedInGapPicksNearest() {
+        // Two windows both within 5s adjacency of the seed, but not overlapping
+        // each other. Seed is closer to the second window.
+        let seed = 97.0 // gap between [60,90] and [100,120]; closer to [100,120]
+        let adWindows = [
+            makeAdWindow(start: 60, end: 90, confidence: 0.7),
+            makeAdWindow(start: 100, end: 120, confidence: 0.85),
+        ]
+
+        let result = expander.expand(
+            seed: seed,
+            featureWindows: [],
+            transcriptChunks: [],
+            adWindows: adWindows
+        )
+
+        #expect(result.source == .existingWindow)
+        // Seed is 7s from end of [60,90] and 3s from start of [100,120].
+        // Distance-based fallback should pick [100,120].
+        #expect(result.startTime == 100.0, "Should pick the nearer window: got \(result.startTime)")
+        #expect(result.endTime == 120.0)
+        #expect(result.boundaryConfidence >= 0.85)
+    }
+
     // MARK: - Test 2: Acoustic + lexical signals narrow to lexical markers
 
     @Test("acoustic and lexical signals produce acousticAndLexical source")

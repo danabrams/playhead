@@ -4853,6 +4853,12 @@ actor AnalysisStore {
     ) throws -> (resolvedHash: String, entry: FingerprintEntry) {
         // 1. Exact match?
         if let existing = try loadFingerprintEntry(podcastId: podcastId, fingerprintHash: fingerprintHash) {
+            // Blocked is truly terminal — return as-is to prevent the "new
+            // entry" path from overwriting via UPSERT. Decayed entries CAN
+            // recover through re-confirmation (by design).
+            if existing.state == .blocked {
+                return (fingerprintHash, existing)
+            }
             let newCount = existing.confirmationCount + 1
             let now = Date().timeIntervalSince1970
             let newState = promote(existing.state, newCount, existing.rollbackCount)
@@ -4875,9 +4881,11 @@ actor AnalysisStore {
             return (fingerprintHash, updated)
         }
 
-        // 2. Near-duplicate match?
+        // 2. Near-duplicate match? Skip blocked entries — blocked is truly
+        //    terminal and should not accumulate confirmations. Decayed entries
+        //    can recover through re-confirmation.
         let allEntries = try loadAllFingerprintEntries(podcastId: podcastId)
-        for entry in allEntries {
+        for entry in allEntries where entry.state != .blocked {
             if nearDuplicateCheck(fingerprintHash, entry.fingerprintHash) {
                 let newCount = entry.confirmationCount + 1
                 let now = Date().timeIntervalSince1970

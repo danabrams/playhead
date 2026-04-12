@@ -140,6 +140,15 @@ struct NowPlayingView: View {
                     correctionStore: runtime.correctionStore,
                     trustService: runtime.trustService,
                     podcastId: runtime.currentPodcastId,
+                    // Phase 9.1: wire the orchestrator revert so "not an ad"
+                    // removes skip cues and timeline markers immediately.
+                    onRevertAdWindows: { span in
+                        await runtime.skipOrchestrator.revertByTimeRange(
+                            start: span.startTime,
+                            end: span.endTime,
+                            podcastId: runtime.currentPodcastId
+                        )
+                    },
                     runtime: runtime
                 )
                 .presentationDetents([.medium, .large])
