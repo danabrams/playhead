@@ -216,8 +216,8 @@ struct SpanHypothesisEngineTests {
         #expect(Set(engine.activeHypotheses.compactMap { $0.sponsorEntity?.value }) == Set(["betterhelp", "squarespace"]))
     }
 
-    @Test("sponsor-less close anchors prefer the older compatible hypothesis")
-    func sponsorlessCloseAnchorsAttachToOlderCompatibleSpan() throws {
+    @Test("sponsor-less promo closes prefer the stronger compatible owner over a newer weaker span")
+    func sponsorlessPromoCloseAnchorsChooseStrongerCompatibleSpan() throws {
         var engine = SpanHypothesisEngine()
         let analysisAssetId = "asset-span-engine"
         let sponsorLexiconScanner = makeScanner(podcastSponsorLexicon: "BetterHelp, Squarespace")
@@ -269,6 +269,71 @@ struct SpanHypothesisEngineTests {
         #expect(engine.closedHypotheses[0].sponsorEntity?.value == "betterhelp")
         #expect(engine.activeHypotheses.count == 1)
         #expect(engine.activeHypotheses[0].sponsorEntity?.value == "squarespace")
+    }
+
+    @Test("sponsor-less return markers prefer the stronger current hypothesis over an older stale one")
+    func sponsorlessReturnMarkersChooseStrongerCurrentSpan() throws {
+        var engine = SpanHypothesisEngine()
+        let analysisAssetId = "asset-span-engine"
+        let sponsorLexiconScanner = makeScanner(podcastSponsorLexicon: "BetterHelp, Squarespace")
+
+        let betterHelpDisclosure = try scanHit(
+            category: .sponsor,
+            text: "this episode is sponsored by betterhelp",
+            startTime: 0,
+            endTime: 1,
+            matching: { $0.matchedText == "sponsored by" }
+        )
+        _ = engine.ingest(betterHelpDisclosure, analysisAssetId: analysisAssetId)
+
+        let betterHelpLexicon = try scanHit(
+            scanner: sponsorLexiconScanner,
+            category: .sponsor,
+            text: "betterhelp can help you find a therapist",
+            startTime: 2,
+            endTime: 3,
+            matching: { $0.matchedText == "betterhelp" }
+        )
+        _ = engine.ingest(betterHelpLexicon, analysisAssetId: analysisAssetId)
+
+        let squarespaceSeed = try scanHit(
+            scanner: sponsorLexiconScanner,
+            category: .sponsor,
+            text: "squarespace makes publishing easy",
+            startTime: 10,
+            endTime: 11,
+            matching: { $0.matchedText == "squarespace" }
+        )
+        _ = engine.ingest(squarespaceSeed, analysisAssetId: analysisAssetId)
+
+        let squarespaceSupport = try scanHit(
+            scanner: sponsorLexiconScanner,
+            category: .sponsor,
+            text: "squarespace lets you build a website fast",
+            startTime: 14,
+            endTime: 15,
+            matching: { $0.matchedText == "squarespace" }
+        )
+        _ = engine.ingest(squarespaceSupport, analysisAssetId: analysisAssetId)
+
+        #expect(engine.activeHypotheses.count == 2)
+        #expect(engine.activeHypotheses.map(\.sponsorEntity?.value) == ["betterhelp", "squarespace"])
+
+        let returnMarker = try scanHit(
+            category: .transitionMarker,
+            text: "back to the show",
+            startTime: 18,
+            endTime: 19
+        )
+        let closed = engine.ingest(returnMarker, analysisAssetId: analysisAssetId)
+
+        #expect(closed.count == 1)
+        #expect(closed[0].closingReason == .returnMarker)
+        #expect(closed[0].sponsorEntity?.value == "squarespace")
+        #expect(engine.closedHypotheses.count == 1)
+        #expect(engine.closedHypotheses[0].sponsorEntity?.value == "squarespace")
+        #expect(engine.activeHypotheses.count == 1)
+        #expect(engine.activeHypotheses[0].sponsorEntity?.value == "betterhelp")
     }
 
     @Test("orphan promo anchors seed hypotheses but do not emit skip-eligible spans")

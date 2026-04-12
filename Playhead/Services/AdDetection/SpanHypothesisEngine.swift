@@ -515,9 +515,17 @@ struct SpanHypothesisEngine: Sendable {
     }
 
     private func hypothesis(_ lhs: SpanHypothesis, isBetterMatchThan rhs: SpanHypothesis, for event: AnchorEvent) -> Bool {
-        if prefersEarliestCompatibleHypothesis(for: event) {
-            if lhs.seedAnchor.startTime != rhs.seedAnchor.startTime {
-                return lhs.seedAnchor.startTime < rhs.seedAnchor.startTime
+        if prefersPlausibilityRanking(for: event) {
+            let lhsScore = lhs.score(at: event.endTime)
+            let rhsScore = rhs.score(at: event.endTime)
+            if lhsScore != rhsScore {
+                return lhsScore > rhsScore
+            }
+
+            let lhsGap = abs(lhs.lastEvidenceTime - event.startTime)
+            let rhsGap = abs(rhs.lastEvidenceTime - event.startTime)
+            if lhsGap != rhsGap {
+                return lhsGap < rhsGap
             }
         } else if lhs.lastEvidenceTime != rhs.lastEvidenceTime {
             return lhs.lastEvidenceTime > rhs.lastEvidenceTime
@@ -530,7 +538,7 @@ struct SpanHypothesisEngine: Sendable {
         return lhs.seedAnchor.startTime < rhs.seedAnchor.startTime
     }
 
-    private func prefersEarliestCompatibleHypothesis(for event: AnchorEvent) -> Bool {
+    private func prefersPlausibilityRanking(for event: AnchorEvent) -> Bool {
         event.sponsorEntity == nil && (event.anchorType.isExplicitCloseAnchor || event.isExplicitReturnMarker)
     }
 
