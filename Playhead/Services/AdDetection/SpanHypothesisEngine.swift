@@ -166,13 +166,14 @@ struct SpanHypothesis: Sendable, Equatable {
         minConfirmedEvidence: Double,
         decayRate: Double = SpanHypothesisEngine.defaultDecayRate
     ) -> CandidateAdSpan {
+        let wasConfirmedBeforeClose = state == .confirmed
         lastEvidenceTime = max(lastEvidenceTime, closeTime)
         state = .closed
         let score = self.score(at: closeTime, decayRate: decayRate)
         let plausibleSpan = endCandidateTime > startCandidateTime
         let skipEligible = switch closingReason {
         case .explicitClose, .returnMarker:
-            plausibleSpan
+            plausibleSpan && (wasConfirmedBeforeClose || score >= minConfirmedEvidence)
         case .idleGap, .timeout:
             plausibleSpan && score >= minConfirmedEvidence
         }
@@ -306,14 +307,7 @@ struct SpanHypothesisEngine: Sendable {
                     config: config.config(for: event.anchorType)
                 )
                 hypothesis.confirmIfNeeded(minConfirmedEvidence: config.minConfirmedEvidence)
-                let span = hypothesis.close(
-                    analysisAssetId: analysisAssetId,
-                    closingReason: .explicitClose,
-                    closeTime: event.endTime,
-                    minConfirmedEvidence: config.minConfirmedEvidence
-                )
-                closedHypotheses.append(hypothesis)
-                emitted.append(span)
+                activeHypotheses.append(hypothesis)
             }
             return emitted
         }
@@ -458,14 +452,14 @@ struct SpanHypothesisEngine: Sendable {
 
     private func bestCompatibleHypothesisIndex(for event: AnchorEvent) -> Int? {
         let candidates = activeHypotheses.enumerated().filter { index, hypothesis in
-            hypothesisCompatible(hypothesis, with: event) && overlaps(hypothesis, with: event)
+            hypothesisCompatible(hypothesis, with: event) && eventFallsWithinWindow(hypothesis, event: event)
         }
         if candidates.isEmpty {
             return nil
         }
 
         let ordered = candidates.sorted { lhs, rhs in
-            lhs.element.seedAnchor.startTime < rhs.element.seedAnchor.startTime
+            lhs.element.lastEvidenceTime > rhs.element.lastEvidenceTime
         }
         return ordered.first?.offset
     }
@@ -520,12 +514,12 @@ struct SpanHypothesisEngine: Sendable {
         return hypothesisSponsor == eventSponsor
     }
 
-    private func overlaps(_ hypothesis: SpanHypothesis, with event: AnchorEvent) -> Bool {
-        let overlap = max(0, min(hypothesis.endCandidateTime, event.endTime) - max(hypothesis.startCandidateTime, event.startTime))
-        if hypothesis.sponsorEntity == nil || event.sponsorEntity == nil {
-            return overlap > Self.strictOverlapThreshold
-        }
-        return overlap > 0
+    private func eventFallsWithinWindow(_ hypothesis: SpanHypothesis, event: AnchorEvent) -> Bool {
+        let slack = (hypothesis.sponsorEntity == nil || event.sponsorEntity == nil)
+            ? Self.strictOverlapThreshold
+            : 0
+        return event.startTime <= hypothesis.endCandidateTime + slack
+            && event.endTime >= hypothesis.startCandidateTime - slack
     }
 
     private func hypothesisOverlap(_ lhs: SpanHypothesis, _ rhs: SpanHypothesis) -> TimeInterval {
