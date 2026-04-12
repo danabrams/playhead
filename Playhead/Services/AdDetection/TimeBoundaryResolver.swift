@@ -1,6 +1,3 @@
-// TimeBoundaryResolver.swift
-// Seconds-based boundary snapping across acoustic and lexical cues.
-
 import Foundation
 
 enum BoundaryType: Sendable {
@@ -8,99 +5,133 @@ enum BoundaryType: Sendable {
     case end
 }
 
-struct BoundaryCueWeights: Sendable, Equatable {
+struct BoundarySnapDistance: Sendable, Equatable {
+    let start: TimeInterval
+    let end: TimeInterval
+
+    func maxSnapDistance(for boundaryType: BoundaryType) -> TimeInterval {
+        switch boundaryType {
+        case .start:
+            start
+        case .end:
+            end
+        }
+    }
+}
+
+struct StartBoundaryCueWeights: Sendable, Equatable {
     let pauseVAD: Double
     let speakerChangeProxy: Double
     let musicBedChange: Double
     let spectralChange: Double
     let lexicalDensityDelta: Double
-    let returnMarker: Double
-
-    static let defaultStart = BoundaryCueWeights(
-        pauseVAD: 0.25,
-        speakerChangeProxy: 0.20,
-        musicBedChange: 0.15,
-        spectralChange: 0.20,
-        lexicalDensityDelta: 0.20,
-        returnMarker: 0.0
-    )
-
-    static let defaultEnd = BoundaryCueWeights(
-        pauseVAD: 0.25,
-        speakerChangeProxy: 0.20,
-        musicBedChange: 0.15,
-        spectralChange: 0.15,
-        lexicalDensityDelta: 0.0,
-        returnMarker: 0.25
-    )
 
     var totalWeight: Double {
-        pauseVAD + speakerChangeProxy + musicBedChange + spectralChange + lexicalDensityDelta + returnMarker
+        pauseVAD + speakerChangeProxy + musicBedChange + spectralChange + lexicalDensityDelta
     }
 }
 
-struct BoundarySnapDistance: Sendable, Equatable {
-    let start: TimeInterval
-    let end: TimeInterval
+struct EndBoundaryCueWeights: Sendable, Equatable {
+    let pauseVAD: Double
+    let speakerChangeProxy: Double
+    let musicBedChange: Double
+    let spectralChange: Double
+    let explicitReturnMarker: Double
+
+    var totalWeight: Double {
+        pauseVAD + speakerChangeProxy + musicBedChange + spectralChange + explicitReturnMarker
+    }
 }
 
-struct BoundarySnappingConfig: Sendable {
-    let startCueWeights: BoundaryCueWeights
-    let endCueWeights: BoundaryCueWeights
+struct BoundarySnappingConfig: Sendable, Equatable {
+    let startWeights: StartBoundaryCueWeights
+    let endWeights: EndBoundaryCueWeights
+    let maxSnapDistanceByAnchorType: [AnchorType: BoundarySnapDistance]
     let lambda: Double
     let minBoundaryScore: Double
     let minImprovementOverOriginal: Double
-    let lexicalDensityNormalizationCap: Double
-    let maxSnapDistanceByAnchorType: [AnchorType: BoundarySnapDistance]
-
-    static let defaultMaxSnapDistanceByAnchorType: [AnchorType: BoundarySnapDistance] = [
-        .disclosure: BoundarySnapDistance(start: 5.0, end: 15.0),
-        .sponsorLexicon: BoundarySnapDistance(start: 5.0, end: 15.0),
-        .url: BoundarySnapDistance(start: 15.0, end: 5.0),
-        .promoCode: BoundarySnapDistance(start: 15.0, end: 5.0),
-        .fmPositive: BoundarySnapDistance(start: 10.0, end: 10.0),
-        .transitionMarker: BoundarySnapDistance(start: 15.0, end: 5.0),
-    ]
+    let lexicalDensityDeltaCap: Double
+    let spectralBaselineFloor: Double
 
     init(
-        startCueWeights: BoundaryCueWeights = .defaultStart,
-        endCueWeights: BoundaryCueWeights = .defaultEnd,
+        startWeights: StartBoundaryCueWeights = .init(
+            pauseVAD: 0.25,
+            speakerChangeProxy: 0.20,
+            musicBedChange: 0.15,
+            spectralChange: 0.20,
+            lexicalDensityDelta: 0.20
+        ),
+        endWeights: EndBoundaryCueWeights = .init(
+            pauseVAD: 0.25,
+            speakerChangeProxy: 0.20,
+            musicBedChange: 0.15,
+            spectralChange: 0.15,
+            explicitReturnMarker: 0.25
+        ),
+        maxSnapDistanceByAnchorType: [AnchorType: BoundarySnapDistance] = Self.defaultMaxSnapDistanceByAnchorType,
         lambda: Double = 0.3,
         minBoundaryScore: Double = 0.3,
         minImprovementOverOriginal: Double = 0.1,
-        lexicalDensityNormalizationCap: Double = 3.0,
-        maxSnapDistanceByAnchorType: [AnchorType: BoundarySnapDistance] = Self.defaultMaxSnapDistanceByAnchorType
+        lexicalDensityDeltaCap: Double = 3.0,
+        spectralBaselineFloor: Double = 0.001
     ) {
-        self.startCueWeights = startCueWeights
-        self.endCueWeights = endCueWeights
+        precondition(Self.isApproximatelyOne(startWeights.totalWeight), "Start-boundary cue weights must total 1.0")
+        precondition(Self.isApproximatelyOne(endWeights.totalWeight), "End-boundary cue weights must total 1.0")
+
+        self.startWeights = startWeights
+        self.endWeights = endWeights
+        self.maxSnapDistanceByAnchorType = maxSnapDistanceByAnchorType
         self.lambda = lambda
         self.minBoundaryScore = minBoundaryScore
         self.minImprovementOverOriginal = minImprovementOverOriginal
-        self.lexicalDensityNormalizationCap = lexicalDensityNormalizationCap
-        self.maxSnapDistanceByAnchorType = maxSnapDistanceByAnchorType
+        self.lexicalDensityDeltaCap = lexicalDensityDeltaCap
+        self.spectralBaselineFloor = spectralBaselineFloor
     }
 
     static let `default` = BoundarySnappingConfig()
 
     func maxSnapDistance(for anchorType: AnchorType, boundaryType: BoundaryType) -> TimeInterval {
-        guard let distance = maxSnapDistanceByAnchorType[anchorType] else {
-            preconditionFailure("Missing snap-distance configuration for \(anchorType)")
+        if let configured = maxSnapDistanceByAnchorType[anchorType] {
+            return configured.maxSnapDistance(for: boundaryType)
         }
-        switch boundaryType {
-        case .start:
-            return distance.start
-        case .end:
-            return distance.end
+
+        let fallback: BoundarySnapDistance
+        switch SpanHypothesisConfig.default.config(for: anchorType).polarity {
+        case .startAnchored:
+            fallback = BoundarySnapDistance(start: 5, end: 15)
+        case .endAnchored:
+            fallback = BoundarySnapDistance(start: 15, end: 5)
+        case .neutral:
+            fallback = BoundarySnapDistance(start: 10, end: 10)
         }
+        return fallback.maxSnapDistance(for: boundaryType)
+    }
+
+    private static let defaultMaxSnapDistanceByAnchorType: [AnchorType: BoundarySnapDistance] = [
+        .disclosure: BoundarySnapDistance(start: 5, end: 15),
+        .sponsorLexicon: BoundarySnapDistance(start: 5, end: 15),
+        .url: BoundarySnapDistance(start: 15, end: 5),
+        .promoCode: BoundarySnapDistance(start: 15, end: 5),
+        .fmPositive: BoundarySnapDistance(start: 10, end: 10),
+        .transitionMarker: BoundarySnapDistance(start: 15, end: 5),
+    ]
+
+    private static func isApproximatelyOne(_ value: Double) -> Bool {
+        abs(value - 1.0) <= 0.000_001
     }
 }
 
-struct TimeBoundarySnapResult: Sendable, Equatable {
-    let originalTime: Double
-    let time: Double
+struct ScoredBoundaryCandidate: Sendable, Equatable {
+    let boundaryTime: Double
+    let cueBlend: Double
+    let normalizedDistance: Double
+    let distancePenalty: Double
     let score: Double
-    let maxSnapDistance: TimeInterval
-    let didSnap: Bool
+    let lexicalDensityDelta: Double
+    let explicitReturnMarker: Double
+    let spectralChange: Double
+    let windowStartTime: Double
+    let windowEndTime: Double
 }
 
 struct TimeBoundaryResolver: Sendable {
@@ -112,258 +143,298 @@ struct TimeBoundaryResolver: Sendable {
         featureWindows: [FeatureWindow],
         lexicalHits: [LexicalHit],
         config: BoundarySnappingConfig = .default
-    ) -> TimeBoundarySnapResult {
-        let maxSnapDistance = config.maxSnapDistance(for: anchorType, boundaryType: boundaryType)
-        guard maxSnapDistance > 0 else {
-            return TimeBoundarySnapResult(
-                originalTime: candidateTime,
-                time: candidateTime,
-                score: 0.0,
-                maxSnapDistance: maxSnapDistance,
-                didSnap: false
-            )
-        }
-
-        let orderedWindows = featureWindows.sorted {
-            if $0.startTime == $1.startTime {
-                return $0.endTime < $1.endTime
-            }
-            return $0.startTime < $1.startTime
-        }
-
-        let nearbyWindows = orderedWindows.filter { window in
-            let boundaryTime = boundaryTime(for: window, boundaryType: boundaryType)
-            return abs(boundaryTime - candidateTime) <= maxSnapDistance
-        }
-
-        guard !nearbyWindows.isEmpty else {
-            return TimeBoundarySnapResult(
-                originalTime: candidateTime,
-                time: candidateTime,
-                score: 0.0,
-                maxSnapDistance: maxSnapDistance,
-                didSnap: false
-            )
-        }
-
-        let localSpectralMean = nearbyWindows.map(\.spectralFlux).reduce(0.0, +) / Double(nearbyWindows.count)
-
-        let lexicalCountsByWindow = lexicalCountsByWindow(orderedWindows, lexicalHits: lexicalHits)
-
-        var bestCandidate: CandidateScore?
-        for window in nearbyWindows {
-            let boundaryTime = boundaryTime(for: window, boundaryType: boundaryType)
-            let cueBlend = cueBlend(
-                for: window,
-                boundaryType: boundaryType,
-                lexicalHits: lexicalHits,
-                lexicalCountsByWindow: lexicalCountsByWindow,
-                localSpectralMean: localSpectralMean,
-                config: config
-            )
-            let normalizedDistance = abs(boundaryTime - candidateTime) / maxSnapDistance
-            let score = cueBlend - config.lambda * normalizedDistance
-
-            let candidate = CandidateScore(
-                boundaryTime: boundaryTime,
-                score: score,
-                cueBlend: cueBlend,
-                distance: abs(boundaryTime - candidateTime)
-            )
-            if let currentBest = bestCandidate {
-                if candidate.isBetter(than: currentBest) {
-                    bestCandidate = candidate
-                }
-            } else {
-                bestCandidate = candidate
-            }
-        }
-
-        guard let bestCandidate else {
-            return TimeBoundarySnapResult(
-                originalTime: candidateTime,
-                time: candidateTime,
-                score: 0.0,
-                maxSnapDistance: maxSnapDistance,
-                didSnap: false
-            )
-        }
-
-        let originalScore = scoreAtOriginalTime(
+    ) -> Double {
+        let scored = scoredCandidates(
             candidateTime: candidateTime,
             boundaryType: boundaryType,
-            orderedWindows: orderedWindows,
+            anchorType: anchorType,
+            featureWindows: featureWindows,
             lexicalHits: lexicalHits,
-            lexicalCountsByWindow: lexicalCountsByWindow,
-            localSpectralMean: localSpectralMean,
             config: config
         )
 
-        guard bestCandidate.score >= config.minBoundaryScore else {
-            return TimeBoundarySnapResult(
-                originalTime: candidateTime,
-                time: candidateTime,
-                score: bestCandidate.score,
-                maxSnapDistance: maxSnapDistance,
-                didSnap: false
-            )
-        }
+        guard !scored.isEmpty else { return candidateTime }
 
-        guard bestCandidate.score - originalScore >= config.minImprovementOverOriginal else {
-            return TimeBoundarySnapResult(
-                originalTime: candidateTime,
-                time: candidateTime,
-                score: bestCandidate.score,
-                maxSnapDistance: maxSnapDistance,
-                didSnap: false
-            )
-        }
-
-        return TimeBoundarySnapResult(
+        let originalCueBlend = referenceCueBlend(
             originalTime: candidateTime,
-            time: bestCandidate.boundaryTime,
-            score: bestCandidate.score,
-            maxSnapDistance: maxSnapDistance,
-            didSnap: abs(bestCandidate.boundaryTime - candidateTime) > 0.000001
+            boundaryType: boundaryType,
+            featureWindows: featureWindows,
+            lexicalHits: lexicalHits,
+            maxSnapDistance: config.maxSnapDistance(for: anchorType, boundaryType: boundaryType),
+            config: config
+        )
+
+        let localMaxima = localMaxima(in: scored)
+        let qualifying = localMaxima.filter {
+            $0.score >= config.minBoundaryScore &&
+            ($0.score - originalCueBlend) >= config.minImprovementOverOriginal
+        }
+
+        guard let best = qualifying.min(by: { lhs, rhs in
+            let lhsDistance = abs(lhs.boundaryTime - candidateTime)
+            let rhsDistance = abs(rhs.boundaryTime - candidateTime)
+            if lhsDistance != rhsDistance {
+                return lhsDistance < rhsDistance
+            }
+            if lhs.score != rhs.score {
+                return lhs.score > rhs.score
+            }
+            return lhs.boundaryTime < rhs.boundaryTime
+        }) else {
+            return candidateTime
+        }
+
+        return best.boundaryTime
+    }
+
+    func scoredCandidates(
+        candidateTime: Double,
+        boundaryType: BoundaryType,
+        anchorType: AnchorType,
+        featureWindows: [FeatureWindow],
+        lexicalHits: [LexicalHit],
+        config: BoundarySnappingConfig = .default
+    ) -> [ScoredBoundaryCandidate] {
+        let maxSnapDistance = config.maxSnapDistance(for: anchorType, boundaryType: boundaryType)
+        guard maxSnapDistance > 0 else { return [] }
+
+        let orderedWindows = featureWindows.sorted {
+            boundaryTime(for: $0, boundaryType: boundaryType) < boundaryTime(for: $1, boundaryType: boundaryType)
+        }
+        let candidateWindows = orderedWindows.enumerated().filter { _, window in
+            abs(boundaryTime(for: window, boundaryType: boundaryType) - candidateTime) <= maxSnapDistance
+        }
+
+        guard !candidateWindows.isEmpty else { return [] }
+
+        let overlapCounts = lexicalOverlapCounts(for: orderedWindows, lexicalHits: lexicalHits)
+
+        return candidateWindows.map { originalIndex, window in
+            let boundaryTime = boundaryTime(for: window, boundaryType: boundaryType)
+            let lexicalDensityDelta = boundaryType == .start
+                ? lexicalDensityDelta(at: originalIndex, overlapCounts: overlapCounts, cap: config.lexicalDensityDeltaCap)
+                : 0
+            let explicitReturnMarker = boundaryType == .end
+                ? explicitReturnMarker(for: window, lexicalHits: lexicalHits)
+                : 0
+            let spectralChange = spectralChange(
+                for: window,
+                boundaryType: boundaryType,
+                candidateWindows: candidateWindows.map(\.element),
+                radius: maxSnapDistance,
+                baselineFloor: config.spectralBaselineFloor
+            )
+            let cueBlend = cueBlend(
+                for: window,
+                boundaryType: boundaryType,
+                lexicalDensityDelta: lexicalDensityDelta,
+                explicitReturnMarker: explicitReturnMarker,
+                spectralChange: spectralChange,
+                config: config
+            )
+            let normalizedDistance = min(1.0, abs(boundaryTime - candidateTime) / maxSnapDistance)
+            let distancePenalty = config.lambda * normalizedDistance
+
+            return ScoredBoundaryCandidate(
+                boundaryTime: boundaryTime,
+                cueBlend: cueBlend,
+                normalizedDistance: normalizedDistance,
+                distancePenalty: distancePenalty,
+                score: cueBlend - distancePenalty,
+                lexicalDensityDelta: lexicalDensityDelta,
+                explicitReturnMarker: explicitReturnMarker,
+                spectralChange: spectralChange,
+                windowStartTime: window.startTime,
+                windowEndTime: window.endTime
+            )
+        }
+    }
+
+    private func referenceCueBlend(
+        originalTime: Double,
+        boundaryType: BoundaryType,
+        featureWindows: [FeatureWindow],
+        lexicalHits: [LexicalHit],
+        maxSnapDistance: Double,
+        config: BoundarySnappingConfig
+    ) -> Double {
+        let orderedWindows = featureWindows.sorted {
+            boundaryTime(for: $0, boundaryType: boundaryType) < boundaryTime(for: $1, boundaryType: boundaryType)
+        }
+        let nearbyWindows = orderedWindows.filter {
+            abs(boundaryTime(for: $0, boundaryType: boundaryType) - originalTime) <= maxSnapDistance
+        }
+        let overlapCounts = lexicalOverlapCounts(for: orderedWindows, lexicalHits: lexicalHits)
+        guard let reference = orderedWindows.enumerated().first(where: { _, window in
+            window.contains(originalTime)
+        }) else {
+            return 0
+        }
+
+        let index = reference.offset
+        let window = reference.element
+        let lexicalDensityDelta = boundaryType == .start
+            ? lexicalDensityDelta(at: index, overlapCounts: overlapCounts, cap: config.lexicalDensityDeltaCap)
+            : 0
+        let explicitReturnMarker = boundaryType == .end
+            ? explicitReturnMarker(for: window, lexicalHits: lexicalHits)
+            : 0
+        let spectralChange = spectralChange(
+            for: window,
+            boundaryType: boundaryType,
+            candidateWindows: nearbyWindows,
+            radius: maxSnapDistance,
+            baselineFloor: config.spectralBaselineFloor
+        )
+
+        return cueBlend(
+            for: window,
+            boundaryType: boundaryType,
+            lexicalDensityDelta: lexicalDensityDelta,
+            explicitReturnMarker: explicitReturnMarker,
+            spectralChange: spectralChange,
+            config: config
         )
     }
 
-    private struct CandidateScore {
-        let boundaryTime: Double
-        let score: Double
-        let cueBlend: Double
-        let distance: Double
+    private func localMaxima(in candidates: [ScoredBoundaryCandidate]) -> [ScoredBoundaryCandidate] {
+        guard !candidates.isEmpty else { return [] }
 
-        func isBetter(than other: CandidateScore) -> Bool {
-            if score == other.score {
-                return distance < other.distance
+        return candidates.enumerated().compactMap { index, candidate in
+            let previousScore = index > 0 ? candidates[index - 1].score : -.infinity
+            let nextScore = index + 1 < candidates.count ? candidates[index + 1].score : -.infinity
+            if candidate.score >= previousScore && candidate.score >= nextScore {
+                return candidate
             }
-            return score > other.score
-        }
-    }
-
-    private func boundaryTime(for window: FeatureWindow, boundaryType: BoundaryType) -> Double {
-        switch boundaryType {
-        case .start:
-            return window.startTime
-        case .end:
-            return window.endTime
+            return nil
         }
     }
 
     private func cueBlend(
         for window: FeatureWindow,
         boundaryType: BoundaryType,
-        lexicalHits: [LexicalHit],
-        lexicalCountsByWindow: [Double: WindowLexicalCounts],
-        localSpectralMean: Double,
+        lexicalDensityDelta: Double,
+        explicitReturnMarker: Double,
+        spectralChange: Double,
         config: BoundarySnappingConfig
     ) -> Double {
-        let weights: BoundaryCueWeights
         switch boundaryType {
         case .start:
-            weights = config.startCueWeights
+            return clamp01(window.pauseProbability) * config.startWeights.pauseVAD +
+                clamp01(window.speakerChangeProxyScore) * config.startWeights.speakerChangeProxy +
+                clamp01(window.musicBedChangeScore) * config.startWeights.musicBedChange +
+                spectralChange * config.startWeights.spectralChange +
+                lexicalDensityDelta * config.startWeights.lexicalDensityDelta
         case .end:
-            weights = config.endCueWeights
+            return clamp01(window.pauseProbability) * config.endWeights.pauseVAD +
+                clamp01(window.speakerChangeProxyScore) * config.endWeights.speakerChangeProxy +
+                clamp01(window.musicBedChangeScore) * config.endWeights.musicBedChange +
+                spectralChange * config.endWeights.spectralChange +
+                explicitReturnMarker * config.endWeights.explicitReturnMarker
         }
-
-        let spectralScore: Double
-        if localSpectralMean > 0 {
-            spectralScore = min(1.0, max(0.0, window.spectralFlux / localSpectralMean))
-        } else {
-            spectralScore = 0.0
-        }
-
-        let pauseScore = clamp01(window.pauseProbability)
-        let speakerScore = clamp01(window.speakerChangeProxyScore)
-        let musicScore = clamp01(window.musicBedChangeScore)
-        let lexicalDensityScore: Double
-        let returnMarkerScore: Double
-
-        switch boundaryType {
-        case .start:
-            let counts = lexicalCountsByWindow[window.startTime] ?? WindowLexicalCounts(current: 0, previous: 0)
-            let delta = abs(counts.current - counts.previous)
-            lexicalDensityScore = min(1.0, Double(delta) / config.lexicalDensityNormalizationCap)
-            returnMarkerScore = 0.0
-        case .end:
-            lexicalDensityScore = 0.0
-            returnMarkerScore = lexicalHits.contains { hit in
-                hit.category == .transitionMarker && hit.overlaps(window)
-            } ? 1.0 : 0.0
-        }
-
-        return pauseScore * weights.pauseVAD
-            + speakerScore * weights.speakerChangeProxy
-            + musicScore * weights.musicBedChange
-            + spectralScore * weights.spectralChange
-            + lexicalDensityScore * weights.lexicalDensityDelta
-            + returnMarkerScore * weights.returnMarker
     }
 
-    private func scoreAtOriginalTime(
-        candidateTime: Double,
-        boundaryType: BoundaryType,
-        orderedWindows: [FeatureWindow],
-        lexicalHits: [LexicalHit],
-        lexicalCountsByWindow: [Double: WindowLexicalCounts],
-        localSpectralMean: Double,
-        config: BoundarySnappingConfig
-    ) -> Double {
-        guard let window = orderedWindows.first(where: { $0.contains(candidateTime) }) else {
-            return 0.0
-        }
-        return cueBlend(
-            for: window,
-            boundaryType: boundaryType,
-            lexicalHits: lexicalHits,
-            lexicalCountsByWindow: lexicalCountsByWindow,
-            localSpectralMean: localSpectralMean,
-            config: config
-        )
-    }
-
-    private struct WindowLexicalCounts {
-        let current: Int
-        let previous: Int
-    }
-
-    private func lexicalCountsByWindow(
-        _ orderedWindows: [FeatureWindow],
+    private func lexicalOverlapCounts(
+        for windows: [FeatureWindow],
         lexicalHits: [LexicalHit]
-    ) -> [Double: WindowLexicalCounts] {
-        guard !orderedWindows.isEmpty else { return [:] }
-
-        let adHits = lexicalHits.filter { $0.isAdDensityCategory }
-        var counts: [Double: WindowLexicalCounts] = [:]
-        var previousCount = 0
-
-        for window in orderedWindows {
-            let currentCount = adHits.filter { $0.overlaps(window) }.count
-            counts[window.startTime] = WindowLexicalCounts(current: currentCount, previous: previousCount)
-            previousCount = currentCount
+    ) -> [Int] {
+        windows.map { window in
+            lexicalHits.reduce(into: 0) { count, hit in
+                guard Self.adLexicalCategories.contains(hit.category) else { return }
+                if overlaps(window, with: hit) {
+                    count += 1
+                }
+            }
         }
+    }
 
-        return counts
+    private func lexicalDensityDelta(
+        at index: Int,
+        overlapCounts: [Int],
+        cap: Double
+    ) -> Double {
+        let previousCount = index > 0 ? overlapCounts[index - 1] : 0
+        let delta = abs(Double(overlapCounts[index] - previousCount))
+        guard cap > 0 else { return 0 }
+        return clamp01(delta / cap)
+    }
+
+    private func explicitReturnMarker(
+        for window: FeatureWindow,
+        lexicalHits: [LexicalHit]
+    ) -> Double {
+        lexicalHits.contains {
+            $0.category == .transitionMarker && overlaps(window, with: $0)
+        } ? 1.0 : 0.0
+    }
+
+    private func spectralChange(
+        for window: FeatureWindow,
+        boundaryType: BoundaryType,
+        candidateWindows: [FeatureWindow],
+        radius: Double,
+        baselineFloor: Double
+    ) -> Double {
+        let referenceTime = boundaryTime(for: window, boundaryType: boundaryType)
+        let neighborhood = candidateWindows.filter {
+            abs(boundaryTime(for: $0, boundaryType: boundaryType) - referenceTime) <= radius
+        }
+        let localMean = neighborhood.map(\.spectralFlux).mean
+        let baseline = max(localMean, baselineFloor)
+        guard baseline > 0 else { return 0 }
+        return clamp01(window.spectralFlux / baseline)
+    }
+
+    private func boundaryTime(
+        for window: FeatureWindow,
+        boundaryType: BoundaryType
+    ) -> Double {
+        switch boundaryType {
+        case .start:
+            window.startTime
+        case .end:
+            window.endTime
+        }
+    }
+
+    private func overlaps(
+        _ window: FeatureWindow,
+        with hit: LexicalHit
+    ) -> Bool {
+        hit.startTime < window.endTime && hit.endTime > window.startTime
     }
 
     private func clamp01(_ value: Double) -> Double {
-        min(1.0, max(0.0, value))
-    }
-}
-
-private extension LexicalHit {
-    var isAdDensityCategory: Bool {
-        category != .transitionMarker
+        min(max(value, 0), 1)
     }
 
-    func overlaps(_ window: FeatureWindow) -> Bool {
-        startTime < window.endTime && endTime > window.startTime
-    }
+    private static let adLexicalCategories: Set<LexicalPatternCategory> = [
+        .sponsor,
+        .promoCode,
+        .urlCTA,
+        .purchaseLanguage,
+    ]
 }
 
 private extension FeatureWindow {
     func contains(_ time: Double) -> Bool {
-        time >= startTime && time <= endTime
+        startTime <= time && time <= endTime
+    }
+
+    var midpoint: Double {
+        (startTime + endTime) / 2.0
+    }
+}
+
+private extension Sequence where Element == Double {
+    var mean: Double {
+        var total = 0.0
+        var count = 0.0
+        for value in self {
+            total += value
+            count += 1
+        }
+        guard count > 0 else { return 0 }
+        return total / count
     }
 }

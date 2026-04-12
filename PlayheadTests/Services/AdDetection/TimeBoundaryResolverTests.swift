@@ -1,8 +1,5 @@
-// TimeBoundaryResolverTests.swift
-// Regression tests for seconds-based boundary snapping.
-
-import Testing
 import Foundation
+import Testing
 
 @testable import Playhead
 
@@ -11,413 +8,333 @@ struct TimeBoundaryResolverTests {
 
     private let resolver = TimeBoundaryResolver()
 
-    @Test("start scoring uses the weighted cue blend")
-    func startScoringFormula() {
-        let featureWindows = [
-            makeFeatureWindow(
-                start: 100,
-                end: 104,
-                pauseProb: 0.8,
-                speakerChangeProxyScore: 0.4,
-                musicBedChangeScore: 0.2,
-                spectralFlux: 1.0
-            ),
-            makeFeatureWindow(
-                start: 106,
-                end: 110,
-                pauseProb: 0.0,
-                speakerChangeProxyScore: 0.0,
-                musicBedChangeScore: 0.0,
-                spectralFlux: 3.0
-            ),
+    @Test("score formula applies cue blend and distance penalty")
+    func scoreFormulaAndDistancePenalty() throws {
+        let windows = [
+            makeWindow(start: 99, end: 101, pause: 0.05, speakerChange: 0.05, musicBedChange: 0.05, spectralFlux: 0.05),
+            makeWindow(start: 102, end: 104, pause: 0.44, speakerChange: 0.45, musicBedChange: 0.40, spectralFlux: 0.20),
+            makeWindow(start: 109, end: 111, pause: 0.56, speakerChange: 0.60, musicBedChange: 0.60, spectralFlux: 0.30),
         ]
 
-        let config = BoundarySnappingConfig(
-            lambda: 0.0,
-            minBoundaryScore: 0.0,
-            minImprovementOverOriginal: -1.0
-        )
-
-        #expect(abs(config.startCueWeights.totalWeight - 1.0) < 0.0001)
-        #expect(abs(config.endCueWeights.totalWeight - 1.0) < 0.0001)
-
-        let result = resolver.snap(
-            candidateTime: 100.0,
+        let zeroPenalty = BoundarySnappingConfig(lambda: 0)
+        let scoredWithoutPenalty = resolver.scoredCandidates(
+            candidateTime: 100,
             boundaryType: .start,
             anchorType: .fmPositive,
-            featureWindows: featureWindows,
+            featureWindows: windows,
             lexicalHits: [],
-            config: config
+            config: zeroPenalty
         )
 
-        #expect(abs(result.score - 0.41) < 0.0001)
-        #expect(result.time == 100.0)
+        let nearNoPenalty = try #require(scoredWithoutPenalty.first(where: { $0.boundaryTime == 102 }))
+        let farNoPenalty = try #require(scoredWithoutPenalty.first(where: { $0.boundaryTime == 109 }))
+        expectApproximately(nearNoPenalty.cueBlend, 0.46)
+        expectApproximately(farNoPenalty.cueBlend, 0.55)
+        expectApproximately(nearNoPenalty.distancePenalty, 0)
+        expectApproximately(farNoPenalty.distancePenalty, 0)
+        #expect(farNoPenalty.score > nearNoPenalty.score)
+        #expect(
+            resolver.snap(
+                candidateTime: 100,
+                boundaryType: .start,
+                anchorType: .fmPositive,
+                featureWindows: windows,
+                lexicalHits: [],
+                config: zeroPenalty
+            ) == 109
+        )
+
+        let scoredWithPenalty = resolver.scoredCandidates(
+            candidateTime: 100,
+            boundaryType: .start,
+            anchorType: .fmPositive,
+            featureWindows: windows,
+            lexicalHits: [],
+            config: .default
+        )
+        let nearWithPenalty = try #require(scoredWithPenalty.first(where: { $0.boundaryTime == 102 }))
+        let farWithPenalty = try #require(scoredWithPenalty.first(where: { $0.boundaryTime == 109 }))
+        expectApproximately(nearWithPenalty.normalizedDistance, 0.2)
+        expectApproximately(nearWithPenalty.distancePenalty, 0.06)
+        expectApproximately(farWithPenalty.normalizedDistance, 0.9)
+        expectApproximately(farWithPenalty.distancePenalty, 0.27)
+        #expect(nearWithPenalty.score > farWithPenalty.score)
+        #expect(
+            resolver.snap(
+                candidateTime: 100,
+                boundaryType: .start,
+                anchorType: .fmPositive,
+                featureWindows: windows,
+                lexicalHits: [],
+                config: .default
+            ) == 102
+        )
     }
 
-    @Test("distance penalty favors the nearer candidate over a higher-scoring distant one")
-    func distancePenaltyPrefersNearerCandidate() {
-        let featureWindows = [
-            makeFeatureWindow(
-                start: 100,
-                end: 101,
-                pauseProb: 1.0,
-                speakerChangeProxyScore: 1.0,
-                musicBedChangeScore: 1.0,
-                spectralFlux: 1.0
-            ),
-            makeFeatureWindow(
-                start: 100,
-                end: 115,
-                pauseProb: 1.0,
-                speakerChangeProxyScore: 1.0,
-                musicBedChangeScore: 1.0,
-                spectralFlux: 1.0
-            ),
+    @Test("default snap radii are anchor-type and boundary-type aware")
+    func asymmetricSnapRadii() {
+        struct Scenario {
+            let anchorType: AnchorType
+            let boundaryType: BoundaryType
+            let within: Double
+            let beyond: Double
+        }
+
+        let scenarios = [
+            Scenario(anchorType: .disclosure, boundaryType: .start, within: 104.8, beyond: 105.2),
+            Scenario(anchorType: .disclosure, boundaryType: .end, within: 114.8, beyond: 115.2),
+            Scenario(anchorType: .url, boundaryType: .start, within: 114.8, beyond: 115.2),
+            Scenario(anchorType: .url, boundaryType: .end, within: 104.8, beyond: 105.2),
+            Scenario(anchorType: .fmPositive, boundaryType: .start, within: 109.8, beyond: 110.2),
         ]
 
-        let lexicalHits = [
-            makeLexicalHit(
-                category: .transitionMarker,
-                start: 114.5,
-                end: 114.9
-            ),
-        ]
-
-        let result = resolver.snap(
-            candidateTime: 100.0,
-            boundaryType: .end,
-            anchorType: .disclosure,
-            featureWindows: featureWindows,
-            lexicalHits: lexicalHits,
-            config: BoundarySnappingConfig(
-                lambda: 0.3,
-                minBoundaryScore: 0.0,
-                minImprovementOverOriginal: -1.0
+        for scenario in scenarios {
+            let windows = [
+                makeWindow(start: 99, end: 101, pause: 0.05, speakerChange: 0.05, musicBedChange: 0.05, spectralFlux: 0.05),
+                makeBoundaryWindow(boundaryTime: scenario.within, boundaryType: scenario.boundaryType),
+                makeBoundaryWindow(boundaryTime: scenario.beyond, boundaryType: scenario.boundaryType),
+            ]
+            let scored = resolver.scoredCandidates(
+                candidateTime: 100,
+                boundaryType: scenario.boundaryType,
+                anchorType: scenario.anchorType,
+                featureWindows: windows,
+                lexicalHits: []
             )
-        )
 
-        #expect(result.didSnap)
-        #expect(result.time == 101.0)
-        #expect(result.score > 0.7)
-    }
-
-    @Test("anchor type changes the maximum snap distance for start and end boundaries")
-    func asymmetricSnapDistances() {
-        let startWindows = [
-            makeFeatureWindow(
-                start: 112,
-                end: 113,
-                pauseProb: 1.0,
-                speakerChangeProxyScore: 1.0,
-                musicBedChangeScore: 1.0,
-                spectralFlux: 1.0
-            ),
-        ]
-        let endWindows = [
-            makeFeatureWindow(
-                start: 87,
-                end: 88,
-                pauseProb: 1.0,
-                speakerChangeProxyScore: 1.0,
-                musicBedChangeScore: 1.0,
-                spectralFlux: 1.0
-            ),
-        ]
-        let config = BoundarySnappingConfig(
-            lambda: 0.0,
-            minBoundaryScore: 0.0,
-            minImprovementOverOriginal: -1.0
-        )
-
-        let startDisclosure = resolver.snap(
-            candidateTime: 100.0,
-            boundaryType: .start,
-            anchorType: .disclosure,
-            featureWindows: startWindows,
-            lexicalHits: [],
-            config: config
-        )
-        let startURL = resolver.snap(
-            candidateTime: 100.0,
-            boundaryType: .start,
-            anchorType: .url,
-            featureWindows: startWindows,
-            lexicalHits: [],
-            config: config
-        )
-        let startFMPositive = resolver.snap(
-            candidateTime: 100.0,
-            boundaryType: .start,
-            anchorType: .fmPositive,
-            featureWindows: startWindows,
-            lexicalHits: [],
-            config: config
-        )
-
-        let endDisclosure = resolver.snap(
-            candidateTime: 100.0,
-            boundaryType: .end,
-            anchorType: .disclosure,
-            featureWindows: endWindows,
-            lexicalHits: [],
-            config: config
-        )
-        let endURL = resolver.snap(
-            candidateTime: 100.0,
-            boundaryType: .end,
-            anchorType: .url,
-            featureWindows: endWindows,
-            lexicalHits: [],
-            config: config
-        )
-        let endFMPositive = resolver.snap(
-            candidateTime: 100.0,
-            boundaryType: .end,
-            anchorType: .fmPositive,
-            featureWindows: endWindows,
-            lexicalHits: [],
-            config: config
-        )
-
-        #expect(!startDisclosure.didSnap)
-        #expect(startURL.didSnap)
-        #expect(!startFMPositive.didSnap)
-        #expect(endDisclosure.didSnap)
-        #expect(!endURL.didSnap)
-        #expect(!endFMPositive.didSnap)
-    }
-
-    @Test("boundary snapping falls back when no candidate clears the minimum score")
-    func fallsBackBelowMinimumBoundaryScore() {
-        let featureWindows = [
-            makeFeatureWindow(
-                start: 100,
-                end: 101,
-                pauseProb: 0.15,
-                speakerChangeProxyScore: 0.0,
-                musicBedChangeScore: 0.0,
-                spectralFlux: 0.0
-            ),
-        ]
-
-        let result = resolver.snap(
-            candidateTime: 100.0,
-            boundaryType: .start,
-            anchorType: .fmPositive,
-            featureWindows: featureWindows,
-            lexicalHits: [],
-            config: BoundarySnappingConfig(
-                lambda: 0.0,
-                minBoundaryScore: 0.3,
-                minImprovementOverOriginal: 0.1
+            #expect(scored.contains(where: { abs($0.boundaryTime - scenario.within) < 0.000_001 }))
+            #expect(!scored.contains(where: { abs($0.boundaryTime - scenario.beyond) < 0.000_001 }))
+            #expect(
+                abs(
+                    resolver.snap(
+                        candidateTime: 100,
+                        boundaryType: scenario.boundaryType,
+                        anchorType: scenario.anchorType,
+                        featureWindows: windows,
+                        lexicalHits: []
+                    ) - scenario.within
+                ) < 0.000_001
             )
-        )
-
-        #expect(!result.didSnap)
-        #expect(result.time == 100.0)
+        }
     }
 
-    @Test("boundary snapping falls back when improvement over the original is too small")
-    func fallsBackBelowImprovementThreshold() {
-        let featureWindows = [
-            makeFeatureWindow(
-                start: 100,
-                end: 101,
-                pauseProb: 0.4,
-                speakerChangeProxyScore: 0.0,
-                musicBedChangeScore: 0.0,
-                spectralFlux: 0.0
-            ),
-            makeFeatureWindow(
-                start: 105,
-                end: 106,
-                pauseProb: 0.45,
-                speakerChangeProxyScore: 0.0,
-                musicBedChangeScore: 0.0,
-                spectralFlux: 0.0
-            ),
+    @Test("start snapping uses lexical density deltas from overlapping hits")
+    func lexicalDensityDeltaCue() throws {
+        let windows = [
+            makeWindow(start: 98, end: 99, pause: 0.15, speakerChange: 0.10, musicBedChange: 0.05, spectralFlux: 0.08),
+            makeWindow(start: 100, end: 101, pause: 0.15, speakerChange: 0.10, musicBedChange: 0.05, spectralFlux: 0.08),
+            makeWindow(start: 102, end: 103, pause: 0.15, speakerChange: 0.10, musicBedChange: 0.05, spectralFlux: 0.08),
+        ]
+        let lexicalHits = [
+            makeLexicalHit(category: .sponsor, start: 100.1, end: 102.1),
+            makeLexicalHit(category: .urlCTA, start: 100.2, end: 102.2),
+            makeLexicalHit(category: .purchaseLanguage, start: 100.3, end: 102.3),
         ]
 
-        let config = BoundarySnappingConfig(
-            startCueWeights: BoundaryCueWeights(
-                pauseVAD: 1.0,
-                speakerChangeProxy: 0.0,
-                musicBedChange: 0.0,
-                spectralChange: 0.0,
-                lexicalDensityDelta: 0.0,
-                returnMarker: 0.0
-            ),
-            endCueWeights: BoundaryCueWeights(
-                pauseVAD: 1.0,
-                speakerChangeProxy: 0.0,
-                musicBedChange: 0.0,
-                spectralChange: 0.0,
-                lexicalDensityDelta: 0.0,
-                returnMarker: 0.0
-            ),
-            lambda: 0.0,
-            minBoundaryScore: 0.3,
-            minImprovementOverOriginal: 0.1
-        )
-
-        let result = resolver.snap(
-            candidateTime: 100.0,
+        let scored = resolver.scoredCandidates(
+            candidateTime: 98.5,
             boundaryType: .start,
             anchorType: .fmPositive,
-            featureWindows: featureWindows,
+            featureWindows: windows,
+            lexicalHits: lexicalHits
+        )
+
+        let firstSharpIncrease = try #require(scored.first(where: { $0.boundaryTime == 100 }))
+        let laterFlatWindow = try #require(scored.first(where: { $0.boundaryTime == 102 }))
+        expectApproximately(firstSharpIncrease.lexicalDensityDelta, 1)
+        expectApproximately(laterFlatWindow.lexicalDensityDelta, 0)
+        #expect(
+            resolver.snap(
+                candidateTime: 98.5,
+                boundaryType: .start,
+                anchorType: .fmPositive,
+                featureWindows: windows,
+                lexicalHits: lexicalHits
+            ) == 100
+        )
+    }
+
+    @Test("end snapping uses explicit return markers from lexical hits")
+    func returnMarkerCue() throws {
+        let windows = [
+            makeBoundaryWindow(boundaryTime: 152, boundaryType: .end),
+            makeBoundaryWindow(boundaryTime: 154, boundaryType: .end),
+        ]
+        let lexicalHits = [
+            makeLexicalHit(category: .transitionMarker, start: 153.1, end: 153.9, text: "back to the show"),
+        ]
+
+        let scored = resolver.scoredCandidates(
+            candidateTime: 151.5,
+            boundaryType: .end,
+            anchorType: .fmPositive,
+            featureWindows: windows,
+            lexicalHits: lexicalHits
+        )
+
+        let withoutMarker = try #require(scored.first(where: { $0.boundaryTime == 152 }))
+        let withMarker = try #require(scored.first(where: { $0.boundaryTime == 154 }))
+        expectApproximately(withoutMarker.explicitReturnMarker, 0)
+        expectApproximately(withMarker.explicitReturnMarker, 1)
+        #expect(
+            resolver.snap(
+                candidateTime: 151.5,
+                boundaryType: .end,
+                anchorType: .fmPositive,
+                featureWindows: windows,
+                lexicalHits: lexicalHits
+            ) == 154
+        )
+    }
+
+    @Test("spectral flux is normalized against each candidate's local baseline")
+    func localSpectralBaselineNormalization() throws {
+        let windows = [
+            makeWindow(start: 94, end: 95, pause: 0.0, speakerChange: 0.0, musicBedChange: 0.0, spectralFlux: 0.05),
+            makeWindow(start: 96, end: 97, pause: 0.35, speakerChange: 0.2, musicBedChange: 0.1, spectralFlux: 0.30),
+            makeWindow(start: 98, end: 99, pause: 0.0, speakerChange: 0.0, musicBedChange: 0.0, spectralFlux: 0.05),
+            makeWindow(start: 102, end: 103, pause: 0.0, speakerChange: 0.0, musicBedChange: 0.0, spectralFlux: 0.70),
+            makeWindow(start: 104, end: 105, pause: 0.35, speakerChange: 0.2, musicBedChange: 0.1, spectralFlux: 0.50),
+            makeWindow(start: 106, end: 107, pause: 0.0, speakerChange: 0.0, musicBedChange: 0.0, spectralFlux: 0.70),
+        ]
+        let config = BoundarySnappingConfig(lambda: 0.05, minBoundaryScore: 0.2)
+
+        let scored = resolver.scoredCandidates(
+            candidateTime: 100,
+            boundaryType: .start,
+            anchorType: .disclosure,
+            featureWindows: windows,
             lexicalHits: [],
             config: config
         )
 
-        #expect(!result.didSnap)
-        #expect(result.time == 100.0)
+        let lowBaselineCandidate = try #require(scored.first(where: { $0.boundaryTime == 96 }))
+        let highBaselineCandidate = try #require(scored.first(where: { $0.boundaryTime == 104 }))
+        #expect(lowBaselineCandidate.spectralChange > highBaselineCandidate.spectralChange)
+        #expect(lowBaselineCandidate.score > highBaselineCandidate.score)
+        #expect(
+            resolver.snap(
+                candidateTime: 100,
+                boundaryType: .start,
+                anchorType: .disclosure,
+                featureWindows: windows,
+                lexicalHits: [],
+                config: config
+            ) == 96
+        )
     }
 
-    @Test("lexical density delta is driven by overlapping ad-category hits per adjacent window")
-    func lexicalDensityDelta() {
-        let featureWindows = [
-            makeFeatureWindow(
-                start: 90,
-                end: 95,
-                pauseProb: 0.0,
-                speakerChangeProxyScore: 0.0,
-                musicBedChangeScore: 0.0,
-                spectralFlux: 0.0
+    @Test("snap falls back to original time when thresholds are not met")
+    func fallbackToOriginal() {
+        struct Scenario {
+            let candidateTime: Double
+            let config: BoundarySnappingConfig
+            let windows: [FeatureWindow]
+        }
+
+        let scenarios = [
+            Scenario(
+                candidateTime: 100,
+                config: .default,
+                windows: [
+                    makeWindow(start: 99, end: 101, pause: 0.05, speakerChange: 0.05, musicBedChange: 0.05, spectralFlux: 0.05),
+                    makeWindow(start: 102, end: 103, pause: 0.12, speakerChange: 0.10, musicBedChange: 0.08, spectralFlux: 0.05),
+                ]
             ),
-            makeFeatureWindow(
-                start: 100,
-                end: 105,
-                pauseProb: 0.0,
-                speakerChangeProxyScore: 0.0,
-                musicBedChangeScore: 0.0,
-                spectralFlux: 0.0
+            Scenario(
+                candidateTime: 100,
+                config: BoundarySnappingConfig(lambda: 0),
+                windows: [
+                    makeWindow(start: 99, end: 101, pause: 0.60, speakerChange: 0.50, musicBedChange: 0.40, spectralFlux: 0.30),
+                    makeWindow(start: 102, end: 103, pause: 0.66, speakerChange: 0.55, musicBedChange: 0.45, spectralFlux: 0.30),
+                ]
             ),
         ]
-        let lexicalHits = [
-            makeLexicalHit(category: .sponsor, start: 100.5, end: 101.5),
-            makeLexicalHit(category: .urlCTA, start: 102.0, end: 103.0),
-        ]
-        let config = BoundarySnappingConfig(
-            startCueWeights: BoundaryCueWeights(
-                pauseVAD: 0.0,
-                speakerChangeProxy: 0.0,
-                musicBedChange: 0.0,
-                spectralChange: 0.0,
-                lexicalDensityDelta: 1.0,
-                returnMarker: 0.0
-            ),
-            endCueWeights: BoundaryCueWeights(
-                pauseVAD: 0.0,
-                speakerChangeProxy: 0.0,
-                musicBedChange: 0.0,
-                spectralChange: 0.0,
-                lexicalDensityDelta: 0.0,
-                returnMarker: 1.0
-            ),
-            lambda: 0.0,
-            minBoundaryScore: 0.0,
-            minImprovementOverOriginal: -1.0
-        )
 
-        let result = resolver.snap(
-            candidateTime: 100.0,
-            boundaryType: .start,
-            anchorType: .fmPositive,
-            featureWindows: featureWindows,
-            lexicalHits: lexicalHits,
-            config: config
-        )
-
-        #expect(abs(result.score - (2.0 / 3.0)) < 0.0001)
+        for scenario in scenarios {
+            #expect(
+                resolver.snap(
+                    candidateTime: scenario.candidateTime,
+                    boundaryType: .start,
+                    anchorType: .fmPositive,
+                    featureWindows: scenario.windows,
+                    lexicalHits: [],
+                    config: scenario.config
+                ) == scenario.candidateTime
+            )
+        }
     }
 
-    @Test("transition markers drive the end-boundary return cue")
-    func returnMarkerCue() {
-        let featureWindows = [
-            makeFeatureWindow(
-                start: 100,
-                end: 105,
-                pauseProb: 0.0,
-                speakerChangeProxyScore: 0.0,
-                musicBedChangeScore: 0.0,
-                spectralFlux: 0.0
-            ),
-        ]
-        let lexicalHits = [
-            makeLexicalHit(category: .transitionMarker, start: 101.0, end: 104.0),
-        ]
-        let config = BoundarySnappingConfig(
-            startCueWeights: BoundaryCueWeights(
-                pauseVAD: 0.0,
-                speakerChangeProxy: 0.0,
-                musicBedChange: 0.0,
-                spectralChange: 0.0,
-                lexicalDensityDelta: 0.0,
-                returnMarker: 0.0
-            ),
-            endCueWeights: BoundaryCueWeights(
-                pauseVAD: 0.0,
-                speakerChangeProxy: 0.0,
-                musicBedChange: 0.0,
-                spectralChange: 0.0,
-                lexicalDensityDelta: 0.0,
-                returnMarker: 1.0
-            ),
-            lambda: 0.0,
-            minBoundaryScore: 0.0,
-            minImprovementOverOriginal: -1.0
-        )
-
-        let result = resolver.snap(
-            candidateTime: 105.0,
-            boundaryType: .end,
-            anchorType: .transitionMarker,
-            featureWindows: featureWindows,
-            lexicalHits: lexicalHits,
-            config: config
-        )
-
-        #expect(result.time == 105.0)
-        #expect(abs(result.score - 1.0) < 0.0001)
-    }
-
-    // MARK: - Helpers
-
-    private func makeFeatureWindow(
+    private func makeWindow(
         start: Double,
         end: Double,
-        pauseProb: Double,
-        speakerChangeProxyScore: Double,
-        musicBedChangeScore: Double,
+        pause: Double,
+        speakerChange: Double,
+        musicBedChange: Double,
         spectralFlux: Double
     ) -> FeatureWindow {
         FeatureWindow(
-            analysisAssetId: "test-asset",
+            analysisAssetId: "asset-348",
             startTime: start,
             endTime: end,
-            rms: 0.0,
+            rms: 0.1,
             spectralFlux: spectralFlux,
-            musicProbability: 0.0,
-            speakerChangeProxyScore: speakerChangeProxyScore,
-            musicBedChangeScore: musicBedChangeScore,
-            pauseProbability: pauseProb,
+            musicProbability: 0,
+            speakerChangeProxyScore: speakerChange,
+            musicBedChangeScore: musicBedChange,
+            pauseProbability: pause,
             speakerClusterId: nil,
             jingleHash: nil,
-            featureVersion: 1
+            featureVersion: 4
         )
+    }
+
+    private func makeBoundaryWindow(
+        boundaryTime: Double,
+        boundaryType: BoundaryType
+    ) -> FeatureWindow {
+        switch boundaryType {
+        case .start:
+            makeWindow(
+                start: boundaryTime,
+                end: boundaryTime + 1,
+                pause: 0.8,
+                speakerChange: 0.8,
+                musicBedChange: 0.8,
+                spectralFlux: 0.8
+            )
+        case .end:
+            makeWindow(
+                start: boundaryTime - 1,
+                end: boundaryTime,
+                pause: 0.8,
+                speakerChange: 0.8,
+                musicBedChange: 0.8,
+                spectralFlux: 0.8
+            )
+        }
     }
 
     private func makeLexicalHit(
         category: LexicalPatternCategory,
         start: Double,
-        end: Double
+        end: Double,
+        text: String = "ad cue"
     ) -> LexicalHit {
         LexicalHit(
             category: category,
-            matchedText: "hit",
+            matchedText: text,
             startTime: start,
             endTime: end,
-            weight: 1.0
+            weight: 1
         )
+    }
+
+    private func expectApproximately(
+        _ actual: Double,
+        _ expected: Double,
+        tolerance: Double = 0.000_001
+    ) {
+        #expect(abs(actual - expected) <= tolerance, "expected \(expected), got \(actual)")
     }
 }
