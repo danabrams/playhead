@@ -319,6 +319,54 @@ struct CommercialEvidenceResolverTests {
         }
     }
 
+    @Test("brand window-context fallback preserves repeated evidence span")
+    func brandWindowContextFallbackPreservesRepeatedSpan() throws {
+        let segments = [
+            makeResolverSegment(index: 0, startTime: 0, endTime: 5,
+                                text: "Sponsored by BetterHelp today."),
+            makeResolverSegment(index: 10, startTime: 50, endTime: 55,
+                                text: "BetterHelp is great for support."),
+            makeResolverSegment(index: 20, startTime: 100, endTime: 105,
+                                text: "Sponsored by BetterHelp again.")
+        ]
+        let evidenceCatalog = EvidenceCatalogBuilder.build(
+            atoms: segments.flatMap(\.atoms),
+            analysisAssetId: "asset-1",
+            transcriptVersion: "transcript-v1"
+        )
+        let brandEntry = try #require(
+            evidenceCatalog.entries.first(where: { $0.category == .brandSpan && $0.normalizedText == "betterhelp" })
+        )
+        #expect(brandEntry.count == 2)
+
+        let plan = makeResolverPlan(lineRefs: [0, 10, 20], promptEvidence: [])
+        let resolved = CommercialEvidenceResolver.resolve(
+            anchors: [
+                EvidenceAnchorSchema(
+                    evidenceRef: nil,
+                    lineRef: 10,
+                    kind: .brandSpan,
+                    certainty: .moderate
+                )
+            ],
+            plan: plan,
+            lineRefLookup: Dictionary(uniqueKeysWithValues: segments.map { ($0.segmentIndex, $0) }),
+            evidenceCatalog: evidenceCatalog
+        )
+
+        #expect(resolved.count == 1)
+        let resolvedEntry = try #require(resolved[0].entry)
+        #expect(resolved[0].resolutionSource == .lineRefFallback)
+        #expect(resolvedEntry.count == 2)
+        #expect(resolvedEntry.matchedText == "BetterHelp")
+        #expect(resolvedEntry.startTime >= 50)
+        #expect(resolvedEntry.endTime <= 55)
+        #expect(resolvedEntry.firstTime == brandEntry.firstTime)
+        #expect(resolvedEntry.lastTime == brandEntry.lastTime)
+        #expect(resolved[0].lineRef == 10)
+        #expect(!resolved[0].memoryWriteEligible)
+    }
+
     @Test("line-ref fallback never marks memory write eligible")
     func lineRefFallbackNotMemoryEligible() {
         let segments = [
@@ -867,6 +915,7 @@ struct EvidenceCatalogBuilderDedupTests {
         )
     }
 }
+
 private func makeResolverSegment(
     index: Int,
     startTime: Double = 5,

@@ -422,7 +422,8 @@ struct PromptEvidenceEntry: Sendable {
     /// to `[DRUG]` before they ever reach Apple's safety classifier.
     func renderForPrompt(redactor: PromptRedactor = .noop) -> String {
         let masked = redactor.redact(line: entry.matchedText)
-        return "[E\(entry.evidenceRef)] \"\(masked)\" (\(entry.category.rawValue), line \(lineRef))"
+        return "[E\(entry.evidenceRef)] \"\(masked)\" " +
+            entry.renderPromptMetadata(locationLabel: "line", locationValue: lineRef)
     }
 }
 

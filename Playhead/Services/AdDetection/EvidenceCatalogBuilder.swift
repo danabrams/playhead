@@ -34,9 +34,9 @@ struct EvidenceEntry: Sendable, Equatable {
     let normalizedText: String
     /// Which atom this came from (atomKey.atomOrdinal).
     let atomOrdinal: Int
-    /// Time position in episode audio.
+    /// Time position of the representative occurrence kept after dedup.
     let startTime: Double
-    /// Time position in episode audio.
+    /// Time position of the representative occurrence kept after dedup.
     let endTime: Double
     /// How many times this (category, normalizedText) pair appeared.
     let count: Int
@@ -86,11 +86,12 @@ struct EvidenceCatalog: Sendable {
     /// Output format:
     /// ```
     /// [E0] "betterhelp.com slash podcast" (url, atom 2)
-    /// [E1] "BetterHelp" (brandSpan, atom 1)
+    /// [E1] "BetterHelp" (brandSpan, atom 1, ×4, 12s–67s)
     /// ```
     func renderForPrompt() -> String {
         entries.map { entry in
-            "[E\(entry.evidenceRef)] \"\(entry.matchedText)\" (\(entry.category.rawValue), atom \(entry.atomOrdinal))"
+            "[E\(entry.evidenceRef)] \"\(entry.matchedText)\" " +
+                entry.renderPromptMetadata(locationLabel: "atom", locationValue: entry.atomOrdinal)
         }.joined(separator: "\n")
     }
 
@@ -178,6 +179,22 @@ enum EvidenceCatalogBuilder {
         let endTime: Double
         /// Character offset of match within the atom text, for deterministic ordering.
         let matchOffset: Int
+        /// Character length of the original regex match.
+        let matchLength: Int
+    }
+
+    /// Deduplicated raw match with repetition density preserved.
+    private struct CollapsedMatch {
+        let category: EvidenceCategory
+        let matchedText: String
+        let normalizedText: String
+        let atomOrdinal: Int
+        let startTime: Double
+        let endTime: Double
+        let count: Int
+        let firstTime: Double
+        let lastTime: Double
+        let matchOffset: Int
     }
 
     // MARK: - Pattern extraction
@@ -238,7 +255,8 @@ enum EvidenceCatalogBuilder {
                         atomOrdinal: atom.atomKey.atomOrdinal,
                         startTime: startTime,
                         endTime: endTime,
-                        matchOffset: match.range.location
+                        matchOffset: match.range.location,
+                        matchLength: match.range.length
                     ))
                 }
             }
@@ -298,7 +316,8 @@ enum EvidenceCatalogBuilder {
                     atomOrdinal: atom.atomKey.atomOrdinal,
                     startTime: startTime,
                     endTime: endTime,
-                    matchOffset: brandRange.location
+                    matchOffset: brandRange.location,
+                    matchLength: brandRange.length
                 ))
             }
         }
@@ -328,7 +347,8 @@ enum EvidenceCatalogBuilder {
                     atomOrdinal: atom.atomKey.atomOrdinal,
                     startTime: startTime,
                     endTime: endTime,
-                    matchOffset: match.range.location
+                    matchOffset: match.range.location,
+                    matchLength: match.range.length
                 ))
             }
         }
@@ -551,7 +571,7 @@ enum EvidenceCatalogBuilder {
     ///    the other as a substring — the shorter (cleaner) domain is preferred.
     ///    This complements stripURLVerbPrefix for any context-capturing patterns
     ///    we may add in the future.
-    private static func deduplicate(_ matches: [RawMatch]) -> [RawMatch] {
+    private static func deduplicate(_ matches: [RawMatch]) -> [CollapsedMatch] {
         // Pre-sort to ensure dedup picks the earliest occurrence deterministically.
         let sorted = matches.sorted { a, b in
             if a.atomOrdinal != b.atomOrdinal { return a.atomOrdinal < b.atomOrdinal }
@@ -570,42 +590,91 @@ enum EvidenceCatalogBuilder {
             urlTextsByAtom[match.atomOrdinal, default: []].insert(match.normalizedText)
         }
 
-        var seen = Set<String>()
-        var result: [RawMatch] = []
-
-        for match in sorted {
-            let key = "\(match.category.rawValue)::\(match.normalizedText)"
-            guard seen.insert(key).inserted else { continue }
+        let filtered = sorted.filter { match in
+            guard match.category == .url else { return true }
 
             // Subsume bare-domain URL when a longer path URL exists.
             // e.g., skip "acme.com" when "acme.com/offer" is present.
-            if match.category == .url {
-                let isPathSubsumed = urlTexts.contains { other in
-                    other != match.normalizedText &&
-                    other.hasPrefix(match.normalizedText) &&
-                    (other.dropFirst(match.normalizedText.count).first == "/" ||
-                     other.dropFirst(match.normalizedText.count).first == " ")
-                }
-                if isPathSubsumed { continue }
-
-                // Within the same atom, if another URL match is a strict
-                // suffix of this one (i.e., this match has *prefix* context
-                // like "visit " or "go to " in front of the same domain),
-                // drop this longer match and keep the cleaner one. We only
-                // match suffix (not arbitrary substring) to avoid colliding
-                // with the path-URL subsumption rule above: a path URL like
-                // "acme.com/offer" contains "acme.com" as a prefix, not a
-                // suffix, so this rule will not drop it.
-                let siblings = urlTextsByAtom[match.atomOrdinal] ?? []
-                let isContextSubsumed = siblings.contains { other in
-                    other != match.normalizedText &&
-                    other.count < match.normalizedText.count &&
-                    match.normalizedText.hasSuffix(other)
-                }
-                if isContextSubsumed { continue }
+            let isPathSubsumed = urlTexts.contains { other in
+                other != match.normalizedText &&
+                other.hasPrefix(match.normalizedText) &&
+                (other.dropFirst(match.normalizedText.count).first == "/" ||
+                 other.dropFirst(match.normalizedText.count).first == " ")
             }
+            if isPathSubsumed { return false }
 
-            result.append(match)
+            // Within the same atom, if another URL match is a strict
+            // suffix of this one (i.e., this match has *prefix* context
+            // like "visit " or "go to " in front of the same domain),
+            // drop this longer match and keep the cleaner one.
+            let siblings = urlTextsByAtom[match.atomOrdinal] ?? []
+            let isContextSubsumed = siblings.contains { other in
+                other != match.normalizedText &&
+                other.count < match.normalizedText.count &&
+                match.normalizedText.hasSuffix(other)
+            }
+            return !isContextSubsumed
+        }
+
+        let canonicalized = collapseOverlappingOccurrences(canonicalizeBrandVariants(filtered))
+
+        struct AggregatedMatch {
+            var category: EvidenceCategory
+            var matchedText: String
+            var normalizedText: String
+            var atomOrdinal: Int
+            var startTime: Double
+            var endTime: Double
+            var count: Int
+            var firstTime: Double
+            var lastTime: Double
+            var matchOffset: Int
+        }
+
+        var aggregatedByKey: [String: AggregatedMatch] = [:]
+        var orderedKeys: [String] = []
+        for match in canonicalized {
+            let key = "\(match.category.rawValue)::\(match.normalizedText)"
+            if var aggregate = aggregatedByKey[key] {
+                aggregate.count += 1
+                aggregate.firstTime = min(aggregate.firstTime, match.startTime)
+                aggregate.lastTime = max(aggregate.lastTime, match.endTime)
+                aggregatedByKey[key] = aggregate
+            } else {
+                aggregatedByKey[key] = AggregatedMatch(
+                    category: match.category,
+                    matchedText: match.matchedText,
+                    normalizedText: match.normalizedText,
+                    atomOrdinal: match.atomOrdinal,
+                    startTime: match.startTime,
+                    endTime: match.endTime,
+                    count: 1,
+                    firstTime: match.startTime,
+                    lastTime: match.endTime,
+                    matchOffset: match.matchOffset
+                )
+                orderedKeys.append(key)
+            }
+        }
+
+        var result: [CollapsedMatch] = []
+        for key in orderedKeys {
+            guard let match = aggregatedByKey[key] else { continue }
+
+            result.append(
+                CollapsedMatch(
+                    category: match.category,
+                    matchedText: match.matchedText,
+                    normalizedText: match.normalizedText,
+                    atomOrdinal: match.atomOrdinal,
+                    startTime: match.startTime,
+                    endTime: match.endTime,
+                    count: match.count,
+                    firstTime: match.firstTime,
+                    lastTime: match.lastTime,
+                    matchOffset: match.matchOffset
+                )
+            )
         }
 
         return result
@@ -615,7 +684,7 @@ enum EvidenceCatalogBuilder {
 
     /// Assign stable evidenceRef integers in deterministic order:
     /// sorted by atomOrdinal, then by category ordinal, then by match offset.
-    private static func assignRefs(_ matches: [RawMatch]) -> [EvidenceEntry] {
+    private static func assignRefs(_ matches: [CollapsedMatch]) -> [EvidenceEntry] {
         let categoryOrder = Dictionary(
             uniqueKeysWithValues: EvidenceCategory.allCases.enumerated().map { ($1, $0) }
         )
@@ -636,7 +705,10 @@ enum EvidenceCatalogBuilder {
                 normalizedText: match.normalizedText,
                 atomOrdinal: match.atomOrdinal,
                 startTime: match.startTime,
-                endTime: match.endTime
+                endTime: match.endTime,
+                count: match.count,
+                firstTime: match.firstTime,
+                lastTime: match.lastTime
             )
         }
     }
@@ -755,6 +827,13 @@ enum EvidenceCatalogBuilder {
         "not", "no", "all", "every", "some", "many", "more",
     ]
 
+    /// Trailing discourse tokens that sometimes get captured by disclosure
+    /// patterns. These are only stripped when corroborating variants prove the
+    /// shorter prefix is the true brand name.
+    private static let disclosureTrailingBrandTokens: Set<String> = [
+        "again", "today", "tonight", "tomorrow", "yesterday"
+    ]
+
     /// Trim trailing stop words from a brand capture.
     /// "hello fresh and they make" -> "hello fresh"
     private static func trimTrailingStopWords(_ text: String) -> String {
@@ -863,6 +942,7 @@ enum EvidenceCatalogBuilder {
         let endB = startB + lengthB
         return startA < endB && startB < endA
     }
+
     /// Brand extraction patterns — case-insensitive, use capture groups.
     ///
     /// ASR output is typically lowercase, so these patterns do not rely on
@@ -899,5 +979,27 @@ enum EvidenceCatalogBuilder {
                 return nil
             }
         }
+    }
+}
+
+// MARK: - Prompt rendering helpers
+
+extension EvidenceEntry {
+    func renderPromptMetadata(locationLabel: String, locationValue: Int) -> String {
+        var parts = ["\(category.rawValue)", "\(locationLabel) \(locationValue)"]
+        if count > 1 {
+            parts.append("×\(count)")
+            parts.append("\(Self.formatPromptTime(firstTime))–\(Self.formatPromptTime(lastTime))")
+        }
+        return "(\(parts.joined(separator: ", ")))"
+    }
+
+    private static func formatPromptTime(_ value: Double) -> String {
+        if value.rounded() == value {
+            return "\(Int(value))s"
+        }
+
+        let formatted = String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), value)
+        return formatted.hasSuffix(".0") ? String(formatted.dropLast(2)) + "s" : "\(formatted)s"
     }
 }
