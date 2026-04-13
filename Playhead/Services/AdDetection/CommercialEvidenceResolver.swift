@@ -139,15 +139,12 @@ enum CommercialEvidenceResolver {
     }
 
     /// Re-locate a brand evidence entry inside a different transcript segment so the
-    /// resulting entry's atomOrdinal/timing belong to that segment rather than the
-    /// segment where the brand was originally extracted.
+    /// resulting entry's atomOrdinal belongs to that segment while preserving the
+    /// catalog-wide repetition metadata accumulated during deduplication.
     ///
-    /// Timing is computed by **linear interpolation over character offsets**: we
-    /// scale the start/end of the regex match by `matchRange / nsText.length`
-    /// against the segment's wall-clock duration. This is approximate — words at
-    /// the start of a long pause receive bogus offsets — and is suitable for
-    /// banner/diagnostic display only. **Do NOT** use these times for tight
-    /// skip-cut boundaries; use the FM-attested span boundaries instead.
+    /// We only re-anchor the matched text to the segment for display/debugging.
+    /// The catalog timing span stays widened so repeated evidence keeps the
+    /// earliest/latest occurrence boundaries that dedup accumulated.
     ///
     /// The regex uses `.useUnicodeWordBoundaries` so that brand names containing
     /// non-ASCII characters (e.g. "Café", "Müller", "naïve") are recognised as
@@ -173,11 +170,6 @@ enum CommercialEvidenceResolver {
         }
 
         let matchedText = nsText.substring(with: match.range)
-        let (startTime, endTime) = interpolateTiming(
-            matchRange: match.range,
-            textLength: nsText.length,
-            segment: segment
-        )
 
         return EvidenceEntry(
             evidenceRef: entry.evidenceRef,
@@ -185,26 +177,9 @@ enum CommercialEvidenceResolver {
             matchedText: matchedText,
             normalizedText: entry.normalizedText,
             atomOrdinal: segment.firstAtomOrdinal,
-            startTime: startTime,
-            endTime: endTime
-        )
-    }
-
-    /// Char-offset linear interpolation. Approximate; see `contextualizedBrandEntry`
-    /// for the precision caveat. Not safe for skip-cut boundaries.
-    private static func interpolateTiming(
-        matchRange: NSRange,
-        textLength: Int,
-        segment: AdTranscriptSegment
-    ) -> (Double, Double) {
-        guard textLength > 0 else { return (segment.startTime, segment.endTime) }
-
-        let duration = segment.endTime - segment.startTime
-        let startFraction = Double(matchRange.location) / Double(textLength)
-        let endFraction = Double(matchRange.location + matchRange.length) / Double(textLength)
-        return (
-            segment.startTime + duration * startFraction,
-            segment.startTime + duration * endFraction
+            count: entry.count,
+            firstTime: entry.firstTime,
+            lastTime: entry.lastTime
         )
     }
 

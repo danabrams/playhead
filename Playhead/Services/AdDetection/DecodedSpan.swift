@@ -93,19 +93,25 @@ extension AnchorRef: Codable {
 
 extension EvidenceEntry: Codable {
     private enum CodingKeys: String, CodingKey {
-        case evidenceRef, category, matchedText, normalizedText, atomOrdinal, startTime, endTime
+        case evidenceRef, category, matchedText, normalizedText, atomOrdinal, count, firstTime, lastTime, startTime, endTime
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        let count = try c.decodeIfPresent(Int.self, forKey: .count) ?? 1
+        let firstTime = try c.decodeIfPresent(Double.self, forKey: .firstTime)
+            ?? c.decode(Double.self, forKey: .startTime)
+        let lastTime = try c.decodeIfPresent(Double.self, forKey: .lastTime)
+            ?? c.decode(Double.self, forKey: .endTime)
         self.init(
             evidenceRef: try c.decode(Int.self, forKey: .evidenceRef),
             category: try c.decode(EvidenceCategory.self, forKey: .category),
             matchedText: try c.decode(String.self, forKey: .matchedText),
             normalizedText: try c.decode(String.self, forKey: .normalizedText),
             atomOrdinal: try c.decode(Int.self, forKey: .atomOrdinal),
-            startTime: try c.decode(Double.self, forKey: .startTime),
-            endTime: try c.decode(Double.self, forKey: .endTime)
+            count: count,
+            firstTime: firstTime,
+            lastTime: lastTime
         )
     }
 
@@ -116,6 +122,10 @@ extension EvidenceEntry: Codable {
         try c.encode(matchedText, forKey: .matchedText)
         try c.encode(normalizedText, forKey: .normalizedText)
         try c.encode(atomOrdinal, forKey: .atomOrdinal)
+        try c.encode(count, forKey: .count)
+        try c.encode(firstTime, forKey: .firstTime)
+        try c.encode(lastTime, forKey: .lastTime)
+        // Emit legacy startTime/endTime so older builds can still decode persisted spans.
         try c.encode(startTime, forKey: .startTime)
         try c.encode(endTime, forKey: .endTime)
     }

@@ -175,8 +175,9 @@ enum EvidenceCatalogBuilder {
         let matchedText: String
         let normalizedText: String
         let atomOrdinal: Int
-        let startTime: Double
-        let endTime: Double
+        var startTime: Double
+        var endTime: Double
+        var count: Int
         /// Character offset of match within the atom text, for deterministic ordering.
         let matchOffset: Int
         /// Character length of the original regex match.
@@ -564,7 +565,8 @@ enum EvidenceCatalogBuilder {
     // MARK: - Deduplication
 
     /// Deduplicate matches by (normalizedText, category). Keeps the first occurrence
-    /// (lowest atomOrdinal, then lowest matchOffset). Also subsumes:
+    /// (lowest atomOrdinal, then lowest matchOffset), while accumulating repeat count
+    /// and widening the time span across every merged occurrence. Also subsumes:
     /// 1. Bare-domain URLs when a more specific path URL exists globally
     ///    (e.g., removes "acme.com" when "acme.com/offer" is present).
     /// 2. Within a single atom, the LONGER of two URL matches when one contains
