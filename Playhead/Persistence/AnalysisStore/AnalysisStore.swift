@@ -2512,7 +2512,7 @@ actor AnalysisStore {
         let sql = """
             UPDATE ad_windows SET
                 startTime = ?, endTime = ?, confidence = ?, boundaryState = ?,
-                evidenceText = ?, evidenceStartTime = ?
+                evidenceText = ?, evidenceStartTime = ?, evidenceSources = ?
             WHERE id = ?
             """
         let stmt = try prepare(sql)
@@ -2523,7 +2523,8 @@ actor AnalysisStore {
         bind(stmt, 4, ad.boundaryState)
         bind(stmt, 5, ad.evidenceText)
         bind(stmt, 6, ad.evidenceStartTime)
-        bind(stmt, 7, ad.id)
+        bind(stmt, 7, ad.evidenceSources)
+        bind(stmt, 8, ad.id)
         try step(stmt, expecting: SQLITE_DONE)
     }
 

@@ -506,8 +506,8 @@ struct SkipOrchestratorCorrectionStoreTests {
 @Suite("SkipOrchestrator Characterization - Finalized Boundaries")
 struct SkipOrchestratorCharacterizationFinalizedBoundaryTests {
 
-    @Test("Finalized boundaries pass through unchanged")
-    func keepsFinalizedBoundaries() async throws {
+    @Test("Boundaries are forwarded as-is (snapping is upstream)")
+    func boundariesPassThroughWithoutModification() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
 
@@ -522,24 +522,22 @@ struct SkipOrchestratorCharacterizationFinalizedBoundaryTests {
             podcastId: "podcast-1"
         )
 
+        // Use non-round boundary times to verify they are not modified.
         let ad = makeSkipTestAdWindow(
             id: "ad-snap",
-            startTime: 61,
-            endTime: 120,
+            startTime: 61.347,
+            endTime: 119.892,
             confidence: 0.85,
             decisionState: "confirmed"
         )
         await orchestrator.receiveAdWindows([ad])
 
         let log = await orchestrator.getDecisionLog()
-        if let record = log.first {
-            #expect(record.originalStart == 61)
-            #expect(record.snappedStart == 61)
-            #expect(record.originalEnd == 120)
-            #expect(record.snappedEnd == 120)
-        } else {
-            Issue.record("Expected a decision log record for the finalized window")
-        }
+        let record = try #require(log.first, "Expected a decision log record for the window")
+        #expect(record.originalStart == 61.347)
+        #expect(record.snappedStart == 61.347, "SkipOrchestrator should not modify boundaries — snapping is upstream")
+        #expect(record.originalEnd == 119.892)
+        #expect(record.snappedEnd == 119.892, "SkipOrchestrator should not modify boundaries — snapping is upstream")
     }
 }
 

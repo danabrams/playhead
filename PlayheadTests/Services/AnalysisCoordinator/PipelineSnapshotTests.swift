@@ -34,54 +34,61 @@ private func makeHotPathContextChunk(
 
 // MARK: - Shard Prioritization Logic
 
+private let defaultChunkOverlap: TimeInterval = 0.5
+private let defaultLookaheadWallClockSeconds: TimeInterval = 120.0
+
+private func makeTestShard(id: Int, startTime: TimeInterval, duration: TimeInterval = 30) -> AnalysisShard {
+    AnalysisShard(id: id, episodeID: "test-ep", startTime: startTime, duration: duration, samples: [])
+}
+
+private func prioritizeViaProduction(
+    shardStarts: [TimeInterval],
+    playhead: TimeInterval,
+    rate: Double = 1.0
+) -> [TimeInterval] {
+    let shards = shardStarts.enumerated().map { i, start in
+        makeTestShard(id: i, startTime: start)
+    }
+    return TranscriptEngineService.prioritizeShards(
+        shards,
+        playhead: playhead,
+        playbackRate: rate,
+        chunkOverlap: defaultChunkOverlap,
+        lookaheadWallClockSeconds: defaultLookaheadWallClockSeconds
+    ).map(\.startTime)
+}
+
 @Suite("Shard Prioritization – Partition Logic")
 struct ShardPartitionTests {
 
-    // These tests reproduce the exact partition logic from
-    // TranscriptEngineService.prioritizeShards() to verify shard ordering.
-
-    private let chunkOverlap: TimeInterval = 0.5
-
-    private func isAhead(shardStart: TimeInterval, playhead: TimeInterval) -> Bool {
-        shardStart >= playhead - chunkOverlap
-    }
-
     @Test("All shards ahead when playhead is at 0")
     func allAheadAtZero() {
-        let playhead: TimeInterval = 0.0
-        #expect(isAhead(shardStart: 0, playhead: playhead))
-        #expect(isAhead(shardStart: 30, playhead: playhead))
-        #expect(isAhead(shardStart: 60, playhead: playhead))
-        #expect(isAhead(shardStart: 90, playhead: playhead))
+        let ordered = prioritizeViaProduction(shardStarts: [0, 30, 60, 90], playhead: 0)
+        #expect(ordered.first == 0)
+        #expect(ordered == [0, 30, 60, 90])
     }
 
     @Test("Shard 0 is behind when playhead drifts to 15s")
     func shard0BehindWhenDrifted() {
-        // This is the bug scenario: during streaming download, playhead
-        // drifts to ~15s before analysis starts. Without pipelineStartSnapshot,
-        // shard 0 (startTime=0) falls into the behind partition.
-        let playhead: TimeInterval = 15.0
-        #expect(!isAhead(shardStart: 0, playhead: playhead),
-                "Shard 0 is behind at drifted playhead — the bug we fixed")
-        #expect(isAhead(shardStart: 15, playhead: playhead))
-        #expect(isAhead(shardStart: 30, playhead: playhead))
+        // Shard 0 (startTime=0) falls into 'behind' at playhead 15, but
+        // the production code hoists it to the front.
+        let ordered = prioritizeViaProduction(shardStarts: [0, 15, 30], playhead: 15)
+        #expect(ordered.first == 0,
+                "Shard 0 must always be first — production code hoists it from behind")
     }
 
     @Test("Shard 0 stays ahead at small drift under overlap")
     func shard0AheadAtSmallDrift() {
-        // If playhead is only 0.3s in, shard 0 is still ahead
-        // because 0 >= 0.3 - 0.5 = -0.2
-        let playhead: TimeInterval = 0.3
-        #expect(isAhead(shardStart: 0, playhead: playhead))
+        let ordered = prioritizeViaProduction(shardStarts: [0, 30], playhead: 0.3)
+        #expect(ordered.first == 0)
     }
 
     @Test("Shard just below cutoff falls behind")
     func shardJustBelowCutoff() {
-        let playhead: TimeInterval = 30.0
-        // 29.0 >= 30.0 - 0.5 = 29.5 → false
-        #expect(!isAhead(shardStart: 29.0, playhead: playhead))
-        // 29.5 >= 29.5 → true
-        #expect(isAhead(shardStart: 29.5, playhead: playhead))
+        // 29.0 < 30.0 - 0.5 = 29.5 → behind; 29.5 >= 29.5 → ahead
+        let ordered = prioritizeViaProduction(shardStarts: [29.0, 29.5, 30], playhead: 30)
+        #expect(ordered.first == 29.5 || ordered.first == 30,
+                "Shard at 29.0 must not be first (it is behind)")
     }
 }
 
@@ -90,67 +97,31 @@ struct ShardPartitionTests {
 @Suite("Shard Prioritization – Ordering")
 struct ShardOrderingTests {
 
-    private let chunkOverlap: TimeInterval = 0.5
-    private let lookaheadWallClockSeconds: TimeInterval = 120.0
-
-    /// Reproduce the full prioritization: shard 0 → hot path → cold ahead → behind.
-    private func prioritize(
-        shardStarts: [TimeInterval],
-        playhead: TimeInterval,
-        rate: Double = 1.0
-    ) -> [TimeInterval] {
-        let lookaheadAudioSeconds = lookaheadWallClockSeconds * rate
-
-        let ahead = shardStarts
-            .filter { $0 >= playhead - chunkOverlap }
-            .sorted()
-
-        let behind = shardStarts
-            .filter { $0 < playhead - chunkOverlap }
-            .sorted(by: >)
-
-        // Shard 0 always goes first for pre-roll ad detection.
-        let shard0 = behind.filter { $0 == 0 }
-        let behindWithoutShard0 = behind.filter { $0 > 0 }
-
-        let hotPath = ahead.filter { $0 < playhead + lookaheadAudioSeconds }
-        let coldAhead = ahead.filter { $0 >= playhead + lookaheadAudioSeconds }
-
-        return shard0 + hotPath + coldAhead + behindWithoutShard0
-    }
-
     @Test("Shard 0 is first when playhead is at 0")
     func shard0FirstAtZero() {
-        let shards: [TimeInterval] = [0, 30, 60, 90, 120]
-        let ordered = prioritize(shardStarts: shards, playhead: 0)
+        let ordered = prioritizeViaProduction(shardStarts: [0, 30, 60, 90, 120], playhead: 0)
         #expect(ordered.first == 0, "Shard 0 must be transcribed first")
     }
 
     @Test("Shard 0 is first even when playhead drifts to 15s")
     func shard0FirstWhenDrifted() {
-        let shards: [TimeInterval] = [0, 30, 60, 90, 120]
-        let ordered = prioritize(shardStarts: shards, playhead: 15)
+        let ordered = prioritizeViaProduction(shardStarts: [0, 30, 60, 90, 120], playhead: 15)
         #expect(ordered.first == 0, "Shard 0 must always be first for pre-roll ad detection")
     }
 
     @Test("Shard 0 is first even when playback starts mid-episode")
     func shard0FirstMidEpisode() {
-        let shards: [TimeInterval] = [0, 30, 60, 90, 120, 150, 180]
-        let ordered = prioritize(shardStarts: shards, playhead: 90)
+        let ordered = prioritizeViaProduction(shardStarts: [0, 30, 60, 90, 120, 150, 180], playhead: 90)
         #expect(ordered.first == 0, "Shard 0 must always be first")
-        // Shards near playhead (90, 120) should follow shard 0.
         #expect(ordered[1] == 90)
     }
 
     @Test("At 2x speed, hot path window doubles")
     func hotPathScalesWithSpeed() {
-        // 200 shards, each 30s → 6000s total.
-        // At 2x with 120s lookahead → 240s of audio in hot path.
         let shards = (0..<200).map { TimeInterval($0) * 30.0 }
-        let ordered = prioritize(shardStarts: shards, playhead: 0, rate: 2.0)
+        let ordered = prioritizeViaProduction(shardStarts: shards, playhead: 0, rate: 2.0)
 
-        // First 8 shards (0-240s) should be in hot path, in order.
-        let hotPathEnd = 0 + 120.0 * 2.0 // 240s
+        let hotPathEnd = 120.0 * 2.0 // 240s
         let hotCount = ordered.prefix(while: { $0 < hotPathEnd }).count
         #expect(hotCount == 8)
     }

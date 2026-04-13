@@ -382,14 +382,15 @@ struct SpanHypothesisEngine: Sendable {
             if let index = bestCompatibleHypothesisIndex(for: event) {
                 var hypothesis = activeHypotheses[index]
                 hypothesis.absorb(anchor: event)
-                hypothesis.confirmIfNeeded(minConfirmedEvidence: config.minConfirmedEvidence)
+                hypothesis.confirmIfNeeded(minConfirmedEvidence: config.minConfirmedEvidence, decayRate: config.evidenceDecayRate)
                 hypothesis.closingAnchor = event
                 hypothesis.expandedBoundary = makeExpandedBoundary(for: hypothesis)
                 let span = hypothesis.close(
                     analysisAssetId: analysisAssetId,
                     closingReason: .returnMarker,
                     closeTime: event.endTime,
-                    minConfirmedEvidence: config.minConfirmedEvidence
+                    minConfirmedEvidence: config.minConfirmedEvidence,
+                    decayRate: config.evidenceDecayRate
                 )
                 emitClosingHypothesis(hypothesis, at: index)
                 emitted.append(span)
@@ -401,14 +402,15 @@ struct SpanHypothesisEngine: Sendable {
             if let index = bestCompatibleHypothesisIndex(for: event) {
                 var hypothesis = activeHypotheses[index]
                 hypothesis.absorb(anchor: event)
-                hypothesis.confirmIfNeeded(minConfirmedEvidence: config.minConfirmedEvidence)
+                hypothesis.confirmIfNeeded(minConfirmedEvidence: config.minConfirmedEvidence, decayRate: config.evidenceDecayRate)
                 hypothesis.closingAnchor = event
                 hypothesis.expandedBoundary = makeExpandedBoundary(for: hypothesis)
                 let span = hypothesis.close(
                     analysisAssetId: analysisAssetId,
                     closingReason: .explicitClose,
                     closeTime: event.endTime,
-                    minConfirmedEvidence: config.minConfirmedEvidence
+                    minConfirmedEvidence: config.minConfirmedEvidence,
+                    decayRate: config.evidenceDecayRate
                 )
                 emitClosingHypothesis(hypothesis, at: index)
                 emitted.append(span)
@@ -417,7 +419,7 @@ struct SpanHypothesisEngine: Sendable {
                     seedAnchor: event,
                     config: config.config(for: event.anchorType)
                 )
-                hypothesis.confirmIfNeeded(minConfirmedEvidence: config.minConfirmedEvidence)
+                hypothesis.confirmIfNeeded(minConfirmedEvidence: config.minConfirmedEvidence, decayRate: config.evidenceDecayRate)
                 activeHypotheses.append(hypothesis)
             }
             return emitted
@@ -425,7 +427,7 @@ struct SpanHypothesisEngine: Sendable {
 
         if let index = bestCompatibleHypothesisIndex(for: event) {
             activeHypotheses[index].absorb(anchor: event)
-            activeHypotheses[index].confirmIfNeeded(minConfirmedEvidence: config.minConfirmedEvidence)
+            activeHypotheses[index].confirmIfNeeded(minConfirmedEvidence: config.minConfirmedEvidence, decayRate: config.evidenceDecayRate)
             emitted.append(contentsOf: mergeCompatibleHypotheses(around: index, analysisAssetId: analysisAssetId))
         } else {
             activeHypotheses.append(SpanHypothesis(seedAnchor: event, config: config.config(for: event.anchorType)))
@@ -439,7 +441,7 @@ struct SpanHypothesisEngine: Sendable {
 
         if let index = bestBodyEvidenceHypothesisIndex(for: bodyEvidence) {
             activeHypotheses[index].absorb(bodyEvidence: bodyEvidence)
-            activeHypotheses[index].confirmIfNeeded(minConfirmedEvidence: config.minConfirmedEvidence)
+            activeHypotheses[index].confirmIfNeeded(minConfirmedEvidence: config.minConfirmedEvidence, decayRate: config.evidenceDecayRate)
             return mergeCompatibleHypotheses(around: index, analysisAssetId: analysisAssetId)
         }
 
@@ -455,7 +457,8 @@ struct SpanHypothesisEngine: Sendable {
                 analysisAssetId: analysisAssetId,
                 closingReason: .timeout,
                 closeTime: time,
-                minConfirmedEvidence: config.minConfirmedEvidence
+                minConfirmedEvidence: config.minConfirmedEvidence,
+                decayRate: config.evidenceDecayRate
             )
             closedHypotheses.append(hypothesis)
             emitted.append(span)
@@ -708,7 +711,8 @@ struct SpanHypothesisEngine: Sendable {
                     analysisAssetId: analysisAssetId,
                     closingReason: .idleGap,
                     closeTime: time,
-                    minConfirmedEvidence: config.minConfirmedEvidence
+                    minConfirmedEvidence: config.minConfirmedEvidence,
+                    decayRate: config.evidenceDecayRate
                 )
                 closedHypotheses.append(closed)
                 emitted.append(span)
@@ -784,24 +788,26 @@ struct SpanHypothesisEngine: Sendable {
         return hypothesisSponsor == eventSponsor
     }
 
+    private static let comparisonEpsilon: Double = 1e-9
+
     private func hypothesis(_ lhs: SpanHypothesis, isBetterMatchThan rhs: SpanHypothesis, for event: AnchorEvent) -> Bool {
         if prefersPlausibilityRanking(for: event) {
             let lhsScore = terminalAnchorOwnershipScore(for: lhs, event: event)
             let rhsScore = terminalAnchorOwnershipScore(for: rhs, event: event)
-            if lhsScore != rhsScore {
+            if abs(lhsScore - rhsScore) > Self.comparisonEpsilon {
                 return lhsScore > rhsScore
             }
 
             let lhsGap = max(0, event.startTime - lhs.lastEvidenceTime)
             let rhsGap = max(0, event.startTime - rhs.lastEvidenceTime)
-            if lhsGap != rhsGap {
+            if abs(lhsGap - rhsGap) > Self.comparisonEpsilon {
                 return lhsGap < rhsGap
             }
-        } else if lhs.lastEvidenceTime != rhs.lastEvidenceTime {
+        } else if abs(lhs.lastEvidenceTime - rhs.lastEvidenceTime) > Self.comparisonEpsilon {
             return lhs.lastEvidenceTime > rhs.lastEvidenceTime
         }
 
-        if lhs.lastEvidenceTime != rhs.lastEvidenceTime {
+        if abs(lhs.lastEvidenceTime - rhs.lastEvidenceTime) > Self.comparisonEpsilon {
             return lhs.lastEvidenceTime > rhs.lastEvidenceTime
         }
 
@@ -861,21 +867,24 @@ struct SpanHypothesisEngine: Sendable {
     }
 
     private mutating func merge(_ lhs: SpanHypothesis, with rhs: SpanHypothesis) -> SpanHypothesis {
-        var merged = lhs
-        if rhs.seedAnchor.startTime < merged.seedAnchor.startTime {
-            merged = rhs
+        let (winner, loser): (SpanHypothesis, SpanHypothesis)
+        if rhs.seedAnchor.startTime < lhs.seedAnchor.startTime {
+            (winner, loser) = (rhs, lhs)
+        } else {
+            (winner, loser) = (lhs, rhs)
         }
-        merged.supportingAnchors.append(contentsOf: lhs.supportingAnchors)
-        merged.supportingAnchors.append(contentsOf: rhs.supportingAnchors)
-        merged.bodyEvidence.append(contentsOf: lhs.bodyEvidence)
-        merged.bodyEvidence.append(contentsOf: rhs.bodyEvidence)
+        var merged = winner
+        // Append only the loser's evidence to avoid double-counting the winner's.
+        merged.supportingAnchors.append(loser.seedAnchor)
+        merged.supportingAnchors.append(contentsOf: loser.supportingAnchors)
+        merged.bodyEvidence.append(contentsOf: loser.bodyEvidence)
         merged.startCandidateTime = min(lhs.startCandidateTime, rhs.startCandidateTime)
         merged.endCandidateTime = max(lhs.endCandidateTime, rhs.endCandidateTime)
         merged.lastEvidenceTime = max(lhs.lastEvidenceTime, rhs.lastEvidenceTime)
         if merged.sponsorEntity == nil {
-            merged.sponsorEntity = lhs.sponsorEntity ?? rhs.sponsorEntity
+            merged.sponsorEntity = loser.sponsorEntity
         }
-        merged.expandedBoundary = lhs.expandedBoundary ?? rhs.expandedBoundary
+        merged.expandedBoundary = winner.expandedBoundary ?? loser.expandedBoundary
         merged.state = maxState(lhs.state, rhs.state)
         return merged
     }
@@ -969,14 +978,14 @@ struct SpanHypothesisEngine: Sendable {
         return trimmed.joined(separator: " ")
     }
 
-    private static func extractPromoSponsor(from normalized: String) -> NormalizedSponsor? {
-        let patterns = [
-            #"(?:use|enter|promo|discount|coupon) code [a-z0-9]+(?: at| for| with)? ([a-z0-9][a-z0-9 ]+)"#,
-            #"use code [a-z0-9]+ at ([a-z0-9][a-z0-9 ]+)"#,
-            #"code [a-z0-9]+ at ([a-z0-9][a-z0-9 ]+)"#
-        ]
+    private static let promoSponsorPatterns: [String] = [
+        #"(?:use|enter|promo|discount|coupon) code [a-z0-9]+(?: at| for| with)? ([a-z0-9][a-z0-9 ]+)"#,
+        #"use code [a-z0-9]+ at ([a-z0-9][a-z0-9 ]+)"#,
+        #"code [a-z0-9]+ at ([a-z0-9][a-z0-9 ]+)"#
+    ]
 
-        for pattern in patterns {
+    private static func extractPromoSponsor(from normalized: String) -> NormalizedSponsor? {
+        for pattern in promoSponsorPatterns {
             if let capture = firstCapture(in: normalized, pattern: pattern) {
                 let cleaned = stripTrailingFillerWords(capture)
                 if !cleaned.isEmpty {
@@ -988,8 +997,17 @@ struct SpanHypothesisEngine: Sendable {
         return nil
     }
 
+    private static let compiledRegexCache: [String: NSRegularExpression] = {
+        var cache: [String: NSRegularExpression] = [:]
+        for pattern in promoSponsorPatterns {
+            cache[pattern] = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+        }
+        return cache
+    }()
+
     private static func firstCapture(in text: String, pattern: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+        guard let regex = compiledRegexCache[pattern]
+                ?? (try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])) else {
             return nil
         }
         let nsText = text as NSString

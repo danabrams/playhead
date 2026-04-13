@@ -216,6 +216,80 @@ struct SpanHypothesisEngineTests {
         #expect(Set(engine.activeHypotheses.compactMap { $0.sponsorEntity?.value }) == Set(["betterhelp", "squarespace"]))
     }
 
+    @Test("merge does not double-count winner evidence")
+    func mergeDoesNotDoubleCountEvidence() throws {
+        // Create two same-sponsor hypotheses far enough apart to start as separate,
+        // then bridge them so they merge. After merge, the combined evidence count
+        // should equal the sum of individual evidence counts, not more.
+        var engine = SpanHypothesisEngine()
+        let assetId = "asset-merge-test"
+        let sponsorScanner = makeScanner(podcastSponsorLexicon: "BetterHelp")
+
+        // Hypothesis A: disclosure + sponsor lexicon at t=0-1
+        let disclosureA = try scanHit(
+            category: .sponsor,
+            text: "this episode is sponsored by betterhelp",
+            startTime: 0, endTime: 1,
+            matching: { $0.matchedText == "sponsored by" }
+        )
+        _ = engine.ingest(disclosureA, analysisAssetId: assetId)
+
+        let lexA = try scanHit(
+            scanner: sponsorScanner,
+            category: .sponsor,
+            text: "betterhelp can help you find a therapist",
+            startTime: 5, endTime: 6,
+            matching: { $0.matchedText == "betterhelp" }
+        )
+        _ = engine.ingest(lexA, analysisAssetId: assetId)
+
+        // Hypothesis A now has: seed + 1 supporting = 2 anchors total, 0 body
+
+        // Hypothesis B: separate disclosure for betterhelp much later
+        // (far enough that it doesn't absorb into A via bestCompatibleHypothesisIndex)
+        let disclosureB = try scanHit(
+            category: .sponsor,
+            text: "betterhelp is sponsored by betterhelp again",
+            startTime: 200, endTime: 201,
+            matching: { $0.matchedText == "sponsored by" }
+        )
+        _ = engine.ingest(disclosureB, analysisAssetId: assetId)
+
+        // Should be 2 active (same sponsor but non-overlapping time windows initially)
+        // OR 1 if they already merged. Record state before the bridging event.
+        let preCount = engine.activeHypotheses.count
+
+        if preCount == 2 {
+            let totalAnchorsBefore = engine.activeHypotheses.reduce(0) {
+                $0 + 1 + $1.supportingAnchors.count  // 1 for seed + supporting
+            }
+
+            // Bridge them: a lexical hit between the two triggers merge
+            let bridge = try scanHit(
+                scanner: sponsorScanner,
+                category: .sponsor,
+                text: "betterhelp dot com slash podcast",
+                startTime: 100, endTime: 101,
+                matching: { $0.matchedText == "betterhelp" }
+            )
+            _ = engine.ingest(bridge, analysisAssetId: assetId)
+
+            #expect(engine.activeHypotheses.count == 1, "Same-sponsor hypotheses should merge")
+            let merged = engine.activeHypotheses[0]
+            // 1 seed + supporting anchors. Without double-counting: the bridge event (1)
+            // + loser seed promoted to supporting (1) + loser's supporting (0) + winner's original supporting (1) = 3
+            // Plus the winner seed = 4 total anchors (1 seed + 3 supporting).
+            // With the old bug it would be: 3 supporting from winner + 3 from loser = 6+ supporting
+            let totalAnchorsAfter = 1 + merged.supportingAnchors.count
+            #expect(totalAnchorsAfter == totalAnchorsBefore + 1,
+                    "Merged evidence count (\(totalAnchorsAfter)) should be sum of originals (\(totalAnchorsBefore)) + bridge (1), not more")
+        } else {
+            // They merged immediately (same sponsor) — still verify no inflation
+            let merged = engine.activeHypotheses[0]
+            #expect(merged.supportingAnchors.count <= 3, "Should not double-count evidence on immediate merge")
+        }
+    }
+
     @Test("sponsor-less promo closes prefer the stronger compatible owner over a newer weaker span")
     func sponsorlessPromoCloseAnchorsChooseStrongerCompatibleSpan() throws {
         var engine = SpanHypothesisEngine()

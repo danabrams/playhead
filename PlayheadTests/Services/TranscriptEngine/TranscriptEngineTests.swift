@@ -505,7 +505,7 @@ private final class TrackingRecognizer: SpeechRecognizer, @unchecked Sendable {
 @Suite("TranscriptEngine – Incremental Shard Append")
 struct IncrementalShardAppendTests {
 
-    @Test("appendShards processes new shards after initial loop completes")
+    @Test("appendShards processes new shards after initial loop completes", .timeLimit(.minutes(1)))
     func appendShardsAfterCompletion() async throws {
         let store = try await makeTestStore()
         let recognizer = TrackingRecognizer()
@@ -537,6 +537,9 @@ struct IncrementalShardAppendTests {
         let initialCount = recognizer.transcribedShardIds.count
         #expect(initialCount >= 3, "Expected at least 3 shards transcribed, got \(initialCount)")
 
+        // Subscribe to events before appending so we don't miss .completed.
+        let appendEvents = await engine.events()
+
         // Now append new shards (simulating incremental download).
         let newShards = [
             makeShard(id: 10, startTime: 300, duration: 30),
@@ -548,8 +551,10 @@ struct IncrementalShardAppendTests {
             snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
         )
 
-        // Give the loop time to process (it runs in a Task on the actor).
-        try await Task.sleep(for: .seconds(2))
+        // Wait for the append loop to complete (it starts a new loop that emits .completed).
+        for await event in appendEvents {
+            if case .completed = event { break }
+        }
 
         // The appended shards must have been transcribed.
         let allIds = recognizer.transcribedShardIds

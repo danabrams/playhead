@@ -533,38 +533,38 @@ actor TranscriptEngineService {
         existingCoverage: Double
     ) -> [AnalysisShard] {
         guard let snapshot = latestSnapshot else {
-            // No playback info — process in natural order.
             return shards
         }
+        return Self.prioritizeShards(
+            shards,
+            playhead: snapshot.playheadTime,
+            playbackRate: snapshot.playbackRate,
+            chunkOverlap: config.chunkOverlap,
+            lookaheadWallClockSeconds: config.lookaheadWallClockSeconds
+        )
+    }
 
-        let playhead = snapshot.playheadTime
-        let rate = max(snapshot.playbackRate, 1.0)
+    static func prioritizeShards(
+        _ shards: [AnalysisShard],
+        playhead: Double,
+        playbackRate: Double,
+        chunkOverlap: TimeInterval,
+        lookaheadWallClockSeconds: TimeInterval
+    ) -> [AnalysisShard] {
+        let rate = max(playbackRate, 1.0)
+        let lookaheadAudioSeconds = lookaheadWallClockSeconds * rate
 
-        // Compute the lookahead window in audio seconds.
-        let lookaheadAudioSeconds = config.lookaheadWallClockSeconds * rate
-
-        // Partition: ahead-of-playhead first (sorted by proximity),
-        // then behind-playhead (sorted by proximity descending for
-        // backfill from recent to old).
-        // Coverage filtering removed — the watermark is a high-water mark
-        // that doesn't reflect behind-playhead gaps. Per-shard fingerprint
-        // dedup in transcribeShard handles already-transcribed shards.
         let ahead = shards
-            .filter { $0.startTime >= playhead - config.chunkOverlap }
+            .filter { $0.startTime >= playhead - chunkOverlap }
             .sorted { $0.startTime < $1.startTime }
 
         let behind = shards
-            .filter { $0.startTime < playhead - config.chunkOverlap }
+            .filter { $0.startTime < playhead - chunkOverlap }
             .sorted { $0.startTime > $1.startTime }
 
-        // Always include shard 0 in hot path — pre-roll ad detection
-        // needs the episode start regardless of where playback begins.
-        // Without this, shard 0 ends up last in `behind` and may be
-        // skipped if the task is cancelled before reaching it.
         let shard0 = behind.filter { $0.startTime == 0 }
         let behindWithoutShard0 = behind.filter { $0.startTime > 0 }
 
-        // Hot path: shards within the lookahead window come first.
         let hotPath = ahead.filter { $0.startTime < playhead + lookaheadAudioSeconds }
         let coldAhead = ahead.filter { $0.startTime >= playhead + lookaheadAudioSeconds }
 

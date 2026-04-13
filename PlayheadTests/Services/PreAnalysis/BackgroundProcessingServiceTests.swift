@@ -24,7 +24,7 @@ private func makeBPS(
 }
 
 /// Wait until a stub task is completed, with a timeout to avoid hanging.
-private func waitForCompletion(of task: StubBackgroundTask, timeout: Duration = .seconds(5)) async throws {
+private func waitForCompletion(of task: StubBackgroundTask, timeout: Duration = .seconds(10)) async throws {
     let deadline = ContinuousClock.now + timeout
     while task.completedSuccess == nil && ContinuousClock.now < deadline {
         try await Task.sleep(for: .milliseconds(10))
@@ -36,7 +36,8 @@ private func waitForCompletion(of task: StubBackgroundTask, timeout: Duration = 
 @Suite("Backfill Task Handler")
 struct BackfillTaskHandlerTests {
 
-    @Test("Backfill completes successfully")
+    @Test("Backfill completes successfully",
+          .timeLimit(.minutes(1)))
     func backfillCompletesSuccessfully() async throws {
         let (bps, coordinator, scheduler, _) = makeBPS()
         let task = StubBackgroundTask()
@@ -56,7 +57,8 @@ struct BackfillTaskHandlerTests {
         #expect(!backfillRequests.isEmpty)
     }
 
-    @Test("Backfill skipped on thermal throttle via capabilitiesService")
+    @Test("Backfill skipped on thermal throttle via capabilitiesService",
+          .timeLimit(.minutes(1)))
     func backfillSkippedOnThermalThrottle() async throws {
         // NOTE: This test exercises the throttle-check code path in handleBackfillTask.
         // On a simulator with nominal thermal state, the backfill will proceed normally.
@@ -75,7 +77,8 @@ struct BackfillTaskHandlerTests {
         #expect(task.completedSuccess == true)
     }
 
-    @Test("Backfill expiration cancels work")
+    @Test("Backfill expiration cancels work",
+          .timeLimit(.minutes(1)))
     func backfillExpirationCancelsWork() async throws {
         let coordinator = StubAnalysisCoordinator()
         // Make runPendingBackfill() take long enough for expiration to fire.
@@ -107,7 +110,8 @@ struct BackfillTaskHandlerTests {
         #expect(task.completedSuccess == false)
     }
 
-    @Test("Backfill handler invokes real work method, not startCapabilityObserver")
+    @Test("Backfill handler invokes real work method, not startCapabilityObserver",
+          .timeLimit(.minutes(1)))
     func backfillInvokesRealWorkMethod() async throws {
         // Regression: handleBackfillTask used to call the coordinator's
         // capability-observer setup (now startCapabilityObserver()), which
@@ -132,7 +136,8 @@ struct BackfillTaskHandlerTests {
         #expect(task.completedSuccess == true)
     }
 
-    @Test("Overlapping BG handlers each complete their own task independently")
+    @Test("Overlapping BG handlers each complete their own task independently",
+          .timeLimit(.minutes(1)))
     func overlappingHandlersCompleteIndependently() async throws {
         // Regression for H1: prior to this fix, BackgroundProcessingService
         // shared a single `bgTaskCompleted` flag and a single

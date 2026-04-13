@@ -420,10 +420,6 @@ private extension FeatureWindow {
     func contains(_ time: Double) -> Bool {
         startTime <= time && time <= endTime
     }
-
-    var midpoint: Double {
-        (startTime + endTime) / 2.0
-    }
 }
 
 private extension Sequence where Element == Double {

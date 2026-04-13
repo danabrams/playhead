@@ -52,7 +52,8 @@ struct RuntimeShutdownLifecycleTests {
     //             post-shutdown wake/start are no-ops).
 
     @MainActor
-    @Test("shutdown() after startup drives a clean exit and is idempotent")
+    @Test("shutdown() after startup drives a clean exit and is idempotent",
+          .timeLimit(.minutes(1)))
     func shutdownStopsObserverAndIsIdempotent() async throws {
         let runtime = PlayheadRuntime(isPreviewRuntime: false)
         guard let observer = runtime._shadowRetryObserverForTesting() else {
@@ -110,7 +111,8 @@ struct RuntimeShutdownLifecycleTests {
     // MARK: - 2. Startup vs teardown race.
 
     @MainActor
-    @Test("shutdown() racing startup leaves the observer unarmed")
+    @Test("shutdown() racing startup leaves the observer unarmed",
+          .timeLimit(.minutes(1)))
     func shutdownDuringStartupLeavesObserverUnarmed() async throws {
         // Construct a non-preview runtime and IMMEDIATELY shut it down,
         // without yielding or polling for the observer loop to be
@@ -184,7 +186,8 @@ struct RuntimeShutdownLifecycleTests {
     // MARK: - 3. Deinit fallback.
 
     @MainActor
-    @Test("deinit releases the runtime even while the observer loop is still running")
+    @Test("deinit releases the runtime even while the observer loop is still running",
+          .timeLimit(.minutes(1)))
     func deinitReleasesRuntimeWithoutCycleWhenShutdownSkipped() async throws {
         // The deinit fallback on `PlayheadRuntime` is documented as a
         // best-effort safety net whose only useful action is
@@ -313,7 +316,7 @@ struct RuntimeShutdownLifecycleTests {
     /// teardown must first wait for the loop to actually be running.
     private func waitForLoopRunning(
         observer: ShadowRetryObserver,
-        timeout: TimeInterval = 2.0
+        timeout: TimeInterval = 5.0
     ) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {

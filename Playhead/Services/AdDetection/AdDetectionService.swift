@@ -560,7 +560,14 @@ actor AdDetectionService {
         )
         guard !reconciledWindows.isEmpty else {
             logger.info("Hot path: replay matched only terminal windows; nothing new to persist")
-            return HotPathRunResult(windows: [], retiredWindowIDs: [])
+            if !replayCandidateIDs.isEmpty {
+                try await store.upsertHotPathAdWindows(
+                    [],
+                    existingIDs: [],
+                    retiredIDs: replayCandidateIDs
+                )
+            }
+            return HotPathRunResult(windows: [], retiredWindowIDs: replayCandidateIDs)
         }
 
         let matchedExistingIDs = Set(reconciledWindows.compactMap(\.matchedExistingID))

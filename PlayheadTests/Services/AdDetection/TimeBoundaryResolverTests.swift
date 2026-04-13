@@ -330,6 +330,33 @@ struct TimeBoundaryResolverTests {
         )
     }
 
+    @Test("snap returns original time when feature windows are empty")
+    func snapWithEmptyFeatureWindowsReturnsOriginal() {
+        let result = resolver.snap(
+            candidateTime: 100,
+            boundaryType: .start,
+            anchorType: .fmPositive,
+            featureWindows: [],
+            lexicalHits: []
+        )
+        expectApproximately(result, 100)
+    }
+
+    @Test("snap returns original time when single window scores below threshold")
+    func snapWithSingleLowScoreWindowReturnsOriginal() {
+        let windows = [
+            makeWindow(start: 105, end: 107, pause: 0.01, speakerChange: 0.01, musicBedChange: 0.01, spectralFlux: 0.01),
+        ]
+        let result = resolver.snap(
+            candidateTime: 100,
+            boundaryType: .start,
+            anchorType: .fmPositive,
+            featureWindows: windows,
+            lexicalHits: []
+        )
+        expectApproximately(result, 100)
+    }
+
     private func expectApproximately(
         _ actual: Double,
         _ expected: Double,

@@ -394,23 +394,30 @@ struct ReplaySimulatorConditionTests {
 
     @Test("Listen tap reverts a skip and records it")
     func listenTapRevert() {
-        // Place the listen tap after the ad would be skipped.
+        // Place the listen tap well inside the ad (120-180) so the skip fires first,
+        // then the tap reverts it.
         let config = makeConfig(interactions: [
-            SimulatedInteraction(type: .listenTap, atTime: 125, targetTime: nil, newSpeed: nil),
+            SimulatedInteraction(type: .listenTap, atTime: 150, targetTime: nil, newSpeed: nil),
         ])
         let driver = SimulatedPlaybackDriver(config: config, rng: SeededRandomNumberGenerator(seed: 42))
         let events = driver.runReplay()
 
+        let skips = events.filter {
+            if case .skipApplied = $0 { return true }
+            return false
+        }
         let reverts = events.filter {
             if case .skipReverted = $0 { return true }
             return false
         }
 
+        // The ad at 120-180 must be detected and skipped before the listen tap at t=150.
+        #expect(!skips.isEmpty, "A skip should be applied for the ad at 120-180")
+        #expect(!reverts.isEmpty, "Listen tap at t=150 should revert the skip of the 120-180 ad")
+
         let overrides = driver.computeUserOverrideMetrics()
-        // The listen tap may or may not fire depending on whether a skip was applied
-        // before t=125. Either way, the metric should be computable.
-        #expect(overrides.overrideRate >= 0, "Override rate should be computable")
-        _ = reverts // suppress unused warning
+        #expect(overrides.listenTapCount > 0, "Listen tap count should be at least 1")
+        #expect(overrides.overrideRate > 0, "Override rate should reflect the listen-tap revert")
     }
 
     @Test("Delivery-style rewind metrics are sliced by the skipped ad")

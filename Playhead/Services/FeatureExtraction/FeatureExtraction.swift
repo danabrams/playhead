@@ -333,6 +333,9 @@ enum FeatureSignalExtraction {
             analyzer.completeAnalysis()
             return observer.timeline
         } catch {
+            #if DEBUG
+            print("[FeatureExtraction] SoundAnalysis music classifier failed: \(error)")
+            #endif
             return nil
         }
     }
