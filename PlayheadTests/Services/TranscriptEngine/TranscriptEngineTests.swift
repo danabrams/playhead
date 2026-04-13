@@ -1,6 +1,7 @@
 // TranscriptEngineTests.swift
 // Tests for the Speech integration layer and dual-pass transcript engine.
 
+import AVFoundation
 import Foundation
 import os
 import Testing
@@ -756,6 +757,62 @@ struct TranscriptWeakAnchorMetadataTests {
 }
 
 #if canImport(Speech)
+
+private func makeAnalyzerStyleInt16Buffer(
+    frameCount: AVAudioFrameCount = 16_000
+) throws -> (buffer: AVAudioPCMBuffer, format: AVAudioFormat) {
+    guard let format = AVAudioFormat(
+        commonFormat: .pcmFormatInt16,
+        sampleRate: 16_000,
+        channels: 1,
+        interleaved: false
+    ) else {
+        throw NSError(domain: "TranscriptEngineTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to create analyzer test format"])
+    }
+
+    guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+        throw NSError(domain: "TranscriptEngineTests", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to allocate analyzer test buffer"])
+    }
+
+    buffer.frameLength = frameCount
+
+    guard let channelData = buffer.int16ChannelData?.pointee else {
+        throw NSError(domain: "TranscriptEngineTests", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to access analyzer test channel data"])
+    }
+
+    for index in 0..<Int(frameCount) {
+        channelData[index] = Int16(truncatingIfNeeded: (index % 2048) - 1024)
+    }
+
+    return (buffer, format)
+}
+
+@Suite("AppleSpeechRecognizer audio file bridge")
+struct AppleSpeechRecognizerAudioFileBridgeTests {
+
+    @Test("analysis audio file settings force interleaved file storage")
+    func analysisAudioFileSettingsForceInterleavedStorage() throws {
+        let (_, format) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
+        let settings = AppleSpeechRecognizer.analysisAudioFileSettings(for: format)
+        let formatID = settings[AVFormatIDKey] as? NSNumber
+
+        #expect(settings[AVLinearPCMIsNonInterleaved] as? Bool == false)
+        #expect(formatID?.uint32Value == kAudioFormatLinearPCM)
+    }
+
+    @Test("makeAnalysisAudioFile writes analyzer-style Int16 buffers")
+    func makeAnalysisAudioFileWritesAnalyzerStyleBuffer() throws {
+        let (buffer, format) = try makeAnalyzerStyleInt16Buffer()
+        let fileURL = try AppleSpeechRecognizer.makeAnalysisAudioFile(from: buffer, format: format)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let file = try AVAudioFile(forReading: fileURL)
+
+        #expect(file.length == AVAudioFramePosition(buffer.frameLength))
+        #expect(file.fileFormat.sampleRate == 16_000)
+        #expect(file.fileFormat.channelCount == 1)
+    }
+}
 
 @Suite("SpeechTranscriber extraction")
 struct SpeechTranscriberExtractionTests {

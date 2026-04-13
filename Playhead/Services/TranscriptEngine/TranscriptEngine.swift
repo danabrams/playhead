@@ -1057,14 +1057,29 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         return buffer
     }
 
-    private static func makeAnalysisAudioFile(
+    static func analysisAudioFileSettings(for format: AVAudioFormat) -> [String: Any] {
+        var settings = format.settings
+        // Persist interleaved linear PCM to disk even when the analyzer's
+        // processing buffer is non-interleaved. AVAudioFile can then accept
+        // the explicit buffer processing format below without rejecting the
+        // write on iOS device builds.
+        settings[AVLinearPCMIsNonInterleaved] = false
+        return settings
+    }
+
+    static func makeAnalysisAudioFile(
         from buffer: AVAudioPCMBuffer,
         format: AVAudioFormat
     ) throws -> URL {
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("playhead-transcript-\(UUID().uuidString).caf")
 
-        let file = try AVAudioFile(forWriting: fileURL, settings: format.settings)
+        let file = try AVAudioFile(
+            forWriting: fileURL,
+            settings: analysisAudioFileSettings(for: format),
+            commonFormat: buffer.format.commonFormat,
+            interleaved: buffer.format.isInterleaved
+        )
         try file.write(from: buffer)
         return fileURL
     }
