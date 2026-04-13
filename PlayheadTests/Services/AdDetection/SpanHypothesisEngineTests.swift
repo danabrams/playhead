@@ -533,6 +533,56 @@ struct SpanHypothesisEngineTests {
         #expect(!closed[0].isSkipEligible)
     }
 
+    @Test("confirmed CTA-only end anchored hypotheses expand boundaries at close time without mutating their live window")
+    func confirmedCTAOnlyEndAnchoredHypothesesExpandAtClose() throws {
+        let urlConfig = SpanHypothesisConfig.defaultURLConfig
+        var engine = SpanHypothesisEngine(
+            config: SpanHypothesisConfig(
+                minConfirmedEvidence: 0.95
+            ),
+            boundaryExpansionContext: .init(
+                featureWindows: [
+                    makeFeatureWindow(start: 15, end: 16, pauseProb: 0.95, rms: 0.01),
+                    makeFeatureWindow(start: 110, end: 111, pauseProb: 0.96, rms: 0.01),
+                ],
+                transcriptChunks: []
+            )
+        )
+        let analysisAssetId = "asset-span-engine"
+
+        let urlHit = try scanHit(
+            category: .urlCTA,
+            text: "visit betterhelp.com/podcast for details",
+            startTime: 100,
+            endTime: 101,
+            matching: { $0.weight == 0.95 }
+        )
+        let emitted = engine.ingest(urlHit, analysisAssetId: analysisAssetId)
+
+        #expect(emitted.isEmpty)
+        #expect(engine.activeHypotheses.count == 1)
+        #expect(engine.activeHypotheses[0].state == .confirmed)
+        let expectedStartCandidate = urlHit.startTime - urlConfig.backwardSearchRadius
+        let expectedEndCandidate = urlHit.endTime + urlConfig.forwardSearchRadius
+        #expect(abs(engine.activeHypotheses[0].startCandidateTime - expectedStartCandidate) < 0.001)
+        #expect(abs(engine.activeHypotheses[0].endCandidateTime - expectedEndCandidate) < 0.001)
+        #expect(engine.activeHypotheses[0].expandedBoundary == nil)
+
+        let closed = engine.finish(analysisAssetId: analysisAssetId, at: urlHit.endTime)
+
+        #expect(closed.count == 1)
+        #expect(closed[0].startTime == 15.0)
+        #expect(closed[0].endTime == 111.0)
+        #expect(closed[0].isSkipEligible)
+
+        #expect(engine.closedHypotheses.count == 1)
+        #expect(abs(engine.closedHypotheses[0].startCandidateTime - expectedStartCandidate) < 0.001)
+        #expect(abs(engine.closedHypotheses[0].endCandidateTime - expectedEndCandidate) < 0.001)
+        #expect(engine.closedHypotheses[0].expandedBoundary?.startTime == 15.0)
+        #expect(engine.closedHypotheses[0].expandedBoundary?.endTime == 111.0)
+        #expect(engine.closedHypotheses[0].expandedBoundary?.source == .acousticOnly)
+    }
+
     @Test("evidence decay lowers the score as time advances")
     func evidenceDecayLowersScore() {
         let event = AnchorEvent(
@@ -634,5 +684,25 @@ private func makeChunk(text: String, startTime: Double, endTime: Double) -> Tran
         modelVersion: "test",
         transcriptVersion: nil,
         atomOrdinal: nil
+    )
+}
+
+private func makeFeatureWindow(
+    start: Double,
+    end: Double,
+    pauseProb: Double,
+    rms: Double
+) -> FeatureWindow {
+    FeatureWindow(
+        analysisAssetId: "analysis-asset",
+        startTime: start,
+        endTime: end,
+        rms: rms,
+        spectralFlux: 0,
+        musicProbability: 0,
+        pauseProbability: pauseProb,
+        speakerClusterId: nil,
+        jingleHash: nil,
+        featureVersion: 1
     )
 }

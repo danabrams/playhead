@@ -141,6 +141,135 @@ struct BoundaryExpanderTests {
         #expect(result.endTime > 80.0)
     }
 
+    @Test("explicit neutral config preserves the legacy default expansion exactly")
+    func neutralConfigMatchesLegacyDefault() {
+        let featureWindows = [
+            makeFeatureWindow(start: 55, end: 56, pauseProb: 0.9, rms: 0.01),
+            makeFeatureWindow(start: 105, end: 106, pauseProb: 0.85, rms: 0.02),
+        ]
+        let chunks = [
+            makeTranscriptChunk(
+                start: 62, end: 75,
+                text: "this episode is sponsored by Acme Corp use code SAVE20",
+                normalizedText: "this episode is sponsored by acme corp use code save20"
+            ),
+            makeTranscriptChunk(
+                start: 85, end: 98,
+                text: "go to acme dot com and use code SAVE20 at checkout let s get back to the show",
+                normalizedText: "go to acme dot com and use code save20 at checkout let s get back to the show"
+            ),
+        ]
+
+        let legacy = expander.expand(
+            seed: 80.0,
+            featureWindows: featureWindows,
+            transcriptChunks: chunks,
+            adWindows: []
+        )
+        let explicitNeutral = expander.expand(
+            seed: 80.0,
+            featureWindows: featureWindows,
+            transcriptChunks: chunks,
+            adWindows: [],
+            config: .neutral
+        )
+
+        #expect(legacy == explicitNeutral)
+    }
+
+    @Test("end anchored config searches farther backward than the neutral preset")
+    func endAnchoredExpandsFartherBackward() {
+        let featureWindows = [
+            makeFeatureWindow(start: 15, end: 16, pauseProb: 0.95, rms: 0.01),
+            makeFeatureWindow(start: 110, end: 111, pauseProb: 0.93, rms: 0.01),
+        ]
+
+        let neutral = expander.expand(
+            seed: 100.0,
+            featureWindows: featureWindows,
+            transcriptChunks: [],
+            adWindows: [],
+            config: .neutral
+        )
+        let endAnchored = expander.expand(
+            seed: 100.0,
+            featureWindows: featureWindows,
+            transcriptChunks: [],
+            adWindows: [],
+            config: .endAnchored
+        )
+
+        #expect(neutral.source == .acousticOnly)
+        #expect(neutral.startTime == 70.0)
+        #expect(neutral.endTime == 111.0)
+
+        #expect(endAnchored.source == .acousticOnly)
+        #expect(endAnchored.startTime == 15.0)
+        #expect(endAnchored.endTime == 111.0)
+    }
+
+    @Test("start anchored config searches farther forward than the neutral preset")
+    func startAnchoredExpandsFartherForward() {
+        let featureWindows = [
+            makeFeatureWindow(start: 90, end: 91, pauseProb: 0.94, rms: 0.01),
+            makeFeatureWindow(start: 185, end: 186, pauseProb: 0.96, rms: 0.01),
+        ]
+
+        let neutral = expander.expand(
+            seed: 100.0,
+            featureWindows: featureWindows,
+            transcriptChunks: [],
+            adWindows: [],
+            config: .neutral
+        )
+        let startAnchored = expander.expand(
+            seed: 100.0,
+            featureWindows: featureWindows,
+            transcriptChunks: [],
+            adWindows: [],
+            config: .startAnchored
+        )
+
+        #expect(neutral.source == .acousticOnly)
+        #expect(neutral.startTime == 90.0)
+        #expect(neutral.endTime == 130.0)
+
+        #expect(startAnchored.source == .acousticOnly)
+        #expect(startAnchored.startTime == 90.0)
+        #expect(startAnchored.endTime == 186.0)
+    }
+
+    @Test("end anchored lexical search reaches candidates that the neutral preset leaves behind")
+    func endAnchoredLexicalSearchReachesFartherBackward() {
+        let chunks = [
+            makeTranscriptChunk(
+                start: 0, end: 15,
+                text: "visit betterhelp.com/podcast for details",
+                normalizedText: "visit betterhelp com podcast for details"
+            ),
+        ]
+
+        let neutral = expander.expand(
+            seed: 110.0,
+            featureWindows: [],
+            transcriptChunks: chunks,
+            adWindows: [],
+            config: .neutral
+        )
+        let endAnchored = expander.expand(
+            seed: 110.0,
+            featureWindows: [],
+            transcriptChunks: chunks,
+            adWindows: [],
+            config: .endAnchored
+        )
+
+        #expect(neutral.source == .fallback)
+        #expect(endAnchored.source == .acousticAndLexical)
+        #expect(endAnchored.startTime < neutral.startTime)
+        #expect(endAnchored.endTime < neutral.endTime)
+    }
+
     // MARK: - Test 3: Acoustic only uses best silence points
 
     @Test("acoustic only uses silence points when no lexical signals")

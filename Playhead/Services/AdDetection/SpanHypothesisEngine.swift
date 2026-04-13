@@ -76,6 +76,7 @@ struct SpanHypothesis: Sendable, Equatable {
     var closingAnchor: AnchorEvent?
     var startCandidateTime: Double
     var endCandidateTime: Double
+    var expandedBoundary: ExpandedBoundary?
     var lastEvidenceTime: Double
     var state: SpanHypothesisState
 
@@ -92,6 +93,7 @@ struct SpanHypothesis: Sendable, Equatable {
         self.closingAnchor = nil
         self.startCandidateTime = seedAnchor.startTime - config.backwardSearchRadius
         self.endCandidateTime = seedAnchor.endTime + config.forwardSearchRadius
+        self.expandedBoundary = nil
         self.lastEvidenceTime = seedAnchor.endTime
         self.state = .seeded
     }
@@ -175,7 +177,9 @@ struct SpanHypothesis: Sendable, Equatable {
         lastEvidenceTime = max(lastEvidenceTime, closeTime)
         state = .closed
         let score = self.score(at: closeTime, decayRate: decayRate)
-        let plausibleSpan = endCandidateTime > startCandidateTime
+        let emittedStartTime = expandedBoundary?.startTime ?? startCandidateTime
+        let emittedEndTime = expandedBoundary?.endTime ?? endCandidateTime
+        let plausibleSpan = emittedEndTime > emittedStartTime
         let skipEligible = switch closingReason {
         case .explicitClose, .returnMarker:
             plausibleSpan && (wasConfirmedBeforeClose || score >= minConfirmedEvidence)
@@ -185,15 +189,15 @@ struct SpanHypothesis: Sendable, Equatable {
         return CandidateAdSpan(
             id: Self.makeId(
                 analysisAssetId: analysisAssetId,
-                startTime: startCandidateTime,
-                endTime: endCandidateTime,
+                startTime: emittedStartTime,
+                endTime: emittedEndTime,
                 anchorType: anchorType,
                 sponsorEntity: sponsorEntity,
                 closingReason: closingReason
             ),
             analysisAssetId: analysisAssetId,
-            startTime: startCandidateTime,
-            endTime: endCandidateTime,
+            startTime: emittedStartTime,
+            endTime: emittedEndTime,
             confidence: min(1.0, score / max(minConfirmedEvidence, 1.0)),
             evidenceScore: score,
             anchorType: anchorType,
@@ -237,15 +241,28 @@ struct SpanHypothesis: Sendable, Equatable {
 // MARK: - Engine
 
 struct SpanHypothesisEngine: Sendable {
+    struct BoundaryExpansionContext: Sendable {
+        let featureWindows: [FeatureWindow]
+        let transcriptChunks: [TranscriptChunk]
+    }
+
     static let defaultDecayRate: Double = 0.95
     private static let strictOverlapThreshold: TimeInterval = 3.0
 
     let config: SpanHypothesisConfig
+    private let boundaryExpansionContext: BoundaryExpansionContext?
+    private let boundaryExpander: BoundaryExpander
     private(set) var activeHypotheses: [SpanHypothesis] = []
     private(set) var closedHypotheses: [SpanHypothesis] = []
 
-    init(config: SpanHypothesisConfig = .default) {
+    init(
+        config: SpanHypothesisConfig = .default,
+        boundaryExpansionContext: BoundaryExpansionContext? = nil,
+        boundaryExpander: BoundaryExpander = BoundaryExpander()
+    ) {
         self.config = config
+        self.boundaryExpansionContext = boundaryExpansionContext
+        self.boundaryExpander = boundaryExpander
     }
 
     mutating func ingest(_ hit: LexicalHit, analysisAssetId: String) -> [CandidateAdSpan] {
@@ -280,6 +297,7 @@ struct SpanHypothesisEngine: Sendable {
                 hypothesis.absorb(anchor: event)
                 hypothesis.confirmIfNeeded(minConfirmedEvidence: config.minConfirmedEvidence)
                 hypothesis.closingAnchor = event
+                hypothesis.expandedBoundary = makeExpandedBoundary(for: hypothesis)
                 let span = hypothesis.close(
                     analysisAssetId: analysisAssetId,
                     closingReason: .returnMarker,
@@ -298,6 +316,7 @@ struct SpanHypothesisEngine: Sendable {
                 hypothesis.absorb(anchor: event)
                 hypothesis.confirmIfNeeded(minConfirmedEvidence: config.minConfirmedEvidence)
                 hypothesis.closingAnchor = event
+                hypothesis.expandedBoundary = makeExpandedBoundary(for: hypothesis)
                 let span = hypothesis.close(
                     analysisAssetId: analysisAssetId,
                     closingReason: .explicitClose,
@@ -344,6 +363,7 @@ struct SpanHypothesisEngine: Sendable {
         var emitted: [CandidateAdSpan] = []
         while !activeHypotheses.isEmpty {
             var hypothesis = activeHypotheses.removeFirst()
+            hypothesis.expandedBoundary = makeExpandedBoundary(for: hypothesis)
             let span = hypothesis.close(
                 analysisAssetId: analysisAssetId,
                 closingReason: .timeout,
@@ -439,6 +459,7 @@ struct SpanHypothesisEngine: Sendable {
         for hypothesis in activeHypotheses {
             if time - hypothesis.lastEvidenceTime > config.maxIdleGapSeconds {
                 var closed = hypothesis
+                closed.expandedBoundary = makeExpandedBoundary(for: closed)
                 let span = closed.close(
                     analysisAssetId: analysisAssetId,
                     closingReason: .idleGap,
@@ -570,6 +591,30 @@ struct SpanHypothesisEngine: Sendable {
         max(0, min(lhs.endCandidateTime, rhs.endCandidateTime) - max(lhs.startCandidateTime, rhs.startCandidateTime))
     }
 
+    private func makeExpandedBoundary(for hypothesis: SpanHypothesis) -> ExpandedBoundary? {
+        guard hypothesis.state == .confirmed else { return nil }
+        guard let boundaryExpansionContext else { return nil }
+
+        return boundaryExpander.expand(
+            seed: boundaryExpansionSeed(for: hypothesis),
+            featureWindows: boundaryExpansionContext.featureWindows,
+            transcriptChunks: boundaryExpansionContext.transcriptChunks,
+            adWindows: [],
+            config: .forPolarity(hypothesis.polarity)
+        )
+    }
+
+    private func boundaryExpansionSeed(for hypothesis: SpanHypothesis) -> Double {
+        switch hypothesis.polarity {
+        case .startAnchored:
+            return hypothesis.seedAnchor.startTime
+        case .endAnchored:
+            return hypothesis.seedAnchor.endTime
+        case .neutral:
+            return (hypothesis.seedAnchor.startTime + hypothesis.seedAnchor.endTime) / 2.0
+        }
+    }
+
     private mutating func merge(_ lhs: SpanHypothesis, with rhs: SpanHypothesis) -> SpanHypothesis {
         var merged = lhs
         if rhs.seedAnchor.startTime < merged.seedAnchor.startTime {
@@ -585,6 +630,7 @@ struct SpanHypothesisEngine: Sendable {
         if merged.sponsorEntity == nil {
             merged.sponsorEntity = lhs.sponsorEntity ?? rhs.sponsorEntity
         }
+        merged.expandedBoundary = lhs.expandedBoundary ?? rhs.expandedBoundary
         merged.state = maxState(lhs.state, rhs.state)
         return merged
     }

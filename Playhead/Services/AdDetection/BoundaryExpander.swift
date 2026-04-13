@@ -20,7 +20,7 @@ enum BoundarySource: String, Sendable {
 }
 
 /// Expanded ad boundary produced from a single seed tap position.
-struct ExpandedBoundary: Sendable {
+struct ExpandedBoundary: Sendable, Equatable {
     let startTime: Double
     let endTime: Double
     let boundaryConfidence: Double // 0.0–1.0
@@ -34,16 +34,54 @@ struct ExpandedBoundary: Sendable {
 /// (FeatureWindow pause/RMS scoring), and lexical patterns (LexicalScanner).
 struct BoundaryExpander: Sendable {
 
+    struct ExpansionConfig: Sendable, Equatable {
+        let acousticBackwardSearchRadius: Double
+        let acousticForwardSearchRadius: Double
+        let lexicalBackwardSearchRadius: Double
+        let lexicalForwardSearchRadius: Double
+
+        static let neutral = ExpansionConfig(
+            acousticBackwardSearchRadius: 60.0,
+            acousticForwardSearchRadius: 60.0,
+            lexicalBackwardSearchRadius: 90.0,
+            lexicalForwardSearchRadius: 90.0
+        )
+
+        static let startAnchored = ExpansionConfig(
+            acousticBackwardSearchRadius: 20.0,
+            acousticForwardSearchRadius: 90.0,
+            lexicalBackwardSearchRadius: 30.0,
+            lexicalForwardSearchRadius: 120.0
+        )
+
+        static let endAnchored = ExpansionConfig(
+            acousticBackwardSearchRadius: 90.0,
+            acousticForwardSearchRadius: 20.0,
+            lexicalBackwardSearchRadius: 120.0,
+            lexicalForwardSearchRadius: 30.0
+        )
+
+        var fallbackBackwardWidth: Double {
+            min(30.0, acousticBackwardSearchRadius)
+        }
+
+        var fallbackForwardWidth: Double {
+            min(30.0, acousticForwardSearchRadius)
+        }
+
+        static func forPolarity(_ polarity: AnchorPolarity) -> ExpansionConfig {
+            switch polarity {
+            case .startAnchored:
+                return .startAnchored
+            case .endAnchored:
+                return .endAnchored
+            case .neutral:
+                return .neutral
+            }
+        }
+    }
+
     private let logger = Logger(subsystem: "com.playhead", category: "BoundaryExpander")
-
-    /// Maximum distance (seconds) to search backward/forward for acoustic boundaries.
-    private let acousticSearchRadius: Double = 60.0
-
-    /// Maximum distance (seconds) to search for transcript chunks around the seed.
-    private let lexicalSearchRadius: Double = 90.0
-
-    /// Fallback half-width when no signals are found.
-    private let fallbackHalfWidth: Double = 30.0
 
     /// Minimum combined score for a feature window to qualify as a boundary point.
     /// Intentionally lower than SkipOrchestrator's 0.6 threshold: user corrections
@@ -65,8 +103,11 @@ struct BoundaryExpander: Sendable {
         seed: Double,
         featureWindows: [FeatureWindow],
         transcriptChunks: [TranscriptChunk],
-        adWindows: [AdWindow]
+        adWindows: [AdWindow],
+        config: ExpansionConfig? = nil
     ) -> ExpandedBoundary {
+        let expansionConfig = config ?? .neutral
+
         // Signal 3 (highest priority): Check existing AdWindows.
         if let windowBoundary = expandFromExistingWindows(seed: seed, adWindows: adWindows) {
             logger.info("Boundary expansion from existing window: \(windowBoundary.startTime, format: .fixed(precision: 1))–\(windowBoundary.endTime, format: .fixed(precision: 1))")
@@ -74,13 +115,24 @@ struct BoundaryExpander: Sendable {
         }
 
         // Signal 1: Acoustic boundaries from FeatureWindows.
-        let acousticStart = findAcousticBoundary(seed: seed, direction: .backward, featureWindows: featureWindows)
-        let acousticEnd = findAcousticBoundary(seed: seed, direction: .forward, featureWindows: featureWindows)
+        let acousticStart = findAcousticBoundary(
+            seed: seed,
+            direction: .backward,
+            featureWindows: featureWindows,
+            searchRadius: expansionConfig.acousticBackwardSearchRadius
+        )
+        let acousticEnd = findAcousticBoundary(
+            seed: seed,
+            direction: .forward,
+            featureWindows: featureWindows,
+            searchRadius: expansionConfig.acousticForwardSearchRadius
+        )
 
         // Signal 2: Narrow using lexical patterns if available.
         let lexicalBoundary = findLexicalBoundaries(
             seed: seed,
-            transcriptChunks: transcriptChunks
+            transcriptChunks: transcriptChunks,
+            config: expansionConfig
         )
 
         if let lexical = lexicalBoundary {
@@ -120,8 +172,8 @@ struct BoundaryExpander: Sendable {
 
         // Acoustic only — use best silence points.
         if acousticStart != nil || acousticEnd != nil {
-            let startTime = acousticStart ?? (seed - fallbackHalfWidth)
-            let endTime = acousticEnd ?? (seed + fallbackHalfWidth)
+            let startTime = acousticStart ?? (seed - expansionConfig.fallbackBackwardWidth)
+            let endTime = acousticEnd ?? (seed + expansionConfig.fallbackForwardWidth)
 
             logger.info("Boundary expansion acoustic-only: \(startTime, format: .fixed(precision: 1))–\(endTime, format: .fixed(precision: 1))")
             return ExpandedBoundary(
@@ -134,11 +186,11 @@ struct BoundaryExpander: Sendable {
 
         // Fallback: seed ± 30s, snapped to nearest silence if possible.
         let fallbackStart = snapToNearestSilence(
-            time: seed - fallbackHalfWidth,
+            time: seed - expansionConfig.fallbackBackwardWidth,
             featureWindows: featureWindows
         )
         let fallbackEnd = snapToNearestSilence(
-            time: seed + fallbackHalfWidth,
+            time: seed + expansionConfig.fallbackForwardWidth,
             featureWindows: featureWindows
         )
 
@@ -228,19 +280,20 @@ struct BoundaryExpander: Sendable {
     private func findAcousticBoundary(
         seed: Double,
         direction: SearchDirection,
-        featureWindows: [FeatureWindow]
+        featureWindows: [FeatureWindow],
+        searchRadius: Double
     ) -> Double? {
         let nearby: [FeatureWindow]
         switch direction {
         case .backward:
             nearby = featureWindows.filter { fw in
                 let center = (fw.startTime + fw.endTime) / 2.0
-                return center >= seed - acousticSearchRadius && center < seed
+                return center >= seed - searchRadius && center < seed
             }
         case .forward:
             nearby = featureWindows.filter { fw in
                 let center = (fw.startTime + fw.endTime) / 2.0
-                return center > seed && center <= seed + acousticSearchRadius
+                return center > seed && center <= seed + searchRadius
             }
         }
 
@@ -271,11 +324,12 @@ struct BoundaryExpander: Sendable {
     /// Returns the earliest sponsor-intro boundary and the latest transition boundary.
     private func findLexicalBoundaries(
         seed: Double,
-        transcriptChunks: [TranscriptChunk]
+        transcriptChunks: [TranscriptChunk],
+        config: ExpansionConfig
     ) -> (startTime: Double, endTime: Double)? {
         let nearbyChunks = transcriptChunks.filter { chunk in
-            chunk.endTime >= seed - lexicalSearchRadius &&
-            chunk.startTime <= seed + lexicalSearchRadius
+            chunk.endTime >= seed - config.lexicalBackwardSearchRadius &&
+            chunk.startTime <= seed + config.lexicalForwardSearchRadius
         }
 
         guard !nearbyChunks.isEmpty else { return nil }
@@ -298,20 +352,38 @@ struct BoundaryExpander: Sendable {
             return (startTime: best.startTime, endTime: best.endTime)
         }
 
-        // Find nearest candidate to the seed.
-        let nearest = candidates.min { a, b in
-            let distA = min(abs(a.startTime - seed), abs(a.endTime - seed))
-            let distB = min(abs(b.startTime - seed), abs(b.endTime - seed))
-            return distA < distB
+        let reachableCandidates = candidates.compactMap { candidate -> (candidate: LexicalCandidate, distance: Double)? in
+            guard let distance = lexicalDistance(from: seed, to: candidate, config: config) else {
+                return nil
+            }
+            return (candidate, distance)
         }
 
-        guard let nearest else { return nil }
+        guard let nearest = reachableCandidates.min(by: { lhs, rhs in
+            lhs.distance < rhs.distance
+        }) else {
+            return nil
+        }
 
-        // Only use if reasonably close (within lexical search radius).
-        let dist = min(abs(nearest.startTime - seed), abs(nearest.endTime - seed))
-        guard dist <= lexicalSearchRadius else { return nil }
+        return (startTime: nearest.candidate.startTime, endTime: nearest.candidate.endTime)
+    }
 
-        return (startTime: nearest.startTime, endTime: nearest.endTime)
+    private func lexicalDistance(
+        from seed: Double,
+        to candidate: LexicalCandidate,
+        config: ExpansionConfig
+    ) -> Double? {
+        if candidate.startTime <= seed && candidate.endTime >= seed {
+            return 0
+        }
+
+        if candidate.endTime < seed {
+            let distance = seed - candidate.endTime
+            return distance <= config.lexicalBackwardSearchRadius ? distance : nil
+        }
+
+        let distance = candidate.startTime - seed
+        return distance <= config.lexicalForwardSearchRadius ? distance : nil
     }
 
     // MARK: - Boundary Narrowing
