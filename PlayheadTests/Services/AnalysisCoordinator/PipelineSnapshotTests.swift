@@ -290,7 +290,7 @@ struct HotPathContextSelectionTests {
         let service = try await makeReplayContextService()
         let allChunks = [
             makeHotPathContextChunk(id: "intro", chunkIndex: 0, startTime: 100, endTime: 101, text: "this episode is sponsored by betterhelp"),
-            makeHotPathContextChunk(id: "body", chunkIndex: 1, startTime: 145, endTime: 146, text: "talk to a therapist from your phone"),
+            makeHotPathContextChunk(id: "body", chunkIndex: 1, startTime: 145, endTime: 146, text: "free trial for new members"),
             makeHotPathContextChunk(
                 id: "close",
                 chunkIndex: 2,
@@ -320,7 +320,7 @@ struct HotPathContextSelectionTests {
         let service = try await makeReplayContextService()
         let allChunks = [
             makeHotPathContextChunk(id: "intro", chunkIndex: 0, startTime: 100, endTime: 101, text: "this episode is sponsored by betterhelp"),
-            makeHotPathContextChunk(id: "body", chunkIndex: 1, startTime: 145, endTime: 146, text: "talk to a therapist from your phone"),
+            makeHotPathContextChunk(id: "body", chunkIndex: 1, startTime: 145, endTime: 146, text: "free trial for new members"),
             makeHotPathContextChunk(
                 id: "close",
                 chunkIndex: 2,

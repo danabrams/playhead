@@ -866,13 +866,20 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         return segment
     }
 
-    /// The iOS 26 Speech SDK exposes `SpeechTranscriber.Result.alternatives`
-    /// plus per-run confidence attributes, so we persist both and let
-    /// downstream rescans stay tightly scoped to weak-anchor neighborhoods.
+    /// Build a time-indexed progressive preset that explicitly asks Speech
+    /// for both alternative transcriptions and run-level confidence. The base
+    /// progressive preset does not request confidence attributes on its own.
+    static func speechTranscriberPreset() -> SpeechTranscriber.Preset {
+        let base = SpeechTranscriber.Preset.timeIndexedProgressiveTranscription
+        return SpeechTranscriber.Preset(
+            transcriptionOptions: base.transcriptionOptions,
+            reportingOptions: base.reportingOptions.union([.alternativeTranscriptions]),
+            attributeOptions: base.attributeOptions.union([.transcriptionConfidence])
+        )
+    }
+
     private static func makeSpeechTranscriber(locale: Locale) -> SpeechTranscriber {
-        var preset = SpeechTranscriber.Preset.timeIndexedProgressiveTranscription
-        preset.reportingOptions.insert(.alternativeTranscriptions)
-        return SpeechTranscriber(locale: locale, preset: preset)
+        SpeechTranscriber(locale: locale, preset: speechTranscriberPreset())
     }
 
     static func extractWords(from result: SpeechTranscriber.Result) -> ExtractedTranscriptContent {

@@ -755,6 +755,18 @@ struct TranscriptWeakAnchorMetadataTests {
 @Suite("SpeechTranscriber extraction")
 struct SpeechTranscriberExtractionTests {
 
+    @Test("configured SpeechTranscriber preset requests alternatives and confidence attributes")
+    func configuredPresetRequestsWeakAnchorSignals() {
+        let base = SpeechTranscriber.Preset.timeIndexedProgressiveTranscription
+        let preset = AppleSpeechRecognizer.speechTranscriberPreset()
+
+        #expect(preset.transcriptionOptions == base.transcriptionOptions)
+        #expect(preset.reportingOptions.isSuperset(of: base.reportingOptions))
+        #expect(preset.reportingOptions.contains(.alternativeTranscriptions))
+        #expect(preset.attributeOptions.isSuperset(of: base.attributeOptions))
+        #expect(preset.attributeOptions.contains(.transcriptionConfidence))
+    }
+
     @Test("extractWords maps Speech alternatives and run-level weak-anchor timing")
     func extractWordsMapsAlternativesAndWeakAnchorTiming() throws {
         let primaryText = makeSpeechAttributedString([
