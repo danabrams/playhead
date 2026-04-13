@@ -359,8 +359,8 @@ struct CommercialEvidenceResolverTests {
         #expect(resolved[0].resolutionSource == .lineRefFallback)
         #expect(resolvedEntry.count == 2)
         #expect(resolvedEntry.matchedText == "BetterHelp")
-        #expect(resolvedEntry.startTime >= 50)
-        #expect(resolvedEntry.endTime <= 55)
+        #expect(resolvedEntry.startTime == brandEntry.startTime)
+        #expect(resolvedEntry.endTime == brandEntry.endTime)
         #expect(resolvedEntry.firstTime == brandEntry.firstTime)
         #expect(resolvedEntry.lastTime == brandEntry.lastTime)
         #expect(resolved[0].lineRef == 10)
@@ -459,6 +459,8 @@ struct CommercialEvidenceResolverTests {
                     matchedText: "BetterHelp",
                     normalizedText: "betterhelp",
                     atomOrdinal: 0,
+                    startTime: 1,
+                    endTime: 4,
                     count: 1,
                     firstTime: 1,
                     lastTime: 4
@@ -514,6 +516,8 @@ struct CommercialEvidenceResolverTests {
                     matchedText: "Acme",
                     normalizedText: "acme",
                     atomOrdinal: 0,
+                    startTime: 1,
+                    endTime: 24,
                     count: 3,
                     firstTime: 1,
                     lastTime: 24
@@ -842,7 +846,7 @@ struct EvidenceCatalogBuilderNormalizationTests {
             #expect(promoCode.lastTime == 24)
         }
         #expect(catalog.renderForPrompt().contains("×2"))
-        #expect(catalog.renderForPrompt().contains("1.0–24.0s"))
+        #expect(catalog.renderForPrompt().contains("1s–24s"))
     }
 
     @Test("legacy JSON without count/firstTime/lastTime decodes with defaults")
@@ -877,6 +881,8 @@ struct EvidenceCatalogBuilderNormalizationTests {
             matchedText: "SAVE20",
             normalizedText: "save20",
             atomOrdinal: 7,
+            startTime: 10.0,
+            endTime: 50.0,
             count: 3,
             firstTime: 10.0,
             lastTime: 50.0

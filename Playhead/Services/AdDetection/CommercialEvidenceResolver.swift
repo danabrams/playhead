@@ -177,6 +177,8 @@ enum CommercialEvidenceResolver {
             matchedText: matchedText,
             normalizedText: entry.normalizedText,
             atomOrdinal: segment.firstAtomOrdinal,
+            startTime: entry.startTime,
+            endTime: entry.endTime,
             count: entry.count,
             firstTime: entry.firstTime,
             lastTime: entry.lastTime

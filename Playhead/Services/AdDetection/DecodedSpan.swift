@@ -103,12 +103,16 @@ extension EvidenceEntry: Codable {
             ?? c.decode(Double.self, forKey: .startTime)
         let lastTime = try c.decodeIfPresent(Double.self, forKey: .lastTime)
             ?? c.decode(Double.self, forKey: .endTime)
+        let startTime = try c.decodeIfPresent(Double.self, forKey: .startTime) ?? firstTime
+        let endTime = try c.decodeIfPresent(Double.self, forKey: .endTime) ?? lastTime
         self.init(
             evidenceRef: try c.decode(Int.self, forKey: .evidenceRef),
             category: try c.decode(EvidenceCategory.self, forKey: .category),
             matchedText: try c.decode(String.self, forKey: .matchedText),
             normalizedText: try c.decode(String.self, forKey: .normalizedText),
             atomOrdinal: try c.decode(Int.self, forKey: .atomOrdinal),
+            startTime: startTime,
+            endTime: endTime,
             count: count,
             firstTime: firstTime,
             lastTime: lastTime

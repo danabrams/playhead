@@ -256,6 +256,7 @@ enum EvidenceCatalogBuilder {
                         atomOrdinal: atom.atomKey.atomOrdinal,
                         startTime: startTime,
                         endTime: endTime,
+                        count: 1,
                         matchOffset: match.range.location,
                         matchLength: match.range.length
                     ))
@@ -317,6 +318,7 @@ enum EvidenceCatalogBuilder {
                     atomOrdinal: atom.atomKey.atomOrdinal,
                     startTime: startTime,
                     endTime: endTime,
+                    count: 1,
                     matchOffset: brandRange.location,
                     matchLength: brandRange.length
                 ))
@@ -348,6 +350,7 @@ enum EvidenceCatalogBuilder {
                     atomOrdinal: atom.atomKey.atomOrdinal,
                     startTime: startTime,
                     endTime: endTime,
+                    count: 1,
                     matchOffset: match.range.location,
                     matchLength: match.range.length
                 ))
@@ -899,6 +902,7 @@ enum EvidenceCatalogBuilder {
                 atomOrdinal: match.atomOrdinal,
                 startTime: match.startTime,
                 endTime: match.endTime,
+                count: match.count,
                 matchOffset: match.matchOffset,
                 matchLength: match.matchLength
             )
