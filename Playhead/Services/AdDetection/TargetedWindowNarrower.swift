@@ -443,8 +443,8 @@ enum TargetedWindowNarrower {
         return .narrowed(resultSegments)
     }
 
-    /// playhead-7q3 (Phase 4, Option D): adjust each merged per-anchor
-    /// interval's outer edges to align with nearby `AcousticBreak`s.
+    /// Adjust each merged per-anchor interval's outer edges by routing the
+    /// acoustic break evidence through `TimeBoundaryResolver`.
     ///
     /// The algorithm is intentionally conservative:
     ///   1. For each merged interval `[loIdx, hiIdx]`, compute its time
@@ -492,6 +492,9 @@ enum TargetedWindowNarrower {
 
         let maxDrift = config.perAnchorPaddingSegments
         let snapDistance = config.acousticBreakSnapMaxDistanceSeconds
+        let resolver = TimeBoundaryResolver()
+        let resolverConfig = boundaryResolverConfig(snapDistance: snapDistance)
+        let featureWindows = syntheticFeatureWindows(from: acousticBreaks)
 
         return merged.map { interval -> (Int, Int) in
             var (lo, hi) = interval
@@ -507,8 +510,10 @@ enum TargetedWindowNarrower {
             // to a segment index and update `lo`.
             if let snap = snapEdge(
                 targetTime: loSegment.startTime,
-                acousticBreaks: acousticBreaks,
-                snapDistance: snapDistance,
+                boundaryType: .start,
+                resolver: resolver,
+                featureWindows: featureWindows,
+                resolverConfig: resolverConfig,
                 orderedSegments: orderedSegments,
                 availableLineRefs: availableLineRefs
             ) {
@@ -525,8 +530,10 @@ enum TargetedWindowNarrower {
             // RIGHT edge snap: same logic for the interval's end time.
             if let snap = snapEdge(
                 targetTime: hiSegment.endTime,
-                acousticBreaks: acousticBreaks,
-                snapDistance: snapDistance,
+                boundaryType: .end,
+                resolver: resolver,
+                featureWindows: featureWindows,
+                resolverConfig: resolverConfig,
                 orderedSegments: orderedSegments,
                 availableLineRefs: availableLineRefs
             ) {
@@ -558,42 +565,47 @@ enum TargetedWindowNarrower {
         let breakDistanceSeconds: Double
     }
 
-    /// Resolve `targetTime` to a segment index by (a) finding the nearest
-    /// acoustic break within `snapDistance`, then (b) mapping that break's
-    /// time to the segment whose timespan contains it. Returns `nil` if no
-    /// break is in range or if the break time cannot be placed inside any
-    /// available segment.
+    /// Resolve `targetTime` to a segment index by (a) letting
+    /// `TimeBoundaryResolver` choose a snapped boundary time from the synthetic
+    /// break windows, then (b) mapping that snapped time to the segment whose
+    /// timespan contains it. Returns `nil` if no resolver-qualified boundary is
+    /// in range or if the snapped time cannot be placed inside any available
+    /// segment.
     private static func snapEdge(
         targetTime: Double,
-        acousticBreaks: [AcousticBreak],
-        snapDistance: Double,
+        boundaryType: BoundaryType,
+        resolver: TimeBoundaryResolver,
+        featureWindows: [FeatureWindow],
+        resolverConfig: BoundarySnappingConfig,
         orderedSegments: [AdTranscriptSegment],
         availableLineRefs: [Int]
     ) -> SnapResult? {
-        var nearest: (distance: Double, time: Double)?
-        for candidate in acousticBreaks {
-            let distance = abs(candidate.time - targetTime)
-            if distance > snapDistance { continue }
-            if let current = nearest, distance >= current.distance { continue }
-            nearest = (distance, candidate.time)
+        let snappedTime = resolver.snap(
+            candidateTime: targetTime,
+            boundaryType: boundaryType,
+            anchorType: .fmPositive,
+            featureWindows: featureWindows,
+            lexicalHits: [],
+            config: resolverConfig
+        )
+        guard abs(snappedTime - targetTime) > 0.000_001 else {
+            return nil
         }
-        guard let nearest else { return nil }
-        let breakTime = nearest.time
-        let breakDistance = nearest.distance
+        let breakDistance = abs(snappedTime - targetTime)
 
-        // Find the segment whose [startTime, endTime] contains breakTime.
-        // If breakTime falls in a gap between segments, pick the segment
+        // Find the segment whose [startTime, endTime] contains the snapped
+        // boundary time. If it falls in a gap between segments, pick the segment
         // whose boundary is closest to breakTime.
         var containingIndex: Int?
         var closestIndex: Int?
         var closestDistance = Double.infinity
         for segment in orderedSegments {
-            if breakTime >= segment.startTime && breakTime <= segment.endTime {
+            if snappedTime >= segment.startTime && snappedTime <= segment.endTime {
                 containingIndex = segment.segmentIndex
                 break
             }
-            let distanceToStart = abs(segment.startTime - breakTime)
-            let distanceToEnd = abs(segment.endTime - breakTime)
+            let distanceToStart = abs(segment.startTime - snappedTime)
+            let distanceToEnd = abs(segment.endTime - snappedTime)
             let distance = min(distanceToStart, distanceToEnd)
             if distance < closestDistance {
                 closestDistance = distance
@@ -610,6 +622,65 @@ enum TargetedWindowNarrower {
         }
         let clipped = min(max(resolved, lower), upper)
         return SnapResult(segmentIndex: clipped, breakDistanceSeconds: breakDistance)
+    }
+
+    private static func syntheticFeatureWindows(
+        from acousticBreaks: [AcousticBreak]
+    ) -> [FeatureWindow] {
+        acousticBreaks.sorted { $0.time < $1.time }.map { acousticBreak in
+            let proxyStrength = acousticBreak.signals.contains(.energyDrop) || acousticBreak.signals.contains(.energyRise)
+                ? acousticBreak.breakStrength
+                : 0.0
+            let pauseStrength = acousticBreak.signals.contains(.pauseCluster)
+                ? acousticBreak.breakStrength
+                : 0.0
+            let spectralStrength = acousticBreak.signals.contains(.spectralSpike)
+                ? max(acousticBreak.breakStrength, 0.001)
+                : 0.0
+
+            return FeatureWindow(
+                analysisAssetId: "targeted-window-narrower-breaks",
+                startTime: acousticBreak.time,
+                endTime: acousticBreak.time,
+                rms: 0.0,
+                spectralFlux: spectralStrength,
+                musicProbability: 0.0,
+                speakerChangeProxyScore: proxyStrength,
+                musicBedChangeScore: 0.0,
+                pauseProbability: pauseStrength,
+                speakerClusterId: nil,
+                jingleHash: nil,
+                featureVersion: 1
+            )
+        }
+    }
+
+    private static func boundaryResolverConfig(
+        snapDistance: Double
+    ) -> BoundarySnappingConfig {
+        BoundarySnappingConfig(
+            startWeights: StartBoundaryCueWeights(
+                pauseVAD: 0.35,
+                speakerChangeProxy: 0.45,
+                musicBedChange: 0.0,
+                spectralChange: 0.20,
+                lexicalDensityDelta: 0.0
+            ),
+            endWeights: EndBoundaryCueWeights(
+                pauseVAD: 0.35,
+                speakerChangeProxy: 0.45,
+                musicBedChange: 0.0,
+                spectralChange: 0.20,
+                explicitReturnMarker: 0.0
+            ),
+            maxSnapDistanceByAnchorType: [.fmPositive: BoundarySnapDistance(start: snapDistance, end: snapDistance)],
+            lambda: 0.1,
+            // AcousticBreakDetector's single-signal breaks top out at 0.3-0.4
+            // before distance penalty, so the resolver floor must stay low
+            // enough for realistic nearby edges to qualify.
+            minBoundaryScore: 0.1,
+            minImprovementOverOriginal: 0.05
+        )
     }
 
     private static func auditSegments(

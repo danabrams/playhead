@@ -216,6 +216,81 @@ struct TargetedWindowNarrowerTests {
         #expect(withoutBreaksRefs == Array(0...15))
     }
 
+    @Test("playhead-9ua.2: realistic nearby energy-rise break snaps the right edge through the resolver")
+    func acousticBreakSnapsRightEdge() {
+        let inputs = makeSyntheticInputs(segmentCount: 50, anchorIndices: [20])
+        let withBreaks = TargetedWindowNarrower.Inputs(
+            analysisAssetId: inputs.analysisAssetId,
+            podcastId: inputs.podcastId,
+            transcriptVersion: inputs.transcriptVersion,
+            segments: inputs.segments,
+            evidenceCatalog: inputs.evidenceCatalog,
+            auditWindowSampleRate: inputs.auditWindowSampleRate,
+            episodesSinceLastFullRescan: inputs.episodesSinceLastFullRescan,
+            acousticBreaks: [
+                AcousticBreak(time: 26.5, breakStrength: 0.4, signals: [.energyRise])
+            ]
+        )
+        let result = TargetedWindowNarrower.narrow(
+            phase: .scanHarvesterProposals,
+            inputs: withBreaks
+        )
+        let lineRefs = (result.narrowedSegments ?? []).map(\.segmentIndex).sorted()
+
+        #expect(lineRefs.first == 0)
+        #expect(lineRefs.last == 26, "right edge should snap from 25 to the break's segment (got \(lineRefs.last ?? -1))")
+    }
+
+    @Test("playhead-9ua.2: weak nearby breaks do not qualify for snapping")
+    func weakBreakDoesNotSnap() {
+        let inputs = makeSyntheticInputs(segmentCount: 50, anchorIndices: [30])
+        let withWeakBreak = TargetedWindowNarrower.Inputs(
+            analysisAssetId: inputs.analysisAssetId,
+            podcastId: inputs.podcastId,
+            transcriptVersion: inputs.transcriptVersion,
+            segments: inputs.segments,
+            evidenceCatalog: inputs.evidenceCatalog,
+            auditWindowSampleRate: inputs.auditWindowSampleRate,
+            episodesSinceLastFullRescan: inputs.episodesSinceLastFullRescan,
+            acousticBreaks: [
+                AcousticBreak(time: 3.5, breakStrength: 0.1, signals: [.energyDrop])
+            ]
+        )
+
+        let result = TargetedWindowNarrower.narrow(
+            phase: .scanHarvesterProposals,
+            inputs: withWeakBreak
+        )
+        let lineRefs = (result.narrowedSegments ?? []).map(\.segmentIndex).sorted()
+
+        #expect(lineRefs == Array(5...35))
+    }
+
+    @Test("playhead-9ua.2: weak energy-only breaks near the edge do not inherit spectral score")
+    func weakEnergyOnlyBreakNearEdgeDoesNotSnap() {
+        let inputs = makeSyntheticInputs(segmentCount: 50, anchorIndices: [30])
+        let withWeakBreak = TargetedWindowNarrower.Inputs(
+            analysisAssetId: inputs.analysisAssetId,
+            podcastId: inputs.podcastId,
+            transcriptVersion: inputs.transcriptVersion,
+            segments: inputs.segments,
+            evidenceCatalog: inputs.evidenceCatalog,
+            auditWindowSampleRate: inputs.auditWindowSampleRate,
+            episodesSinceLastFullRescan: inputs.episodesSinceLastFullRescan,
+            acousticBreaks: [
+                AcousticBreak(time: 4.9, breakStrength: 0.1, signals: [.energyDrop])
+            ]
+        )
+
+        let result = TargetedWindowNarrower.narrow(
+            phase: .scanHarvesterProposals,
+            inputs: withWeakBreak
+        )
+        let lineRefs = (result.narrowedSegments ?? []).map(\.segmentIndex).sorted()
+
+        #expect(lineRefs == Array(5...35))
+    }
+
     @Test("playhead-7q3: narrowing with breaks is deterministic across repeated calls")
     func narrowingWithBreaksIsDeterministic() {
         let base = makeSyntheticInputs(segmentCount: 30, anchorIndices: [10])
