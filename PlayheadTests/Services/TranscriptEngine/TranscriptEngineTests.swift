@@ -85,6 +85,22 @@ private func makeWeakAnchorMetadata(
     )
 }
 
+private func transcriptEngineSource() throws -> String {
+    let repoRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let sourceURL = repoRoot.appendingPathComponent("Playhead/Services/TranscriptEngine/TranscriptEngine.swift")
+    return try String(contentsOf: sourceURL, encoding: .utf8)
+}
+
+private func appleSpeechAnalyzerRunnerSource() throws -> String {
+    let source = try transcriptEngineSource()
+    let start = try #require(source.range(of: "struct AppleSpeechAnalyzerRunner"))
+    let end = try #require(source.range(of: "enum AppleSpeechResultMapper"))
+    return String(source[start.lowerBound..<end.lowerBound])
+}
+
 private func makeWeakAnchorMetadata() -> TranscriptWeakAnchorMetadata {
     TranscriptWeakAnchorMetadata(
         averageConfidence: 0.46,
@@ -833,6 +849,16 @@ struct AppleSpeechAnalyzerRunnerTests {
 
         #expect(input.buffer === buffer)
         #expect(input.bufferStartTime == nil)
+    }
+
+    @Test("runner does not mix file-backed analyzer input with buffer-sequence analysis")
+    func runnerAvoidsMixedAnalyzerInputModes() throws {
+        let source = try appleSpeechAnalyzerRunnerSource()
+
+        #expect(source.contains("SpeechAnalyzer(modules:"))
+        #expect(!source.contains("inputAudioFile:"))
+        #expect(!source.contains("makeAnalysisAudioFile("))
+        #expect(!source.contains("bufferStartTime: .zero"))
     }
 }
 

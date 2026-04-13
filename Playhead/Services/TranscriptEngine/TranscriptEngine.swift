@@ -753,6 +753,10 @@ struct AppleSpeechAnalyzerRunner {
         self.vocabularyProvider = vocabularyProvider
     }
 
+    // Single-shard analysis must use exactly one input mode. Mixing the
+    // file-backed SpeechAnalyzer initializer with analyzeSequence(buffer...)
+    // replays the same audio on a conflicting timeline and triggers
+    // SFSpeechErrorDomain Code=2 for overlapping timestamps.
     func transcribe(
         buffer: AVAudioPCMBuffer,
         format: AVAudioFormat,
