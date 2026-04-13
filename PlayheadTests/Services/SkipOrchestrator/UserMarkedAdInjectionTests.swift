@@ -78,8 +78,8 @@ struct UserMarkedAdInjectionTests {
         let cue = lastCues.first!
         let cueStart = CMTimeGetSeconds(cue.start)
         let cueEnd = CMTimeGetSeconds(cue.end)
-        #expect(cueStart <= 60.0)
-        #expect(cueEnd >= 120.0)
+        #expect(cueStart == 60.0)
+        #expect(cueEnd == 120.0)
     }
 
     @Test("injectUserMarkedAd emits banner item")
@@ -117,8 +117,8 @@ struct UserMarkedAdInjectionTests {
 
         #expect(bannerItem != nil, "Expected a banner item to be emitted")
         if let item = bannerItem {
-            #expect(item.adStartTime <= 60.0)
-            #expect(item.adEndTime >= 120.0)
+            #expect(item.adStartTime == 60.0)
+            #expect(item.adEndTime == 120.0)
         }
     }
 
@@ -157,6 +157,12 @@ struct UserMarkedAdInjectionTests {
         #expect(segments != nil, "Expected applied segments to be broadcast")
         if let segs = segments {
             #expect(!segs.isEmpty)
+            if let segment = segs.first {
+                #expect(segment.start == 60.0)
+                #expect(segment.end == 120.0)
+            } else {
+                Issue.record("Expected the injected user-marked span to be broadcast unchanged")
+            }
         }
     }
 }
