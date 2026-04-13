@@ -483,8 +483,9 @@ struct BoundaryExpanderTests {
         pauseProb: Double,
         rms: Double,
         spectralFlux: Double = 0,
-        speakerChangeProxyScore: Double = 0,
-        musicBedChangeScore: Double = 0
+        musicProbability: Double = 0.0,
+        speakerChangeProxyScore: Double = 0.0,
+        musicBedChangeScore: Double = 0.0
     ) -> FeatureWindow {
         FeatureWindow(
             analysisAssetId: "test-asset",
@@ -492,7 +493,7 @@ struct BoundaryExpanderTests {
             endTime: end,
             rms: rms,
             spectralFlux: spectralFlux,
-            musicProbability: 0,
+            musicProbability: musicProbability,
             speakerChangeProxyScore: speakerChangeProxyScore,
             musicBedChangeScore: musicBedChangeScore,
             pauseProbability: pauseProb,

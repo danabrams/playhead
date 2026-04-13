@@ -102,6 +102,8 @@ private func buildFeatureWindows(
             rms: nearBoundary ? 0.01 : 0.05,
             spectralFlux: 0.01,
             musicProbability: 0.0,
+            speakerChangeProxyScore: 0.0,
+            musicBedChangeScore: 0.0,
             pauseProbability: nearBoundary ? 0.9 : 0.1,
             speakerClusterId: nil,
             jingleHash: nil,

@@ -62,6 +62,9 @@ private func makeFeatureWindow(
     assetId: String = "asset-1",
     startTime: Double,
     endTime: Double,
+    musicProbability: Double = 0.0,
+    speakerChangeProxyScore: Double = 0.0,
+    musicBedChangeScore: Double = 0.0,
     pauseProbability: Double = 0.1,
     speakerClusterId: Int?
 ) -> FeatureWindow {
@@ -71,7 +74,9 @@ private func makeFeatureWindow(
         endTime: endTime,
         rms: 0.4,
         spectralFlux: 0.1,
-        musicProbability: 0.0,
+        musicProbability: musicProbability,
+        speakerChangeProxyScore: speakerChangeProxyScore,
+        musicBedChangeScore: musicBedChangeScore,
         pauseProbability: pauseProbability,
         speakerClusterId: speakerClusterId,
         jingleHash: nil,

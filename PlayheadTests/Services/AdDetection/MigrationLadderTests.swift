@@ -60,6 +60,10 @@ struct MigrationLadderTests {
         // V8 ad copy fingerprint tables (Phase 9).
         #expect(try probeTableExists(in: dir, table: "ad_copy_fingerprints"))
         #expect(try probeTableExists(in: dir, table: "fingerprint_source_events"))
+
+        // Phase A feature-window additions.
+        #expect(try probeColumnExists(in: dir, table: "feature_windows", column: "speakerChangeProxyScore"))
+        #expect(try probeColumnExists(in: dir, table: "feature_windows", column: "musicBedChangeScore"))
     }
 
     // MARK: - H11: seeded v1 → v5 ladder runs all V*IfNeeded blocks

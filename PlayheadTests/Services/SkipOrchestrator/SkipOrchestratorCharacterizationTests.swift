@@ -7,6 +7,9 @@ private func makeSkipTestFeatureWindow(
     assetId: String = "asset-1",
     startTime: Double = 0,
     endTime: Double = 1,
+    musicProbability: Double = 0.0,
+    speakerChangeProxyScore: Double = 0.0,
+    musicBedChangeScore: Double = 0.0,
     pauseProbability: Double = 0.1,
     rms: Double = 0.05
 ) -> FeatureWindow {
@@ -16,7 +19,9 @@ private func makeSkipTestFeatureWindow(
         endTime: endTime,
         rms: rms,
         spectralFlux: 0.01,
-        musicProbability: 0.0,
+        musicProbability: musicProbability,
+        speakerChangeProxyScore: speakerChangeProxyScore,
+        musicBedChangeScore: musicBedChangeScore,
         pauseProbability: pauseProbability,
         speakerClusterId: nil,
         jingleHash: nil,

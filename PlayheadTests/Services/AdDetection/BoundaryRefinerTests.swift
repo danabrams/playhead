@@ -145,7 +145,10 @@ struct BoundaryRefinerTests {
         start: Double,
         end: Double,
         pause: Double,
-        spectralFlux: Double
+        spectralFlux: Double,
+        musicProbability: Double = 0.0,
+        speakerChangeProxyScore: Double = 0.0,
+        musicBedChangeScore: Double = 0.0
     ) -> FeatureWindow {
         FeatureWindow(
             analysisAssetId: "asset-boundary",
@@ -153,9 +156,9 @@ struct BoundaryRefinerTests {
             endTime: end,
             rms: 0.05,
             spectralFlux: spectralFlux,
-            musicProbability: 0,
-            speakerChangeProxyScore: 0,
-            musicBedChangeScore: 0,
+            musicProbability: musicProbability,
+            speakerChangeProxyScore: speakerChangeProxyScore,
+            musicBedChangeScore: musicBedChangeScore,
             pauseProbability: pause,
             speakerClusterId: nil,
             jingleHash: nil,
