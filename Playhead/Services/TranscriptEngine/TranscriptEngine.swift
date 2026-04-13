@@ -747,6 +747,7 @@ enum AppleSpeechAudioBridge {
 
 struct AppleSpeechAnalyzerRunner {
     private let vocabularyProvider: ASRVocabularyProvider?
+    private let options = SpeechAnalyzer.Options(priority: .utility, modelRetention: .lingering)
 
     init(vocabularyProvider: ASRVocabularyProvider? = nil) {
         self.vocabularyProvider = vocabularyProvider
@@ -760,35 +761,26 @@ struct AppleSpeechAnalyzerRunner {
     ) async throws -> [TranscriptSegment] {
         let transcriber = AppleSpeechResultMapper.makeSpeechTranscriber(locale: locale)
         let analysisContext = await makeAnalysisContext(for: podcastId)
-        let analysisAudioURL = try AppleSpeechAudioBridge.makeAnalysisAudioFile(from: buffer, format: format)
-        defer { try? FileManager.default.removeItem(at: analysisAudioURL) }
-
-        let analysisInputFile = try openAnalysisAudioFile(at: analysisAudioURL)
-        let analyzer: SpeechAnalyzer
-        do {
-            analyzer = try await SpeechAnalyzer(
-                inputAudioFile: analysisInputFile,
-                modules: [transcriber],
-                options: .init(priority: .utility, modelRetention: .lingering),
-                analysisContext: analysisContext
-            )
-        } catch {
-            throw AppleSpeechBoundaryError.analyzerSessionFailure("Failed to create SpeechAnalyzer: \(error)")
-        }
-
+        let analyzer = SpeechAnalyzer(modules: [transcriber], options: options)
+        try await apply(context: analysisContext, to: analyzer)
         try await prepare(analyzer: analyzer, in: format)
 
-        let inputSequence = Self.singleBufferSequence(buffer: buffer)
         let collector = Task { try await AppleSpeechResultMapper.collectSegments(from: transcriber.results) }
+        var shouldCancelAnalyzer = true
 
         do {
-            if let lastSample = try await analyzer.analyzeSequence(inputSequence) {
+            if let lastSample = try await analyzer.analyzeSequence(Self.singleBufferSequence(buffer: buffer)) {
                 try await analyzer.finalizeAndFinish(through: lastSample)
+            } else {
+                try await analyzer.finalizeAndFinishThroughEndOfInput()
             }
+            shouldCancelAnalyzer = false
             withExtendedLifetime(buffer) {}
             return try await collector.value
         } catch {
-            await analyzer.cancelAndFinishNow()
+            if shouldCancelAnalyzer {
+                await analyzer.cancelAndFinishNow()
+            }
             collector.cancel()
             if let boundaryError = error as? AppleSpeechBoundaryError {
                 throw boundaryError
@@ -802,34 +794,25 @@ struct AppleSpeechAnalyzerRunner {
         format: AVAudioFormat
     ) async throws -> [VADResult] {
         let detector = SpeechDetector()
-        let analysisAudioURL = try AppleSpeechAudioBridge.makeAnalysisAudioFile(from: buffer, format: format)
-        defer { try? FileManager.default.removeItem(at: analysisAudioURL) }
-
-        let analysisInputFile = try openAnalysisAudioFile(at: analysisAudioURL)
-        let analyzer: SpeechAnalyzer
-        do {
-            analyzer = try await SpeechAnalyzer(
-                inputAudioFile: analysisInputFile,
-                modules: [detector],
-                options: .init(priority: .utility, modelRetention: .lingering)
-            )
-        } catch {
-            throw AppleSpeechBoundaryError.analyzerSessionFailure("Failed to create SpeechAnalyzer VAD session: \(error)")
-        }
-
+        let analyzer = SpeechAnalyzer(modules: [detector], options: options)
         try await prepare(analyzer: analyzer, in: format)
 
-        let inputSequence = Self.singleBufferSequence(buffer: buffer)
         let collector = Task { try await AppleSpeechResultMapper.collectVAD(from: detector.results) }
+        var shouldCancelAnalyzer = true
 
         do {
-            if let lastSample = try await analyzer.analyzeSequence(inputSequence) {
+            if let lastSample = try await analyzer.analyzeSequence(Self.singleBufferSequence(buffer: buffer)) {
                 try await analyzer.finalizeAndFinish(through: lastSample)
+            } else {
+                try await analyzer.finalizeAndFinishThroughEndOfInput()
             }
+            shouldCancelAnalyzer = false
             withExtendedLifetime(buffer) {}
             return try await collector.value
         } catch {
-            await analyzer.cancelAndFinishNow()
+            if shouldCancelAnalyzer {
+                await analyzer.cancelAndFinishNow()
+            }
             collector.cancel()
             if let boundaryError = error as? AppleSpeechBoundaryError {
                 throw boundaryError
@@ -852,11 +835,11 @@ struct AppleSpeechAnalyzerRunner {
         return context
     }
 
-    private func openAnalysisAudioFile(at url: URL) throws -> AVAudioFile {
+    private func apply(context: AnalysisContext, to analyzer: SpeechAnalyzer) async throws {
         do {
-            return try AVAudioFile(forReading: url)
+            try await analyzer.setContext(context)
         } catch {
-            throw AppleSpeechBoundaryError.audioBridgeFailure("Failed to reopen analysis audio file: \(error)")
+            throw AppleSpeechBoundaryError.analyzerSessionFailure("SpeechAnalyzer context setup failed: \(error)")
         }
     }
 
@@ -868,9 +851,13 @@ struct AppleSpeechAnalyzerRunner {
         }
     }
 
+    static func makeAnalyzerInput(buffer: AVAudioPCMBuffer) -> AnalyzerInput {
+        AnalyzerInput(buffer: buffer)
+    }
+
     private static func singleBufferSequence(buffer: AVAudioPCMBuffer) -> AsyncStream<AnalyzerInput> {
         AsyncStream { continuation in
-            continuation.yield(AnalyzerInput(buffer: buffer, bufferStartTime: .zero))
+            continuation.yield(makeAnalyzerInput(buffer: buffer))
             continuation.finish()
         }
     }

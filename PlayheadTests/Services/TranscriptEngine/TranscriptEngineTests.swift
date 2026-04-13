@@ -823,6 +823,19 @@ struct AppleSpeechAudioBridgeTests {
     }
 }
 
+@Suite("AppleSpeechAnalyzerRunner")
+struct AppleSpeechAnalyzerRunnerTests {
+
+    @Test("single buffer analyzer input leaves timeline implicit")
+    func singleBufferAnalyzerInputLeavesTimelineImplicit() throws {
+        let (buffer, _) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
+        let input = AppleSpeechAnalyzerRunner.makeAnalyzerInput(buffer: buffer)
+
+        #expect(input.buffer === buffer)
+        #expect(input.bufferStartTime == nil)
+    }
+}
+
 @Suite("SpeechTranscriber extraction")
 struct SpeechTranscriberExtractionTests {
 
