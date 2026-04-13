@@ -124,6 +124,43 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
         #expect(!applied.isEmpty)
     }
 
+    @Test("Retiring stale candidate ids removes them from active orchestration")
+    func retireStaleCandidateIds() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "shadow",
+            trustScore: 0.5,
+            observations: 0
+        )
+        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        let introWindow = makeSkipTestAdWindow(
+            id: "ad-intro",
+            startTime: 60,
+            endTime: 90,
+            confidence: 0.75,
+            decisionState: "candidate"
+        )
+        let closeWindow = makeSkipTestAdWindow(
+            id: "ad-close",
+            startTime: 100,
+            endTime: 120,
+            confidence: 0.75,
+            decisionState: "candidate"
+        )
+        await orchestrator.receiveAdWindows([introWindow, closeWindow])
+        #expect(await orchestrator.activeWindowIDs() == Set(["ad-intro", "ad-close"]))
+
+        await orchestrator.retireAdWindows(ids: ["ad-close"])
+
+        #expect(await orchestrator.activeWindowIDs() == Set(["ad-intro"]))
+    }
+
     @Test("Seek suppresses auto-skip temporarily")
     func seekSuppression() async throws {
         let store = try await makeTestStore()

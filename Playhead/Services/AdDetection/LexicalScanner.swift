@@ -103,6 +103,8 @@ struct LexicalCandidate: Sendable {
     let categories: Set<LexicalPatternCategory>
     /// Representative evidence text (first significant hit).
     let evidenceText: String
+    /// Stable timestamp for the representative lexical evidence.
+    let evidenceStartTime: Double
     /// Detector version tag.
     let detectorVersion: String
 }
@@ -115,6 +117,20 @@ struct LexicalCandidate: Sendable {
 /// Thread-safe: all state is either immutable or isolated to method scope.
 /// Patterns are compiled once at init for performance.
 struct LexicalScanner: Sendable {
+
+    private struct LexicalHitSignature: Hashable {
+        let category: LexicalPatternCategory
+        let matchedText: String
+        let startMicroseconds: Int
+        let endMicroseconds: Int
+
+        init(_ hit: LexicalHit) {
+            self.category = hit.category
+            self.matchedText = hit.matchedText.lowercased()
+            self.startMicroseconds = Int((hit.startTime * 1_000_000).rounded())
+            self.endMicroseconds = Int((hit.endTime * 1_000_000).rounded())
+        }
+    }
 
     private let logger = Logger(subsystem: "com.playhead", category: "LexicalScanner")
     private let config: LexicalScannerConfig
@@ -132,6 +148,7 @@ struct LexicalScanner: Sendable {
     /// Weight used for literal-TLD URL hits. Set slightly above the default
     /// high-weight bypass threshold so a single URL promotes to a candidate.
     private static let strongUrlWeight: Double = 0.95
+    private static let maxAlternativeRescanRadius: TimeInterval = 45
 
     /// Per-show sponsor terms parsed from PodcastProfile.sponsorLexicon.
     /// Empty array when no profile is available.
@@ -345,6 +362,73 @@ struct LexicalScanner: Sendable {
         return hits
     }
 
+    /// Re-scan only alternative-transcription and low-confidence text within a
+    /// bounded time window. The radius is clamped so callers cannot turn this
+    /// into a global full-transcript rescan.
+    func rescanAlternatives(
+        chunks: [TranscriptChunk],
+        nearTime: Double,
+        radius: TimeInterval
+    ) -> [LexicalHit] {
+        let effectiveRadius = min(max(radius, 0), Self.maxAlternativeRescanRadius)
+        guard effectiveRadius > 0 else { return [] }
+
+        let windowStart = nearTime - effectiveRadius
+        let windowEnd = nearTime + effectiveRadius
+        let scopedChunks = chunks.filter { chunk in
+            chunk.endTime >= windowStart && chunk.startTime <= windowEnd
+        }
+
+        var rescannedHits: [LexicalHit] = []
+        var seen = Set<LexicalHitSignature>()
+
+        for chunk in scopedChunks {
+            guard let metadata = chunk.weakAnchorMetadata else { continue }
+            let clippedChunkStart = max(chunk.startTime, windowStart)
+            let clippedChunkEnd = min(chunk.endTime, windowEnd)
+            guard clippedChunkEnd > clippedChunkStart else { continue }
+
+            for alternativeText in metadata.alternativeTexts {
+                for hit in scanChunk(
+                    syntheticChunk(
+                        text: alternativeText,
+                        analysisAssetId: chunk.analysisAssetId,
+                        startTime: clippedChunkStart,
+                        endTime: clippedChunkEnd
+                    )
+                ) {
+                    guard seen.insert(LexicalHitSignature(hit)).inserted else { continue }
+                    rescannedHits.append(hit)
+                }
+            }
+
+            for phrase in metadata.lowConfidencePhrases {
+                let startTime = max(chunk.startTime, windowStart, phrase.startTime)
+                let endTime = min(chunk.endTime, windowEnd, phrase.endTime)
+                guard endTime > startTime else { continue }
+                for hit in scanChunk(
+                    syntheticChunk(
+                        text: phrase.text,
+                        analysisAssetId: chunk.analysisAssetId,
+                        startTime: startTime,
+                        endTime: endTime
+                    )
+                ) {
+                    guard seen.insert(LexicalHitSignature(hit)).inserted else { continue }
+                    rescannedHits.append(hit)
+                }
+            }
+        }
+
+        rescannedHits.sort { lhs, rhs in
+            if lhs.startTime != rhs.startTime {
+                return lhs.startTime < rhs.startTime
+            }
+            return lhs.endTime < rhs.endTime
+        }
+        return rescannedHits
+    }
+
     /// Re-run the scanner over a synthetic region-sized chunk while preserving
     /// the same normalization, pattern matching, and confidence rules as the
     /// regular transcript-chunk path.
@@ -362,7 +446,30 @@ struct LexicalScanner: Sendable {
         // regex pass and does not persist or memoize anything keyed on these
         // fields. The chunk never leaves this function — it is built, scanned,
         // and discarded — so minting fresh UUIDs cannot pollute any cache.
-        let syntheticChunk = TranscriptChunk(
+        let syntheticChunk = syntheticChunk(
+            text: text,
+            analysisAssetId: analysisAssetId,
+            startTime: startTime,
+            endTime: endTime
+        )
+        let hits = scanChunk(syntheticChunk)
+        guard !hits.isEmpty else { return nil }
+
+        return buildCandidate(
+            from: hits,
+            startTime: startTime,
+            endTime: endTime,
+            analysisAssetId: analysisAssetId
+        )
+    }
+
+    private func syntheticChunk(
+        text: String,
+        analysisAssetId: String,
+        startTime: Double,
+        endTime: Double
+    ) -> TranscriptChunk {
+        TranscriptChunk(
             id: UUID().uuidString,
             analysisAssetId: analysisAssetId,
             segmentFingerprint: UUID().uuidString,
@@ -374,16 +481,8 @@ struct LexicalScanner: Sendable {
             pass: "final",
             modelVersion: "region-feature-extractor",
             transcriptVersion: nil,
-            atomOrdinal: nil
-        )
-        let hits = scanChunk(syntheticChunk)
-        guard !hits.isEmpty else { return nil }
-
-        return buildCandidate(
-            from: hits,
-            startTime: startTime,
-            endTime: endTime,
-            analysisAssetId: analysisAssetId
+            atomOrdinal: nil,
+            weakAnchorMetadata: nil
         )
     }
 
@@ -638,6 +737,7 @@ struct LexicalScanner: Sendable {
         // Pick the most significant hit as evidence (highest weight).
         let bestHit = hits.max { $0.weight < $1.weight }
         let evidenceText = bestHit?.matchedText ?? hits[0].matchedText
+        let evidenceStartTime = bestHit?.startTime ?? startTime
 
         return LexicalCandidate(
             id: UUID().uuidString,
@@ -648,6 +748,7 @@ struct LexicalScanner: Sendable {
             hitCount: hits.count,
             categories: categories,
             evidenceText: evidenceText,
+            evidenceStartTime: evidenceStartTime,
             detectorVersion: config.detectorVersion
         )
     }

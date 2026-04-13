@@ -103,7 +103,6 @@ enum PlaybackEvent: Sendable {
 /// events, manages AnalysisSessions, and dispatches work to downstream
 /// services. Runs as a Swift actor with explicit handoff boundaries.
 actor AnalysisCoordinator {
-
     private let logger = Logger(subsystem: "com.playhead", category: "AnalysisCoordinator")
 
     // MARK: - Dependencies
@@ -1094,11 +1093,23 @@ actor AnalysisCoordinator {
         guard !fastChunks.isEmpty else { return }
 
         do {
-            let windows = try await adDetectionService.runHotPath(
-                chunks: fastChunks,
-                analysisAssetId: assetId,
-                episodeDuration: currentEpisodeDuration()
+            let persistedChunks = try await store.fetchTranscriptChunks(assetId: assetId)
+            let hotPathChunks = await adDetectionService.hotPathReplayContextChunks(
+                from: persistedChunks,
+                around: fastChunks
             )
+            guard !hotPathChunks.isEmpty else { return }
+
+            let result = try await adDetectionService.runHotPathResult(
+                chunks: hotPathChunks,
+                analysisAssetId: assetId,
+                episodeDuration: currentEpisodeDuration(),
+                retireUnmatchedReplayCandidates: true
+            )
+            if !result.retiredWindowIDs.isEmpty {
+                await skipOrchestrator.retireAdWindows(ids: result.retiredWindowIDs)
+            }
+            let windows = result.windows
             guard !windows.isEmpty else { return }
             await skipOrchestrator.receiveAdWindows(windows)
         } catch {

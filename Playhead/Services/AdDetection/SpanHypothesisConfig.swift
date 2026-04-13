@@ -101,4 +101,16 @@ struct SpanHypothesisConfig: Sendable {
         }
         return config
     }
+
+    var maximumBackwardSearchRadius: TimeInterval {
+        anchorTypeConfigByType.values.map(\.backwardSearchRadius).max() ?? 0
+    }
+
+    var maximumForwardSearchRadius: TimeInterval {
+        anchorTypeConfigByType.values.map(\.forwardSearchRadius).max() ?? 0
+    }
+
+    var maximumContextPadding: TimeInterval {
+        max(maximumBackwardSearchRadius, maximumForwardSearchRadius)
+    }
 }

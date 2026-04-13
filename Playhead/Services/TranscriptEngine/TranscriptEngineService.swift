@@ -429,8 +429,11 @@ actor TranscriptEngineService {
             return
         }
 
-        // Convert segments to TranscriptChunks and persist.
-        var chunks: [TranscriptChunk] = []
+        // Convert segments to TranscriptChunks and persist. Metadata upgrades on
+        // duplicate fingerprints re-emit the upgraded chunk but must not be
+        // inserted as a new row.
+        var chunksToInsert: [TranscriptChunk] = []
+        var emittedChunks: [TranscriptChunk] = []
 
         for segment in segments {
             try Task.checkCancellation()
@@ -441,13 +444,45 @@ actor TranscriptEngineService {
                 endTime: segment.endTime
             )
 
-            // Dedup: skip if this fingerprint already exists.
-            let exists = try await store.hasTranscriptChunk(
+            // Dedup: preserve the existing row, but let later passes upgrade
+            // weak-anchor metadata when the same text/timing arrives with
+            // richer recovery text.
+            if let existingChunk = try await store.fetchTranscriptChunk(
                 analysisAssetId: analysisAssetId,
                 segmentFingerprint: fingerprint
-            )
-            if exists {
-                logger.debug("Skipping duplicate segment: \(fingerprint.prefix(8))")
+            ) {
+                let mergedMetadata = mergedWeakAnchorMetadata(
+                    existing: existingChunk.weakAnchorMetadata,
+                    candidate: segment.weakAnchorMetadata
+                )
+                if mergedMetadata != existingChunk.weakAnchorMetadata {
+                    let didUpdate = try await store.updateTranscriptChunkWeakAnchorMetadata(
+                        analysisAssetId: analysisAssetId,
+                        segmentFingerprint: fingerprint,
+                        weakAnchorMetadata: mergedMetadata
+                    )
+                    if didUpdate {
+                        emittedChunks.append(
+                            TranscriptChunk(
+                                id: existingChunk.id,
+                                analysisAssetId: existingChunk.analysisAssetId,
+                                segmentFingerprint: existingChunk.segmentFingerprint,
+                                chunkIndex: existingChunk.chunkIndex,
+                                startTime: existingChunk.startTime,
+                                endTime: existingChunk.endTime,
+                                text: existingChunk.text,
+                                normalizedText: existingChunk.normalizedText,
+                                pass: existingChunk.pass,
+                                modelVersion: existingChunk.modelVersion,
+                                transcriptVersion: existingChunk.transcriptVersion,
+                                atomOrdinal: existingChunk.atomOrdinal,
+                                weakAnchorMetadata: mergedMetadata
+                            )
+                        )
+                    }
+                } else {
+                    logger.debug("Skipping duplicate segment: \(fingerprint.prefix(8))")
+                }
                 continue
             }
 
@@ -463,16 +498,20 @@ actor TranscriptEngineService {
                 pass: segment.passType.rawValue,
                 modelVersion: config.modelVersion,
                 transcriptVersion: nil,
-                atomOrdinal: nil
+                atomOrdinal: nil,
+                weakAnchorMetadata: segment.weakAnchorMetadata
             )
-            chunks.append(chunk)
+            chunksToInsert.append(chunk)
+            emittedChunks.append(chunk)
             chunkCounter += 1
         }
 
         // Batch-insert to SQLite.
-        if !chunks.isEmpty {
-            try await store.insertTranscriptChunks(chunks)
-            emitEvent(.chunksPersisted(analysisAssetId: analysisAssetId, chunks: chunks))
+        if !chunksToInsert.isEmpty {
+            try await store.insertTranscriptChunks(chunksToInsert)
+        }
+        if !emittedChunks.isEmpty {
+            emitEvent(.chunksPersisted(analysisAssetId: analysisAssetId, chunks: emittedChunks))
         }
 
         // Update coverage watermark.
@@ -482,7 +521,7 @@ actor TranscriptEngineService {
             endTime: shardEnd
         )
 
-        logger.info("Wrote \(chunks.count) chunks for shard \(shard.id) [\(String(format: "%.1f", shard.startTime))-\(String(format: "%.1f", shardEnd))s]")
+        logger.info("Wrote \(emittedChunks.count) chunks for shard \(shard.id) [\(String(format: "%.1f", shard.startTime))-\(String(format: "%.1f", shardEnd))s]")
     }
 
     // MARK: - Prioritization
@@ -557,6 +596,17 @@ actor TranscriptEngineService {
         let input = "\(text)|\(startTime)|\(endTime)"
         let digest = SHA256.hash(data: Data(input.utf8))
         return digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func mergedWeakAnchorMetadata(
+        existing: TranscriptWeakAnchorMetadata?,
+        candidate: TranscriptWeakAnchorMetadata?
+    ) -> TranscriptWeakAnchorMetadata? {
+        guard let candidate else { return existing }
+        guard candidate.hasRecoveryText else { return existing }
+        guard let existing else { return candidate }
+        guard existing.hasRecoveryText else { return candidate }
+        return existing.merged(with: candidate)
     }
 
     // MARK: - Text normalization

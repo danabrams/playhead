@@ -7,6 +7,31 @@ import Foundation
 import Testing
 @testable import Playhead
 
+private func makeHotPathContextChunk(
+    id: String,
+    chunkIndex: Int,
+    startTime: Double,
+    endTime: Double,
+    text: String,
+    weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil
+) -> TranscriptChunk {
+    TranscriptChunk(
+        id: id,
+        analysisAssetId: "asset-1",
+        segmentFingerprint: "fp-\(id)",
+        chunkIndex: chunkIndex,
+        startTime: startTime,
+        endTime: endTime,
+        text: text,
+        normalizedText: TranscriptEngineService.normalizeText(text),
+        pass: TranscriptPassType.fast.rawValue,
+        modelVersion: "speech-v1",
+        transcriptVersion: nil,
+        atomOrdinal: nil,
+        weakAnchorMetadata: weakAnchorMetadata
+    )
+}
+
 // MARK: - Shard Prioritization Logic
 
 @Suite("Shard Prioritization – Partition Logic")
@@ -215,5 +240,279 @@ struct IncrementalDecodeTests {
         // Verify shard IDs are correct for the delta.
         #expect(newShards[0].id == 5)
         #expect(newShards[4].id == 9)
+    }
+}
+
+@Suite("Hot Path Context Selection")
+struct HotPathContextSelectionTests {
+
+    private func makeReplayContextService() async throws -> AdDetectionService {
+        let store = try await makeTestStore()
+        return AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor()
+        )
+    }
+
+    @Test("upgraded duplicate batches pull neighboring persisted fast chunks into hot-path context")
+    func includesNeighboringPersistedChunks() async throws {
+        let service = try await makeReplayContextService()
+        let allChunks = [
+            makeHotPathContextChunk(id: "intro", chunkIndex: 0, startTime: 100, endTime: 101, text: "sponsored by betterhelp"),
+            makeHotPathContextChunk(id: "body", chunkIndex: 1, startTime: 105, endTime: 106, text: "free trial for new members"),
+            makeHotPathContextChunk(
+                id: "close",
+                chunkIndex: 2,
+                startTime: 110,
+                endTime: 111,
+                text: "yoose cawd sev ten",
+                weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                    averageConfidence: 0.27,
+                    minimumConfidence: 0.27,
+                    alternativeTexts: ["use code save10 at checkout"],
+                    lowConfidencePhrases: []
+                )
+            ),
+            makeHotPathContextChunk(id: "far", chunkIndex: 3, startTime: 300, endTime: 301, text: "completely unrelated far away content"),
+        ]
+
+        let context = await service.hotPathReplayContextChunks(
+            from: allChunks,
+            around: [allChunks[2]]
+        )
+
+        #expect(context.map(\.id) == ["intro", "body", "close"])
+    }
+
+    @Test("upgraded duplicate intro batches keep closing anchors within the configured forward search radius")
+    func includesDistantClosingAnchorsWithinForwardPadding() async throws {
+        let service = try await makeReplayContextService()
+        let allChunks = [
+            makeHotPathContextChunk(id: "intro", chunkIndex: 0, startTime: 100, endTime: 101, text: "this episode is sponsored by betterhelp"),
+            makeHotPathContextChunk(id: "body", chunkIndex: 1, startTime: 145, endTime: 146, text: "talk to a therapist from your phone"),
+            makeHotPathContextChunk(
+                id: "close",
+                chunkIndex: 2,
+                startTime: 189,
+                endTime: 190,
+                text: "yoose cawd sev ten",
+                weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                    averageConfidence: 0.25,
+                    minimumConfidence: 0.25,
+                    alternativeTexts: ["use code save10 at checkout"],
+                    lowConfidencePhrases: []
+                )
+            ),
+            makeHotPathContextChunk(id: "far", chunkIndex: 3, startTime: 320, endTime: 321, text: "completely unrelated far away content"),
+        ]
+
+        let context = await service.hotPathReplayContextChunks(
+            from: allChunks,
+            around: [allChunks[0]]
+        )
+
+        #expect(context.map(\.id) == ["intro", "body", "close"])
+    }
+
+    @Test("upgraded duplicate closing batches keep opening anchors within the configured backward search radius")
+    func includesDistantOpeningAnchorsWithinBackwardPadding() async throws {
+        let service = try await makeReplayContextService()
+        let allChunks = [
+            makeHotPathContextChunk(id: "intro", chunkIndex: 0, startTime: 100, endTime: 101, text: "this episode is sponsored by betterhelp"),
+            makeHotPathContextChunk(id: "body", chunkIndex: 1, startTime: 145, endTime: 146, text: "talk to a therapist from your phone"),
+            makeHotPathContextChunk(
+                id: "close",
+                chunkIndex: 2,
+                startTime: 189,
+                endTime: 190,
+                text: "yoose cawd sev ten",
+                weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                    averageConfidence: 0.25,
+                    minimumConfidence: 0.25,
+                    alternativeTexts: ["use code save10 at checkout"],
+                    lowConfidencePhrases: []
+                )
+            ),
+            makeHotPathContextChunk(id: "far", chunkIndex: 3, startTime: 320, endTime: 321, text: "completely unrelated far away content"),
+        ]
+
+        let context = await service.hotPathReplayContextChunks(
+            from: allChunks,
+            around: [allChunks[2]]
+        )
+
+        #expect(context.map(\.id) == ["intro", "body", "close"])
+    }
+
+    @Test("intro-seeded replay context does not walk backward through close-only anchors")
+    func introSeedDoesNotExtendBackwardThroughCloseAnchors() async throws {
+        let service = try await makeReplayContextService()
+        let allChunks = [
+            makeHotPathContextChunk(
+                id: "close",
+                chunkIndex: 0,
+                startTime: 140,
+                endTime: 141,
+                text: "yoose cawd sev ten",
+                weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                    averageConfidence: 0.25,
+                    minimumConfidence: 0.25,
+                    alternativeTexts: ["use code save10 at checkout"],
+                    lowConfidencePhrases: []
+                )
+            ),
+            makeHotPathContextChunk(id: "intro", chunkIndex: 1, startTime: 200, endTime: 201, text: "this episode is sponsored by betterhelp"),
+        ]
+
+        let context = await service.hotPathReplayContextChunks(
+            from: allChunks,
+            around: [allChunks[1]]
+        )
+
+        #expect(context.map(\.id) == ["intro"])
+    }
+
+    @Test("close-seeded replay context does not walk forward through intro-only anchors")
+    func closeSeedDoesNotExtendForwardThroughIntroAnchors() async throws {
+        let service = try await makeReplayContextService()
+        let allChunks = [
+            makeHotPathContextChunk(
+                id: "close",
+                chunkIndex: 0,
+                startTime: 200,
+                endTime: 201,
+                text: "yoose cawd sev ten",
+                weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                    averageConfidence: 0.25,
+                    minimumConfidence: 0.25,
+                    alternativeTexts: ["use code save10 at checkout"],
+                    lowConfidencePhrases: []
+                )
+            ),
+            makeHotPathContextChunk(id: "intro", chunkIndex: 1, startTime: 220, endTime: 221, text: "this episode is sponsored by betterhelp"),
+        ]
+
+        let context = await service.hotPathReplayContextChunks(
+            from: allChunks,
+            around: [allChunks[0]]
+        )
+
+        #expect(context.map(\.id) == ["close"])
+    }
+
+    @Test("upgraded duplicate intro batches follow chained body evidence beyond the first search hop")
+    func followsTransitiveBodyEvidenceChainFromIntroSeed() async throws {
+        let service = try await makeReplayContextService()
+        let allChunks = [
+            makeHotPathContextChunk(id: "intro", chunkIndex: 0, startTime: 100, endTime: 101, text: "this episode is sponsored by betterhelp"),
+            makeHotPathContextChunk(id: "body-1", chunkIndex: 1, startTime: 180, endTime: 181, text: "free trial for new members"),
+            makeHotPathContextChunk(id: "bridge", chunkIndex: 2, startTime: 260, endTime: 261, text: "money back guarantee on every order"),
+            makeHotPathContextChunk(
+                id: "close",
+                chunkIndex: 3,
+                startTime: 340,
+                endTime: 341,
+                text: "yoose cawd sev ten",
+                weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                    averageConfidence: 0.25,
+                    minimumConfidence: 0.25,
+                    alternativeTexts: ["use code save10 at checkout"],
+                    lowConfidencePhrases: []
+                )
+            ),
+            makeHotPathContextChunk(id: "far", chunkIndex: 4, startTime: 500, endTime: 501, text: "completely unrelated far away content"),
+        ]
+
+        let context = await service.hotPathReplayContextChunks(
+            from: allChunks,
+            around: [allChunks[0]]
+        )
+
+        #expect(context.map(\.id) == ["intro", "body-1", "bridge", "close"])
+    }
+
+    @Test("upgraded duplicate closing batches follow chained body evidence back to the intro")
+    func followsTransitiveBodyEvidenceChainFromClosingSeed() async throws {
+        let service = try await makeReplayContextService()
+        let allChunks = [
+            makeHotPathContextChunk(id: "intro", chunkIndex: 0, startTime: 100, endTime: 101, text: "this episode is sponsored by betterhelp"),
+            makeHotPathContextChunk(id: "body-1", chunkIndex: 1, startTime: 175, endTime: 176, text: "free trial for new members"),
+            makeHotPathContextChunk(id: "bridge", chunkIndex: 2, startTime: 250, endTime: 251, text: "money back guarantee on every order"),
+            makeHotPathContextChunk(
+                id: "close",
+                chunkIndex: 3,
+                startTime: 325,
+                endTime: 326,
+                text: "yoose cawd sev ten",
+                weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                    averageConfidence: 0.25,
+                    minimumConfidence: 0.25,
+                    alternativeTexts: ["use code save10 at checkout"],
+                    lowConfidencePhrases: []
+                )
+            ),
+            makeHotPathContextChunk(id: "far", chunkIndex: 4, startTime: 500, endTime: 501, text: "completely unrelated far away content"),
+        ]
+
+        let context = await service.hotPathReplayContextChunks(
+            from: allChunks,
+            around: [allChunks[3]]
+        )
+
+        #expect(context.map(\.id) == ["intro", "body-1", "bridge", "close"])
+    }
+
+    @Test("generic low-confidence narration does not chain replay context without lexical recovery hits")
+    func genericLowConfidenceNarrationDoesNotExtendReplayContext() async throws {
+        let service = try await makeReplayContextService()
+        let allChunks = [
+            makeHotPathContextChunk(id: "intro", chunkIndex: 0, startTime: 100, endTime: 101, text: "this episode is sponsored by betterhelp"),
+            makeHotPathContextChunk(
+                id: "noise",
+                chunkIndex: 1,
+                startTime: 180,
+                endTime: 181,
+                text: "uh maybe we should talk about the other thing later",
+                weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                    averageConfidence: 0.25,
+                    minimumConfidence: 0.25,
+                    alternativeTexts: [],
+                    lowConfidencePhrases: [
+                        WeakAnchorPhrase(
+                            text: "uh maybe we should talk about the other thing later",
+                            startTime: 180,
+                            endTime: 181,
+                            confidence: 0.25
+                        ),
+                    ]
+                )
+            ),
+            makeHotPathContextChunk(
+                id: "close",
+                chunkIndex: 2,
+                startTime: 260,
+                endTime: 261,
+                text: "yoose cawd sev ten",
+                weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                    averageConfidence: 0.25,
+                    minimumConfidence: 0.25,
+                    alternativeTexts: ["use code save10 at checkout"],
+                    lowConfidencePhrases: []
+                )
+            ),
+        ]
+
+        let introSeedContext = await service.hotPathReplayContextChunks(
+            from: allChunks,
+            around: [allChunks[0]]
+        )
+        let closeSeedContext = await service.hotPathReplayContextChunks(
+            from: allChunks,
+            around: [allChunks[2]]
+        )
+
+        #expect(introSeedContext.map(\.id) == ["intro"])
+        #expect(closeSeedContext.map(\.id) == ["close"])
     }
 }

@@ -663,6 +663,7 @@ private func makeLexicalCandidate(
         hitCount: 2,
         categories: [.sponsor, .urlCTA],
         evidenceText: "evidence",
+        evidenceStartTime: startTime,
         detectorVersion: "lexical-v1"
     )
 }

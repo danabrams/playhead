@@ -16,7 +16,8 @@ private func makeChunk(
     startTime: Double = 0,
     endTime: Double = 5,
     text: String = "hello world",
-    pass: String = "final"
+    pass: String = "final",
+    weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil
 ) -> TranscriptChunk {
     TranscriptChunk(
         id: id,
@@ -30,7 +31,8 @@ private func makeChunk(
         pass: pass,
         modelVersion: "speech-v1",
         transcriptVersion: nil,
-        atomOrdinal: nil
+        atomOrdinal: nil,
+        weakAnchorMetadata: weakAnchorMetadata
     )
 }
 
@@ -985,7 +987,20 @@ struct TranscriptChunkMigrationTests {
             text: "hello world", normalizedText: "hello world",
             pass: "final", modelVersion: "v1",
             transcriptVersion: "abc123def456",
-            atomOrdinal: 42
+            atomOrdinal: 42,
+            weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                averageConfidence: 0.52,
+                minimumConfidence: 0.21,
+                alternativeTexts: ["sponsored by betterhelp"],
+                lowConfidencePhrases: [
+                    WeakAnchorPhrase(
+                        text: "better help",
+                        startTime: 3.0,
+                        endTime: 4.0,
+                        confidence: 0.21
+                    )
+                ]
+            )
         )
         try await store.insertTranscriptChunk(chunk)
 
@@ -993,6 +1008,10 @@ struct TranscriptChunkMigrationTests {
         #expect(fetched.count == 1)
         #expect(fetched[0].transcriptVersion == "abc123def456")
         #expect(fetched[0].atomOrdinal == 42)
+        #expect(fetched[0].weakAnchorMetadata?.averageConfidence == 0.52)
+        #expect(fetched[0].weakAnchorMetadata?.minimumConfidence == 0.21)
+        #expect(fetched[0].weakAnchorMetadata?.alternativeTexts == ["sponsored by betterhelp"])
+        #expect(fetched[0].weakAnchorMetadata?.lowConfidencePhrases.first?.text == "better help")
     }
 
     @Test("ALTER TABLE migration backfills legacy transcript chunks")
@@ -1050,6 +1069,7 @@ struct TranscriptChunkMigrationTests {
             #expect(fetched.map(\.atomOrdinal) == [0, 1])
             #expect(fetched[0].transcriptVersion == fetched[1].transcriptVersion)
             #expect(fetched[0].transcriptVersion?.isEmpty == false)
+            #expect(fetched.allSatisfy { $0.weakAnchorMetadata == nil })
 
             // New row with non-nil values should round-trip
             let newChunk = TranscriptChunk(
@@ -1059,7 +1079,13 @@ struct TranscriptChunkMigrationTests {
                 text: "new text", normalizedText: "new text",
                 pass: "final", modelVersion: "v1",
                 transcriptVersion: "version-hash",
-                atomOrdinal: 7
+                atomOrdinal: 7,
+                weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                    averageConfidence: 0.61,
+                    minimumConfidence: 0.44,
+                    alternativeTexts: ["visit betterhelp dot com"],
+                    lowConfidencePhrases: []
+                )
             )
             try await store.insertTranscriptChunk(newChunk)
 
@@ -1068,6 +1094,7 @@ struct TranscriptChunkMigrationTests {
             let newRow = all.first { $0.id == "new-chunk" }!
             #expect(newRow.transcriptVersion == "version-hash")
             #expect(newRow.atomOrdinal == 7)
+            #expect(newRow.weakAnchorMetadata?.alternativeTexts == ["visit betterhelp dot com"])
         }
     }
 
@@ -1099,7 +1126,8 @@ struct TranscriptChunkMigrationTests {
                 text: "fast pass text", normalizedText: "fast pass text",
                 pass: "fast", modelVersion: "v1",
                 transcriptVersion: nil,
-                atomOrdinal: nil
+                atomOrdinal: nil,
+                weakAnchorMetadata: nil
             )
             try await store.insertTranscriptChunk(chunk)
         }
@@ -1111,5 +1139,6 @@ struct TranscriptChunkMigrationTests {
         #expect(fetched.count == 1)
         #expect(fetched[0].transcriptVersion == nil)
         #expect(fetched[0].atomOrdinal == nil)
+        #expect(fetched[0].weakAnchorMetadata == nil)
     }
 }

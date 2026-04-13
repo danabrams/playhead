@@ -135,7 +135,8 @@ private func makeHotPathChunk(
     chunkIndex: Int,
     startTime: Double,
     endTime: Double,
-    text: String
+    text: String,
+    weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil
 ) -> TranscriptChunk {
     TranscriptChunk(
         id: "hot-\(assetId)-\(chunkIndex)",
@@ -149,7 +150,8 @@ private func makeHotPathChunk(
         pass: "fast",
         modelVersion: "integration-v1",
         transcriptVersion: nil,
-        atomOrdinal: nil
+        atomOrdinal: nil,
+        weakAnchorMetadata: weakAnchorMetadata
     )
 }
 
@@ -364,6 +366,607 @@ struct HypothesisHotPathIntegrationTests {
         #expect(windows.count == 1)
     }
 
+    @Test("Hot path replay reuses the existing candidate window instead of duplicating it")
+    func hotPathReplayReusesExistingCandidateWindow() async throws {
+        let store = try await makeIntegrationStore()
+        let assetId = "int-asset-hypothesis-replay-idempotent"
+
+        try await store.insertAsset(makeIntegrationAsset(id: assetId, episodeId: "int-ep-hypothesis-replay-idempotent"))
+
+        let chunks = [
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 0,
+                startTime: 100,
+                endTime: 101,
+                text: "this episode is sponsored by betterhelp"
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 1,
+                startTime: 126,
+                endTime: 127,
+                text: "free trial for new members"
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 2,
+                startTime: 170,
+                endTime: 171,
+                text: "use code save10 at checkout"
+            ),
+        ]
+        try await store.insertTranscriptChunks(chunks)
+
+        try await store.insertFeatureWindows([
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 85, endTime: 86, pauseProbability: 0.95, rms: 0.01),
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 128, endTime: 129, pauseProbability: 0.94, rms: 0.01),
+        ])
+
+        let detector = AdDetectionService(
+            store: store,
+            classifier: CapturingClassifier(adProbability: 0.95),
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+
+        let firstPassWindows = try await detector.runHotPath(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: 600
+        )
+        let secondPassWindows = try await detector.runHotPath(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: 600
+        )
+        let persistedWindows = try await store.fetchAdWindows(assetId: assetId)
+        let firstBodyWindow = try #require(firstPassWindows.first { $0.evidenceText?.contains("free trial") == true })
+        let secondBodyWindow = try #require(secondPassWindows.first { $0.evidenceText?.contains("free trial") == true })
+        let firstCloseWindow = try #require(firstPassWindows.first { $0.evidenceText?.contains("save10") == true })
+        let secondCloseWindow = try #require(secondPassWindows.first { $0.evidenceText?.contains("save10") == true })
+
+        #expect(firstPassWindows.count == 2)
+        #expect(secondPassWindows.count == 2)
+        #expect(secondBodyWindow.id == firstBodyWindow.id)
+        #expect(secondCloseWindow.id == firstCloseWindow.id)
+        #expect(Set(secondPassWindows.map(\.id)) == Set(firstPassWindows.map(\.id)))
+        #expect(Set(persistedWindows.map(\.id)) == Set(firstPassWindows.map(\.id)))
+        #expect(persistedWindows.count == 2)
+    }
+
+    @Test("Hot path replay widens the existing candidate window instead of inserting a second row")
+    func hotPathReplayWidensExistingCandidateWindow() async throws {
+        let store = try await makeIntegrationStore()
+        let assetId = "int-asset-hypothesis-replay-widen"
+
+        try await store.insertAsset(makeIntegrationAsset(id: assetId, episodeId: "int-ep-hypothesis-replay-widen"))
+
+        let intro = makeHotPathChunk(
+            assetId: assetId,
+            chunkIndex: 0,
+            startTime: 100,
+            endTime: 101,
+            text: "this episode is sponsored by betterhelp"
+        )
+        let body = makeHotPathChunk(
+            assetId: assetId,
+            chunkIndex: 1,
+            startTime: 126,
+            endTime: 127,
+            text: "free trial for new members"
+        )
+        let close = makeHotPathChunk(
+            assetId: assetId,
+            chunkIndex: 2,
+            startTime: 170,
+            endTime: 171,
+            text: "use code save10 at checkout"
+        )
+        try await store.insertTranscriptChunks([intro, body, close])
+
+        try await store.insertFeatureWindows([
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 85, endTime: 86, pauseProbability: 0.95, rms: 0.01),
+        ])
+
+        let detector = AdDetectionService(
+            store: store,
+            classifier: CapturingClassifier(adProbability: 0.95),
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+
+        let firstPassWindows = try await detector.runHotPath(
+            chunks: [intro, body],
+            analysisAssetId: assetId,
+            episodeDuration: 600
+        )
+        try await store.insertFeatureWindows([
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 176, endTime: 177, pauseProbability: 0.96, rms: 0.01),
+        ])
+        let replayWindows = try await detector.runHotPath(
+            chunks: [intro, body, close],
+            analysisAssetId: assetId,
+            episodeDuration: 600
+        )
+        let persistedWindows = try await store.fetchAdWindows(assetId: assetId)
+        #expect(firstPassWindows.count == 1)
+        #expect(replayWindows.count == 1)
+        let firstPrimaryWindow = try #require(firstPassWindows.first)
+        let replayPrimaryWindow = try #require(replayWindows.first)
+        let persistedPrimaryWindows = persistedWindows.filter { $0.id == firstPrimaryWindow.id }
+
+        #expect(firstPrimaryWindow.endTime < 177.0)
+        #expect(replayPrimaryWindow.id == firstPrimaryWindow.id)
+        #expect(replayPrimaryWindow.endTime > firstPrimaryWindow.endTime)
+        #expect(persistedPrimaryWindows.count == 1)
+        #expect(persistedPrimaryWindows[0].endTime == replayPrimaryWindow.endTime)
+    }
+
+    @Test("Hot path replay reuses a body-first lexical fallback when recovered anchors widen both edges")
+    func hotPathReplayReusesBodyFirstFallbackCandidate() async throws {
+        let store = try await makeIntegrationStore()
+        let assetId = "int-asset-hypothesis-body-first-replay"
+
+        try await store.insertAsset(makeIntegrationAsset(id: assetId, episodeId: "int-ep-hypothesis-body-first-replay"))
+
+        let intro = makeHotPathChunk(
+            assetId: assetId,
+            chunkIndex: 0,
+            startTime: 100,
+            endTime: 101,
+            text: "this episode is sponsored by betterhelp"
+        )
+        let body = makeHotPathChunk(
+            assetId: assetId,
+            chunkIndex: 1,
+            startTime: 126,
+            endTime: 127,
+            text: "free trial special offer for new members"
+        )
+        let close = makeHotPathChunk(
+            assetId: assetId,
+            chunkIndex: 2,
+            startTime: 170,
+            endTime: 171,
+            text: "use code save10 at checkout"
+        )
+        try await store.insertTranscriptChunks([intro, body, close])
+
+        let detector = AdDetectionService(
+            store: store,
+            classifier: CapturingClassifier(adProbability: 0.95),
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+
+        let firstPassWindows = try await detector.runHotPath(
+            chunks: [body],
+            analysisAssetId: assetId,
+            episodeDuration: 600
+        )
+        try await store.insertFeatureWindows([
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 85, endTime: 86, pauseProbability: 0.95, rms: 0.01),
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 176, endTime: 177, pauseProbability: 0.96, rms: 0.01),
+        ])
+        let replayWindows = try await detector.runHotPath(
+            chunks: [intro, body, close],
+            analysisAssetId: assetId,
+            episodeDuration: 600
+        )
+        let persistedWindows = try await store.fetchAdWindows(assetId: assetId)
+
+        #expect(firstPassWindows.count == 1)
+        #expect(replayWindows.count == 1)
+        let firstBodyWindow = try #require(firstPassWindows.first)
+        let replayBodyWindow = try #require(replayWindows.first)
+        let persistedBodyWindows = persistedWindows.filter { $0.id == firstBodyWindow.id }
+
+        #expect(replayBodyWindow.id == firstBodyWindow.id)
+        #expect(replayBodyWindow.startTime + 5 < firstBodyWindow.startTime)
+        #expect(replayBodyWindow.endTime > firstBodyWindow.endTime + 5)
+        #expect(replayBodyWindow.evidenceStartTime == firstBodyWindow.evidenceStartTime)
+        #expect(persistedBodyWindows.count == 1)
+        #expect(persistedBodyWindows[0].endTime == replayBodyWindow.endTime)
+    }
+
+    @Test("Hot path replay reuses a body-first fallback when replay recovers earlier body evidence from metadata")
+    func hotPathReplayReusesBodyFirstFallbackWithEarlierRecoveredBodyEvidence() async throws {
+        let store = try await makeIntegrationStore()
+        let assetId = "int-asset-hypothesis-body-first-earlier-body"
+
+        try await store.insertAsset(makeIntegrationAsset(id: assetId, episodeId: "int-ep-hypothesis-body-first-earlier-body"))
+
+        let intro = makeHotPathChunk(
+            assetId: assetId,
+            chunkIndex: 0,
+            startTime: 100,
+            endTime: 101,
+            text: "this episode is sponsored by betterhelp"
+        )
+        let recoveredBody = makeHotPathChunk(
+            assetId: assetId,
+            chunkIndex: 1,
+            startTime: 110,
+            endTime: 111,
+            text: "frie trile speshul awfer",
+            weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                averageConfidence: 0.24,
+                minimumConfidence: 0.18,
+                alternativeTexts: ["free trial special offer for new members"],
+                lowConfidencePhrases: []
+            )
+        )
+        let body = makeHotPathChunk(
+            assetId: assetId,
+            chunkIndex: 2,
+            startTime: 126,
+            endTime: 127,
+            text: "free trial special offer for new members"
+        )
+        let close = makeHotPathChunk(
+            assetId: assetId,
+            chunkIndex: 3,
+            startTime: 170,
+            endTime: 171,
+            text: "use code save10 at checkout"
+        )
+        try await store.insertTranscriptChunks([intro, recoveredBody, body, close])
+
+        let detector = AdDetectionService(
+            store: store,
+            classifier: CapturingClassifier(adProbability: 0.95),
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+
+        let firstPassWindows = try await detector.runHotPath(
+            chunks: [body],
+            analysisAssetId: assetId,
+            episodeDuration: 600
+        )
+        try await store.insertFeatureWindows([
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 85, endTime: 86, pauseProbability: 0.95, rms: 0.01),
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 176, endTime: 177, pauseProbability: 0.96, rms: 0.01),
+        ])
+        let replayWindows = try await detector.runHotPath(
+            chunks: [intro, recoveredBody, body, close],
+            analysisAssetId: assetId,
+            episodeDuration: 600
+        )
+        let persistedWindows = try await store.fetchAdWindows(assetId: assetId)
+
+        #expect(firstPassWindows.count == 1)
+        #expect(replayWindows.count == 1)
+        let firstBodyWindow = try #require(firstPassWindows.first)
+        let replayBodyWindow = try #require(replayWindows.first)
+        let persistedBodyWindows = persistedWindows.filter { $0.id == firstBodyWindow.id }
+
+        #expect(replayBodyWindow.id == firstBodyWindow.id)
+        #expect(replayBodyWindow.startTime + 5 < firstBodyWindow.startTime)
+        #expect(replayBodyWindow.endTime > firstBodyWindow.endTime + 5)
+        #expect(replayBodyWindow.evidenceStartTime == firstBodyWindow.evidenceStartTime)
+        #expect(persistedBodyWindows.count == 1)
+        #expect(persistedBodyWindows[0].endTime == replayBodyWindow.endTime)
+    }
+
+    @Test("Hot path replay collapses sibling candidate rows into one full-span window")
+    func hotPathReplayCollapsesSiblingCandidateRows() async throws {
+        let store = try await makeIntegrationStore()
+        let assetId = "int-asset-hypothesis-collapse-siblings"
+
+        try await store.insertAsset(makeIntegrationAsset(id: assetId, episodeId: "int-ep-hypothesis-collapse-siblings"))
+        try await store.insertAdWindow(
+            AdWindow(
+                id: "intro-fragment",
+                analysisAssetId: assetId,
+                startTime: 85,
+                endTime: 129,
+                confidence: 0.8,
+                boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                decisionState: AdDecisionState.candidate.rawValue,
+                detectorVersion: AdDetectionConfig.default.detectorVersion,
+                advertiser: nil,
+                product: nil,
+                adDescription: nil,
+                evidenceText: "this episode is sponsored | sponsored by | free trial",
+                evidenceStartTime: 100,
+                metadataSource: "none",
+                metadataConfidence: nil,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false
+            )
+        )
+        try await store.insertAdWindow(
+            AdWindow(
+                id: "close-fragment",
+                analysisAssetId: assetId,
+                startTime: 170,
+                endTime: 177,
+                confidence: 0.8,
+                boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                decisionState: AdDecisionState.candidate.rawValue,
+                detectorVersion: AdDetectionConfig.default.detectorVersion,
+                advertiser: nil,
+                product: nil,
+                adDescription: nil,
+                evidenceText: "use code save10",
+                evidenceStartTime: 170,
+                metadataSource: "none",
+                metadataConfidence: nil,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false
+            )
+        )
+
+        let chunks = [
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 0,
+                startTime: 100,
+                endTime: 101,
+                text: "this episode is sponsored by betterhelp"
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 1,
+                startTime: 126,
+                endTime: 127,
+                text: "free trial for new members"
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 2,
+                startTime: 170,
+                endTime: 171,
+                text: "use code save10 at checkout"
+            ),
+        ]
+        try await store.insertTranscriptChunks(chunks)
+        try await store.insertFeatureWindows([
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 85, endTime: 86, pauseProbability: 0.95, rms: 0.01),
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 176, endTime: 177, pauseProbability: 0.96, rms: 0.01),
+        ])
+
+        let detector = AdDetectionService(
+            store: store,
+            classifier: CapturingClassifier(adProbability: 0.95),
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+
+        let windows = try await detector.runHotPath(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: 600
+        )
+        let persistedWindows = try await store.fetchAdWindows(assetId: assetId)
+
+        #expect(windows.count == 1)
+        let replayWindow = try #require(windows.first)
+        #expect(replayWindow.id == "intro-fragment" || replayWindow.id == "close-fragment")
+        #expect(persistedWindows.count == 1)
+        #expect(persistedWindows[0].id == replayWindow.id)
+        #expect(!persistedWindows.contains { $0.id == "intro-fragment" && replayWindow.id != "intro-fragment" })
+        #expect(!persistedWindows.contains { $0.id == "close-fragment" && replayWindow.id != "close-fragment" })
+    }
+
+    @Test("Hot path replay retires stale candidate rows when the replayed slice no longer produces an ad")
+    func hotPathReplayRetiresStaleCandidatesWhenReplayFindsNoWindows() async throws {
+        let store = try await makeIntegrationStore()
+        let assetId = "int-asset-hypothesis-retire-stale-replay"
+
+        try await store.insertAsset(makeIntegrationAsset(id: assetId, episodeId: "int-ep-hypothesis-retire-stale-replay"))
+        try await store.insertAdWindow(
+            AdWindow(
+                id: "stale-candidate",
+                analysisAssetId: assetId,
+                startTime: 100,
+                endTime: 140,
+                confidence: 0.82,
+                boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                decisionState: AdDecisionState.candidate.rawValue,
+                detectorVersion: AdDetectionConfig.default.detectorVersion,
+                advertiser: nil,
+                product: nil,
+                adDescription: nil,
+                evidenceText: "legacy stale replay candidate",
+                evidenceStartTime: 100,
+                metadataSource: "none",
+                metadataConfidence: nil,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false
+            )
+        )
+
+        let replayChunks = [
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 0,
+                startTime: 100,
+                endTime: 101,
+                text: "ordinary editorial discussion without sponsor language"
+            ),
+        ]
+        try await store.insertTranscriptChunks(replayChunks)
+
+        let detector = AdDetectionService(
+            store: store,
+            classifier: CapturingClassifier(adProbability: 0.95),
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+
+        let result = try await detector.runHotPathResult(
+            chunks: replayChunks,
+            analysisAssetId: assetId,
+            episodeDuration: 600,
+            retireUnmatchedReplayCandidates: true
+        )
+        let persistedWindows = try await store.fetchAdWindows(assetId: assetId)
+
+        #expect(result.windows.isEmpty)
+        #expect(result.retiredWindowIDs == Set(["stale-candidate"]))
+        #expect(persistedWindows.isEmpty)
+    }
+
+    @Test("Hot path replay does not steal ids from finalized overlapping windows")
+    func hotPathReplayDoesNotReuseFinalizedOverlappingWindow() async throws {
+        let store = try await makeIntegrationStore()
+        let assetId = "int-asset-hypothesis-finalized-overlap"
+
+        try await store.insertAsset(makeIntegrationAsset(id: assetId, episodeId: "int-ep-hypothesis-finalized-overlap"))
+        try await store.insertAdWindow(
+            AdWindow(
+                id: "confirmed-overlap",
+                analysisAssetId: assetId,
+                startTime: 110,
+                endTime: 145,
+                confidence: 0.93,
+                boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                decisionState: AdDecisionState.confirmed.rawValue,
+                detectorVersion: AdDetectionConfig.default.detectorVersion,
+                advertiser: "Existing Sponsor",
+                product: nil,
+                adDescription: nil,
+                evidenceText: "existing overlap",
+                evidenceStartTime: 110,
+                metadataSource: "fallback",
+                metadataConfidence: 0.9,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false
+            )
+        )
+
+        let chunks = [
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 0,
+                startTime: 100,
+                endTime: 101,
+                text: "this episode is sponsored by betterhelp"
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 1,
+                startTime: 126,
+                endTime: 127,
+                text: "free trial for new members"
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 2,
+                startTime: 170,
+                endTime: 171,
+                text: "use code save10 at checkout"
+            ),
+        ]
+        try await store.insertTranscriptChunks(chunks)
+        try await store.insertFeatureWindows([
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 85, endTime: 86, pauseProbability: 0.95, rms: 0.01),
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 176, endTime: 177, pauseProbability: 0.96, rms: 0.01),
+        ])
+
+        let detector = AdDetectionService(
+            store: store,
+            classifier: CapturingClassifier(adProbability: 0.95),
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+
+        let windows = try await detector.runHotPath(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: 600
+        )
+        let persistedWindows = try await store.fetchAdWindows(assetId: assetId)
+
+        #expect(windows[0].id != "confirmed-overlap")
+        #expect(persistedWindows.contains { $0.id == "confirmed-overlap" })
+        #expect(persistedWindows.contains { $0.id == windows[0].id })
+    }
+
+    @Test("Hot path replay keeps a distinct overlapping candidate when its edges do not line up")
+    func hotPathReplayKeepsDistinctOverlappingCandidate() async throws {
+        let store = try await makeIntegrationStore()
+        let assetId = "int-asset-hypothesis-distinct-overlap"
+
+        try await store.insertAsset(makeIntegrationAsset(id: assetId, episodeId: "int-ep-hypothesis-distinct-overlap"))
+        try await store.insertAdWindow(
+            AdWindow(
+                id: "candidate-overlap",
+                analysisAssetId: assetId,
+                startTime: 110,
+                endTime: 145,
+                confidence: 0.82,
+                boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                decisionState: AdDecisionState.candidate.rawValue,
+                detectorVersion: AdDetectionConfig.default.detectorVersion,
+                advertiser: nil,
+                product: nil,
+                adDescription: nil,
+                evidenceText: "other overlap",
+                evidenceStartTime: 110,
+                metadataSource: "none",
+                metadataConfidence: nil,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false
+            )
+        )
+
+        let chunks = [
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 0,
+                startTime: 100,
+                endTime: 101,
+                text: "this episode is sponsored by betterhelp"
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 1,
+                startTime: 126,
+                endTime: 127,
+                text: "free trial for new members"
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 2,
+                startTime: 170,
+                endTime: 171,
+                text: "use code save10 at checkout"
+            ),
+        ]
+        try await store.insertTranscriptChunks(chunks)
+        try await store.insertFeatureWindows([
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 85, endTime: 86, pauseProbability: 0.95, rms: 0.01),
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 176, endTime: 177, pauseProbability: 0.96, rms: 0.01),
+        ])
+
+        let detector = AdDetectionService(
+            store: store,
+            classifier: CapturingClassifier(adProbability: 0.95),
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+
+        let windows = try await detector.runHotPath(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: 600
+        )
+        let persistedWindows = try await store.fetchAdWindows(assetId: assetId)
+
+        #expect(windows[0].id != "candidate-overlap")
+        #expect(persistedWindows.contains { $0.id == "candidate-overlap" })
+        #expect(persistedWindows.contains { $0.id == windows[0].id })
+    }
+
     @Test("Hot path keeps unrelated lexical-only candidates when hypothesis windows are also present")
     func hotPathPreservesNonOverlappingLexicalCandidatesInMixedBatch() async throws {
         let store = try await makeIntegrationStore()
@@ -439,6 +1042,128 @@ struct HypothesisHotPathIntegrationTests {
         #expect(lexicalCandidate.endTime >= 270.5)
         #expect(lexicalCandidate.evidenceText.contains("free trial"))
         #expect(windows.count == 2)
+    }
+
+    @Test("Hot path alternative rescans recover a missed intro near an orphan close anchor")
+    func hotPathAlternativeRescanRecoversMissedIntro() async throws {
+        let store = try await makeIntegrationStore()
+        let assetId = "int-asset-hypothesis-alt-intro"
+
+        try await store.insertAsset(makeIntegrationAsset(id: assetId, episodeId: "int-ep-hypothesis-alt-intro"))
+
+        let chunks = [
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 0,
+                startTime: 100,
+                endTime: 101,
+                text: "this epizode is sponsered by beterhalp",
+                weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                    averageConfidence: 0.34,
+                    minimumConfidence: 0.19,
+                    alternativeTexts: ["this episode is sponsored by betterhelp free trial"],
+                    lowConfidencePhrases: []
+                )
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 1,
+                startTime: 110,
+                endTime: 111,
+                text: "use code save10 at checkout"
+            ),
+        ]
+        try await store.insertTranscriptChunks(chunks)
+
+        let classifier = CapturingClassifier(adProbability: 0.95)
+        let detector = AdDetectionService(
+            store: store,
+            classifier: classifier,
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+
+        let windows = try await detector.runHotPath(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: 600
+        )
+
+        let candidate = try #require(classifier.capturedInputs.first?.candidate)
+        #expect(classifier.capturedInputs.count == 1)
+        #expect(candidate.startTime <= 100.0)
+        #expect(candidate.endTime >= 111.0)
+        #expect(candidate.evidenceText.contains("sponsored by"))
+        #expect(candidate.evidenceText.contains("use code save10"))
+        #expect(windows.count == 1)
+    }
+
+    @Test("Hot path alternative rescans recover a missing closing anchor for an open hypothesis")
+    func hotPathAlternativeRescanRecoversClosingAnchor() async throws {
+        let store = try await makeIntegrationStore()
+        let assetId = "int-asset-hypothesis-alt-close"
+
+        try await store.insertAsset(makeIntegrationAsset(id: assetId, episodeId: "int-ep-hypothesis-alt-close"))
+
+        let chunks = [
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 0,
+                startTime: 100,
+                endTime: 101,
+                text: "this episode is sponsored by betterhelp"
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 1,
+                startTime: 105,
+                endTime: 106,
+                text: "free trial for new members"
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 2,
+                startTime: 110,
+                endTime: 111,
+                text: "yoose cawd sev ten at chec kout",
+                weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                    averageConfidence: 0.27,
+                    minimumConfidence: 0.27,
+                    alternativeTexts: [],
+                    lowConfidencePhrases: [
+                        WeakAnchorPhrase(
+                            text: "use code save10 at checkout",
+                            startTime: 110,
+                            endTime: 111,
+                            confidence: 0.27
+                        )
+                    ]
+                )
+            ),
+        ]
+        try await store.insertTranscriptChunks(chunks)
+
+        let classifier = CapturingClassifier(adProbability: 0.95)
+        let detector = AdDetectionService(
+            store: store,
+            classifier: classifier,
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+
+        let windows = try await detector.runHotPath(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: 600
+        )
+
+        let candidate = try #require(classifier.capturedInputs.first?.candidate)
+        #expect(classifier.capturedInputs.count == 1)
+        #expect(candidate.startTime <= 100.0)
+        #expect(candidate.endTime >= 111.0)
+        #expect(candidate.evidenceText.contains("sponsored"))
+        #expect(candidate.evidenceText.contains("use code save10"))
+        #expect(windows.count == 1)
     }
 }
 
@@ -1421,6 +2146,7 @@ struct CombinedTuningReplayTests {
             hitCount: 5,
             categories: [.sponsor, .promoCode, .urlCTA],
             evidenceText: "brought to you by acme corp",
+            evidenceStartTime: 60,
             detectorVersion: "test-v1"
         )
 

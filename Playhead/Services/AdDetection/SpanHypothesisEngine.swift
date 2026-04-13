@@ -246,12 +246,49 @@ struct SpanHypothesisEngine: Sendable {
         let transcriptChunks: [TranscriptChunk]
     }
 
+    private struct LexicalHitSignature: Hashable {
+        let category: LexicalPatternCategory
+        let matchedText: String
+        let startMicroseconds: Int
+        let endMicroseconds: Int
+
+        init(_ hit: LexicalHit) {
+            self.category = hit.category
+            self.matchedText = hit.matchedText.lowercased()
+            self.startMicroseconds = Int((hit.startTime * 1_000_000).rounded())
+            self.endMicroseconds = Int((hit.endTime * 1_000_000).rounded())
+        }
+    }
+
+    private struct RescanWindow: Hashable {
+        enum Reason: Hashable {
+            case closeAnchor
+            case confirmedHypothesis
+            case lowConfidenceRegion
+        }
+
+        let reason: Reason
+        let nearTimeMilliseconds: Int
+        let radiusMilliseconds: Int
+
+        init(reason: Reason, nearTime: Double, radius: TimeInterval) {
+            self.reason = reason
+            self.nearTimeMilliseconds = Int((nearTime * 1_000).rounded())
+            self.radiusMilliseconds = Int((radius * 1_000).rounded())
+        }
+
+        var nearTime: Double { Double(nearTimeMilliseconds) / 1_000.0 }
+        var radius: TimeInterval { Double(radiusMilliseconds) / 1_000.0 }
+    }
+
     static let defaultDecayRate: Double = 0.95
     private static let strictOverlapThreshold: TimeInterval = 3.0
+    private static let confirmedHypothesisRescanRadius: TimeInterval = 30
 
     let config: SpanHypothesisConfig
     private let boundaryExpansionContext: BoundaryExpansionContext?
     private let boundaryExpander: BoundaryExpander
+    private(set) var observedHits: [LexicalHit] = []
     private(set) var activeHypotheses: [SpanHypothesis] = []
     private(set) var closedHypotheses: [SpanHypothesis] = []
 
@@ -263,6 +300,56 @@ struct SpanHypothesisEngine: Sendable {
         self.config = config
         self.boundaryExpansionContext = boundaryExpansionContext
         self.boundaryExpander = boundaryExpander
+    }
+
+    mutating func process(
+        chunks: [TranscriptChunk],
+        analysisAssetId: String,
+        scanner: LexicalScanner
+    ) -> [LexicalHit] {
+        let primaryHits = chunks
+            .flatMap { scanner.scanChunk($0) }
+            .sorted(by: Self.lexicalHitsAscending)
+        guard !primaryHits.isEmpty else {
+            observedHits = []
+            return []
+        }
+
+        var seenHits = Set<LexicalHitSignature>()
+        var executedRescans = Set<RescanWindow>()
+        var observed: [LexicalHit] = []
+
+        for hit in primaryHits {
+            let preIngestHits = rescannedHits(
+                beforeIngesting: hit,
+                chunks: chunks,
+                scanner: scanner,
+                executedRescans: &executedRescans
+            )
+
+            for pendingHit in ([hit] + preIngestHits).sorted(by: Self.lexicalHitsAscending) {
+                guard seenHits.insert(LexicalHitSignature(pendingHit)).inserted else { continue }
+                guard !Self.isRedundantLexicalHit(pendingHit, against: observed) else { continue }
+                observed.append(pendingHit)
+                _ = ingest(pendingHit, analysisAssetId: analysisAssetId)
+
+                let postIngestHits = rescannedHitsForConfirmedHypotheses(
+                    afterIngesting: pendingHit,
+                    chunks: chunks,
+                    scanner: scanner,
+                    executedRescans: &executedRescans
+                )
+                for rescannedHit in postIngestHits.sorted(by: Self.lexicalHitsAscending) {
+                    guard seenHits.insert(LexicalHitSignature(rescannedHit)).inserted else { continue }
+                    guard !Self.isRedundantLexicalHit(rescannedHit, against: observed) else { continue }
+                    observed.append(rescannedHit)
+                    _ = ingest(rescannedHit, analysisAssetId: analysisAssetId)
+                }
+            }
+        }
+
+        observedHits = observed.sorted(by: Self.lexicalHitsAscending)
+        return observedHits
     }
 
     mutating func ingest(_ hit: LexicalHit, analysisAssetId: String) -> [CandidateAdSpan] {
@@ -449,6 +536,163 @@ struct SpanHypothesisEngine: Sendable {
         default:
             return nil
         }
+    }
+
+    private func rescannedHits(
+        beforeIngesting hit: LexicalHit,
+        chunks: [TranscriptChunk],
+        scanner: LexicalScanner,
+        executedRescans: inout Set<RescanWindow>
+    ) -> [LexicalHit] {
+        var windows: [RescanWindow] = []
+
+        if let event = Self.mapToAnchorEvent(hit),
+           event.anchorType.isExplicitCloseAnchor || event.isExplicitReturnMarker
+        {
+            let anchorConfig = config.config(for: event.anchorType)
+            windows.append(
+                RescanWindow(
+                    reason: .closeAnchor,
+                    nearTime: event.startTime,
+                    radius: anchorConfig.backwardSearchRadius
+                )
+            )
+        }
+
+        if let bodyEvidence = Self.mapToBodyEvidence(hit),
+           shouldRescanLowConfidenceRegion(at: bodyEvidence.timestamp, chunks: chunks)
+        {
+            windows.append(
+                RescanWindow(
+                    reason: .lowConfidenceRegion,
+                    nearTime: bodyEvidence.timestamp,
+                    radius: max(15.0, config.maxIdleGapSeconds)
+                )
+            )
+        }
+
+        var rescannedHits: [LexicalHit] = []
+        for window in windows {
+            guard executedRescans.insert(window).inserted else { continue }
+            rescannedHits.append(contentsOf: scanner.rescanAlternatives(
+                chunks: chunks,
+                nearTime: window.nearTime,
+                radius: window.radius
+            ))
+        }
+        return rescannedHits
+    }
+
+    private func rescannedHitsForConfirmedHypotheses(
+        afterIngesting hit: LexicalHit,
+        chunks: [TranscriptChunk],
+        scanner: LexicalScanner,
+        executedRescans: inout Set<RescanWindow>
+    ) -> [LexicalHit] {
+        guard activeHypotheses.contains(where: { $0.state == .confirmed && $0.closingAnchor == nil }) else {
+            return []
+        }
+
+        let window = RescanWindow(
+            reason: .confirmedHypothesis,
+            nearTime: hit.endTime,
+            radius: Self.confirmedHypothesisRescanRadius
+        )
+        guard executedRescans.insert(window).inserted else { return [] }
+
+        return scanner.rescanAlternatives(
+            chunks: chunks,
+            nearTime: window.nearTime,
+            radius: window.radius
+        )
+    }
+
+    private func shouldRescanLowConfidenceRegion(
+        at timestamp: Double,
+        chunks: [TranscriptChunk]
+    ) -> Bool {
+        chunks.contains { chunk in
+            guard chunk.weakAnchorMetadata?.hasRecoveryText == true else { return false }
+            return timestamp >= chunk.startTime && timestamp <= chunk.endTime
+        }
+    }
+
+    private static func lexicalHitsAscending(_ lhs: LexicalHit, _ rhs: LexicalHit) -> Bool {
+        if lhs.startTime != rhs.startTime {
+            return lhs.startTime < rhs.startTime
+        }
+        if lhs.endTime != rhs.endTime {
+            return lhs.endTime < rhs.endTime
+        }
+        let lhsIsAnchor = mapToAnchorEvent(lhs) != nil
+        let rhsIsAnchor = mapToAnchorEvent(rhs) != nil
+        if lhsIsAnchor != rhsIsAnchor {
+            return lhsIsAnchor && !rhsIsAnchor
+        }
+        return lhs.matchedText < rhs.matchedText
+    }
+
+    private static func isRedundantLexicalHit(_ hit: LexicalHit, against observed: [LexicalHit]) -> Bool {
+        return observed.contains { other in
+            guard other.category == hit.category,
+                  overlaps(hit, other)
+            else {
+                return false
+            }
+
+            if hit.category == .promoCode,
+               let hitCode = promoCodeToken(from: hit.matchedText),
+               let otherCode = promoCodeToken(from: other.matchedText),
+               otherCode == hitCode
+            {
+                let hitPriority = promoHitPriority(hit.matchedText)
+                let otherPriority = promoHitPriority(other.matchedText)
+                if otherPriority != hitPriority {
+                    return otherPriority > hitPriority
+                }
+                return other.matchedText.count >= hit.matchedText.count
+            }
+
+            return other.matchedText.caseInsensitiveCompare(hit.matchedText) == .orderedSame
+        }
+    }
+
+    private static func overlaps(_ lhs: LexicalHit, _ rhs: LexicalHit) -> Bool {
+        max(lhs.startTime, rhs.startTime) <= min(lhs.endTime, rhs.endTime)
+    }
+
+    private static func promoCodeToken(from matchedText: String) -> String? {
+        let normalized = matchedText.lowercased()
+        guard let capture = firstCapture(
+            in: normalized,
+            pattern: #"(?:use|enter|promo|discount|coupon)? ?code ([a-z0-9]+)"#
+        ), !capture.isEmpty else {
+            return nil
+        }
+        return capture
+    }
+
+    private static func promoHitPriority(_ matchedText: String) -> Int {
+        let normalized = matchedText.lowercased()
+        if normalized.hasPrefix("use code ") {
+            return 5
+        }
+        if normalized.hasPrefix("enter code ") {
+            return 4
+        }
+        if normalized.hasPrefix("promo code ") {
+            return 3
+        }
+        if normalized.hasPrefix("discount code ") {
+            return 2
+        }
+        if normalized.hasPrefix("coupon code ") {
+            return 1
+        }
+        if normalized.hasPrefix("code ") {
+            return 0
+        }
+        return -1
     }
 
     private mutating func closeStaleHypotheses(before time: Double, analysisAssetId: String) -> [CandidateAdSpan] {

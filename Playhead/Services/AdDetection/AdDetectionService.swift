@@ -150,12 +150,39 @@ extension AdDetectionProviding {
 /// ClassifierService (Layer 2), and MetadataExtractor (Layer 3) into a
 /// unified detection pipeline with hot-path and backfill flows.
 actor AdDetectionService {
+    struct HotPathRunResult: Sendable {
+        let windows: [AdWindow]
+        let retiredWindowIDs: Set<String>
+    }
+
     private struct HotPathHypothesisCandidate: Sendable {
         let candidate: LexicalCandidate
         let evidenceCount: Int
         let hasClosingAnchor: Bool
         let supportingHits: [LexicalHit]
     }
+
+    private struct ReconciledHotPathWindow: Sendable {
+        let window: AdWindow
+        let matchedExistingID: String?
+        let retiredExistingIDs: Set<String>
+    }
+
+    private struct ReplaySignalProfile: Sendable {
+        let hasSignal: Bool
+        let hasDirectionalSignal: Bool
+        let backwardReach: TimeInterval
+        let forwardReach: TimeInterval
+
+        static let none = ReplaySignalProfile(
+            hasSignal: false,
+            hasDirectionalSignal: false,
+            backwardReach: 0,
+            forwardReach: 0
+        )
+    }
+
+    private static let hotPathCandidateIdentityTolerance: Double = 5
 
     private let logger = Logger(subsystem: "com.playhead", category: "AdDetectionService")
 
@@ -350,6 +377,79 @@ actor AdDetectionService {
         currentPodcastProfile = profile
     }
 
+    /// Rebuild the smallest hot-path replay slice that can still reproduce the
+    /// hypothesis engine's transitive context growth for duplicate chunk
+    /// re-emits. The closure grows only through chunks that already present a
+    /// primary lexical signal or weak-anchor recovery text, then fills in the
+    /// intervening transcript for boundary expansion and lexical fallback.
+    func hotPathReplayContextChunks(
+        from allChunks: [TranscriptChunk],
+        around persistedChunks: [TranscriptChunk]
+    ) -> [TranscriptChunk] {
+        let fastAllChunks = allChunks
+            .filter { $0.pass == TranscriptPassType.fast.rawValue }
+            .sorted { lhs, rhs in
+                if lhs.startTime != rhs.startTime {
+                    return lhs.startTime < rhs.startTime
+                }
+                return lhs.endTime < rhs.endTime
+            }
+        let seedIDs = Set(
+            persistedChunks
+                .filter { $0.pass == TranscriptPassType.fast.rawValue }
+                .map(\.id)
+        )
+        let seedChunks = fastAllChunks.filter { seedIDs.contains($0.id) }
+        guard !seedChunks.isEmpty else { return [] }
+
+        let padding = SpanHypothesisConfig.default.maximumContextPadding
+        let signalProfilesByChunkID: [String: ReplaySignalProfile] = Dictionary(
+            uniqueKeysWithValues: fastAllChunks.compactMap { chunk in
+                let profile = replaySignalProfile(for: chunk)
+                guard profile.hasSignal else { return nil }
+                return (chunk.id, profile)
+            }
+        )
+        var relevantChunkIDs = Set(seedChunks.map(\.id))
+        var windowStart = seedChunks.map(\.startTime).min() ?? 0
+        var windowEnd = seedChunks.map(\.endTime).max() ?? 0
+        var currentBackwardReach: TimeInterval = padding
+        var currentForwardReach: TimeInterval = padding
+
+        let seedProfiles: [ReplaySignalProfile] = seedChunks.compactMap { signalProfilesByChunkID[$0.id] }
+        let seedHasDirectionalSignal = seedProfiles.contains { $0.hasDirectionalSignal }
+        if seedHasDirectionalSignal {
+            currentBackwardReach = seedProfiles.map(\.backwardReach).max() ?? 0
+            currentForwardReach = seedProfiles.map(\.forwardReach).max() ?? 0
+        }
+
+        var changed = true
+        while changed {
+            changed = false
+            for chunk in fastAllChunks where !relevantChunkIDs.contains(chunk.id) {
+                guard let signalProfile = signalProfilesByChunkID[chunk.id] else { continue }
+                guard chunk.endTime >= windowStart - currentBackwardReach,
+                      chunk.startTime <= windowEnd + currentForwardReach
+                else {
+                    continue
+                }
+
+                relevantChunkIDs.insert(chunk.id)
+                windowStart = min(windowStart, chunk.startTime)
+                windowEnd = max(windowEnd, chunk.endTime)
+                if signalProfile.hasDirectionalSignal {
+                    currentBackwardReach = max(currentBackwardReach, signalProfile.backwardReach)
+                    currentForwardReach = max(currentForwardReach, signalProfile.forwardReach)
+                }
+                changed = true
+            }
+        }
+
+        return fastAllChunks.filter { chunk in
+            chunk.endTime >= windowStart && chunk.startTime <= windowEnd
+        }
+    }
+
     // MARK: - Hot Path
 
     /// Run the hot-path detection pipeline on fast-pass transcript chunks
@@ -372,8 +472,33 @@ actor AdDetectionService {
         analysisAssetId: String,
         episodeDuration: Double
     ) async throws -> [AdWindow] {
+        try await runHotPathResult(
+            chunks: chunks,
+            analysisAssetId: analysisAssetId,
+            episodeDuration: episodeDuration
+        ).windows
+    }
+
+    func runHotPathResult(
+        chunks: [TranscriptChunk],
+        analysisAssetId: String,
+        episodeDuration: Double,
+        retireUnmatchedReplayCandidates: Bool = false
+    ) async throws -> HotPathRunResult {
         self.episodeDuration = episodeDuration
-        guard !chunks.isEmpty else { return [] }
+        guard !chunks.isEmpty else {
+            return HotPathRunResult(windows: [], retiredWindowIDs: [])
+        }
+
+        let replayCandidateIDs: Set<String>
+        if retireUnmatchedReplayCandidates {
+            replayCandidateIDs = try await hotPathCandidateIDs(
+                analysisAssetId: analysisAssetId,
+                overlapping: replayEnvelope(for: chunks)
+            )
+        } else {
+            replayCandidateIDs = []
+        }
 
         // Layer 1: hypothesis windows take precedence when active; otherwise
         // preserve the legacy lexical merge path.
@@ -384,7 +509,14 @@ actor AdDetectionService {
 
         guard !candidates.isEmpty else {
             logger.info("Hot path: no candidates from \(chunks.count) chunks")
-            return []
+            if !replayCandidateIDs.isEmpty {
+                try await store.upsertHotPathAdWindows(
+                    [],
+                    existingIDs: [],
+                    retiredIDs: replayCandidateIDs
+                )
+            }
+            return HotPathRunResult(windows: [], retiredWindowIDs: replayCandidateIDs)
         }
 
         logger.info("Hot path: \(candidates.count) candidates from \(chunks.count) chunks")
@@ -405,21 +537,57 @@ actor AdDetectionService {
                     from: result,
                     boundaryState: .acousticRefined,
                     decisionState: .candidate,
-                    evidenceText: candidatesByID[result.candidateId]?.evidenceText
+                    evidenceText: candidatesByID[result.candidateId]?.evidenceText,
+                    evidenceStartTime: candidatesByID[result.candidateId]?.evidenceStartTime
                 )
             }
 
         guard !adWindows.isEmpty else {
             logger.info("Hot path: all \(classifierResults.count) results below threshold")
-            return []
+            if !replayCandidateIDs.isEmpty {
+                try await store.upsertHotPathAdWindows(
+                    [],
+                    existingIDs: [],
+                    retiredIDs: replayCandidateIDs
+                )
+            }
+            return HotPathRunResult(windows: [], retiredWindowIDs: replayCandidateIDs)
+        }
+
+        let reconciledWindows = try await reconcileHotPathWindows(
+            adWindows,
+            analysisAssetId: analysisAssetId
+        )
+        guard !reconciledWindows.isEmpty else {
+            logger.info("Hot path: replay matched only terminal windows; nothing new to persist")
+            return HotPathRunResult(windows: [], retiredWindowIDs: [])
+        }
+
+        let matchedExistingIDs = Set(reconciledWindows.compactMap(\.matchedExistingID))
+        var retiredWindowIDs = reconciledWindows.reduce(into: Set<String>()) { partial, window in
+            partial.formUnion(window.retiredExistingIDs)
+        }
+        if !replayCandidateIDs.isEmpty {
+            retiredWindowIDs.formUnion(
+                replayCandidateIDs
+                    .subtracting(matchedExistingIDs)
+                    .subtracting(retiredWindowIDs)
+            )
         }
 
         // Persist to SQLite.
-        try await store.insertAdWindows(adWindows)
+        try await store.upsertHotPathAdWindows(
+            reconciledWindows.map(\.window),
+            existingIDs: matchedExistingIDs,
+            retiredIDs: retiredWindowIDs
+        )
 
-        logger.info("Hot path: persisted \(adWindows.count) candidate AdWindows")
+        logger.info("Hot path: persisted \(reconciledWindows.count) candidate AdWindows")
 
-        return adWindows
+        return HotPathRunResult(
+            windows: reconciledWindows.map(\.window),
+            retiredWindowIDs: retiredWindowIDs
+        )
     }
 
     // MARK: - Backfill
@@ -1534,24 +1702,286 @@ actor AdDetectionService {
         return lexicalCandidates
     }
 
+    private func chunkHasReplaySignal(_ chunk: TranscriptChunk) -> Bool {
+        replaySignalProfile(for: chunk).hasSignal
+    }
+
+    private func replaySignalProfile(for chunk: TranscriptChunk) -> ReplaySignalProfile {
+        let hits = replaySignalHits(for: chunk)
+        guard !hits.isEmpty else { return .none }
+
+        var backwardReach: TimeInterval = 0
+        var forwardReach: TimeInterval = 0
+        var hasDirectionalSignal = false
+
+        for hit in hits {
+            guard let anchorEvent = SpanHypothesisEngine.mapToAnchorEvent(hit) else { continue }
+            let anchorConfig = SpanHypothesisConfig.default.config(for: anchorEvent.anchorType)
+            backwardReach = max(backwardReach, anchorConfig.backwardSearchRadius)
+            forwardReach = max(forwardReach, anchorConfig.forwardSearchRadius)
+            hasDirectionalSignal = true
+        }
+
+        return ReplaySignalProfile(
+            hasSignal: true,
+            hasDirectionalSignal: hasDirectionalSignal,
+            backwardReach: backwardReach,
+            forwardReach: forwardReach
+        )
+    }
+
+    private func replaySignalHits(for chunk: TranscriptChunk) -> [LexicalHit] {
+        var hits = scanner.scanChunk(chunk)
+        guard let metadata = chunk.weakAnchorMetadata else { return hits }
+
+        for alternativeText in metadata.alternativeTexts {
+            guard !alternativeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            hits.append(contentsOf: scanner.scanChunk(
+                syntheticReplayChunk(
+                    text: alternativeText,
+                    analysisAssetId: chunk.analysisAssetId,
+                    startTime: chunk.startTime,
+                    endTime: chunk.endTime
+                )
+            ))
+        }
+
+        for phrase in metadata.lowConfidencePhrases {
+            let startTime = max(chunk.startTime, phrase.startTime)
+            let endTime = min(chunk.endTime, phrase.endTime)
+            guard endTime > startTime else { continue }
+            hits.append(contentsOf: scanner.scanChunk(
+                syntheticReplayChunk(
+                    text: phrase.text,
+                    analysisAssetId: chunk.analysisAssetId,
+                    startTime: startTime,
+                    endTime: endTime
+                )
+            ))
+        }
+
+        return hits
+    }
+
+    private func reconcileHotPathWindows(
+        _ adWindows: [AdWindow],
+        analysisAssetId: String
+    ) async throws -> [ReconciledHotPathWindow] {
+        let existingWindows = try await currentHotPathCandidateWindows(
+            analysisAssetId: analysisAssetId
+        )
+        var matchedExistingIDs = Set<String>()
+        var reconciled: [ReconciledHotPathWindow] = []
+
+        for adWindow in adWindows.sorted(by: hotPathWindowOrdering) {
+            let matchingWindows = matchingHotPathWindows(
+                for: adWindow,
+                in: existingWindows,
+                excluding: matchedExistingIDs
+            )
+            guard let existing = bestMatchingHotPathWindow(
+                for: adWindow,
+                in: matchingWindows
+            ) else {
+                reconciled.append(
+                    ReconciledHotPathWindow(
+                        window: adWindow,
+                        matchedExistingID: nil,
+                        retiredExistingIDs: []
+                    )
+                )
+                continue
+            }
+
+            let allMatchingIDs = Set(matchingWindows.map(\.id))
+            matchedExistingIDs.formUnion(allMatchingIDs)
+            let retiredExistingIDs = allMatchingIDs.subtracting([existing.id])
+
+            let preservedWindow = AdWindow(
+                id: existing.id,
+                analysisAssetId: adWindow.analysisAssetId,
+                startTime: adWindow.startTime,
+                endTime: adWindow.endTime,
+                confidence: adWindow.confidence,
+                boundaryState: adWindow.boundaryState,
+                decisionState: existing.decisionState,
+                detectorVersion: adWindow.detectorVersion,
+                advertiser: existing.advertiser,
+                product: existing.product,
+                adDescription: existing.adDescription,
+                evidenceText: adWindow.evidenceText,
+                evidenceStartTime: existing.evidenceStartTime ?? adWindow.evidenceStartTime,
+                metadataSource: existing.metadataSource,
+                metadataConfidence: existing.metadataConfidence,
+                metadataPromptVersion: existing.metadataPromptVersion,
+                wasSkipped: existing.wasSkipped,
+                userDismissedBanner: existing.userDismissedBanner,
+                evidenceSources: existing.evidenceSources,
+                eligibilityGate: existing.eligibilityGate
+            )
+            reconciled.append(
+                ReconciledHotPathWindow(
+                    window: preservedWindow,
+                    matchedExistingID: existing.id,
+                    retiredExistingIDs: retiredExistingIDs
+                )
+            )
+        }
+
+        return reconciled
+    }
+
+    private func currentHotPathCandidateWindows(
+        analysisAssetId: String
+    ) async throws -> [AdWindow] {
+        try await store.fetchAdWindows(assetId: analysisAssetId)
+            .filter {
+                $0.detectorVersion == config.detectorVersion
+                    && $0.decisionState == AdDecisionState.candidate.rawValue
+            }
+    }
+
+    private func hotPathCandidateIDs(
+        analysisAssetId: String,
+        overlapping replayEnvelope: ClosedRange<Double>
+    ) async throws -> Set<String> {
+        let windows = try await currentHotPathCandidateWindows(
+            analysisAssetId: analysisAssetId
+        )
+        return Set(
+            windows
+                .filter { window in
+                    window.endTime > replayEnvelope.lowerBound
+                        && window.startTime < replayEnvelope.upperBound
+                }
+                .map(\.id)
+        )
+    }
+
+    private func replayEnvelope(for chunks: [TranscriptChunk]) -> ClosedRange<Double> {
+        let start = chunks.map(\.startTime).min() ?? 0
+        let end = chunks.map(\.endTime).max() ?? start
+        return start...max(start, end)
+    }
+
+    private func matchingHotPathWindows(
+        for incoming: AdWindow,
+        in existingWindows: [AdWindow],
+        excluding excludedIDs: Set<String>
+    ) -> [AdWindow] {
+        existingWindows
+            .filter { existing in
+                !excludedIDs.contains(existing.id)
+                    && existing.analysisAssetId == incoming.analysisAssetId
+                    && existing.boundaryState == incoming.boundaryState
+                    && existing.endTime > incoming.startTime
+                    && existing.startTime < incoming.endTime
+                    && hotPathWindowsShareIdentity(existing: existing, incoming: incoming)
+            }
+    }
+
+    private func bestMatchingHotPathWindow(
+        for incoming: AdWindow,
+        in matchingWindows: [AdWindow]
+    ) -> AdWindow? {
+        matchingWindows.max { lhs, rhs in
+                let lhsScore = hotPathWindowMatchScore(existing: lhs, incoming: incoming)
+                let rhsScore = hotPathWindowMatchScore(existing: rhs, incoming: incoming)
+                if lhsScore != rhsScore {
+                    return lhsScore < rhsScore
+                }
+
+                let lhsDistance = abs(lhs.startTime - incoming.startTime) + abs(lhs.endTime - incoming.endTime)
+                let rhsDistance = abs(rhs.startTime - incoming.startTime) + abs(rhs.endTime - incoming.endTime)
+                if lhsDistance != rhsDistance {
+                    return lhsDistance > rhsDistance
+                }
+                return lhs.id > rhs.id
+            }
+    }
+
+    private func hotPathWindowMatchScore(existing: AdWindow, incoming: AdWindow) -> Double {
+        let overlapStart = max(existing.startTime, incoming.startTime)
+        let overlapEnd = min(existing.endTime, incoming.endTime)
+        let overlap = max(0, overlapEnd - overlapStart)
+        let union = max(existing.endTime, incoming.endTime) - min(existing.startTime, incoming.startTime)
+        guard union > 0 else { return 1 }
+        return overlap / union
+    }
+
+    private func hotPathWindowsShareIdentity(existing: AdWindow, incoming: AdWindow) -> Bool {
+        if abs(existing.startTime - incoming.startTime) <= Self.hotPathCandidateIdentityTolerance {
+            return true
+        }
+        if abs(existing.endTime - incoming.endTime) <= Self.hotPathCandidateIdentityTolerance {
+            return true
+        }
+        if let existingEvidenceStartTime = existing.evidenceStartTime,
+           let incomingEvidenceStartTime = incoming.evidenceStartTime,
+           abs(existingEvidenceStartTime - incomingEvidenceStartTime) <= Self.hotPathCandidateIdentityTolerance
+        {
+            return true
+        }
+        if hotPathEvidenceTextSharesIdentity(existing: existing, incoming: incoming) {
+            return true
+        }
+        return false
+    }
+
+    private func hotPathEvidenceTextSharesIdentity(existing: AdWindow, incoming: AdWindow) -> Bool {
+        guard let existingText = normalizedHotPathEvidenceText(existing.evidenceText),
+              let incomingText = normalizedHotPathEvidenceText(incoming.evidenceText)
+        else {
+            return false
+        }
+
+        let (shorter, longer) = existingText.count <= incomingText.count
+            ? (existingText, incomingText)
+            : (incomingText, existingText)
+        guard shorter.count >= 12 else { return false }
+        return longer.contains(shorter)
+    }
+
+    private func normalizedHotPathEvidenceText(_ text: String?) -> String? {
+        guard let text else { return nil }
+        let normalized = TranscriptEngineService.normalizeText(text)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private func hotPathWindowOrdering(_ lhs: AdWindow, _ rhs: AdWindow) -> Bool {
+        if lhs.startTime != rhs.startTime {
+            return lhs.startTime < rhs.startTime
+        }
+        return lhs.endTime < rhs.endTime
+    }
+
+    private func syntheticReplayChunk(
+        text: String,
+        analysisAssetId: String,
+        startTime: Double,
+        endTime: Double
+    ) -> TranscriptChunk {
+        TranscriptChunk(
+            id: UUID().uuidString,
+            analysisAssetId: analysisAssetId,
+            segmentFingerprint: UUID().uuidString,
+            chunkIndex: 0,
+            startTime: startTime,
+            endTime: endTime,
+            text: text,
+            normalizedText: TranscriptEngineService.normalizeText(text),
+            pass: TranscriptPassType.fast.rawValue,
+            modelVersion: "hot-path-replay",
+            transcriptVersion: nil,
+            atomOrdinal: nil,
+            weakAnchorMetadata: nil
+        )
+    }
+
     private func hypothesisCandidates(
         from chunks: [TranscriptChunk],
         analysisAssetId: String
     ) async throws -> [LexicalCandidate] {
-        var hits: [LexicalHit] = []
-        for chunk in chunks {
-            hits.append(contentsOf: scanner.scanChunk(chunk))
-        }
-
-        guard !hits.isEmpty else { return [] }
-
-        hits.sort { lhs, rhs in
-            if lhs.startTime != rhs.startTime {
-                return lhs.startTime < rhs.startTime
-            }
-            return lhs.endTime < rhs.endTime
-        }
-
         let spanConfig = SpanHypothesisConfig.default
         let boundaryContext = try await hotPathBoundaryExpansionContext(
             for: chunks,
@@ -1562,10 +1992,13 @@ actor AdDetectionService {
             config: spanConfig,
             boundaryExpansionContext: boundaryContext
         )
-
-        for hit in hits {
-            _ = engine.ingest(hit, analysisAssetId: analysisAssetId)
-        }
+        _ = engine.process(
+            chunks: chunks,
+            analysisAssetId: analysisAssetId,
+            scanner: scanner
+        )
+        let hits = engine.observedHits
+        guard !hits.isEmpty else { return [] }
 
         let finishTime = max(
             chunks.last?.endTime ?? 0,
@@ -1696,6 +2129,7 @@ actor AdDetectionService {
                 hitCount: max(preferred.candidate.hitCount, other.candidate.hitCount, mergedHits.count),
                 categories: categories,
                 evidenceText: evidenceText,
+                evidenceStartTime: preferred.candidate.evidenceStartTime,
                 detectorVersion: preferred.candidate.detectorVersion
             ),
             evidenceCount: max(preferred.evidenceCount, other.evidenceCount),
@@ -1783,6 +2217,7 @@ actor AdDetectionService {
             1.0,
             hypothesis.score(at: hypothesis.lastEvidenceTime) / max(minConfirmedEvidence, 1.0)
         )
+        let evidenceStartTime = hotPathEvidenceStartTime(for: hypothesis)
 
         return HotPathHypothesisCandidate(
             candidate: LexicalCandidate(
@@ -1799,12 +2234,26 @@ actor AdDetectionService {
                 hitCount: max(1, supportingHits.count),
                 categories: Set(categories),
                 evidenceText: evidenceText,
+                evidenceStartTime: evidenceStartTime,
                 detectorVersion: "hypothesis-v1"
             ),
             evidenceCount: 1 + hypothesis.supportingAnchors.count + hypothesis.bodyEvidence.count + (hypothesis.closingAnchor == nil ? 0 : 1),
             hasClosingAnchor: hypothesis.closingAnchor != nil,
             supportingHits: supportingHits
         )
+    }
+
+    private func hotPathEvidenceStartTime(for hypothesis: SpanHypothesis) -> Double {
+        if let bodyTimestamp = hypothesis.bodyEvidence.map(\.timestamp).min() {
+            return bodyTimestamp
+        }
+        if let closingAnchor = hypothesis.closingAnchor {
+            return closingAnchor.startTime
+        }
+        if let supportingAnchorStart = hypothesis.supportingAnchors.map(\.startTime).min() {
+            return supportingAnchorStart
+        }
+        return hypothesis.seedAnchor.startTime
     }
 
     private func hotPathExpandedBoundary(
@@ -2029,7 +2478,8 @@ actor AdDetectionService {
         from result: ClassifierResult,
         boundaryState: AdBoundaryState,
         decisionState: AdDecisionState,
-        evidenceText: String?
+        evidenceText: String?,
+        evidenceStartTime: Double?
     ) -> AdWindow {
         AdWindow(
             id: UUID().uuidString,
@@ -2044,7 +2494,7 @@ actor AdDetectionService {
             product: nil,
             adDescription: nil,
             evidenceText: evidenceText,
-            evidenceStartTime: result.startTime,
+            evidenceStartTime: evidenceStartTime,
             metadataSource: "none",
             metadataConfidence: nil,
             metadataPromptVersion: nil,

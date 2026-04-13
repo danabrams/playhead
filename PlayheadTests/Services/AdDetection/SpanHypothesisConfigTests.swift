@@ -76,4 +76,29 @@ struct SpanHypothesisConfigTests {
         #expect(config.maxIdleGapSeconds == 11)
         #expect(config.evidenceDecayRate == 0.95)
     }
+
+    @Test("maximum context padding tracks the widest configured search radius")
+    func maximumContextPaddingFollowsConfiguredSearchRadii() {
+        let customURL = AnchorTypeConfig(
+            polarity: .endAnchored,
+            windowDuration: 75,
+            backwardSearchRadius: 120,
+            forwardSearchRadius: 12
+        )
+        let customDisclosure = AnchorTypeConfig(
+            polarity: .startAnchored,
+            windowDuration: 90,
+            backwardSearchRadius: 10,
+            forwardSearchRadius: 95
+        )
+
+        let config = SpanHypothesisConfig(
+            disclosure: customDisclosure,
+            url: customURL
+        )
+
+        #expect(config.maximumBackwardSearchRadius == 120)
+        #expect(config.maximumForwardSearchRadius == 95)
+        #expect(config.maximumContextPadding == 120)
+    }
 }

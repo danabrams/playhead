@@ -6,6 +6,10 @@ import os
 import Testing
 @testable import Playhead
 
+#if canImport(Speech)
+import Speech
+#endif
+
 // MARK: - Mock Speech Recognizer
 
 /// Controllable mock for testing SpeechService without real Apple Speech.
@@ -59,6 +63,43 @@ private func makeSegment(id: Int = 0, passType: TranscriptPassType = .fast) -> T
     )
 }
 
+private func makeWeakAnchorMetadata(
+    averageConfidence: Double = 0.52,
+    minimumConfidence: Double = 0.31
+) -> TranscriptWeakAnchorMetadata {
+    TranscriptWeakAnchorMetadata(
+        averageConfidence: averageConfidence,
+        minimumConfidence: minimumConfidence,
+        alternativeTexts: [
+            "visit betterhelp.com/podcast for details",
+        ],
+        lowConfidencePhrases: [
+            TranscriptWeakAnchorMetadata.LowConfidencePhrase(
+                text: "use code save10 at checkout",
+                startTime: 0.2,
+                endTime: 0.8,
+                confidence: minimumConfidence
+            ),
+        ]
+    )
+}
+
+private func makeWeakAnchorMetadata() -> TranscriptWeakAnchorMetadata {
+    TranscriptWeakAnchorMetadata(
+        averageConfidence: 0.46,
+        minimumConfidence: 0.19,
+        alternativeTexts: ["sponsored by betterhelp"],
+        lowConfidencePhrases: [
+            WeakAnchorPhrase(
+                text: "better help",
+                startTime: 0.2,
+                endTime: 0.4,
+                confidence: 0.19
+            )
+        ]
+    )
+}
+
 private func makeTranscriptAsset(
     id: String,
     episodeId: String
@@ -77,6 +118,32 @@ private func makeTranscriptAsset(
         capabilitySnapshot: nil
     )
 }
+
+#if canImport(Speech)
+
+private func makeSpeechAttributedString(
+    _ runs: [(text: String, startTime: Double, endTime: Double, confidence: Double?)]
+) -> AttributedString {
+    var attributed = AttributedString()
+
+    for run in runs {
+        var segment = AttributedString(run.text)
+        var attributes = AttributeContainer()
+        attributes.audioTimeRange = CMTimeRange(
+            start: CMTime(seconds: run.startTime, preferredTimescale: 600),
+            duration: CMTime(seconds: run.endTime - run.startTime, preferredTimescale: 600)
+        )
+        if let confidence = run.confidence {
+            attributes.transcriptionConfidence = confidence
+        }
+        segment.mergeAttributes(attributes)
+        attributed.append(segment)
+    }
+
+    return attributed
+}
+
+#endif
 
 // MARK: - SpeechService Tests
 
@@ -572,6 +639,49 @@ struct TranscriptEngineAssetSwitchingTests {
         #expect(!allIds.contains(99), "stale appended shard should be dropped")
         #expect(asset2Chunks.isEmpty, "no transcript should be written for stale asset append")
     }
+
+    @Test("startTranscription persists weak-anchor metadata from transcript segments")
+    func weakAnchorMetadataPersistsToChunks() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeTranscriptAsset(id: "asset-weak", episodeId: "ep-weak"))
+
+        let recognizer = MockSpeechRecognizer()
+        let weakAnchorMetadata = makeWeakAnchorMetadata()
+        recognizer.transcribeResult = [
+            TranscriptSegment(
+                id: 0,
+                words: [
+                    TranscriptWord(text: "visit", startTime: 0, endTime: 0.4, confidence: 0.9),
+                    TranscriptWord(text: "betterhelp", startTime: 0.4, endTime: 0.8, confidence: 0.4),
+                ],
+                text: "visit betterhelp",
+                startTime: 0,
+                endTime: 0.8,
+                avgConfidence: 0.65,
+                passType: .fast,
+                weakAnchorMetadata: weakAnchorMetadata
+            ),
+        ]
+        let speech = SpeechService(recognizer: recognizer)
+        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        let events = await engine.events()
+
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, startTime: 0, duration: 30)],
+            analysisAssetId: "asset-weak",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+
+        for await event in events {
+            if case .completed(let assetId) = event, assetId == "asset-weak" { break }
+        }
+
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-weak")
+        let chunk = try #require(chunks.first)
+        #expect(chunk.weakAnchorMetadata == weakAnchorMetadata)
+    }
 }
 
 // MARK: - Partial Result Promotion Tests (playhead-4ck)
@@ -593,7 +703,8 @@ private func makeSnapshot(
     text: String,
     startTime: TimeInterval = 0,
     endTime: TimeInterval = 1,
-    confidence: Float = 0.9
+    confidence: Float = 0.9,
+    weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil
 ) -> RecognitionSnapshot {
     let words = text.isEmpty ? [] : [
         TranscriptWord(text: text, startTime: startTime, endTime: endTime, confidence: confidence)
@@ -603,11 +714,100 @@ private func makeSnapshot(
         text: text,
         words: words,
         startTime: startTime,
-        endTime: endTime
+        endTime: endTime,
+        weakAnchorMetadata: weakAnchorMetadata
     )
 }
 
+@Suite("TranscriptWeakAnchorMetadata")
+struct TranscriptWeakAnchorMetadataTests {
+
+    @Test("build captures distinct alternatives and grouped low-confidence spans")
+    func buildCapturesAlternativesAndLowConfidenceSpans() throws {
+        let metadata = try #require(TranscriptWeakAnchorMetadata.build(
+            primaryText: "visit better halp dot com for details",
+            words: [
+                TranscriptWord(text: "visit", startTime: 0.0, endTime: 0.2, confidence: 0.95),
+                TranscriptWord(text: "better", startTime: 0.2, endTime: 0.4, confidence: 0.42),
+                TranscriptWord(text: "halp", startTime: 0.4, endTime: 0.6, confidence: 0.41),
+                TranscriptWord(text: "dot", startTime: 0.6, endTime: 0.8, confidence: 0.40),
+                TranscriptWord(text: "com", startTime: 0.8, endTime: 1.0, confidence: 0.39),
+            ],
+            alternatives: [
+                "visit betterhelp.com/podcast for details",
+                "visit better halp dot com for details",
+            ],
+            startTime: 0,
+            endTime: 1
+        ))
+
+        #expect(abs(metadata.averageConfidence - 0.514) < 0.000_001)
+        #expect(abs(metadata.minimumConfidence - 0.39) < 0.000_001)
+        #expect(metadata.alternativeTexts.contains("visit betterhelp.com/podcast for details"))
+        #expect(metadata.lowConfidencePhrases.contains {
+            $0.text == "better halp dot com"
+        })
+    }
+}
+
 #if canImport(Speech)
+
+@Suite("SpeechTranscriber extraction")
+struct SpeechTranscriberExtractionTests {
+
+    @Test("extractWords maps Speech alternatives and run-level weak-anchor timing")
+    func extractWordsMapsAlternativesAndWeakAnchorTiming() throws {
+        let primaryText = makeSpeechAttributedString([
+            ("visit ", 1.0, 1.4, 0.96),
+            ("better halp dot com", 1.4, 3.8, 0.34),
+        ])
+        let extracted = AppleSpeechRecognizer.extractWords(
+            from: primaryText,
+            alternatives: [
+                AttributedString("visit betterhelp.com/podcast"),
+                AttributedString("visit better halp dot com"),
+            ],
+            fallbackStart: 10.0,
+            fallbackEnd: 12.0
+        )
+
+        #expect(extracted.words.map(\.text) == ["visit", "better", "halp", "dot", "com"])
+        #expect(abs(extracted.words[0].startTime - 1.0) < 0.000_001)
+        #expect(abs(extracted.words[1].startTime - 1.4) < 0.000_001)
+        #expect(abs(extracted.words[4].endTime - 3.8) < 0.000_001)
+        #expect(abs(extracted.words[1].confidence - 0.34) < 0.000_001)
+
+        let metadata = try #require(extracted.weakAnchorMetadata)
+        #expect(metadata.alternativeTexts == ["visit betterhelp.com/podcast"])
+        #expect(abs(metadata.averageConfidence - 0.464) < 0.000_001)
+        #expect(abs(metadata.minimumConfidence - 0.34) < 0.000_001)
+        #expect(metadata.lowConfidencePhrases.count == 1)
+        #expect(metadata.lowConfidencePhrases[0].text == "better halp dot com")
+        #expect(abs(metadata.lowConfidencePhrases[0].startTime - 1.4) < 0.000_001)
+        #expect(abs(metadata.lowConfidencePhrases[0].endTime - 3.8) < 0.000_001)
+        #expect(abs(metadata.lowConfidencePhrases[0].confidence - 0.34) < 0.000_001)
+    }
+
+    @Test("extracted weak-anchor metadata can be offset to shard-relative episode time")
+    func extractedWeakAnchorMetadataOffsetsForShardStart() throws {
+        let primaryText = makeSpeechAttributedString([
+            ("visit ", 0.0, 0.2, 0.95),
+            ("better help", 0.2, 0.8, 0.19),
+        ])
+        let extracted = AppleSpeechRecognizer.extractWords(
+            from: primaryText,
+            alternatives: [AttributedString("visit betterhelp dot com")],
+            fallbackStart: 0.0,
+            fallbackEnd: 1.0
+        )
+
+        let offsetMetadata = try #require(extracted.weakAnchorMetadata?.offsettingTimes(by: 30.0))
+        let phrase = try #require(offsetMetadata.lowConfidencePhrases.first)
+        #expect(offsetMetadata.alternativeTexts == ["visit betterhelp dot com"])
+        #expect(abs(phrase.startTime - 30.2) < 0.000_001)
+        #expect(abs(phrase.endTime - 30.8) < 0.000_001)
+    }
+}
 
 @Suite("collectSegmentsFromSnapshots – Partial Promotion")
 struct CollectSegmentsPartialPromotionTests {
@@ -727,9 +927,267 @@ struct CollectSegmentsPartialPromotionTests {
         #expect(segments[1].text == "How are you")
         #expect(segments[2].text == "I am fi", "Trailing partial from shard 3 should be promoted")
     }
+
+    @Test("weak-anchor metadata survives snapshot promotion into transcript segments")
+    func weakAnchorMetadataSurvivesSnapshotPromotion() async throws {
+        let metadata = makeWeakAnchorMetadata()
+        let stream = snapshotStream([
+            makeSnapshot(
+                isFinal: true,
+                text: "sponsored by betterhelp",
+                startTime: 0,
+                endTime: 1,
+                confidence: 0.19,
+                weakAnchorMetadata: metadata
+            )
+        ])
+
+        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        #expect(segments.count == 1)
+        #expect(segments[0].weakAnchorMetadata == metadata)
+    }
 }
 
 #endif
+
+@Suite("TranscriptEngineService – Weak Anchor Metadata")
+struct TranscriptEngineWeakAnchorMetadataTests {
+
+    @Test("transcribed segment metadata persists into transcript chunks")
+    func weakAnchorMetadataPersistsIntoChunks() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeTranscriptAsset(id: "asset-weak-anchor", episodeId: "ep-weak-anchor"))
+
+        let mock = MockSpeechRecognizer()
+        mock.transcribeResult = [
+            TranscriptSegment(
+                id: 0,
+                words: [
+                    TranscriptWord(text: "hello", startTime: 0, endTime: 0.5, confidence: 0.19)
+                ],
+                text: "hello",
+                startTime: 0,
+                endTime: 0.5,
+                avgConfidence: 0.19,
+                passType: .fast,
+                weakAnchorMetadata: makeWeakAnchorMetadata()
+            )
+        ]
+
+        let speech = SpeechService(recognizer: mock)
+        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        let events = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, startTime: 0, duration: 30)],
+            analysisAssetId: "asset-weak-anchor",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+
+        for await event in events {
+            if case .completed(let assetId) = event, assetId == "asset-weak-anchor" {
+                break
+            }
+        }
+
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-weak-anchor")
+        #expect(chunks.count == 1)
+        #expect(chunks[0].weakAnchorMetadata == makeWeakAnchorMetadata())
+    }
+
+    @Test("duplicate fingerprints upgrade persisted weak-anchor metadata and re-emit the chunk")
+    func duplicateFingerprintUpgradesWeakAnchorMetadata() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeTranscriptAsset(id: "asset-weak-upgrade", episodeId: "ep-weak-upgrade"))
+
+        let initialMetadata = TranscriptWeakAnchorMetadata(
+            averageConfidence: 0.22,
+            minimumConfidence: 0.22,
+            alternativeTexts: [],
+            lowConfidencePhrases: []
+        )
+        let upgradedMetadata = makeWeakAnchorMetadata()
+
+        let mock = MockSpeechRecognizer()
+        mock.transcribeResult = [
+            TranscriptSegment(
+                id: 0,
+                words: [
+                    TranscriptWord(text: "hello", startTime: 0, endTime: 0.5, confidence: 0.22)
+                ],
+                text: "hello",
+                startTime: 0,
+                endTime: 0.5,
+                avgConfidence: 0.22,
+                passType: .fast,
+                weakAnchorMetadata: initialMetadata
+            )
+        ]
+
+        let speech = SpeechService(recognizer: mock)
+        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+
+        let firstEvents = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, startTime: 0, duration: 30)],
+            analysisAssetId: "asset-weak-upgrade",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        for await event in firstEvents {
+            if case .completed(let assetId) = event, assetId == "asset-weak-upgrade" {
+                break
+            }
+        }
+
+        mock.transcribeResult = [
+            TranscriptSegment(
+                id: 0,
+                words: [
+                    TranscriptWord(text: "hello", startTime: 0, endTime: 0.5, confidence: 0.19)
+                ],
+                text: "hello",
+                startTime: 0,
+                endTime: 0.5,
+                avgConfidence: 0.19,
+                passType: .fast,
+                weakAnchorMetadata: upgradedMetadata
+            )
+        ]
+
+        let secondEvents = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, startTime: 0, duration: 30)],
+            analysisAssetId: "asset-weak-upgrade",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+
+        var upgradedEventChunks: [TranscriptChunk] = []
+        var sawCompletion = false
+        for await event in secondEvents {
+            switch event {
+            case .chunksPersisted(let assetId, let chunks) where assetId == "asset-weak-upgrade":
+                upgradedEventChunks = chunks
+            case .completed(let assetId) where assetId == "asset-weak-upgrade":
+                sawCompletion = true
+            default:
+                continue
+            }
+            if !upgradedEventChunks.isEmpty || sawCompletion {
+                break
+            }
+        }
+
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-weak-upgrade")
+        #expect(chunks.count == 1)
+        #expect(chunks[0].weakAnchorMetadata == upgradedMetadata)
+        #expect(upgradedEventChunks.count == 1)
+        #expect(upgradedEventChunks[0].id == chunks[0].id)
+        #expect(upgradedEventChunks[0].weakAnchorMetadata == upgradedMetadata)
+    }
+
+    @Test("duplicate fingerprints do not replace richer weak-anchor metadata with poorer payloads")
+    func duplicateFingerprintDoesNotDowngradeWeakAnchorMetadata() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeTranscriptAsset(id: "asset-weak-downgrade", episodeId: "ep-weak-downgrade"))
+
+        let richMetadata = TranscriptWeakAnchorMetadata(
+            averageConfidence: 0.19,
+            minimumConfidence: 0.12,
+            alternativeTexts: [
+                "visit betterhelp.com/podcast",
+                "use code save10",
+            ],
+            lowConfidencePhrases: [
+                WeakAnchorPhrase(
+                    text: "better help",
+                    startTime: 0.2,
+                    endTime: 0.6,
+                    confidence: 0.12
+                )
+            ]
+        )
+        let poorerMetadata = TranscriptWeakAnchorMetadata(
+            averageConfidence: 0.42,
+            minimumConfidence: 0.42,
+            alternativeTexts: ["visit betterhelp.com/podcast"],
+            lowConfidencePhrases: []
+        )
+
+        let mock = MockSpeechRecognizer()
+        mock.transcribeResult = [
+            TranscriptSegment(
+                id: 0,
+                words: [
+                    TranscriptWord(text: "hello", startTime: 0, endTime: 0.5, confidence: 0.19)
+                ],
+                text: "hello",
+                startTime: 0,
+                endTime: 0.5,
+                avgConfidence: 0.19,
+                passType: .fast,
+                weakAnchorMetadata: richMetadata
+            )
+        ]
+
+        let speech = SpeechService(recognizer: mock)
+        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+
+        let firstEvents = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, startTime: 0, duration: 30)],
+            analysisAssetId: "asset-weak-downgrade",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        for await event in firstEvents {
+            if case .completed(let assetId) = event, assetId == "asset-weak-downgrade" {
+                break
+            }
+        }
+
+        mock.transcribeResult = [
+            TranscriptSegment(
+                id: 0,
+                words: [
+                    TranscriptWord(text: "hello", startTime: 0, endTime: 0.5, confidence: 0.42)
+                ],
+                text: "hello",
+                startTime: 0,
+                endTime: 0.5,
+                avgConfidence: 0.42,
+                passType: .fast,
+                weakAnchorMetadata: poorerMetadata
+            )
+        ]
+
+        let secondEvents = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, startTime: 0, duration: 30)],
+            analysisAssetId: "asset-weak-downgrade",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+
+        var sawPersistedChunk = false
+        for await event in secondEvents {
+            switch event {
+            case .chunksPersisted(let assetId, _) where assetId == "asset-weak-downgrade":
+                sawPersistedChunk = true
+            case .completed(let assetId) where assetId == "asset-weak-downgrade":
+                break
+            default:
+                continue
+            }
+            break
+        }
+
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-weak-downgrade")
+        #expect(chunks.count == 1)
+        #expect(chunks[0].weakAnchorMetadata == richMetadata)
+        #expect(!sawPersistedChunk)
+    }
+}
 
 // MARK: - StreamingAudioDecoder Tests
 

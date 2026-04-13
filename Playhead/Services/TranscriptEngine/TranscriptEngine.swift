@@ -27,6 +27,150 @@ struct TranscriptWord: Sendable, Equatable {
     let confidence: Float
 }
 
+struct WeakAnchorPhrase: Sendable, Codable, Equatable {
+    let text: String
+    let startTime: TimeInterval
+    let endTime: TimeInterval
+    let confidence: Double
+
+    func offsettingTimes(by delta: TimeInterval) -> WeakAnchorPhrase {
+        WeakAnchorPhrase(
+            text: text,
+            startTime: startTime + delta,
+            endTime: endTime + delta,
+            confidence: confidence
+        )
+    }
+}
+
+struct TranscriptWeakAnchorMetadata: Sendable, Codable, Equatable {
+    typealias LowConfidencePhrase = WeakAnchorPhrase
+
+    private struct PhraseSignature: Hashable {
+        let text: String
+        let startMicroseconds: Int
+        let endMicroseconds: Int
+
+        init(_ phrase: WeakAnchorPhrase) {
+            self.text = phrase.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            self.startMicroseconds = Int((phrase.startTime * 1_000_000).rounded())
+            self.endMicroseconds = Int((phrase.endTime * 1_000_000).rounded())
+        }
+    }
+
+    let averageConfidence: Double
+    let minimumConfidence: Double
+    let alternativeTexts: [String]
+    let lowConfidencePhrases: [WeakAnchorPhrase]
+
+    var hasRecoveryText: Bool {
+        !alternativeTexts.isEmpty || !lowConfidencePhrases.isEmpty
+    }
+
+    func offsettingTimes(by delta: TimeInterval) -> TranscriptWeakAnchorMetadata {
+        TranscriptWeakAnchorMetadata(
+            averageConfidence: averageConfidence,
+            minimumConfidence: minimumConfidence,
+            alternativeTexts: alternativeTexts,
+            lowConfidencePhrases: lowConfidencePhrases.map { $0.offsettingTimes(by: delta) }
+        )
+    }
+
+    func merged(with other: TranscriptWeakAnchorMetadata) -> TranscriptWeakAnchorMetadata {
+        var seenAlternatives = Set<String>()
+        let mergedAlternatives = (alternativeTexts + other.alternativeTexts).filter { text in
+            let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !normalized.isEmpty else { return false }
+            return seenAlternatives.insert(normalized).inserted
+        }
+
+        var seenPhrases = Set<PhraseSignature>()
+        let mergedPhrases = (lowConfidencePhrases + other.lowConfidencePhrases).filter { phrase in
+            seenPhrases.insert(PhraseSignature(phrase)).inserted
+        }
+
+        return TranscriptWeakAnchorMetadata(
+            averageConfidence: min(averageConfidence, other.averageConfidence),
+            minimumConfidence: min(minimumConfidence, other.minimumConfidence),
+            alternativeTexts: mergedAlternatives,
+            lowConfidencePhrases: mergedPhrases
+        )
+    }
+
+    static func build(
+        primaryText: String,
+        words: [TranscriptWord],
+        alternatives: [String],
+        startTime: TimeInterval,
+        endTime: TimeInterval,
+        lowConfidenceThreshold: Float = 0.6
+    ) -> TranscriptWeakAnchorMetadata? {
+        guard !words.isEmpty || !alternatives.isEmpty || !primaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        let averageConfidence: Double
+        let minimumConfidence: Double
+        if words.isEmpty {
+            averageConfidence = 1.0
+            minimumConfidence = 1.0
+        } else {
+            let confidences = words.map { Double($0.confidence) }
+            averageConfidence = confidences.reduce(0, +) / Double(confidences.count)
+            minimumConfidence = confidences.min() ?? 1.0
+        }
+
+        var phrases: [WeakAnchorPhrase] = []
+        var currentGroup: [TranscriptWord] = []
+
+        func flushGroup() {
+            guard let first = currentGroup.first, let last = currentGroup.last else { return }
+            phrases.append(
+                WeakAnchorPhrase(
+                    text: currentGroup.map(\.text).joined(separator: " "),
+                    startTime: first.startTime,
+                    endTime: max(first.endTime, last.endTime),
+                    confidence: currentGroup.map { Double($0.confidence) }.min() ?? 1.0
+                )
+            )
+            currentGroup.removeAll(keepingCapacity: true)
+        }
+
+        for word in words {
+            if word.confidence < lowConfidenceThreshold {
+                currentGroup.append(word)
+            } else {
+                flushGroup()
+            }
+        }
+        flushGroup()
+
+        return TranscriptWeakAnchorMetadata(
+            averageConfidence: averageConfidence,
+            minimumConfidence: minimumConfidence,
+            alternativeTexts: alternatives.filter {
+                !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && $0.caseInsensitiveCompare(primaryText) != .orderedSame
+            },
+            lowConfidencePhrases: phrases.isEmpty && !words.isEmpty && minimumConfidence < Double(lowConfidenceThreshold)
+                ? [
+                    WeakAnchorPhrase(
+                        text: primaryText,
+                        startTime: startTime,
+                        endTime: endTime,
+                        confidence: minimumConfidence
+                    )
+                ]
+                : phrases
+        )
+    }
+}
+
+struct ExtractedTranscriptContent: Sendable, Equatable {
+    let words: [TranscriptWord]
+    let weakAnchorMetadata: TranscriptWeakAnchorMetadata?
+}
+
 /// A segment (roughly a sentence or phrase) produced by the ASR model.
 struct TranscriptSegment: Sendable, Equatable {
     let id: Int
@@ -42,6 +186,28 @@ struct TranscriptSegment: Sendable, Equatable {
     let avgConfidence: Float
     /// Which model pass produced this segment.
     let passType: TranscriptPassType
+    /// Alternative-transcription and weak-anchor recovery metadata.
+    let weakAnchorMetadata: TranscriptWeakAnchorMetadata?
+
+    init(
+        id: Int,
+        words: [TranscriptWord],
+        text: String,
+        startTime: TimeInterval,
+        endTime: TimeInterval,
+        avgConfidence: Float,
+        passType: TranscriptPassType,
+        weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil
+    ) {
+        self.id = id
+        self.words = words
+        self.text = text
+        self.startTime = startTime
+        self.endTime = endTime
+        self.avgConfidence = avgConfidence
+        self.passType = passType
+        self.weakAnchorMetadata = weakAnchorMetadata
+    }
 }
 
 /// Distinguishes fast-path (real-time) from final-path (backfill) results.
@@ -61,6 +227,23 @@ struct RecognitionSnapshot: Sendable {
     let words: [TranscriptWord]
     let startTime: TimeInterval
     let endTime: TimeInterval
+    let weakAnchorMetadata: TranscriptWeakAnchorMetadata?
+
+    init(
+        isFinal: Bool,
+        text: String,
+        words: [TranscriptWord],
+        startTime: TimeInterval,
+        endTime: TimeInterval,
+        weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil
+    ) {
+        self.isFinal = isFinal
+        self.text = text
+        self.words = words
+        self.startTime = startTime
+        self.endTime = endTime
+        self.weakAnchorMetadata = weakAnchorMetadata
+    }
 }
 
 // MARK: - VAD Types
@@ -219,7 +402,8 @@ actor SpeechService {
                 startTime: seg.startTime,
                 endTime: seg.endTime,
                 avgConfidence: seg.avgConfidence,
-                passType: passType
+                passType: passType,
+                weakAnchorMetadata: seg.weakAnchorMetadata
             )
         }
 
@@ -357,6 +541,7 @@ private func makeDefaultSpeechRecognizer(
 /// No microphone or speech recognition permission required.
 actor AppleSpeechRecognizer: SpeechRecognizer {
     private let logger = Logger(subsystem: "com.playhead", category: "AppleSpeechRecognizer")
+    private static let lowConfidenceThreshold: Float = 0.6
     private let vocabularyProvider: ASRVocabularyProvider?
     private var selectedLocale: Locale?
     private var analyzerFormat: AVAudioFormat?
@@ -373,7 +558,7 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         let locale = Locale(identifier: "en-US")
         selectedLocale = locale
 
-        let transcriber = SpeechTranscriber(locale: locale, preset: .timeIndexedProgressiveTranscription)
+        let transcriber = Self.makeSpeechTranscriber(locale: locale)
         let modules: [any SpeechModule] = [transcriber]
         let status = await AssetInventory.status(forModules: modules)
         logger.info("Speech asset status: \(String(describing: status), privacy: .public)")
@@ -431,7 +616,7 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
             )
         }
 
-        let transcriber = SpeechTranscriber(locale: locale, preset: .timeIndexedProgressiveTranscription)
+        let transcriber = Self.makeSpeechTranscriber(locale: locale)
         let analysisContext = await Self.makeAnalysisContext(
             podcastId: podcastId,
             vocabularyProvider: vocabularyProvider
@@ -479,7 +664,8 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
                     startTime: seg.startTime + timeOffset,
                     endTime: seg.endTime + timeOffset,
                     avgConfidence: seg.avgConfidence,
-                    passType: seg.passType
+                    passType: seg.passType,
+                    weakAnchorMetadata: seg.weakAnchorMetadata?.offsettingTimes(by: timeOffset)
                 )
             }
         } catch {
@@ -607,15 +793,16 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         let snapshots = results.map { result -> RecognitionSnapshot in
             let fullText = String(result.text.characters)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            let words = Self.extractWords(from: result)
-            let startTime = words.first?.startTime ?? Self.seconds(from: result.range.start)
-            let endTime = words.last?.endTime ?? Self.seconds(from: CMTimeAdd(result.range.start, result.range.duration))
+            let extracted = Self.extractWords(from: result)
+            let startTime = extracted.words.first?.startTime ?? Self.seconds(from: result.range.start)
+            let endTime = extracted.words.last?.endTime ?? Self.seconds(from: CMTimeAdd(result.range.start, result.range.duration))
             return RecognitionSnapshot(
                 isFinal: result.isFinal,
                 text: fullText,
-                words: words,
+                words: extracted.words,
                 startTime: startTime,
-                endTime: endTime
+                endTime: endTime,
+                weakAnchorMetadata: extracted.weakAnchorMetadata
             )
         }
         return try await collectSegmentsFromSnapshots(snapshots)
@@ -672,19 +859,43 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
             startTime: snapshot.startTime,
             endTime: snapshot.endTime,
             avgConfidence: avgConf,
-            passType: .fast
+            passType: .fast,
+            weakAnchorMetadata: snapshot.weakAnchorMetadata
         )
         nextId += 1
         return segment
     }
 
-    private static func extractWords(from result: SpeechTranscriber.Result) -> [TranscriptWord] {
+    /// The iOS 26 Speech SDK exposes `SpeechTranscriber.Result.alternatives`
+    /// plus per-run confidence attributes, so we persist both and let
+    /// downstream rescans stay tightly scoped to weak-anchor neighborhoods.
+    private static func makeSpeechTranscriber(locale: Locale) -> SpeechTranscriber {
+        var preset = SpeechTranscriber.Preset.timeIndexedProgressiveTranscription
+        preset.reportingOptions.insert(.alternativeTranscriptions)
+        return SpeechTranscriber(locale: locale, preset: preset)
+    }
+
+    static func extractWords(from result: SpeechTranscriber.Result) -> ExtractedTranscriptContent {
         let fallbackStart = seconds(from: result.range.start)
         let fallbackEnd = seconds(from: CMTimeAdd(result.range.start, result.range.duration))
+        return extractWords(
+            from: result.text,
+            alternatives: result.alternatives,
+            fallbackStart: fallbackStart,
+            fallbackEnd: fallbackEnd
+        )
+    }
 
+    static func extractWords(
+        from text: AttributedString,
+        alternatives: [AttributedString],
+        fallbackStart: TimeInterval,
+        fallbackEnd: TimeInterval
+    ) -> ExtractedTranscriptContent {
         var words: [TranscriptWord] = []
-        for run in result.text.runs {
-            let runText = String(result.text[run.range].characters)
+
+        for run in text.runs {
+            let runText = String(text[run.range].characters)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !runText.isEmpty else { continue }
             let pieces = runText.split(whereSeparator: \.isWhitespace).map(String.init)
@@ -705,12 +916,48 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         }
 
         if words.isEmpty {
-            let text = String(result.text.characters)
+            let rawText = String(text.characters)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return [] }
-            words = [TranscriptWord(text: text, startTime: fallbackStart, endTime: fallbackEnd, confidence: 1.0)]
+            guard !rawText.isEmpty else {
+                return ExtractedTranscriptContent(words: [], weakAnchorMetadata: nil)
+            }
+            words = [TranscriptWord(text: rawText, startTime: fallbackStart, endTime: fallbackEnd, confidence: 1.0)]
         }
-        return words
+
+        let primaryText = String(text.characters)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let metadata = TranscriptWeakAnchorMetadata.build(
+            primaryText: primaryText,
+            words: words,
+            alternatives: uniqueAlternativeTexts(
+                from: alternatives,
+                excluding: primaryText
+            ),
+            startTime: fallbackStart,
+            endTime: fallbackEnd,
+            lowConfidenceThreshold: lowConfidenceThreshold
+        )
+        return ExtractedTranscriptContent(words: words, weakAnchorMetadata: metadata)
+    }
+
+    private static func uniqueAlternativeTexts(
+        from alternatives: [AttributedString],
+        excluding primaryText: String
+    ) -> [String] {
+        let normalizedPrimary = primaryText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var seen = Set<String>()
+        var ordered: [String] = []
+
+        for alternative in alternatives {
+            let text = String(alternative.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            let normalized = text.lowercased()
+            guard normalized != normalizedPrimary else { continue }
+            guard seen.insert(normalized).inserted else { continue }
+            ordered.append(text)
+        }
+
+        return ordered
     }
 
     private static func collectVAD<S>(

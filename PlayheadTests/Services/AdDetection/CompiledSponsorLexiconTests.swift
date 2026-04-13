@@ -27,7 +27,8 @@ private func makeChunk(
     text: String,
     normalizedText: String? = nil,
     startTime: Double = 0.0,
-    endTime: Double = 10.0
+    endTime: Double = 10.0,
+    weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil
 ) -> TranscriptChunk {
     TranscriptChunk(
         id: UUID().uuidString,
@@ -41,7 +42,8 @@ private func makeChunk(
         pass: "final",
         modelVersion: "test",
         transcriptVersion: nil,
-        atomOrdinal: nil
+        atomOrdinal: nil,
+        weakAnchorMetadata: weakAnchorMetadata
     )
 }
 
@@ -276,5 +278,61 @@ struct CompiledSponsorLexiconScannerTests {
             #expect(hit.category == .sponsor)
             #expect(hit.weight == 1.5)
         }
+    }
+}
+
+@Suite("LexicalScanner — weak-anchor rescans")
+struct LexicalScannerWeakAnchorRescanTests {
+
+    @Test("rescanAlternatives scans only weak-anchor sources inside the requested window")
+    func rescansScopedWeakAnchorSources() {
+        let scanner = LexicalScanner()
+        let nearChunk = makeChunk(
+            text: "visit bitterhelp for details",
+            startTime: 100,
+            endTime: 101,
+            weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                averageConfidence: 0.48,
+                minimumConfidence: 0.31,
+                alternativeTexts: [
+                    "visit betterhelp.com/podcast for details",
+                ],
+                lowConfidencePhrases: [
+                    .init(
+                        text: "use code save10 at checkout",
+                        startTime: 100.2,
+                        endTime: 100.8,
+                        confidence: 0.31
+                    ),
+                ]
+            )
+        )
+        let farChunk = makeChunk(
+            text: "visit squarespce for templates",
+            startTime: 300,
+            endTime: 301,
+            weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                averageConfidence: 0.44,
+                minimumConfidence: 0.29,
+                alternativeTexts: ["visit squarespace.com/templates"],
+                lowConfidencePhrases: []
+            )
+        )
+
+        let hits = scanner.rescanAlternatives(
+            chunks: [nearChunk, farChunk],
+            nearTime: 100.5,
+            radius: 2
+        )
+
+        #expect(hits.contains {
+            $0.category == .urlCTA && $0.matchedText.lowercased().contains("betterhelp.com")
+        })
+        #expect(hits.contains {
+            $0.category == .promoCode && $0.matchedText == "use code save10"
+        })
+        #expect(!hits.contains {
+            $0.matchedText.lowercased().contains("squarespace.com")
+        }, "far-away alternatives must not be globally rescanned")
     }
 }

@@ -398,6 +398,21 @@ actor SkipOrchestrator {
         evaluateAndPush()
     }
 
+    func retireAdWindows(ids: Set<String>) async {
+        guard !ids.isEmpty else { return }
+
+        for id in ids {
+            guard let existing = windows[id] else { continue }
+            if existing.decisionState == .applied || existing.decisionState == .reverted {
+                continue
+            }
+            windows.removeValue(forKey: id)
+            banneredWindowIds.remove(id)
+        }
+
+        evaluateAndPush()
+    }
+
     /// Receive fusion-based AdDecisionResults from AdDetectionService.
     ///
     /// This is the Phase 6 production entry point (playhead-4my.6.4). Replaces the
@@ -739,6 +754,10 @@ actor SkipOrchestrator {
     /// Return the decision log for the evaluation harness.
     func getDecisionLog() -> [SkipDecisionRecord] {
         decisionLog
+    }
+
+    func activeWindowIDs() -> Set<String> {
+        Set(windows.keys)
     }
 
     // MARK: - Core Skip Policy

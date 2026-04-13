@@ -212,7 +212,8 @@ private func makeTranscriptChunk(
     endTime: Double = 10,
     text: String = "this episode is brought to you by acme corp",
     normalizedText: String? = nil,
-    pass: String = "fast"
+    pass: String = "fast",
+    weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil
 ) -> TranscriptChunk {
     let normalized = normalizedText
         ?? TranscriptEngineService.normalizeText(text)
@@ -228,7 +229,8 @@ private func makeTranscriptChunk(
         pass: pass,
         modelVersion: "apple-speech-v1",
         transcriptVersion: nil,
-        atomOrdinal: nil
+        atomOrdinal: nil,
+        weakAnchorMetadata: weakAnchorMetadata
     )
 }
 
@@ -271,7 +273,8 @@ private func makeFeatureWindow(
     startTime: Double = 0,
     endTime: Double = 1,
     pauseProbability: Double = 0.1,
-    rms: Double = 0.05
+    rms: Double = 0.05,
+    featureVersion: Int = FeatureExtractionConfig.default.featureVersion
 ) -> FeatureWindow {
     FeatureWindow(
         analysisAssetId: assetId,
@@ -283,7 +286,7 @@ private func makeFeatureWindow(
         pauseProbability: pauseProbability,
         speakerClusterId: nil,
         jingleHash: nil,
-        featureVersion: 1
+        featureVersion: featureVersion
     )
 }
 
@@ -797,6 +800,128 @@ struct LexicalScannerMergingTests {
         let sponsorHits = hits.filter { $0.category == .sponsor && $0.weight == 1.5 }
         #expect(!sponsorHits.isEmpty,
                 "Per-show sponsor lexicon should produce boosted hits")
+    }
+}
+
+@Suite("LexicalScanner - Alternative Rescans")
+struct LexicalScannerAlternativeRescanTests {
+
+    @Test("rescans alternative and low-confidence text only inside the requested window")
+    func rescansOnlyNearbyWeakAnchorMetadata() {
+        let scanner = LexicalScanner()
+        let nearby = makeTranscriptChunk(
+            id: "nearby",
+            startTime: 40,
+            endTime: 50,
+            text: "friendly chatter",
+            weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                averageConfidence: 0.42,
+                minimumConfidence: 0.18,
+                alternativeTexts: ["use code SAVE20 at checkout"],
+                lowConfidencePhrases: [
+                    WeakAnchorPhrase(
+                        text: "better help",
+                        startTime: 43,
+                        endTime: 44,
+                        confidence: 0.18
+                    )
+                ]
+            )
+        )
+        let distant = makeTranscriptChunk(
+            id: "distant",
+            startTime: 200,
+            endTime: 210,
+            text: "other chatter",
+            weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                averageConfidence: 0.41,
+                minimumConfidence: 0.12,
+                alternativeTexts: ["sponsored by squarespace"],
+                lowConfidencePhrases: []
+            )
+        )
+
+        let hits = scanner.rescanAlternatives(
+            chunks: [nearby, distant],
+            nearTime: 45,
+            radius: 15
+        )
+
+        #expect(hits.contains { $0.category == .promoCode && $0.matchedText == "use code save20" })
+        #expect(!hits.contains { $0.matchedText.contains("squarespace") })
+    }
+
+    @Test("very large radius is clamped so rescans cannot become global")
+    func alternativeRescanRadiusIsClamped() {
+        let scanner = LexicalScanner()
+        let nearby = makeTranscriptChunk(
+            id: "nearby",
+            startTime: 40,
+            endTime: 50,
+            text: "friendly chatter",
+            weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                averageConfidence: 0.42,
+                minimumConfidence: 0.18,
+                alternativeTexts: ["sponsored by betterhelp"],
+                lowConfidencePhrases: []
+            )
+        )
+        let distant = makeTranscriptChunk(
+            id: "distant",
+            startTime: 500,
+            endTime: 510,
+            text: "other chatter",
+            weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                averageConfidence: 0.41,
+                minimumConfidence: 0.12,
+                alternativeTexts: ["use code FARAWAY at checkout"],
+                lowConfidencePhrases: []
+            )
+        )
+
+        let hits = scanner.rescanAlternatives(
+            chunks: [nearby, distant],
+            nearTime: 45,
+            radius: 10_000
+        )
+
+        #expect(hits.contains { $0.category == .sponsor && $0.matchedText == "sponsored by" })
+        #expect(!hits.contains { $0.matchedText.contains("FARAWAY") })
+    }
+
+    @Test("rescans clip overlapping chunks to the requested window")
+    func alternativeRescansClipToWindow() throws {
+        let scanner = LexicalScanner()
+        let overlapping = makeTranscriptChunk(
+            id: "overlapping",
+            startTime: 100,
+            endTime: 200,
+            text: "friendly chatter",
+            weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                averageConfidence: 0.33,
+                minimumConfidence: 0.18,
+                alternativeTexts: ["sponsored by betterhelp"],
+                lowConfidencePhrases: [
+                    WeakAnchorPhrase(
+                        text: "use code save10 at checkout",
+                        startTime: 160,
+                        endTime: 170,
+                        confidence: 0.18
+                    )
+                ]
+            )
+        )
+
+        let hits = scanner.rescanAlternatives(
+            chunks: [overlapping],
+            nearTime: 140,
+            radius: 5
+        )
+
+        let sponsorHit = try #require(hits.first { $0.category == .sponsor })
+        #expect(sponsorHit.startTime >= 135)
+        #expect(sponsorHit.endTime <= 145)
+        #expect(!hits.contains { $0.category == .promoCode })
     }
 }
 

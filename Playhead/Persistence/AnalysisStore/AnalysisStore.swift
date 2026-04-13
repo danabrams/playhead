@@ -145,6 +145,37 @@ struct TranscriptChunk: Sendable {
     let modelVersion: String
     let transcriptVersion: String?   // nil for fast-pass chunks (version computed on final)
     let atomOrdinal: Int?            // nil for fast-pass chunks
+    let weakAnchorMetadata: TranscriptWeakAnchorMetadata?
+
+    init(
+        id: String,
+        analysisAssetId: String,
+        segmentFingerprint: String,
+        chunkIndex: Int,
+        startTime: Double,
+        endTime: Double,
+        text: String,
+        normalizedText: String,
+        pass: String,
+        modelVersion: String,
+        transcriptVersion: String?,
+        atomOrdinal: Int?,
+        weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil
+    ) {
+        self.id = id
+        self.analysisAssetId = analysisAssetId
+        self.segmentFingerprint = segmentFingerprint
+        self.chunkIndex = chunkIndex
+        self.startTime = startTime
+        self.endTime = endTime
+        self.text = text
+        self.normalizedText = normalizedText
+        self.pass = pass
+        self.modelVersion = modelVersion
+        self.transcriptVersion = transcriptVersion
+        self.atomOrdinal = atomOrdinal
+        self.weakAnchorMetadata = weakAnchorMetadata
+    }
 }
 
 struct AdWindow: Sendable {
@@ -698,6 +729,7 @@ actor AnalysisStore {
         // PRAGMA table_info first and only ALTER when the column is missing.
         try addColumnIfNeeded(table: "transcript_chunks", column: "transcriptVersion", definition: "TEXT")
         try addColumnIfNeeded(table: "transcript_chunks", column: "atomOrdinal", definition: "INTEGER")
+        try addColumnIfNeeded(table: "transcript_chunks", column: "weakAnchorMetadataJSON", definition: "TEXT")
         try backfillLegacyTranscriptChunksPhase1IfNeeded()
     }
 
@@ -1408,7 +1440,8 @@ actor AnalysisStore {
                 pass                TEXT NOT NULL DEFAULT 'fast',
                 modelVersion        TEXT NOT NULL,
                 transcriptVersion   TEXT,
-                atomOrdinal         INTEGER
+                atomOrdinal         INTEGER,
+                weakAnchorMetadataJSON TEXT
             )
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_chunks_asset ON transcript_chunks(analysisAssetId)")
@@ -2240,8 +2273,8 @@ actor AnalysisStore {
         let sql = """
             INSERT INTO transcript_chunks
             (id, analysisAssetId, segmentFingerprint, chunkIndex, startTime, endTime,
-             text, normalizedText, pass, modelVersion, transcriptVersion, atomOrdinal)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             text, normalizedText, pass, modelVersion, transcriptVersion, atomOrdinal, weakAnchorMetadataJSON)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -2257,6 +2290,7 @@ actor AnalysisStore {
         bind(stmt, 10, chunk.modelVersion)
         bind(stmt, 11, chunk.transcriptVersion)
         bind(stmt, 12, chunk.atomOrdinal)
+        bind(stmt, 13, try encodeJSONString(chunk.weakAnchorMetadata))
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -2290,6 +2324,43 @@ actor AnalysisStore {
         bind(stmt, 1, analysisAssetId)
         bind(stmt, 2, segmentFingerprint)
         return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
+    func fetchTranscriptChunk(
+        analysisAssetId: String,
+        segmentFingerprint: String
+    ) throws -> TranscriptChunk? {
+        let sql = """
+            SELECT * FROM transcript_chunks
+            WHERE analysisAssetId = ? AND segmentFingerprint = ?
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        bind(stmt, 2, segmentFingerprint)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return readTranscriptChunk(stmt)
+    }
+
+    @discardableResult
+    func updateTranscriptChunkWeakAnchorMetadata(
+        analysisAssetId: String,
+        segmentFingerprint: String,
+        weakAnchorMetadata: TranscriptWeakAnchorMetadata?
+    ) throws -> Bool {
+        let sql = """
+            UPDATE transcript_chunks
+            SET weakAnchorMetadataJSON = ?
+            WHERE analysisAssetId = ? AND segmentFingerprint = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, try encodeJSONString(weakAnchorMetadata))
+        bind(stmt, 2, analysisAssetId)
+        bind(stmt, 3, segmentFingerprint)
+        try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
     }
 
     func fetchTranscriptChunks(assetId: String) throws -> [TranscriptChunk] {
@@ -2344,7 +2415,11 @@ actor AnalysisStore {
             pass: text(stmt, 8),
             modelVersion: text(stmt, 9),
             transcriptVersion: optionalText(stmt, 10),
-            atomOrdinal: optionalInt(stmt, 11)
+            atomOrdinal: optionalInt(stmt, 11),
+            weakAnchorMetadata: try? decodeJSON(
+                TranscriptWeakAnchorMetadata.self,
+                from: optionalText(stmt, 12)
+            )
         )
     }
 
@@ -2433,6 +2508,25 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    func updateAdWindowHotPathCandidate(_ ad: AdWindow) throws {
+        let sql = """
+            UPDATE ad_windows SET
+                startTime = ?, endTime = ?, confidence = ?, boundaryState = ?,
+                evidenceText = ?, evidenceStartTime = ?
+            WHERE id = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, ad.startTime)
+        bind(stmt, 2, ad.endTime)
+        bind(stmt, 3, ad.confidence)
+        bind(stmt, 4, ad.boundaryState)
+        bind(stmt, 5, ad.evidenceText)
+        bind(stmt, 6, ad.evidenceStartTime)
+        bind(stmt, 7, ad.id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
     func insertAdWindows(_ windows: [AdWindow]) throws {
         guard !windows.isEmpty else { return }
         try exec("BEGIN TRANSACTION")
@@ -2444,6 +2538,44 @@ actor AnalysisStore {
         } catch {
             try? exec("ROLLBACK")
             throw error
+        }
+    }
+
+    func upsertHotPathAdWindows(
+        _ windows: [AdWindow],
+        existingIDs: Set<String>,
+        retiredIDs: Set<String> = []
+    ) throws {
+        guard !windows.isEmpty || !retiredIDs.isEmpty else { return }
+        try exec("BEGIN TRANSACTION")
+        do {
+            for ad in windows {
+                if existingIDs.contains(ad.id) {
+                    try updateAdWindowHotPathCandidate(ad)
+                } else {
+                    try insertAdWindow(ad)
+                }
+            }
+            if !retiredIDs.isEmpty {
+                try deleteAdWindows(ids: retiredIDs)
+            }
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    private func deleteAdWindows(ids: Set<String>) throws {
+        guard !ids.isEmpty else { return }
+        let sql = "DELETE FROM ad_windows WHERE id = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        for id in ids {
+            sqlite3_reset(stmt)
+            sqlite3_clear_bindings(stmt)
+            bind(stmt, 1, id)
+            try step(stmt, expecting: SQLITE_DONE)
         }
     }
 

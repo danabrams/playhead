@@ -626,6 +626,154 @@ struct SpanHypothesisEngineTests {
         #expect(closed[0].closingReason == .timeout)
         #expect(!closed[0].isSkipEligible)
     }
+
+    @Test("scoped alternative rescans can recover a closing promo code for an open confirmed hypothesis")
+    func rescansRecoverClosingAnchorInsideConfirmedHypothesisWindow() {
+        let scanner = LexicalScanner()
+        var engine = SpanHypothesisEngine()
+        let analysisAssetId = "asset-span-engine"
+
+        let chunks = [
+            makeChunk(
+                text: "this episode is sponsored by betterhelp with a free trial and money back guarantee",
+                startTime: 10,
+                endTime: 12
+            ),
+            makeChunk(
+                text: "friendly midroll chatter",
+                startTime: 18,
+                endTime: 22,
+                weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                    averageConfidence: 0.44,
+                    minimumConfidence: 0.17,
+                    alternativeTexts: ["use code SAVE20 at checkout"],
+                    lowConfidencePhrases: []
+                )
+            )
+        ]
+
+        let hits = engine.process(
+            chunks: chunks,
+            analysisAssetId: analysisAssetId,
+            scanner: scanner
+        )
+        let closed = engine.finish(analysisAssetId: analysisAssetId, at: 25)
+
+        #expect(hits.contains { $0.category == .promoCode && $0.matchedText == "use code save20" })
+        #expect(engine.closedHypotheses.count == 1)
+        #expect(engine.closedHypotheses[0].closingAnchor?.anchorType == .promoCode)
+        #expect(engine.closedHypotheses[0].allEvidenceTexts.contains("use code save20"))
+        #expect(closed.isEmpty)
+    }
+
+    @Test("rescans keep only the most informative overlapping promo hit for the same code")
+    func rescansPreferMoreInformativePromoHit() {
+        let scanner = LexicalScanner()
+        var engine = SpanHypothesisEngine()
+
+        let chunks = [
+            makeChunk(
+                text: "use code save20",
+                startTime: 18,
+                endTime: 22,
+                weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                    averageConfidence: 0.44,
+                    minimumConfidence: 0.17,
+                    alternativeTexts: ["use code save20 at checkout"],
+                    lowConfidencePhrases: []
+                )
+            )
+        ]
+
+        let hits = engine.process(
+            chunks: chunks,
+            analysisAssetId: "asset-span-engine",
+            scanner: scanner
+        )
+
+        let promoHits = hits.filter { $0.category == .promoCode }
+        #expect(promoHits.count == 1)
+        #expect(promoHits[0].matchedText == "use code save20")
+    }
+
+    @Test("low-confidence likely-ad chunks can trigger rescans without global fallback")
+    func lowConfidenceLikelyAdChunksTriggerScopedRescan() {
+        let scanner = LexicalScanner()
+        var engine = SpanHypothesisEngine()
+        let analysisAssetId = "asset-span-engine"
+
+        let chunks = [
+            makeChunk(
+                text: "friendly chatter with free trial language",
+                startTime: 30,
+                endTime: 34,
+                weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                    averageConfidence: 0.39,
+                    minimumConfidence: 0.11,
+                    alternativeTexts: ["sponsored by betterhelp"],
+                    lowConfidencePhrases: []
+                )
+            ),
+            makeChunk(
+                text: "completely unrelated far away content",
+                startTime: 300,
+                endTime: 304,
+                weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                    averageConfidence: 0.40,
+                    minimumConfidence: 0.10,
+                    alternativeTexts: ["use code FARAWAY"],
+                    lowConfidencePhrases: []
+                )
+            )
+        ]
+
+        _ = engine.process(
+            chunks: chunks,
+            analysisAssetId: analysisAssetId,
+            scanner: scanner
+        )
+        let closed = engine.finish(analysisAssetId: analysisAssetId, at: 40)
+
+        #expect(closed.count == 1)
+        #expect(closed[0].evidenceText.contains("sponsored by"))
+        #expect(!closed[0].evidenceText.contains("FARAWAY"))
+    }
+
+    @Test("rescans do not double-count identical sponsor evidence from multiple weak-anchor sources")
+    func rescansDedupEquivalentSponsorEvidenceAcrossWeakAnchorSources() {
+        let scanner = LexicalScanner()
+        var engine = SpanHypothesisEngine()
+
+        let chunks = [
+            makeChunk(
+                text: "free trial for new members",
+                startTime: 30,
+                endTime: 34,
+                weakAnchorMetadata: TranscriptWeakAnchorMetadata(
+                    averageConfidence: 0.39,
+                    minimumConfidence: 0.11,
+                    alternativeTexts: ["sponsored by betterhelp"],
+                    lowConfidencePhrases: [
+                        WeakAnchorPhrase(
+                            text: "sponsored by betterhelp",
+                            startTime: 31,
+                            endTime: 32,
+                            confidence: 0.11
+                        )
+                    ]
+                )
+            )
+        ]
+
+        let hits = engine.process(
+            chunks: chunks,
+            analysisAssetId: "asset-span-engine",
+            scanner: scanner
+        )
+        let sponsorHits = hits.filter { $0.category == .sponsor && $0.matchedText == "sponsored by" }
+
+        #expect(sponsorHits.count == 1)
+    }
 }
 
 private enum SpanHypothesisEngineTestError: Error {
@@ -670,7 +818,12 @@ private func scanHit(
     return hit
 }
 
-private func makeChunk(text: String, startTime: Double, endTime: Double) -> TranscriptChunk {
+private func makeChunk(
+    text: String,
+    startTime: Double,
+    endTime: Double,
+    weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil
+) -> TranscriptChunk {
     TranscriptChunk(
         id: UUID().uuidString,
         analysisAssetId: "analysis-asset",
@@ -683,7 +836,8 @@ private func makeChunk(text: String, startTime: Double, endTime: Double) -> Tran
         pass: "final",
         modelVersion: "test",
         transcriptVersion: nil,
-        atomOrdinal: nil
+        atomOrdinal: nil,
+        weakAnchorMetadata: weakAnchorMetadata
     )
 }
 
