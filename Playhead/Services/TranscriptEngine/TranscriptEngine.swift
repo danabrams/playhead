@@ -616,39 +616,6 @@ enum AppleSpeechAudioBridge {
         return analyzerBuffer
     }
 
-    static func analysisAudioFileSettings(for format: AVAudioFormat) -> [String: Any] {
-        var settings = format.settings
-        // Persist interleaved linear PCM to disk even when the analyzer's
-        // processing buffer is non-interleaved. AVAudioFile can then accept
-        // the explicit buffer processing format below without rejecting the
-        // write on iOS device builds.
-        settings[AVLinearPCMIsNonInterleaved] = false
-        return settings
-    }
-
-    static func makeAnalysisAudioFile(
-        from buffer: AVAudioPCMBuffer,
-        format: AVAudioFormat
-    ) throws -> URL {
-        let fileURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("playhead-transcript-\(UUID().uuidString).caf")
-
-        do {
-            let file = try AVAudioFile(
-                forWriting: fileURL,
-                settings: analysisAudioFileSettings(for: format),
-                commonFormat: buffer.format.commonFormat,
-                interleaved: buffer.format.isInterleaved
-            )
-            try file.write(from: buffer)
-            return fileURL
-        } catch {
-            throw AppleSpeechBoundaryError.audioBridgeFailure(
-                "Failed to bridge analyzer buffer into a temporary audio file: \(error)"
-            )
-        }
-    }
-
     private static func convert(
         _ source: AVAudioPCMBuffer,
         to targetFormat: AVAudioFormat
@@ -672,12 +639,21 @@ enum AppleSpeechAudioBridge {
         }
 
         var error: NSError?
-        converter.convert(to: targetBuffer, error: &error) { _, outStatus in
+        var inputConsumed = false
+        let status = converter.convert(to: targetBuffer, error: &error) { _, outStatus in
+            if inputConsumed {
+                outStatus.pointee = .endOfStream
+                return nil
+            }
+            inputConsumed = true
             outStatus.pointee = .haveData
             return source
         }
         if let error {
             throw AppleSpeechBoundaryError.audioBridgeFailure("Audio conversion failed: \(error)")
+        }
+        if status == .error {
+            throw AppleSpeechBoundaryError.audioBridgeFailure("Audio conversion returned error status without details")
         }
 
         return targetBuffer
@@ -695,17 +671,11 @@ enum AppleSpeechAudioBridge {
         for sample in shard.samples {
             if sample.isNaN { nanCount += 1 }
             else if sample.isInfinite { infCount += 1 }
-            else if sample == 0 { zeroCount += 1 }
-            sumSquares += Double(sample * sample)
+            else {
+                if sample == 0 { zeroCount += 1 }
+                sumSquares += Double(sample * sample)
+            }
         }
-        let rms = sqrt(sumSquares / Double(shard.samples.count))
-
-        bufferLogger.info("""
-            Shard \(shard.id) audio: \(shard.samples.count) samples, \
-            rms=\(String(format: "%.6f", rms)), \
-            zeros=\(zeroCount)/\(shard.samples.count), \
-            nan=\(nanCount), inf=\(infCount)
-            """)
 
         if nanCount > 0 || infCount > 0 {
             throw AppleSpeechBoundaryError.audioBridgeFailure(
@@ -717,6 +687,13 @@ enum AppleSpeechAudioBridge {
                 "shard \(shard.id) is entirely silent (all zeros)"
             )
         }
+
+        let rms = sqrt(sumSquares / Double(shard.samples.count))
+        bufferLogger.info("""
+            Shard \(shard.id) audio: \(shard.samples.count) samples, \
+            rms=\(String(format: "%.6f", rms)), \
+            zeros=\(zeroCount)/\(shard.samples.count)
+            """)
 
         guard let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -830,7 +807,6 @@ struct AppleSpeechAnalyzerRunner {
         }
     }
 
-    @available(iOS 26.0, *)
     private func makeAnalysisContext(for podcastId: String?) async -> AnalysisContext {
         let context = AnalysisContext()
         guard let podcastId, let vocabularyProvider else { return context }
@@ -863,8 +839,13 @@ struct AppleSpeechAnalyzerRunner {
     static func makeAnalyzerInput(
         buffer: AVAudioPCMBuffer,
         bufferStartTime: CMTime? = nil
-    ) -> AnalyzerInput {
+    ) throws -> AnalyzerInput {
         if let bufferStartTime {
+            guard bufferStartTime.isValid else {
+                throw AppleSpeechBoundaryError.invalidAnalyzerInputTimeline(
+                    "SpeechAnalyzer input buffer start time must be valid"
+                )
+            }
             return AnalyzerInput(buffer: buffer, bufferStartTime: bufferStartTime)
         }
         return AnalyzerInput(buffer: buffer)
@@ -891,7 +872,7 @@ struct AppleSpeechAnalyzerRunner {
             }
             guard startTime.isValid else {
                 throw AppleSpeechBoundaryError.invalidAnalyzerInputTimeline(
-                    "SpeechAnalyzer input buffer start time must be valid"
+                    "SpeechAnalyzer input at timeline position has invalid buffer start time"
                 )
             }
 
@@ -1067,7 +1048,7 @@ enum AppleSpeechResultMapper {
             let runStart = timeRange.map { seconds(from: $0.start) } ?? fallbackStart
             let runEnd = timeRange.map { seconds(from: CMTimeAdd($0.start, $0.duration)) } ?? fallbackEnd
             let runDuration = max(runEnd - runStart, 0)
-            let step = pieces.count > 0 ? runDuration / Double(pieces.count) : 0
+            let step = runDuration / Double(pieces.count)
             let confidence = Float(run.transcriptionConfidence ?? 1.0)
 
             for (i, piece) in pieces.enumerated() {
@@ -1133,7 +1114,7 @@ enum AppleSpeechResultMapper {
             startTime: snapshot.startTime,
             endTime: snapshot.endTime,
             avgConfidence: avgConf,
-            passType: .fast,
+            passType: .fast, // SpeechService.transcribe re-tags pass type at the shard level
             weakAnchorMetadata: snapshot.weakAnchorMetadata
         )
         nextId += 1
@@ -1208,6 +1189,7 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
     }
 
     func unloadModel() async {
+        selectedLocale = nil
         analyzerFormat = nil
         prepared = false
     }
@@ -1265,45 +1247,6 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         }
     }
 
-    static func collectSegmentsFromSnapshots<S>(
-        _ snapshots: S
-    ) async throws -> [TranscriptSegment]
-    where S: AsyncSequence, S.Element == RecognitionSnapshot, S.Failure == Error {
-        try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(snapshots)
-    }
-
-    static func speechTranscriberPreset() -> SpeechTranscriber.Preset {
-        AppleSpeechResultMapper.speechTranscriberPreset()
-    }
-
-    static func extractWords(from result: SpeechTranscriber.Result) -> ExtractedTranscriptContent {
-        AppleSpeechResultMapper.extractWords(from: result)
-    }
-
-    static func extractWords(
-        from text: AttributedString,
-        alternatives: [AttributedString],
-        fallbackStart: TimeInterval,
-        fallbackEnd: TimeInterval
-    ) -> ExtractedTranscriptContent {
-        AppleSpeechResultMapper.extractWords(
-            from: text,
-            alternatives: alternatives,
-            fallbackStart: fallbackStart,
-            fallbackEnd: fallbackEnd
-        )
-    }
-
-    static func analysisAudioFileSettings(for format: AVAudioFormat) -> [String: Any] {
-        AppleSpeechAudioBridge.analysisAudioFileSettings(for: format)
-    }
-
-    static func makeAnalysisAudioFile(
-        from buffer: AVAudioPCMBuffer,
-        format: AVAudioFormat
-    ) throws -> URL {
-        try AppleSpeechAudioBridge.makeAnalysisAudioFile(from: buffer, format: format)
-    }
 }
 
 #endif

@@ -90,6 +90,7 @@ private func transcriptEngineSource() throws -> String {
         .deletingLastPathComponent()
         .deletingLastPathComponent()
         .deletingLastPathComponent()
+        .deletingLastPathComponent()
     let sourceURL = repoRoot.appendingPathComponent("Playhead/Services/TranscriptEngine/TranscriptEngine.swift")
     return try String(contentsOf: sourceURL, encoding: .utf8)
 }
@@ -806,35 +807,36 @@ private func makeAnalyzerStyleInt16Buffer(
 @Suite("AppleSpeechAudioBridge")
 struct AppleSpeechAudioBridgeTests {
 
-    @Test("analysis audio file settings force interleaved file storage")
-    func analysisAudioFileSettingsForceInterleavedStorage() throws {
-        let (_, format) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
-        let settings = AppleSpeechAudioBridge.analysisAudioFileSettings(for: format)
-        let formatID = settings[AVFormatIDKey] as? NSNumber
-
-        #expect(settings[AVLinearPCMIsNonInterleaved] as? Bool == false)
-        #expect(formatID?.uint32Value == kAudioFormatLinearPCM)
-    }
-
-    @Test("makeAnalysisAudioFile writes analyzer-style Int16 buffers")
-    func makeAnalysisAudioFileWritesAnalyzerStyleBuffer() throws {
-        let (buffer, format) = try makeAnalyzerStyleInt16Buffer()
-        let fileURL = try AppleSpeechAudioBridge.makeAnalysisAudioFile(from: buffer, format: format)
-        defer { try? FileManager.default.removeItem(at: fileURL) }
-
-        let file = try AVAudioFile(forReading: fileURL)
-
-        #expect(file.length == AVAudioFramePosition(buffer.frameLength))
-        #expect(file.fileFormat.sampleRate == 16_000)
-        #expect(file.fileFormat.channelCount == 1)
-    }
-
     @Test("makeAnalyzerBuffer rejects silent shards at the audio bridge boundary")
     func makeAnalyzerBufferRejectsSilentShard() throws {
         let (_, targetFormat) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
 
         #expect(throws: AppleSpeechBoundaryError.self) {
             try AppleSpeechAudioBridge.makeAnalyzerBuffer(from: makeShard(), targetFormat: targetFormat)
+        }
+    }
+
+    @Test("makeAnalyzerBuffer rejects shards containing NaN samples")
+    func makeAnalyzerBufferRejectsNaNSamples() throws {
+        let (_, targetFormat) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
+        var samples = [Float](repeating: 0.5, count: 512)
+        samples[100] = Float.nan
+
+        let shard = AnalysisShard(id: 0, episodeID: "test", startTime: 0, duration: 0.032, samples: samples)
+        #expect(throws: AppleSpeechBoundaryError.self) {
+            try AppleSpeechAudioBridge.makeAnalyzerBuffer(from: shard, targetFormat: targetFormat)
+        }
+    }
+
+    @Test("makeAnalyzerBuffer rejects shards containing Inf samples")
+    func makeAnalyzerBufferRejectsInfSamples() throws {
+        let (_, targetFormat) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
+        var samples = [Float](repeating: 0.5, count: 512)
+        samples[200] = Float.infinity
+
+        let shard = AnalysisShard(id: 0, episodeID: "test", startTime: 0, duration: 0.032, samples: samples)
+        #expect(throws: AppleSpeechBoundaryError.self) {
+            try AppleSpeechAudioBridge.makeAnalyzerBuffer(from: shard, targetFormat: targetFormat)
         }
     }
 }
@@ -845,10 +847,20 @@ struct AppleSpeechAnalyzerRunnerTests {
     @Test("single buffer analyzer input leaves timeline implicit")
     func singleBufferAnalyzerInputLeavesTimelineImplicit() throws {
         let (buffer, _) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
-        let input = AppleSpeechAnalyzerRunner.makeAnalyzerInput(buffer: buffer)
+        let input = try AppleSpeechAnalyzerRunner.makeAnalyzerInput(buffer: buffer)
 
         #expect(input.buffer === buffer)
         #expect(input.bufferStartTime == nil)
+    }
+
+    @Test("explicit buffer start time is preserved in analyzer input")
+    func explicitBufferStartTimePreserved() throws {
+        let (buffer, _) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
+        let startTime = CMTime(seconds: 5.0, preferredTimescale: 600_000)
+        let input = try AppleSpeechAnalyzerRunner.makeAnalyzerInput(buffer: buffer, bufferStartTime: startTime)
+
+        #expect(input.buffer === buffer)
+        #expect(input.bufferStartTime == startTime)
     }
 
     @Test("timeline validator allows implicit analyzer inputs")
@@ -857,8 +869,8 @@ struct AppleSpeechAnalyzerRunnerTests {
         let (bufferB, _) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
 
         try AppleSpeechAnalyzerRunner.validateAnalyzerInputTimeline([
-            AppleSpeechAnalyzerRunner.makeAnalyzerInput(buffer: bufferA),
-            AppleSpeechAnalyzerRunner.makeAnalyzerInput(buffer: bufferB),
+            try AppleSpeechAnalyzerRunner.makeAnalyzerInput(buffer: bufferA),
+            try AppleSpeechAnalyzerRunner.makeAnalyzerInput(buffer: bufferB),
         ])
     }
 
@@ -869,8 +881,8 @@ struct AppleSpeechAnalyzerRunnerTests {
 
         #expect(throws: AppleSpeechBoundaryError.self) {
             try AppleSpeechAnalyzerRunner.validateAnalyzerInputTimeline([
-                AppleSpeechAnalyzerRunner.makeAnalyzerInput(buffer: bufferA),
-                AppleSpeechAnalyzerRunner.makeAnalyzerInput(
+                try AppleSpeechAnalyzerRunner.makeAnalyzerInput(buffer: bufferA),
+                try AppleSpeechAnalyzerRunner.makeAnalyzerInput(
                     buffer: bufferB,
                     bufferStartTime: CMTime(seconds: 0.032, preferredTimescale: 600_000)
                 ),
@@ -885,11 +897,11 @@ struct AppleSpeechAnalyzerRunnerTests {
 
         #expect(throws: AppleSpeechBoundaryError.self) {
             try AppleSpeechAnalyzerRunner.validateAnalyzerInputTimeline([
-                AppleSpeechAnalyzerRunner.makeAnalyzerInput(
+                try AppleSpeechAnalyzerRunner.makeAnalyzerInput(
                     buffer: bufferA,
                     bufferStartTime: CMTime(seconds: 0.0, preferredTimescale: 600_000)
                 ),
-                AppleSpeechAnalyzerRunner.makeAnalyzerInput(
+                try AppleSpeechAnalyzerRunner.makeAnalyzerInput(
                     buffer: bufferB,
                     bufferStartTime: CMTime(seconds: 0.01, preferredTimescale: 600_000)
                 ),
@@ -904,15 +916,27 @@ struct AppleSpeechAnalyzerRunnerTests {
         let durationSeconds = Double(bufferA.frameLength) / bufferA.format.sampleRate
 
         try AppleSpeechAnalyzerRunner.validateAnalyzerInputTimeline([
-            AppleSpeechAnalyzerRunner.makeAnalyzerInput(
+            try AppleSpeechAnalyzerRunner.makeAnalyzerInput(
                 buffer: bufferA,
                 bufferStartTime: CMTime(seconds: 0.0, preferredTimescale: 600_000)
             ),
-            AppleSpeechAnalyzerRunner.makeAnalyzerInput(
+            try AppleSpeechAnalyzerRunner.makeAnalyzerInput(
                 buffer: bufferB,
                 bufferStartTime: CMTime(seconds: durationSeconds, preferredTimescale: 600_000)
             ),
         ])
+    }
+
+    @Test("makeAnalyzerInput rejects invalid CMTime before reaching Speech framework")
+    func makeAnalyzerInputRejectsInvalidCMTime() throws {
+        let (buffer, _) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
+
+        #expect(throws: AppleSpeechBoundaryError.self) {
+            try AppleSpeechAnalyzerRunner.makeAnalyzerInput(
+                buffer: buffer,
+                bufferStartTime: CMTime.invalid
+            )
+        }
     }
 
     @Test("runner does not mix file-backed analyzer input with buffer-sequence analysis")
