@@ -461,21 +461,13 @@ struct SkipOrchestratorCorrectionStoreTests {
     }
 }
 
-@Suite("SkipOrchestrator Characterization - Boundary Snapping")
-struct SkipOrchestratorCharacterizationSnappingTests {
+@Suite("SkipOrchestrator Characterization - Finalized Boundaries")
+struct SkipOrchestratorCharacterizationFinalizedBoundaryTests {
 
-    @Test("Boundaries snap to nearby silence points")
-    func snapToSilence() async throws {
+    @Test("Finalized boundaries pass through unchanged")
+    func keepsFinalizedBoundaries() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
-
-        let silentWindow = makeSkipTestFeatureWindow(
-            startTime: 59.5,
-            endTime: 60.5,
-            pauseProbability: 0.9,
-            rms: 0.01
-        )
-        try await store.insertFeatureWindow(silentWindow)
 
         let trustService = try await makeSkipTestTrustService(
             mode: "auto",
@@ -499,9 +491,12 @@ struct SkipOrchestratorCharacterizationSnappingTests {
 
         let log = await orchestrator.getDecisionLog()
         if let record = log.first {
-            #expect(record.snappedStart == 59.5)
+            #expect(record.originalStart == 61)
+            #expect(record.snappedStart == 61)
+            #expect(record.originalEnd == 120)
+            #expect(record.snappedEnd == 120)
         } else {
-            Issue.record("Expected a decision log record for the snapped window")
+            Issue.record("Expected a decision log record for the finalized window")
         }
     }
 }
@@ -573,6 +568,14 @@ struct SkipOrchestratorAdDecisionContractTests {
         let log = await orchestrator.getDecisionLog()
         let applied = log.filter { $0.decision == .applied }
         #expect(!applied.isEmpty, "Eligible span above enterThreshold in auto mode must be applied")
+        if let record = applied.first(where: { $0.adWindowId == "eligible-enter" }) {
+            #expect(record.originalStart == 60.0)
+            #expect(record.snappedStart == 60.0)
+            #expect(record.originalEnd == 120.0)
+            #expect(record.snappedEnd == 120.0)
+        } else {
+            Issue.record("Expected an applied decision record for eligible-enter")
+        }
     }
 
     @Test("Decision recomputation stays stable for unchanged spans")

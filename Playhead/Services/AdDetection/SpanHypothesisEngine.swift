@@ -600,7 +600,8 @@ struct SpanHypothesisEngine: Sendable {
             featureWindows: boundaryExpansionContext.featureWindows,
             transcriptChunks: boundaryExpansionContext.transcriptChunks,
             adWindows: [],
-            config: .forPolarity(hypothesis.polarity)
+            config: .forPolarity(hypothesis.polarity),
+            anchorType: hypothesis.anchorType
         )
     }
 

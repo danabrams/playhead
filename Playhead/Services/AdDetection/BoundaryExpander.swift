@@ -31,7 +31,7 @@ struct ExpandedBoundary: Sendable, Equatable {
 
 /// Stateless utility that expands a seed time into ad boundaries using three
 /// signal layers: existing AdWindows (highest priority), acoustic features
-/// (FeatureWindow pause/RMS scoring), and lexical patterns (LexicalScanner).
+/// resolved through TimeBoundaryResolver, and lexical patterns (LexicalScanner).
 struct BoundaryExpander: Sendable {
 
     struct ExpansionConfig: Sendable, Equatable {
@@ -82,12 +82,12 @@ struct BoundaryExpander: Sendable {
     }
 
     private let logger = Logger(subsystem: "com.playhead", category: "BoundaryExpander")
+    private let boundaryResolver = TimeBoundaryResolver()
 
-    /// Minimum combined score for a feature window to qualify as a boundary point.
-    /// Intentionally lower than SkipOrchestrator's 0.6 threshold: user corrections
-    /// should be more generous in finding boundaries since the user has confirmed
-    /// an ad is present.
-    private let silenceThreshold: Double = 0.4
+    private struct LexicalContext: Sendable {
+        let candidates: [LexicalCandidate]
+        let hits: [LexicalHit]
+    }
 
     // MARK: - Public API
 
@@ -104,7 +104,8 @@ struct BoundaryExpander: Sendable {
         featureWindows: [FeatureWindow],
         transcriptChunks: [TranscriptChunk],
         adWindows: [AdWindow],
-        config: ExpansionConfig? = nil
+        config: ExpansionConfig? = nil,
+        anchorType: AnchorType = .fmPositive
     ) -> ExpandedBoundary {
         let expansionConfig = config ?? .neutral
 
@@ -114,26 +115,39 @@ struct BoundaryExpander: Sendable {
             return windowBoundary
         }
 
+        let lexicalContext = makeLexicalContext(
+            seed: seed,
+            transcriptChunks: transcriptChunks,
+            config: expansionConfig
+        )
+        let lexicalHits = lexicalContext?.hits ?? []
+
         // Signal 1: Acoustic boundaries from FeatureWindows.
         let acousticStart = findAcousticBoundary(
             seed: seed,
             direction: .backward,
             featureWindows: featureWindows,
-            searchRadius: expansionConfig.acousticBackwardSearchRadius
+            searchRadius: expansionConfig.acousticBackwardSearchRadius,
+            lexicalHits: lexicalHits,
+            anchorType: anchorType
         )
         let acousticEnd = findAcousticBoundary(
             seed: seed,
             direction: .forward,
             featureWindows: featureWindows,
-            searchRadius: expansionConfig.acousticForwardSearchRadius
+            searchRadius: expansionConfig.acousticForwardSearchRadius,
+            lexicalHits: lexicalHits,
+            anchorType: anchorType
         )
 
         // Signal 2: Narrow using lexical patterns if available.
-        let lexicalBoundary = findLexicalBoundaries(
-            seed: seed,
-            transcriptChunks: transcriptChunks,
-            config: expansionConfig
-        )
+        let lexicalBoundary = lexicalContext.flatMap { context in
+            findLexicalBoundaries(
+                seed: seed,
+                candidates: context.candidates,
+                config: expansionConfig
+            )
+        }
 
         if let lexical = lexicalBoundary {
             // Combine: use lexical markers to narrow acoustic boundaries.
@@ -187,11 +201,17 @@ struct BoundaryExpander: Sendable {
         // Fallback: seed ± 30s, snapped to nearest silence if possible.
         let fallbackStart = snapToNearestSilence(
             time: seed - expansionConfig.fallbackBackwardWidth,
-            featureWindows: featureWindows
+            featureWindows: featureWindows,
+            boundaryType: .start,
+            lexicalHits: lexicalHits,
+            anchorType: anchorType
         )
         let fallbackEnd = snapToNearestSilence(
             time: seed + expansionConfig.fallbackForwardWidth,
-            featureWindows: featureWindows
+            featureWindows: featureWindows,
+            boundaryType: .end,
+            lexicalHits: lexicalHits,
+            anchorType: anchorType
         )
 
         logger.info("Boundary expansion fallback: \(fallbackStart, format: .fixed(precision: 1))–\(fallbackEnd, format: .fixed(precision: 1))")
@@ -268,65 +288,59 @@ struct BoundaryExpander: Sendable {
         case backward, forward
     }
 
-    /// Score a feature window using the same formula as SkipOrchestrator.snapBoundary:
-    /// `combined = pauseProbability * 0.7 + max(0, 1 - rms * 10) * 0.3`
-    private func scoreFeatureWindow(_ fw: FeatureWindow) -> Double {
-        let pauseScore = fw.pauseProbability
-        let quietScore = max(0, 1.0 - fw.rms * 10.0)
-        return pauseScore * 0.7 + quietScore * 0.3
-    }
-
     /// Search for the best acoustic boundary point within the search radius.
     private func findAcousticBoundary(
         seed: Double,
         direction: SearchDirection,
         featureWindows: [FeatureWindow],
-        searchRadius: Double
+        searchRadius: Double,
+        lexicalHits: [LexicalHit],
+        anchorType: AnchorType
     ) -> Double? {
         let nearby: [FeatureWindow]
         switch direction {
         case .backward:
             nearby = featureWindows.filter { fw in
                 let center = (fw.startTime + fw.endTime) / 2.0
-                return center >= seed - searchRadius && center < seed
+                return center >= seed - searchRadius && center <= seed
             }
         case .forward:
             nearby = featureWindows.filter { fw in
                 let center = (fw.startTime + fw.endTime) / 2.0
-                return center > seed && center <= seed + searchRadius
+                return center >= seed && center <= seed + searchRadius
             }
         }
 
         guard !nearby.isEmpty else { return nil }
+        let boundaryType: BoundaryType = direction == .backward ? .start : .end
+        let resolved = boundaryResolver.snap(
+            candidateTime: seed,
+            boundaryType: boundaryType,
+            anchorType: anchorType,
+            featureWindows: nearby,
+            lexicalHits: lexicalHits,
+            config: resolverConfig(
+                anchorType: anchorType,
+                snapDistance: BoundarySnapDistance(start: searchRadius, end: searchRadius)
+            )
+        )
 
-        var bestTime: Double?
-        var bestScore: Double = -1
-
-        for fw in nearby {
-            let score = scoreFeatureWindow(fw)
-            if score > bestScore && score >= silenceThreshold {
-                bestScore = score
-                switch direction {
-                case .backward:
-                    bestTime = fw.startTime
-                case .forward:
-                    bestTime = fw.endTime
-                }
-            }
+        if abs(resolved - seed) < 0.000_001 {
+            return nearby.contains { featureWindow in
+                abs(boundaryTime(for: featureWindow, boundaryType: boundaryType) - seed) < 0.000_001
+            } ? seed : nil
         }
 
-        return bestTime
+        return resolved
     }
 
     // MARK: - Signal 2: Lexical Boundaries
 
-    /// Run LexicalScanner on transcript chunks near the seed point.
-    /// Returns the earliest sponsor-intro boundary and the latest transition boundary.
-    private func findLexicalBoundaries(
+    private func makeLexicalContext(
         seed: Double,
         transcriptChunks: [TranscriptChunk],
         config: ExpansionConfig
-    ) -> (startTime: Double, endTime: Double)? {
+    ) -> LexicalContext? {
         let nearbyChunks = transcriptChunks.filter { chunk in
             chunk.endTime >= seed - config.lexicalBackwardSearchRadius &&
             chunk.startTime <= seed + config.lexicalForwardSearchRadius
@@ -335,10 +349,25 @@ struct BoundaryExpander: Sendable {
         guard !nearbyChunks.isEmpty else { return nil }
 
         let scanner = LexicalScanner()
-        let candidates = scanner.scan(
-            chunks: nearbyChunks,
-            analysisAssetId: nearbyChunks[0].analysisAssetId
-        )
+        let hits = nearbyChunks
+            .flatMap { scanner.scanChunk($0) }
+            .sorted { lhs, rhs in
+                if lhs.startTime != rhs.startTime {
+                    return lhs.startTime < rhs.startTime
+                }
+                return lhs.endTime < rhs.endTime
+            }
+        let candidates = scanner.scan(chunks: nearbyChunks, analysisAssetId: nearbyChunks[0].analysisAssetId)
+
+        return LexicalContext(candidates: candidates, hits: hits)
+    }
+
+    /// Returns the lexical candidate region that contains or is nearest the seed.
+    private func findLexicalBoundaries(
+        seed: Double,
+        candidates: [LexicalCandidate],
+        config: ExpansionConfig
+    ) -> (startTime: Double, endTime: Double)? {
 
         guard !candidates.isEmpty else { return nil }
 
@@ -411,11 +440,14 @@ struct BoundaryExpander: Sendable {
 
     // MARK: - Silence Snapping
 
-    /// Snap a time to the nearest silence point within ±10s.
+    /// Snap a time to the nearest resolver-selected boundary point within ±10s.
     /// Used for fallback boundaries.
     private func snapToNearestSilence(
         time: Double,
-        featureWindows: [FeatureWindow]
+        featureWindows: [FeatureWindow],
+        boundaryType: BoundaryType,
+        lexicalHits: [LexicalHit],
+        anchorType: AnchorType
     ) -> Double {
         let snapRadius = 10.0
         let nearby = featureWindows.filter { fw in
@@ -425,22 +457,54 @@ struct BoundaryExpander: Sendable {
 
         guard !nearby.isEmpty else { return time }
 
-        var bestTime = time
-        var bestScore: Double = -1
+        return boundaryResolver.snap(
+            candidateTime: time,
+            boundaryType: boundaryType,
+            anchorType: anchorType,
+            featureWindows: nearby,
+            lexicalHits: lexicalHits,
+            config: resolverConfig(
+                anchorType: anchorType,
+                snapDistance: BoundarySnapDistance(start: snapRadius, end: snapRadius)
+            )
+        )
+    }
 
-        for fw in nearby {
-            let score = scoreFeatureWindow(fw)
-            if score > bestScore && score >= silenceThreshold {
-                bestScore = score
-                // Snap to the edge closest to the target time.
-                if abs(fw.startTime - time) < abs(fw.endTime - time) {
-                    bestTime = fw.startTime
-                } else {
-                    bestTime = fw.endTime
-                }
-            }
+    private func resolverConfig(
+        anchorType: AnchorType,
+        snapDistance: BoundarySnapDistance
+    ) -> BoundarySnappingConfig {
+        BoundarySnappingConfig(
+            startWeights: StartBoundaryCueWeights(
+                pauseVAD: 0.55,
+                speakerChangeProxy: 0.10,
+                musicBedChange: 0.10,
+                spectralChange: 0.20,
+                lexicalDensityDelta: 0.05
+            ),
+            endWeights: EndBoundaryCueWeights(
+                pauseVAD: 0.55,
+                speakerChangeProxy: 0.10,
+                musicBedChange: 0.10,
+                spectralChange: 0.15,
+                explicitReturnMarker: 0.10
+            ),
+            maxSnapDistanceByAnchorType: [anchorType: snapDistance],
+            lambda: 0.15,
+            minBoundaryScore: 0.3,
+            minImprovementOverOriginal: 0.05
+        )
+    }
+
+    private func boundaryTime(
+        for featureWindow: FeatureWindow,
+        boundaryType: BoundaryType
+    ) -> Double {
+        switch boundaryType {
+        case .start:
+            featureWindow.startTime
+        case .end:
+            featureWindow.endTime
         }
-
-        return bestTime
     }
 }

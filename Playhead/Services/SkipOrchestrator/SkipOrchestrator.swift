@@ -2,7 +2,7 @@
 // Decision layer between ad detection and playback transport.
 //
 // Consumes AdWindows from AdDetectionService, applies skip policy
-// (hysteresis, merging, boundary snapping, suppression after seek),
+// (hysteresis, merging, suppression after seek),
 // and pushes skip cues to PlaybackService as CMTimeRanges.
 //
 // Every skip decision is idempotent, keyed by
@@ -77,10 +77,6 @@ struct SkipPolicyConfig: Sendable {
     let seekSuppressionSeconds: TimeInterval
     /// Seconds of stability required after seek before re-enabling skip.
     let seekStabilitySeconds: TimeInterval
-    /// Maximum boundary snap distance (seconds) to nearest silence point.
-    let boundarySnapMaxDistance: TimeInterval
-    /// Pause probability threshold for silence detection in boundary snapping.
-    let silenceThreshold: Double
     /// Policy version tag for idempotency keys.
     let policyVersion: String
 
@@ -92,8 +88,6 @@ struct SkipPolicyConfig: Sendable {
         shortSpanOverrideConfidence: 0.85,
         seekSuppressionSeconds: 3.0,
         seekStabilitySeconds: 2.0,
-        boundarySnapMaxDistance: 3.0,
-        silenceThreshold: 0.6,
         policyVersion: "skip-policy-v1"
     )
 }
@@ -132,8 +126,8 @@ private struct ManagedWindow: Sendable {
 // MARK: - SkipOrchestrator
 
 /// Consumes ad detection events and produces skip cues for PlaybackService.
-/// Maintains hysteresis state, merges short gaps, snaps boundaries to silence,
-/// and suppresses skips after user seeks.
+/// Maintains hysteresis state, merges short gaps, and suppresses skips
+/// after user seeks.
 ///
 /// All decisions are logged for the evaluation harness.
 actor SkipOrchestrator {
@@ -175,9 +169,6 @@ actor SkipOrchestrator {
     /// Decision log for evaluation harness. Capped to prevent unbounded growth.
     private var decisionLog: [SkipDecisionRecord] = []
     private let decisionLogCapacity = 500
-
-    /// Feature windows cache for boundary snapping (loaded per-asset).
-    private var cachedFeatureWindows: [FeatureWindow] = []
 
     /// Callback to push skip cues to PlaybackService.
     /// Set via `setSkipCueHandler`. Avoids direct PlaybackServiceActor coupling.
@@ -325,14 +316,6 @@ actor SkipOrchestrator {
             activeSkipMode = .shadow
         }
 
-        // Pre-load feature windows for boundary snapping.
-        do {
-            cachedFeatureWindows = try await store.fetchAllFeatureWindows(assetId: analysisAssetId)
-        } catch {
-            logger.warning("Failed to load feature windows for snapping: \(error.localizedDescription)")
-            cachedFeatureWindows = []
-        }
-
         // Pre-load materialized skip cues from prior analysis.
         do {
             let preCues = try await store.fetchSkipCues(for: analysisAssetId)
@@ -373,7 +356,6 @@ actor SkipOrchestrator {
         activeAssetId = nil
         activePodcastId = nil
         inAdState = false
-        cachedFeatureWindows = []
         banneredWindowIds.removeAll()
         pushSkipCues()
     }
@@ -399,15 +381,13 @@ actor SkipOrchestrator {
             let incomingState = SkipDecisionState(rawValue: adWindow.decisionState) ?? .candidate
 
             // Build or update the managed window.
-            let snappedStart = snapBoundary(time: adWindow.startTime, direction: .start)
-            let snappedEnd = snapBoundary(time: adWindow.endTime, direction: .end)
             let key = idempotencyKey(assetId: assetId, windowId: adWindow.id)
 
             let managed = ManagedWindow(
                 adWindow: adWindow,
                 decisionState: incomingState,
-                snappedStart: snappedStart,
-                snappedEnd: snappedEnd,
+                snappedStart: adWindow.startTime,
+                snappedEnd: adWindow.endTime,
                 idempotencyKey: key,
                 cueActive: false
             )
@@ -444,8 +424,6 @@ actor SkipOrchestrator {
                 continue
             }
 
-            let snappedStart = snapBoundary(time: result.startTime, direction: .start)
-            let snappedEnd = snapBoundary(time: result.endTime, direction: .end)
             let key = idempotencyKey(assetId: assetId, windowId: result.id)
 
             // Build a synthetic AdWindow from the fusion decision so the existing
@@ -469,8 +447,8 @@ actor SkipOrchestrator {
             let managed = ManagedWindow(
                 adWindow: syntheticWindow,
                 decisionState: .confirmed,
-                snappedStart: snappedStart,
-                snappedEnd: snappedEnd,
+                snappedStart: result.startTime,
+                snappedEnd: result.endTime,
                 idempotencyKey: key,
                 cueActive: false
             )
@@ -922,54 +900,6 @@ actor SkipOrchestrator {
         return decision
     }
 
-    // MARK: - Boundary Snapping
-
-    private enum SnapDirection {
-        case start, end
-    }
-
-    /// Snap a boundary time to the nearest silence/low-energy point
-    /// using cached FeatureWindows.
-    private func snapBoundary(time: Double, direction: SnapDirection) -> Double {
-        guard !cachedFeatureWindows.isEmpty else { return time }
-
-        let maxDist = config.boundarySnapMaxDistance
-        let nearby = cachedFeatureWindows.filter { fw in
-            let center = (fw.startTime + fw.endTime) / 2.0
-            return abs(center - time) <= maxDist
-        }
-
-        guard !nearby.isEmpty else { return time }
-
-        // Find the window with the highest pause probability (most silence-like).
-        var bestTime = time
-        var bestScore: Double = -1
-
-        for fw in nearby {
-            let pauseScore = fw.pauseProbability
-            // Prefer low RMS (quiet) windows as well.
-            let quietScore = max(0, 1.0 - fw.rms * 10.0)
-            let combined = pauseScore * 0.7 + quietScore * 0.3
-
-            if combined > bestScore {
-                bestScore = combined
-                switch direction {
-                case .start:
-                    bestTime = fw.startTime
-                case .end:
-                    bestTime = fw.endTime
-                }
-            }
-        }
-
-        // Only snap if we found a meaningful silence point.
-        if bestScore >= config.silenceThreshold {
-            return bestTime
-        }
-
-        return time
-    }
-
     // MARK: - Window Merging
 
     /// Merge adjacent applied windows with gaps smaller than mergeGapSeconds.
@@ -1041,15 +971,13 @@ actor SkipOrchestrator {
             wasSkipped: false, userDismissedBanner: false
         )
 
-        let snappedStart = snapBoundary(time: start, direction: .start)
-        let snappedEnd = snapBoundary(time: end, direction: .end)
         let key = idempotencyKey(assetId: analysisAssetId, windowId: windowId)
 
         let managed = ManagedWindow(
             adWindow: adWindow,
             decisionState: .confirmed,
-            snappedStart: snappedStart,
-            snappedEnd: snappedEnd,
+            snappedStart: start,
+            snappedEnd: end,
             idempotencyKey: key,
             cueActive: false
         )

@@ -45,6 +45,12 @@ struct SkipOrchestratorRevertTests {
 
         // Should have a skip cue before revert.
         #expect(!pushedCues.isEmpty)
+        if let cue = pushedCues.first {
+            #expect(CMTimeGetSeconds(cue.start) == 60)
+            #expect(CMTimeGetSeconds(cue.end) == 120)
+        } else {
+            Issue.record("Expected the pre-revert cue to preserve the finalized window boundaries")
+        }
 
         // Revert by time range that overlaps the ad window.
         await orchestrator.revertByTimeRange(start: 70, end: 110, podcastId: "podcast-1")

@@ -316,6 +316,43 @@ struct BoundaryExpanderTests {
         #expect(result.endTime == 110.0)
     }
 
+    @Test("distance penalty prefers the closer acoustic boundary when scores are comparable")
+    func acousticDistancePenaltyPrefersCloserBoundary() {
+        let featureWindows = [
+            makeFeatureWindow(start: 52, end: 53, pauseProb: 0.85, rms: 0.01),
+            makeFeatureWindow(start: 80, end: 81, pauseProb: 0.8, rms: 0.01),
+        ]
+
+        let result = expander.expand(
+            seed: 100.0,
+            featureWindows: featureWindows,
+            transcriptChunks: [],
+            adWindows: []
+        )
+
+        #expect(result.source == .acousticOnly)
+        #expect(result.startTime == 80.0)
+        #expect(result.endTime == 130.0)
+    }
+
+    @Test("resolver-selected boundaries at the exact seed time are preserved")
+    func exactSeedBoundaryPreserved() {
+        let featureWindows = [
+            makeFeatureWindow(start: 80, end: 80, pauseProb: 1.0, rms: 0.0),
+        ]
+
+        let result = expander.expand(
+            seed: 80.0,
+            featureWindows: featureWindows,
+            transcriptChunks: [],
+            adWindows: []
+        )
+
+        #expect(result.source == .acousticOnly)
+        #expect(result.startTime == 80.0)
+        #expect(result.endTime == 80.0)
+    }
+
     // MARK: - Test 4: No signals → fallback seed ± 30s
 
     @Test("no signals produces fallback with seed plus minus 30 seconds")
@@ -414,16 +451,15 @@ struct BoundaryExpanderTests {
         #expect(result.endTime == 90.0)
     }
 
-    // MARK: - Scoring formula
+    // MARK: - Resolver-driven acoustic selection
 
-    @Test("acoustic scoring matches SkipOrchestrator formula")
+    @Test("resolver-driven acoustic selection still picks the strongest nearby boundary")
     func scoringFormula() {
-        // Window with high pause probability and low RMS should score highest.
+        // Window with high pause probability should still be selected when
+        // the competing candidate has materially weaker boundary cues.
         let highScore = makeFeatureWindow(start: 50, end: 51, pauseProb: 1.0, rms: 0.0)
-        // Expected: 1.0 * 0.7 + max(0, 1 - 0 * 10) * 0.3 = 0.7 + 0.3 = 1.0
 
         let lowScore = makeFeatureWindow(start: 52, end: 53, pauseProb: 0.0, rms: 0.5)
-        // Expected: 0.0 * 0.7 + max(0, 1 - 5.0) * 0.3 = 0 + 0 = 0.0
 
         let featureWindows = [lowScore, highScore]
 
@@ -445,15 +481,20 @@ struct BoundaryExpanderTests {
         start: Double,
         end: Double,
         pauseProb: Double,
-        rms: Double
+        rms: Double,
+        spectralFlux: Double = 0,
+        speakerChangeProxyScore: Double = 0,
+        musicBedChangeScore: Double = 0
     ) -> FeatureWindow {
         FeatureWindow(
             analysisAssetId: "test-asset",
             startTime: start,
             endTime: end,
             rms: rms,
-            spectralFlux: 0,
+            spectralFlux: spectralFlux,
             musicProbability: 0,
+            speakerChangeProxyScore: speakerChangeProxyScore,
+            musicBedChangeScore: musicBedChangeScore,
             pauseProbability: pauseProb,
             speakerClusterId: nil,
             jingleHash: nil,

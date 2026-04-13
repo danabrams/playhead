@@ -36,18 +36,13 @@ struct DecodedSpan: Sendable, Equatable, Identifiable {
 
 // MARK: - DecoderConstants
 
-/// Universal constants for MinimalContiguousSpanDecoder.
-/// These are fixed-by-design, not tunable parameters.
+/// Universal duration caps for MinimalContiguousSpanDecoder.
+/// Merge and snap radii now live in MinimalContiguousSpanDecoder.Configuration.
 enum DecoderConstants {
     /// Minimum span duration (seconds). Spans below this are dropped.
     static let minDurationSeconds: Double = 5
     /// Maximum span duration (seconds). Spans above this are recursively split.
     static let maxDurationSeconds: Double = 180
-    /// Maximum gap (in atom count) between two adjacent candidate spans for merging.
-    /// Atom-count rather than seconds for transcript-density invariance.
-    static let mergeGapAtoms: Int = 3
-    /// Snap radius (atom count) for Use A boundary refinement.
-    static let boundarySnapRadiusAtoms: Int = 15
 }
 
 // MARK: - AnchorRef Codable helpers

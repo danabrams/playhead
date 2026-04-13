@@ -1825,7 +1825,8 @@ actor AdDetectionService {
             featureWindows: featureWindows,
             transcriptChunks: [],
             adWindows: [],
-            config: config
+            config: config,
+            anchorType: hypothesis.anchorType
         )
         let usableAcousticOnly = acousticOnly.source == .fallback || !boundaryCoversEvidenceTimes(acousticOnly, evidenceTimes: evidenceTimes)
             ? nil
@@ -1836,7 +1837,8 @@ actor AdDetectionService {
             featureWindows: featureWindows,
             transcriptChunks: transcriptChunks,
             adWindows: [],
-            config: config
+            config: config,
+            anchorType: hypothesis.anchorType
         )
         let usableLexicalAware = lexicalAware.source == .fallback || !boundaryCoversEvidenceTimes(lexicalAware, evidenceTimes: evidenceTimes)
             ? nil

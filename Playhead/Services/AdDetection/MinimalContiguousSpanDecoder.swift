@@ -3,9 +3,9 @@
 //
 // Algorithm (rule order is pinned — must stay in this order for determinism):
 //   1. FORM RUNS: contiguous anchored + non-vetoed atoms → candidate spans
-//   2. MERGE: adjacent candidates with gap < MERGE_GAP_ATOMS (no veto, no acoustic break in gap)
+//   2. MERGE: adjacent candidates with gap < mergeGapSeconds (no veto, no acoustic break in gap)
 //   3. SPLIT: spans > MAX_DURATION → split at longest internal gap (recurse)
-//   4. USE A: boundary snap → snap edges to nearest acoustic break within ±BOUNDARY_SNAP_RADIUS
+//   4. USE A: boundary snap → snap edges to nearest acoustic break within ±snapRadiusSeconds
 //   5. DROP: spans < MIN_DURATION → drop
 //
 // Precision-first invariants:
@@ -22,11 +22,31 @@ import OSLog
 // MARK: - MinimalContiguousSpanDecoder
 
 struct MinimalContiguousSpanDecoder {
+    struct Configuration: Sendable, Equatable {
+        let mergeGapSeconds: Double
+        let snapRadiusSeconds: Double
+
+        static let `default` = Configuration(
+            mergeGapSeconds: 3.0,
+            snapRadiusSeconds: 8.0
+        )
+    }
+
+    enum BoundaryOwnership: Sendable {
+        case legacyEvidence
+        case hypothesisOwned
+    }
 
     private static let logger = Logger(
         subsystem: "com.playhead",
         category: "MinimalContiguousSpanDecoder"
     )
+
+    private let config: Configuration
+
+    init(config: Configuration = .default) {
+        self.config = config
+    }
 
     // MARK: - Public API
 
@@ -43,7 +63,11 @@ struct MinimalContiguousSpanDecoder {
     // because Use A can expand boundaries beyond the original anchored range. Phase 6 must not
     // assume re-projection is deterministic across boundary changes. Tracked as known risk in the
     // Phase 5 design doc (docs/plans/2026-04-09-phase-5-design.md).
-    func decode(atoms: [AtomEvidence], assetId: String) -> [DecodedSpan] {
+    func decode(
+        atoms: [AtomEvidence],
+        assetId: String,
+        boundaryOwnership: BoundaryOwnership = .legacyEvidence
+    ) -> [DecodedSpan] {
         guard !atoms.isEmpty else { return [] }
 
         let sortedAtoms = atoms.sorted { $0.atomOrdinal < $1.atomOrdinal }
@@ -64,7 +88,13 @@ struct MinimalContiguousSpanDecoder {
         let split = merged.flatMap { splitIfNeeded($0, allAtoms: sortedAtoms, atomsByOrdinal: atomsByOrdinal) }
 
         // Step 4: USE A — boundary snap
-        let snapped = split.map { applyBoundarySnap($0, allAtoms: sortedAtoms, atomsByOrdinal: atomsByOrdinal) }
+        let snapped: [CandidateSpan]
+        switch boundaryOwnership {
+        case .legacyEvidence:
+            snapped = split.map { applyBoundarySnap($0, allAtoms: sortedAtoms) }
+        case .hypothesisOwned:
+            snapped = split
+        }
 
         // Step 4b: Resolve overlaps introduced by boundary snap.
         // After snap, adjacent spans may overlap. Clip the later span's start
@@ -164,7 +194,7 @@ struct MinimalContiguousSpanDecoder {
     // MARK: - Step 2: MERGE
 
     /// Merge two adjacent candidate spans if:
-    ///   1. Gap (in atom count) < MERGE_GAP_ATOMS
+    ///   1. Gap (in seconds) < mergeGapSeconds
     ///   2. No .userVetoed atom in the gap
     ///   3. No atom in the gap has hasAcousticBreakHint (Use B anti-merge)
     private func mergeAdjacentCandidates(
@@ -179,9 +209,9 @@ struct MinimalContiguousSpanDecoder {
             let prev = result[result.count - 1]
             let next = candidates[i]
 
-            let gapAtomCount = next.firstOrdinal - prev.lastOrdinal - 1
+            let gapSeconds = next.startTime - prev.endTime
 
-            if gapAtomCount < DecoderConstants.mergeGapAtoms && gapAtomCount >= 0 {
+            if gapSeconds < config.mergeGapSeconds && gapSeconds >= 0 {
                 // Check gap atoms for veto or acoustic break hint.
                 let gapOrdinals = (prev.lastOrdinal + 1) ..< next.firstOrdinal
                 let gapAtoms = gapOrdinals.compactMap { atomsByOrdinal[$0] }
@@ -303,30 +333,34 @@ struct MinimalContiguousSpanDecoder {
     // Right edge: latest break (furthest right) to maximize rightward expansion.
     // This differs from Use C (nearest-break) which identifies corroboration for a specific FM hit.
 
-    /// Snap span boundaries to nearby acoustic break atoms (±BOUNDARY_SNAP_RADIUS_ATOMS).
+    /// Snap span boundaries to nearby acoustic break atoms within the configured
+    /// time radius.
     /// Use A only adjusts edges — never creates spans.
-    private func applyBoundarySnap(_ span: CandidateSpan, allAtoms: [AtomEvidence], atomsByOrdinal: [Int: AtomEvidence]) -> CandidateSpan {
-        let radius = DecoderConstants.boundarySnapRadiusAtoms
+    private func applyBoundarySnap(
+        _ span: CandidateSpan,
+        allAtoms: [AtomEvidence]
+    ) -> CandidateSpan {
+        let radius = config.snapRadiusSeconds
         var result = span
 
-        // Left edge: look in [firstOrdinal - radius, firstOrdinal + radius]
-        // Select the earliest (furthest left) break atom to maximize leftward expansion.
-        let leftLow = max(span.firstOrdinal - radius, allAtoms.first?.atomOrdinal ?? 0)
-        let leftHigh = min(span.firstOrdinal + radius, span.lastOrdinal)
-        if let snapAtom = (leftLow ... leftHigh)
-            .compactMap({ atomsByOrdinal[$0] })
-            .first(where: { $0.hasAcousticBreakHint }) {
+        // Left edge: select the earliest (furthest left) qualifying break atom
+        // in the configured time window to maximize leftward expansion.
+        if let snapAtom = allAtoms.first(where: { atom in
+            atom.hasAcousticBreakHint
+                && atom.startTime >= span.startTime - radius
+                && atom.startTime <= span.startTime + radius
+        }) {
             result.firstOrdinal = snapAtom.atomOrdinal
             result.startTime = snapAtom.startTime
         }
 
-        // Right edge: look in [lastOrdinal - radius, lastOrdinal + radius]
-        // Select the latest (furthest right) break atom to maximize rightward expansion.
-        let rightLow = max(span.lastOrdinal - radius, result.firstOrdinal)
-        let rightHigh = min(span.lastOrdinal + radius, allAtoms.last?.atomOrdinal ?? span.lastOrdinal)
-        if let snapAtom = (rightLow ... rightHigh)
-            .compactMap({ atomsByOrdinal[$0] })
-            .last(where: { $0.hasAcousticBreakHint }) {
+        // Right edge: select the latest (furthest right) qualifying break atom
+        // in the configured time window to maximize rightward expansion.
+        if let snapAtom = allAtoms.last(where: { atom in
+            atom.hasAcousticBreakHint
+                && atom.endTime >= span.endTime - radius
+                && atom.endTime <= span.endTime + radius
+        }) {
             result.lastOrdinal = snapAtom.atomOrdinal
             result.endTime = snapAtom.endTime
         }
