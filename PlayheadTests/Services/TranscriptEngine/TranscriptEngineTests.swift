@@ -851,6 +851,70 @@ struct AppleSpeechAnalyzerRunnerTests {
         #expect(input.bufferStartTime == nil)
     }
 
+    @Test("timeline validator allows implicit analyzer inputs")
+    func timelineValidatorAllowsImplicitAnalyzerInputs() throws {
+        let (bufferA, _) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
+        let (bufferB, _) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
+
+        try AppleSpeechAnalyzerRunner.validateAnalyzerInputTimeline([
+            AppleSpeechAnalyzerRunner.makeAnalyzerInput(buffer: bufferA),
+            AppleSpeechAnalyzerRunner.makeAnalyzerInput(buffer: bufferB),
+        ])
+    }
+
+    @Test("timeline validator rejects mixed implicit and explicit timestamps")
+    func timelineValidatorRejectsMixedTimestampModes() throws {
+        let (bufferA, _) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
+        let (bufferB, _) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
+
+        #expect(throws: AppleSpeechBoundaryError.self) {
+            try AppleSpeechAnalyzerRunner.validateAnalyzerInputTimeline([
+                AppleSpeechAnalyzerRunner.makeAnalyzerInput(buffer: bufferA),
+                AppleSpeechAnalyzerRunner.makeAnalyzerInput(
+                    buffer: bufferB,
+                    bufferStartTime: CMTime(seconds: 0.032, preferredTimescale: 600_000)
+                ),
+            ])
+        }
+    }
+
+    @Test("timeline validator rejects overlapping explicit timestamps")
+    func timelineValidatorRejectsOverlappingExplicitTimestamps() throws {
+        let (bufferA, _) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
+        let (bufferB, _) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
+
+        #expect(throws: AppleSpeechBoundaryError.self) {
+            try AppleSpeechAnalyzerRunner.validateAnalyzerInputTimeline([
+                AppleSpeechAnalyzerRunner.makeAnalyzerInput(
+                    buffer: bufferA,
+                    bufferStartTime: CMTime(seconds: 0.0, preferredTimescale: 600_000)
+                ),
+                AppleSpeechAnalyzerRunner.makeAnalyzerInput(
+                    buffer: bufferB,
+                    bufferStartTime: CMTime(seconds: 0.01, preferredTimescale: 600_000)
+                ),
+            ])
+        }
+    }
+
+    @Test("timeline validator allows contiguous explicit timestamps")
+    func timelineValidatorAllowsContiguousExplicitTimestamps() throws {
+        let (bufferA, _) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
+        let (bufferB, _) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
+        let durationSeconds = Double(bufferA.frameLength) / bufferA.format.sampleRate
+
+        try AppleSpeechAnalyzerRunner.validateAnalyzerInputTimeline([
+            AppleSpeechAnalyzerRunner.makeAnalyzerInput(
+                buffer: bufferA,
+                bufferStartTime: CMTime(seconds: 0.0, preferredTimescale: 600_000)
+            ),
+            AppleSpeechAnalyzerRunner.makeAnalyzerInput(
+                buffer: bufferB,
+                bufferStartTime: CMTime(seconds: durationSeconds, preferredTimescale: 600_000)
+            ),
+        ])
+    }
+
     @Test("runner does not mix file-backed analyzer input with buffer-sequence analysis")
     func runnerAvoidsMixedAnalyzerInputModes() throws {
         let source = try appleSpeechAnalyzerRunnerSource()

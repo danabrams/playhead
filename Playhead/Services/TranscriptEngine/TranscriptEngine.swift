@@ -542,6 +542,7 @@ enum AppleSpeechBoundaryError: Error, CustomStringConvertible {
     case speechAssetsUnsupported(localeIdentifier: String)
     case analyzerFormatUnavailable(localeIdentifier: String)
     case audioBridgeFailure(String)
+    case invalidAnalyzerInputTimeline(String)
     case analyzerSessionFailure(String)
 
     var description: String {
@@ -551,6 +552,8 @@ enum AppleSpeechBoundaryError: Error, CustomStringConvertible {
         case .analyzerFormatUnavailable(let localeIdentifier):
             "SpeechAnalyzer did not negotiate a usable audio format for \(localeIdentifier)"
         case .audioBridgeFailure(let reason):
+            reason
+        case .invalidAnalyzerInputTimeline(let reason):
             reason
         case .analyzerSessionFailure(let reason):
             reason
@@ -768,12 +771,13 @@ struct AppleSpeechAnalyzerRunner {
         let analyzer = SpeechAnalyzer(modules: [transcriber], options: options)
         try await apply(context: analysisContext, to: analyzer)
         try await prepare(analyzer: analyzer, in: format)
+        let inputSequence = try Self.singleBufferSequence(buffer: buffer)
 
         let collector = Task { try await AppleSpeechResultMapper.collectSegments(from: transcriber.results) }
         var shouldCancelAnalyzer = true
 
         do {
-            if let lastSample = try await analyzer.analyzeSequence(Self.singleBufferSequence(buffer: buffer)) {
+            if let lastSample = try await analyzer.analyzeSequence(inputSequence) {
                 try await analyzer.finalizeAndFinish(through: lastSample)
             } else {
                 try await analyzer.finalizeAndFinishThroughEndOfInput()
@@ -800,12 +804,13 @@ struct AppleSpeechAnalyzerRunner {
         let detector = SpeechDetector()
         let analyzer = SpeechAnalyzer(modules: [detector], options: options)
         try await prepare(analyzer: analyzer, in: format)
+        let inputSequence = try Self.singleBufferSequence(buffer: buffer)
 
         let collector = Task { try await AppleSpeechResultMapper.collectVAD(from: detector.results) }
         var shouldCancelAnalyzer = true
 
         do {
-            if let lastSample = try await analyzer.analyzeSequence(Self.singleBufferSequence(buffer: buffer)) {
+            if let lastSample = try await analyzer.analyzeSequence(inputSequence) {
                 try await analyzer.finalizeAndFinish(through: lastSample)
             } else {
                 try await analyzer.finalizeAndFinishThroughEndOfInput()
@@ -855,15 +860,76 @@ struct AppleSpeechAnalyzerRunner {
         }
     }
 
-    static func makeAnalyzerInput(buffer: AVAudioPCMBuffer) -> AnalyzerInput {
-        AnalyzerInput(buffer: buffer)
+    static func makeAnalyzerInput(
+        buffer: AVAudioPCMBuffer,
+        bufferStartTime: CMTime? = nil
+    ) -> AnalyzerInput {
+        if let bufferStartTime {
+            return AnalyzerInput(buffer: buffer, bufferStartTime: bufferStartTime)
+        }
+        return AnalyzerInput(buffer: buffer)
     }
 
-    private static func singleBufferSequence(buffer: AVAudioPCMBuffer) -> AsyncStream<AnalyzerInput> {
-        AsyncStream { continuation in
-            continuation.yield(makeAnalyzerInput(buffer: buffer))
+    static func validateAnalyzerInputTimeline(_ inputs: [AnalyzerInput]) throws {
+        guard !inputs.isEmpty else { return }
+
+        let hasExplicitTimestamps = inputs.contains { $0.bufferStartTime != nil }
+        let hasImplicitTimestamps = inputs.contains { $0.bufferStartTime == nil }
+
+        if hasExplicitTimestamps && hasImplicitTimestamps {
+            throw AppleSpeechBoundaryError.invalidAnalyzerInputTimeline(
+                "SpeechAnalyzer inputs must use either all implicit or all explicit buffer start times"
+            )
+        }
+
+        guard hasExplicitTimestamps else { return }
+
+        var previousEndTime: CMTime?
+        for input in inputs {
+            guard let startTime = input.bufferStartTime else {
+                continue
+            }
+            guard startTime.isValid else {
+                throw AppleSpeechBoundaryError.invalidAnalyzerInputTimeline(
+                    "SpeechAnalyzer input buffer start time must be valid"
+                )
+            }
+
+            let endTime = try analyzerInputEndTime(input)
+            if let previousEndTime, CMTimeCompare(startTime, previousEndTime) < 0 {
+                throw AppleSpeechBoundaryError.invalidAnalyzerInputTimeline(
+                    "SpeechAnalyzer input buffer timestamps overlap or precede prior audio input"
+                )
+            }
+            previousEndTime = endTime
+        }
+    }
+
+    static func makeAnalyzerSequence(inputs: [AnalyzerInput]) throws -> AsyncStream<AnalyzerInput> {
+        try validateAnalyzerInputTimeline(inputs)
+        return AsyncStream { continuation in
+            for input in inputs {
+                continuation.yield(input)
+            }
             continuation.finish()
         }
+    }
+
+    private static func singleBufferSequence(buffer: AVAudioPCMBuffer) throws -> AsyncStream<AnalyzerInput> {
+        try makeAnalyzerSequence(inputs: [makeAnalyzerInput(buffer: buffer)])
+    }
+
+    private static func analyzerInputEndTime(_ input: AnalyzerInput) throws -> CMTime {
+        let sampleRate = input.buffer.format.sampleRate
+        guard sampleRate > 0 else {
+            throw AppleSpeechBoundaryError.invalidAnalyzerInputTimeline(
+                "SpeechAnalyzer input buffer sample rate must be positive"
+            )
+        }
+
+        let durationSeconds = Double(input.buffer.frameLength) / sampleRate
+        let duration = CMTime(seconds: durationSeconds, preferredTimescale: 600_000)
+        return CMTimeAdd(input.bufferStartTime ?? .zero, duration)
     }
 }
 
