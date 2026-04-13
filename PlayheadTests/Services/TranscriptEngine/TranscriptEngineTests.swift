@@ -787,13 +787,13 @@ private func makeAnalyzerStyleInt16Buffer(
     return (buffer, format)
 }
 
-@Suite("AppleSpeechRecognizer audio file bridge")
-struct AppleSpeechRecognizerAudioFileBridgeTests {
+@Suite("AppleSpeechAudioBridge")
+struct AppleSpeechAudioBridgeTests {
 
     @Test("analysis audio file settings force interleaved file storage")
     func analysisAudioFileSettingsForceInterleavedStorage() throws {
         let (_, format) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
-        let settings = AppleSpeechRecognizer.analysisAudioFileSettings(for: format)
+        let settings = AppleSpeechAudioBridge.analysisAudioFileSettings(for: format)
         let formatID = settings[AVFormatIDKey] as? NSNumber
 
         #expect(settings[AVLinearPCMIsNonInterleaved] as? Bool == false)
@@ -803,7 +803,7 @@ struct AppleSpeechRecognizerAudioFileBridgeTests {
     @Test("makeAnalysisAudioFile writes analyzer-style Int16 buffers")
     func makeAnalysisAudioFileWritesAnalyzerStyleBuffer() throws {
         let (buffer, format) = try makeAnalyzerStyleInt16Buffer()
-        let fileURL = try AppleSpeechRecognizer.makeAnalysisAudioFile(from: buffer, format: format)
+        let fileURL = try AppleSpeechAudioBridge.makeAnalysisAudioFile(from: buffer, format: format)
         defer { try? FileManager.default.removeItem(at: fileURL) }
 
         let file = try AVAudioFile(forReading: fileURL)
@@ -811,6 +811,15 @@ struct AppleSpeechRecognizerAudioFileBridgeTests {
         #expect(file.length == AVAudioFramePosition(buffer.frameLength))
         #expect(file.fileFormat.sampleRate == 16_000)
         #expect(file.fileFormat.channelCount == 1)
+    }
+
+    @Test("makeAnalyzerBuffer rejects silent shards at the audio bridge boundary")
+    func makeAnalyzerBufferRejectsSilentShard() throws {
+        let (_, targetFormat) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
+
+        #expect(throws: AppleSpeechBoundaryError.self) {
+            try AppleSpeechAudioBridge.makeAnalyzerBuffer(from: makeShard(), targetFormat: targetFormat)
+        }
     }
 }
 
@@ -820,7 +829,7 @@ struct SpeechTranscriberExtractionTests {
     @Test("configured SpeechTranscriber preset requests alternatives and confidence attributes")
     func configuredPresetRequestsWeakAnchorSignals() {
         let base = SpeechTranscriber.Preset.timeIndexedProgressiveTranscription
-        let preset = AppleSpeechRecognizer.speechTranscriberPreset()
+        let preset = AppleSpeechResultMapper.speechTranscriberPreset()
 
         #expect(preset.transcriptionOptions == base.transcriptionOptions)
         #expect(preset.reportingOptions.isSuperset(of: base.reportingOptions))
@@ -835,7 +844,7 @@ struct SpeechTranscriberExtractionTests {
             ("visit ", 1.0, 1.4, 0.96),
             ("better halp dot com", 1.4, 3.8, 0.34),
         ])
-        let extracted = AppleSpeechRecognizer.extractWords(
+        let extracted = AppleSpeechResultMapper.extractWords(
             from: primaryText,
             alternatives: [
                 AttributedString("visit betterhelp.com/podcast"),
@@ -868,7 +877,7 @@ struct SpeechTranscriberExtractionTests {
             ("visit ", 0.0, 0.2, 0.95),
             ("better help", 0.2, 0.8, 0.19),
         ])
-        let extracted = AppleSpeechRecognizer.extractWords(
+        let extracted = AppleSpeechResultMapper.extractWords(
             from: primaryText,
             alternatives: [AttributedString("visit betterhelp dot com")],
             fallbackStart: 0.0,
@@ -892,7 +901,7 @@ struct CollectSegmentsPartialPromotionTests {
             makeSnapshot(isFinal: true, text: "Hello world", startTime: 0, endTime: 1),
             makeSnapshot(isFinal: true, text: "Second segment", startTime: 1, endTime: 2),
         ])
-        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
         #expect(segments.count == 2)
         #expect(segments[0].text == "Hello world")
         #expect(segments[1].text == "Second segment")
@@ -904,7 +913,7 @@ struct CollectSegmentsPartialPromotionTests {
             makeSnapshot(isFinal: true, text: "First sentence", startTime: 0, endTime: 1),
             makeSnapshot(isFinal: false, text: "Trailing partial", startTime: 1, endTime: 2),
         ])
-        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
         #expect(segments.count == 2, "Trailing partial should be promoted to a segment")
         #expect(segments[1].text == "Trailing partial")
     }
@@ -915,7 +924,7 @@ struct CollectSegmentsPartialPromotionTests {
             makeSnapshot(isFinal: false, text: "Partial attempt", startTime: 0, endTime: 1),
             makeSnapshot(isFinal: true, text: "Final version", startTime: 0, endTime: 1),
         ])
-        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
         #expect(segments.count == 1, "Superseded partial must not be double-counted")
         #expect(segments[0].text == "Final version")
     }
@@ -927,7 +936,7 @@ struct CollectSegmentsPartialPromotionTests {
             makeSnapshot(isFinal: false, text: "Partial v1", startTime: 1, endTime: 2),
             makeSnapshot(isFinal: false, text: "Partial v2", startTime: 1, endTime: 2.5),
         ])
-        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
         #expect(segments.count == 2)
         #expect(segments[1].text == "Partial v2", "Only the latest partial should be promoted")
     }
@@ -938,7 +947,7 @@ struct CollectSegmentsPartialPromotionTests {
             makeSnapshot(isFinal: true, text: "Content", startTime: 0, endTime: 1),
             makeSnapshot(isFinal: false, text: "", startTime: 1, endTime: 2),
         ])
-        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
         #expect(segments.count == 1, "Empty trailing partial should not be promoted")
     }
 
@@ -949,7 +958,7 @@ struct CollectSegmentsPartialPromotionTests {
             makeSnapshot(isFinal: false, text: "Partial 2", startTime: 0, endTime: 1.5),
             makeSnapshot(isFinal: false, text: "Partial 3", startTime: 0, endTime: 2),
         ])
-        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
         #expect(segments.count == 1, "Only the last partial should survive")
         #expect(segments[0].text == "Partial 3")
     }
@@ -960,7 +969,7 @@ struct CollectSegmentsPartialPromotionTests {
             makeSnapshot(isFinal: true, text: "Later segment", startTime: 5, endTime: 6),
             makeSnapshot(isFinal: false, text: "Earlier partial", startTime: 2, endTime: 3),
         ])
-        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
         #expect(segments.count == 2)
         #expect(segments[0].text == "Earlier partial", "Promoted partial should be sorted by startTime")
         #expect(segments[1].text == "Later segment")
@@ -969,7 +978,7 @@ struct CollectSegmentsPartialPromotionTests {
     @Test("Empty stream produces no segments")
     func emptyStream() async throws {
         let stream = snapshotStream([])
-        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
         #expect(segments.isEmpty)
     }
 
@@ -979,7 +988,7 @@ struct CollectSegmentsPartialPromotionTests {
             makeSnapshot(isFinal: false, text: "Speculative", startTime: 0, endTime: 1),
             makeSnapshot(isFinal: true, text: "", startTime: 0, endTime: 1),
         ])
-        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
         #expect(segments.isEmpty, "Empty final retracts the preceding partial")
     }
 
@@ -995,7 +1004,7 @@ struct CollectSegmentsPartialPromotionTests {
             // Shard 3: only a trailing partial (shard boundary truncation)
             makeSnapshot(isFinal: false, text: "I am fi", startTime: 2, endTime: 2.5),
         ])
-        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
         #expect(segments.count == 3, "Two finals + one promoted trailing partial")
         #expect(segments[0].text == "Hello world")
         #expect(segments[1].text == "How are you")
@@ -1016,7 +1025,7 @@ struct CollectSegmentsPartialPromotionTests {
             )
         ])
 
-        let segments = try await AppleSpeechRecognizer.collectSegmentsFromSnapshots(stream)
+        let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
         #expect(segments.count == 1)
         #expect(segments[0].weakAnchorMetadata == metadata)
     }

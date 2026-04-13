@@ -533,41 +533,44 @@ private func makeDefaultSpeechRecognizer(
 
 #if canImport(Speech)
 
-// MARK: - AppleSpeechRecognizer
+struct AppleSpeechPreparedModel {
+    let locale: Locale
+    let analyzerFormat: AVAudioFormat
+}
 
-/// Production recognizer using SpeechAnalyzer (iOS 26+).
-/// Uses bestAvailableAudioFormat to resolve the format SpeechAnalyzer
-/// expects (16kHz Int16), then converts our Float32 buffers to match.
-/// No microphone or speech recognition permission required.
-actor AppleSpeechRecognizer: SpeechRecognizer {
-    private let logger = Logger(subsystem: "com.playhead", category: "AppleSpeechRecognizer")
-    private static let lowConfidenceThreshold: Float = 0.6
-    private let vocabularyProvider: ASRVocabularyProvider?
-    private var selectedLocale: Locale?
-    private var analyzerFormat: AVAudioFormat?
-    private var prepared = false
+enum AppleSpeechBoundaryError: Error, CustomStringConvertible {
+    case speechAssetsUnsupported(localeIdentifier: String)
+    case analyzerFormatUnavailable(localeIdentifier: String)
+    case audioBridgeFailure(String)
+    case analyzerSessionFailure(String)
 
-    init(vocabularyProvider: ASRVocabularyProvider? = nil) {
-        self.vocabularyProvider = vocabularyProvider
+    var description: String {
+        switch self {
+        case .speechAssetsUnsupported(let localeIdentifier):
+            "Speech assets unsupported for \(localeIdentifier)"
+        case .analyzerFormatUnavailable(let localeIdentifier):
+            "SpeechAnalyzer did not negotiate a usable audio format for \(localeIdentifier)"
+        case .audioBridgeFailure(let reason):
+            reason
+        case .analyzerSessionFailure(let reason):
+            reason
+        }
     }
+}
 
-    // MARK: - Model Lifecycle
+struct AppleSpeechAssetBootstrapper {
+    private let logger = Logger(subsystem: "com.playhead", category: "AppleSpeechBootstrapper")
 
-    func loadModel(from directory: URL) async throws {
-        logger.info("Preparing SpeechAnalyzer backend")
-        let locale = Locale(identifier: "en-US")
-        selectedLocale = locale
-
-        let transcriber = Self.makeSpeechTranscriber(locale: locale)
+    func prepare(localeIdentifier: String = "en-US") async throws -> AppleSpeechPreparedModel {
+        let locale = Locale(identifier: localeIdentifier)
+        let transcriber = AppleSpeechResultMapper.makeSpeechTranscriber(locale: locale)
         let modules: [any SpeechModule] = [transcriber]
         let status = await AssetInventory.status(forModules: modules)
         logger.info("Speech asset status: \(String(describing: status), privacy: .public)")
 
         switch status {
         case .unsupported:
-            throw TranscriptEngineError.transcriptionFailed(
-                "Speech assets unsupported for \(locale.identifier)"
-            )
+            throw AppleSpeechBoundaryError.speechAssetsUnsupported(localeIdentifier: locale.identifier)
         case .supported, .downloading:
             logger.info("Downloading Speech assets…")
             let start = ContinuousClock.now
@@ -581,166 +584,68 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
             break
         }
 
-        let resolvedFormat = await SpeechAnalyzer.bestAvailableAudioFormat(
+        guard let resolvedFormat = await SpeechAnalyzer.bestAvailableAudioFormat(
             compatibleWith: [transcriber]
-        )
-        analyzerFormat = resolvedFormat
-        logger.info("SpeechAnalyzer format: \(String(describing: resolvedFormat))")
-
-        prepared = true
-        logger.info("SpeechAnalyzer ready")
-    }
-
-    func unloadModel() async {
-        analyzerFormat = nil
-        prepared = false
-    }
-
-    func isModelLoaded() async -> Bool {
-        prepared && analyzerFormat != nil
-    }
-
-    // MARK: - Transcription
-
-    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
-        guard let locale = selectedLocale, let targetFormat = analyzerFormat else {
-            throw TranscriptEngineError.modelNotLoaded
+        ) else {
+            throw AppleSpeechBoundaryError.analyzerFormatUnavailable(localeIdentifier: locale.identifier)
         }
+        logger.info("SpeechAnalyzer format: \(String(describing: resolvedFormat))")
+        return AppleSpeechPreparedModel(locale: locale, analyzerFormat: resolvedFormat)
+    }
+}
 
-        let sourceBuffer = try Self.makeBuffer(from: shard)
-        let analyzerBuffer = try Self.convert(sourceBuffer, to: targetFormat)
+enum AppleSpeechAudioBridge {
+    private static let bufferLogger = Logger(subsystem: "com.playhead", category: "AudioBuffer")
+
+    static func makeAnalyzerBuffer(
+        from shard: AnalysisShard,
+        targetFormat: AVAudioFormat
+    ) throws -> AVAudioPCMBuffer {
+        let sourceBuffer = try makeSourceBuffer(from: shard)
+        let analyzerBuffer = try convert(sourceBuffer, to: targetFormat)
 
         guard analyzerBuffer.format == targetFormat else {
-            throw TranscriptEngineError.transcriptionFailed(
+            throw AppleSpeechBoundaryError.audioBridgeFailure(
                 "Buffer format \(analyzerBuffer.format) does not match analyzer format \(targetFormat)"
             )
         }
 
-        let transcriber = Self.makeSpeechTranscriber(locale: locale)
-        let analysisContext = await Self.makeAnalysisContext(
-            podcastId: podcastId,
-            vocabularyProvider: vocabularyProvider
-        )
+        return analyzerBuffer
+    }
 
-        let analysisAudioURL = try Self.makeAnalysisAudioFile(from: analyzerBuffer, format: targetFormat)
-        defer { try? FileManager.default.removeItem(at: analysisAudioURL) }
-        let analysisInputFile = try AVAudioFile(forReading: analysisAudioURL)
-        let analyzer = try await SpeechAnalyzer(
-            inputAudioFile: analysisInputFile,
-            modules: [transcriber],
-            options: .init(priority: .utility, modelRetention: .lingering),
-            analysisContext: analysisContext
-        )
+    static func analysisAudioFileSettings(for format: AVAudioFormat) -> [String: Any] {
+        var settings = format.settings
+        // Persist interleaved linear PCM to disk even when the analyzer's
+        // processing buffer is non-interleaved. AVAudioFile can then accept
+        // the explicit buffer processing format below without rejecting the
+        // write on iOS device builds.
+        settings[AVLinearPCMIsNonInterleaved] = false
+        return settings
+    }
 
-        logger.debug("Preparing SpeechAnalyzer for shard \(shard.id)")
-        try await analyzer.prepareToAnalyze(in: targetFormat)
-
-        let inputSequence = Self.singleBufferSequence(buffer: analyzerBuffer)
-        let collector = Task { try await Self.collectSegments(from: transcriber.results) }
+    static func makeAnalysisAudioFile(
+        from buffer: AVAudioPCMBuffer,
+        format: AVAudioFormat
+    ) throws -> URL {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("playhead-transcript-\(UUID().uuidString).caf")
 
         do {
-            // analyzeSequence consumes the stream and returns the last sample.
-            // finalizeAndFinish closes the session and terminates transcriber.results,
-            // which unblocks the collector. Without this call, results hangs forever.
-            if let lastSample = try await analyzer.analyzeSequence(inputSequence) {
-                try await analyzer.finalizeAndFinish(through: lastSample)
-            }
-            withExtendedLifetime(analyzerBuffer) {}
-
-            let rawSegments = try await collector.value
-            let timeOffset = shard.startTime
-            return rawSegments.map { seg in
-                TranscriptSegment(
-                    id: seg.id,
-                    words: seg.words.map { w in
-                        TranscriptWord(
-                            text: w.text,
-                            startTime: w.startTime + timeOffset,
-                            endTime: w.endTime + timeOffset,
-                            confidence: w.confidence
-                        )
-                    },
-                    text: seg.text,
-                    startTime: seg.startTime + timeOffset,
-                    endTime: seg.endTime + timeOffset,
-                    avgConfidence: seg.avgConfidence,
-                    passType: seg.passType,
-                    weakAnchorMetadata: seg.weakAnchorMetadata?.offsettingTimes(by: timeOffset)
-                )
-            }
+            let file = try AVAudioFile(
+                forWriting: fileURL,
+                settings: analysisAudioFileSettings(for: format),
+                commonFormat: buffer.format.commonFormat,
+                interleaved: buffer.format.isInterleaved
+            )
+            try file.write(from: buffer)
+            return fileURL
         } catch {
-            await analyzer.cancelAndFinishNow()
-            collector.cancel()
-            throw error
+            throw AppleSpeechBoundaryError.audioBridgeFailure(
+                "Failed to bridge analyzer buffer into a temporary audio file: \(error)"
+            )
         }
     }
 
-    // MARK: - VAD
-
-    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
-        guard let targetFormat = analyzerFormat else {
-            throw TranscriptEngineError.modelNotLoaded
-        }
-
-        let sourceBuffer = try Self.makeBuffer(from: shard)
-        let analyzerBuffer = try Self.convert(sourceBuffer, to: targetFormat)
-
-        let detector = SpeechDetector()
-        let analysisAudioURL = try Self.makeAnalysisAudioFile(from: analyzerBuffer, format: targetFormat)
-        defer { try? FileManager.default.removeItem(at: analysisAudioURL) }
-        let analysisInputFile = try AVAudioFile(forReading: analysisAudioURL)
-        let analyzer = try await SpeechAnalyzer(
-            inputAudioFile: analysisInputFile,
-            modules: [detector],
-            options: .init(priority: .utility, modelRetention: .lingering)
-        )
-
-        try await analyzer.prepareToAnalyze(in: targetFormat)
-        let inputSequence = Self.singleBufferSequence(buffer: analyzerBuffer)
-        let collector = Task { try await Self.collectVAD(from: detector.results) }
-
-        do {
-            if let lastSample = try await analyzer.analyzeSequence(inputSequence) {
-                try await analyzer.finalizeAndFinish(through: lastSample)
-            }
-            withExtendedLifetime(analyzerBuffer) {}
-
-            let timeOffset = shard.startTime
-            return try await collector.value.map { vad in
-                VADResult(
-                    isSpeech: vad.isSpeech,
-                    speechProbability: vad.speechProbability,
-                    startTime: vad.startTime + timeOffset,
-                    endTime: vad.endTime + timeOffset
-                )
-            }
-        } catch {
-            await analyzer.cancelAndFinishNow()
-            collector.cancel()
-            throw error
-        }
-    }
-
-    @available(iOS 26.0, *)
-    private static func makeAnalysisContext(
-        podcastId: String?,
-        vocabularyProvider: ASRVocabularyProvider?
-    ) async -> AnalysisContext {
-        let context = AnalysisContext()
-        guard let podcastId, let vocabularyProvider else { return context }
-
-        let contextualStrings = await vocabularyProvider.contextualStrings(forPodcastId: podcastId)
-        if !contextualStrings.isEmpty {
-            context.contextualStrings[.general] = contextualStrings
-            Logger(subsystem: "com.playhead", category: "AppleSpeechRecognizer")
-                .debug("Applied \(contextualStrings.count) ASR contextual strings for podcast \(podcastId, privacy: .public)")
-        }
-        return context
-    }
-
-    // MARK: - Format Conversion
-
-    /// Convert a 16kHz Float32 buffer to the format SpeechAnalyzer expects.
     private static func convert(
         _ source: AVAudioPCMBuffer,
         to targetFormat: AVAudioFormat
@@ -748,7 +653,7 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         if source.format == targetFormat { return source }
 
         guard let converter = AVAudioConverter(from: source.format, to: targetFormat) else {
-            throw TranscriptEngineError.transcriptionFailed(
+            throw AppleSpeechBoundaryError.audioBridgeFailure(
                 "Cannot create converter from \(source.format) to \(targetFormat)"
             )
         }
@@ -760,7 +665,7 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
             pcmFormat: targetFormat,
             frameCapacity: targetFrameCount
         ) else {
-            throw TranscriptEngineError.transcriptionFailed("Failed to allocate conversion buffer")
+            throw AppleSpeechBoundaryError.audioBridgeFailure("Failed to allocate conversion buffer")
         }
 
         var error: NSError?
@@ -769,13 +674,199 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
             return source
         }
         if let error {
-            throw TranscriptEngineError.transcriptionFailed("Audio conversion failed: \(error)")
+            throw AppleSpeechBoundaryError.audioBridgeFailure("Audio conversion failed: \(error)")
         }
 
         return targetBuffer
     }
 
-    // MARK: - Buffer & Stream Helpers
+    private static func makeSourceBuffer(from shard: AnalysisShard) throws -> AVAudioPCMBuffer {
+        guard !shard.samples.isEmpty else {
+            throw AppleSpeechBoundaryError.audioBridgeFailure("empty audio shard")
+        }
+
+        var nanCount = 0
+        var infCount = 0
+        var zeroCount = 0
+        var sumSquares: Double = 0
+        for sample in shard.samples {
+            if sample.isNaN { nanCount += 1 }
+            else if sample.isInfinite { infCount += 1 }
+            else if sample == 0 { zeroCount += 1 }
+            sumSquares += Double(sample * sample)
+        }
+        let rms = sqrt(sumSquares / Double(shard.samples.count))
+
+        bufferLogger.info("""
+            Shard \(shard.id) audio: \(shard.samples.count) samples, \
+            rms=\(String(format: "%.6f", rms)), \
+            zeros=\(zeroCount)/\(shard.samples.count), \
+            nan=\(nanCount), inf=\(infCount)
+            """)
+
+        if nanCount > 0 || infCount > 0 {
+            throw AppleSpeechBoundaryError.audioBridgeFailure(
+                "shard \(shard.id) contains \(nanCount) NaN and \(infCount) Inf samples"
+            )
+        }
+        if zeroCount == shard.samples.count {
+            throw AppleSpeechBoundaryError.audioBridgeFailure(
+                "shard \(shard.id) is entirely silent (all zeros)"
+            )
+        }
+
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        ) else {
+            throw AppleSpeechBoundaryError.audioBridgeFailure("failed to create analysis audio format")
+        }
+
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: AVAudioFrameCount(shard.samples.count)
+        ) else {
+            throw AppleSpeechBoundaryError.audioBridgeFailure("failed to allocate audio buffer")
+        }
+
+        buffer.frameLength = AVAudioFrameCount(shard.samples.count)
+
+        guard let channelData = buffer.floatChannelData?.pointee else {
+            throw AppleSpeechBoundaryError.audioBridgeFailure("failed to access buffer channel data")
+        }
+        shard.samples.withUnsafeBufferPointer { samples in
+            guard let source = samples.baseAddress else { return }
+            channelData.update(from: source, count: shard.samples.count)
+        }
+
+        return buffer
+    }
+}
+
+struct AppleSpeechAnalyzerRunner {
+    private let vocabularyProvider: ASRVocabularyProvider?
+
+    init(vocabularyProvider: ASRVocabularyProvider? = nil) {
+        self.vocabularyProvider = vocabularyProvider
+    }
+
+    func transcribe(
+        buffer: AVAudioPCMBuffer,
+        format: AVAudioFormat,
+        locale: Locale,
+        podcastId: String?
+    ) async throws -> [TranscriptSegment] {
+        let transcriber = AppleSpeechResultMapper.makeSpeechTranscriber(locale: locale)
+        let analysisContext = await makeAnalysisContext(for: podcastId)
+        let analysisAudioURL = try AppleSpeechAudioBridge.makeAnalysisAudioFile(from: buffer, format: format)
+        defer { try? FileManager.default.removeItem(at: analysisAudioURL) }
+
+        let analysisInputFile = try openAnalysisAudioFile(at: analysisAudioURL)
+        let analyzer: SpeechAnalyzer
+        do {
+            analyzer = try await SpeechAnalyzer(
+                inputAudioFile: analysisInputFile,
+                modules: [transcriber],
+                options: .init(priority: .utility, modelRetention: .lingering),
+                analysisContext: analysisContext
+            )
+        } catch {
+            throw AppleSpeechBoundaryError.analyzerSessionFailure("Failed to create SpeechAnalyzer: \(error)")
+        }
+
+        try await prepare(analyzer: analyzer, in: format)
+
+        let inputSequence = Self.singleBufferSequence(buffer: buffer)
+        let collector = Task { try await AppleSpeechResultMapper.collectSegments(from: transcriber.results) }
+
+        do {
+            if let lastSample = try await analyzer.analyzeSequence(inputSequence) {
+                try await analyzer.finalizeAndFinish(through: lastSample)
+            }
+            withExtendedLifetime(buffer) {}
+            return try await collector.value
+        } catch {
+            await analyzer.cancelAndFinishNow()
+            collector.cancel()
+            if let boundaryError = error as? AppleSpeechBoundaryError {
+                throw boundaryError
+            }
+            throw AppleSpeechBoundaryError.analyzerSessionFailure("SpeechAnalyzer transcription failed: \(error)")
+        }
+    }
+
+    func detectVoiceActivity(
+        buffer: AVAudioPCMBuffer,
+        format: AVAudioFormat
+    ) async throws -> [VADResult] {
+        let detector = SpeechDetector()
+        let analysisAudioURL = try AppleSpeechAudioBridge.makeAnalysisAudioFile(from: buffer, format: format)
+        defer { try? FileManager.default.removeItem(at: analysisAudioURL) }
+
+        let analysisInputFile = try openAnalysisAudioFile(at: analysisAudioURL)
+        let analyzer: SpeechAnalyzer
+        do {
+            analyzer = try await SpeechAnalyzer(
+                inputAudioFile: analysisInputFile,
+                modules: [detector],
+                options: .init(priority: .utility, modelRetention: .lingering)
+            )
+        } catch {
+            throw AppleSpeechBoundaryError.analyzerSessionFailure("Failed to create SpeechAnalyzer VAD session: \(error)")
+        }
+
+        try await prepare(analyzer: analyzer, in: format)
+
+        let inputSequence = Self.singleBufferSequence(buffer: buffer)
+        let collector = Task { try await AppleSpeechResultMapper.collectVAD(from: detector.results) }
+
+        do {
+            if let lastSample = try await analyzer.analyzeSequence(inputSequence) {
+                try await analyzer.finalizeAndFinish(through: lastSample)
+            }
+            withExtendedLifetime(buffer) {}
+            return try await collector.value
+        } catch {
+            await analyzer.cancelAndFinishNow()
+            collector.cancel()
+            if let boundaryError = error as? AppleSpeechBoundaryError {
+                throw boundaryError
+            }
+            throw AppleSpeechBoundaryError.analyzerSessionFailure("SpeechAnalyzer VAD failed: \(error)")
+        }
+    }
+
+    @available(iOS 26.0, *)
+    private func makeAnalysisContext(for podcastId: String?) async -> AnalysisContext {
+        let context = AnalysisContext()
+        guard let podcastId, let vocabularyProvider else { return context }
+
+        let contextualStrings = await vocabularyProvider.contextualStrings(forPodcastId: podcastId)
+        if !contextualStrings.isEmpty {
+            context.contextualStrings[.general] = contextualStrings
+            Logger(subsystem: "com.playhead", category: "AppleSpeechAnalyzerRunner")
+                .debug("Applied \(contextualStrings.count) ASR contextual strings for podcast \(podcastId, privacy: .public)")
+        }
+        return context
+    }
+
+    private func openAnalysisAudioFile(at url: URL) throws -> AVAudioFile {
+        do {
+            return try AVAudioFile(forReading: url)
+        } catch {
+            throw AppleSpeechBoundaryError.audioBridgeFailure("Failed to reopen analysis audio file: \(error)")
+        }
+    }
+
+    private func prepare(analyzer: SpeechAnalyzer, in format: AVAudioFormat) async throws {
+        do {
+            try await analyzer.prepareToAnalyze(in: format)
+        } catch {
+            throw AppleSpeechBoundaryError.analyzerSessionFailure("SpeechAnalyzer prepare failed: \(error)")
+        }
+    }
 
     private static func singleBufferSequence(buffer: AVAudioPCMBuffer) -> AsyncStream<AnalyzerInput> {
         AsyncStream { continuation in
@@ -783,19 +874,60 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
             continuation.finish()
         }
     }
+}
 
-    private static func collectSegments<S>(
+enum AppleSpeechResultMapper {
+    private static let lowConfidenceThreshold: Float = 0.6
+
+    static func offsetSegments(
+        _ segments: [TranscriptSegment],
+        by delta: TimeInterval
+    ) -> [TranscriptSegment] {
+        segments.map { segment in
+            TranscriptSegment(
+                id: segment.id,
+                words: segment.words.map { word in
+                    TranscriptWord(
+                        text: word.text,
+                        startTime: word.startTime + delta,
+                        endTime: word.endTime + delta,
+                        confidence: word.confidence
+                    )
+                },
+                text: segment.text,
+                startTime: segment.startTime + delta,
+                endTime: segment.endTime + delta,
+                avgConfidence: segment.avgConfidence,
+                passType: segment.passType,
+                weakAnchorMetadata: segment.weakAnchorMetadata?.offsettingTimes(by: delta)
+            )
+        }
+    }
+
+    static func offsetVADResults(
+        _ results: [VADResult],
+        by delta: TimeInterval
+    ) -> [VADResult] {
+        results.map { result in
+            VADResult(
+                isSpeech: result.isSpeech,
+                speechProbability: result.speechProbability,
+                startTime: result.startTime + delta,
+                endTime: result.endTime + delta
+            )
+        }
+    }
+
+    static func collectSegments<S>(
         from results: S
     ) async throws -> [TranscriptSegment]
     where S: AsyncSequence, S.Element == SpeechTranscriber.Result, S.Failure == Error {
-        // Map Apple Speech results to lightweight snapshots, then delegate to
-        // the testable helper that handles partial-result promotion.
         let snapshots = results.map { result -> RecognitionSnapshot in
             let fullText = String(result.text.characters)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            let extracted = Self.extractWords(from: result)
-            let startTime = extracted.words.first?.startTime ?? Self.seconds(from: result.range.start)
-            let endTime = extracted.words.last?.endTime ?? Self.seconds(from: CMTimeAdd(result.range.start, result.range.duration))
+            let extracted = extractWords(from: result)
+            let startTime = extracted.words.first?.startTime ?? seconds(from: result.range.start)
+            let endTime = extracted.words.last?.endTime ?? seconds(from: CMTimeAdd(result.range.start, result.range.duration))
             return RecognitionSnapshot(
                 isFinal: result.isFinal,
                 text: fullText,
@@ -808,10 +940,6 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         return try await collectSegmentsFromSnapshots(snapshots)
     }
 
-    /// Builds transcript segments from a stream of recognition snapshots,
-    /// promoting the last partial result when the stream ends without a
-    /// superseding final result. This prevents tail-audio truncation at
-    /// shard boundaries (playhead-4ck).
     static func collectSegmentsFromSnapshots<S>(
         _ snapshots: S
     ) async throws -> [TranscriptSegment]
@@ -822,53 +950,23 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
 
         for try await snapshot in snapshots {
             if snapshot.isFinal {
-                // Final result supersedes any tracked partial.
                 latestPartial = nil
 
                 guard !snapshot.text.isEmpty else { continue }
-                segments.append(Self.buildSegment(from: snapshot, id: &nextId))
+                segments.append(buildSegment(from: snapshot, id: &nextId))
             } else {
-                // Track the latest partial; it will be promoted if no final
-                // result supersedes it before the stream ends.
                 latestPartial = snapshot
             }
         }
 
-        // Promote the trailing partial if it was never superseded.
         if let partial = latestPartial, !partial.text.isEmpty {
-            segments.append(Self.buildSegment(from: partial, id: &nextId))
+            segments.append(buildSegment(from: partial, id: &nextId))
         }
 
         segments.sort { $0.startTime < $1.startTime }
         return segments
     }
 
-    private static func buildSegment(
-        from snapshot: RecognitionSnapshot,
-        id nextId: inout Int
-    ) -> TranscriptSegment {
-        let avgConf = snapshot.words.isEmpty
-            ? Float(1.0)
-            : snapshot.words.map(\.confidence).reduce(0, +) / Float(snapshot.words.count)
-        let segment = TranscriptSegment(
-            id: nextId,
-            words: snapshot.words.isEmpty
-                ? [TranscriptWord(text: snapshot.text, startTime: snapshot.startTime, endTime: snapshot.endTime, confidence: avgConf)]
-                : snapshot.words,
-            text: snapshot.text,
-            startTime: snapshot.startTime,
-            endTime: snapshot.endTime,
-            avgConfidence: avgConf,
-            passType: .fast,
-            weakAnchorMetadata: snapshot.weakAnchorMetadata
-        )
-        nextId += 1
-        return segment
-    }
-
-    /// Build a time-indexed progressive preset that explicitly asks Speech
-    /// for both alternative transcriptions and run-level confidence. The base
-    /// progressive preset does not request confidence attributes on its own.
     static func speechTranscriberPreset() -> SpeechTranscriber.Preset {
         let base = SpeechTranscriber.Preset.timeIndexedProgressiveTranscription
         return SpeechTranscriber.Preset(
@@ -878,7 +976,7 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         )
     }
 
-    private static func makeSpeechTranscriber(locale: Locale) -> SpeechTranscriber {
+    static func makeSpeechTranscriber(locale: Locale) -> SpeechTranscriber {
         SpeechTranscriber(locale: locale, preset: speechTranscriberPreset())
     }
 
@@ -947,6 +1045,44 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         return ExtractedTranscriptContent(words: words, weakAnchorMetadata: metadata)
     }
 
+    static func collectVAD<S>(
+        from results: S
+    ) async throws -> [VADResult]
+    where S: AsyncSequence, S.Element == SpeechDetector.Result, S.Failure == Error {
+        var vadResults: [VADResult] = []
+        for try await result in results {
+            guard result.isFinal, result.speechDetected else { continue }
+            let start = seconds(from: result.range.start)
+            let end = seconds(from: CMTimeAdd(result.range.start, result.range.duration))
+            vadResults.append(VADResult(isSpeech: true, speechProbability: 1.0, startTime: start, endTime: end))
+        }
+        vadResults.sort { $0.startTime < $1.startTime }
+        return vadResults
+    }
+
+    private static func buildSegment(
+        from snapshot: RecognitionSnapshot,
+        id nextId: inout Int
+    ) -> TranscriptSegment {
+        let avgConf = snapshot.words.isEmpty
+            ? Float(1.0)
+            : snapshot.words.map(\.confidence).reduce(0, +) / Float(snapshot.words.count)
+        let segment = TranscriptSegment(
+            id: nextId,
+            words: snapshot.words.isEmpty
+                ? [TranscriptWord(text: snapshot.text, startTime: snapshot.startTime, endTime: snapshot.endTime, confidence: avgConf)]
+                : snapshot.words,
+            text: snapshot.text,
+            startTime: snapshot.startTime,
+            endTime: snapshot.endTime,
+            avgConfidence: avgConf,
+            passType: .fast,
+            weakAnchorMetadata: snapshot.weakAnchorMetadata
+        )
+        nextId += 1
+        return segment
+    }
+
     private static func uniqueAlternativeTexts(
         from alternatives: [AttributedString],
         excluding primaryText: String
@@ -967,121 +1103,149 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         return ordered
     }
 
-    private static func collectVAD<S>(
-        from results: S
-    ) async throws -> [VADResult]
-    where S: AsyncSequence, S.Element == SpeechDetector.Result, S.Failure == Error {
-        var vadResults: [VADResult] = []
-        for try await result in results {
-            guard result.isFinal, result.speechDetected else { continue }
-            let start = seconds(from: result.range.start)
-            let end = seconds(from: CMTimeAdd(result.range.start, result.range.duration))
-            vadResults.append(VADResult(isSpeech: true, speechProbability: 1.0, startTime: start, endTime: end))
-        }
-        vadResults.sort { $0.startTime < $1.startTime }
-        return vadResults
-    }
-
     private static func seconds(from time: CMTime) -> TimeInterval {
         let s = CMTimeGetSeconds(time)
         guard s.isFinite else { return 0 }
         return max(s, 0)
     }
+}
 
-    // MARK: - Buffer Creation
+// MARK: - AppleSpeechRecognizer
 
-    private static let bufferLogger = Logger(subsystem: "com.playhead", category: "AudioBuffer")
+/// Production recognizer using SpeechAnalyzer (iOS 26+).
+/// Uses bestAvailableAudioFormat to resolve the format SpeechAnalyzer
+/// expects (16kHz Int16), then converts our Float32 buffers to match.
+/// No microphone or speech recognition permission required.
+actor AppleSpeechRecognizer: SpeechRecognizer {
+    private let logger = Logger(subsystem: "com.playhead", category: "AppleSpeechRecognizer")
+    private let vocabularyProvider: ASRVocabularyProvider?
+    private let assetBootstrapper: AppleSpeechAssetBootstrapper
+    private let analyzerRunner: AppleSpeechAnalyzerRunner
+    private var selectedLocale: Locale?
+    private var analyzerFormat: AVAudioFormat?
+    private var prepared = false
 
-    private static func makeBuffer(from shard: AnalysisShard) throws -> AVAudioPCMBuffer {
-        guard !shard.samples.isEmpty else {
-            throw TranscriptEngineError.transcriptionFailed("empty audio shard")
+    init(vocabularyProvider: ASRVocabularyProvider? = nil) {
+        self.vocabularyProvider = vocabularyProvider
+        self.assetBootstrapper = AppleSpeechAssetBootstrapper()
+        self.analyzerRunner = AppleSpeechAnalyzerRunner(vocabularyProvider: vocabularyProvider)
+    }
+
+    // MARK: - Model Lifecycle
+
+    func loadModel(from directory: URL) async throws {
+        logger.info("Preparing SpeechAnalyzer backend")
+        do {
+            let preparedModel = try await assetBootstrapper.prepare()
+            selectedLocale = preparedModel.locale
+            analyzerFormat = preparedModel.analyzerFormat
+            prepared = true
+            logger.info("SpeechAnalyzer ready")
+        } catch let error as TranscriptEngineError {
+            throw error
+        } catch let error as AppleSpeechBoundaryError {
+            throw TranscriptEngineError.transcriptionFailed(error.description)
+        } catch {
+            throw TranscriptEngineError.transcriptionFailed("Failed to prepare SpeechAnalyzer backend: \(error)")
+        }
+    }
+
+    func unloadModel() async {
+        analyzerFormat = nil
+        prepared = false
+    }
+
+    func isModelLoaded() async -> Bool {
+        prepared && analyzerFormat != nil
+    }
+
+    // MARK: - Transcription
+
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
+        guard let locale = selectedLocale, let targetFormat = analyzerFormat else {
+            throw TranscriptEngineError.modelNotLoaded
         }
 
-        // Validate sample data.
-        var nanCount = 0
-        var infCount = 0
-        var zeroCount = 0
-        var sumSquares: Double = 0
-        for sample in shard.samples {
-            if sample.isNaN { nanCount += 1 }
-            else if sample.isInfinite { infCount += 1 }
-            else if sample == 0 { zeroCount += 1 }
-            sumSquares += Double(sample * sample)
-        }
-        let rms = sqrt(sumSquares / Double(shard.samples.count))
-
-        bufferLogger.info("""
-            Shard \(shard.id) audio: \(shard.samples.count) samples, \
-            rms=\(String(format: "%.6f", rms)), \
-            zeros=\(zeroCount)/\(shard.samples.count), \
-            nan=\(nanCount), inf=\(infCount)
-            """)
-
-        if nanCount > 0 || infCount > 0 {
-            throw TranscriptEngineError.transcriptionFailed(
-                "shard \(shard.id) contains \(nanCount) NaN and \(infCount) Inf samples"
+        do {
+            let analyzerBuffer = try AppleSpeechAudioBridge.makeAnalyzerBuffer(from: shard, targetFormat: targetFormat)
+            logger.debug("Preparing SpeechAnalyzer for shard \(shard.id)")
+            let rawSegments = try await analyzerRunner.transcribe(
+                buffer: analyzerBuffer,
+                format: targetFormat,
+                locale: locale,
+                podcastId: podcastId
             )
+            return AppleSpeechResultMapper.offsetSegments(rawSegments, by: shard.startTime)
+        } catch let error as TranscriptEngineError {
+            throw error
+        } catch let error as AppleSpeechBoundaryError {
+            throw TranscriptEngineError.transcriptionFailed(error.description)
+        } catch {
+            throw TranscriptEngineError.transcriptionFailed("Speech transcription failed for shard \(shard.id): \(error)")
         }
-        if zeroCount == shard.samples.count {
-            throw TranscriptEngineError.transcriptionFailed(
-                "shard \(shard.id) is entirely silent (all zeros)"
+    }
+
+    // MARK: - VAD
+
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
+        guard let targetFormat = analyzerFormat else {
+            throw TranscriptEngineError.modelNotLoaded
+        }
+
+        do {
+            let analyzerBuffer = try AppleSpeechAudioBridge.makeAnalyzerBuffer(from: shard, targetFormat: targetFormat)
+            let vadResults = try await analyzerRunner.detectVoiceActivity(
+                buffer: analyzerBuffer,
+                format: targetFormat
             )
+            return AppleSpeechResultMapper.offsetVADResults(vadResults, by: shard.startTime)
+        } catch let error as TranscriptEngineError {
+            throw error
+        } catch let error as AppleSpeechBoundaryError {
+            throw TranscriptEngineError.transcriptionFailed(error.description)
+        } catch {
+            throw TranscriptEngineError.transcriptionFailed("Speech VAD failed for shard \(shard.id): \(error)")
         }
+    }
 
-        guard let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: 16_000,
-            channels: 1,
-            interleaved: false
-        ) else {
-            throw TranscriptEngineError.transcriptionFailed("failed to create analysis audio format")
-        }
+    static func collectSegmentsFromSnapshots<S>(
+        _ snapshots: S
+    ) async throws -> [TranscriptSegment]
+    where S: AsyncSequence, S.Element == RecognitionSnapshot, S.Failure == Error {
+        try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(snapshots)
+    }
 
-        guard let buffer = AVAudioPCMBuffer(
-            pcmFormat: format,
-            frameCapacity: AVAudioFrameCount(shard.samples.count)
-        ) else {
-            throw TranscriptEngineError.transcriptionFailed("failed to allocate audio buffer")
-        }
+    static func speechTranscriberPreset() -> SpeechTranscriber.Preset {
+        AppleSpeechResultMapper.speechTranscriberPreset()
+    }
 
-        buffer.frameLength = AVAudioFrameCount(shard.samples.count)
+    static func extractWords(from result: SpeechTranscriber.Result) -> ExtractedTranscriptContent {
+        AppleSpeechResultMapper.extractWords(from: result)
+    }
 
-        guard let channelData = buffer.floatChannelData?.pointee else {
-            throw TranscriptEngineError.transcriptionFailed("failed to access buffer channel data")
-        }
-        shard.samples.withUnsafeBufferPointer { samples in
-            guard let source = samples.baseAddress else { return }
-            channelData.assign(from: source, count: shard.samples.count)
-        }
-
-        return buffer
+    static func extractWords(
+        from text: AttributedString,
+        alternatives: [AttributedString],
+        fallbackStart: TimeInterval,
+        fallbackEnd: TimeInterval
+    ) -> ExtractedTranscriptContent {
+        AppleSpeechResultMapper.extractWords(
+            from: text,
+            alternatives: alternatives,
+            fallbackStart: fallbackStart,
+            fallbackEnd: fallbackEnd
+        )
     }
 
     static func analysisAudioFileSettings(for format: AVAudioFormat) -> [String: Any] {
-        var settings = format.settings
-        // Persist interleaved linear PCM to disk even when the analyzer's
-        // processing buffer is non-interleaved. AVAudioFile can then accept
-        // the explicit buffer processing format below without rejecting the
-        // write on iOS device builds.
-        settings[AVLinearPCMIsNonInterleaved] = false
-        return settings
+        AppleSpeechAudioBridge.analysisAudioFileSettings(for: format)
     }
 
     static func makeAnalysisAudioFile(
         from buffer: AVAudioPCMBuffer,
         format: AVAudioFormat
     ) throws -> URL {
-        let fileURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("playhead-transcript-\(UUID().uuidString).caf")
-
-        let file = try AVAudioFile(
-            forWriting: fileURL,
-            settings: analysisAudioFileSettings(for: format),
-            commonFormat: buffer.format.commonFormat,
-            interleaved: buffer.format.isInterleaved
-        )
-        try file.write(from: buffer)
-        return fileURL
+        try AppleSpeechAudioBridge.makeAnalysisAudioFile(from: buffer, format: format)
     }
 }
 
