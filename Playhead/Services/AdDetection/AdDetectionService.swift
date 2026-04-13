@@ -150,6 +150,12 @@ extension AdDetectionProviding {
 /// ClassifierService (Layer 2), and MetadataExtractor (Layer 3) into a
 /// unified detection pipeline with hot-path and backfill flows.
 actor AdDetectionService {
+    private struct HotPathHypothesisCandidate: Sendable {
+        let candidate: LexicalCandidate
+        let evidenceCount: Int
+        let hasClosingAnchor: Bool
+        let supportingHits: [LexicalHit]
+    }
 
     private let logger = Logger(subsystem: "com.playhead", category: "AdDetectionService")
 
@@ -369,24 +375,27 @@ actor AdDetectionService {
         self.episodeDuration = episodeDuration
         guard !chunks.isEmpty else { return [] }
 
-        // Layer 1: Lexical scan for candidate regions.
-        let lexicalCandidates = scanner.scan(
-            chunks: chunks,
+        // Layer 1: hypothesis windows take precedence when active; otherwise
+        // preserve the legacy lexical merge path.
+        let candidates = try await hotPathCandidates(
+            from: chunks,
             analysisAssetId: analysisAssetId
         )
 
-        guard !lexicalCandidates.isEmpty else {
-            logger.info("Hot path: no lexical candidates from \(chunks.count) chunks")
+        guard !candidates.isEmpty else {
+            logger.info("Hot path: no candidates from \(chunks.count) chunks")
             return []
         }
 
-        logger.info("Hot path: \(lexicalCandidates.count) lexical candidates from \(chunks.count) chunks")
+        logger.info("Hot path: \(candidates.count) candidates from \(chunks.count) chunks")
 
         // Layer 0 + Layer 2: Fetch features, classify, refine boundaries.
         let classifierResults = try await classifyCandidates(
-            lexicalCandidates,
+            candidates,
             analysisAssetId: analysisAssetId
         )
+
+        let candidatesByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
 
         // Filter by candidate threshold and build AdWindows.
         let adWindows = classifierResults
@@ -396,8 +405,7 @@ actor AdDetectionService {
                     from: result,
                     boundaryState: .acousticRefined,
                     decisionState: .candidate,
-                    evidenceText: lexicalCandidates
-                        .first { $0.id == result.candidateId }?.evidenceText
+                    evidenceText: candidatesByID[result.candidateId]?.evidenceText
                 )
             }
 
@@ -1479,6 +1487,511 @@ actor AdDetectionService {
     }
 
     // MARK: - Classification Pipeline
+
+    /// Route hot-path lexical hits through the span hypothesis engine when it
+    /// can produce windows; otherwise fall back to the legacy 30-second lexical
+    /// merge path unchanged.
+    private func hotPathCandidates(
+        from chunks: [TranscriptChunk],
+        analysisAssetId: String
+    ) async throws -> [LexicalCandidate] {
+        let orderedChunks = chunks.sorted { lhs, rhs in
+            if lhs.startTime != rhs.startTime {
+                return lhs.startTime < rhs.startTime
+            }
+            return lhs.endTime < rhs.endTime
+        }
+
+        let hypothesisCandidates = try await hypothesisCandidates(
+            from: orderedChunks,
+            analysisAssetId: analysisAssetId
+        )
+        let lexicalCandidates = scanner.scan(
+            chunks: orderedChunks,
+            analysisAssetId: analysisAssetId
+        )
+
+        if !hypothesisCandidates.isEmpty {
+            let survivingLexicalCandidates = lexicalCandidates.filter { lexicalCandidate in
+                !hypothesisCandidates.contains { hypothesisCandidate in
+                    candidatesOverlap(lexicalCandidate, hypothesisCandidate)
+                }
+            }
+            let mergedCandidates = (hypothesisCandidates + survivingLexicalCandidates).sorted { lhs, rhs in
+                if lhs.startTime != rhs.startTime {
+                    return lhs.startTime < rhs.startTime
+                }
+                return lhs.endTime < rhs.endTime
+            }
+
+            logger.info("Hot path: hypothesis engine emitted \(hypothesisCandidates.count) candidates and preserved \(survivingLexicalCandidates.count) non-overlapping lexical candidates")
+            return mergedCandidates
+        }
+
+        if !lexicalCandidates.isEmpty {
+            logger.info("Hot path: lexical fallback emitted \(lexicalCandidates.count) candidates")
+        }
+        return lexicalCandidates
+    }
+
+    private func hypothesisCandidates(
+        from chunks: [TranscriptChunk],
+        analysisAssetId: String
+    ) async throws -> [LexicalCandidate] {
+        var hits: [LexicalHit] = []
+        for chunk in chunks {
+            hits.append(contentsOf: scanner.scanChunk(chunk))
+        }
+
+        guard !hits.isEmpty else { return [] }
+
+        hits.sort { lhs, rhs in
+            if lhs.startTime != rhs.startTime {
+                return lhs.startTime < rhs.startTime
+            }
+            return lhs.endTime < rhs.endTime
+        }
+
+        let spanConfig = SpanHypothesisConfig.default
+        let boundaryContext = try await hotPathBoundaryExpansionContext(
+            for: chunks,
+            analysisAssetId: analysisAssetId,
+            config: spanConfig
+        )
+        var engine = SpanHypothesisEngine(
+            config: spanConfig,
+            boundaryExpansionContext: boundaryContext
+        )
+
+        for hit in hits {
+            _ = engine.ingest(hit, analysisAssetId: analysisAssetId)
+        }
+
+        let finishTime = max(
+            chunks.last?.endTime ?? 0,
+            hits.last?.endTime ?? 0
+        )
+        _ = engine.finish(
+            analysisAssetId: analysisAssetId,
+            at: finishTime
+        )
+
+        guard !engine.closedHypotheses.isEmpty else { return [] }
+        let envelopes: [HotPathHypothesisCandidate] = engine.closedHypotheses.compactMap {
+            (hypothesis: SpanHypothesis) -> HotPathHypothesisCandidate? in
+            guard shouldPromoteHotPathHypothesis(hypothesis) else { return nil }
+
+            return makeHotPathHypothesisCandidate(
+                from: hypothesis,
+                analysisAssetId: analysisAssetId,
+                allHits: hits,
+                transcriptChunks: chunks,
+                featureWindows: boundaryContext.featureWindows,
+                minConfirmedEvidence: spanConfig.minConfirmedEvidence
+            )
+        }.filter { envelope in
+            envelope.candidate.endTime > envelope.candidate.startTime
+        }
+
+        return collapseHotPathHypothesisCandidates(envelopes)
+            .map(\.candidate)
+    }
+
+    private func collapseHotPathHypothesisCandidates(
+        _ candidates: [HotPathHypothesisCandidate]
+    ) -> [HotPathHypothesisCandidate] {
+        let orderedCandidates = candidates.sorted { lhs, rhs in
+            if lhs.candidate.startTime != rhs.candidate.startTime {
+                return lhs.candidate.startTime < rhs.candidate.startTime
+            }
+            return lhs.candidate.endTime < rhs.candidate.endTime
+        }
+
+        var collapsed: [HotPathHypothesisCandidate] = []
+        for candidate in orderedCandidates {
+            guard let last = collapsed.last else {
+                collapsed.append(candidate)
+                continue
+            }
+
+            if candidatesOverlap(last.candidate, candidate.candidate) {
+                let preferred = prefersHotPathCandidate(candidate, over: last) ? candidate : last
+                let other = preferred.candidate.id == candidate.candidate.id ? last : candidate
+                collapsed[collapsed.count - 1] = mergeHotPathCandidates(preferred, with: other)
+            } else {
+                collapsed.append(candidate)
+            }
+        }
+
+        return collapsed
+    }
+
+    private func candidatesOverlap(_ lhs: LexicalCandidate, _ rhs: LexicalCandidate) -> Bool {
+        lhs.endTime >= rhs.startTime && rhs.endTime >= lhs.startTime
+    }
+
+    private func prefersHotPathCandidate(
+        _ lhs: HotPathHypothesisCandidate,
+        over rhs: HotPathHypothesisCandidate
+    ) -> Bool {
+        if lhs.evidenceCount != rhs.evidenceCount {
+            return lhs.evidenceCount > rhs.evidenceCount
+        }
+
+        if lhs.hasClosingAnchor != rhs.hasClosingAnchor {
+            return lhs.hasClosingAnchor
+        }
+
+        if lhs.candidate.categories.count != rhs.candidate.categories.count {
+            return lhs.candidate.categories.count > rhs.candidate.categories.count
+        }
+
+        if lhs.candidate.evidenceText.count != rhs.candidate.evidenceText.count {
+            return lhs.candidate.evidenceText.count > rhs.candidate.evidenceText.count
+        }
+
+        if lhs.candidate.hitCount != rhs.candidate.hitCount {
+            return lhs.candidate.hitCount > rhs.candidate.hitCount
+        }
+
+        if lhs.candidate.startTime != rhs.candidate.startTime {
+            return lhs.candidate.startTime < rhs.candidate.startTime
+        }
+
+        let lhsDuration = lhs.candidate.endTime - lhs.candidate.startTime
+        let rhsDuration = rhs.candidate.endTime - rhs.candidate.startTime
+        if lhsDuration != rhsDuration {
+            return lhsDuration < rhsDuration
+        }
+
+        if lhs.candidate.confidence != rhs.candidate.confidence {
+            return lhs.candidate.confidence > rhs.candidate.confidence
+        }
+
+        return lhs.candidate.endTime < rhs.candidate.endTime
+    }
+
+    private func mergeHotPathCandidates(
+        _ preferred: HotPathHypothesisCandidate,
+        with other: HotPathHypothesisCandidate
+    ) -> HotPathHypothesisCandidate {
+        let mergedHits = deduplicatedHotPathHits(preferred.supportingHits + other.supportingHits)
+        let mergedStart = min(preferred.candidate.startTime, other.candidate.startTime)
+        let mergedEnd = max(preferred.candidate.endTime, other.candidate.endTime)
+        let categories = mergedHits.isEmpty
+            ? preferred.candidate.categories.union(other.candidate.categories)
+            : Set(mergedHits.map(\.category))
+        let evidenceText = hotPathEvidenceText(
+            from: mergedHits,
+            fallbackTexts: [preferred.candidate.evidenceText, other.candidate.evidenceText]
+        )
+
+        return HotPathHypothesisCandidate(
+            candidate: LexicalCandidate(
+                id: preferred.candidate.id,
+                analysisAssetId: preferred.candidate.analysisAssetId,
+                startTime: mergedStart,
+                endTime: mergedEnd,
+                confidence: max(preferred.candidate.confidence, other.candidate.confidence),
+                hitCount: max(preferred.candidate.hitCount, other.candidate.hitCount, mergedHits.count),
+                categories: categories,
+                evidenceText: evidenceText,
+                detectorVersion: preferred.candidate.detectorVersion
+            ),
+            evidenceCount: max(preferred.evidenceCount, other.evidenceCount),
+            hasClosingAnchor: preferred.hasClosingAnchor || other.hasClosingAnchor,
+            supportingHits: mergedHits
+        )
+    }
+
+    private func hotPathBoundaryExpansionContext(
+        for chunks: [TranscriptChunk],
+        analysisAssetId: String,
+        config: SpanHypothesisConfig
+    ) async throws -> SpanHypothesisEngine.BoundaryExpansionContext {
+        let minStart = chunks.map(\.startTime).min() ?? 0
+        let maxEnd = chunks.map(\.endTime).max() ?? 0
+        let hypothesisBackwardMargin = config.anchorTypeConfigByType.values
+            .map(\.backwardSearchRadius)
+            .max() ?? 0
+        let hypothesisForwardMargin = config.anchorTypeConfigByType.values
+            .map(\.forwardSearchRadius)
+            .max() ?? 0
+        let expansionConfigs: [BoundaryExpander.ExpansionConfig] = [
+            .startAnchored,
+            .endAnchored,
+            .neutral
+        ]
+        let acousticBackwardMargin = expansionConfigs
+            .map(\.acousticBackwardSearchRadius)
+            .max() ?? 0
+        let acousticForwardMargin = expansionConfigs
+            .map(\.acousticForwardSearchRadius)
+            .max() ?? 0
+        let backwardMargin = max(hypothesisBackwardMargin, acousticBackwardMargin)
+        let forwardMargin = max(hypothesisForwardMargin, acousticForwardMargin)
+
+        let featureWindows = try await store.fetchFeatureWindows(
+            assetId: analysisAssetId,
+            from: max(0, minStart - backwardMargin),
+            to: maxEnd + forwardMargin
+        )
+
+        return SpanHypothesisEngine.BoundaryExpansionContext(
+            featureWindows: featureWindows,
+            transcriptChunks: chunks
+        )
+    }
+
+    private func makeHotPathHypothesisCandidate(
+        from hypothesis: SpanHypothesis,
+        analysisAssetId: String,
+        allHits: [LexicalHit],
+        transcriptChunks: [TranscriptChunk],
+        featureWindows: [FeatureWindow],
+        minConfirmedEvidence: Double
+    ) -> HotPathHypothesisCandidate {
+        let boundary = hotPathExpandedBoundary(
+            for: hypothesis,
+            featureWindows: featureWindows,
+            transcriptChunks: transcriptChunks
+        )
+        let startTime = boundary?.startTime ?? hypothesis.startCandidateTime
+        let endTime = boundary?.endTime ?? hypothesis.endCandidateTime
+        let supportingHits = allHits.filter { hit in
+            hit.endTime >= startTime && hit.startTime <= endTime
+        }
+        let categories = supportingHits.isEmpty
+            ? [defaultCategory(for: hypothesis.anchorType)]
+            : Array(Set(supportingHits.map(\.category)))
+        let evidenceTexts = supportingHits.isEmpty
+            ? hypothesis.allEvidenceTexts
+            : supportingHits
+                .sorted { lhs, rhs in
+                    if lhs.startTime != rhs.startTime {
+                        return lhs.startTime < rhs.startTime
+                    }
+                    return lhs.endTime < rhs.endTime
+                }
+                .map(\.matchedText)
+        let evidenceText = evidenceTexts.reduce(into: [String]()) { partial, text in
+            if !partial.contains(text) {
+                partial.append(text)
+            }
+        }.joined(separator: " | ")
+        let confidence = min(
+            1.0,
+            hypothesis.score(at: hypothesis.lastEvidenceTime) / max(minConfirmedEvidence, 1.0)
+        )
+
+        return HotPathHypothesisCandidate(
+            candidate: LexicalCandidate(
+                id: [
+                    analysisAssetId,
+                    String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), startTime),
+                    String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), endTime),
+                    "hypothesis"
+                ].joined(separator: ":"),
+                analysisAssetId: analysisAssetId,
+                startTime: startTime,
+                endTime: endTime,
+                confidence: confidence,
+                hitCount: max(1, supportingHits.count),
+                categories: Set(categories),
+                evidenceText: evidenceText,
+                detectorVersion: "hypothesis-v1"
+            ),
+            evidenceCount: 1 + hypothesis.supportingAnchors.count + hypothesis.bodyEvidence.count + (hypothesis.closingAnchor == nil ? 0 : 1),
+            hasClosingAnchor: hypothesis.closingAnchor != nil,
+            supportingHits: supportingHits
+        )
+    }
+
+    private func hotPathExpandedBoundary(
+        for hypothesis: SpanHypothesis,
+        featureWindows: [FeatureWindow],
+        transcriptChunks: [TranscriptChunk]
+    ) -> ExpandedBoundary? {
+        let additionalEvidenceCount = hypothesis.supportingAnchors.count + hypothesis.bodyEvidence.count + (hypothesis.closingAnchor == nil ? 0 : 1)
+        guard additionalEvidenceCount > 0 else { return nil }
+
+        let seed = hotPathBoundarySeed(for: hypothesis)
+        let config = BoundaryExpander.ExpansionConfig.forPolarity(hypothesis.polarity)
+        let evidenceTimes = hotPathEvidenceTimes(for: hypothesis)
+        let hasTemporalSpread = hotPathHasTemporalSpread(hypothesis)
+
+        let acousticOnly = BoundaryExpander().expand(
+            seed: seed,
+            featureWindows: featureWindows,
+            transcriptChunks: [],
+            adWindows: [],
+            config: config
+        )
+        let usableAcousticOnly = acousticOnly.source == .fallback || !boundaryCoversEvidenceTimes(acousticOnly, evidenceTimes: evidenceTimes)
+            ? nil
+            : acousticOnly
+
+        let lexicalAware = BoundaryExpander().expand(
+            seed: seed,
+            featureWindows: featureWindows,
+            transcriptChunks: transcriptChunks,
+            adWindows: [],
+            config: config
+        )
+        let usableLexicalAware = lexicalAware.source == .fallback || !boundaryCoversEvidenceTimes(lexicalAware, evidenceTimes: evidenceTimes)
+            ? nil
+            : lexicalAware
+
+        if hasTemporalSpread {
+            return usableAcousticOnly ?? usableLexicalAware
+        }
+
+        if hypothesis.closingAnchor != nil {
+            return usableLexicalAware ?? usableAcousticOnly
+        }
+
+        // Same-chunk corroboration should stay tight instead of widening into a
+        // speculative open-ended window.
+        if additionalEvidenceCount > 0 {
+            return usableLexicalAware ?? usableAcousticOnly
+        }
+
+        return usableAcousticOnly ?? usableLexicalAware
+    }
+
+    private func hotPathBoundarySeed(for hypothesis: SpanHypothesis) -> Double {
+        switch hypothesis.polarity {
+        case .startAnchored:
+            return hypothesis.seedAnchor.startTime
+        case .endAnchored:
+            return hypothesis.seedAnchor.endTime
+        case .neutral:
+            return (hypothesis.seedAnchor.startTime + hypothesis.seedAnchor.endTime) / 2.0
+        }
+    }
+
+    private func defaultCategory(for anchorType: AnchorType) -> LexicalPatternCategory {
+        switch anchorType {
+        case .disclosure, .sponsorLexicon, .fmPositive:
+            return .sponsor
+        case .url:
+            return .urlCTA
+        case .promoCode:
+            return .promoCode
+        case .transitionMarker:
+            return .transitionMarker
+        }
+    }
+
+    private func shouldPromoteHotPathHypothesis(_ hypothesis: SpanHypothesis) -> Bool {
+        let additionalEvidenceCount = hypothesis.supportingAnchors.count
+            + hypothesis.bodyEvidence.count
+            + (hypothesis.closingAnchor == nil ? 0 : 1)
+        guard additionalEvidenceCount > 0 else { return false }
+
+        if hypothesis.sponsorEntity != nil {
+            return true
+        }
+
+        let anchors = [hypothesis.seedAnchor] + hypothesis.supportingAnchors
+        return anchors.contains { anchor in
+            switch anchor.anchorType {
+            case .disclosure, .sponsorLexicon, .fmPositive:
+                return true
+            case .url, .promoCode, .transitionMarker:
+                return false
+            }
+        }
+    }
+
+    private func hotPathEvidenceTimes(for hypothesis: SpanHypothesis) -> [Double] {
+        var timestamps: [Double] = [
+            hypothesis.seedAnchor.startTime,
+            hypothesis.seedAnchor.endTime,
+        ]
+        timestamps.append(contentsOf: hypothesis.supportingAnchors.flatMap { [$0.startTime, $0.endTime] })
+        timestamps.append(contentsOf: hypothesis.bodyEvidence.map(\.timestamp))
+        if let closingAnchor = hypothesis.closingAnchor {
+            timestamps.append(contentsOf: [closingAnchor.startTime, closingAnchor.endTime])
+        }
+        return timestamps
+    }
+
+    private func hotPathHasTemporalSpread(_ hypothesis: SpanHypothesis) -> Bool {
+        let temporalSpreadThreshold = 5.0
+        let seedTime = hypothesis.seedAnchor.endTime
+
+        let supportingAnchorTimes = hypothesis.supportingAnchors.flatMap { [$0.startTime, $0.endTime] }
+        if supportingAnchorTimes.contains(where: { abs($0 - seedTime) >= temporalSpreadThreshold }) {
+            return true
+        }
+
+        if hypothesis.bodyEvidence.contains(where: { abs($0.timestamp - seedTime) >= temporalSpreadThreshold }) {
+            return true
+        }
+
+        if let closingAnchor = hypothesis.closingAnchor {
+            return abs(closingAnchor.endTime - seedTime) >= temporalSpreadThreshold
+                || abs(closingAnchor.startTime - seedTime) >= temporalSpreadThreshold
+        }
+
+        return false
+    }
+
+    private func boundaryCoversEvidenceTimes(
+        _ boundary: ExpandedBoundary,
+        evidenceTimes: [Double]
+    ) -> Bool {
+        evidenceTimes.allSatisfy { time in
+            time >= boundary.startTime && time <= boundary.endTime
+        }
+    }
+
+    private func deduplicatedHotPathHits(_ hits: [LexicalHit]) -> [LexicalHit] {
+        let orderedHits = hits.sorted { lhs, rhs in
+            if lhs.startTime != rhs.startTime {
+                return lhs.startTime < rhs.startTime
+            }
+            if lhs.endTime != rhs.endTime {
+                return lhs.endTime < rhs.endTime
+            }
+            if lhs.category != rhs.category {
+                return lhs.category.rawValue < rhs.category.rawValue
+            }
+            return lhs.matchedText < rhs.matchedText
+        }
+
+        var seen = Set<String>()
+        var deduplicated: [LexicalHit] = []
+        for hit in orderedHits {
+            let key = [
+                hit.category.rawValue,
+                hit.matchedText,
+                String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), hit.startTime),
+                String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), hit.endTime)
+            ].joined(separator: "|")
+            if seen.insert(key).inserted {
+                deduplicated.append(hit)
+            }
+        }
+        return deduplicated
+    }
+
+    private func hotPathEvidenceText(
+        from hits: [LexicalHit],
+        fallbackTexts: [String]
+    ) -> String {
+        let orderedFragments = hits.isEmpty
+            ? fallbackTexts
+            : hits.map(\.matchedText)
+
+        return orderedFragments.reduce(into: [String]()) { partial, fragment in
+            guard !fragment.isEmpty else { return }
+            if !partial.contains(fragment) {
+                partial.append(fragment)
+            }
+        }.joined(separator: " | ")
+    }
 
     /// Fetch feature windows for each lexical candidate and run the classifier.
     private func classifyCandidates(

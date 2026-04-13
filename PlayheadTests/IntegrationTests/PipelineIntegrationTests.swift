@@ -130,6 +130,318 @@ private func makeIntegrationAsset(
     )
 }
 
+private func makeHotPathChunk(
+    assetId: String,
+    chunkIndex: Int,
+    startTime: Double,
+    endTime: Double,
+    text: String
+) -> TranscriptChunk {
+    TranscriptChunk(
+        id: "hot-\(assetId)-\(chunkIndex)",
+        analysisAssetId: assetId,
+        segmentFingerprint: "hot-fp-\(chunkIndex)",
+        chunkIndex: chunkIndex,
+        startTime: startTime,
+        endTime: endTime,
+        text: text,
+        normalizedText: TranscriptEngineService.normalizeText(text),
+        pass: "fast",
+        modelVersion: "integration-v1",
+        transcriptVersion: nil,
+        atomOrdinal: nil
+    )
+}
+
+private func makeHotPathFeatureWindow(
+    assetId: String,
+    startTime: Double,
+    endTime: Double,
+    pauseProbability: Double,
+    rms: Double
+) -> FeatureWindow {
+    FeatureWindow(
+        analysisAssetId: assetId,
+        startTime: startTime,
+        endTime: endTime,
+        rms: rms,
+        spectralFlux: 0.01,
+        musicProbability: 0.0,
+        pauseProbability: pauseProbability,
+        speakerClusterId: nil,
+        jingleHash: nil,
+        featureVersion: FeatureExtractionConfig.default.featureVersion
+    )
+}
+
+private final class CapturingClassifier: @unchecked Sendable, ClassifierService {
+    private(set) var capturedInputs: [ClassifierInput] = []
+    private let adProbability: Double
+
+    init(adProbability: Double) {
+        self.adProbability = adProbability
+    }
+
+    func classify(inputs: [ClassifierInput], priors: ShowPriors) -> [ClassifierResult] {
+        capturedInputs = inputs
+        return inputs.map { classify(input: $0, priors: priors) }
+    }
+
+    func classify(input: ClassifierInput, priors: ShowPriors) -> ClassifierResult {
+        ClassifierResult(
+            candidateId: input.candidate.id,
+            analysisAssetId: input.candidate.analysisAssetId,
+            startTime: input.candidate.startTime,
+            endTime: input.candidate.endTime,
+            adProbability: adProbability,
+            startAdjustment: 0,
+            endAdjustment: 0,
+            signalBreakdown: SignalBreakdown(
+                lexicalScore: input.candidate.confidence,
+                rmsDropScore: 0,
+                spectralChangeScore: 0,
+                musicScore: 0,
+                speakerChangeScore: 0,
+                priorScore: 0
+            )
+        )
+    }
+}
+
+// MARK: - Pipeline Integration: Hypothesis Hot Path
+
+@Suite("Pipeline Integration – Hypothesis Hot Path")
+struct HypothesisHotPathIntegrationTests {
+
+    @Test("Hot path uses hypothesis windows to emit one full-span candidate for intro body CTA patterns")
+    func hypothesisWindowsProduceSingleFullSpanCandidate() async throws {
+        let store = try await makeIntegrationStore()
+        let assetId = "int-asset-hypothesis-span"
+
+        try await store.insertAsset(makeIntegrationAsset(id: assetId, episodeId: "int-ep-hypothesis-span"))
+
+        let chunks = [
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 0,
+                startTime: 100,
+                endTime: 101,
+                text: "this episode is sponsored by betterhelp"
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 1,
+                startTime: 126,
+                endTime: 127,
+                text: "free trial for new members"
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 2,
+                startTime: 170,
+                endTime: 171,
+                text: "use code save10 at checkout"
+            ),
+        ]
+        try await store.insertTranscriptChunks(chunks)
+
+        try await store.insertFeatureWindows([
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 85, endTime: 86, pauseProbability: 0.95, rms: 0.01),
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 176, endTime: 177, pauseProbability: 0.96, rms: 0.01),
+        ])
+
+        let classifier = CapturingClassifier(adProbability: 0.95)
+        let detector = AdDetectionService(
+            store: store,
+            classifier: classifier,
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+
+        let windows = try await detector.runHotPath(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: 600
+        )
+
+        let inputs = classifier.capturedInputs
+        #expect(inputs.count == 1, "Hypothesis wiring should replace split lexical clusters with one full-span candidate")
+        let candidate = try #require(inputs.first?.candidate)
+        #expect(candidate.startTime == 85.0)
+        #expect(candidate.endTime == 177.0)
+        #expect(windows.count == 1)
+        #expect(windows[0].startTime == 85.0)
+        #expect(windows[0].endTime == 177.0)
+        #expect(windows[0].evidenceText?.contains("sponsored by") == true)
+        #expect(windows[0].evidenceText?.contains("use code save10") == true)
+    }
+
+    @Test("Hot path falls back to lexical candidate merging when no hypothesis seed appears")
+    func hotPathFallsBackToLexicalCandidatesWhenNoHypothesisSeeds() async throws {
+        let store = try await makeIntegrationStore()
+        let assetId = "int-asset-hypothesis-fallback"
+
+        try await store.insertAsset(makeIntegrationAsset(id: assetId, episodeId: "int-ep-hypothesis-fallback"))
+
+        let chunks = [
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 0,
+                startTime: 200,
+                endTime: 201,
+                text: "free trial for new members"
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 1,
+                startTime: 210,
+                endTime: 211,
+                text: "back to the show"
+            ),
+        ]
+        try await store.insertTranscriptChunks(chunks)
+
+        let classifier = CapturingClassifier(adProbability: 0.95)
+        let detector = AdDetectionService(
+            store: store,
+            classifier: classifier,
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+
+        let windows = try await detector.runHotPath(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: 600
+        )
+
+        let inputs = classifier.capturedInputs
+        #expect(inputs.count == 1, "Lexical fallback should still produce one candidate when the hypothesis engine never seeds")
+        let candidate = try #require(inputs.first?.candidate)
+        #expect(candidate.startTime <= 200.5)
+        #expect(candidate.endTime >= 210.5)
+        #expect(candidate.evidenceText.contains("free trial"))
+        #expect(windows.count == 1)
+    }
+
+    @Test("Seed-only hypotheses do not suppress the tighter lexical fallback candidate")
+    func seedOnlyHypothesesDoNotReplaceLexicalFallback() async throws {
+        let store = try await makeIntegrationStore()
+        let assetId = "int-asset-hypothesis-seed-only"
+
+        try await store.insertAsset(makeIntegrationAsset(id: assetId, episodeId: "int-ep-hypothesis-seed-only"))
+
+        let chunks = [
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 0,
+                startTime: 100,
+                endTime: 101,
+                text: "this episode is sponsored by betterhelp"
+            ),
+        ]
+        try await store.insertTranscriptChunks(chunks)
+
+        let classifier = CapturingClassifier(adProbability: 0.95)
+        let detector = AdDetectionService(
+            store: store,
+            classifier: classifier,
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+
+        let windows = try await detector.runHotPath(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: 600
+        )
+
+        let candidate = try #require(classifier.capturedInputs.first?.candidate)
+        #expect(classifier.capturedInputs.count == 1)
+        #expect(candidate.startTime >= 100.0)
+        #expect(candidate.endTime <= 101.0)
+        #expect(candidate.evidenceText.contains("sponsored"))
+        #expect(windows.count == 1)
+    }
+
+    @Test("Hot path keeps unrelated lexical-only candidates when hypothesis windows are also present")
+    func hotPathPreservesNonOverlappingLexicalCandidatesInMixedBatch() async throws {
+        let store = try await makeIntegrationStore()
+        let assetId = "int-asset-hypothesis-mixed"
+
+        try await store.insertAsset(makeIntegrationAsset(id: assetId, episodeId: "int-ep-hypothesis-mixed"))
+
+        let chunks = [
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 0,
+                startTime: 100,
+                endTime: 101,
+                text: "this episode is sponsored by betterhelp"
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 1,
+                startTime: 126,
+                endTime: 127,
+                text: "free trial for new members"
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 2,
+                startTime: 170,
+                endTime: 171,
+                text: "use code save10 at checkout"
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 3,
+                startTime: 260,
+                endTime: 261,
+                text: "free trial for new members"
+            ),
+            makeHotPathChunk(
+                assetId: assetId,
+                chunkIndex: 4,
+                startTime: 270,
+                endTime: 271,
+                text: "back to the show"
+            ),
+        ]
+        try await store.insertTranscriptChunks(chunks)
+
+        try await store.insertFeatureWindows([
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 85, endTime: 86, pauseProbability: 0.95, rms: 0.01),
+            makeHotPathFeatureWindow(assetId: assetId, startTime: 176, endTime: 177, pauseProbability: 0.96, rms: 0.01),
+        ])
+
+        let classifier = CapturingClassifier(adProbability: 0.95)
+        let detector = AdDetectionService(
+            store: store,
+            classifier: classifier,
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+
+        let windows = try await detector.runHotPath(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: 900
+        )
+
+        let candidates = classifier.capturedInputs.map(\.candidate)
+        #expect(candidates.count == 2, "The hypothesis span should coexist with non-overlapping lexical-only candidates")
+        let hypothesisCandidate = candidates.first { candidate in
+            candidate.startTime == 85.0 && candidate.endTime == 177.0
+        }
+        #expect(hypothesisCandidate != nil)
+        let lexicalCandidate = try #require(candidates.first(where: { $0.startTime >= 260.0 }))
+        #expect(lexicalCandidate.endTime >= 270.5)
+        #expect(lexicalCandidate.evidenceText.contains("free trial"))
+        #expect(windows.count == 2)
+    }
+}
+
 // MARK: - Pipeline Integration: Known Ads Episode
 
 @Suite("Pipeline Integration – Known Ads Episode")
