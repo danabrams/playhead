@@ -1,11 +1,31 @@
 // BoundaryRefiner.swift
-// Shared boundary-snapping helper for classifier-driven ad windows.
+// Shared boundary refinement helper for classifier-driven ad windows.
 
 import Foundation
 
 enum BoundaryRefiner {
     private static let maxBoundaryAdjust: Double = 3.0
-    private static let minimumTransitionStrength: Double = 0.05
+    private static let resolver = TimeBoundaryResolver()
+    private static let resolverConfig = BoundarySnappingConfig(
+        startWeights: StartBoundaryCueWeights(
+            pauseVAD: 0.90,
+            speakerChangeProxy: 0.0,
+            musicBedChange: 0.0,
+            spectralChange: 0.10,
+            lexicalDensityDelta: 0.0
+        ),
+        endWeights: EndBoundaryCueWeights(
+            pauseVAD: 0.90,
+            speakerChangeProxy: 0.0,
+            musicBedChange: 0.0,
+            spectralChange: 0.10,
+            explicitReturnMarker: 0.0
+        ),
+        maxSnapDistanceByAnchorType: [.fmPositive: BoundarySnapDistance(start: maxBoundaryAdjust, end: maxBoundaryAdjust)],
+        lambda: 0.05,
+        minBoundaryScore: 0.50,
+        minImprovementOverOriginal: -0.10
+    )
 
     static func computeAdjustments(
         windows: [FeatureWindow],
@@ -14,12 +34,20 @@ enum BoundaryRefiner {
     ) -> (startAdjust: Double, endAdjust: Double) {
         guard windows.count >= 3 else { return (0.0, 0.0) }
 
-        let startAdj = findNearestTransition(windows: windows, anchor: candidateStart)
-        let endAdj = findNearestTransition(windows: windows, anchor: candidateEnd)
+        let startBoundary = resolveBoundary(
+            candidateTime: candidateStart,
+            boundaryType: .start,
+            windows: windows
+        )
+        let endBoundary = resolveBoundary(
+            candidateTime: candidateEnd,
+            boundaryType: .end,
+            windows: windows
+        )
 
         return (
-            clamp(adjustment: startAdj),
-            clamp(adjustment: endAdj)
+            clamp(adjustment: startBoundary - candidateStart),
+            clamp(adjustment: endBoundary - candidateEnd)
         )
     }
 
@@ -27,36 +55,18 @@ enum BoundaryRefiner {
         max(-maxBoundaryAdjust, min(adjustment, maxBoundaryAdjust))
     }
 
-    private static func findNearestTransition(
-        windows: [FeatureWindow],
-        anchor: Double
+    private static func resolveBoundary(
+        candidateTime: Double,
+        boundaryType: BoundaryType,
+        windows: [FeatureWindow]
     ) -> Double {
-        // Search all windows within maxBoundaryAdjust of the anchor. Acoustic
-        // transitions (RMS drops + spectral flux peaks) are direction-neutral —
-        // the best boundary snap is the strongest transition regardless of whether
-        // we are looking for a start or end edge.
-        let nearbyWindows = windows.filter {
-            abs(($0.startTime + $0.endTime) / 2.0 - anchor) <= maxBoundaryAdjust
-        }
-        guard nearbyWindows.count >= 2 else { return 0.0 }
-
-        var bestDelta = 0.0
-        var bestTime = anchor
-
-        for index in 0 ..< nearbyWindows.count - 1 {
-            let first = nearbyWindows[index]
-            let second = nearbyWindows[index + 1]
-            let rmsDelta = abs(second.rms - first.rms)
-            let fluxBoost = max(first.spectralFlux, second.spectralFlux) * 0.5
-            let combined = rmsDelta + fluxBoost
-
-            if combined > bestDelta {
-                bestDelta = combined
-                bestTime = (first.endTime + second.startTime) / 2.0
-            }
-        }
-
-        guard bestDelta > minimumTransitionStrength else { return 0.0 }
-        return bestTime - anchor
+        resolver.snap(
+            candidateTime: candidateTime,
+            boundaryType: boundaryType,
+            anchorType: .fmPositive,
+            featureWindows: windows,
+            lexicalHits: [],
+            config: resolverConfig
+        )
     }
 }
