@@ -15,6 +15,20 @@
 import Foundation
 import OSLog
 
+// MARK: - AnchorLandmark
+
+/// A typed anchor position within a fingerprinted ad span. Used for
+/// anchor-aware local alignment when transferring full boundaries from
+/// a fingerprint match to a new episode occurrence.
+struct AnchorLandmark: Sendable, Equatable, Codable {
+    /// The type of anchor (disclosure, url, promoCode, etc.)
+    let type: AnchorType
+    /// Seconds from fingerprint match start to this landmark.
+    let offsetSeconds: Double
+    /// Normalized text of the landmark (e.g., "betterhelp dot com").
+    let normalizedText: String?
+}
+
 // MARK: - FingerprintEntry
 
 /// A MinHash fingerprint entry with lifecycle state and per-entry stats.
@@ -33,6 +47,20 @@ struct FingerprintEntry: Sendable, Equatable {
     let blockedAt: Double?
     let metadata: [String: String]?
 
+    // B10: Span offset fields for full-span recovery.
+    /// Seconds from fingerprint match start to full ad start (typically positive or zero).
+    /// adStart = matchStart - spanStartOffset, so a positive value means the ad starts
+    /// before the match point.
+    let spanStartOffset: Double
+    /// Seconds from fingerprint match end to full ad end (typically positive or zero).
+    let spanEndOffset: Double
+    /// Total ad duration in seconds when the fingerprint was created.
+    let spanDurationSeconds: Double
+    /// Canonical sponsor identity for entity-aware matching.
+    let canonicalSponsorEntity: NormalizedSponsor?
+    /// Typed anchor positions within the ad for alignment validation.
+    let anchorLandmarks: [AnchorLandmark]
+
     init(
         id: String = UUID().uuidString,
         podcastId: String,
@@ -46,7 +74,12 @@ struct FingerprintEntry: Sendable, Equatable {
         lastRollbackAt: Double? = nil,
         decayedAt: Double? = nil,
         blockedAt: Double? = nil,
-        metadata: [String: String]? = nil
+        metadata: [String: String]? = nil,
+        spanStartOffset: Double = 0,
+        spanEndOffset: Double = 0,
+        spanDurationSeconds: Double = 0,
+        canonicalSponsorEntity: NormalizedSponsor? = nil,
+        anchorLandmarks: [AnchorLandmark] = []
     ) {
         self.id = id
         self.podcastId = podcastId
@@ -61,6 +94,11 @@ struct FingerprintEntry: Sendable, Equatable {
         self.decayedAt = decayedAt
         self.blockedAt = blockedAt
         self.metadata = metadata
+        self.spanStartOffset = spanStartOffset
+        self.spanEndOffset = spanEndOffset
+        self.spanDurationSeconds = spanDurationSeconds
+        self.canonicalSponsorEntity = canonicalSponsorEntity
+        self.anchorLandmarks = anchorLandmarks
     }
 
     /// Rollback rate as a fraction of total observations (confirmations + rollbacks).
@@ -68,6 +106,11 @@ struct FingerprintEntry: Sendable, Equatable {
         let total = confirmationCount + rollbackCount
         guard total > 0 else { return 0.0 }
         return Double(rollbackCount) / Double(total)
+    }
+
+    /// Whether this entry has span offsets populated (non-zero duration).
+    var hasSpanOffsets: Bool {
+        spanDurationSeconds > 0
     }
 }
 
@@ -112,6 +155,8 @@ enum FingerprintPromotionThresholds {
     static let rollbackSpikeThreshold = 0.5
     /// Minimum confidence for initial candidate extraction.
     static let minCandidateConfidence = 0.5
+    /// Minimum BoundaryExpander confidence for user-marked ad fingerprint seeding.
+    static let minUserMarkedConfidence = 0.7
 }
 
 // MARK: - MinHash Constants
@@ -323,6 +368,107 @@ struct AdCopyFingerprintStore: Sendable {
             fingerprintHash: resolvedHash,
             sourceAdWindowId: sourceAdWindowId,
             confidence: confidence
+        )
+        try await store.appendFingerprintSourceEvent(event)
+    }
+
+    // MARK: - Write: Seed from User-Marked Ad (B10)
+
+    /// Seed a fingerprint entry from a user-marked ad when BoundaryExpander
+    /// produces a span with confidence >= 0.7. The entry starts at `candidate`
+    /// state and goes through the normal trust lifecycle.
+    ///
+    /// - Parameters:
+    ///   - podcastId: The podcast identifier.
+    ///   - text: Transcript text within the expanded boundaries.
+    ///   - analysisAssetId: The episode asset identifier.
+    ///   - sourceAdWindowId: The ad window identifier (may be user-generated).
+    ///   - boundary: The expanded boundary from BoundaryExpander.
+    ///   - matchStartTime: Start time of the fingerprinted fragment within the ad.
+    ///   - matchEndTime: End time of the fingerprinted fragment within the ad.
+    ///   - sponsorEntity: Optional sponsor identity extracted from the ad text.
+    ///   - anchorLandmarks: Typed anchor positions found within the ad span.
+    // Note: The load-then-upsert pattern below has a theoretical TOCTOU window,
+    // but it's acceptable because: (a) AnalysisStore actor serializes calls,
+    // (b) user-marked seeding is a rare manual action, and (c) the worst case
+    // is a benign offset overwrite.
+    func seedFromUserMarkedAd(
+        podcastId: String,
+        text: String,
+        analysisAssetId: String,
+        sourceAdWindowId: String,
+        boundary: ExpandedBoundary,
+        matchStartTime: Double,
+        matchEndTime: Double,
+        sponsorEntity: NormalizedSponsor? = nil,
+        anchorLandmarks: [AnchorLandmark] = []
+    ) async throws {
+        guard boundary.boundaryConfidence >= FingerprintPromotionThresholds.minUserMarkedConfidence else {
+            logger.debug("seedFromUserMarkedAd: boundary confidence \(boundary.boundaryConfidence) below threshold")
+            return
+        }
+
+        let normalizedText = MinHashUtilities.normalizeText(text)
+        guard !normalizedText.isEmpty else {
+            logger.debug("seedFromUserMarkedAd: skipping empty normalized text")
+            return
+        }
+
+        let fingerprintHash = MinHashUtilities.generateFingerprint(from: text)
+        let spanStartOffset = matchStartTime - boundary.startTime
+        let spanEndOffset = boundary.endTime - matchEndTime
+        let spanDuration = boundary.endTime - boundary.startTime
+
+        // Check for existing entry to avoid clobbering its lifecycle state.
+        // If an entry already exists, update only span offsets; preserve
+        // state, confirmationCount, rollbackCount, and timestamps.
+        if let existing = try await store.loadFingerprintEntry(
+            podcastId: podcastId,
+            fingerprintHash: fingerprintHash
+        ) {
+            let updated = FingerprintEntry(
+                id: existing.id,
+                podcastId: existing.podcastId,
+                fingerprintHash: existing.fingerprintHash,
+                normalizedText: existing.normalizedText,
+                state: existing.state,
+                confirmationCount: existing.confirmationCount,
+                rollbackCount: existing.rollbackCount,
+                firstSeenAt: existing.firstSeenAt,
+                lastConfirmedAt: existing.lastConfirmedAt,
+                lastRollbackAt: existing.lastRollbackAt,
+                decayedAt: existing.decayedAt,
+                blockedAt: existing.blockedAt,
+                metadata: existing.metadata,
+                spanStartOffset: spanStartOffset,
+                spanEndOffset: spanEndOffset,
+                spanDurationSeconds: spanDuration,
+                canonicalSponsorEntity: sponsorEntity ?? existing.canonicalSponsorEntity,
+                anchorLandmarks: anchorLandmarks.isEmpty ? existing.anchorLandmarks : anchorLandmarks
+            )
+            try await store.upsertFingerprintEntry(updated)
+        } else {
+            let entry = FingerprintEntry(
+                podcastId: podcastId,
+                fingerprintHash: fingerprintHash,
+                normalizedText: normalizedText,
+                state: .candidate,
+                confirmationCount: 0,
+                firstSeenAt: Date().timeIntervalSince1970,
+                spanStartOffset: spanStartOffset,
+                spanEndOffset: spanEndOffset,
+                spanDurationSeconds: spanDuration,
+                canonicalSponsorEntity: sponsorEntity,
+                anchorLandmarks: anchorLandmarks
+            )
+            try await store.upsertFingerprintEntry(entry)
+        }
+
+        let event = FingerprintSourceEvent(
+            analysisAssetId: analysisAssetId,
+            fingerprintHash: fingerprintHash,
+            sourceAdWindowId: sourceAdWindowId,
+            confidence: boundary.boundaryConfidence
         )
         try await store.appendFingerprintSourceEvent(event)
     }

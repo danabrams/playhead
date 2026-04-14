@@ -1,6 +1,6 @@
 import Foundation
 
-enum AnchorType: Sendable {
+enum AnchorType: String, Sendable, Codable {
     case disclosure
     case sponsorLexicon
     case url
