@@ -406,6 +406,20 @@ actor FeatureExtractionService {
         var penultimateRawSpeakerChangeProxyScore: Double?
         var lastWindowStartTime: Double?
         var lastWindowEndTime: Double?
+        private var rmsSum: Double = 0
+        private var rmsCount: Int = 0
+
+        /// Running mean RMS across all windows processed so far.
+        /// Returns 0 if no windows have been processed yet.
+        var runningMeanRms: Double {
+            guard rmsCount > 0 else { return 0 }
+            return rmsSum / Double(rmsCount)
+        }
+
+        mutating func updateRunningMeanRms(_ rms: Double) {
+            rmsSum += rms
+            rmsCount += 1
+        }
 
         init() {}
 
@@ -640,13 +654,17 @@ actor FeatureExtractionService {
                 pauseProbability: Double(pauseProb),
                 spectralFlux: Double(flux)
             )
-            let musicBedChange = FeatureSignalExtraction.musicBedChangeScore(
-                currentMusicProbability: musicProb,
-                previousMusicProbability: state.previousMusicProbability
+            let musicClassification = MusicBedClassifier.classify(
+                musicProbability: musicProb,
+                previousMusicProbability: state.previousMusicProbability,
+                rms: Double(rms),
+                localMeanRms: state.runningMeanRms,
+                spectralFlux: Double(flux)
             )
             state.previousMagnitudes = magnitudes
             state.previousMusicProbability = musicProb
             state.previousRms = Double(rms)
+            state.updateRunningMeanRms(Double(rms))
 
             let window = FeatureWindow(
                 analysisAssetId: analysisAssetId,
@@ -656,7 +674,10 @@ actor FeatureExtractionService {
                 spectralFlux: Double(flux),
                 musicProbability: musicProb,
                 speakerChangeProxyScore: speakerProxy,
-                musicBedChangeScore: musicBedChange,
+                musicBedChangeScore: musicClassification.changeScore,
+                musicBedOnsetScore: musicClassification.onsetScore,
+                musicBedOffsetScore: musicClassification.offsetScore,
+                musicBedLevel: musicClassification.level,
                 pauseProbability: Double(pauseProb),
                 speakerClusterId: nil, // Deferred
                 jingleHash: nil, // Deferred
@@ -734,6 +755,9 @@ actor FeatureExtractionService {
             musicProbability: window.musicProbability,
             speakerChangeProxyScore: speakerChangeProxyScore,
             musicBedChangeScore: window.musicBedChangeScore,
+            musicBedOnsetScore: window.musicBedOnsetScore,
+            musicBedOffsetScore: window.musicBedOffsetScore,
+            musicBedLevel: window.musicBedLevel,
             pauseProbability: window.pauseProbability,
             speakerClusterId: window.speakerClusterId,
             jingleHash: window.jingleHash,
@@ -753,7 +777,22 @@ actor FeatureExtractionService {
         ) else {
             return ExtractionState()
         }
-        return ExtractionState(checkpoint: checkpoint)
+        var state = ExtractionState(checkpoint: checkpoint)
+
+        // Pre-seed runningMeanRms from persisted feature windows so that
+        // amplitude-relative classification (amplitudeIsHigh) works correctly
+        // immediately after checkpoint resume, rather than starting from zero.
+        let recentWindows = try await store.fetchFeatureWindows(
+            assetId: analysisAssetId,
+            from: 0,
+            to: coverageEndTime,
+            minimumFeatureVersion: config.featureVersion
+        )
+        for window in recentWindows {
+            state.updateRunningMeanRms(window.rms)
+        }
+
+        return state
     }
 
     private func makeExtractionWindowInput(
