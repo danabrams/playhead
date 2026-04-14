@@ -290,6 +290,53 @@ protocol SpeechRecognizer: Sendable {
     ) async throws -> [VADResult]
 }
 
+/// Serializes recognizer calls that ultimately touch Apple's Speech framework.
+/// Swift actors are reentrant across `await`, so a cancelled transcription can
+/// still overlap a restarted one unless we hold an explicit permit across the
+/// full async recognizer call. Overlap triggers `SFSpeechErrorDomain Code=16`
+/// ("Maximum number of simultaneous requests reached") on `prepareToAnalyze`.
+private actor SpeechRecognitionRequestGate {
+    private var isHeld = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func withExclusiveAccess<T>(
+        _ operation: @Sendable () async throws -> T
+    ) async throws -> T {
+        await acquire()
+
+        do {
+            try Task.checkCancellation()
+            let result = try await operation()
+            release()
+            return result
+        } catch {
+            release()
+            throw error
+        }
+    }
+
+    private func acquire() async {
+        guard !isHeld else {
+            await withCheckedContinuation { continuation in
+                waiters.append(continuation)
+            }
+            return
+        }
+
+        isHeld = true
+    }
+
+    private func release() {
+        guard !waiters.isEmpty else {
+            isHeld = false
+            return
+        }
+
+        let waiter = waiters.removeFirst()
+        waiter.resume()
+    }
+}
+
 // MARK: - SpeechService
 
 /// Actor wrapping the runtime ASR backend for thread-safe transcription.
@@ -299,6 +346,7 @@ protocol SpeechRecognizer: Sendable {
 /// background thread — never touches the playback audio session or main thread.
 actor SpeechService {
     private let logger = Logger(subsystem: "com.playhead", category: "SpeechEngine")
+    private static let requestGate = SpeechRecognitionRequestGate()
 
     /// The underlying recognizer (Apple Speech or stub).
     private let recognizer: any SpeechRecognizer
@@ -389,7 +437,10 @@ actor SpeechService {
             episode=\(shard.episodeID)]
             """)
         let start = ContinuousClock.now
-        let rawSegments = try await recognizer.transcribe(shard: shard, podcastId: podcastId)
+        let recognizer = self.recognizer
+        let rawSegments = try await Self.requestGate.withExclusiveAccess {
+            try await recognizer.transcribe(shard: shard, podcastId: podcastId)
+        }
         let elapsed = ContinuousClock.now - start
         logger.info("Shard \(shard.id) transcribed in \(elapsed) → \(rawSegments.count) segments")
 
@@ -430,7 +481,10 @@ actor SpeechService {
             try Task.checkCancellation()
 
             // Run VAD first to skip non-speech chunks.
-            let vadResults = try await recognizer.detectVoiceActivity(shard: shard)
+            let recognizer = self.recognizer
+            let vadResults = try await Self.requestGate.withExclusiveAccess {
+                try await recognizer.detectVoiceActivity(shard: shard)
+            }
             let hasSpeech = vadResults.contains { $0.speechProbability >= speechThreshold }
 
             guard hasSpeech else {

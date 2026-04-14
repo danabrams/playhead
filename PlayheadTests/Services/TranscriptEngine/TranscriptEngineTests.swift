@@ -49,6 +49,85 @@ final class MockSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
     }
 }
 
+/// Probe recognizer used to detect overlap between async transcribe calls.
+private final class ConcurrentProbeSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
+    private struct State {
+        var loaded = false
+        var transcribeCallCount = 0
+        var concurrentTranscribes = 0
+        var maxConcurrentTranscribes = 0
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+    private let delay: Duration
+
+    init(delay: Duration = .milliseconds(100)) {
+        self.delay = delay
+    }
+
+    var maxConcurrentTranscribes: Int {
+        state.withLock { $0.maxConcurrentTranscribes }
+    }
+
+    var transcribeCallCount: Int {
+        state.withLock { $0.transcribeCallCount }
+    }
+
+    func loadModel(from directory: URL) async throws {
+        state.withLock { $0.loaded = true }
+    }
+
+    func unloadModel() async {
+        state.withLock { $0.loaded = false }
+    }
+
+    func isModelLoaded() async -> Bool {
+        state.withLock { $0.loaded }
+    }
+
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
+        guard state.withLock({ $0.loaded }) else { throw TranscriptEngineError.modelNotLoaded }
+
+        state.withLock { state in
+            state.transcribeCallCount += 1
+            state.concurrentTranscribes += 1
+            state.maxConcurrentTranscribes = max(
+                state.maxConcurrentTranscribes,
+                state.concurrentTranscribes
+            )
+        }
+        defer {
+            state.withLock { $0.concurrentTranscribes -= 1 }
+        }
+
+        try? await Task.sleep(for: delay)
+
+        return [TranscriptSegment(
+            id: shard.id,
+            words: [TranscriptWord(
+                text: "probe-\(shard.id)",
+                startTime: shard.startTime,
+                endTime: shard.startTime + shard.duration,
+                confidence: 0.9
+            )],
+            text: "probe-\(shard.id)",
+            startTime: shard.startTime,
+            endTime: shard.startTime + shard.duration,
+            avgConfidence: 0.9,
+            passType: .fast
+        )]
+    }
+
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
+        [VADResult(
+            isSpeech: true,
+            speechProbability: 1.0,
+            startTime: shard.startTime,
+            endTime: shard.startTime + shard.duration
+        )]
+    }
+}
+
 // MARK: - Helpers
 
 private func makeSegment(id: Int = 0, passType: TranscriptPassType = .fast) -> TranscriptSegment {
@@ -258,6 +337,29 @@ struct SpeechServiceTranscriptionTests {
         let segments = try await service.transcribe(shard: shard)
         #expect(segments.count == 1)
         #expect(segments[0].passType == .final_)
+    }
+
+    @Test("Concurrent transcribe calls are serialized across await points")
+    func concurrentTranscribesStaySerialized() async throws {
+        let recognizer = ConcurrentProbeSpeechRecognizer()
+        let service = SpeechService(recognizer: recognizer)
+        try await service.loadFastModel(from: URL(fileURLWithPath: "/tmp/model"))
+
+        async let first = service.transcribe(
+            shard: makeShard(id: 0, startTime: 0, duration: 30)
+        )
+        async let second = service.transcribe(
+            shard: makeShard(id: 1, startTime: 30, duration: 30)
+        )
+
+        _ = try await first
+        _ = try await second
+
+        #expect(recognizer.transcribeCallCount == 2)
+        #expect(
+            recognizer.maxConcurrentTranscribes == 1,
+            "SpeechService should not overlap recognizer transcribes while awaiting Apple Speech"
+        )
     }
 }
 
