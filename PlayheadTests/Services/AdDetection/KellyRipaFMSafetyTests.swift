@@ -457,6 +457,7 @@ private actor FakeRefusalRuntime {
             tokenCount: { _ in 4 },
             coarseSchemaTokenCount: { 8 },
             refinementSchemaTokenCount: { 16 },
+            boundarySchemaTokenCount: { 16 },
             makeSession: {
                 let callIndex = await self.nextCallIndex()
                 return FoundationModelClassifier.Runtime.Session(
@@ -515,6 +516,7 @@ private actor FakeSuccessRuntime {
             tokenCount: { _ in 4 },
             coarseSchemaTokenCount: { 8 },
             refinementSchemaTokenCount: { 16 },
+            boundarySchemaTokenCount: { 16 },
             makeSession: {
                 FoundationModelClassifier.Runtime.Session(
                     prewarm: { _ in },

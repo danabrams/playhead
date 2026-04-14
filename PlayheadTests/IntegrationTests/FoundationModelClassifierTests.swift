@@ -4753,6 +4753,7 @@ private func wrapRuntimeWithFeedback(
         tokenCount: base.tokenCount,
         coarseSchemaTokenCount: base.coarseSchemaTokenCount,
         refinementSchemaTokenCount: base.refinementSchemaTokenCount,
+        boundarySchemaTokenCount: base.boundarySchemaTokenCount,
         makeSession: {
             let session = await base.makeSession()
             return FoundationModelClassifier.Runtime.Session(
@@ -4950,6 +4951,7 @@ private actor RuntimeRecorder {
             tokenCount: { prompt in await self.currentTokenCount(for: prompt) },
             coarseSchemaTokenCount: { await self.currentCoarseSchemaTokenCount() },
             refinementSchemaTokenCount: { await self.currentRefinementSchemaTokenCount() },
+            boundarySchemaTokenCount: { 32 },
             makeSession: {
                 let sessionID = await self.nextSessionID()
                 return FoundationModelClassifier.Runtime.Session(

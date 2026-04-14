@@ -96,6 +96,7 @@ private func makeTrackedRuntime(
         tokenCount: { _ in tokenCountPerCall },
         coarseSchemaTokenCount: { coarseSchemaTokens },
         refinementSchemaTokenCount: { refinementSchemaTokens },
+        boundarySchemaTokenCount: { 32 },
         makeSession: {
             let id = await tracker.nextSession()
             return FoundationModelClassifier.Runtime.Session(

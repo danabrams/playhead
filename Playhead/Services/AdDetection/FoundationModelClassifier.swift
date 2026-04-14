@@ -172,6 +172,36 @@ struct SpanRefinementSchema: Sendable, Codable, Hashable {
 struct RefinementWindowSchema: Sendable, Codable, Hashable {
     var spans: [SpanRefinementSchema]
 }
+
+// MARK: - B9 Boundary Extraction Schema
+
+@available(iOS 26.0, *)
+@Generable
+enum SpanRole: String, Sendable, Codable, Hashable {
+    case show
+    case adIntro
+    case adBody
+    case adCTA
+    case returnToShow
+}
+
+@available(iOS 26.0, *)
+@Generable
+struct FMSpanLabel: Sendable, Codable, Hashable {
+    var firstSegmentRef: String
+    var lastSegmentRef: String
+    var role: SpanRole
+    var commercialIntent: CertaintyBand
+    var ownership: Ownership
+    var evidenceRefs: [String]
+}
+
+@available(iOS 26.0, *)
+@Generable
+struct FMBoundarySchema: Sendable, Codable, Hashable {
+    var spans: [FMSpanLabel]
+    var abstain: Bool
+}
 #else
 enum TranscriptQuality: String, Sendable, Codable, Hashable {
     case good
@@ -271,7 +301,222 @@ struct SpanRefinementSchema: Sendable, Codable, Hashable {
 struct RefinementWindowSchema: Sendable, Codable, Hashable {
     var spans: [SpanRefinementSchema]
 }
+
+// MARK: - B9 Boundary Extraction Schema (non-FoundationModels)
+
+enum SpanRole: String, Sendable, Codable, Hashable {
+    case show
+    case adIntro
+    case adBody
+    case adCTA
+    case returnToShow
+}
+
+struct FMSpanLabel: Sendable, Codable, Hashable {
+    var firstSegmentRef: String
+    var lastSegmentRef: String
+    var role: SpanRole
+    var commercialIntent: CertaintyBand
+    var ownership: Ownership
+    var evidenceRefs: [String]
+}
+
+struct FMBoundarySchema: Sendable, Codable, Hashable {
+    var spans: [FMSpanLabel]
+    var abstain: Bool
+}
 #endif
+
+// MARK: - B9 Discourse Unit
+
+/// A discourse unit is a sentence-like chunk of transcript (2-8 seconds)
+/// used for FM boundary extraction. Pre-segmenting into discourse units
+/// avoids token-heavy atom-level labeling.
+struct DiscourseUnit: Sendable {
+    /// Stable reference used in FM prompts: "S0", "S1", ...
+    let ref: String
+    /// The atoms composing this unit, ordered by ordinal.
+    let atoms: [TranscriptAtom]
+    /// Start time of the first atom.
+    var startTime: Double { atoms.first?.startTime ?? 0 }
+    /// End time of the last atom.
+    var endTime: Double { atoms.last?.endTime ?? 0 }
+    /// Duration in seconds.
+    var duration: Double { endTime - startTime }
+    /// Concatenated text of all atoms.
+    var text: String { atoms.map(\.text).joined(separator: " ") }
+}
+
+extension DiscourseUnit: Equatable {
+    static func == (lhs: DiscourseUnit, rhs: DiscourseUnit) -> Bool {
+        lhs.ref == rhs.ref &&
+        lhs.atoms.count == rhs.atoms.count &&
+        lhs.startTime == rhs.startTime &&
+        lhs.endTime == rhs.endTime
+    }
+}
+
+/// B9: Output plan for a single boundary extraction window.
+struct BoundaryExtractionWindowPlan: Sendable, Equatable {
+    let windowIndex: Int
+    let candidateSpanId: String
+    let discourseUnits: [DiscourseUnit]
+    let prompt: String
+    let promptTokenCount: Int
+    let startTime: Double
+    let endTime: Double
+    let evidenceRefs: [EvidenceEntry]
+}
+
+/// B9: Result of a single boundary extraction call.
+struct FMBoundaryExtractionWindowOutput: Sendable {
+    let windowIndex: Int
+    let candidateSpanId: String
+    let schema: FMBoundarySchema
+    let discourseUnits: [DiscourseUnit]
+    let latencyMillis: Double
+    let usedPermissiveFallback: Bool
+    let hadContradiction: Bool
+
+    init(
+        windowIndex: Int,
+        candidateSpanId: String,
+        schema: FMBoundarySchema,
+        discourseUnits: [DiscourseUnit],
+        latencyMillis: Double,
+        usedPermissiveFallback: Bool = false,
+        hadContradiction: Bool = false
+    ) {
+        self.windowIndex = windowIndex
+        self.candidateSpanId = candidateSpanId
+        self.schema = schema
+        self.discourseUnits = discourseUnits
+        self.latencyMillis = latencyMillis
+        self.usedPermissiveFallback = usedPermissiveFallback
+        self.hadContradiction = hadContradiction
+    }
+}
+
+/// B9: Aggregated result of all boundary extraction calls in a pass.
+struct FMBoundaryExtractionOutput: Sendable {
+    let status: SemanticScanStatus
+    let windows: [FMBoundaryExtractionWindowOutput]
+    let latencyMillis: Double
+    let prewarmHit: Bool
+}
+
+// MARK: - B9 Discourse Unit Segmenter
+
+/// Segments transcript atoms into discourse units of roughly 2-8 seconds,
+/// using pause and punctuation boundaries. This is NOT the same as the
+/// existing `TranscriptSegmenter` which produces 10-120s segments for
+/// coarse scanning. Discourse units are sentence-like chunks optimized
+/// for FM boundary extraction prompts.
+enum DiscourseUnitSegmenter {
+
+    struct Config: Sendable {
+        /// Minimum discourse unit duration (seconds).
+        let minDuration: Double
+        /// Maximum discourse unit duration (seconds).
+        let maxDuration: Double
+        /// Pause gap (seconds) that forces a unit break.
+        let pauseThreshold: Double
+
+        static let `default` = Config(
+            minDuration: 2.0,
+            maxDuration: 8.0,
+            pauseThreshold: 0.5
+        )
+    }
+
+    /// Segment atoms into discourse units of 2-8 seconds each.
+    /// Breaks on: pauses >= threshold, sentence-ending punctuation
+    /// (when min duration met), and max duration.
+    static func segment(
+        atoms: [TranscriptAtom],
+        config: Config = .default
+    ) -> [DiscourseUnit] {
+        guard !atoms.isEmpty else { return [] }
+
+        let sorted = atoms.sorted { $0.atomKey.atomOrdinal < $1.atomKey.atomOrdinal }
+        var units: [DiscourseUnit] = []
+        var currentAtoms: [TranscriptAtom] = [sorted[0]]
+        var unitIndex = 0
+
+        for i in 1..<sorted.count {
+            let prev = sorted[i - 1]
+            let curr = sorted[i]
+            let segStart = currentAtoms.first!.startTime
+            let segDuration = prev.endTime - segStart
+            let gap = curr.startTime - prev.endTime
+
+            // Hard break: max duration exceeded
+            if segDuration >= config.maxDuration {
+                units.append(DiscourseUnit(
+                    ref: "S\(unitIndex)",
+                    atoms: currentAtoms
+                ))
+                unitIndex += 1
+                currentAtoms = [curr]
+                continue
+            }
+
+            // Hard break: significant pause
+            if gap >= config.pauseThreshold && segDuration >= config.minDuration {
+                units.append(DiscourseUnit(
+                    ref: "S\(unitIndex)",
+                    atoms: currentAtoms
+                ))
+                unitIndex += 1
+                currentAtoms = [curr]
+                continue
+            }
+
+            // Soft break: sentence-ending punctuation after min duration
+            if segDuration >= config.minDuration,
+               endsWithSentencePunctuation(prev.text) {
+                units.append(DiscourseUnit(
+                    ref: "S\(unitIndex)",
+                    atoms: currentAtoms
+                ))
+                unitIndex += 1
+                currentAtoms = [curr]
+                continue
+            }
+
+            currentAtoms.append(curr)
+        }
+
+        // Emit final unit
+        if !currentAtoms.isEmpty {
+            // If the trailing unit is below min duration and we have a
+            // previous unit, merge it back to avoid micro-units.
+            let trailingDuration = (currentAtoms.last?.endTime ?? 0)
+                - (currentAtoms.first?.startTime ?? 0)
+            if trailingDuration < config.minDuration, var last = units.last {
+                units.removeLast()
+                let merged = last.atoms + currentAtoms
+                units.append(DiscourseUnit(
+                    ref: last.ref,
+                    atoms: merged
+                ))
+            } else {
+                units.append(DiscourseUnit(
+                    ref: "S\(unitIndex)",
+                    atoms: currentAtoms
+                ))
+            }
+        }
+
+        return units
+    }
+
+    private static func endsWithSentencePunctuation(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard let last = trimmed.last else { return false }
+        return last == "." || last == "!" || last == "?"
+    }
+}
 
 // MARK: - Backward-compatible SpanRefinementSchema init
 //
@@ -683,6 +928,8 @@ struct FoundationModelClassifier: Sendable {
             let prewarm: @Sendable (_ promptPrefix: String) async -> Void
             let respondCoarse: @Sendable (_ prompt: String) async throws -> CoarseScreeningSchema
             let respondRefinement: @Sendable (_ prompt: String) async throws -> RefinementWindowSchema
+            /// B9: boundary extraction response using the FMBoundarySchema.
+            let respondBoundaryExtraction: @Sendable (_ prompt: String) async throws -> FMBoundarySchema
             /// bd-fmfb: invoke `LanguageModelSession.logFeedbackAttachment` on
             /// the underlying session and return the resulting `Data`. The
             /// closure intentionally returns `Data?` so test runtimes that
@@ -696,11 +943,15 @@ struct FoundationModelClassifier: Sendable {
                 prewarm: @escaping @Sendable (_ promptPrefix: String) async -> Void,
                 respondCoarse: @escaping @Sendable (_ prompt: String) async throws -> CoarseScreeningSchema,
                 respondRefinement: @escaping @Sendable (_ prompt: String) async throws -> RefinementWindowSchema,
+                respondBoundaryExtraction: @escaping @Sendable (_ prompt: String) async throws -> FMBoundarySchema = { _ in
+                    FMBoundarySchema(spans: [], abstain: true)
+                },
                 logFeedback: @escaping @Sendable (_ desiredOutput: String, _ negative: Bool) async -> Data? = { _, _ in nil }
             ) {
                 self.prewarm = prewarm
                 self.respondCoarse = respondCoarse
                 self.respondRefinement = respondRefinement
+                self.respondBoundaryExtraction = respondBoundaryExtraction
                 self.logFeedback = logFeedback
             }
         }
@@ -710,11 +961,14 @@ struct FoundationModelClassifier: Sendable {
         let tokenCount: @Sendable (_ prompt: String) async throws -> Int
         let coarseSchemaTokenCount: @Sendable () async throws -> Int
         let refinementSchemaTokenCount: @Sendable () async throws -> Int
+        /// B9: token overhead for the FMBoundarySchema.
+        let boundarySchemaTokenCount: @Sendable () async throws -> Int
         let makeSession: @Sendable () async -> Session
     }
 
     private static let promptPrefix = "Classify ad content."
     private static let refinementPromptPrefix = "Refine ad spans."
+    private static let boundaryExtractionPromptPrefix = "Extract ad boundaries."
 
     // H10: The native `model.tokenCount(for:)` API isn't available on iOS
     // 26.0–26.3, so we estimate. The previous `wordCount * 1.35` factor
@@ -730,6 +984,7 @@ struct FoundationModelClassifier: Sendable {
     }
     private static let fallbackCoarseSchemaTokenEstimate = 128
     private static let fallbackRefinementSchemaTokenEstimate = 256
+    private static let fallbackBoundarySchemaTokenEstimate = 256
 
     /// Diagnostic payload emitted when the refinement pass catches a
     /// `SemanticScanStatus.decodingFailure` from the Foundation Models session.
@@ -984,6 +1239,8 @@ struct FoundationModelClassifier: Sendable {
         }
         return raw == "1" || raw == "true" || raw == "yes"
     }
+
+    // MARK: - Legacy coarse/refine path (retained until extractBoundaries is wired into BackfillJobRunner — see B9 bead notes)
 
     func coarsePassA(
         segments: [AdTranscriptSegment],
@@ -1464,6 +1721,302 @@ struct FoundationModelClassifier: Sendable {
         return plans
     }
 
+    // MARK: - B9 Boundary Extraction
+
+    /// B9: Plan boundary extraction windows for suspicious regions
+    /// identified by SpanHypothesisEngine. One window per CandidateAdSpan.
+    /// Replaces planPassA() for the boundary extraction path.
+    func planBoundaryExtractionWindows(
+        candidateSpans: [CandidateAdSpan],
+        segments: [AdTranscriptSegment],
+        evidenceCatalog: EvidenceCatalog
+    ) async throws -> [BoundaryExtractionWindowPlan] {
+        guard !candidateSpans.isEmpty, !segments.isEmpty else { return [] }
+
+        let budget = try await promptBudget(
+            schemaTokens: runtime.boundarySchemaTokenCount,
+            maximumResponseTokens: config.refinementMaximumResponseTokens
+        )
+
+        // Build a sorted list of all atoms from segments for discourse
+        // unit segmentation within each candidate span's time range.
+        let allAtoms = segments.flatMap(\.atoms)
+            .sorted { $0.atomKey.atomOrdinal < $1.atomKey.atomOrdinal }
+
+        var plans: [BoundaryExtractionWindowPlan] = []
+
+        for (index, span) in candidateSpans.enumerated() {
+            // Select atoms that fall within the candidate span's time range
+            let spanAtoms = allAtoms.filter { atom in
+                atom.startTime >= span.startTime && atom.endTime <= span.endTime
+            }
+            guard !spanAtoms.isEmpty else { continue }
+
+            // Pre-segment into discourse units (2-8s each)
+            let units = DiscourseUnitSegmenter.segment(atoms: spanAtoms)
+            guard !units.isEmpty else { continue }
+
+            // Find evidence entries that overlap this span
+            let spanEvidence = evidenceCatalog.entries.filter { entry in
+                entry.coverageEndTime >= span.startTime &&
+                entry.coverageStartTime <= span.endTime
+            }
+
+            let prompt = Self.buildBoundaryExtractionPrompt(
+                discourseUnits: units,
+                evidenceEntries: spanEvidence,
+                redactor: redactor
+            )
+            let tokenCount = try await runtime.tokenCount(prompt)
+
+            plans.append(BoundaryExtractionWindowPlan(
+                windowIndex: index,
+                candidateSpanId: span.id,
+                discourseUnits: units,
+                prompt: prompt,
+                promptTokenCount: tokenCount,
+                startTime: span.startTime,
+                endTime: span.endTime,
+                evidenceRefs: spanEvidence
+            ))
+        }
+
+        return plans
+    }
+
+    // MARK: - B9: Structured boundary extraction (not yet wired into pipeline — coarsePassA/refinePassB retained as active path)
+
+    /// B9: Extract structured boundaries from suspicious regions using FM.
+    /// Each CandidateAdSpan from SpanHypothesisEngine becomes one FM call.
+    /// The FM returns per-discourse-unit role labels with commercial intent
+    /// and ownership metadata.
+    func extractBoundaries(
+        plans: [BoundaryExtractionWindowPlan],
+        candidateSpans: [CandidateAdSpan],
+        locale: Locale = .current
+    ) async throws -> FMBoundaryExtractionOutput {
+        let clock = ContinuousClock()
+        let start = clock.now
+
+        if let status = await runtime.availabilityStatus(locale) {
+            return FMBoundaryExtractionOutput(
+                status: status,
+                windows: [],
+                latencyMillis: 0,
+                prewarmHit: false
+            )
+        }
+
+        guard !plans.isEmpty else {
+            return FMBoundaryExtractionOutput(
+                status: .success,
+                windows: [],
+                latencyMillis: 0,
+                prewarmHit: false
+            )
+        }
+
+        let budget = try await promptBudget(
+            schemaTokens: runtime.boundarySchemaTokenCount,
+            maximumResponseTokens: config.refinementMaximumResponseTokens
+        )
+
+        // Build a lookup from candidateSpanId to CandidateAdSpan for
+        // contradiction guardrail checks.
+        let spanById = Dictionary(
+            candidateSpans.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        var windows: [FMBoundaryExtractionWindowOutput] = []
+        windows.reserveCapacity(plans.count)
+        var prewarmHit = false
+        var failedCount = 0
+
+        for plan in plans {
+            // Cooperative cancellation
+            try Task.checkCancellation()
+
+            if plan.promptTokenCount > budget {
+                failedCount += 1
+                logger.error(
+                    """
+                    fm.classifier.boundary_extraction_window_abandoned \
+                    window=\(plan.windowIndex, privacy: .public) \
+                    candidateSpan=\(plan.candidateSpanId, privacy: .public) \
+                    status=exceededContextWindow \
+                    tokenCount=\(plan.promptTokenCount, privacy: .public) \
+                    budget=\(budget, privacy: .public)
+                    """
+                )
+                continue
+            }
+
+            // Per Apple guidance: prewarm session before extraction
+            let perWindowBox = await makePrewarmedSessionBox(
+                promptPrefix: Self.boundaryExtractionPromptPrefix
+            )
+            prewarmHit = true
+
+            let windowStart = clock.now
+            do {
+                let schema = try await perWindowBox.respondBoundaryExtraction(plan.prompt)
+                let latency = Self.latencyMillis(since: windowStart, clock: clock)
+
+                // FM contradiction guardrail: if the FM returns a span
+                // that crosses a strong contradiction from the hypothesis
+                // engine, treat as uncertain.
+                let hadContradiction: Bool
+                if let candidate = spanById[plan.candidateSpanId] {
+                    hadContradiction = Self.checkContradiction(
+                        schema: schema,
+                        candidate: candidate,
+                        discourseUnits: plan.discourseUnits
+                    )
+                } else {
+                    hadContradiction = false
+                }
+
+                // Respect explicit abstain — not a failure, FM
+                // legitimately declined to label this region.
+                if schema.abstain {
+                    logger.debug(
+                        """
+                        fm.classifier.boundary_extraction_abstain \
+                        window=\(plan.windowIndex, privacy: .public) \
+                        candidateSpan=\(plan.candidateSpanId, privacy: .public)
+                        """
+                    )
+                    continue
+                }
+
+                windows.append(FMBoundaryExtractionWindowOutput(
+                    windowIndex: plan.windowIndex,
+                    candidateSpanId: plan.candidateSpanId,
+                    schema: schema,
+                    discourseUnits: plan.discourseUnits,
+                    latencyMillis: latency,
+                    hadContradiction: hadContradiction
+                ))
+            } catch {
+                failedCount += 1
+                let status = SemanticScanStatus.from(error: error)
+                logger.error(
+                    """
+                    fm.classifier.boundary_extraction_failed \
+                    window=\(plan.windowIndex, privacy: .public) \
+                    candidateSpan=\(plan.candidateSpanId, privacy: .public) \
+                    status=\(status.rawValue, privacy: .public) \
+                    error=\(String(describing: error), privacy: .private)
+                    """
+                )
+            }
+        }
+
+        // Status is .success unless every plan failed with an error
+        // (abstain is not a failure).
+        let topLevelStatus: SemanticScanStatus =
+            (failedCount > 0 && failedCount == plans.count) ? .failedTransient : .success
+
+        return FMBoundaryExtractionOutput(
+            status: topLevelStatus,
+            windows: windows,
+            latencyMillis: Self.latencyMillis(since: start, clock: clock),
+            prewarmHit: prewarmHit
+        )
+    }
+
+    // MARK: - B9 Prompt Construction
+
+    /// Build the boundary extraction prompt with one-shot examples.
+    /// Includes 1 positive host-read ad example and 1 negative lookalike.
+    static func buildBoundaryExtractionPrompt(
+        discourseUnits: [DiscourseUnit],
+        evidenceEntries: [EvidenceEntry],
+        redactor: PromptRedactor = .noop
+    ) -> String {
+        var lines: [String] = []
+
+        // One-shot examples (per B9 spec: 1 positive, 1 negative)
+        lines.append("""
+            Label each segment's role. Return a JSON object with a "spans" array and an "abstain" boolean.
+
+            Example 1 (host-read ad):
+            S0> "This episode is brought to you by FreshBox."
+            S1> "I've been using FreshBox for about three months now and the meals are actually really good."
+            S2> "Head to freshbox.com slash podcast for twenty percent off your first order."
+            Answer: {"spans":[{"firstSegmentRef":"S0","lastSegmentRef":"S0","role":"adIntro","commercialIntent":"strong","ownership":"thirdParty","evidenceRefs":[]},{"firstSegmentRef":"S1","lastSegmentRef":"S1","role":"adBody","commercialIntent":"strong","ownership":"thirdParty","evidenceRefs":[]},{"firstSegmentRef":"S2","lastSegmentRef":"S2","role":"adCTA","commercialIntent":"strong","ownership":"thirdParty","evidenceRefs":[]}],"abstain":false}
+
+            Example 2 (not an ad — show recommendation):
+            S0> "Before we go I wanted to mention our other show The Deep Dive."
+            S1> "It's a weekly interview format where we talk to scientists about their latest research."
+            S2> "You can find it wherever you get your podcasts."
+            Answer: {"spans":[{"firstSegmentRef":"S0","lastSegmentRef":"S2","role":"show","commercialIntent":"weak","ownership":"show","evidenceRefs":[]}],"abstain":false}
+
+            Now label the following segments:
+            """)
+
+        // Discourse units
+        for unit in discourseUnits {
+            let redacted = redactor.redact(line: unit.text)
+            lines.append("\(unit.ref)> \"\(escapedLine(redacted))\"")
+        }
+
+        // Evidence catalog
+        if !evidenceEntries.isEmpty {
+            lines.append("Evidence catalog:")
+            for entry in evidenceEntries {
+                let masked = redactor.redact(line: entry.matchedText)
+                lines.append("[E\(entry.evidenceRef)] \"\(masked)\" (\(entry.category.rawValue), \(entry.count > 1 ? "×\(entry.count), " : "")\(String(format: "%.0f", entry.firstTime))s–\(String(format: "%.0f", entry.lastTime))s)")
+            }
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    // MARK: - B9 Contradiction Guardrail
+
+    /// Check if any FM span crosses a strong contradiction from the
+    /// hypothesis engine. Returns true if a contradiction was detected.
+    static func checkContradiction(
+        schema: FMBoundarySchema,
+        candidate: CandidateAdSpan,
+        discourseUnits: [DiscourseUnit]
+    ) -> Bool {
+        // If the candidate has low confidence (< 0.4), any ad-role FM
+        // spans that extend beyond the candidate's time range are
+        // treated as contradictions — the hypothesis engine did not
+        // have strong evidence for those regions.
+        guard candidate.confidence < 0.4 else { return false }
+
+        let unitsByRef = Dictionary(
+            discourseUnits.map { ($0.ref, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        for span in schema.spans {
+            guard span.role != .show && span.role != .returnToShow else { continue }
+            guard let firstUnit = unitsByRef[span.firstSegmentRef],
+                  let lastUnit = unitsByRef[span.lastSegmentRef] else { continue }
+
+            // If the FM's ad span extends significantly beyond the
+            // hypothesis engine's candidate boundaries, flag it.
+            let fmStart = firstUnit.startTime
+            let fmEnd = lastUnit.endTime
+            let overlapStart = max(fmStart, candidate.startTime)
+            let overlapEnd = min(fmEnd, candidate.endTime)
+            let overlap = max(0, overlapEnd - overlapStart)
+            let fmDuration = max(0.001, fmEnd - fmStart)
+            let overlapRatio = overlap / fmDuration
+
+            if overlapRatio < 0.5 {
+                return true
+            }
+        }
+
+        return false
+    }
+
     // MARK: - bd-1my: outward expansion plan
     //
     // Build a `RefinementWindowPlan` for an arbitrary set of contiguous line
@@ -1537,6 +2090,8 @@ struct FoundationModelClassifier: Sendable {
             promptEvidence: promptEvidence
         )
     }
+
+    // MARK: - Legacy coarse/refine path (retained until extractBoundaries is wired into BackfillJobRunner — see B9 bead notes)
 
     func refinePassB(
         zoomPlans: [RefinementWindowPlan],
@@ -4019,6 +4574,11 @@ final actor SessionBox {
         try await session.respondRefinement(prompt)
     }
 
+    /// B9: boundary extraction response.
+    func respondBoundaryExtraction(_ prompt: String) async throws -> FMBoundarySchema {
+        try await session.respondBoundaryExtraction(prompt)
+    }
+
     /// bd-fmfb: invoke the underlying session's `logFeedbackAttachment` and
     /// return the captured `Data`. Returns `nil` for test runtimes that
     /// don't model a real session.
@@ -4084,6 +4644,17 @@ final actor LiveSessionActor {
         let response = try await session.respond(
             to: prompt,
             generating: RefinementWindowSchema.self,
+            includeSchemaInPrompt: false,
+            options: GenerationOptions(maximumResponseTokens: maximumResponseTokens)
+        )
+        return response.content
+    }
+
+    /// B9: boundary extraction using FMBoundarySchema.
+    func respondBoundaryExtraction(_ prompt: String, maximumResponseTokens: Int) async throws -> FMBoundarySchema {
+        let response = try await session.respond(
+            to: prompt,
+            generating: FMBoundarySchema.self,
             includeSchemaInPrompt: false,
             options: GenerationOptions(maximumResponseTokens: maximumResponseTokens)
         )
@@ -4176,6 +4747,16 @@ private extension FoundationModelClassifier {
                 }
                 return fallbackRefinementSchemaTokenEstimate
             },
+            boundarySchemaTokenCount: {
+                guard #available(iOS 26.0, *) else {
+                    return fallbackBoundarySchemaTokenEstimate
+                }
+                let model = SystemLanguageModel.default
+                if #available(iOS 26.4, *) {
+                    return try await model.tokenCount(for: FMBoundarySchema.generationSchema)
+                }
+                return fallbackBoundarySchemaTokenEstimate
+            },
             makeSession: {
                 guard #available(iOS 26.0, *) else {
                     return Runtime.Session(
@@ -4209,6 +4790,12 @@ private extension FoundationModelClassifier {
                             maximumResponseTokens: config.refinementMaximumResponseTokens
                         )
                     },
+                    respondBoundaryExtraction: { prompt in
+                        try await live.respondBoundaryExtraction(
+                            prompt,
+                            maximumResponseTokens: config.refinementMaximumResponseTokens
+                        )
+                    },
                     logFeedback: { desiredOutput, negative in
                         await live.logFeedback(desiredOutput: desiredOutput, negative: negative)
                     }
@@ -4222,6 +4809,7 @@ private extension FoundationModelClassifier {
             tokenCount: { prompt in fallbackTokenEstimate(for: prompt) },
             coarseSchemaTokenCount: { fallbackCoarseSchemaTokenEstimate },
             refinementSchemaTokenCount: { fallbackRefinementSchemaTokenEstimate },
+            boundarySchemaTokenCount: { fallbackBoundarySchemaTokenEstimate },
             makeSession: {
                 Runtime.Session(
                     prewarm: { _ in },
