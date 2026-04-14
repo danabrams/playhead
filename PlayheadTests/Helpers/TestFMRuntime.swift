@@ -17,27 +17,36 @@ import FoundationModels
 actor TestFMRuntime {
     private var coarseQueue: [CoarseScreeningSchema]
     private var refinementQueue: [RefinementWindowSchema]
+    private var boundaryExtractionQueue: [FMBoundarySchema]
     private var coarseFailureQueue: [TestFMRuntimeFailure?]
     private var refinementFailureQueue: [TestFMRuntimeFailure?]
+    private var boundaryExtractionFailureQueue: [TestFMRuntimeFailure?]
     private var coarsePrompts: [String] = []
     private var refinementPrompts: [String] = []
+    private var boundaryExtractionPrompts: [String] = []
     private let defaultCoarse: CoarseScreeningSchema
     private let defaultRefinement: RefinementWindowSchema
+    private let defaultBoundaryExtraction: FMBoundarySchema
     private let contextSizeValue: Int
     private let coarseSchemaTokenCountValue: Int
     private let refinementSchemaTokenCountValue: Int
+    private let boundarySchemaTokenCountValue: Int
     private let tokenCountRule: @Sendable (String) -> Int
     private(set) var coarseCallCount = 0
     private(set) var refinementCallCount = 0
+    private(set) var boundaryExtractionCallCount = 0
 
     init(
         coarseResponses: [CoarseScreeningSchema] = [],
         refinementResponses: [RefinementWindowSchema] = [],
+        boundaryExtractionResponses: [FMBoundarySchema] = [],
         coarseFailures: [TestFMRuntimeFailure?] = [],
         refinementFailures: [TestFMRuntimeFailure?] = [],
+        boundaryExtractionFailures: [TestFMRuntimeFailure?] = [],
         contextSize: Int = 4_096,
         coarseSchemaTokenCount: Int = 16,
         refinementSchemaTokenCount: Int = 32,
+        boundarySchemaTokenCount: Int = 32,
         tokenCountRule: @escaping @Sendable (String) -> Int = { prompt in
             max(1, prompt.split(whereSeparator: \.isWhitespace).count)
         },
@@ -45,18 +54,23 @@ actor TestFMRuntime {
             disposition: .noAds,
             support: nil
         ),
-        defaultRefinement: RefinementWindowSchema = RefinementWindowSchema(spans: [])
+        defaultRefinement: RefinementWindowSchema = RefinementWindowSchema(spans: []),
+        defaultBoundaryExtraction: FMBoundarySchema = FMBoundarySchema(spans: [], abstain: false)
     ) {
         self.coarseQueue = coarseResponses
         self.refinementQueue = refinementResponses
+        self.boundaryExtractionQueue = boundaryExtractionResponses
         self.coarseFailureQueue = coarseFailures
         self.refinementFailureQueue = refinementFailures
+        self.boundaryExtractionFailureQueue = boundaryExtractionFailures
         self.contextSizeValue = contextSize
         self.coarseSchemaTokenCountValue = coarseSchemaTokenCount
         self.refinementSchemaTokenCountValue = refinementSchemaTokenCount
+        self.boundarySchemaTokenCountValue = boundarySchemaTokenCount
         self.tokenCountRule = tokenCountRule
         self.defaultCoarse = defaultCoarse
         self.defaultRefinement = defaultRefinement
+        self.defaultBoundaryExtraction = defaultBoundaryExtraction
     }
 
     nonisolated var runtime: FoundationModelClassifier.Runtime {
@@ -68,11 +82,13 @@ actor TestFMRuntime {
             },
             coarseSchemaTokenCount: { self.coarseSchemaTokenCountValue },
             refinementSchemaTokenCount: { self.refinementSchemaTokenCountValue },
+            boundarySchemaTokenCount: { self.boundarySchemaTokenCountValue },
             makeSession: {
                 FoundationModelClassifier.Runtime.Session(
                     prewarm: { _ in },
                     respondCoarse: { prompt in try await self.nextCoarse(prompt: prompt) },
-                    respondRefinement: { prompt in try await self.nextRefinement(prompt: prompt) }
+                    respondRefinement: { prompt in try await self.nextRefinement(prompt: prompt) },
+                    respondBoundaryExtraction: { prompt in try await self.nextBoundaryExtraction(prompt: prompt) }
                 )
             }
         )
@@ -110,6 +126,21 @@ actor TestFMRuntime {
             return defaultRefinement
         }
         return refinementQueue.removeFirst()
+    }
+
+    private func nextBoundaryExtraction(prompt: String) throws -> FMBoundarySchema {
+        boundaryExtractionPrompts.append(prompt)
+        boundaryExtractionCallCount += 1
+        if !boundaryExtractionFailureQueue.isEmpty {
+            let failure = boundaryExtractionFailureQueue.removeFirst()
+            if let failure {
+                throw failure.error
+            }
+        }
+        if boundaryExtractionQueue.isEmpty {
+            return defaultBoundaryExtraction
+        }
+        return boundaryExtractionQueue.removeFirst()
     }
 
     /// Rev4-L2: exposed for adversarial-input regression tests.

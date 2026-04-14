@@ -257,6 +257,7 @@ private func makeStubRuntime() -> FoundationModelClassifier.Runtime {
         },
         coarseSchemaTokenCount: { 4 },
         refinementSchemaTokenCount: { 8 },
+        boundarySchemaTokenCount: { 8 },
         makeSession: {
             FoundationModelClassifier.Runtime.Session(
                 prewarm: { _ in },

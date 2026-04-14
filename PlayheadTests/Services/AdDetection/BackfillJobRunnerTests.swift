@@ -761,6 +761,7 @@ struct BackfillJobRunnerTests {
             },
             coarseSchemaTokenCount: { 16 },
             refinementSchemaTokenCount: { 32 },
+            boundarySchemaTokenCount: { 32 },
             makeSession: {
                 FoundationModelClassifier.Runtime.Session(
                     prewarm: { _ in },
@@ -1084,6 +1085,7 @@ struct BackfillJobRunnerTests {
             tokenCount: { _ in throw CoarseFailure() },
             coarseSchemaTokenCount: { 16 },
             refinementSchemaTokenCount: { 32 },
+            boundarySchemaTokenCount: { 32 },
             makeSession: {
                 FoundationModelClassifier.Runtime.Session(
                     prewarm: { _ in },
@@ -2330,6 +2332,7 @@ private actor WindowedTestFMRuntime {
             },
             coarseSchemaTokenCount: { 4 },
             refinementSchemaTokenCount: { 8 },
+            boundarySchemaTokenCount: { 8 },
             makeSession: {
                 FoundationModelClassifier.Runtime.Session(
                     prewarm: { _ in },
