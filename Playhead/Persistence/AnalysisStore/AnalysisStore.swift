@@ -606,6 +606,32 @@ actor AnalysisStore {
                 column: "musicBedChangeScore",
                 definition: "REAL NOT NULL DEFAULT 0"
             )
+            // B10: Fingerprint full-span recovery fields.
+            try addColumnIfNeeded(
+                table: "ad_copy_fingerprints",
+                column: "spanStartOffset",
+                definition: "REAL NOT NULL DEFAULT 0"
+            )
+            try addColumnIfNeeded(
+                table: "ad_copy_fingerprints",
+                column: "spanEndOffset",
+                definition: "REAL NOT NULL DEFAULT 0"
+            )
+            try addColumnIfNeeded(
+                table: "ad_copy_fingerprints",
+                column: "spanDurationSeconds",
+                definition: "REAL NOT NULL DEFAULT 0"
+            )
+            try addColumnIfNeeded(
+                table: "ad_copy_fingerprints",
+                column: "canonicalSponsorEntity",
+                definition: "TEXT"
+            )
+            try addColumnIfNeeded(
+                table: "ad_copy_fingerprints",
+                column: "anchorLandmarks",
+                definition: "TEXT"
+            )
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -5162,8 +5188,10 @@ actor AnalysisStore {
             INSERT INTO ad_copy_fingerprints
             (id, podcastId, fingerprintHash, normalizedText, state,
              confirmationCount, rollbackCount, firstSeenAt, lastConfirmedAt,
-             lastRollbackAt, decayedAt, blockedAt, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             lastRollbackAt, decayedAt, blockedAt, metadata,
+             spanStartOffset, spanEndOffset, spanDurationSeconds,
+             canonicalSponsorEntity, anchorLandmarks)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(podcastId, fingerprintHash) DO UPDATE SET
                 normalizedText = excluded.normalizedText,
                 state = excluded.state,
@@ -5173,7 +5201,12 @@ actor AnalysisStore {
                 lastRollbackAt = excluded.lastRollbackAt,
                 decayedAt = excluded.decayedAt,
                 blockedAt = excluded.blockedAt,
-                metadata = excluded.metadata
+                metadata = excluded.metadata,
+                spanStartOffset = excluded.spanStartOffset,
+                spanEndOffset = excluded.spanEndOffset,
+                spanDurationSeconds = excluded.spanDurationSeconds,
+                canonicalSponsorEntity = excluded.canonicalSponsorEntity,
+                anchorLandmarks = excluded.anchorLandmarks
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -5191,6 +5224,12 @@ actor AnalysisStore {
         bind(stmt, 12, entry.blockedAt)
         let metadataJSON = try encodeJSONString(entry.metadata)
         bind(stmt, 13, metadataJSON)
+        bind(stmt, 14, entry.spanStartOffset)
+        bind(stmt, 15, entry.spanEndOffset)
+        bind(stmt, 16, entry.spanDurationSeconds)
+        bind(stmt, 17, entry.canonicalSponsorEntity?.value)
+        let landmarksJSON = try encodeJSONString(entry.anchorLandmarks.isEmpty ? nil : entry.anchorLandmarks)
+        bind(stmt, 18, landmarksJSON)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -5202,7 +5241,9 @@ actor AnalysisStore {
         let sql = """
             SELECT id, podcastId, fingerprintHash, normalizedText, state,
                    confirmationCount, rollbackCount, firstSeenAt, lastConfirmedAt,
-                   lastRollbackAt, decayedAt, blockedAt, metadata
+                   lastRollbackAt, decayedAt, blockedAt, metadata,
+                   spanStartOffset, spanEndOffset, spanDurationSeconds,
+                   canonicalSponsorEntity, anchorLandmarks
             FROM ad_copy_fingerprints
             WHERE podcastId = ? AND fingerprintHash = ?
             """
@@ -5224,7 +5265,9 @@ actor AnalysisStore {
         let sql = """
             SELECT id, podcastId, fingerprintHash, normalizedText, state,
                    confirmationCount, rollbackCount, firstSeenAt, lastConfirmedAt,
-                   lastRollbackAt, decayedAt, blockedAt, metadata
+                   lastRollbackAt, decayedAt, blockedAt, metadata,
+                   spanStartOffset, spanEndOffset, spanDurationSeconds,
+                   canonicalSponsorEntity, anchorLandmarks
             FROM ad_copy_fingerprints
             WHERE podcastId = ? AND state = ?
             ORDER BY firstSeenAt ASC
@@ -5251,7 +5294,9 @@ actor AnalysisStore {
         let sql = """
             SELECT id, podcastId, fingerprintHash, normalizedText, state,
                    confirmationCount, rollbackCount, firstSeenAt, lastConfirmedAt,
-                   lastRollbackAt, decayedAt, blockedAt, metadata
+                   lastRollbackAt, decayedAt, blockedAt, metadata,
+                   spanStartOffset, spanEndOffset, spanDurationSeconds,
+                   canonicalSponsorEntity, anchorLandmarks
             FROM ad_copy_fingerprints
             WHERE podcastId = ?
             ORDER BY firstSeenAt ASC
@@ -5292,6 +5337,16 @@ actor AnalysisStore {
 
         let metadata: [String: String]? = try decodeJSON([String: String].self, from: metadataJSON)
 
+        // B10: Read span offset columns (indices 13-17).
+        let spanStartOffset = sqlite3_column_double(stmt, 13)
+        let spanEndOffset = sqlite3_column_double(stmt, 14)
+        let spanDurationSeconds = sqlite3_column_double(stmt, 15)
+        let canonicalSponsorEntityRaw = optionalText(stmt, 16)
+        let anchorLandmarksJSON = optionalText(stmt, 17)
+
+        let canonicalSponsorEntity: NormalizedSponsor? = canonicalSponsorEntityRaw.map { NormalizedSponsor($0) }
+        let anchorLandmarks: [AnchorLandmark] = (try decodeJSON([AnchorLandmark].self, from: anchorLandmarksJSON)) ?? []
+
         return FingerprintEntry(
             id: id,
             podcastId: podcastId,
@@ -5305,7 +5360,12 @@ actor AnalysisStore {
             lastRollbackAt: lastRollbackAt,
             decayedAt: decayedAt,
             blockedAt: blockedAt,
-            metadata: metadata
+            metadata: metadata,
+            spanStartOffset: spanStartOffset,
+            spanEndOffset: spanEndOffset,
+            spanDurationSeconds: spanDurationSeconds,
+            canonicalSponsorEntity: canonicalSponsorEntity,
+            anchorLandmarks: anchorLandmarks
         )
     }
 
@@ -5346,7 +5406,12 @@ actor AnalysisStore {
                 lastRollbackAt: existing.lastRollbackAt,
                 decayedAt: newState == .decayed ? now : existing.decayedAt,
                 blockedAt: newState == .blocked ? now : existing.blockedAt,
-                metadata: existing.metadata
+                metadata: existing.metadata,
+                spanStartOffset: existing.spanStartOffset,
+                spanEndOffset: existing.spanEndOffset,
+                spanDurationSeconds: existing.spanDurationSeconds,
+                canonicalSponsorEntity: existing.canonicalSponsorEntity,
+                anchorLandmarks: existing.anchorLandmarks
             )
             try upsertFingerprintEntry(updated)
             return (fingerprintHash, updated)
@@ -5374,7 +5439,12 @@ actor AnalysisStore {
                     lastRollbackAt: entry.lastRollbackAt,
                     decayedAt: newState == .decayed ? now : entry.decayedAt,
                     blockedAt: newState == .blocked ? now : entry.blockedAt,
-                    metadata: entry.metadata
+                    metadata: entry.metadata,
+                    spanStartOffset: entry.spanStartOffset,
+                    spanEndOffset: entry.spanEndOffset,
+                    spanDurationSeconds: entry.spanDurationSeconds,
+                    canonicalSponsorEntity: entry.canonicalSponsorEntity,
+                    anchorLandmarks: entry.anchorLandmarks
                 )
                 try upsertFingerprintEntry(updated)
                 return (entry.fingerprintHash, updated)
@@ -5422,7 +5492,12 @@ actor AnalysisStore {
             lastRollbackAt: now,
             decayedAt: newState == .decayed ? now : existing.decayedAt,
             blockedAt: newState == .blocked ? now : existing.blockedAt,
-            metadata: existing.metadata
+            metadata: existing.metadata,
+            spanStartOffset: existing.spanStartOffset,
+            spanEndOffset: existing.spanEndOffset,
+            spanDurationSeconds: existing.spanDurationSeconds,
+            canonicalSponsorEntity: existing.canonicalSponsorEntity,
+            anchorLandmarks: existing.anchorLandmarks
         )
         try upsertFingerprintEntry(updated)
     }
