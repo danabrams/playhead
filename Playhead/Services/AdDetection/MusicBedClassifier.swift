@@ -109,7 +109,9 @@ enum MusicBedClassifier {
         spectralFlux: Double,
         config: MusicDetectionConfig = .default
     ) -> Classification {
-        precondition(config.isValid, "MusicDetectionConfig has unsupported windowDuration \(config.windowDuration)")
+        assert(config.isValid, "MusicDetectionConfig has unsupported windowDuration \(config.windowDuration)")
+        // Graceful fallback in release builds if config is invalid.
+        guard config.isValid else { return Classification(level: .none, onsetScore: 0, offsetScore: 0, changeScore: 0) }
         let level = classifyLevel(
             musicProbability: musicProbability,
             rms: rms,

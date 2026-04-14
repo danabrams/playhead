@@ -165,7 +165,8 @@ struct ValidatedSpeakerLabelProvider: SpeakerLabelProvider {
     }
 
     func speakerChanges(startTime: Double, endTime: Double) -> [SpeakerChangeEvent] {
-        changes.filter { $0.time >= startTime && $0.time <= endTime }
+        // Half-open range [startTime, endTime) — consistent with speakerLabels overlap semantics.
+        changes.filter { $0.time >= startTime && $0.time < endTime }
     }
 
     func speakerChangeProxyScore(
@@ -178,10 +179,8 @@ struct ValidatedSpeakerLabelProvider: SpeakerLabelProvider {
         let windowStart = window.startTime
         let windowEnd = window.endTime
 
-        // Direct hit: speaker change in this window.
-        let directHit = changes.contains { change in
-            change.time >= windowStart && change.time <= windowEnd
-        }
+        // Direct hit: speaker change in this window (binary search on sorted changes).
+        let directHit = hasChangeInRange(start: windowStart, end: windowEnd)
         if directHit { return 1.0 }
 
         // Smoothing: check adjacent windows for turn boundaries.
@@ -189,30 +188,58 @@ struct ValidatedSpeakerLabelProvider: SpeakerLabelProvider {
         let smoothingWeight = Self.adjacentWindowSmoothingWeight
 
         if let prev = previousWindow {
-            let prevHit = changes.contains { change in
-                change.time >= prev.startTime && change.time <= prev.endTime
+            if hasChangeInRange(start: prev.startTime, end: prev.endTime) {
+                return smoothingWeight
             }
-            if prevHit { return smoothingWeight }
         }
 
         if let next = nextWindow {
-            let nextHit = changes.contains { change in
-                change.time >= next.startTime && change.time <= next.endTime
+            if hasChangeInRange(start: next.startTime, end: next.endTime) {
+                return smoothingWeight
             }
-            if nextHit { return smoothingWeight }
         }
 
         return 0.0
     }
 
     func speakerId(at time: Double) -> Int? {
-        // Find the label that covers this time. Labels are sorted by startTime.
-        labels.last { label in
-            label.startTime <= time && label.endTime > time
-        }?.speakerId
+        // Binary search: find the last label whose startTime <= time,
+        // then check if the time falls within that label's range.
+        // Labels are sorted by startTime, so we can partition efficiently.
+        guard !labels.isEmpty else { return nil }
+        var lo = 0, hi = labels.count
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2
+            if labels[mid].startTime <= time {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        // lo is now the first index where startTime > time; check lo-1.
+        guard lo > 0 else { return nil }
+        let candidate = labels[lo - 1]
+        return (candidate.startTime <= time && candidate.endTime > time) ? candidate.speakerId : nil
     }
 
     // MARK: - Private
+
+    /// Binary search: returns true if any change falls in [start, end).
+    private func hasChangeInRange(start: Double, end: Double) -> Bool {
+        guard !changes.isEmpty else { return false }
+        // Find first change with time >= start via binary search.
+        var lo = 0, hi = changes.count
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2
+            if changes[mid].time < start {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        // lo is the first index where time >= start; check if it's < end.
+        return lo < changes.count && changes[lo].time < end
+    }
 
     private static func computeChanges(from sortedLabels: [SpeakerLabel]) -> [SpeakerChangeEvent] {
         guard sortedLabels.count >= 2 else { return [] }
@@ -222,7 +249,10 @@ struct ValidatedSpeakerLabelProvider: SpeakerLabelProvider {
             let prev = sortedLabels[i - 1]
             let curr = sortedLabels[i]
             // A speaker change occurs when the speaker ID differs between
-            // adjacent labels.
+            // adjacent labels. Note: nil == nil evaluates to true, so two
+            // adjacent unknown-speaker segments produce no change event. This
+            // is a deliberate simplification — sparse nil gaps from ASR are
+            // not expected in the iOS 26 speaker label API.
             if prev.speakerId != curr.speakerId {
                 changes.append(SpeakerChangeEvent(
                     time: curr.startTime,

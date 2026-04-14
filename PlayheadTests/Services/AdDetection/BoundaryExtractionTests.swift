@@ -1214,4 +1214,57 @@ struct BoundaryExtractionIntegrationTests {
         #expect(plans[0].candidateSpanId == "span-a")
         #expect(plans[1].candidateSpanId == "span-b")
     }
+
+    @Test("boundary-straddling atoms are included via overlap filtering")
+    func boundaryStraddlingAtomsIncluded() async throws {
+        // Atom at [9.0, 11.5] straddles the span start (10.0)
+        // Atom at [19.5, 21.0] straddles the span end (20.0)
+        // Both should be included with overlap-based filtering.
+        let atoms = [
+            makeAtom(ordinal: 0, start: 9.0, end: 11.5, text: "brought to you by"),
+            makeAtom(ordinal: 1, start: 11.5, end: 14.0, text: "squarespace"),
+            makeAtom(ordinal: 2, start: 14.0, end: 17.0, text: "build your website"),
+            makeAtom(ordinal: 3, start: 17.0, end: 19.5, text: "go to squarespace dot com"),
+            makeAtom(ordinal: 4, start: 19.5, end: 21.0, text: "for twenty percent off"),
+        ]
+        let segments = [AdTranscriptSegment(
+            atoms: atoms,
+            segmentIndex: 0,
+            boundaryReason: .startOfTranscript,
+            boundaryConfidence: 1.0,
+            segmentType: .speech
+        )]
+
+        let span = CandidateAdSpan(
+            id: "span-straddle",
+            analysisAssetId: "test-asset",
+            startTime: 10.0,
+            endTime: 20.0,
+            confidence: 0.8,
+            evidenceScore: 3.0,
+            anchorType: .disclosure,
+            sponsorEntity: nil,
+            isSkipEligible: true,
+            evidenceText: "test",
+            closingReason: .explicitClose
+        )
+
+        let testRuntime = TestFMRuntime()
+        let classifier = FoundationModelClassifier(runtime: testRuntime.runtime)
+
+        let plans = try await classifier.planBoundaryExtractionWindows(
+            candidateSpans: [span],
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "test-asset",
+                transcriptVersion: "v1",
+                entries: []
+            )
+        )
+
+        #expect(plans.count == 1)
+        // All 5 atoms should be included (overlap-based, not strict containment)
+        let totalAtoms = plans[0].discourseUnits.reduce(0) { $0 + $1.atoms.count }
+        #expect(totalAtoms == 5)
+    }
 }

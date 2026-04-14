@@ -815,4 +815,96 @@ struct UserMarkedFingerprintSeedingTests {
         #expect(events[0].confidence == 0.85)
         #expect(events[0].sourceAdWindowId == "window-prov")
     }
+
+    // MARK: - Negative adStartTime clamping
+
+    @Test("Transfer clamps adStartTime to zero when spanStartOffset exceeds match start")
+    func negativeAdStartTimeClamped() {
+        let entry = makeEntryWithSpan(
+            spanStartOffset: 15.0,
+            spanEndOffset: 5.0,
+            spanDurationSeconds: 25.0,
+            anchorLandmarks: []
+        )
+        // match.startTime (5.0) < entry.spanStartOffset (15.0)
+        // would produce adStartTime = -10.0 without clamp
+        let match = FingerprintMatch(
+            firstAtomOrdinal: 0,
+            lastAtomOrdinal: 5,
+            fingerprintId: entry.id,
+            similarity: 0.7,
+            startTime: 5.0,
+            endTime: 20.0,
+            matchStrength: .normal
+        )
+        let transferred = AdCopyFingerprintMatcher.transferSpanBoundary(
+            match: match,
+            entry: entry,
+            episodeAnchors: []
+        )
+        #expect(transferred != nil)
+        #expect(transferred?.adStartTime == 0.0)  // clamped, not -10.0
+        #expect(transferred?.adEndTime == 25.0)    // 20 + 5
+    }
+
+    @Test("Transfer with zero match start and large spanStartOffset clamps to zero")
+    func zeroMatchStartClamped() {
+        let entry = makeEntryWithSpan(
+            spanStartOffset: 30.0,
+            spanEndOffset: 5.0,
+            spanDurationSeconds: 50.0,
+            anchorLandmarks: []
+        )
+        let match = FingerprintMatch(
+            firstAtomOrdinal: 0,
+            lastAtomOrdinal: 3,
+            fingerprintId: entry.id,
+            similarity: 0.65,
+            startTime: 0.0,
+            endTime: 15.0,
+            matchStrength: .normal
+        )
+        let transferred = AdCopyFingerprintMatcher.transferSpanBoundary(
+            match: match,
+            entry: entry,
+            episodeAnchors: []
+        )
+        #expect(transferred != nil)
+        #expect(transferred?.adStartTime == 0.0)
+    }
+
+    @Test("Transfer returns nil for zero-duration span (adEndTime == adStartTime)")
+    func zeroDurationTransferReturnsNil() {
+        // spanStartOffset = 10, spanEndOffset = 0, match at [10, 20]
+        // adStartTime = max(0, 10 - 10) = 0, adEndTime = 20 + 0 = 20 → valid
+        // But with a degenerate case: match at [10, 10], offsets [10, 0]
+        // adStartTime = 0, adEndTime = 10 → still valid (end > start)
+        // For true zero-duration: match at [5, 5], offsets [5, 0]
+        // adStartTime = 0, adEndTime = 5 → valid
+        // For actual equal: match [10, 10], offsets [10, -10] — but offsets
+        // can't be negative. Use entry where after clamp start == end.
+        // Simplest: match [0, 0], spanStartOffset=0, spanEndOffset=0
+        let entry = makeEntryWithSpan(
+            spanStartOffset: 0,
+            spanEndOffset: 0,
+            spanDurationSeconds: 5.0,
+            anchorLandmarks: []
+        )
+        let match = FingerprintMatch(
+            firstAtomOrdinal: 0,
+            lastAtomOrdinal: 0,
+            fingerprintId: entry.id,
+            similarity: 0.7,
+            startTime: 0.0,
+            endTime: 0.0,
+            matchStrength: .normal
+        )
+        let transferred = AdCopyFingerprintMatcher.transferSpanBoundary(
+            match: match,
+            entry: entry,
+            episodeAnchors: []
+        )
+        // adStartTime = 0, adEndTime = 0 → guard adEndTime > adStartTime fails → nil
+        #expect(transferred == nil)
+    }
 }

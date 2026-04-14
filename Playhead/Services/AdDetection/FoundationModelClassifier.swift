@@ -352,7 +352,8 @@ extension DiscourseUnit: Equatable {
         lhs.ref == rhs.ref &&
         lhs.atoms.count == rhs.atoms.count &&
         lhs.startTime == rhs.startTime &&
-        lhs.endTime == rhs.endTime
+        lhs.endTime == rhs.endTime &&
+        lhs.text == rhs.text
     }
 }
 
@@ -1746,9 +1747,10 @@ struct FoundationModelClassifier: Sendable {
         var plans: [BoundaryExtractionWindowPlan] = []
 
         for (index, span) in candidateSpans.enumerated() {
-            // Select atoms that fall within the candidate span's time range
+            // Select atoms that overlap the candidate span's time range
+            // (overlap-based, not strict containment, so boundary atoms aren't dropped)
             let spanAtoms = allAtoms.filter { atom in
-                atom.startTime >= span.startTime && atom.endTime <= span.endTime
+                atom.endTime > span.startTime && atom.startTime < span.endTime
             }
             guard !spanAtoms.isEmpty else { continue }
 
@@ -1756,10 +1758,11 @@ struct FoundationModelClassifier: Sendable {
             let units = DiscourseUnitSegmenter.segment(atoms: spanAtoms)
             guard !units.isEmpty else { continue }
 
-            // Find evidence entries that overlap this span
+            // Find evidence entries that overlap this span (same open-interval
+            // semantics as atom filtering: entry.end > span.start && entry.start < span.end)
             let spanEvidence = evidenceCatalog.entries.filter { entry in
-                entry.coverageEndTime >= span.startTime &&
-                entry.coverageStartTime <= span.endTime
+                entry.coverageEndTime > span.startTime &&
+                entry.coverageStartTime < span.endTime
             }
 
             let prompt = Self.buildBoundaryExtractionPrompt(
@@ -4651,11 +4654,15 @@ final actor LiveSessionActor {
     }
 
     /// B9: boundary extraction using FMBoundarySchema.
+    /// Uses `includeSchemaInPrompt: true` because the session-level Instructions
+    /// contain a refinement one-shot example (different schema shape). The
+    /// framework-injected schema ensures the FM produces FMBoundarySchema output,
+    /// while the per-call prompt provides its own boundary-specific one-shot examples.
     func respondBoundaryExtraction(_ prompt: String, maximumResponseTokens: Int) async throws -> FMBoundarySchema {
         let response = try await session.respond(
             to: prompt,
             generating: FMBoundarySchema.self,
-            includeSchemaInPrompt: false,
+            includeSchemaInPrompt: true,
             options: GenerationOptions(maximumResponseTokens: maximumResponseTokens)
         )
         return response.content
@@ -4766,6 +4773,9 @@ private extension FoundationModelClassifier {
                         },
                         respondRefinement: { _ in
                             throw FoundationModelClassifierError.runtimeUnavailable("Foundation Models require iOS 26 or newer.")
+                        },
+                        respondBoundaryExtraction: { _ in
+                            throw FoundationModelClassifierError.runtimeUnavailable("Foundation Models require iOS 26 or newer.")
                         }
                     )
                 }
@@ -4817,6 +4827,9 @@ private extension FoundationModelClassifier {
                         throw FoundationModelClassifierError.runtimeUnavailable("FoundationModels framework not available.")
                     },
                     respondRefinement: { _ in
+                        throw FoundationModelClassifierError.runtimeUnavailable("FoundationModels framework not available.")
+                    },
+                    respondBoundaryExtraction: { _ in
                         throw FoundationModelClassifierError.runtimeUnavailable("FoundationModels framework not available.")
                     }
                 )

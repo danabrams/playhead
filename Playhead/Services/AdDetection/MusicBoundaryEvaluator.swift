@@ -153,6 +153,9 @@ struct MusicBoundaryEvaluator: Sendable {
         var falsePositives = 0
 
         // Sort detected by score descending for greedy matching.
+        // Note: matching is level-agnostic — a foreground detection can match
+        // a background ground-truth entry if direction and time match. This is
+        // intentional: boundary timing evaluation is separate from level accuracy.
         let sortedDetected = detected.sorted { $0.score > $1.score }
 
         for det in sortedDetected {

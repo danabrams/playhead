@@ -447,4 +447,74 @@ struct SpeakerLabelProviderTests {
             sourceLocation: sourceLocation
         )
     }
+
+    // MARK: - Edge cases (review cycle fixes)
+
+    @Test("validated provider handles unsorted input")
+    func validatedProviderSortsUnsortedInput() {
+        // Labels passed out of order should be sorted internally.
+        let provider = ValidatedSpeakerLabelProvider(labels: [
+            SpeakerLabel(speakerId: 1, startTime: 30, endTime: 60),
+            SpeakerLabel(speakerId: 0, startTime: 0, endTime: 30),
+        ])
+        let labels = provider.speakerLabels(startTime: 0, endTime: 60)
+        #expect(labels.count == 2)
+        #expect(labels[0].startTime == 0)
+        #expect(labels[1].startTime == 30)
+        // Changes should still be computed correctly.
+        let changes = provider.speakerChanges(startTime: 0, endTime: 60)
+        #expect(changes.count == 1)
+        #expect(changes[0].fromSpeakerId == 0)
+        #expect(changes[0].toSpeakerId == 1)
+    }
+
+    @Test("single-label provider produces zero changes")
+    func singleLabelProviderZeroChanges() {
+        let provider = ValidatedSpeakerLabelProvider(labels: [
+            SpeakerLabel(speakerId: 0, startTime: 0, endTime: 60),
+        ])
+        let changes = provider.speakerChanges(startTime: 0, endTime: 60)
+        #expect(changes.isEmpty)
+    }
+
+    @Test("speakerId returns nil for time in gap between labels")
+    func speakerIdReturnsNilInGap() {
+        let provider = ValidatedSpeakerLabelProvider(labels: [
+            SpeakerLabel(speakerId: 0, startTime: 0, endTime: 10),
+            SpeakerLabel(speakerId: 1, startTime: 20, endTime: 30),
+        ])
+        // Time 15.0 falls in the gap between labels.
+        #expect(provider.speakerId(at: 15.0) == nil)
+    }
+
+    @Test("speakerId returns nil for time before first label")
+    func speakerIdReturnsNilBeforeFirstLabel() {
+        let provider = ValidatedSpeakerLabelProvider(labels: [
+            SpeakerLabel(speakerId: 0, startTime: 10, endTime: 30),
+        ])
+        #expect(provider.speakerId(at: 5.0) == nil)
+    }
+
+    @Test("speakerLabels returns empty for range matching no labels")
+    func speakerLabelsEmptyForNoMatch() {
+        let provider = ValidatedSpeakerLabelProvider(labels: [
+            SpeakerLabel(speakerId: 0, startTime: 50, endTime: 60),
+        ])
+        let labels = provider.speakerLabels(startTime: 0, endTime: 10)
+        #expect(labels.isEmpty)
+    }
+
+    @Test("speakerChanges uses half-open range consistent with speakerLabels")
+    func speakerChangesHalfOpenRange() {
+        let provider = ValidatedSpeakerLabelProvider(labels: [
+            SpeakerLabel(speakerId: 0, startTime: 0, endTime: 10),
+            SpeakerLabel(speakerId: 1, startTime: 10, endTime: 20),
+            SpeakerLabel(speakerId: 2, startTime: 20, endTime: 30),
+        ])
+        // Change at t=10 should be IN [10, 20) but NOT in [0, 10).
+        let changesExcluding = provider.speakerChanges(startTime: 0, endTime: 10)
+        #expect(changesExcluding.isEmpty)
+        let changesIncluding = provider.speakerChanges(startTime: 10, endTime: 20)
+        #expect(changesIncluding.count == 1)
+    }
 }

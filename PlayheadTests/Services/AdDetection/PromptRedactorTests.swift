@@ -269,13 +269,18 @@ struct PromptRedactorTests {
 
     // MARK: - B11: TypedRedactionPass suffix letter generation
 
-    @Test("suffixLetter produces A-Z then AA for indices 0-26")
+    @Test("suffixLetter produces A-Z then AA-AZ then BA for bijective base-26")
     func suffixLetterGeneration() {
         #expect(PromptRedactor.TypedRedactionPass.suffixLetter(for: 0) == "A")
         #expect(PromptRedactor.TypedRedactionPass.suffixLetter(for: 1) == "B")
         #expect(PromptRedactor.TypedRedactionPass.suffixLetter(for: 25) == "Z")
         #expect(PromptRedactor.TypedRedactionPass.suffixLetter(for: 26) == "AA")
         #expect(PromptRedactor.TypedRedactionPass.suffixLetter(for: 27) == "AB")
+        // Extended range: AZ, BA, ZZ, AAA boundaries
+        #expect(PromptRedactor.TypedRedactionPass.suffixLetter(for: 51) == "AZ")
+        #expect(PromptRedactor.TypedRedactionPass.suffixLetter(for: 52) == "BA")
+        #expect(PromptRedactor.TypedRedactionPass.suffixLetter(for: 701) == "ZZ")
+        #expect(PromptRedactor.TypedRedactionPass.suffixLetter(for: 702) == "AAA")
     }
 
     @Test("empty string returns empty without crashing")
@@ -284,6 +289,20 @@ struct PromptRedactorTests {
         let pass = PromptRedactor.TypedRedactionPass()
         let out = redactor.redact(line: "", policy: .typed, pass: pass)
         #expect(out == "")
+    }
+
+    @Test("case-insensitive sponsor entity handles map to same suffix")
+    func caseInsensitiveSponsorHandles() {
+        let redactor = makeFixtureRedactor()
+        let pass = PromptRedactor.TypedRedactionPass()
+        // "Ozempic" and "OZEMPIC" should both map to [DRUG_A]
+        let out1 = redactor.redact(line: "Ozempic is great.", policy: .typed, pass: pass)
+        let out2 = redactor.redact(line: "OZEMPIC is great.", policy: .typed, pass: pass)
+        #expect(out1 == "[DRUG_A] is great.")
+        #expect(out2 == "[DRUG_A] is great.")
+        // Verify the handle preserves original casing from first occurrence
+        let handles = pass.sponsorEntityHandles
+        #expect(handles["ozempic"]?.originalText == "Ozempic")
     }
 
     // MARK: - FoundationModelClassifier integration

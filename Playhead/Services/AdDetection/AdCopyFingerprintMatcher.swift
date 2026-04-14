@@ -33,6 +33,11 @@ struct AnchorAlignmentResult: Sendable, Equatable {
 // MARK: - Transferred span boundary
 
 /// Full ad span boundaries transferred from a fingerprint match.
+///
+/// **Important:** For normal-strength matches, `alignment.isValid` may be `false`.
+/// Callers must check `alignment.isValid` before acting on transferred boundaries
+/// from normal matches — use them only to seed hypotheses for SpanHypothesisEngine
+/// verification, not for direct boundary adoption.
 struct TransferredSpanBoundary: Sendable, Equatable {
     /// Computed full ad start time in episode seconds.
     let adStartTime: Double
@@ -216,7 +221,7 @@ enum AdCopyFingerprintMatcher {
             return nil
         }
 
-        let adStartTime = match.startTime - entry.spanStartOffset
+        let adStartTime = max(0, match.startTime - entry.spanStartOffset)
         let adEndTime = match.endTime + entry.spanEndOffset
 
         // Sanity: ad end must be after ad start, and duration must be reasonable.

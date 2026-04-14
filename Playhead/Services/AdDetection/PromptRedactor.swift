@@ -88,10 +88,14 @@ public struct PromptRedactor: Sendable {
         /// Returns the typed placeholder for `original` within `category`.
         /// First unique string gets `_A`, second gets `_B`, etc.
         /// Same string always maps to the same suffix within a pass.
+        /// Category must be bracket-wrapped (e.g. `"[DRUG]"`).
         func placeholder(for original: String, category: String) -> String {
             let key = original.lowercased()
+            // Strip trailing `]` to insert suffix; fall back to raw append if missing.
+            let base = category.hasSuffix("]") ? String(category.dropLast()) : category
+            let close = category.hasSuffix("]") ? "]" : ""
             if let existing = assignments[category]?[key] {
-                return "\(category.dropLast())_\(existing)]"
+                return "\(base)_\(existing)\(close)"
             }
             let index = nextIndex[category, default: 0]
             let suffix = Self.suffixLetter(for: index)
@@ -100,7 +104,7 @@ public struct PromptRedactor: Sendable {
                 assignments[category] = [:]
             }
             assignments[category]![key] = suffix
-            return "\(category.dropLast())_\(suffix)]"
+            return "\(base)_\(suffix)\(close)"
         }
 
         /// Record a sponsor entity handle for pipeline identity reasoning.
