@@ -18,7 +18,125 @@ import Foundation
 /// Rev2-L1 (Cycle 2): nested manifest type renamed from `Dictionary`
 /// to `Manifest` so call sites are not ambiguous against Swift's
 /// `Dictionary<Key, Value>`.
+///
+/// B11 (playhead-0nha): two-tier redaction policy. Default path uses
+/// minimal / no redaction for ordinary sponsor names in on-device FM
+/// calls. Fallback path uses typed placeholder redaction with stable
+/// per-entity IDs (`[DRUG_A]`, `[DRUG_B]`, etc.) for categories that
+/// trigger FM refusals or when using the permissive fallback path.
 public struct PromptRedactor: Sendable {
+
+    // MARK: - B11: Two-Tier Redaction Policy
+
+    /// Controls whether the redactor applies full typed-placeholder
+    /// redaction or passes text through with minimal / no redaction.
+    ///
+    /// - `.minimal`: On-device FM calls for ordinary sponsor names.
+    ///   Text passes through unchanged (the FM is local, so sponsor
+    ///   strings never leave the device).
+    /// - `.typed`: Categories that trigger FM refusals, or when
+    ///   invoking the permissive fallback path. Applies typed
+    ///   placeholder redaction with stable per-entity IDs.
+    public enum RedactionPolicy: Sendable, Equatable {
+        case minimal
+        case typed
+    }
+
+    /// Compile-time flag for always-redact mode. When `true`, the
+    /// redactor ignores the requested policy and always applies typed
+    /// placeholder redaction. This exists as a safety valve until the
+    /// legal policy question (design doc open question #8) is resolved.
+    ///
+    /// Set to `true` to force all FM input through typed redaction
+    /// regardless of the caller's policy choice.
+    #if PLAYHEAD_ALWAYS_REDACT
+    static let alwaysRedact: Bool = true
+    #else
+    static let alwaysRedact: Bool = false
+    #endif
+
+    /// Ephemeral per-pass state that tracks typed placeholder
+    /// assignments. Each unique original string within a category gets
+    /// a deterministic suffix (`_A`, `_B`, `_C`, ...). The mapping is
+    /// rebuilt for every redaction pass — never persisted.
+    ///
+    /// Suffix assignment is deterministic by first-occurrence order
+    /// (not alphabetical). The FM does not reason about suffix ordering,
+    /// so first-occurrence determinism is sufficient and avoids the
+    /// complexity of deferred alphabetical reassignment in a streaming
+    /// line-by-line pass.
+    ///
+    /// Thread-safety: `TypedRedactionPass` is a mutable reference type
+    /// intended for single-threaded use within one redaction pass. The
+    /// caller creates a pass, feeds lines through it sequentially, then
+    /// discards it. NOT Sendable — do not share across isolation domains.
+    public final class TypedRedactionPass {
+        /// Maps (categoryPlaceholder, normalizedOriginal) → suffix letter.
+        /// e.g. ("[DRUG]", "ozempic") → "A"
+        private var assignments: [String: [String: String]] = [:]
+        /// Counter per category for the next suffix.
+        private var nextIndex: [String: Int] = [:]
+
+        /// Sponsor entity handles extracted during this pass. Maps the
+        /// original sponsor string to an opaque handle that the rest of
+        /// the pipeline can use for identity reasoning even when the
+        /// text itself has been redacted.
+        public private(set) var sponsorEntityHandles: [String: SponsorEntityHandle] = [:]
+
+        public init() {}
+
+        /// Returns the typed placeholder for `original` within `category`.
+        /// First unique string gets `_A`, second gets `_B`, etc.
+        /// Same string always maps to the same suffix within a pass.
+        func placeholder(for original: String, category: String) -> String {
+            let key = original.lowercased()
+            if let existing = assignments[category]?[key] {
+                return "\(category.dropLast())_\(existing)]"
+            }
+            let index = nextIndex[category, default: 0]
+            let suffix = Self.suffixLetter(for: index)
+            nextIndex[category] = index + 1
+            if assignments[category] == nil {
+                assignments[category] = [:]
+            }
+            assignments[category]![key] = suffix
+            return "\(category.dropLast())_\(suffix)]"
+        }
+
+        /// Record a sponsor entity handle for pipeline identity reasoning.
+        func recordSponsorEntity(original: String, placeholder: String) {
+            let key = original.lowercased()
+            if sponsorEntityHandles[key] == nil {
+                sponsorEntityHandles[key] = SponsorEntityHandle(
+                    originalText: original,
+                    redactedPlaceholder: placeholder
+                )
+            }
+        }
+
+        /// Convert index to letter: 0→A, 1→B, ..., 25→Z, 26→AA, etc.
+        static func suffixLetter(for index: Int) -> String {
+            var result = ""
+            var n = index
+            repeat {
+                result = String(Character(UnicodeScalar(65 + (n % 26))!)) + result
+                n = n / 26 - 1
+            } while n >= 0
+            return result
+        }
+    }
+
+    /// Opaque handle preserving sponsor identity outside redacted text.
+    /// The pipeline can use this for entity-based reasoning (e.g.,
+    /// sponsor compatibility checks in SpanHypothesisEngine) even when
+    /// the visible prompt text has been redacted.
+    public struct SponsorEntityHandle: Sendable, Equatable {
+        /// The original unredacted sponsor string (e.g. "Ozempic").
+        public let originalText: String
+        /// The typed placeholder assigned in the redacted text
+        /// (e.g. "[DRUG_A]").
+        public let redactedPlaceholder: String
+    }
     public struct RedactionRule: Sendable, Codable {
         public let pattern: String
         public let isRegex: Bool
@@ -155,6 +273,101 @@ public struct PromptRedactor: Sendable {
         }
 
         return result
+    }
+
+    /// B11: policy-aware redaction with typed placeholders. When the
+    /// effective policy is `.minimal`, text passes through unchanged.
+    /// When `.typed`, each matched string gets a unique per-entity
+    /// placeholder (`[DRUG_A]`, `[DRUG_B]`, etc.) tracked by `pass`.
+    ///
+    /// The compile-time `alwaysRedact` flag overrides `.minimal` → `.typed`.
+    public func redact(
+        line: String,
+        policy: RedactionPolicy,
+        pass: TypedRedactionPass
+    ) -> String {
+        let effectivePolicy = Self.alwaysRedact ? .typed : policy
+        switch effectivePolicy {
+        case .minimal:
+            return line
+        case .typed:
+            return redactTyped(line: line, pass: pass)
+        }
+    }
+
+    /// Apply typed-placeholder redaction to a single line. The logic
+    /// mirrors `redact(line:)` (trigger-first, then cooccurrent gating)
+    /// but replaces each match with a per-entity typed placeholder
+    /// instead of the category's generic placeholder.
+    private func redactTyped(line: String, pass: TypedRedactionPass) -> String {
+        var result = line
+        var matchedTriggerCategories: Set<String> = []
+
+        for category in manifest.categories where category.category == "trigger" {
+            let (newResult, didMatch, _) = applyCategoryTyped(
+                category, to: result, pass: pass
+            )
+            result = newResult
+            if didMatch {
+                matchedTriggerCategories.insert(category.id)
+            }
+        }
+
+        for category in manifest.categories where category.category == "cooccurrent" {
+            guard let triggers = category.cooccurrentWith,
+                  !Set(triggers).intersection(matchedTriggerCategories).isEmpty else {
+                continue
+            }
+            let (newResult, _, _) = applyCategoryTyped(
+                category, to: result, pass: pass
+            )
+            result = newResult
+        }
+
+        return result
+    }
+
+    /// Apply typed-placeholder substitution for a single category.
+    /// Each unique matched substring gets a deterministic suffix via
+    /// `pass.placeholder(for:category:)`.
+    private func applyCategoryTyped(
+        _ category: Category,
+        to text: String,
+        pass: TypedRedactionPass
+    ) -> (String, Bool, [String]) {
+        var result = text
+        var matched = false
+        var matchedStrings: [String] = []
+        let compiled = compiledRulesByCategory[category.id] ?? []
+
+        for compiledRule in compiled {
+            // Find all matches, extract originals, then replace from
+            // end to start so earlier NSRange indices stay valid.
+            let nsString = result as NSString
+            let fullRange = NSRange(location: 0, length: nsString.length)
+            let matches = compiledRule.regex.matches(
+                in: result, options: [], range: fullRange
+            )
+            guard !matches.isEmpty else { continue }
+            matched = true
+
+            // Collect (range, original) pairs first so all substring
+            // extractions happen against the same unmodified string.
+            let pairs: [(range: NSRange, original: String)] = matches.map { m in
+                (m.range, nsString.substring(with: m.range))
+            }
+
+            // Replace in reverse order to preserve earlier indices.
+            for pair in pairs.reversed() {
+                let typed = pass.placeholder(for: pair.original, category: category.placeholder)
+                matchedStrings.append(pair.original)
+                pass.recordSponsorEntity(original: pair.original, placeholder: typed)
+                result = (result as NSString).replacingCharacters(
+                    in: pair.range, with: typed
+                )
+            }
+        }
+        return (result, matched, matchedStrings)
     }
 
     private func applyCategory(_ category: Category, to text: String) -> (String, Bool) {

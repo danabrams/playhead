@@ -118,6 +118,174 @@ struct PromptRedactorTests {
         #expect(!PromptRedactor.noop.isActive)
     }
 
+    // MARK: - B11: Typed placeholder assignment
+
+    @Test("typed redaction assigns _A to first unique string in a category")
+    func typedPlaceholderFirstOccurrence() {
+        let redactor = makeFixtureRedactor()
+        let pass = PromptRedactor.TypedRedactionPass()
+        let line = "Ask your doctor about Ozempic."
+        let out = redactor.redact(line: line, policy: .typed, pass: pass)
+        #expect(out == "Ask your doctor about [DRUG_A].")
+    }
+
+    @Test("typed redaction assigns _B to second unique string in same category")
+    func typedPlaceholderSecondOccurrence() {
+        let redactor = makeFixtureRedactor()
+        let pass = PromptRedactor.TypedRedactionPass()
+        _ = redactor.redact(line: "Ask about Ozempic.", policy: .typed, pass: pass)
+        let out = redactor.redact(line: "Try Trulicity instead.", policy: .typed, pass: pass)
+        #expect(out == "Try [DRUG_B] instead.")
+    }
+
+    @Test("same string always maps to same ID within a pass")
+    func typedPlaceholderConsistentMapping() {
+        let redactor = makeFixtureRedactor()
+        let pass = PromptRedactor.TypedRedactionPass()
+        let out1 = redactor.redact(line: "Ozempic works.", policy: .typed, pass: pass)
+        let out2 = redactor.redact(line: "Ozempic is great.", policy: .typed, pass: pass)
+        #expect(out1 == "[DRUG_A] works.")
+        #expect(out2 == "[DRUG_A] is great.")
+    }
+
+    @Test("typed placeholders across multiple categories are independent")
+    func typedPlaceholderCrossCategory() {
+        let redactor = makeFixtureRedactor()
+        let pass = PromptRedactor.TypedRedactionPass()
+        _ = redactor.redact(line: "Ozempic.", policy: .typed, pass: pass)
+        let out = redactor.redact(line: "BetterHelp.", policy: .typed, pass: pass)
+        // Ozempic is [DRUG_A], BetterHelp is [SERVICE_A] — independent counters.
+        #expect(out == "[SERVICE_A].")
+    }
+
+    @Test("typed redaction with cooccurrent gating produces typed placeholders for both")
+    func typedPlaceholderCooccurrent() {
+        let redactor = makeFixtureRedactor()
+        let pass = PromptRedactor.TypedRedactionPass()
+        let out = redactor.redact(
+            line: "Schedule your shingles vaccine today.",
+            policy: .typed,
+            pass: pass
+        )
+        #expect(out == "Schedule your [CONDITION_A] [PRODUCT_A] today.")
+    }
+
+    @Test("multiple occurrences of same string in one line all get same suffix")
+    func typedPlaceholderSameStringMultipleTimes() {
+        let redactor = makeFixtureRedactor()
+        let pass = PromptRedactor.TypedRedactionPass()
+        let out = redactor.redact(
+            line: "Ozempic is better than not Ozempic.",
+            policy: .typed,
+            pass: pass
+        )
+        #expect(out == "[DRUG_A] is better than not [DRUG_A].")
+    }
+
+    // MARK: - B11: Two-tier policy switching
+
+    @Test("minimal policy passes text through unchanged")
+    func minimalPolicyNoRedaction() {
+        let redactor = makeFixtureRedactor()
+        let pass = PromptRedactor.TypedRedactionPass()
+        let line = "Ask your doctor about Ozempic and Trulicity."
+        let out = redactor.redact(line: line, policy: .minimal, pass: pass)
+        #expect(out == line)
+    }
+
+    @Test("typed policy applies full typed redaction")
+    func typedPolicyRedacts() {
+        let redactor = makeFixtureRedactor()
+        let pass = PromptRedactor.TypedRedactionPass()
+        let line = "Ask your doctor about Ozempic."
+        let out = redactor.redact(line: line, policy: .typed, pass: pass)
+        #expect(out.contains("[DRUG_A]"))
+        #expect(!out.contains("Ozempic"))
+    }
+
+    @Test("non-medical ad copy unchanged under typed policy")
+    func typedPolicyNonMedicalUnchanged() {
+        let redactor = makeFixtureRedactor()
+        let pass = PromptRedactor.TypedRedactionPass()
+        let line = "Save twenty percent on your first Casper mattress."
+        let out = redactor.redact(line: line, policy: .typed, pass: pass)
+        #expect(out == line)
+    }
+
+    @Test("original redact(line:) method still works unchanged")
+    func legacyRedactMethodUnchanged() {
+        let redactor = makeFixtureRedactor()
+        // Original method should continue to work identically.
+        let line = "Ask your doctor about Trulicity."
+        let out = redactor.redact(line: line)
+        #expect(out == "Ask your doctor about [DRUG].")
+    }
+
+    // MARK: - B11: sponsorEntityHandle preservation
+
+    @Test("typed redaction populates sponsorEntityHandles")
+    func sponsorEntityHandlePopulated() {
+        let redactor = makeFixtureRedactor()
+        let pass = PromptRedactor.TypedRedactionPass()
+        _ = redactor.redact(line: "Ask about Ozempic.", policy: .typed, pass: pass)
+        let handles = pass.sponsorEntityHandles
+        #expect(handles.count == 1)
+        let handle = handles["ozempic"]
+        #expect(handle?.originalText == "Ozempic")
+        #expect(handle?.redactedPlaceholder == "[DRUG_A]")
+    }
+
+    @Test("multiple entities produce distinct handles")
+    func sponsorEntityHandleMultiple() {
+        let redactor = makeFixtureRedactor()
+        let pass = PromptRedactor.TypedRedactionPass()
+        _ = redactor.redact(line: "Ozempic vs Trulicity.", policy: .typed, pass: pass)
+        let handles = pass.sponsorEntityHandles
+        #expect(handles.count == 2)
+        #expect(handles["ozempic"] != nil)
+        #expect(handles["trulicity"] != nil)
+    }
+
+    @Test("minimal policy does not populate sponsorEntityHandles")
+    func sponsorEntityHandleMinimalEmpty() {
+        let redactor = makeFixtureRedactor()
+        let pass = PromptRedactor.TypedRedactionPass()
+        _ = redactor.redact(line: "Ask about Ozempic.", policy: .minimal, pass: pass)
+        #expect(pass.sponsorEntityHandles.isEmpty)
+    }
+
+    @Test("sponsorEntityHandle preserved across multiple lines in same pass")
+    func sponsorEntityHandleAcrossLines() {
+        let redactor = makeFixtureRedactor()
+        let pass = PromptRedactor.TypedRedactionPass()
+        _ = redactor.redact(line: "Ozempic works.", policy: .typed, pass: pass)
+        _ = redactor.redact(line: "BetterHelp helps.", policy: .typed, pass: pass)
+        _ = redactor.redact(line: "Ozempic again.", policy: .typed, pass: pass)
+        let handles = pass.sponsorEntityHandles
+        #expect(handles.count == 2)
+        #expect(handles["ozempic"]?.redactedPlaceholder == "[DRUG_A]")
+        #expect(handles["betterhelp"]?.redactedPlaceholder == "[SERVICE_A]")
+    }
+
+    // MARK: - B11: TypedRedactionPass suffix letter generation
+
+    @Test("suffixLetter produces A-Z then AA for indices 0-26")
+    func suffixLetterGeneration() {
+        #expect(PromptRedactor.TypedRedactionPass.suffixLetter(for: 0) == "A")
+        #expect(PromptRedactor.TypedRedactionPass.suffixLetter(for: 1) == "B")
+        #expect(PromptRedactor.TypedRedactionPass.suffixLetter(for: 25) == "Z")
+        #expect(PromptRedactor.TypedRedactionPass.suffixLetter(for: 26) == "AA")
+        #expect(PromptRedactor.TypedRedactionPass.suffixLetter(for: 27) == "AB")
+    }
+
+    @Test("empty string returns empty without crashing")
+    func emptyStringEdgeCase() {
+        let redactor = makeFixtureRedactor()
+        let pass = PromptRedactor.TypedRedactionPass()
+        let out = redactor.redact(line: "", policy: .typed, pass: pass)
+        #expect(out == "")
+    }
+
     // MARK: - FoundationModelClassifier integration
 
     @Test("buildPrompt with default noop redactor leaves text intact")
