@@ -18,6 +18,25 @@ struct TranscriptAtom: Sendable {
     let endTime: Double
     let text: String
     let chunkIndex: Int              // diagnostic convenience
+    let speakerId: Int?              // B7: validated speaker label, nil when unavailable
+
+    init(
+        atomKey: TranscriptAtomKey,
+        contentHash: String,
+        startTime: Double,
+        endTime: Double,
+        text: String,
+        chunkIndex: Int,
+        speakerId: Int? = nil
+    ) {
+        self.atomKey = atomKey
+        self.contentHash = contentHash
+        self.startTime = startTime
+        self.endTime = endTime
+        self.text = text
+        self.chunkIndex = chunkIndex
+        self.speakerId = speakerId
+    }
 }
 
 struct TranscriptVersion: Sendable, Codable {
@@ -91,7 +110,8 @@ enum TranscriptAtomizer {
                 startTime: chunk.startTime,
                 endTime: chunk.endTime,
                 text: chunk.text,
-                chunkIndex: chunk.chunkIndex
+                chunkIndex: chunk.chunkIndex,
+                speakerId: chunk.speakerId
             )
         }
 

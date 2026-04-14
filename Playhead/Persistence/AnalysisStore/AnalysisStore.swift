@@ -146,6 +146,7 @@ struct TranscriptChunk: Sendable {
     let transcriptVersion: String?   // nil for fast-pass chunks (version computed on final)
     let atomOrdinal: Int?            // nil for fast-pass chunks
     let weakAnchorMetadata: TranscriptWeakAnchorMetadata?
+    let speakerId: Int?              // B7: validated speaker label, nil when unavailable
 
     init(
         id: String,
@@ -160,7 +161,8 @@ struct TranscriptChunk: Sendable {
         modelVersion: String,
         transcriptVersion: String?,
         atomOrdinal: Int?,
-        weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil
+        weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil,
+        speakerId: Int? = nil
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -175,6 +177,7 @@ struct TranscriptChunk: Sendable {
         self.transcriptVersion = transcriptVersion
         self.atomOrdinal = atomOrdinal
         self.weakAnchorMetadata = weakAnchorMetadata
+        self.speakerId = speakerId
     }
 }
 
@@ -730,6 +733,8 @@ actor AnalysisStore {
         try addColumnIfNeeded(table: "transcript_chunks", column: "transcriptVersion", definition: "TEXT")
         try addColumnIfNeeded(table: "transcript_chunks", column: "atomOrdinal", definition: "INTEGER")
         try addColumnIfNeeded(table: "transcript_chunks", column: "weakAnchorMetadataJSON", definition: "TEXT")
+        // B7: speaker label from validated ASR diarization (nil until available).
+        try addColumnIfNeeded(table: "transcript_chunks", column: "speakerId", definition: "INTEGER")
         try backfillLegacyTranscriptChunksPhase1IfNeeded()
     }
 
@@ -1441,7 +1446,8 @@ actor AnalysisStore {
                 modelVersion        TEXT NOT NULL,
                 transcriptVersion   TEXT,
                 atomOrdinal         INTEGER,
-                weakAnchorMetadataJSON TEXT
+                weakAnchorMetadataJSON TEXT,
+                speakerId           INTEGER
             )
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_chunks_asset ON transcript_chunks(analysisAssetId)")
@@ -2273,8 +2279,9 @@ actor AnalysisStore {
         let sql = """
             INSERT INTO transcript_chunks
             (id, analysisAssetId, segmentFingerprint, chunkIndex, startTime, endTime,
-             text, normalizedText, pass, modelVersion, transcriptVersion, atomOrdinal, weakAnchorMetadataJSON)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             text, normalizedText, pass, modelVersion, transcriptVersion, atomOrdinal,
+             weakAnchorMetadataJSON, speakerId)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -2291,6 +2298,7 @@ actor AnalysisStore {
         bind(stmt, 11, chunk.transcriptVersion)
         bind(stmt, 12, chunk.atomOrdinal)
         bind(stmt, 13, try encodeJSONString(chunk.weakAnchorMetadata))
+        bind(stmt, 14, chunk.speakerId)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -2419,7 +2427,8 @@ actor AnalysisStore {
             weakAnchorMetadata: try? decodeJSON(
                 TranscriptWeakAnchorMetadata.self,
                 from: optionalText(stmt, 12)
-            )
+            ),
+            speakerId: optionalInt(stmt, 13)
         )
     }
 
