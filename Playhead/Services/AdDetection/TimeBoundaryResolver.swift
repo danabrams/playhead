@@ -318,17 +318,27 @@ struct TimeBoundaryResolver: Sendable {
         spectralChange: Double,
         config: BoundarySnappingConfig
     ) -> Double {
+        // Use directional onset/offset scores when available (non-zero),
+        // falling back to the legacy musicBedChangeScore for backward
+        // compatibility with windows that predate the directional fields.
+        let musicCue: Double
         switch boundaryType {
         case .start:
+            musicCue = window.musicBedOnsetScore > 0
+                ? clamp01(window.musicBedOnsetScore)
+                : clamp01(window.musicBedChangeScore)
             return clamp01(window.pauseProbability) * config.startWeights.pauseVAD +
                 clamp01(window.speakerChangeProxyScore) * config.startWeights.speakerChangeProxy +
-                clamp01(window.musicBedChangeScore) * config.startWeights.musicBedChange +
+                musicCue * config.startWeights.musicBedChange +
                 spectralChange * config.startWeights.spectralChange +
                 lexicalDensityDelta * config.startWeights.lexicalDensityDelta
         case .end:
+            musicCue = window.musicBedOffsetScore > 0
+                ? clamp01(window.musicBedOffsetScore)
+                : clamp01(window.musicBedChangeScore)
             return clamp01(window.pauseProbability) * config.endWeights.pauseVAD +
                 clamp01(window.speakerChangeProxyScore) * config.endWeights.speakerChangeProxy +
-                clamp01(window.musicBedChangeScore) * config.endWeights.musicBedChange +
+                musicCue * config.endWeights.musicBedChange +
                 spectralChange * config.endWeights.spectralChange +
                 explicitReturnMarker * config.endWeights.explicitReturnMarker
         }

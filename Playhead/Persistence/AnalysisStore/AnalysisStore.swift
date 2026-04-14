@@ -78,6 +78,9 @@ struct FeatureWindow: Sendable {
     let musicProbability: Double
     let speakerChangeProxyScore: Double
     let musicBedChangeScore: Double
+    let musicBedOnsetScore: Double
+    let musicBedOffsetScore: Double
+    let musicBedLevel: MusicBedLevel
     let pauseProbability: Double
     let speakerClusterId: Int?
     let jingleHash: String?
@@ -92,6 +95,9 @@ struct FeatureWindow: Sendable {
         musicProbability: Double,
         speakerChangeProxyScore: Double = 0,
         musicBedChangeScore: Double = 0,
+        musicBedOnsetScore: Double = 0,
+        musicBedOffsetScore: Double = 0,
+        musicBedLevel: MusicBedLevel = .none,
         pauseProbability: Double,
         speakerClusterId: Int?,
         jingleHash: String?,
@@ -105,6 +111,9 @@ struct FeatureWindow: Sendable {
         self.musicProbability = musicProbability
         self.speakerChangeProxyScore = speakerChangeProxyScore
         self.musicBedChangeScore = musicBedChangeScore
+        self.musicBedOnsetScore = musicBedOnsetScore
+        self.musicBedOffsetScore = musicBedOffsetScore
+        self.musicBedLevel = musicBedLevel
         self.pauseProbability = pauseProbability
         self.speakerClusterId = speakerClusterId
         self.jingleHash = jingleHash
@@ -671,6 +680,9 @@ actor AnalysisStore {
                 musicProbability  REAL NOT NULL,
                 speakerChangeProxyScore REAL NOT NULL DEFAULT 0,
                 musicBedChangeScore REAL NOT NULL DEFAULT 0,
+                musicBedOnsetScore REAL NOT NULL DEFAULT 0,
+                musicBedOffsetScore REAL NOT NULL DEFAULT 0,
+                musicBedLevelRaw  TEXT NOT NULL DEFAULT 'none',
                 pauseProbability  REAL NOT NULL,
                 speakerClusterId  INTEGER,
                 jingleHash        TEXT,
@@ -700,6 +712,21 @@ actor AnalysisStore {
             table: "feature_windows",
             column: "musicBedChangeScore",
             definition: "REAL NOT NULL DEFAULT 0"
+        )
+        try addColumnIfNeeded(
+            table: "feature_windows",
+            column: "musicBedOnsetScore",
+            definition: "REAL NOT NULL DEFAULT 0"
+        )
+        try addColumnIfNeeded(
+            table: "feature_windows",
+            column: "musicBedOffsetScore",
+            definition: "REAL NOT NULL DEFAULT 0"
+        )
+        try addColumnIfNeeded(
+            table: "feature_windows",
+            column: "musicBedLevelRaw",
+            definition: "TEXT NOT NULL DEFAULT 'none'"
         )
         // Mirror the belt-and-suspenders phase/jobPhase column re-adds
         // that `migrate()` performs after the v2/v3 evidence_events
@@ -1410,6 +1437,9 @@ actor AnalysisStore {
                 musicProbability  REAL NOT NULL,
                 speakerChangeProxyScore REAL NOT NULL DEFAULT 0,
                 musicBedChangeScore REAL NOT NULL DEFAULT 0,
+                musicBedOnsetScore REAL NOT NULL DEFAULT 0,
+                musicBedOffsetScore REAL NOT NULL DEFAULT 0,
+                musicBedLevelRaw  TEXT NOT NULL DEFAULT 'none',
                 pauseProbability  REAL NOT NULL,
                 speakerClusterId  INTEGER,
                 jingleHash        TEXT,
@@ -2059,8 +2089,9 @@ actor AnalysisStore {
             INSERT OR REPLACE INTO feature_windows
             (analysisAssetId, startTime, endTime, rms, spectralFlux,
              musicProbability, speakerChangeProxyScore, musicBedChangeScore,
+             musicBedOnsetScore, musicBedOffsetScore, musicBedLevelRaw,
              pauseProbability, speakerClusterId, jingleHash, featureVersion)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -2072,10 +2103,13 @@ actor AnalysisStore {
         bind(stmt, 6, fw.musicProbability)
         bind(stmt, 7, fw.speakerChangeProxyScore)
         bind(stmt, 8, fw.musicBedChangeScore)
-        bind(stmt, 9, fw.pauseProbability)
-        bind(stmt, 10, fw.speakerClusterId)
-        bind(stmt, 11, fw.jingleHash)
-        bind(stmt, 12, fw.featureVersion)
+        bind(stmt, 9, fw.musicBedOnsetScore)
+        bind(stmt, 10, fw.musicBedOffsetScore)
+        bind(stmt, 11, fw.musicBedLevel.rawValue)
+        bind(stmt, 12, fw.pauseProbability)
+        bind(stmt, 13, fw.speakerClusterId)
+        bind(stmt, 14, fw.jingleHash)
+        bind(stmt, 15, fw.featureVersion)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -2253,6 +2287,7 @@ actor AnalysisStore {
         let sql = """
             SELECT analysisAssetId, startTime, endTime, rms, spectralFlux,
                    musicProbability, speakerChangeProxyScore, musicBedChangeScore,
+                   musicBedOnsetScore, musicBedOffsetScore, musicBedLevelRaw,
                    pauseProbability, speakerClusterId, jingleHash, featureVersion
             FROM feature_windows
             WHERE analysisAssetId = ? AND startTime >= ? AND endTime <= ? \(versionClause)
@@ -2642,6 +2677,7 @@ actor AnalysisStore {
         let sql = """
             SELECT analysisAssetId, startTime, endTime, rms, spectralFlux,
                    musicProbability, speakerChangeProxyScore, musicBedChangeScore,
+                   musicBedOnsetScore, musicBedOffsetScore, musicBedLevelRaw,
                    pauseProbability, speakerClusterId, jingleHash, featureVersion
             FROM feature_windows
             WHERE analysisAssetId = ? \(versionClause)
@@ -2661,7 +2697,9 @@ actor AnalysisStore {
     }
 
     private func readFeatureWindow(_ stmt: OpaquePointer?) -> FeatureWindow {
-        FeatureWindow(
+        let levelRaw = optionalText(stmt, 10) ?? "none"
+        let level = MusicBedLevel(rawValue: levelRaw) ?? .none
+        return FeatureWindow(
             analysisAssetId: text(stmt, 0),
             startTime: sqlite3_column_double(stmt, 1),
             endTime: sqlite3_column_double(stmt, 2),
@@ -2670,10 +2708,13 @@ actor AnalysisStore {
             musicProbability: sqlite3_column_double(stmt, 5),
             speakerChangeProxyScore: sqlite3_column_double(stmt, 6),
             musicBedChangeScore: sqlite3_column_double(stmt, 7),
-            pauseProbability: sqlite3_column_double(stmt, 8),
-            speakerClusterId: optionalInt(stmt, 9),
-            jingleHash: optionalText(stmt, 10),
-            featureVersion: Int(sqlite3_column_int(stmt, 11))
+            musicBedOnsetScore: sqlite3_column_double(stmt, 8),
+            musicBedOffsetScore: sqlite3_column_double(stmt, 9),
+            musicBedLevel: level,
+            pauseProbability: sqlite3_column_double(stmt, 11),
+            speakerClusterId: optionalInt(stmt, 12),
+            jingleHash: optionalText(stmt, 13),
+            featureVersion: Int(sqlite3_column_int(stmt, 14))
         )
     }
 
