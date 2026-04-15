@@ -200,8 +200,23 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
     /// podcastId is not carried on DecodedSpan; Phase 7.2 can supply it via
     /// `record(_:)` directly when available).
     func recordVeto(span: DecodedSpan) async {
+        await recordVeto(span: span, ledgerEntries: [])
+    }
+
+    /// Record a veto with optional evidence ledger entries for causal attribution.
+    func recordVeto(span: DecodedSpan, ledgerEntries: [EvidenceLedgerEntry]) async {
         let ordinals = span.fullOrdinalRange
         let now = Date().timeIntervalSince1970
+
+        // ef2.3.1: Infer causal source from provenance + ledger.
+        let causalSource = inferCausalSource(
+            provenance: span.anchorProvenance,
+            ledgerEntries: ledgerEntries
+        )
+        let targetRefs = buildTargetRefs(
+            provenance: span.anchorProvenance,
+            ledgerEntries: ledgerEntries
+        )
 
         // Always record the exact span scope.
         let exactScope = CorrectionScope.exactSpan(
@@ -213,7 +228,10 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
             scope: exactScope.serialized,
             createdAt: now,
             source: .manualVeto,
-            podcastId: nil
+            podcastId: nil,
+            correctionType: .falsePositive,
+            causalSource: causalSource,
+            targetRefs: targetRefs
         )
 
         do {
@@ -241,7 +259,10 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
                 scope: sponsorScope.serialized,
                 createdAt: now,
                 source: .manualVeto,
-                podcastId: nil
+                podcastId: nil,
+                correctionType: .falsePositive,
+                causalSource: causalSource,
+                targetRefs: CorrectionTargetRefs(sponsorEntity: entry.normalizedText)
             )
             do {
                 try await record(sponsorEvent)

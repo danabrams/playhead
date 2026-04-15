@@ -240,6 +240,12 @@ struct CorrectionEvent: Sendable, Equatable {
     let source: CorrectionSource?
     /// The podcast feed ID, if known at correction time.
     let podcastId: String?
+    /// ef2.3.1: Semantic nature of the correction (FP/FN/boundary).
+    let correctionType: CorrectionType?
+    /// ef2.3.1: Pipeline component most responsible for the error.
+    let causalSource: CausalSource?
+    /// ef2.3.1: JSON-encoded CorrectionTargetRefs for downstream analysis.
+    let targetRefs: CorrectionTargetRefs?
 
     init(
         id: String = UUID().uuidString,
@@ -247,7 +253,10 @@ struct CorrectionEvent: Sendable, Equatable {
         scope: String,
         createdAt: Double = Date().timeIntervalSince1970,
         source: CorrectionSource? = nil,
-        podcastId: String? = nil
+        podcastId: String? = nil,
+        correctionType: CorrectionType? = nil,
+        causalSource: CausalSource? = nil,
+        targetRefs: CorrectionTargetRefs? = nil
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -255,5 +264,8 @@ struct CorrectionEvent: Sendable, Equatable {
         self.createdAt = createdAt
         self.source = source
         self.podcastId = podcastId
+        self.correctionType = correctionType
+        self.causalSource = causalSource
+        self.targetRefs = targetRefs
     }
 }
