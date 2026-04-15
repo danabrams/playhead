@@ -644,12 +644,17 @@ actor AnalysisStore {
                 column: "anchorLandmarks",
                 definition: "TEXT"
             )
-            // playhead-ef2.1.4: explanation trace column on decision_events
-            try addColumnIfNeeded(
-                table: "decision_events",
-                column: "explanationJSON",
-                definition: "TEXT"
-            )
+            // playhead-ef2.1.4: explanation trace column on decision_events.
+            // Guard: decision_events is created in migrateAdWindowsPhase6PrepV5IfNeeded(),
+            // which is skipped when a test seeds at v5. The column will be added on the
+            // next migrate() after the table exists.
+            if try tableExists("decision_events") {
+                try addColumnIfNeeded(
+                    table: "decision_events",
+                    column: "explanationJSON",
+                    definition: "TEXT"
+                )
+            }
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
