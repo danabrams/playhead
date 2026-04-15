@@ -291,6 +291,24 @@ struct SkipPolicyMatrixV2Tests {
         let b = SkipPolicyMatrixV2.eligibility(for: .thirdPartyPaid, authority: .strong)
         #expect(a == b)
     }
+
+    @Test("all 14 (ContentClass x ProposalAuthority) cells produce a valid SkipEligibility")
+    func exhaustiveMatrixCoverage() {
+        // Guards against adding a new ContentClass or ProposalAuthority case
+        // without updating the policy matrix switch (compiler catches the switch,
+        // this test catches the test suite).
+        var testedCount = 0
+        for contentClass in ContentClass.allCases {
+            for authority in ProposalAuthority.allCases {
+                let result = SkipPolicyMatrixV2.eligibility(for: contentClass, authority: authority)
+                #expect(SkipEligibility.allCases.contains(result),
+                    "Unexpected eligibility \(result) for (\(contentClass), \(authority))")
+                testedCount += 1
+            }
+        }
+        #expect(testedCount == ContentClass.allCases.count * ProposalAuthority.allCases.count)
+        #expect(testedCount == 14, "Expected 7 content classes x 2 authorities = 14 cells")
+    }
 }
 
 // MARK: - SpanDecision Tests

@@ -137,7 +137,7 @@ enum ContentClass: String, Sendable, Codable, Hashable, CaseIterable {
 ///
 /// Reusable across pipeline stages — captures where the span starts and ends
 /// along with how confident the boundary detector is about each edge.
-struct BoundaryEstimate: Sendable, Equatable, Codable {
+struct BoundaryEstimate: Sendable, Equatable, Codable, Hashable {
     /// Estimated start time of the span in seconds.
     let startTime: Double
     /// Estimated end time of the span in seconds.
@@ -233,7 +233,7 @@ struct SkipPolicyMatrixV2: Sendable {
 ///   2. Content classification
 ///   3. Boundary estimate
 ///   4. Skip eligibility (derived from policy matrix, never from proposal/classification scores)
-struct SpanDecision: Sendable, Equatable {
+struct SpanDecision: Sendable, Equatable, Codable, Hashable {
     /// Stage 1: The resolved proposal authority level.
     let proposalAuthority: ProposalAuthority
     /// Stage 1: The signals that contributed to the proposal.
