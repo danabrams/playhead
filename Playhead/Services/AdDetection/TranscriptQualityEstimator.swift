@@ -1,5 +1,147 @@
 import Foundation
 
+// MARK: - NormalizationQuality
+
+/// How well entity extraction (URL detection, sponsor name normalization) worked
+/// on a given atom. Complements chunk-level ASR quality with extraction-specific
+/// signal. Assessed post-extraction by NormalizationQualityAssessor.
+enum NormalizationQuality: String, Sendable, Codable, Equatable {
+    /// Strong entity extraction: URL or promo code successfully detected.
+    case good
+    /// Partial extraction: weaker signals (brand span, CTA) detected but
+    /// no high-confidence entity like a URL or promo code.
+    case partial
+    /// Extraction attempted but failed (e.g. garbled text that pattern-matched
+    /// but produced invalid output).
+    case failed
+    /// No extraction attempted or atom not in a commercial context.
+    case unknown
+}
+
+// MARK: - TranscriptReliability
+
+/// Per-atom reliability signal combining chunk-level ASR quality with
+/// normalization quality. Carried on every TranscriptAtom for downstream
+/// gating decisions.
+///
+/// Design: iOS SFSpeechRecognizer does NOT expose per-word confidence, so
+/// chunk-level quality (from TranscriptQualityEstimator's 5-signal heuristic)
+/// is the best ASR proxy available. NormalizationQuality adds a second axis:
+/// how well did entity extraction work on this specific atom.
+struct TranscriptReliability: Sendable, Equatable {
+    /// Chunk-level ASR quality level inherited from TranscriptQualityEstimator.
+    let chunkQuality: TranscriptQualityLevel
+    /// Numeric chunk quality score (0.0 = worst, 1.0 = best).
+    let chunkQualityScore: Double
+    /// How well entity extraction worked on this atom.
+    let normalizationQuality: NormalizationQuality
+    /// Number of alternative substrings available from SFTranscriptionSegment
+    /// for this atom's time range. 0 when unavailable (the common case on iOS).
+    /// Plumbed for future use — not consumed by current pipeline logic.
+    ///
+    /// Investigation (ef2.1.3): `SFTranscriptionSegment.alternativeSubstrings`
+    /// is available on iOS 10+ and returns up to 5 alternative recognition
+    /// hypotheses per segment. However, Playhead's ASR layer
+    /// (SpeechRecognitionService) currently discards segment-level detail
+    /// before chunks reach the ad detection pipeline. The `alternativeCount`
+    /// field is plumbed here so that a future ASR integration can populate it
+    /// without changing downstream types. When > 0, it indicates the ASR had
+    /// uncertainty for this atom's text, which downstream could use to lower
+    /// fingerprint match thresholds or request FM re-evaluation.
+    let alternativeCount: Int
+
+    /// Default reliability for atoms where no quality assessment has been performed.
+    static let `default` = TranscriptReliability(
+        chunkQuality: .good,
+        chunkQualityScore: 1.0,
+        normalizationQuality: .unknown,
+        alternativeCount: 0
+    )
+
+    /// True when the atom is usable for classification (not unusable ASR).
+    /// Downstream consumers (lexical scanner, FM scheduler) can gate on this.
+    var isUsableForClassification: Bool {
+        chunkQuality != .unusable
+    }
+
+    /// True when both ASR and normalization produced high-quality output.
+    /// Fingerprint matcher and metadata corroboration can prefer these atoms.
+    var isHighConfidence: Bool {
+        chunkQuality == .good && normalizationQuality == .good
+    }
+}
+
+// MARK: - NormalizationQualityAssessor
+
+/// Assesses normalization quality for an atom based on what evidence categories
+/// were extracted from it. Called after EvidenceCatalogBuilder runs.
+enum NormalizationQualityAssessor {
+
+    /// Strong categories that indicate successful entity extraction.
+    private static let strongCategories: Set<EvidenceCategory> = [.url, .promoCode, .disclosurePhrase]
+
+    /// Assess normalization quality based on which evidence categories matched.
+    static func assess(
+        atomText: String,
+        evidenceCategories: Set<EvidenceCategory>
+    ) -> NormalizationQuality {
+        guard !evidenceCategories.isEmpty else {
+            return .unknown
+        }
+
+        if !evidenceCategories.isDisjoint(with: strongCategories) {
+            return .good
+        }
+
+        // Weaker signals: brandSpan, ctaPhrase
+        return .partial
+    }
+}
+
+// MARK: - ReliabilityGate
+
+/// Gated reliability hooks for downstream pipeline stages.
+///
+/// Phase 0: all gates return `true` — no behavior change. Future phases
+/// will activate these gates to skip unusable atoms in classification,
+/// prefer high-confidence atoms in fingerprint matching, etc.
+///
+/// Wiring points (currently pass-through):
+///   - LexicalScanner.rescoreRegionText: call `shouldIncludeInLexicalScan`
+///   - AdCopyFingerprintMatcher.match: call `shouldIncludeInFingerprintMatch`
+///   - FoundationModelClassifier.buildPrompt: call `shouldIncludeInFMScheduling`
+///   - EvidenceCatalogBuilder: call `shouldIncludeInCorroboration`
+enum ReliabilityGate {
+
+    /// Whether to include an atom in lexical scanning.
+    /// Phase 0: always true.
+    static func shouldIncludeInLexicalScan(_ reliability: TranscriptReliability) -> Bool {
+        // Future: return reliability.isUsableForClassification
+        return true
+    }
+
+    /// Whether to include an atom in fingerprint matching.
+    /// Phase 0: always true.
+    static func shouldIncludeInFingerprintMatch(_ reliability: TranscriptReliability) -> Bool {
+        // Future: return reliability.isUsableForClassification
+        return true
+    }
+
+    /// Whether to include an atom in FM scheduling / prompt building.
+    /// Phase 0: always true.
+    static func shouldIncludeInFMScheduling(_ reliability: TranscriptReliability) -> Bool {
+        // Future: return reliability.isUsableForClassification
+        return true
+    }
+
+    /// Whether to include an atom in metadata corroboration (evidence catalog).
+    /// Phase 0: always true.
+    static func shouldIncludeInCorroboration(_ reliability: TranscriptReliability) -> Bool {
+        // Future: return reliability.isUsableForClassification
+        return true
+    }
+}
+
 // MARK: - TranscriptQualityLevel
 
 /// Estimated transcript quality for a segment. Maps to FM schema TranscriptQuality.
