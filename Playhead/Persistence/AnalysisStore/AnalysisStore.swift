@@ -607,6 +607,11 @@ actor AnalysisStore {
                 definition: "TEXT NOT NULL DEFAULT 'shadow'"
             )
             try migrateSponsorKnowledgeV7IfNeeded()
+            // ef2.3.1: CorrectionAttribution columns — unconditional addColumnIfNeeded
+            // so existing v6/v7 databases get the new columns too.
+            try addColumnIfNeeded(table: "correction_events", column: "correctionType", definition: "TEXT")
+            try addColumnIfNeeded(table: "correction_events", column: "causalSource", definition: "TEXT")
+            try addColumnIfNeeded(table: "correction_events", column: "targetRefsJSON", definition: "TEXT")
             try migrateFingerprintStoreV8IfNeeded()
             try addColumnIfNeeded(
                 table: "feature_windows",
@@ -695,6 +700,11 @@ actor AnalysisStore {
         try migrateAdWindowsPhase6PrepV5IfNeeded()
         try migrateCorrectionEventsV6IfNeeded()
         try migrateSponsorKnowledgeV7IfNeeded()
+        // ef2.3.1: CorrectionAttribution columns — unconditional addColumnIfNeeded
+        // so existing v6/v7 databases get the new columns too.
+        try addColumnIfNeeded(table: "correction_events", column: "correctionType", definition: "TEXT")
+        try addColumnIfNeeded(table: "correction_events", column: "causalSource", definition: "TEXT")
+        try addColumnIfNeeded(table: "correction_events", column: "targetRefsJSON", definition: "TEXT")
         try migrateFingerprintStoreV8IfNeeded()
         try exec("""
             CREATE TABLE IF NOT EXISTS feature_windows (
@@ -1244,6 +1254,11 @@ actor AnalysisStore {
         // hand-built the table without them.
         try addColumnIfNeeded(table: "correction_events", column: "source", definition: "TEXT")
         try addColumnIfNeeded(table: "correction_events", column: "podcastId", definition: "TEXT")
+
+        // ef2.3.1: CorrectionAttribution columns — nullable, backward-compatible.
+        try addColumnIfNeeded(table: "correction_events", column: "correctionType", definition: "TEXT")
+        try addColumnIfNeeded(table: "correction_events", column: "causalSource", definition: "TEXT")
+        try addColumnIfNeeded(table: "correction_events", column: "targetRefsJSON", definition: "TEXT")
 
         try setSchemaVersion(6)
     }
@@ -4908,8 +4923,9 @@ actor AnalysisStore {
     func appendCorrectionEvent(_ event: CorrectionEvent) throws {
         let sql = """
             INSERT OR IGNORE INTO correction_events
-            (id, analysisAssetId, scope, createdAt, source, podcastId)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (id, analysisAssetId, scope, createdAt, source, podcastId,
+             correctionType, causalSource, targetRefsJSON)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -4919,13 +4935,23 @@ actor AnalysisStore {
         bind(stmt, 4, event.createdAt)
         bind(stmt, 5, event.source?.rawValue)
         bind(stmt, 6, event.podcastId)
+        bind(stmt, 7, event.correctionType?.rawValue)
+        bind(stmt, 8, event.causalSource?.rawValue)
+        // Encode targetRefs to JSON if present.
+        let targetRefsJSON: String? = {
+            guard let refs = event.targetRefs else { return nil }
+            guard let data = try? JSONEncoder().encode(refs) else { return nil }
+            return String(data: data, encoding: .utf8)
+        }()
+        bind(stmt, 9, targetRefsJSON)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
     /// Load all correction events for an asset, ordered by createdAt ascending.
     func loadCorrectionEvents(analysisAssetId: String) throws -> [CorrectionEvent] {
         let sql = """
-            SELECT id, analysisAssetId, scope, createdAt, source, podcastId
+            SELECT id, analysisAssetId, scope, createdAt, source, podcastId,
+                   correctionType, causalSource, targetRefsJSON
             FROM correction_events
             WHERE analysisAssetId = ?
             ORDER BY createdAt ASC
@@ -4943,13 +4969,25 @@ actor AnalysisStore {
             let sourceRaw = optionalText(stmt, 4)
             let podcastId = optionalText(stmt, 5)
             let source = sourceRaw.flatMap { CorrectionSource(rawValue: $0) }
+            let correctionTypeRaw = optionalText(stmt, 6)
+            let causalSourceRaw = optionalText(stmt, 7)
+            let targetRefsJSONStr = optionalText(stmt, 8)
+            let correctionType = correctionTypeRaw.flatMap { CorrectionType(rawValue: $0) }
+            let causalSource = causalSourceRaw.flatMap { CausalSource(rawValue: $0) }
+            let targetRefs: CorrectionTargetRefs? = targetRefsJSONStr.flatMap { json in
+                guard let data = json.data(using: .utf8) else { return nil }
+                return try? JSONDecoder().decode(CorrectionTargetRefs.self, from: data)
+            }
             results.append(CorrectionEvent(
                 id: id,
                 analysisAssetId: assetId,
                 scope: scope,
                 createdAt: createdAt,
                 source: source,
-                podcastId: podcastId
+                podcastId: podcastId,
+                correctionType: correctionType,
+                causalSource: causalSource,
+                targetRefs: targetRefs
             ))
         }
         return results
