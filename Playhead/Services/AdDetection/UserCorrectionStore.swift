@@ -9,6 +9,7 @@
 //   • PersistentUserCorrectionStore persists events via AnalysisStore and
 //     exposes weighted/filtered query APIs for Phase 7.2 orchestrator wiring.
 
+import CryptoKit
 import Foundation
 import OSLog
 
@@ -314,6 +315,86 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
         guard !falseNegatives.isEmpty else { return 1.0 }
         let maxCorrectionWeight = falseNegatives.map(\.1).max() ?? 0.0
         return min(2.0, 1.0 + maxCorrectionWeight)
+    }
+
+    // MARK: - False-Negative Synthetic Anchor (playhead-ef2.3.2)
+
+    /// Record a false-negative correction ("missed ad here") and immediately create
+    /// a synthetic DecodedSpan so the user sees the correction take effect.
+    ///
+    /// The synthetic span uses ±15s fallback boundaries around the reported time
+    /// (clamped to 0 at the start). It is episode-local (scoped to `assetId`)
+    /// and does NOT propagate to other episodes or the sponsor knowledge store.
+    ///
+    /// The span uses negative atom ordinals to avoid colliding with real transcript
+    /// atom ordinals (which are always >= 0).
+    func recordFalseNegative(
+        assetId: String,
+        reportedTime: Double
+    ) async throws {
+        let correctionId = UUID().uuidString
+        let now = Date().timeIntervalSince1970
+
+        // 1. Compute synthetic ordinals first so the CorrectionEvent scope matches.
+        //
+        // Use deterministic negative ordinals derived from SHA256 of the correction id.
+        // String.hashValue is randomized per process in Swift — SHA256 is stable across
+        // launches and devices, which matters for span ID reproducibility.
+        let hashBytes = SHA256.hash(data: Data(correctionId.utf8))
+        let hashInt = hashBytes.prefix(8).enumerated().reduce(0) { acc, pair in
+            acc | (Int(pair.element) << (pair.offset * 8))
+        }
+        let syntheticFirst = -(abs(hashInt % 1_000_000) + 2)
+        let syntheticLast = syntheticFirst + 1
+
+        // 2. Record the correction event with the actual synthetic ordinals.
+        let scope = CorrectionScope.exactSpan(
+            assetId: assetId,
+            ordinalRange: syntheticFirst...syntheticLast
+        )
+        let event = CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: scope.serialized,
+            createdAt: now,
+            source: .falseNegative,
+            podcastId: nil
+        )
+        try await record(event)
+
+        // 3. Create synthetic DecodedSpan with ±15s fallback boundaries.
+        let fallbackRadius = 15.0
+        let startTime = max(0.0, reportedTime - fallbackRadius)
+        let endTime = reportedTime + fallbackRadius
+
+        let spanId = DecodedSpan.makeId(
+            assetId: assetId,
+            firstAtomOrdinal: syntheticFirst,
+            lastAtomOrdinal: syntheticLast
+        )
+
+        let span = DecodedSpan(
+            id: spanId,
+            assetId: assetId,
+            firstAtomOrdinal: syntheticFirst,
+            lastAtomOrdinal: syntheticLast,
+            startTime: startTime,
+            endTime: endTime,
+            anchorProvenance: [
+                .userCorrection(correctionId: correctionId, reportedTime: reportedTime)
+            ]
+        )
+
+        do {
+            try await store.upsertDecodedSpans([span])
+            logger.info(
+                "recordFalseNegative: created synthetic span \(spanId, privacy: .public) at \(startTime, format: .fixed(precision: 1))–\(endTime, format: .fixed(precision: 1)) for asset \(assetId, privacy: .public)"
+            )
+        } catch {
+            logger.error(
+                "recordFalseNegative: failed to persist synthetic span for asset \(assetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            throw error
+        }
     }
 
     // MARK: - Query

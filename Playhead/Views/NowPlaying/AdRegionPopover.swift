@@ -141,6 +141,7 @@ struct AdRegionPopover: View {
         case .fmConsensus: return "brain.head.profile"
         case .evidenceCatalog: return "text.magnifyingglass"
         case .fmAcousticCorroborated: return "waveform.badge.magnifyingglass"
+        case .userCorrection: return "hand.tap"
         }
     }
 
@@ -165,6 +166,8 @@ struct AdRegionPopover: View {
         case .fmAcousticCorroborated(_, let strength):
             let pct = Int((strength * 100).rounded())
             return "FM + acoustic break (\(pct)% break strength)"
+        case .userCorrection:
+            return "User-reported ad"
         }
     }
 }

@@ -637,6 +637,7 @@ private extension TranscriptPeekView {
             case .fmConsensus: return "FM consensus"
             case .evidenceCatalog(let e): return e.category.rawValue
             case .fmAcousticCorroborated: return "FM and acoustic break"
+            case .userCorrection: return "user-reported ad"
             }
         }
         return descriptions.joined(separator: ", ")
