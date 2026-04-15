@@ -415,7 +415,7 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 6
+    nonisolated private static let currentSchemaVersion = 9
 
     /// bd-m8k / Cycle 2 C4: Maximum number of recent full-rescan **recall**
     /// samples retained for the `stable_recall_flag` ring. Must match the
@@ -660,6 +660,7 @@ actor AnalysisStore {
                     definition: "TEXT"
                 )
             }
+            try migrateBoundaryPriorsV9IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -717,6 +718,7 @@ actor AnalysisStore {
         try addColumnIfNeeded(table: "correction_events", column: "causalSource", definition: "TEXT")
         try addColumnIfNeeded(table: "correction_events", column: "targetRefsJSON", definition: "TEXT")
         try migrateFingerprintStoreV8IfNeeded()
+        try migrateBoundaryPriorsV9IfNeeded()
         try exec("""
             CREATE TABLE IF NOT EXISTS feature_windows (
                 analysisAssetId   TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
@@ -1367,6 +1369,28 @@ actor AnalysisStore {
         try exec("CREATE INDEX IF NOT EXISTS idx_fse_created ON fingerprint_source_events(createdAt)")
 
         try setSchemaVersion(8)
+    }
+
+    // MARK: - V9: Boundary Priors Table (ef2.3.5)
+
+    private func migrateBoundaryPriorsV9IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 9 else { return }
+
+        try exec("""
+            CREATE TABLE IF NOT EXISTS boundary_priors (
+                showId          TEXT NOT NULL,
+                edgeDirection   TEXT NOT NULL,
+                bracketTemplate TEXT NOT NULL DEFAULT '__none__',
+                median          REAL NOT NULL,
+                spread          REAL NOT NULL,
+                sampleCount     INTEGER NOT NULL,
+                lastUpdatedAt   REAL NOT NULL,
+                PRIMARY KEY (showId, edgeDirection, bracketTemplate)
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_bp_show ON boundary_priors(showId)")
+
+        try setSchemaVersion(9)
     }
 
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
@@ -5034,6 +5058,101 @@ actor AnalysisStore {
         var result = Set<String>()
         while sqlite3_step(stmt) == SQLITE_ROW {
             result.insert(text(stmt, 0))
+        }
+        return result
+    }
+
+    // MARK: - CRUD: boundary_priors (ef2.3.5)
+
+    /// Upsert a boundary prior distribution row. Uses INSERT OR REPLACE on the
+    /// composite primary key (showId, edgeDirection, bracketTemplate).
+    ///
+    /// Note: SQLite's PRIMARY KEY on (showId, edgeDirection, bracketTemplate)
+    /// treats NULL bracketTemplate values as distinct — each NULL is unique.
+    /// We normalize NULL to the empty string "__none__" so upserts work correctly.
+    func upsertBoundaryPrior(
+        showId: String,
+        edgeDirection: String,
+        bracketTemplate: String?,
+        median: Double,
+        spread: Double,
+        sampleCount: Int,
+        lastUpdatedAt: Double
+    ) throws {
+        let sql = """
+            INSERT INTO boundary_priors
+            (showId, edgeDirection, bracketTemplate, median, spread, sampleCount, lastUpdatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(showId, edgeDirection, bracketTemplate)
+            DO UPDATE SET
+                median = excluded.median,
+                spread = excluded.spread,
+                sampleCount = excluded.sampleCount,
+                lastUpdatedAt = excluded.lastUpdatedAt
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, showId)
+        bind(stmt, 2, edgeDirection)
+        bind(stmt, 3, bracketTemplate ?? "__none__")
+        bind(stmt, 4, median)
+        bind(stmt, 5, spread)
+        bind(stmt, 6, sampleCount)
+        bind(stmt, 7, lastUpdatedAt)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Load a single boundary prior distribution for the given context.
+    func loadBoundaryPrior(
+        showId: String,
+        edgeDirection: String,
+        bracketTemplate: String?
+    ) throws -> BoundaryPriorDistribution? {
+        let sql = """
+            SELECT median, spread, sampleCount, lastUpdatedAt
+            FROM boundary_priors
+            WHERE showId = ? AND edgeDirection = ? AND bracketTemplate = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, showId)
+        bind(stmt, 2, edgeDirection)
+        bind(stmt, 3, bracketTemplate ?? "__none__")
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return BoundaryPriorDistribution(
+            median: sqlite3_column_double(stmt, 0),
+            spread: sqlite3_column_double(stmt, 1),
+            sampleCount: Int(sqlite3_column_int(stmt, 2)),
+            lastUpdatedAt: sqlite3_column_double(stmt, 3)
+        )
+    }
+
+    /// Load all boundary priors for a given show, returned as a dictionary
+    /// keyed by BoundaryPriorKey.
+    func loadAllBoundaryPriors(forShow showId: String) throws -> [BoundaryPriorKey: BoundaryPriorDistribution] {
+        let sql = """
+            SELECT edgeDirection, bracketTemplate, median, spread, sampleCount, lastUpdatedAt
+            FROM boundary_priors
+            WHERE showId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, showId)
+
+        var result: [BoundaryPriorKey: BoundaryPriorDistribution] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let edgeRaw = text(stmt, 0)
+            let templateRaw = text(stmt, 1)
+            guard let edge = EdgeDirection(rawValue: edgeRaw) else { continue }
+            let template: String? = templateRaw == "__none__" ? nil : templateRaw
+            let key = BoundaryPriorKey(showId: showId, edgeDirection: edge, bracketTemplate: template)
+            let dist = BoundaryPriorDistribution(
+                median: sqlite3_column_double(stmt, 2),
+                spread: sqlite3_column_double(stmt, 3),
+                sampleCount: Int(sqlite3_column_int(stmt, 4)),
+                lastUpdatedAt: sqlite3_column_double(stmt, 5)
+            )
+            result[key] = dist
         }
         return result
     }
