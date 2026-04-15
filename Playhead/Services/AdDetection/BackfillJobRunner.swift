@@ -1735,6 +1735,7 @@ actor BackfillJobRunner {
         switch phase {
         case .scanLikelyAdSlots: 30
         case .scanHarvesterProposals: 20
+        case .metadataSeededRegion: 15
         case .scanRandomAuditWindows: 10
         case .fullEpisodeScan: 5
         }

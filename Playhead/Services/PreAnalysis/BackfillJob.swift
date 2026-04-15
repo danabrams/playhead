@@ -8,6 +8,9 @@ enum BackfillJobPhase: String, Codable, Sendable, Hashable, CaseIterable {
     case scanHarvesterProposals
     case scanLikelyAdSlots
     case scanRandomAuditWindows
+    /// ef2.4.7: FM scheduling phase for regions where metadata suggests ad
+    /// presence but no strong anchor exists yet. Gated by MetadataActivationConfig.
+    case metadataSeededRegion
 }
 
 enum BackfillJobStatus: String, Codable, Sendable, Hashable, CaseIterable {
