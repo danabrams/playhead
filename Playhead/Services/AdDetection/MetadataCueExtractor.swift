@@ -111,8 +111,9 @@ struct MetadataCueExtractor: Sendable {
     /// Decode common HTML entities to their character equivalents.
     static func decodeHTMLEntities(_ text: String) -> String {
         var result = text
+        // NOTE: &amp; is decoded LAST to prevent double-decoding.
+        // If &amp; is first, "&amp;lt;" becomes "&lt;" then "<".
         let entities: [(String, String)] = [
-            ("&amp;", "&"),
             ("&lt;", "<"),
             ("&gt;", ">"),
             ("&quot;", "\""),
@@ -128,12 +129,17 @@ struct MetadataCueExtractor: Sendable {
             ("&ldquo;", "\u{201C}"),
             ("&rdquo;", "\u{201D}"),
             ("&hellip;", "\u{2026}"),
+            ("&amp;", "&"),
         ]
         for (entity, replacement) in entities {
             result = result.replacingOccurrences(of: entity, with: replacement)
         }
 
         // Decode numeric entities: &#123; or &#x1F;
+        // IMPORTANT: Reversed iteration is required for correctness — each
+        // replacement can change the string length, invalidating NSRange offsets
+        // for matches at earlier positions. Processing from end to start ensures
+        // that only already-processed (later) indices are affected.
         if let numericPattern = try? NSRegularExpression(
             pattern: #"&#(\d+);"#,
             options: []
@@ -143,7 +149,6 @@ struct MetadataCueExtractor: Sendable {
                 in: result,
                 range: NSRange(location: 0, length: nsResult.length)
             )
-            // Process in reverse to preserve indices
             for match in matches.reversed() {
                 let codeStr = nsResult.substring(with: match.range(at: 1))
                 if let code = UInt32(codeStr),
@@ -185,29 +190,21 @@ struct MetadataCueExtractor: Sendable {
     /// URL regex pattern matching common URL formats in podcast descriptions.
     private static let urlPattern: NSRegularExpression = {
         // Match http(s) URLs and bare domain URLs
-        let pattern = #"(?:https?://)?(?:www\.)?([a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?\.)+(?:com|net|org|io|co|app|fm|tv|me|info|biz|us|uk|ca|de|fr|es|it|nl|au|dev|tech|store|shop)(?:/[^\s<>\"')\]]*)?(?<![.,;:!?)])"#
+        let pattern = #"(?:https?://)?(?:www\.)?([a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?\.)+(?:com|net|org|io|co|app|fm|tv|me|info|biz|us|uk|ca|de|fr|es|it|nl|au|dev|tech|store|shop|edu|gov|mil|xyz|link|ly|gg)(?:/[^\s<>\"')\]]*)?(?<![.,;:!?)])"#
         return try! NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
     }()
 
-    /// Tracking query parameters to strip from URLs.
-    private static let trackingParams: Set<String> = [
-        "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term",
-        "ref", "affiliate", "aff", "tag", "click_id", "clickid",
-        "fbclid", "gclid", "dclid", "msclkid",
-        "mc_cid", "mc_eid",
-    ]
-
-    /// Extract URLs from text and return normalized domain representations.
-    static func extractURLs(from text: String) -> [(fullURL: String, domain: String)] {
+    /// Extract normalized domains (eTLD+1) from URLs found in text.
+    static func extractDomains(from text: String) -> [String] {
         let nsText = text as NSString
         let range = NSRange(location: 0, length: nsText.length)
         let matches = urlPattern.matches(in: text, range: range)
 
-        var results: [(String, String)] = []
+        var results: [String] = []
         for match in matches {
             let urlString = nsText.substring(with: match.range)
             if let domain = normalizeDomain(from: urlString) {
-                results.append((urlString, domain))
+                results.append(domain)
             }
         }
         return results
@@ -249,27 +246,9 @@ struct MetadataCueExtractor: Sendable {
         return components.suffix(2).joined(separator: ".")
     }
 
-    /// Strip tracking query parameters from a URL string.
-    static func stripTrackingParams(from urlString: String) -> String {
-        var normalized = urlString
-        if !normalized.lowercased().hasPrefix("http://") &&
-           !normalized.lowercased().hasPrefix("https://") {
-            normalized = "https://" + normalized
-        }
-
-        guard var components = URLComponents(string: normalized) else {
-            return urlString
-        }
-
-        if let queryItems = components.queryItems {
-            let filtered = queryItems.filter { item in
-                !trackingParams.contains(item.name.lowercased())
-            }
-            components.queryItems = filtered.isEmpty ? nil : filtered
-        }
-
-        return components.string ?? urlString
-    }
+    // NOTE: Tracking-param stripping is handled by DomainNormalizer in
+    // SponsorEntityGraph.swift. This extractor returns only eTLD+1 domains,
+    // so URL query parameters are irrelevant at this stage.
 
     // MARK: - Cue Extraction (Stages 3-5)
 
@@ -284,10 +263,10 @@ struct MetadataCueExtractor: Sendable {
         let casefolded = text.lowercased()
 
         // Disclosure cues
-        cues.append(contentsOf: extractDisclosures(from: casefolded, original: text, sourceField: sourceField))
+        cues.append(contentsOf: extractDisclosures(from: casefolded, sourceField: sourceField))
 
         // Promo code cues
-        cues.append(contentsOf: extractPromoCodes(from: casefolded, original: text, sourceField: sourceField))
+        cues.append(contentsOf: extractPromoCodes(from: casefolded, sourceField: sourceField))
 
         // URL-based cues (domain classification)
         cues.append(contentsOf: extractDomainCues(from: text, sourceField: sourceField))
@@ -304,12 +283,13 @@ struct MetadataCueExtractor: Sendable {
     private static let disclosurePatterns: [(NSRegularExpression, Float)] = {
         let patterns: [(String, Float)] = [
             // Strong disclosures (high confidence)
-            // Capture group uses [^.,!?\n] to stop at sentence punctuation.
-            (#"(?:this\s+(?:episode|podcast|show)\s+is\s+)?sponsored\s+by\s+(\w[\w\s&']*\w)"#, 0.95),
-            (#"brought\s+to\s+you\s+by\s+(\w[\w\s&']*\w)"#, 0.95),
-            (#"(?:a\s+)?(?:word|message)\s+from\s+(?:our\s+)?sponsor[s]?\s*(?::|\s+)(\w[\w\s&']*\w)"#, 0.90),
-            (#"thanks?\s+to\s+(?:our\s+)?sponsors?\s*[,:]\s*(\w[\w\s&']*\w)"#, 0.90),
-            (#"in\s+(?:partnership|collaboration)\s+with\s+(\w[\w\s&']*\w)"#, 0.85),
+            // Capture groups use [^.,;:!?\n] character class to stop at
+            // sentence punctuation, preventing greedy over-capture.
+            (#"(?:this\s+(?:episode|podcast|show)\s+is\s+)?sponsored\s+by\s+([^.,;:!?\n]+\w)"#, 0.95),
+            (#"brought\s+to\s+you\s+by\s+([^.,;:!?\n]+\w)"#, 0.95),
+            (#"(?:a\s+)?(?:word|message)\s+from\s+(?:our\s+)?sponsor[s]?\s*(?::|\s+)([^.,;:!?\n]+\w)"#, 0.90),
+            (#"thanks?\s+to\s+(?:our\s+)?sponsors?\s*[,:]\s*([^.,;:!?\n]+\w)"#, 0.90),
+            (#"in\s+(?:partnership|collaboration)\s+with\s+([^.,;:!?\n]+\w)"#, 0.85),
             // Weaker disclosures (lower confidence, no captured sponsor name)
             (#"supported\s+by"#, 0.70),
             (#"presented\s+by"#, 0.70),
@@ -327,7 +307,6 @@ struct MetadataCueExtractor: Sendable {
 
     private func extractDisclosures(
         from casefolded: String,
-        original: String,
         sourceField: MetadataCueSourceField
     ) -> [EpisodeMetadataCue] {
         let nsText = casefolded as NSString
@@ -384,7 +363,6 @@ struct MetadataCueExtractor: Sendable {
 
     private func extractPromoCodes(
         from casefolded: String,
-        original: String,
         sourceField: MetadataCueSourceField
     ) -> [EpisodeMetadataCue] {
         let nsText = casefolded as NSString
@@ -427,11 +405,11 @@ struct MetadataCueExtractor: Sendable {
         from text: String,
         sourceField: MetadataCueSourceField
     ) -> [EpisodeMetadataCue] {
-        let urls = Self.extractURLs(from: text)
+        let domains = Self.extractDomains(from: text)
         var cues: [EpisodeMetadataCue] = []
         var seenDomains: Set<String> = []
 
-        for (_, domain) in urls {
+        for domain in domains {
             guard !seenDomains.contains(domain) else { continue }
             seenDomains.insert(domain)
 
@@ -481,8 +459,8 @@ struct MetadataCueExtractor: Sendable {
                 options: [.caseInsensitive]
             ) else { continue }
 
-            let matches = regex.matches(in: casefolded, range: range)
-            for _ in matches {
+            // One cue per sponsor per text — multiple mentions don't add signal.
+            if regex.firstMatch(in: casefolded, range: range) != nil {
                 cues.append(EpisodeMetadataCue(
                     cueType: .sponsorAlias,
                     normalizedValue: sponsor.lowercased(),

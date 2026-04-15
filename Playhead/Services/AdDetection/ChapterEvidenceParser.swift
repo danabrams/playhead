@@ -1,7 +1,7 @@
 // ChapterEvidenceParser.swift
 // ef2.2.4: Parses chapter markers from ID3 metadata and Podcasting 2.0 JSON.
 //
-// Two entry points:
+// Three entry points:
 //   1. `parseID3Chapters(from:)` — extracts CHAP/CTOC from AVAsset metadata.
 //   2. `parsePodcasting20Chapters(from:)` — decodes external JSON from a URL.
 //   3. `fromParsedChapters(_:episodeDuration:)` — converts inline RSS chapters.
@@ -57,6 +57,9 @@ enum ChapterEvidenceParser {
 
         for group in groups {
             let startTime = group.timeRange.start.seconds
+            // Validate startTime: skip malformed ID3 frames
+            guard startTime.isFinite, startTime >= 0 else { continue }
+
             let duration = group.timeRange.duration.seconds
             let endTime = duration.isFinite && duration > 0
                 ? startTime + duration
@@ -102,9 +105,16 @@ enum ChapterEvidenceParser {
             }
         }
 
-        // Fallback: check all items for string values
+        // Fallback: check items with known title-like keys only.
+        // Avoid returning non-title metadata (image URLs, ISRC codes, etc.)
+        // that could cause false-positive ad classifications.
+        let titleKeys: Set<AVMetadataKey> = [
+            .commonKeyTitle,
+            .id3MetadataKeyTitleDescription,
+        ]
         for item in items {
-            if let stringValue = item.stringValue, !stringValue.isEmpty {
+            if let key = item.commonKey, titleKeys.contains(key),
+               let stringValue = item.stringValue, !stringValue.isEmpty {
                 return stringValue
             }
         }
@@ -176,6 +186,12 @@ enum ChapterEvidenceParser {
             // Skip non-TOC chapters (toc: false means "not in table of contents")
             if chapter.toc == false { continue }
 
+            // Validate time values: skip malformed entries
+            guard chapter.startTime.isFinite, chapter.startTime >= 0 else { continue }
+            if let end = chapter.endTime {
+                guard end.isFinite, end > chapter.startTime else { continue }
+            }
+
             let disposition = classifier.classify(chapter.title)
             let quality = scorer.score(
                 title: chapter.title,
@@ -215,7 +231,9 @@ enum ChapterEvidenceParser {
     ) -> [ChapterEvidence] {
         guard !chapters.isEmpty else { return [] }
 
-        let sorted = chapters.sorted { $0.startTime < $1.startTime }
+        // Filter out malformed entries before sorting
+        let valid = chapters.filter { $0.startTime.isFinite && $0.startTime >= 0 }
+        let sorted = valid.sorted { $0.startTime < $1.startTime }
         var evidence: [ChapterEvidence] = []
 
         for (index, chapter) in sorted.enumerated() {
@@ -223,7 +241,7 @@ enum ChapterEvidenceParser {
             let endTime: TimeInterval?
             if index + 1 < sorted.count {
                 endTime = sorted[index + 1].startTime
-            } else if let duration = episodeDuration {
+            } else if let duration = episodeDuration, duration.isFinite, duration > 0 {
                 endTime = duration
             } else {
                 endTime = nil
@@ -234,14 +252,14 @@ enum ChapterEvidenceParser {
                 title: chapter.title,
                 disposition: disposition,
                 hasEndTime: endTime != nil,
-                source: .pc20  // RSS inline chapters use the PC20 namespace
+                source: .rssInline
             )
 
             evidence.append(ChapterEvidence(
                 startTime: chapter.startTime,
                 endTime: endTime,
                 title: chapter.title,
-                source: .pc20,
+                source: .rssInline,
                 disposition: disposition,
                 qualityScore: quality
             ))

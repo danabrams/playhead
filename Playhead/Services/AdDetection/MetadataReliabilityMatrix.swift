@@ -74,9 +74,10 @@ struct BetaDistribution: Sendable, Codable, Equatable {
     }
 
     init(alpha: Float, beta: Float) {
-        precondition(alpha >= 0 && beta >= 0, "Alpha and beta must be non-negative")
-        self.alpha = alpha
-        self.beta = beta
+        // Clamp to non-negative to survive corrupted persistence data
+        // without crashing in release builds.
+        self.alpha = max(0, alpha)
+        self.beta = max(0, beta)
     }
 }
 
@@ -127,7 +128,7 @@ struct ShowReliabilityMatrix: Sendable, Codable, Equatable {
     /// Build default priors for all (sourceField × cueType) combinations.
     private static func defaultPriors() -> [ReliabilityCellKey: BetaDistribution] {
         var result: [ReliabilityCellKey: BetaDistribution] = [:]
-        for sourceField in [MetadataCueSourceField.description, .summary] {
+        for sourceField in MetadataCueSourceField.allCases {
             for cueType in MetadataCueType.allCases {
                 let key = ReliabilityCellKey(sourceField: sourceField, cueType: cueType)
                 result[key] = defaultPrior(for: cueType)
@@ -249,10 +250,11 @@ actor MetadataReliabilityMatrix {
     /// Compute the observation weight based on recency.
     /// Recent observations (≤90 days) get full weight (1.0).
     /// Older observations get decayed weight (0.5).
+    /// Uses seconds-based comparison for timezone-agnostic determinism.
+    private static let recencyThresholdSeconds: TimeInterval = TimeInterval(recencyThresholdDays) * 86400
+
     private static func weight(for date: Date, referenceDate: Date = Date()) -> Float {
-        let daysSince = Calendar.current.dateComponents(
-            [.day], from: date, to: referenceDate
-        ).day ?? 0
-        return daysSince > recencyThresholdDays ? decayedWeight : 1.0
+        let elapsed = referenceDate.timeIntervalSince(date)
+        return elapsed > recencyThresholdSeconds ? decayedWeight : 1.0
     }
 }

@@ -368,7 +368,7 @@ struct RecencyWeightingTests {
             canonicalOwnerId: nil
         )
 
-        let oldDate = Calendar.current.date(byAdding: .day, value: -100, to: Date())!
+        let oldDate = Date(timeIntervalSinceNow: -100 * 86400)
 
         await matrix.observe(
             showId: "show1", cue: cue, wasCorrect: true,
@@ -392,7 +392,9 @@ struct RecencyWeightingTests {
             canonicalOwnerId: nil
         )
 
-        let boundaryDate = Calendar.current.date(byAdding: .day, value: -90, to: Date())!
+        // Use 89.99 days (just within threshold) to avoid flakiness from
+        // wall-clock drift between date construction and weight calculation.
+        let boundaryDate = Date(timeIntervalSinceNow: -89.99 * 86400)
 
         await matrix.observe(
             showId: "show1", cue: cue, wasCorrect: true,
@@ -422,7 +424,7 @@ struct RecencyWeightingTests {
             date: Date(), corroboratingFamily: .domain
         )
 
-        let oldDate = Calendar.current.date(byAdding: .day, value: -180, to: Date())!
+        let oldDate = Date(timeIntervalSinceNow: -180 * 86400)
         await matrixOld.observe(
             showId: "show1", cue: cue, wasCorrect: true,
             date: oldDate, corroboratingFamily: .domain
@@ -588,5 +590,60 @@ struct ResetTests {
 
         #expect(abs(trust1 - 0.10) < 0.001)  // reset to prior
         #expect(trust2 > 0.10)  // still updated
+    }
+}
+
+// MARK: - Boundary and Edge Case Tests
+
+@Suite("MetadataReliabilityMatrix — Edge Cases")
+struct MatrixEdgeCaseTests {
+
+    @Test("Observation at 91 days gets decayed weight")
+    func day91GetsDecayedWeight() async {
+        let matrix = MetadataReliabilityMatrix()
+        let cue = EpisodeMetadataCue(
+            cueType: .externalDomain,
+            normalizedValue: "squarespace.com",
+            sourceField: .description,
+            confidence: 0.9,
+            canonicalSponsorId: nil,
+            canonicalOwnerId: nil
+        )
+
+        let day91 = Date(timeIntervalSinceNow: -91 * 86400)
+
+        await matrix.observe(
+            showId: "show1", cue: cue, wasCorrect: true,
+            date: day91, corroboratingFamily: .textual
+        )
+
+        // Prior Beta(2,8) + 0.5 success = Beta(2.5,8), mean = 2.5/10.5
+        let trust = await matrix.trust(showId: "show1", for: .externalDomain, sourceField: .description)
+        #expect(abs(trust - 2.5 / 10.5) < 0.001)
+    }
+
+    @Test("BetaDistribution(0, 0) returns mean 0.5")
+    func betaZeroZero() {
+        let dist = BetaDistribution(alpha: 0, beta: 0)
+        #expect(abs(dist.mean - 0.5) < 0.001)
+        #expect(dist.variance == 0)
+    }
+
+    @Test("BetaDistribution clamps negative values to zero")
+    func betaClampsNegative() {
+        let dist = BetaDistribution(alpha: -1, beta: -2)
+        #expect(dist.alpha == 0)
+        #expect(dist.beta == 0)
+    }
+
+    @Test("Pre-loaded matrices preserve trust values")
+    func preLoadedMatrices() async {
+        var matrix = ShowReliabilityMatrix()
+        let key = ReliabilityCellKey(sourceField: .description, cueType: .externalDomain)
+        matrix.cells[key] = BetaDistribution(alpha: 10, beta: 2)
+
+        let loaded = MetadataReliabilityMatrix(matrices: ["show1": matrix])
+        let trust = await loaded.trust(showId: "show1", for: .externalDomain, sourceField: .description)
+        #expect(abs(trust - 10.0 / 12.0) < 0.001)
     }
 }

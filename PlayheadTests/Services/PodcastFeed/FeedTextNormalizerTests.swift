@@ -208,6 +208,31 @@ struct FeedTextNormalizerTests {
         #expect(meta1?.sourceHashes != meta2?.sourceHashes)
     }
 
+    // MARK: - Script / Style Block Stripping
+
+    @Test("Strips <script> blocks including content")
+    func stripsScriptBlocks() {
+        let raw = "Before<script type=\"text/javascript\">var x = 1; alert('hi');</script>After"
+        let result = FeedTextNormalizer.normalize(raw)
+        #expect(result == "BeforeAfter")
+    }
+
+    @Test("Strips <style> blocks including CSS content")
+    func stripsStyleBlocks() {
+        let raw = "Hello<style>.foo { color: red; background: url(http://sponsor.com); }</style>World"
+        let result = FeedTextNormalizer.normalize(raw)
+        #expect(result == "HelloWorld")
+        // CSS URL should not leak into normalized text
+        #expect(result?.contains("sponsor") != true)
+    }
+
+    @Test("Strips multiple script and style blocks")
+    func stripsMultipleBlocks() {
+        let raw = "<style>body{}</style>Content<script>alert(1)</script> here<style>p{}</style>."
+        let result = FeedTextNormalizer.normalize(raw)
+        #expect(result == "Content here.")
+    }
+
     // MARK: - Combined HTML + Entity + Whitespace
 
     @Test("Full normalization pipeline: HTML, entities, whitespace, truncation")

@@ -75,53 +75,48 @@ struct URLExtractionTests {
     @Test("Extracts HTTP URLs")
     func extractsHTTPURLs() {
         let text = "Visit https://squarespace.com/conan for more info"
-        let urls = MetadataCueExtractor.extractURLs(from: text)
-        #expect(urls.count == 1)
-        #expect(urls[0].domain == "squarespace.com")
+        let domains = MetadataCueExtractor.extractDomains(from: text)
+        #expect(domains.count == 1)
+        #expect(domains[0] == "squarespace.com")
     }
 
     @Test("Extracts bare domain URLs")
     func extractsBareDomains() {
         let text = "Go to betterhelp.com/conan to get started"
-        let urls = MetadataCueExtractor.extractURLs(from: text)
-        #expect(urls.count == 1)
-        #expect(urls[0].domain == "betterhelp.com")
+        let domains = MetadataCueExtractor.extractDomains(from: text)
+        #expect(domains.count == 1)
+        #expect(domains[0] == "betterhelp.com")
     }
 
     @Test("Strips www prefix")
     func stripsWWWPrefix() {
         let text = "Visit www.example.com/podcast"
-        let urls = MetadataCueExtractor.extractURLs(from: text)
-        #expect(urls.count == 1)
-        #expect(urls[0].domain == "example.com")
+        let domains = MetadataCueExtractor.extractDomains(from: text)
+        #expect(domains.count == 1)
+        #expect(domains[0] == "example.com")
     }
 
     @Test("Handles multiple URLs")
     func handlesMultipleURLs() {
         let text = "Check out squarespace.com and betterhelp.com/podcast"
-        let urls = MetadataCueExtractor.extractURLs(from: text)
-        #expect(urls.count == 2)
-        let domains = Set(urls.map(\.domain))
-        #expect(domains.contains("squarespace.com"))
-        #expect(domains.contains("betterhelp.com"))
+        let domains = MetadataCueExtractor.extractDomains(from: text)
+        #expect(domains.count == 2)
+        #expect(Set(domains) == ["squarespace.com", "betterhelp.com"])
     }
 
     @Test("No URLs in plain text")
     func noURLsInPlainText() {
         let text = "This is a plain text podcast description with no links"
-        let urls = MetadataCueExtractor.extractURLs(from: text)
-        #expect(urls.isEmpty)
+        let domains = MetadataCueExtractor.extractDomains(from: text)
+        #expect(domains.isEmpty)
     }
 
     @Test("Handles various TLDs")
     func handlesVariousTLDs() {
         let text = "Visit podcast.fm and myapp.io and show.tv"
-        let urls = MetadataCueExtractor.extractURLs(from: text)
-        #expect(urls.count == 3)
-        let domains = Set(urls.map(\.domain))
-        #expect(domains.contains("podcast.fm"))
-        #expect(domains.contains("myapp.io"))
-        #expect(domains.contains("show.tv"))
+        let domains = MetadataCueExtractor.extractDomains(from: text)
+        #expect(domains.count == 3)
+        #expect(Set(domains) == ["podcast.fm", "myapp.io", "show.tv"])
     }
 }
 
@@ -161,44 +156,10 @@ struct DomainNormalizationTests {
     }
 }
 
-// MARK: - Tracking Param Stripping
-
-@Suite("MetadataCueExtractor — Tracking Params")
-struct TrackingParamTests {
-
-    @Test("Strips UTM parameters")
-    func stripsUTMParams() {
-        let url = "https://example.com/page?utm_source=podcast&utm_medium=audio&real_param=value"
-        let result = MetadataCueExtractor.stripTrackingParams(from: url)
-        #expect(!result.contains("utm_source"))
-        #expect(!result.contains("utm_medium"))
-        #expect(result.contains("real_param=value"))
-    }
-
-    @Test("Strips affiliate/click params")
-    func stripsAffiliateParams() {
-        let url = "https://example.com/page?ref=podcast123&fbclid=abc&gclid=def"
-        let result = MetadataCueExtractor.stripTrackingParams(from: url)
-        #expect(!result.contains("ref="))
-        #expect(!result.contains("fbclid"))
-        #expect(!result.contains("gclid"))
-    }
-
-    @Test("Preserves non-tracking params")
-    func preservesNonTrackingParams() {
-        let url = "https://example.com/page?product=widget&size=large"
-        let result = MetadataCueExtractor.stripTrackingParams(from: url)
-        #expect(result.contains("product=widget"))
-        #expect(result.contains("size=large"))
-    }
-
-    @Test("Handles URL with no params")
-    func handlesNoParams() {
-        let url = "https://example.com/page"
-        let result = MetadataCueExtractor.stripTrackingParams(from: url)
-        #expect(result.contains("example.com/page"))
-    }
-}
+// NOTE: Tracking param stripping is handled by DomainNormalizer in
+// SponsorEntityGraph.swift and tested in its own test suite. The
+// MetadataCueExtractor returns only eTLD+1 domains, making URL query
+// parameters irrelevant at this extraction stage.
 
 // MARK: - Disclosure Extraction
 
@@ -666,5 +627,73 @@ struct RealWorldTests {
         let external = cues.filter { $0.cueType == .externalDomain }
         #expect(showDomains.count == 1)
         #expect(external.isEmpty)
+    }
+}
+
+// MARK: - Disclosure Capture Boundary Tests
+
+@Suite("MetadataCueExtractor — Disclosure Capture Limits")
+struct DisclosureCaptureLimitTests {
+
+    @Test("Disclosure capture stops at sentence punctuation")
+    func captureStopsAtPunctuation() {
+        let extractor = MetadataCueExtractor()
+        let cues = extractor.extractCues(
+            description: "Sponsored by Acme Corp. Build your website today.",
+            summary: nil
+        )
+        let disclosures = cues.filter { $0.cueType == .disclosure }
+        #expect(!disclosures.isEmpty)
+        // Should capture "Acme Corp", not "Acme Corp. Build your website today"
+        if let disclosure = disclosures.first {
+            #expect(!disclosure.normalizedValue.contains("build"))
+        }
+    }
+
+    @Test("Disclosure captures multi-word sponsor name")
+    func capturesMultiWordSponsor() {
+        let extractor = MetadataCueExtractor()
+        let cues = extractor.extractCues(
+            description: "Brought to you by Athletic Greens, the nutrition company.",
+            summary: nil
+        )
+        let disclosures = cues.filter { $0.cueType == .disclosure }
+        #expect(!disclosures.isEmpty)
+        if let disclosure = disclosures.first {
+            #expect(disclosure.normalizedValue.contains("athletic"))
+        }
+    }
+}
+
+// MARK: - Sponsor Alias Special Characters
+
+@Suite("MetadataCueExtractor — Sponsor Alias Regex Safety")
+struct SponsorAliasRegexSafetyTests {
+
+    @Test("Sponsor names with regex special characters do not crash")
+    func specialCharsDoNotCrash() {
+        // Sponsors with regex metacharacters (., +, *, etc.) must be escaped
+        // to prevent regex compilation failures. The \b word boundary means
+        // sponsors ending in non-word characters may not match, but the
+        // extractor must not crash.
+        let extractor = MetadataCueExtractor(knownSponsors: ["C++", "Yahoo!", "AT&T"])
+        let cues = extractor.extractCues(
+            description: "We use C++ and AT&T services at Yahoo! headquarters.",
+            summary: nil
+        )
+        // Just verify no crash — word boundary behavior with non-word chars
+        // is a known limitation.
+        _ = cues
+    }
+
+    @Test("Sponsor name with ampersand")
+    func ampersandSponsor() {
+        let extractor = MetadataCueExtractor(knownSponsors: ["Ben & Jerry's"])
+        let cues = extractor.extractCues(
+            description: "Enjoy Ben & Jerry's ice cream.",
+            summary: nil
+        )
+        let aliases = cues.filter { $0.cueType == .sponsorAlias }
+        #expect(!aliases.isEmpty)
     }
 }

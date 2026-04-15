@@ -29,7 +29,7 @@ enum MetadataCueType: String, Sendable, Codable, CaseIterable {
 // MARK: - Source Field
 
 /// Which RSS field the cue was extracted from.
-enum MetadataCueSourceField: String, Sendable, Codable {
+enum MetadataCueSourceField: String, Sendable, Codable, CaseIterable {
     case description
     case summary
 }

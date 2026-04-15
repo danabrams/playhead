@@ -54,8 +54,8 @@ struct RecentFeedSponsorAtlasTests {
     @Test("Codable round-trip preserves all fields")
     func codableRoundTrip() throws {
         let atlas = RecentFeedSponsorAtlas(
-            recurringSponsors: ["squarespace": 5, "betterhelp": 2],
-            recurringDomains: ["squarespace.com": 5, "betterhelp.com": 2],
+            sponsorEpisodeCounts: ["squarespace": 5, "betterhelp": 2],
+            domainEpisodeCounts: ["squarespace.com": 5, "betterhelp.com": 2],
             episodesAnalyzed: 8,
             builtAt: Date(timeIntervalSince1970: 1_700_000_000)
         )
@@ -67,8 +67,8 @@ struct RecentFeedSponsorAtlasTests {
     @Test("seedingConfidence returns 0.90 for 3+ appearances")
     func elevatedConfidence() {
         let atlas = RecentFeedSponsorAtlas(
-            recurringSponsors: ["squarespace": 3],
-            recurringDomains: [:],
+            sponsorEpisodeCounts: ["squarespace": 3],
+            domainEpisodeCounts: [:],
             episodesAnalyzed: 5,
             builtAt: .now
         )
@@ -79,8 +79,8 @@ struct RecentFeedSponsorAtlasTests {
     @Test("seedingConfidence returns 0.85 for fewer than 3 appearances")
     func baseConfidence() {
         let atlas = RecentFeedSponsorAtlas(
-            recurringSponsors: ["betterhelp": 2],
-            recurringDomains: [:],
+            sponsorEpisodeCounts: ["betterhelp": 2],
+            domainEpisodeCounts: [:],
             episodesAnalyzed: 5,
             builtAt: .now
         )
@@ -91,8 +91,8 @@ struct RecentFeedSponsorAtlasTests {
     @Test("seedingConfidence returns 0.85 for unknown sponsor")
     func unknownSponsor() {
         let atlas = RecentFeedSponsorAtlas(
-            recurringSponsors: ["squarespace": 5],
-            recurringDomains: [:],
+            sponsorEpisodeCounts: ["squarespace": 5],
+            domainEpisodeCounts: [:],
             episodesAnalyzed: 5,
             builtAt: .now
         )
@@ -102,8 +102,8 @@ struct RecentFeedSponsorAtlasTests {
     @Test("isRecurringDomain checks domain threshold")
     func recurringDomain() {
         let atlas = RecentFeedSponsorAtlas(
-            recurringSponsors: [:],
-            recurringDomains: ["squarespace.com": 4, "betterhelp.com": 1],
+            sponsorEpisodeCounts: [:],
+            domainEpisodeCounts: ["squarespace.com": 4, "betterhelp.com": 1],
             episodesAnalyzed: 5,
             builtAt: .now
         )
@@ -115,8 +115,8 @@ struct RecentFeedSponsorAtlasTests {
     @Test("isRecurringDomain normalizes to lowercase")
     func recurringDomainCaseInsensitive() {
         let atlas = RecentFeedSponsorAtlas(
-            recurringSponsors: [:],
-            recurringDomains: ["squarespace.com": 4],
+            sponsorEpisodeCounts: [:],
+            domainEpisodeCounts: ["squarespace.com": 4],
             episodesAnalyzed: 5,
             builtAt: .now
         )
@@ -157,8 +157,8 @@ struct RecentFeedSponsorAtlasBuilderTests {
         let builder = RecentFeedSponsorAtlasBuilder()
         let atlas = builder.build(from: [])
         #expect(atlas.episodesAnalyzed == 0)
-        #expect(atlas.recurringSponsors.isEmpty)
-        #expect(atlas.recurringDomains.isEmpty)
+        #expect(atlas.sponsorEpisodeCounts.isEmpty)
+        #expect(atlas.domainEpisodeCounts.isEmpty)
     }
 
     // MARK: - Single Episode
@@ -171,9 +171,9 @@ struct RecentFeedSponsorAtlasBuilderTests {
         ]
         let atlas = builder.build(from: episodes)
         #expect(atlas.episodesAnalyzed == 1)
-        #expect(!atlas.recurringSponsors.isEmpty)
+        #expect(!atlas.sponsorEpisodeCounts.isEmpty)
         // One episode can't be recurring (threshold is 3).
-        for (_, count) in atlas.recurringSponsors {
+        for (_, count) in atlas.sponsorEpisodeCounts {
             #expect(count < RecentFeedSponsorAtlas.recurringThreshold)
         }
     }
@@ -190,10 +190,10 @@ struct RecentFeedSponsorAtlasBuilderTests {
         #expect(atlas.episodesAnalyzed == 5)
 
         // "squarespace" should appear in the sponsors map.
-        let squarespaceKey = atlas.recurringSponsors.keys.first { $0.contains("squarespace") }
+        let squarespaceKey = atlas.sponsorEpisodeCounts.keys.first { $0.contains("squarespace") }
         #expect(squarespaceKey != nil)
         if let key = squarespaceKey {
-            #expect(atlas.recurringSponsors[key]! >= 3)
+            #expect(atlas.sponsorEpisodeCounts[key]! >= 3)
             #expect(atlas.seedingConfidence(for: key) == 0.90)
             #expect(atlas.isRecurring(sponsorId: key))
         }
@@ -216,9 +216,9 @@ struct RecentFeedSponsorAtlasBuilderTests {
         }
         let atlas = builder.build(from: episodes)
 
-        let bhKey = atlas.recurringSponsors.keys.first { $0.contains("betterhelp") }
+        let bhKey = atlas.sponsorEpisodeCounts.keys.first { $0.contains("betterhelp") }
         if let key = bhKey {
-            #expect(atlas.recurringSponsors[key]! < 3)
+            #expect(atlas.sponsorEpisodeCounts[key]! < 3)
             #expect(atlas.seedingConfidence(for: key) == 0.85)
             #expect(!atlas.isRecurring(sponsorId: key))
         }
@@ -233,7 +233,7 @@ struct RecentFeedSponsorAtlasBuilderTests {
             makeEpisode(id: "ep-\(i)", sponsor: "Sponsor", domain: "example.com", daysAgo: i)
         }
         let atlas = builder.build(from: episodes)
-        #expect(atlas.recurringDomains["example.com"] == 4)
+        #expect(atlas.domainEpisodeCounts["example.com"] == 4)
         #expect(atlas.isRecurringDomain(domain: "example.com"))
     }
 
@@ -246,9 +246,9 @@ struct RecentFeedSponsorAtlasBuilderTests {
             makeEpisode(id: "ep-2", sponsor: "C", domain: "ccc.com", daysAgo: 2),
         ]
         let atlas = builder.build(from: episodes)
-        #expect(atlas.recurringDomains["aaa.com"] == 1)
-        #expect(atlas.recurringDomains["bbb.com"] == 1)
-        #expect(atlas.recurringDomains["ccc.com"] == 1)
+        #expect(atlas.domainEpisodeCounts["aaa.com"] == 1)
+        #expect(atlas.domainEpisodeCounts["bbb.com"] == 1)
+        #expect(atlas.domainEpisodeCounts["ccc.com"] == 1)
     }
 
     // MARK: - Windowing
@@ -317,8 +317,8 @@ struct RecentFeedSponsorAtlasBuilderTests {
 
         let atlas = builder.build(from: episodes)
         // Should resolve to the canonical ID from the entity graph.
-        let hasCanonical = atlas.recurringSponsors.keys.contains("canon-sq")
-        let hasFallback = atlas.recurringSponsors.keys.contains { $0.contains("squarespace") }
+        let hasCanonical = atlas.sponsorEpisodeCounts.keys.contains("canon-sq")
+        let hasFallback = atlas.sponsorEpisodeCounts.keys.contains { $0.contains("squarespace") }
         // Either the canonical or the fallback key should be present.
         #expect(hasCanonical || hasFallback)
     }
@@ -338,7 +338,7 @@ struct RecentFeedSponsorAtlasBuilderTests {
         ]
         let atlas = builder.build(from: episodes)
         // Both sponsors should appear with count 1.
-        let sponsorKeys = atlas.recurringSponsors.keys
+        let sponsorKeys = atlas.sponsorEpisodeCounts.keys
         let hasSquarespace = sponsorKeys.contains { $0.contains("squarespace") }
         let hasBetterhelp = sponsorKeys.contains { $0.contains("betterhelp") }
         #expect(hasSquarespace)
@@ -360,8 +360,8 @@ struct RecentFeedSponsorAtlasBuilderTests {
         }
         let atlas = builder.build(from: episodes)
         #expect(atlas.episodesAnalyzed == 5)
-        #expect(atlas.recurringSponsors.isEmpty)
-        #expect(atlas.recurringDomains.isEmpty)
+        #expect(atlas.sponsorEpisodeCounts.isEmpty)
+        #expect(atlas.domainEpisodeCounts.isEmpty)
     }
 
     // MARK: - Summary Field
@@ -378,9 +378,9 @@ struct RecentFeedSponsorAtlasBuilderTests {
             )
         }
         let atlas = builder.build(from: episodes)
-        let hasHelloFresh = atlas.recurringSponsors.keys.contains { $0.contains("hellofresh") }
+        let hasHelloFresh = atlas.sponsorEpisodeCounts.keys.contains { $0.contains("hellofresh") }
         #expect(hasHelloFresh)
-        #expect(atlas.recurringDomains["hellofresh.com"] == 3)
+        #expect(atlas.domainEpisodeCounts["hellofresh.com"] == 3)
     }
 
     // MARK: - Deduplication Within Episode
@@ -397,11 +397,11 @@ struct RecentFeedSponsorAtlasBuilderTests {
             )
         }
         let atlas = builder.build(from: episodes)
-        let sqKey = atlas.recurringSponsors.keys.first { $0.contains("squarespace") }
+        let sqKey = atlas.sponsorEpisodeCounts.keys.first { $0.contains("squarespace") }
         #expect(sqKey != nil)
         if let key = sqKey {
             // Should be 3 (one per episode), not 6 (two mentions per episode).
-            #expect(atlas.recurringSponsors[key] == 3)
+            #expect(atlas.sponsorEpisodeCounts[key] == 3)
         }
     }
 }

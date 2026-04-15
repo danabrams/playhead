@@ -16,7 +16,21 @@ enum FeedTextNormalizer {
 
         var text = raw
 
-        // 1. Strip HTML tags (greedy, handles multi-line)
+        // 1a. Strip <script>...</script> and <style>...</style> blocks entirely
+        //     (including content) before general tag stripping, to prevent CSS/JS
+        //     text from leaking into normalized output.
+        text = text.replacingOccurrences(
+            of: "<script[^>]*>[\\s\\S]*?</script>",
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        text = text.replacingOccurrences(
+            of: "<style[^>]*>[\\s\\S]*?</style>",
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+
+        // 1b. Strip HTML tags (greedy, handles multi-line)
         text = text.replacingOccurrences(
             of: "<[^>]+>",
             with: "",
@@ -81,8 +95,9 @@ enum FeedTextNormalizer {
     /// Decode common HTML/XML entities.
     private static func decodeEntities(_ text: String) -> String {
         var result = text
+        // NOTE: &amp; is decoded LAST to prevent double-decoding.
+        // If &amp; is first, "&amp;lt;" becomes "&lt;" then "<".
         let entities: [(String, String)] = [
-            ("&amp;", "&"),
             ("&lt;", "<"),
             ("&gt;", ">"),
             ("&quot;", "\""),
@@ -96,6 +111,7 @@ enum FeedTextNormalizer {
             ("&rsquo;", "\u{2019}"),
             ("&ldquo;", "\u{201C}"),
             ("&rdquo;", "\u{201D}"),
+            ("&amp;", "&"),
         ]
         for (entity, replacement) in entities {
             result = result.replacingOccurrences(of: entity, with: replacement)

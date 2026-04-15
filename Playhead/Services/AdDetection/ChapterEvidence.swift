@@ -17,6 +17,8 @@ enum ChapterSource: String, Sendable, Codable, Equatable {
     case id3
     /// Podcasting 2.0 `podcast:chapters` external JSON.
     case pc20
+    /// RSS inline `<podcast:chapter>` elements (PC20 namespace, but embedded in feed XML).
+    case rssInline
 }
 
 // MARK: - ChapterDisposition
@@ -83,7 +85,15 @@ struct ChapterDispositionClassifier: Sendable {
             #"\bsupport(ed)?\s+by\b"#,
             #"\bspecial\s+offer\b"#,
         ]
-        return patterns.compactMap { try? NSRegularExpression(pattern: $0, options: .caseInsensitive) }
+        return patterns.map { pattern in
+            // These are hardcoded literals — compilation failure is a programmer error.
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
+                assertionFailure("Invalid regex pattern: \(pattern)")
+                // In release builds, skip the broken pattern rather than crashing.
+                return nil
+            }
+            return regex
+        }.compactMap { $0 }
     }()
 
     // MARK: - Content Patterns
@@ -115,9 +125,14 @@ struct ChapterDispositionClassifier: Sendable {
             #"\brecap\b"#,
             // Numbered content (e.g. "Part 1", "Chapter 3")
             #"\bpart\s+\d+\b"#,
-            // Titles with 4+ words that don't match ad patterns are likely content descriptions
         ]
-        return patterns.compactMap { try? NSRegularExpression(pattern: $0, options: .caseInsensitive) }
+        return patterns.map { pattern in
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
+                assertionFailure("Invalid regex pattern: \(pattern)")
+                return nil
+            }
+            return regex
+        }.compactMap { $0 }
     }()
 
     /// Minimum word count for a title to be classified as content by length alone
@@ -185,8 +200,8 @@ struct ChapterQualityScorer: Sendable {
         // Base: titled vs untitled
         if let title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             score += 0.3
-            // Bonus for longer, more specific titles
-            let wordCount = title.split(whereSeparator: { $0.isWhitespace }).count
+            // Bonus for longer, more specific titles (same split logic as classifier)
+            let wordCount = title.split(whereSeparator: { $0.isWhitespace || $0 == "-" }).count
             if wordCount >= 3 {
                 score += 0.1
             }
@@ -210,6 +225,8 @@ struct ChapterQualityScorer: Sendable {
         // Source reliability
         switch source {
         case .pc20:
+            score += 0.1
+        case .rssInline:
             score += 0.1
         case .id3:
             score += 0.05

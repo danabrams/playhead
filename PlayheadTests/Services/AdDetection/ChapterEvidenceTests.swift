@@ -208,16 +208,16 @@ struct ChapterDispositionClassifierTests {
 
     // MARK: - Word boundary safety
 
-    @Test("'Madam' does not match ad pattern")
+    @Test("'Madam' does not match ad pattern — classifies as ambiguous")
     func madamNoFalsePositive() {
         // "ad" is inside "Madam" but word boundary should prevent match
-        #expect(classifier.classify("Madam") != .adBreak)
+        #expect(classifier.classify("Madam") == .ambiguous)
     }
 
-    @Test("'iPad Review' does not match ad pattern")
+    @Test("'iPad' does not match ad pattern — classifies as ambiguous")
     func iPadNoFalsePositive() {
         // "ad" is at the end of "iPad" but word boundary should prevent match
-        #expect(classifier.classify("iPad") != .adBreak)
+        #expect(classifier.classify("iPad") == .ambiguous)
     }
 }
 
@@ -442,7 +442,7 @@ struct RSSInlineChapterTests {
         #expect(evidence.isEmpty)
     }
 
-    @Test("classifies RSS chapters correctly")
+    @Test("classifies RSS chapters correctly with rssInline source")
     func classifiesCorrectly() {
         let chapters = [
             ParsedChapter(startTime: 0, title: "Intro", url: nil, imageURL: nil),
@@ -450,7 +450,9 @@ struct RSSInlineChapterTests {
         ]
         let evidence = ChapterEvidenceParser.fromParsedChapters(chapters)
         #expect(evidence[0].disposition == .content)
+        #expect(evidence[0].source == .rssInline)
         #expect(evidence[1].disposition == .adBreak)
+        #expect(evidence[1].source == .rssInline)
     }
 
     @Test("unsorted input is sorted by startTime")
@@ -502,5 +504,60 @@ struct ChapterEvidenceCodableTests {
         let decoded = try JSONDecoder().decode(ChapterEvidence.self, from: data)
 
         #expect(decoded == original)
+    }
+}
+
+// MARK: - Time Validation Tests
+
+@Suite("PC20 Chapter Time Validation")
+struct PC20TimeValidationTests {
+
+    @Test("skips chapters with negative startTime")
+    func negativeStartTime() {
+        let json = """
+        {"version": "1.0.0", "chapters": [
+            {"startTime": -5, "title": "Bad Chapter"},
+            {"startTime": 0, "title": "Good Chapter"}
+        ]}
+        """
+        let evidence = ChapterEvidenceParser.decodePC20ChaptersJSON(Data(json.utf8))
+        #expect(evidence.count == 1)
+        #expect(evidence[0].title == "Good Chapter")
+    }
+
+    @Test("skips chapters with inverted time range (endTime < startTime)")
+    func invertedTimeRange() {
+        let json = """
+        {"version": "1.0.0", "chapters": [
+            {"startTime": 100, "endTime": 50, "title": "Inverted"},
+            {"startTime": 0, "endTime": 60, "title": "Valid"}
+        ]}
+        """
+        let evidence = ChapterEvidenceParser.decodePC20ChaptersJSON(Data(json.utf8))
+        #expect(evidence.count == 1)
+        #expect(evidence[0].title == "Valid")
+    }
+
+    @Test("skips chapters with NaN startTime")
+    func nanStartTime() {
+        // NaN/Inf can't be expressed in JSON directly, but test the RSS inline path.
+        let chapters = [
+            ParsedChapter(startTime: .nan, title: "NaN", url: nil, imageURL: nil),
+            ParsedChapter(startTime: 0, title: "Valid", url: nil, imageURL: nil),
+        ]
+        let evidence = ChapterEvidenceParser.fromParsedChapters(chapters)
+        #expect(evidence.count == 1)
+        #expect(evidence[0].title == "Valid")
+    }
+
+    @Test("skips chapters with infinite startTime")
+    func infiniteStartTime() {
+        let chapters = [
+            ParsedChapter(startTime: .infinity, title: "Inf", url: nil, imageURL: nil),
+            ParsedChapter(startTime: 60, title: "Valid", url: nil, imageURL: nil),
+        ]
+        let evidence = ChapterEvidenceParser.fromParsedChapters(chapters)
+        #expect(evidence.count == 1)
+        #expect(evidence[0].title == "Valid")
     }
 }

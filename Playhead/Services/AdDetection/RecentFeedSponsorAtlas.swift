@@ -38,10 +38,10 @@ struct EpisodeFeedSnapshot: Sendable, Codable, Equatable {
 struct RecentFeedSponsorAtlas: Sendable, Codable, Equatable {
 
     /// Canonical sponsor ID -> number of episodes the sponsor appeared in.
-    let recurringSponsors: [String: Int]
+    let sponsorEpisodeCounts: [String: Int]
 
     /// Normalized domain (eTLD+1) -> number of episodes the domain appeared in.
-    let recurringDomains: [String: Int]
+    let domainEpisodeCounts: [String: Int]
 
     /// How many episodes were analyzed to build this atlas.
     let episodesAnalyzed: Int
@@ -78,13 +78,13 @@ struct RecentFeedSponsorAtlas: Sendable, Codable, Equatable {
 
     /// Whether a sponsor appears in 3+ of the analyzed episodes.
     func isRecurring(sponsorId: String) -> Bool {
-        guard let count = recurringSponsors[sponsorId] else { return false }
+        guard let count = sponsorEpisodeCounts[sponsorId] else { return false }
         return count >= Self.recurringThreshold
     }
 
     /// Whether a domain appears in 3+ of the analyzed episodes.
     func isRecurringDomain(domain: String) -> Bool {
-        guard let count = recurringDomains[domain.lowercased()] else { return false }
+        guard let count = domainEpisodeCounts[domain.lowercased()] else { return false }
         return count >= Self.recurringThreshold
     }
 
@@ -92,8 +92,8 @@ struct RecentFeedSponsorAtlas: Sendable, Codable, Equatable {
 
     /// An empty atlas (no episodes analyzed).
     static let empty = RecentFeedSponsorAtlas(
-        recurringSponsors: [:],
-        recurringDomains: [:],
+        sponsorEpisodeCounts: [:],
+        domainEpisodeCounts: [:],
         episodesAnalyzed: 0,
         builtAt: .distantPast
     )
@@ -206,14 +206,14 @@ struct RecentFeedSponsorAtlasBuilder: Sendable {
         }
 
         let atlas = RecentFeedSponsorAtlas(
-            recurringSponsors: sponsorEpisodeCounts,
-            recurringDomains: domainEpisodeCounts,
+            sponsorEpisodeCounts: sponsorEpisodeCounts,
+            domainEpisodeCounts: domainEpisodeCounts,
             episodesAnalyzed: windowed.count,
             builtAt: Date()
         )
 
         logger.debug(
-            "Built atlas: \(atlas.episodesAnalyzed) episodes, \(atlas.recurringSponsors.count) sponsors, \(atlas.recurringDomains.count) domains"
+            "Built atlas: \(atlas.episodesAnalyzed) episodes, \(atlas.sponsorEpisodeCounts.count) sponsors, \(atlas.domainEpisodeCounts.count) domains"
         )
 
         return atlas
