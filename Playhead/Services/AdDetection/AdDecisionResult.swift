@@ -36,6 +36,152 @@ struct DecisionEvent: Sendable, Identifiable, Equatable {
     let policyAction: String       // SkipPolicyAction.rawValue
     let decisionCohortJSON: String
     let createdAt: Double
+    /// Structured explanation trace (playhead-ef2.1.4). Compact JSON encoding of
+    /// `DecisionExplanation`. Nil for events created before this field was added.
+    let explanationJSON: String?
+
+    init(
+        id: String,
+        analysisAssetId: String,
+        eventType: String,
+        windowId: String,
+        proposalConfidence: Double,
+        skipConfidence: Double,
+        eligibilityGate: String,
+        policyAction: String,
+        decisionCohortJSON: String,
+        createdAt: Double,
+        explanationJSON: String? = nil
+    ) {
+        self.id = id
+        self.analysisAssetId = analysisAssetId
+        self.eventType = eventType
+        self.windowId = windowId
+        self.proposalConfidence = proposalConfidence
+        self.skipConfidence = skipConfidence
+        self.eligibilityGate = eligibilityGate
+        self.policyAction = policyAction
+        self.decisionCohortJSON = decisionCohortJSON
+        self.createdAt = createdAt
+        self.explanationJSON = explanationJSON
+    }
+}
+
+// MARK: - ProposalAuthority
+
+/// Indicates whether a source's contribution was strong or weak relative to its cap.
+enum ProposalAuthority: String, Sendable, Codable, Equatable {
+    /// Weight exceeds half the source's cap — meaningful contributor.
+    case strong
+    /// Weight is below half the source's cap — marginal contributor.
+    case weak
+}
+
+// MARK: - SourceEvidence
+
+/// Per-source evidence breakdown for a single decision. Aggregated across all
+/// ledger entries of the same source type.
+struct SourceEvidence: Sendable, Codable, Equatable {
+    /// Source type name (matches EvidenceSourceType.rawValue).
+    let source: String
+    /// Total aggregated weight from all entries of this source type.
+    let weight: Double
+    /// The cap that was applied to this source type.
+    let capApplied: Double
+    /// Whether this source's contribution was strong or weak relative to its cap.
+    let authority: ProposalAuthority
+}
+
+// MARK: - ActionRationale
+
+/// Links the threshold, gate, and policy to the final skip eligibility determination.
+struct ActionRationale: Sendable, Codable, Equatable {
+    /// The skip confidence threshold used for auto-skip promotion.
+    let threshold: Double
+    /// The eligibility gate value at decision time.
+    let gate: String
+    /// The policy action applied.
+    let policyAction: String
+    /// Whether the decision was ultimately skip-eligible.
+    let skipEligible: Bool
+}
+
+// MARK: - DecisionExplanation
+
+/// Structured explanation trace for a single fusion decision. Stored as compact JSON
+/// in DecisionEvent.explanationJSON for QA, debugging, replay, and counterfactual
+/// evaluation. Not user-facing.
+struct DecisionExplanation: Sendable, Codable, Equatable {
+    /// Per-source evidence breakdown with calibrated weights and authority.
+    let evidenceBreakdown: [SourceEvidence]
+    /// Which evidence families contributed to the final score (source type names).
+    let contributingFamilies: [String]
+    /// Links threshold/policy/gate to the skip eligibility outcome.
+    let actionRationale: ActionRationale
+
+    /// Build an explanation from the decision ledger and result.
+    ///
+    /// Aggregates ledger entries by source type, computes per-source authority
+    /// relative to the configured cap, and produces the action rationale from
+    /// the decision result and policy action.
+    static func build(
+        ledger: [EvidenceLedgerEntry],
+        decision: DecisionResult,
+        policyAction: SkipPolicyAction,
+        config: FusionWeightConfig,
+        skipThreshold: Double
+    ) -> DecisionExplanation {
+        // Aggregate weights per source type
+        var weightBySource: [EvidenceSourceType: Double] = [:]
+        for entry in ledger {
+            weightBySource[entry.source, default: 0.0] += entry.weight
+        }
+
+        // Stable sort order: follow EvidenceSourceType.allCases ordering
+        let sortedSources = EvidenceSourceType.allCases.filter { weightBySource[$0] != nil }
+
+        let breakdown: [SourceEvidence] = sortedSources.map { sourceType in
+            let totalWeight = weightBySource[sourceType]!
+            let cap = capForSource(sourceType, config: config)
+            let authority: ProposalAuthority = totalWeight > cap * 0.5 ? .strong : .weak
+            return SourceEvidence(
+                source: sourceType.rawValue,
+                weight: totalWeight,
+                capApplied: cap,
+                authority: authority
+            )
+        }
+
+        let families = sortedSources.map { $0.rawValue }
+
+        let isSkipEligible = policyAction == .autoSkipEligible
+            && decision.eligibilityGate == .eligible
+
+        let rationale = ActionRationale(
+            threshold: skipThreshold,
+            gate: decision.eligibilityGate.rawValue,
+            policyAction: policyAction.rawValue,
+            skipEligible: isSkipEligible
+        )
+
+        return DecisionExplanation(
+            evidenceBreakdown: breakdown,
+            contributingFamilies: families,
+            actionRationale: rationale
+        )
+    }
+
+    /// Returns the configured cap for a given source type.
+    private static func capForSource(_ source: EvidenceSourceType, config: FusionWeightConfig) -> Double {
+        switch source {
+        case .fm: return config.fmCap
+        case .lexical: return config.lexicalCap
+        case .acoustic: return config.acousticCap
+        case .catalog: return config.catalogCap
+        case .classifier: return config.classifierCap
+        case .fingerprint: return config.fingerprintCap
+        }
+    }
 }
 
 // MARK: - CorrectionSource

@@ -644,6 +644,12 @@ actor AnalysisStore {
                 column: "anchorLandmarks",
                 definition: "TEXT"
             )
+            // playhead-ef2.1.4: explanation trace column on decision_events
+            try addColumnIfNeeded(
+                table: "decision_events",
+                column: "explanationJSON",
+                definition: "TEXT"
+            )
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -4861,8 +4867,8 @@ actor AnalysisStore {
         let sql = """
             INSERT INTO decision_events
             (id, analysisAssetId, eventType, windowId, proposalConfidence, skipConfidence,
-             eligibilityGate, policyAction, decisionCohortJSON, createdAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             eligibilityGate, policyAction, decisionCohortJSON, createdAt, explanationJSON)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -4876,11 +4882,12 @@ actor AnalysisStore {
         bind(stmt, 8, event.policyAction)
         bind(stmt, 9, event.decisionCohortJSON)
         bind(stmt, 10, event.createdAt)
+        bind(stmt, 11, event.explanationJSON)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
     func loadDecisionEvents(for analysisAssetId: String) throws -> [DecisionEvent] {
-        let sql = "SELECT id, analysisAssetId, eventType, windowId, proposalConfidence, skipConfidence, eligibilityGate, policyAction, decisionCohortJSON, createdAt FROM decision_events WHERE analysisAssetId = ? ORDER BY createdAt"
+        let sql = "SELECT id, analysisAssetId, eventType, windowId, proposalConfidence, skipConfidence, eligibilityGate, policyAction, decisionCohortJSON, createdAt, explanationJSON FROM decision_events WHERE analysisAssetId = ? ORDER BY createdAt"
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, analysisAssetId)
@@ -4896,7 +4903,8 @@ actor AnalysisStore {
                 eligibilityGate: requireText(stmt, 6),
                 policyAction: requireText(stmt, 7),
                 decisionCohortJSON: requireText(stmt, 8),
-                createdAt: sqlite3_column_double(stmt, 9)
+                createdAt: sqlite3_column_double(stmt, 9),
+                explanationJSON: optionalText(stmt, 10)
             ))
         }
         return results

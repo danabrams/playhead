@@ -905,6 +905,17 @@ actor AdDetectionService {
             let decisionCohort = DecisionCohort.production(appBuild: config.detectorVersion)
             let cohortJSON = (try? JSONEncoder().encode(decisionCohort))
                 .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            // playhead-ef2.1.4: build structured explanation trace from ledger + decision
+            let explanation = DecisionExplanation.build(
+                ledger: ledger,
+                decision: decision,
+                policyAction: policyAction,
+                config: fusionConfig,
+                skipThreshold: autoSkipThreshold
+            )
+            let explanationJSON = (try? JSONEncoder().encode(explanation))
+                .flatMap { String(data: $0, encoding: .utf8) }
+
             decisionEvents.append(DecisionEvent(
                 id: UUID().uuidString,
                 analysisAssetId: analysisAssetId,
@@ -915,7 +926,8 @@ actor AdDetectionService {
                 eligibilityGate: decision.eligibilityGate.rawValue,
                 policyAction: policyAction.rawValue,
                 decisionCohortJSON: cohortJSON,
-                createdAt: Date().timeIntervalSince1970
+                createdAt: Date().timeIntervalSince1970,
+                explanationJSON: explanationJSON
             ))
         }
 
