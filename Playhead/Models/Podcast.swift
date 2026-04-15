@@ -55,6 +55,7 @@ final class Episode {
     var publishedAt: Date?
     var playbackPosition: TimeInterval
     var isPlayed: Bool
+    var feedMetadata: FeedDescriptionMetadata?
 
     init(
         feedItemGUID: String,
@@ -69,7 +70,8 @@ final class Episode {
         duration: TimeInterval? = nil,
         publishedAt: Date? = nil,
         playbackPosition: TimeInterval = 0,
-        isPlayed: Bool = false
+        isPlayed: Bool = false,
+        feedMetadata: FeedDescriptionMetadata? = nil
     ) {
         self.feedItemGUID = feedItemGUID
         self.canonicalEpisodeKey = Self.makeCanonicalKey(
@@ -86,6 +88,7 @@ final class Episode {
         self.publishedAt = publishedAt
         self.playbackPosition = playbackPosition
         self.isPlayed = isPlayed
+        self.feedMetadata = feedMetadata
     }
 
     /// Derives the canonical key from feedItemGUID + feedURL for preview budget tracking.
@@ -111,4 +114,24 @@ struct AnalysisSummary: Codable, Sendable, Equatable {
     var adSegmentCount: Int
     var totalAdDuration: TimeInterval
     var lastAnalyzedAt: Date?
+}
+
+// MARK: - FeedDescriptionMetadata
+
+/// Shadow-mode metadata from RSS description/summary fields.
+/// Normalized text + source hashes for rebuild detection.
+/// These fields are persisted but do not influence any live decisions.
+struct FeedDescriptionMetadata: Codable, Sendable, Equatable {
+    /// RSS `<description>` — HTML stripped, entities decoded, truncated.
+    var feedDescription: String?
+    /// iTunes `<itunes:summary>` or `<content:encoded>` — normalized.
+    var feedSummary: String?
+    /// Hashes of the raw source strings, enabling change detection without
+    /// storing unbounded HTML blobs.
+    var sourceHashes: SourceHashes
+
+    struct SourceHashes: Codable, Sendable, Equatable, Hashable {
+        var descriptionHash: UInt64?
+        var summaryHash: UInt64?
+    }
 }

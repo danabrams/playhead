@@ -263,6 +263,11 @@ actor PodcastDiscoveryService {
         for parsedEp in feed.episodes {
             guard !parsedEp.guid.isEmpty else { continue }
 
+            let metadata = FeedTextNormalizer.makeMetadata(
+                rawDescription: parsedEp.description,
+                rawSummary: parsedEp.showNotes
+            )
+
             if existingGUIDs.contains(parsedEp.guid) {
                 // Update existing episode metadata (title, duration, etc.)
                 if let ep = podcast.episodes.first(where: { $0.feedItemGUID == parsedEp.guid }) {
@@ -271,6 +276,10 @@ actor PodcastDiscoveryService {
                     ep.publishedAt = parsedEp.pubDate
                     if let url = parsedEp.enclosureURL {
                         ep.audioURL = url
+                    }
+                    // Shadow: update feed metadata if source changed
+                    if let metadata, ep.feedMetadata?.sourceHashes != metadata.sourceHashes {
+                        ep.feedMetadata = metadata
                     }
                 }
             } else if let audioURL = parsedEp.enclosureURL {
@@ -281,7 +290,8 @@ actor PodcastDiscoveryService {
                     title: parsedEp.title,
                     audioURL: audioURL,
                     duration: parsedEp.duration,
-                    publishedAt: parsedEp.pubDate
+                    publishedAt: parsedEp.pubDate,
+                    feedMetadata: metadata
                 )
                 context.insert(episode)
             }
