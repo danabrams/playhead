@@ -9,30 +9,7 @@
 
 import Foundation
 
-// MARK: - BoundaryCue
-
-/// Signal types that contribute to a boundary estimate, in snap preference order.
-enum BoundaryCue: String, Sendable, CaseIterable, Hashable {
-    /// Silence gap detected (highest priority — cleanest edit point).
-    case silenceGap
-    /// Local energy minimum (valley between loud segments).
-    case energyValley
-    /// Sharp spectral flux change (timbral discontinuity).
-    case spectralDiscontinuity
-    /// No acoustic cue found; falls back to coarse candidate position.
-    case coarseFallback
-}
-
-// MARK: - BoundaryDirection
-
-/// Whether this boundary is the start or end of an ad segment.
-/// Drives asymmetric guard margin and penalty logic.
-enum BoundaryDirection: Sendable, Equatable {
-    /// Start of ad: prefer later (let a fraction of ad leak at the beginning).
-    case adStart
-    /// End of ad: prefer earlier (let a fraction of ad leak at the end).
-    case adEnd
-}
+// BoundaryCue and BoundaryDirection are defined in FineBoundaryRefiner.swift (ef2.3.7).
 
 // MARK: - SignedBoundaryError (replay harness tracking)
 

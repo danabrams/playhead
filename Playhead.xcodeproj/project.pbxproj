@@ -1144,14 +1144,11 @@
 				14A8EF1357C14AF2517D6669 /* AdDecisionResultTests.swift */,
 				572C615FA2B47BBBC3690F73 /* AdDetectionConfigTests.swift */,
 				6BA9BD77BCE57AA045C1A449 /* AdDetectionServiceShadowModeTests.swift */,
-<<<<<<< HEAD
+					A0BD72C058F608DD41DCA71C /* AsymmetricSnapScorerTests.swift */,
 					CET451C3D5F9A0AB2C3D4E5F /* ChapterEvidenceTests.swift */,
 					MCT451C3D5F9A0AB2C3D4E5F /* MetadataCueExtractorTests.swift */,
 					MRT451C3D5F9A0AB2C3D4E5F /* MetadataReliabilityMatrixTests.swift */,
 					RFT451C3D5F9A0AB2C3D4E5F /* RecentFeedSponsorAtlasTests.swift */,
-=======
-				A0BD72C058F608DD41DCA71C /* AsymmetricSnapScorerTests.swift */,
->>>>>>> worktree-agent-a03f4c81
 				EF0787BEA4DF8AE02E3ABFAE /* AtomEvidenceProjectorTests.swift */,
 				D343BF00CCF840A2395C2D69 /* B10FingerprintSpanRecoveryTests.swift */,
 				40D43FFE3E323CC58F4AFE3B /* BackfillEvidenceFusionTests.swift */,
