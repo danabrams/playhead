@@ -212,26 +212,35 @@ struct DecisionMapper: Sendable {
     /// > 1.0 = false-negative boost (user said "hearing an ad").
     /// Default of 1.0 means no active corrections.
     let correctionFactor: Double
+    /// ef2.4.3: Per-source calibration profile. v0 (identity) is the default.
+    let calibrationProfile: ScoreCalibrationProfile
 
     init(
         span: DecodedSpan,
         ledger: [EvidenceLedgerEntry],
         config: FusionWeightConfig,
         transcriptQuality: TranscriptQuality = .good,
-        correctionFactor: Double = 1.0
+        correctionFactor: Double = 1.0,
+        calibrationProfile: ScoreCalibrationProfile = .v0
     ) {
         self.span = span
         self.ledger = ledger
         self.config = config
         self.transcriptQuality = transcriptQuality
         self.correctionFactor = correctionFactor
+        self.calibrationProfile = calibrationProfile
     }
 
     func map() -> DecisionResult {
-        // proposalConfidence is already capped at 1.0 here; calibrate() applies an
-        // additional clamp as a safety belt in case a future non-identity mapping
-        // produces a value outside [0,1]. The redundancy is intentional.
-        let rawProposalConfidence = min(1.0, ledger.reduce(0.0) { $0 + $1.weight })
+        // ef2.4.3: Apply per-source calibration before summing contributions.
+        // Each entry's weight is transformed through the source-specific calibrator
+        // from the calibration profile. v0 (identity) produces identical results
+        // to the uncalibrated path; v1 reshapes per-source contributions.
+        let calibratedSum = ledger.reduce(0.0) { sum, entry in
+            let sourceCalibrator = calibrationProfile.calibrator(for: entry.source)
+            return sum + sourceCalibrator.calibrate(entry.weight)
+        }
+        let rawProposalConfidence = min(1.0, calibratedSum)
         let proposalConfidence = rawProposalConfidence
 
         // Phase 7.2: apply combined correction factor to skipConfidence.
