@@ -177,9 +177,10 @@ struct UpdateTrace: Sendable, Equatable, Codable {
 ///   - fm:         Beta(8,2) -> 0.80
 ///   - lexical:    Beta(17,3) -> 0.85
 ///
-/// `effectiveTrust(for:)` returns posteriorMean^2 — the posterior mean
-/// acts as both the trust estimate and its own confidence, producing
-/// natural dampening for low-observation / uncertain sources.
+/// `effectiveTrust(for:confidence:)` returns posteriorMean * confidence.
+/// Callers supply the confidence factor (e.g. a signal quality estimate
+/// or observation-count dampener); low-observation sources are naturally
+/// dampened because their posteriors are pulled toward 0.5 by the prior.
 struct SourceTrustProfile: Sendable, Equatable {
 
     /// Per-source Beta posteriors. Keyed by EvidenceSourceType raw value
@@ -220,14 +221,14 @@ struct SourceTrustProfile: Sendable, Equatable {
         posteriors[source] ?? Self.defaultPriors[source]!
     }
 
-    /// Effective trust: posteriorMean * posteriorMean.
+    /// Effective trust: posteriorMean * confidence.
     ///
-    /// Using posteriorMean as its own confidence factor produces natural
-    /// dampening: sources with low observation counts have posteriors pulled
-    /// toward 0.5 by the Beta prior, reducing their effective trust.
-    func effectiveTrust(for source: EvidenceSourceType) -> Double {
+    /// The confidence factor is supplied by the caller (e.g. the fusion
+    /// layer's signal quality estimate). Low-observation sources are
+    /// already dampened by the Beta prior pulling their mean toward 0.5.
+    func effectiveTrust(for source: EvidenceSourceType, confidence: Double) -> Double {
         let p = posterior(for: source)
-        return p.effectiveTrust(confidence: p.mean)
+        return p.effectiveTrust(confidence: confidence)
     }
 
     // MARK: - Update

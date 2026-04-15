@@ -259,20 +259,21 @@ struct SourceTrustProfileTests {
         #expect(after.beta == before.beta)
     }
 
-    @Test("effectiveTrust naturally dampens low-observation sources")
-    func lowObservationDampening() {
+    @Test("effectiveTrust = posteriorMean * confidence per spec")
+    func effectiveTrustMatchesSpec() {
         let profile = SourceTrustProfile()
-        // acoustic: Beta(5,5) = 0.50 mean, 10 observations
-        // lexical: Beta(17,3) = 0.85 mean, 20 observations
-        let acousticET = profile.effectiveTrust(for: .acoustic)
-        let lexicalET = profile.effectiveTrust(for: .lexical)
-        // Both should reflect their means; acoustic is lower both in mean
-        // and observation count, so effectiveTrust should be strictly lower.
-        #expect(acousticET < lexicalET)
-        // effectiveTrust should equal mean * mean (since confidence = mean
-        // for the initial posteriors with no external confidence override).
-        let acousticPosterior = profile.posterior(for: .acoustic)
-        #expect(abs(acousticET - acousticPosterior.mean * acousticPosterior.mean) < 1e-10)
+        // FM: Beta(8,2) = 0.80 mean; with confidence 0.9 -> 0.72
+        let fmET = profile.effectiveTrust(for: .fm, confidence: 0.9)
+        #expect(abs(fmET - 0.80 * 0.9) < 1e-10)
+
+        // acoustic: Beta(5,5) = 0.50 mean; with confidence 0.5 -> 0.25
+        let acousticET = profile.effectiveTrust(for: .acoustic, confidence: 0.5)
+        #expect(abs(acousticET - 0.50 * 0.5) < 1e-10)
+
+        // Same confidence -> ordering follows posterior mean.
+        let fmSame = profile.effectiveTrust(for: .fm, confidence: 0.7)
+        let acousticSame = profile.effectiveTrust(for: .acoustic, confidence: 0.7)
+        #expect(fmSame > acousticSame)
     }
 
     @Test("every EvidenceSourceType has a default prior")
