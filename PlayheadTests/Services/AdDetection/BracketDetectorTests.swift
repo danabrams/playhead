@@ -374,6 +374,92 @@ struct BracketDetectorTests {
             #expect(evidence.templateClass == .symmetricBracket)
         }
     }
+    @Test("bed dropout resets to idle after maxBedDropoutWindows")
+    func bedDropoutResetsToIdle() {
+        var windows: [FeatureWindow] = []
+        // Pre-silence
+        windows.append(syntheticWindow(startTime: 0.0, rms: 0.05))
+        // Onset
+        windows.append(syntheticWindow(
+            startTime: 2.0, rms: 0.3,
+            musicProbability: 0.5, musicBedOnsetScore: 0.5
+        ))
+        // Bed sustained for 2 windows (meets minBedSustainWindows)
+        windows.append(syntheticWindow(
+            startTime: 4.0, rms: 0.2, musicProbability: 0.4
+        ))
+        windows.append(syntheticWindow(
+            startTime: 6.0, rms: 0.2, musicProbability: 0.35
+        ))
+        // Music drops out for 7 consecutive windows (exceeds maxBedDropoutWindows=6)
+        for i in 0..<7 {
+            windows.append(syntheticWindow(
+                startTime: 8.0 + Double(i) * 2.0,
+                rms: 0.1,
+                musicProbability: 0.05
+            ))
+        }
+        // No offset score anywhere — the state machine should have reset.
+
+        let result = BracketDetector.scanForBrackets(
+            around: 2.0,
+            candidateEnd: 22.0,
+            using: windows,
+            showTrust: 0.5
+        )
+
+        // After bed dropout, state resets to idle. No offset found → nil.
+        #expect(result == nil)
+    }
+
+    @Test("bed dropout does not reset if music resumes within threshold")
+    func bedDropoutRecoversBelowThreshold() {
+        var windows: [FeatureWindow] = []
+        windows.append(syntheticWindow(startTime: 0.0, rms: 0.05))
+        // Onset
+        windows.append(syntheticWindow(
+            startTime: 2.0, rms: 0.3,
+            musicProbability: 0.5, musicBedOnsetScore: 0.5
+        ))
+        // Bed sustained
+        windows.append(syntheticWindow(
+            startTime: 4.0, rms: 0.2, musicProbability: 0.4
+        ))
+        windows.append(syntheticWindow(
+            startTime: 6.0, rms: 0.2, musicProbability: 0.35
+        ))
+        // Music drops for 4 windows (below threshold of 6)
+        for i in 0..<4 {
+            windows.append(syntheticWindow(
+                startTime: 8.0 + Double(i) * 2.0,
+                rms: 0.1,
+                musicProbability: 0.05
+            ))
+        }
+        // Music resumes
+        windows.append(syntheticWindow(
+            startTime: 16.0, rms: 0.2, musicProbability: 0.4
+        ))
+        // Offset
+        windows.append(syntheticWindow(
+            startTime: 18.0, rms: 0.15,
+            musicProbability: 0.1, musicBedOffsetScore: 0.5
+        ))
+        // Trailing
+        windows.append(syntheticWindow(startTime: 20.0, rms: 0.1))
+        windows.append(syntheticWindow(startTime: 22.0, rms: 0.08))
+        windows.append(syntheticWindow(startTime: 24.0, rms: 0.05))
+
+        let result = BracketDetector.scanForBrackets(
+            around: 2.0,
+            candidateEnd: 20.0,
+            using: windows,
+            showTrust: 0.5
+        )
+
+        // Should detect a bracket — music dropout was temporary.
+        #expect(result != nil)
+    }
 }
 
 // MARK: - BracketEvidence Tests

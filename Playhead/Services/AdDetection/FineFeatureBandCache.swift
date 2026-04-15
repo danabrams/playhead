@@ -15,10 +15,11 @@ actor FineFeatureBandCache {
     // MARK: - Types
 
     /// Composite key: episode + quantized boundary band.
+    /// Uses Int (50ms ticks) instead of Double to avoid floating-point hashing issues.
     struct BandKey: Hashable, Sendable {
         let episodeId: String
-        /// Center of the band (candidate boundary time), quantized to hop resolution.
-        let bandCenter: Double
+        /// Center of the band quantized to 50ms ticks (Int(value * 20)).
+        let bandCenterTick: Int
     }
 
     /// Cached feature band: the windows covering ±radius around a candidate.
@@ -38,7 +39,7 @@ actor FineFeatureBandCache {
     /// Retrieve cached features for a band, or nil if not cached.
     func get(episodeId: String, bandCenter: Double) -> CachedBand? {
         evictIfEpisodeChanged(episodeId)
-        let key = BandKey(episodeId: episodeId, bandCenter: quantize(bandCenter))
+        let key = BandKey(episodeId: episodeId, bandCenterTick: quantize(bandCenter))
         return cache[key]
     }
 
@@ -50,7 +51,7 @@ actor FineFeatureBandCache {
         features: [FeatureWindow]
     ) {
         evictIfEpisodeChanged(episodeId)
-        let key = BandKey(episodeId: episodeId, bandCenter: quantize(bandCenter))
+        let key = BandKey(episodeId: episodeId, bandCenterTick: quantize(bandCenter))
         cache[key] = CachedBand(
             features: features,
             bandCenter: bandCenter,
@@ -77,9 +78,12 @@ actor FineFeatureBandCache {
         }
     }
 
-    /// Quantize band center to 50ms resolution to improve cache hit rate
-    /// when candidates are close but not identical.
-    private func quantize(_ value: Double) -> Double {
-        (value * 20.0).rounded() / 20.0
+    /// Quantize band center to 50ms ticks (Int) to improve cache hit rate
+    /// and avoid floating-point hashing edge cases.
+    /// Clamps to Int range to prevent trapping on extreme doubles.
+    private func quantize(_ value: Double) -> Int {
+        let scaled = (value * 20.0).rounded()
+        guard scaled.isFinite else { return 0 }
+        return Int(clamping: Int64(scaled))
     }
 }

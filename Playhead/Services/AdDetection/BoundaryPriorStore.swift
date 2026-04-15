@@ -38,10 +38,10 @@ struct BoundaryPriorKey: Sendable, Hashable {
 /// Statistical summary of boundary corrections for a given context.
 ///
 /// Uses a rolling mean + Welford's online variance to track the distribution
-/// of signed offsets. The `median` field stores the running mean (named for
-/// its role as central tendency estimate; equal to true median for the
-/// symmetric distributions typical of boundary corrections). `spread` is
-/// the sample standard deviation.
+/// of signed offsets. The `median` field stores the running mean — named
+/// `median` for SQLite column compatibility; it is NOT a true median and
+/// IS sensitive to outliers. Use `spread` (sample standard deviation) to
+/// assess distribution quality before trusting the central estimate.
 struct BoundaryPriorDistribution: Sendable, Equatable {
     /// Running mean of signed offsets (seconds). Positive = boundary should
     /// move later; negative = boundary should move earlier.

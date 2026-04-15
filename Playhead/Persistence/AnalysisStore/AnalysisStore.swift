@@ -725,6 +725,53 @@ actor AnalysisStore {
         try migrateBracketTrustV10IfNeeded()
         try migrateSourceDemotionsV11IfNeeded()
         try migrateImplicitFeedbackV12IfNeeded()
+        // H1 fix: mirror the addColumnIfNeeded calls from migrate() that
+        // follow the versioned ladder steps. Without these, the isolated-
+        // ladder test seam cannot catch regressions in column additions.
+        if try tableExists("semantic_scan_results") {
+            try addColumnIfNeeded(
+                table: "semantic_scan_results",
+                column: "jobPhase",
+                definition: "TEXT NOT NULL DEFAULT 'shadow'"
+            )
+        }
+        // correction_events columns already added above (lines 720-722).
+        // B10: Fingerprint full-span recovery fields.
+        if try tableExists("ad_copy_fingerprints") {
+            try addColumnIfNeeded(
+                table: "ad_copy_fingerprints",
+                column: "spanStartOffset",
+                definition: "REAL NOT NULL DEFAULT 0"
+            )
+            try addColumnIfNeeded(
+                table: "ad_copy_fingerprints",
+                column: "spanEndOffset",
+                definition: "REAL NOT NULL DEFAULT 0"
+            )
+            try addColumnIfNeeded(
+                table: "ad_copy_fingerprints",
+                column: "spanDurationSeconds",
+                definition: "REAL NOT NULL DEFAULT 0"
+            )
+            try addColumnIfNeeded(
+                table: "ad_copy_fingerprints",
+                column: "canonicalSponsorEntity",
+                definition: "TEXT"
+            )
+            try addColumnIfNeeded(
+                table: "ad_copy_fingerprints",
+                column: "anchorLandmarks",
+                definition: "TEXT"
+            )
+        }
+        // playhead-ef2.1.4: explanation trace column on decision_events.
+        if try tableExists("decision_events") {
+            try addColumnIfNeeded(
+                table: "decision_events",
+                column: "explanationJSON",
+                definition: "TEXT"
+            )
+        }
         try exec("""
             CREATE TABLE IF NOT EXISTS feature_windows (
                 analysisAssetId   TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
@@ -768,21 +815,8 @@ actor AnalysisStore {
             column: "musicBedChangeScore",
             definition: "REAL NOT NULL DEFAULT 0"
         )
-        try addColumnIfNeeded(
-            table: "feature_windows",
-            column: "musicBedOnsetScore",
-            definition: "REAL NOT NULL DEFAULT 0"
-        )
-        try addColumnIfNeeded(
-            table: "feature_windows",
-            column: "musicBedOffsetScore",
-            definition: "REAL NOT NULL DEFAULT 0"
-        )
-        try addColumnIfNeeded(
-            table: "feature_windows",
-            column: "musicBedLevelRaw",
-            definition: "TEXT NOT NULL DEFAULT 'none'"
-        )
+        // musicBedOnsetScore, musicBedOffsetScore, musicBedLevelRaw are
+        // already defined in the CREATE TABLE above — no addColumnIfNeeded needed.
         // Mirror the belt-and-suspenders phase/jobPhase column re-adds
         // that `migrate()` performs after the v2/v3 evidence_events
         // rebuild (cycle-8 reconciliation: both columns coexist).
@@ -5921,6 +5955,9 @@ actor AnalysisStore {
         }
     }
 
+    /// Confirmation threshold: how many confirmations clear a dispute.
+    static let fingerprintDisputeConfirmationThreshold = 2
+
     func upsertFingerprintDispute(
         fingerprintId: String,
         showId: String,
@@ -5928,51 +5965,37 @@ actor AnalysisStore {
         incrementConfirmation: Bool,
         now: Double
     ) throws {
-        let existing = try loadFingerprintDisputeRow(fingerprintId: fingerprintId, showId: showId)
+        // H2 fix: single atomic INSERT ... ON CONFLICT DO UPDATE avoids
+        // the read-then-write TOCTOU race in the old load-then-branch pattern.
+        let disputeInc = incrementDispute ? 1 : 0
+        let confirmInc = incrementConfirmation ? 1 : 0
+        let threshold = Self.fingerprintDisputeConfirmationThreshold
 
-        if let existing {
-            var disputeCount = existing.disputeCount
-            var confirmationCount = existing.confirmationCount
-            if incrementDispute { disputeCount += 1 }
-            if incrementConfirmation { confirmationCount += 1 }
-            let status = confirmationCount >= 2 ? "cleared" : "disputed"
-
-            let stmt = try prepare("""
-                UPDATE fingerprint_disputes
-                SET disputeCount = ?, confirmationCount = ?, status = ?, updatedAt = ?
-                WHERE fingerprintId = ? AND showId = ?
-                """)
-            defer { sqlite3_finalize(stmt) }
-            bind(stmt, 1, disputeCount)
-            bind(stmt, 2, confirmationCount)
-            bind(stmt, 3, status)
-            bind(stmt, 4, now)
-            bind(stmt, 5, fingerprintId)
-            bind(stmt, 6, showId)
-            let rc = sqlite3_step(stmt)
-            guard rc == SQLITE_DONE else {
-                throw AnalysisStoreError.queryFailed("updateFingerprintDispute: \(String(cString: sqlite3_errmsg(db)))")
-            }
-        } else {
-            let disputeCount = incrementDispute ? 1 : 0
-            let confirmationCount = incrementConfirmation ? 1 : 0
-            let status = confirmationCount >= 2 ? "cleared" : "disputed"
-
-            let stmt = try prepare("""
-                INSERT INTO fingerprint_disputes (fingerprintId, showId, disputeCount, confirmationCount, status, updatedAt)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """)
-            defer { sqlite3_finalize(stmt) }
-            bind(stmt, 1, fingerprintId)
-            bind(stmt, 2, showId)
-            bind(stmt, 3, disputeCount)
-            bind(stmt, 4, confirmationCount)
-            bind(stmt, 5, status)
-            bind(stmt, 6, now)
-            let rc = sqlite3_step(stmt)
-            guard rc == SQLITE_DONE else {
-                throw AnalysisStoreError.queryFailed("insertFingerprintDispute: \(String(cString: sqlite3_errmsg(db)))")
-            }
+        let stmt = try prepare("""
+            INSERT INTO fingerprint_disputes
+                (fingerprintId, showId, disputeCount, confirmationCount, status, updatedAt)
+            VALUES (?, ?, ?, ?, CASE WHEN ? >= ? THEN 'cleared' ELSE 'disputed' END, ?)
+            ON CONFLICT(fingerprintId, showId)
+            DO UPDATE SET
+                disputeCount = fingerprint_disputes.disputeCount + excluded.disputeCount,
+                confirmationCount = fingerprint_disputes.confirmationCount + excluded.confirmationCount,
+                status = CASE
+                    WHEN fingerprint_disputes.confirmationCount + excluded.confirmationCount >= ?
+                    THEN 'cleared' ELSE 'disputed' END,
+                updatedAt = excluded.updatedAt
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, fingerprintId)
+        bind(stmt, 2, showId)
+        bind(stmt, 3, disputeInc)
+        bind(stmt, 4, confirmInc)
+        bind(stmt, 5, confirmInc) // for CASE in VALUES
+        bind(stmt, 6, threshold)  // threshold for INSERT CASE
+        bind(stmt, 7, now)
+        bind(stmt, 8, threshold)  // threshold for ON CONFLICT CASE
+        let rc = sqlite3_step(stmt)
+        guard rc == SQLITE_DONE else {
+            throw AnalysisStoreError.queryFailed("upsertFingerprintDispute: \(String(cString: sqlite3_errmsg(db)))")
         }
     }
 
@@ -5988,23 +6011,8 @@ actor AnalysisStore {
         return optionalText(stmt, 0)
     }
 
-    private func loadFingerprintDisputeRow(
-        fingerprintId: String,
-        showId: String
-    ) throws -> (disputeCount: Int, confirmationCount: Int, status: String)? {
-        let stmt = try prepare("""
-            SELECT disputeCount, confirmationCount, status FROM fingerprint_disputes
-            WHERE fingerprintId = ? AND showId = ?
-            """)
-        defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, fingerprintId)
-        bind(stmt, 2, showId)
-        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
-        let dc = Int(sqlite3_column_int(stmt, 0))
-        let cc = Int(sqlite3_column_int(stmt, 1))
-        let status = text(stmt, 2)
-        return (disputeCount: dc, confirmationCount: cc, status: status)
-    }
+    // loadFingerprintDisputeRow removed — upsertFingerprintDispute is now
+    // a single atomic INSERT ... ON CONFLICT statement (H2 fix).
 
     // MARK: - CRUD: implicit_feedback_events (ef2.3.4)
 

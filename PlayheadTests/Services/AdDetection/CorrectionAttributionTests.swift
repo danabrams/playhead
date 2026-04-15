@@ -57,7 +57,7 @@ final class CorrectionAttributionTests: XCTestCase {
             EvidenceLedgerEntry(source: .lexical, weight: 0.5, detail: .lexical(matchedCategories: ["url"])),
             EvidenceLedgerEntry(source: .fm, weight: 0.2, detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1")),
         ]
-        let result = inferCausalSource(provenance: [], ledgerEntries: entries)
+        let result = CausalInference.inferCausalSource(provenance: [], ledgerEntries: entries)
         XCTAssertEqual(result, .lexical)
     }
 
@@ -69,7 +69,7 @@ final class CorrectionAttributionTests: XCTestCase {
             EvidenceLedgerEntry(source: .acoustic, weight: 0.5, detail: .acoustic(breakStrength: 0.8)),
         ]
         // FM weight = 0.4, total = 0.9, FM fraction = 0.4/0.9 = 0.444 > 0.3
-        let result = inferCausalSource(provenance: [], ledgerEntries: entries)
+        let result = CausalInference.inferCausalSource(provenance: [], ledgerEntries: entries)
         XCTAssertEqual(result, .foundationModel)
     }
 
@@ -82,7 +82,7 @@ final class CorrectionAttributionTests: XCTestCase {
             EvidenceLedgerEntry(source: .acoustic, weight: 0.7, detail: .acoustic(breakStrength: 0.8)),
         ]
         // FM weight = 0.3, total = 1.0, FM fraction = 0.3 — not > 0.3
-        let result = inferCausalSource(provenance: [], ledgerEntries: entries)
+        let result = CausalInference.inferCausalSource(provenance: [], ledgerEntries: entries)
         XCTAssertEqual(result, .acoustic, "FM at exactly 0.3 fraction should not trigger FM rule")
     }
 
@@ -93,7 +93,7 @@ final class CorrectionAttributionTests: XCTestCase {
             EvidenceLedgerEntry(source: .fingerprint, weight: 0.6, detail: .fingerprint(matchCount: 3, averageSimilarity: 0.95)),
             EvidenceLedgerEntry(source: .fm, weight: 0.1, detail: .fm(disposition: .containsAd, band: .weak, cohortPromptLabel: "v1")),
         ]
-        let result = inferCausalSource(provenance: [], ledgerEntries: entries)
+        let result = CausalInference.inferCausalSource(provenance: [], ledgerEntries: entries)
         XCTAssertEqual(result, .fingerprint)
     }
 
@@ -105,7 +105,7 @@ final class CorrectionAttributionTests: XCTestCase {
             EvidenceLedgerEntry(source: .fm, weight: 0.2, detail: .fm(disposition: .containsAd, band: .weak, cohortPromptLabel: "v1")),
         ]
         // FM fraction = 0.2/0.9 = 0.222 < 0.3, acoustic is top
-        let result = inferCausalSource(provenance: [], ledgerEntries: entries)
+        let result = CausalInference.inferCausalSource(provenance: [], ledgerEntries: entries)
         XCTAssertEqual(result, .acoustic)
     }
 
@@ -118,7 +118,7 @@ final class CorrectionAttributionTests: XCTestCase {
             EvidenceLedgerEntry(source: .acoustic, weight: 0.5, detail: .acoustic(breakStrength: 0.9)),
             EvidenceLedgerEntry(source: .fingerprint, weight: 0.5, detail: .fingerprint(matchCount: 2, averageSimilarity: 0.9)),
         ]
-        let result = inferCausalSource(provenance: [], ledgerEntries: entries)
+        let result = CausalInference.inferCausalSource(provenance: [], ledgerEntries: entries)
         // "acoustic" < "fingerprint" lexicographically, so acoustic wins the tie.
         XCTAssertEqual(result, .acoustic, "Tied weights should resolve deterministically via rawValue ordering")
     }
@@ -133,7 +133,7 @@ final class CorrectionAttributionTests: XCTestCase {
         let provenance: [AnchorRef] = [
             .fmConsensus(regionId: "r1", consensusStrength: 0.8)
         ]
-        let result = inferCausalSource(provenance: provenance, ledgerEntries: entries)
+        let result = CausalInference.inferCausalSource(provenance: provenance, ledgerEntries: entries)
         XCTAssertEqual(result, .foundationModel, "All-zero weights should fall back to provenance inference")
     }
 
@@ -143,7 +143,7 @@ final class CorrectionAttributionTests: XCTestCase {
         let provenance: [AnchorRef] = [
             .fmConsensus(regionId: "r1", consensusStrength: 0.8)
         ]
-        let result = inferCausalSource(provenance: provenance, ledgerEntries: [])
+        let result = CausalInference.inferCausalSource(provenance: provenance, ledgerEntries: [])
         XCTAssertEqual(result, .foundationModel)
     }
 
@@ -158,7 +158,7 @@ final class CorrectionAttributionTests: XCTestCase {
             endTime: 12.0
         )
         let provenance: [AnchorRef] = [.evidenceCatalog(entry: entry)]
-        let result = inferCausalSource(provenance: provenance, ledgerEntries: [])
+        let result = CausalInference.inferCausalSource(provenance: provenance, ledgerEntries: [])
         XCTAssertEqual(result, .lexical)
     }
 
@@ -166,13 +166,13 @@ final class CorrectionAttributionTests: XCTestCase {
         let provenance: [AnchorRef] = [
             .fmAcousticCorroborated(regionId: "r1", breakStrength: 0.5)
         ]
-        let result = inferCausalSource(provenance: provenance, ledgerEntries: [])
+        let result = CausalInference.inferCausalSource(provenance: provenance, ledgerEntries: [])
         // fmAcousticCorroborated counts as FM, so should be .foundationModel
         XCTAssertEqual(result, .foundationModel)
     }
 
     func testInferCausalSourceEmptyProvenanceDefaultsToFM() {
-        let result = inferCausalSource(provenance: [], ledgerEntries: [])
+        let result = CausalInference.inferCausalSource(provenance: [], ledgerEntries: [])
         XCTAssertEqual(result, .foundationModel)
     }
 
@@ -189,7 +189,7 @@ final class CorrectionAttributionTests: XCTestCase {
             endTime: 17.0
         )
         let provenance: [AnchorRef] = [.evidenceCatalog(entry: entry)]
-        let refs = buildTargetRefs(provenance: provenance, ledgerEntries: [])
+        let refs = CausalInference.buildTargetRefs(provenance: provenance, ledgerEntries: [])
         XCTAssertNotNil(refs)
         XCTAssertEqual(refs?.atomIds, [7])
         XCTAssertEqual(refs?.evidenceRefs, ["[E3]"])
@@ -197,7 +197,7 @@ final class CorrectionAttributionTests: XCTestCase {
     }
 
     func testBuildTargetRefsEmptyProvenanceReturnsNil() {
-        let refs = buildTargetRefs(provenance: [], ledgerEntries: [])
+        let refs = CausalInference.buildTargetRefs(provenance: [], ledgerEntries: [])
         XCTAssertNil(refs)
     }
 
@@ -212,7 +212,7 @@ final class CorrectionAttributionTests: XCTestCase {
             endTime: 2.0
         )
         let provenance: [AnchorRef] = [.evidenceCatalog(entry: entry)]
-        let refs = buildTargetRefs(
+        let refs = CausalInference.buildTargetRefs(
             provenance: provenance,
             ledgerEntries: [],
             sponsorEntity: "explicit-sponsor"

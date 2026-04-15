@@ -73,6 +73,10 @@ struct MigrationLadderTests {
 
         // V10 music_bracket_trust table (ef2.3.6).
         #expect(try probeTableExists(in: dir, table: "music_bracket_trust"))
+
+        // V11 source_demotions and fingerprint_disputes tables (ef2.3.3).
+        #expect(try probeTableExists(in: dir, table: "source_demotions"))
+        #expect(try probeTableExists(in: dir, table: "fingerprint_disputes"))
     }
 
     // MARK: - H11: seeded v1 → v5 ladder runs all V*IfNeeded blocks

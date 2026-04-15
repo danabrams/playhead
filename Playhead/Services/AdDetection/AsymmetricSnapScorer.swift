@@ -73,7 +73,9 @@ enum AsymmetricSnapScorer {
     ///
     /// For adStart boundaries: too-early (negative error) clips editorial → 1.5×.
     /// For adEnd boundaries: too-late (positive error) clips editorial → 1.5×.
-    /// All other cases: ad leak → 1.0× baseline.
+    /// All other cases (including zero error): ad leak → 1.0× baseline.
+    /// Zero error is treated as ad-leak (no penalty) by design — a perfect
+    /// snap has no reason to be penalized.
     static func penaltyMultiplier(
         direction: BoundaryDirection,
         signedError: Double

@@ -81,6 +81,10 @@ enum BracketDetector {
         let fadeOutRMSDeclineRate: Double
         /// How many trailing windows to check for fade-out pattern.
         let fadeOutWindowCount: Int
+        /// Maximum consecutive windows with low music probability before
+        /// the bed-sustain state resets to idle. Prevents the state machine
+        /// from getting stuck in `.bedSustained` when music drops out.
+        let maxBedDropoutWindows: Int
 
         static let `default` = Config(
             onsetScoreThreshold: 0.3,
@@ -90,7 +94,8 @@ enum BracketDetector {
             maxOnsetToBedGap: 2,
             sharpOnsetRMSRatio: 1.5,
             fadeOutRMSDeclineRate: 0.15,
-            fadeOutWindowCount: 3
+            fadeOutWindowCount: 3,
+            maxBedDropoutWindows: 6
         )
     }
 
@@ -105,6 +110,8 @@ enum BracketDetector {
         var onsetMusicOnsetScore: Double = 0
         var bedStartIndex: Int?
         var bedWindowCount: Int = 0
+        /// Consecutive windows below bedSustainMusicProbThreshold while in bedSustained.
+        var bedDropoutCount: Int = 0
         var offsetWindowIndex: Int?
         var offsetTime: Double?
         var offsetMusicOffsetScore: Double = 0
@@ -119,7 +126,7 @@ enum BracketDetector {
     /// - Parameters:
     ///   - candidateStart: Start time of the candidate ad region (seconds).
     ///   - candidateEnd: End time of the candidate ad region (seconds).
-    ///   - windows: All feature windows for the episode, sorted by startTime.
+    ///   - windows: All feature windows for the episode (sorted internally; caller order does not matter).
     ///   - showTrust: Per-show musicBracketTrust value (from MusicBracketTrustStore).
     ///   - config: Detection thresholds.
     /// - Returns: BracketEvidence if a bracket pattern is detected, nil otherwise.
@@ -186,7 +193,27 @@ enum BracketDetector {
             case .bedSustained:
                 if window.musicProbability >= config.bedSustainMusicProbThreshold {
                     ctx.bedWindowCount += 1
+                    ctx.bedDropoutCount = 0
+                } else {
+                    ctx.bedDropoutCount += 1
+                    if ctx.bedDropoutCount >= config.maxBedDropoutWindows {
+                        // Music dropped out — bed fizzled, reset to idle.
+                        ctx.state = .idle
+                        ctx.onsetWindowIndex = nil
+                        ctx.onsetTime = nil
+                        ctx.onsetRMS = nil
+                        ctx.onsetMusicOnsetScore = 0
+                        ctx.bedStartIndex = nil
+                        ctx.bedWindowCount = 0
+                        ctx.bedDropoutCount = 0
+                        continue
+                    }
                 }
+                // Note: during a dropout streak (bedDropoutCount > 0 but below
+                // maxBedDropoutWindows), the offset check still runs. A window
+                // with low music probability but high offsetScore can trigger
+                // the offset transition — this is intentional since the offset
+                // score is a distinct signal from music probability.
                 if window.musicBedOffsetScore >= config.offsetScoreThreshold
                     && ctx.bedWindowCount >= config.minBedSustainWindows
                     && window.startTime >= candidateEnd - windowDuration {
@@ -310,8 +337,11 @@ enum BracketDetector {
             }
         }
 
-        // Majority of transitions must be declining.
-        return declines >= (trailingRMS.count - 1 + 1) / 2
+        // Strictly more than half of transitions must be declining.
+        // For even transition counts this requires unanimity (e.g. 2/2),
+        // which is intentionally strict for small sample sizes.
+        let transitions = trailingRMS.count - 1
+        return declines > transitions / 2
     }
 
     // MARK: - Coarse score

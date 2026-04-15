@@ -248,11 +248,11 @@ struct FingerprintDisputeTests {
 
 // MARK: - Schema Migration
 
-@Suite("Source Demotions — V10 Migration")
+@Suite("Source Demotions — V11 Migration")
 struct DemotionMigrationTests {
 
-    @Test("V10 migration creates tables")
-    func v10MigrationCreatesTables() async throws {
+    @Test("V11 migration creates tables")
+    func v11MigrationCreatesTables() async throws {
         let store = try await makeTestStore()
         // If migration worked, we can write and read without error.
         try await store.upsertSourceDemotion(
@@ -263,8 +263,8 @@ struct DemotionMigrationTests {
         #expect(multiplier == 0.8)
     }
 
-    @Test("V10 migration creates fingerprint_disputes table")
-    func v10MigrationCreatesFingerprintDisputes() async throws {
+    @Test("V11 migration creates fingerprint_disputes table")
+    func v11MigrationCreatesFingerprintDisputes() async throws {
         let store = try await makeTestStore()
         try await store.upsertFingerprintDispute(
             fingerprintId: "fp-1", showId: "show-1",

@@ -87,158 +87,163 @@ struct CorrectionAttribution: Sendable, Equatable {
 
 // MARK: - Causal Inference
 
-/// Infer the most likely causal source from a span's anchor provenance and
-/// the evidence ledger entries that contributed to the decision.
-///
-/// Algorithm (ledger-based, when ledger is non-empty):
-///   1. Compute per-source total weight.
-///   2. If the top source is lexical, return .lexical.
-///   3. If FM weight > 0.3 of total weight, return .foundationModel.
-///   4. If the top source is fingerprint, return .fingerprint.
-///   5. Otherwise, return the highest-weight source mapped to CausalSource.
-///
-/// Falls back to provenance-only inference when the ledger is empty.
-func inferCausalSource(
-    provenance: [AnchorRef],
-    ledgerEntries: [EvidenceLedgerEntry]
-) -> CausalSource {
-    // If we have ledger entries, use weight-based inference.
-    if !ledgerEntries.isEmpty {
-        // Accumulate total weight per source type.
-        var weightBySource: [EvidenceSourceType: Double] = [:]
-        for entry in ledgerEntries {
-            weightBySource[entry.source, default: 0] += entry.weight
+/// Namespace for causal inference logic. Groups `inferCausalSource` and
+/// `buildTargetRefs` to avoid global namespace pollution.
+enum CausalInference {
+
+    /// Infer the most likely causal source from a span's anchor provenance and
+    /// the evidence ledger entries that contributed to the decision.
+    ///
+    /// Algorithm (ledger-based, when ledger is non-empty):
+    ///   1. Compute per-source total weight.
+    ///   2. If the top source is lexical, return .lexical.
+    ///   3. If FM weight > 0.3 of total weight, return .foundationModel.
+    ///   4. If the top source is fingerprint, return .fingerprint.
+    ///   5. Otherwise, return the highest-weight source mapped to CausalSource.
+    ///
+    /// Falls back to provenance-only inference when the ledger is empty.
+    static func inferCausalSource(
+        provenance: [AnchorRef],
+        ledgerEntries: [EvidenceLedgerEntry]
+    ) -> CausalSource {
+        // If we have ledger entries, use weight-based inference.
+        if !ledgerEntries.isEmpty {
+            // Accumulate total weight per source type.
+            var weightBySource: [EvidenceSourceType: Double] = [:]
+            for entry in ledgerEntries {
+                weightBySource[entry.source, default: 0] += entry.weight
+            }
+
+            let totalWeight = weightBySource.values.reduce(0, +)
+            guard totalWeight > 0 else {
+                return inferFromProvenance(provenance)
+            }
+
+            // Find the source with the highest weight.
+            // Tie-break by rawValue for deterministic ordering when weights are equal.
+            let sorted = weightBySource.sorted {
+                if $0.value != $1.value { return $0.value > $1.value }
+                return $0.key.rawValue < $1.key.rawValue
+            }
+            let topSource = sorted[0].key
+
+            // Rule 1: Top source is lexical.
+            if topSource == .lexical {
+                return .lexical
+            }
+
+            // Rule 2: FM weight > 0.3 of total.
+            let fmWeight = weightBySource[.fm] ?? 0
+            if fmWeight / totalWeight > 0.3 {
+                return .foundationModel
+            }
+
+            // Rule 3: Fingerprint source present with highest weight.
+            if topSource == .fingerprint {
+                return .fingerprint
+            }
+
+            // Rule 4: Map the highest-weight source to CausalSource.
+            return mapSourceType(topSource)
         }
 
-        let totalWeight = weightBySource.values.reduce(0, +)
-        guard totalWeight > 0 else {
-            return inferFromProvenance(provenance)
-        }
-
-        // Find the source with the highest weight.
-        // Tie-break by rawValue for deterministic ordering when weights are equal.
-        let sorted = weightBySource.sorted {
-            if $0.value != $1.value { return $0.value > $1.value }
-            return $0.key.rawValue < $1.key.rawValue
-        }
-        let topSource = sorted[0].key
-
-        // Rule 1: Top source is lexical.
-        if topSource == .lexical {
-            return .lexical
-        }
-
-        // Rule 2: FM weight > 0.3 of total.
-        let fmWeight = weightBySource[.fm] ?? 0
-        if fmWeight / totalWeight > 0.3 {
-            return .foundationModel
-        }
-
-        // Rule 3: Fingerprint source present with highest weight.
-        if topSource == .fingerprint {
-            return .fingerprint
-        }
-
-        // Rule 4: Map the highest-weight source to CausalSource.
-        return mapSourceType(topSource)
+        // Ledger is empty — fall back to provenance-only inference.
+        return inferFromProvenance(provenance)
     }
 
-    // Ledger is empty — fall back to provenance-only inference.
-    return inferFromProvenance(provenance)
-}
-
-/// Map an EvidenceSourceType to the corresponding CausalSource.
-private func mapSourceType(_ source: EvidenceSourceType) -> CausalSource {
-    switch source {
-    case .fm:          return .foundationModel
-    case .lexical:     return .lexical
-    case .acoustic:    return .acoustic
-    case .catalog:     return .lexical  // catalog entries are lexical matches
-    case .classifier:  return .foundationModel  // legacy classifier ≈ FM
-    case .fingerprint: return .fingerprint
-    case .fusedScore:  return .foundationModel  // fused aggregate ≈ FM pipeline
-    }
-}
-
-/// Infer causal source from anchor provenance alone (no ledger entries).
-private func inferFromProvenance(_ provenance: [AnchorRef]) -> CausalSource {
-    // Count anchor ref types.
-    var fmCount = 0
-    var evidenceCatalogCount = 0
-    var acousticCount = 0
-
-    for ref in provenance {
-        switch ref {
-        case .fmConsensus:
-            fmCount += 1
-        case .evidenceCatalog:
-            evidenceCatalogCount += 1
-        case .fmAcousticCorroborated:
-            fmCount += 1
-            acousticCount += 1
-        case .userCorrection:
-            // User corrections are attribution-neutral — they indicate the
-            // user flagged a region, not a specific pipeline source.
-            break
+    /// Map an EvidenceSourceType to the corresponding CausalSource.
+    private static func mapSourceType(_ source: EvidenceSourceType) -> CausalSource {
+        switch source {
+        case .fm:          return .foundationModel
+        case .lexical:     return .lexical
+        case .acoustic:    return .acoustic
+        case .catalog:     return .lexical  // catalog entries are lexical matches
+        case .classifier:  return .foundationModel  // legacy classifier ≈ FM
+        case .fingerprint: return .fingerprint
+        case .fusedScore:  return .foundationModel  // fused aggregate ≈ FM pipeline
         }
     }
 
-    // Prefer evidence catalog (lexical) if present, then FM, then acoustic.
-    if evidenceCatalogCount > 0 { return .lexical }
-    if fmCount > 0 { return .foundationModel }
-    if acousticCount > 0 { return .acoustic }
+    /// Infer causal source from anchor provenance alone (no ledger entries).
+    private static func inferFromProvenance(_ provenance: [AnchorRef]) -> CausalSource {
+        // Count anchor ref types.
+        var fmCount = 0
+        var evidenceCatalogCount = 0
+        var acousticCount = 0
 
-    // No provenance at all — default to FM as the most common source.
-    return .foundationModel
-}
-
-/// Build a CorrectionTargetRefs from a span's provenance and optional overrides.
-///
-/// The `ledgerEntries` parameter is reserved for future use (e.g. extracting
-/// fingerprint IDs from ledger details); currently only provenance is inspected.
-func buildTargetRefs(
-    provenance: [AnchorRef],
-    ledgerEntries: [EvidenceLedgerEntry],
-    fingerprintId: String? = nil,
-    domain: String? = nil,
-    sponsorEntity: String? = nil
-) -> CorrectionTargetRefs? {
-    // Extract atom ordinals from evidence catalog entries.
-    let atomIds: [Int] = provenance.compactMap { ref in
-        if case .evidenceCatalog(let entry) = ref {
-            return entry.atomOrdinal
+        for ref in provenance {
+            switch ref {
+            case .fmConsensus:
+                fmCount += 1
+            case .evidenceCatalog:
+                evidenceCatalogCount += 1
+            case .fmAcousticCorroborated:
+                fmCount += 1
+                acousticCount += 1
+            case .userCorrection:
+                // User corrections are attribution-neutral — they indicate the
+                // user flagged a region, not a specific pipeline source.
+                break
+            }
         }
-        return nil
+
+        // Prefer evidence catalog (lexical) if present, then FM, then acoustic.
+        if evidenceCatalogCount > 0 { return .lexical }
+        if fmCount > 0 { return .foundationModel }
+        if acousticCount > 0 { return .acoustic }
+
+        // No provenance at all — default to FM as the most common source.
+        return .foundationModel
     }
 
-    // Extract evidence refs from evidence catalog entries.
-    let evidenceRefs: [String] = provenance.compactMap { ref in
-        if case .evidenceCatalog(let entry) = ref {
-            return "[E\(entry.evidenceRef)]"
+    /// Build a CorrectionTargetRefs from a span's provenance and optional overrides.
+    ///
+    /// The `ledgerEntries` parameter is reserved for future use (e.g. extracting
+    /// fingerprint IDs from ledger details); currently only provenance is inspected.
+    static func buildTargetRefs(
+        provenance: [AnchorRef],
+        ledgerEntries: [EvidenceLedgerEntry],
+        fingerprintId: String? = nil,
+        domain: String? = nil,
+        sponsorEntity: String? = nil
+    ) -> CorrectionTargetRefs? {
+        // Extract atom ordinals from evidence catalog entries.
+        let atomIds: [Int] = provenance.compactMap { ref in
+            if case .evidenceCatalog(let entry) = ref {
+                return entry.atomOrdinal
+            }
+            return nil
         }
-        return nil
-    }
 
-    // Extract sponsor entity from brandSpan evidence.
-    let inferredSponsor = sponsorEntity ?? provenance.compactMap { ref -> String? in
-        if case .evidenceCatalog(let entry) = ref, entry.category == .brandSpan {
-            return entry.normalizedText
+        // Extract evidence refs from evidence catalog entries.
+        let evidenceRefs: [String] = provenance.compactMap { ref in
+            if case .evidenceCatalog(let entry) = ref {
+                return "[E\(entry.evidenceRef)]"
+            }
+            return nil
         }
-        return nil
-    }.first
 
-    let refs = CorrectionTargetRefs(
-        atomIds: atomIds.isEmpty ? nil : atomIds,
-        evidenceRefs: evidenceRefs.isEmpty ? nil : evidenceRefs,
-        fingerprintId: fingerprintId,
-        domain: domain,
-        sponsorEntity: inferredSponsor
-    )
+        // Extract sponsor entity from brandSpan evidence.
+        let inferredSponsor = sponsorEntity ?? provenance.compactMap { ref -> String? in
+            if case .evidenceCatalog(let entry) = ref, entry.category == .brandSpan {
+                return entry.normalizedText
+            }
+            return nil
+        }.first
 
-    // Return nil if all fields are nil (no useful refs to store).
-    if refs.atomIds == nil && refs.evidenceRefs == nil &&
-       refs.fingerprintId == nil && refs.domain == nil && refs.sponsorEntity == nil {
-        return nil
+        let refs = CorrectionTargetRefs(
+            atomIds: atomIds.isEmpty ? nil : atomIds,
+            evidenceRefs: evidenceRefs.isEmpty ? nil : evidenceRefs,
+            fingerprintId: fingerprintId,
+            domain: domain,
+            sponsorEntity: inferredSponsor
+        )
+
+        // Return nil if all fields are nil (no useful refs to store).
+        if refs.atomIds == nil && refs.evidenceRefs == nil &&
+           refs.fingerprintId == nil && refs.domain == nil && refs.sponsorEntity == nil {
+            return nil
+        }
+        return refs
     }
-    return refs
 }

@@ -209,11 +209,11 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
         let now = Date().timeIntervalSince1970
 
         // ef2.3.1: Infer causal source from provenance + ledger.
-        let causalSource = inferCausalSource(
+        let causalSource = CausalInference.inferCausalSource(
             provenance: span.anchorProvenance,
             ledgerEntries: ledgerEntries
         )
-        let targetRefs = buildTargetRefs(
+        let targetRefs = CausalInference.buildTargetRefs(
             provenance: span.anchorProvenance,
             ledgerEntries: ledgerEntries
         )

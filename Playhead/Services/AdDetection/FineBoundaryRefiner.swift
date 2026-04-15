@@ -172,6 +172,7 @@ enum FineBoundaryRefiner {
 
         // Clamp to non-negative times (candidate near episode start).
         let clampedLower = max(0, guardedLower)
+        let clampedUpper = max(0, guardedUpper)
         let clampedTime = max(0, guardedTime)
 
         // Build cue breakdown: normalize so weights sum to 1.0 (or all zero).
@@ -181,7 +182,7 @@ enum FineBoundaryRefiner {
             time: clampedTime,
             confidence: confidence,
             lowerBound: clampedLower,
-            upperBound: guardedUpper,
+            upperBound: clampedUpper,
             cueBreakdown: breakdown
         )
     }
@@ -295,6 +296,15 @@ enum FineBoundaryRefiner {
 
     /// Apply asymmetric guard margins to bias toward letting ad audio leak
     /// rather than clipping editorial content.
+    ///
+    /// Worked example (guardMargin = 100ms):
+    ///   adStart at 30.0s → shifts to 30.1s. The system starts muting later,
+    ///   so the first 100ms of ad audio plays (leaks). Editorial before the
+    ///   ad is never clipped.
+    ///
+    ///   adEnd at 60.0s → shifts to 59.9s. The system stops muting earlier,
+    ///   so the last 100ms of ad audio plays (leaks). Editorial after the
+    ///   ad is never clipped.
     private static func applyGuardMargins(
         bestTime: Double,
         rawLower: Double,
@@ -338,7 +348,7 @@ enum FineBoundaryRefiner {
             time: max(0, guardedTime),
             confidence: 0.0,
             lowerBound: max(0, guardedLower),
-            upperBound: guardedUpper,
+            upperBound: max(0, guardedUpper),
             cueBreakdown: [.coarseFallback: 1.0]
         )
     }

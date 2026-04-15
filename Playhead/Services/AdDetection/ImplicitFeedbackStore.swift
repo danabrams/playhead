@@ -86,6 +86,11 @@ struct ImplicitFeedbackEvent: Sendable, Equatable {
         self.spanId = spanId
         self.timestamp = timestamp
         // Enforce the 0.3 constant even if the stored value is stale.
+        // The weight column in SQLite is effectively write-only — on load
+        // we always use the current constant. If the constant changes in a
+        // future version, existing rows adopt the new value automatically.
+        // This is intentional: behavioral signal weight is a policy knob,
+        // not a per-event attribute.
         self.weight = 0.3
     }
 }

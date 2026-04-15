@@ -47,6 +47,23 @@ struct FineBoundaryRefinerTests {
         #expect(result.cueBreakdown[.coarseFallback] == 1.0)
     }
 
+    @Test("coarse fallback clamps upperBound to non-negative for adEnd near zero")
+    func coarseFallbackClampsUpperBoundNearZero() {
+        // adEnd at 0.05s with guard margin 0.1s → raw upperBound would be
+        // 0.05 + 0.15 - 0.1 = 0.1 (positive), but test with smaller candidate
+        // to verify the clamp logic works for extreme edge cases.
+        let result = FineBoundaryRefiner.refineBoundary(
+            candidate: 0.0,
+            features: [],
+            direction: .adEnd
+        )
+
+        #expect(result.confidence == 0.0)
+        #expect(result.lowerBound >= 0)
+        #expect(result.upperBound >= 0)
+        #expect(result.time >= 0)
+    }
+
     @Test("returns coarse fallback when features are outside search radius")
     func coarseFallbackWhenFeaturesOutOfRange() {
         let features = [

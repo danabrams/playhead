@@ -1,6 +1,6 @@
 // ImplicitFeedbackStoreTests.swift
 // Phase ef2 (playhead-ef2.3.4): Tests for ImplicitFeedbackSignal,
-// ImplicitFeedbackEvent, ImplicitFeedbackStore, and the v9 schema migration.
+// ImplicitFeedbackEvent, ImplicitFeedbackStore, and the V12 schema migration.
 
 import XCTest
 import SQLite3
@@ -83,9 +83,9 @@ final class ImplicitFeedbackStoreTests: XCTestCase {
         XCTAssertFalse(event.id.isEmpty)
     }
 
-    // MARK: - Schema V9 Migration
+    // MARK: - Schema V12 Migration
 
-    func testSchemaV9MigrationCreatesImplicitFeedbackTable() async throws {
+    func testSchemaV12MigrationCreatesImplicitFeedbackTable() async throws {
         let dir = try makeTempDir(prefix: "ImplicitFeedbackStoreTests")
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -94,7 +94,7 @@ final class ImplicitFeedbackStoreTests: XCTestCase {
         try await store.migrate()
 
         let version = try await store.schemaVersion()
-        XCTAssertGreaterThanOrEqual(version ?? 0, 9)
+        XCTAssertGreaterThanOrEqual(version ?? 0, 12)
         XCTAssertTrue(try probeTableExists(in: dir, table: "implicit_feedback_events"))
         XCTAssertTrue(try probeColumnExists(in: dir, table: "implicit_feedback_events", column: "signal"))
         XCTAssertTrue(try probeColumnExists(in: dir, table: "implicit_feedback_events", column: "analysisAssetId"))
@@ -104,7 +104,7 @@ final class ImplicitFeedbackStoreTests: XCTestCase {
         XCTAssertTrue(try probeColumnExists(in: dir, table: "implicit_feedback_events", column: "weight"))
     }
 
-    func testFreshDatabaseReachesAtLeastV9() async throws {
+    func testFreshDatabaseReachesAtLeastV12() async throws {
         let dir = try makeTempDir(prefix: "ImplicitFeedbackStoreTests")
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -113,7 +113,7 @@ final class ImplicitFeedbackStoreTests: XCTestCase {
         try await store.migrate()
 
         let version = try await store.schemaVersion()
-        XCTAssertGreaterThanOrEqual(version ?? 0, 9)
+        XCTAssertGreaterThanOrEqual(version ?? 0, 12)
         XCTAssertTrue(try probeTableExists(in: dir, table: "implicit_feedback_events"))
     }
 

@@ -136,6 +136,12 @@ actor CausalSourceDemotionStore {
                 "Demoted \(source.rawValue, privacy: .public) on show \(showId, privacy: .public): \(current, privacy: .public) -> \(newMultiplier, privacy: .public) (floor \(rule.floor, privacy: .public))"
             )
         } catch {
+            // Intentionally non-throwing: shadow-mode callers treat demotion
+            // as best-effort. A persistence failure here is logged but does
+            // not propagate — the skip pipeline must never crash or stall
+            // because a demotion write failed. If this is wired into a live
+            // pipeline in the future, consider surfacing errors via a Result
+            // return type or a delegate callback.
             logger.error(
                 "applyDemotion failed for \(source.rawValue, privacy: .public) on show \(showId, privacy: .public): \(error.localizedDescription, privacy: .public)"
             )
