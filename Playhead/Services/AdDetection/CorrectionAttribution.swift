@@ -156,6 +156,7 @@ private func mapSourceType(_ source: EvidenceSourceType) -> CausalSource {
     case .catalog:     return .lexical  // catalog entries are lexical matches
     case .classifier:  return .foundationModel  // legacy classifier ≈ FM
     case .fingerprint: return .fingerprint
+    case .fusedScore:  return .foundationModel  // fused score is post-FM aggregation
     }
 }
 
@@ -175,6 +176,8 @@ private func inferFromProvenance(_ provenance: [AnchorRef]) -> CausalSource {
         case .fmAcousticCorroborated:
             fmCount += 1
             acousticCount += 1
+        case .userCorrection:
+            break  // User corrections are not a pipeline source to blame
         }
     }
 
