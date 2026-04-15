@@ -244,6 +244,9 @@ struct DecisionMapper: Sendable {
         // < 1.0 = false-positive suppression; if effective confidence drops below 0.40,
         //         gate the span as blockedByUserCorrection.
         // > 1.0 = false-negative boost; caps at 1.0 to avoid over-confident decisions.
+        // TODO: ef2.1.7 — Apply calibrationProfile.decisionThresholds here.
+        // v0 thresholds are zero (no-op). When a real v1 profile ships with non-zero
+        // skipMinimum/proposalMinimum, gate the score before correction factor.
         let rawSkipConfidence = calibrate(proposalConfidence)
         let effectiveConfidence = min(1.0, rawSkipConfidence * max(0.0, correctionFactor))
         let gate: SkipEligibilityGate
@@ -273,11 +276,11 @@ struct DecisionMapper: Sendable {
     private func calibrate(_ raw: Double) -> Double {
         guard raw.isFinite else { return 0.0 }
         // The profile's calibrator handles [0,1] clamping internally.
-        // We use the .classifier calibrator for the aggregate proposalConfidence → skipConfidence
-        // mapping because proposalConfidence is a fused score (not source-specific).
-        // v0 profile: all calibrators are identity, so this is a no-op clamp.
+        // We use .fusedScore (not .classifier) because proposalConfidence is a post-fusion
+        // aggregate, not a raw per-source classifier score. Using a distinct key prevents
+        // future non-identity profiles from conflating the two distributions.
         let clamped = max(0.0, min(1.0, raw))
-        return calibrationProfile.calibrator(for: .classifier).calibrate(clamped)
+        return calibrationProfile.calibrator(for: .fusedScore).calibrate(clamped)
     }
 
     /// Determine the eligibility gate by reading `anchorProvenance` directly.

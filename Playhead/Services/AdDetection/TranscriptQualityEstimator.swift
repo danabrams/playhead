@@ -28,7 +28,7 @@ enum NormalizationQuality: String, Sendable, Codable, Equatable {
 /// chunk-level quality (from TranscriptQualityEstimator's 5-signal heuristic)
 /// is the best ASR proxy available. NormalizationQuality adds a second axis:
 /// how well did entity extraction work on this specific atom.
-struct TranscriptReliability: Sendable, Equatable {
+struct TranscriptReliability: Sendable, Equatable, Codable {
     /// Chunk-level ASR quality level inherited from TranscriptQualityEstimator.
     let chunkQuality: TranscriptQualityLevel
     /// Numeric chunk quality score (0.0 = worst, 1.0 = best).
@@ -49,6 +49,22 @@ struct TranscriptReliability: Sendable, Equatable {
     /// uncertainty for this atom's text, which downstream could use to lower
     /// fingerprint match thresholds or request FM re-evaluation.
     let alternativeCount: Int
+
+    init(
+        chunkQuality: TranscriptQualityLevel,
+        chunkQualityScore: Double,
+        normalizationQuality: NormalizationQuality,
+        alternativeCount: Int
+    ) {
+        precondition(chunkQualityScore >= 0.0 && chunkQualityScore <= 1.0,
+                      "chunkQualityScore must be in [0.0, 1.0], got \(chunkQualityScore)")
+        precondition(alternativeCount >= 0,
+                      "alternativeCount must be non-negative, got \(alternativeCount)")
+        self.chunkQuality = chunkQuality
+        self.chunkQualityScore = chunkQualityScore
+        self.normalizationQuality = normalizationQuality
+        self.alternativeCount = alternativeCount
+    }
 
     /// Default reliability for atoms where no quality assessment has been performed.
     static let `default` = TranscriptReliability(
@@ -93,7 +109,8 @@ enum NormalizationQualityAssessor {
             return .good
         }
 
-        // Weaker signals: brandSpan, ctaPhrase
+        // Weaker signals (brandSpan, ctaPhrase, etc.) — any non-strong category
+        // that passed evidence extraction indicates partial normalization success.
         return .partial
     }
 }
@@ -114,31 +131,27 @@ enum NormalizationQualityAssessor {
 enum ReliabilityGate {
 
     /// Whether to include an atom in lexical scanning.
-    /// Phase 0: always true.
+    /// Phase 0: always true. Phase 1+ will gate on `reliability.isUsableForClassification`.
     static func shouldIncludeInLexicalScan(_ reliability: TranscriptReliability) -> Bool {
-        // Future: return reliability.isUsableForClassification
-        return true
+        true
     }
 
     /// Whether to include an atom in fingerprint matching.
-    /// Phase 0: always true.
+    /// Phase 0: always true. Phase 1+ will gate on `reliability.isUsableForClassification`.
     static func shouldIncludeInFingerprintMatch(_ reliability: TranscriptReliability) -> Bool {
-        // Future: return reliability.isUsableForClassification
-        return true
+        true
     }
 
     /// Whether to include an atom in FM scheduling / prompt building.
-    /// Phase 0: always true.
+    /// Phase 0: always true. Phase 1+ will gate on `reliability.isUsableForClassification`.
     static func shouldIncludeInFMScheduling(_ reliability: TranscriptReliability) -> Bool {
-        // Future: return reliability.isUsableForClassification
-        return true
+        true
     }
 
     /// Whether to include an atom in metadata corroboration (evidence catalog).
-    /// Phase 0: always true.
+    /// Phase 0: always true. Phase 1+ will gate on `reliability.isUsableForClassification`.
     static func shouldIncludeInCorroboration(_ reliability: TranscriptReliability) -> Bool {
-        // Future: return reliability.isUsableForClassification
-        return true
+        true
     }
 }
 

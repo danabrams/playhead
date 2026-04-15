@@ -103,16 +103,18 @@ enum TranscriptAtomizer {
             let atomHash = SHA256.hash(data: Data(chunk.normalizedText.utf8))
                 .prefix(8).map { String(format: "%02x", $0) }.joined()
 
+            let atomKey = TranscriptAtomKey(
+                analysisAssetId: analysisAssetId,
+                transcriptVersion: versionHash,
+                atomOrdinal: ordinal
+            )
+
             // ef2.1.3: Propagate chunk-level quality to atom reliability.
-            // Build a lightweight AdTranscriptSegment to reuse the existing
-            // quality estimator. NormalizationQuality stays .unknown until
-            // EvidenceCatalogBuilder runs downstream.
-            let singleAtom = TranscriptAtom(
-                atomKey: TranscriptAtomKey(
-                    analysisAssetId: analysisAssetId,
-                    transcriptVersion: versionHash,
-                    atomOrdinal: ordinal
-                ),
+            // Build a temporary atom (with default reliability) for the quality
+            // estimator, then construct the final atom with the assessed reliability.
+            // NormalizationQuality stays .unknown until EvidenceCatalogBuilder runs.
+            let tempAtom = TranscriptAtom(
+                atomKey: atomKey,
                 contentHash: atomHash,
                 startTime: chunk.startTime,
                 endTime: chunk.endTime,
@@ -120,8 +122,9 @@ enum TranscriptAtomizer {
                 chunkIndex: chunk.chunkIndex,
                 speakerId: chunk.speakerId
             )
-            let segment = AdTranscriptSegment(atoms: [singleAtom], segmentIndex: ordinal)
-            let assessment = TranscriptQualityEstimator.assess(segment: segment)
+            let assessment = TranscriptQualityEstimator.assess(
+                segment: AdTranscriptSegment(atoms: [tempAtom], segmentIndex: ordinal)
+            )
             let reliability = TranscriptReliability(
                 chunkQuality: assessment.quality,
                 chunkQualityScore: assessment.qualityScore,
@@ -130,7 +133,7 @@ enum TranscriptAtomizer {
             )
 
             return TranscriptAtom(
-                atomKey: singleAtom.atomKey,
+                atomKey: atomKey,
                 contentHash: atomHash,
                 startTime: chunk.startTime,
                 endTime: chunk.endTime,

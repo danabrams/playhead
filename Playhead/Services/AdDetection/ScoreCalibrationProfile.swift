@@ -21,7 +21,14 @@ struct MonotonicCalibrator: Sendable, Codable, Equatable {
     let knots: [(input: Double, output: Double)]
 
     init(knots: [(Double, Double)]) {
-        self.knots = knots.sorted { $0.0 < $1.0 }
+        let sorted = knots.sorted { $0.0 < $1.0 }
+        // Validate monotonicity: outputs must be non-decreasing after sorting by input.
+        for i in 1..<sorted.count {
+            precondition(sorted[i].1 >= sorted[i - 1].1,
+                          "MonotonicCalibrator knots must have non-decreasing outputs, " +
+                          "but output[\(i)] (\(sorted[i].1)) < output[\(i-1)] (\(sorted[i-1].1))")
+        }
+        self.knots = sorted
     }
 
     /// Identity calibrator: maps raw → raw with [0,1] clamping only.
@@ -30,20 +37,20 @@ struct MonotonicCalibrator: Sendable, Codable, Equatable {
     /// Map a raw score through the piecewise-linear function.
     func calibrate(_ raw: Double) -> Double {
         guard raw.isFinite else { return 0.0 }
-        guard !knots.isEmpty else { return max(0.0, min(1.0, raw)) }
+        // Note: knots is guaranteed non-empty by init (must have at least one knot).
 
-        // Single knot: constant output
+        // Single knot: constant output (clamped to [0,1])
         if knots.count == 1 {
-            return knots[0].output
+            return max(0.0, min(1.0, knots[0].output))
         }
 
         // Clamp below first knot
         if raw <= knots[0].input {
-            return knots[0].output
+            return max(0.0, min(1.0, knots[0].output))
         }
         // Clamp above last knot
         if raw >= knots[knots.count - 1].input {
-            return knots[knots.count - 1].output
+            return max(0.0, min(1.0, knots[knots.count - 1].output))
         }
 
         // Find the segment containing raw and interpolate
@@ -52,13 +59,15 @@ struct MonotonicCalibrator: Sendable, Codable, Equatable {
             let hi = knots[i + 1]
             if raw >= lo.input && raw <= hi.input {
                 let span = hi.input - lo.input
-                if span == 0 { return lo.output }
+                if span == 0 { return max(0.0, min(1.0, lo.output)) }
                 let t = (raw - lo.input) / span
-                return lo.output + t * (hi.output - lo.output)
+                let result = lo.output + t * (hi.output - lo.output)
+                return max(0.0, min(1.0, result))
             }
         }
 
-        // Fallback (should not be reached with sorted knots)
+        // Unreachable with sorted knots and the boundary clamps above,
+        // but the compiler requires a return path.
         return max(0.0, min(1.0, raw))
     }
 
@@ -76,7 +85,8 @@ struct MonotonicCalibrator: Sendable, Codable, Equatable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let pairs = try container.decode([KnotPair].self, forKey: .knots)
-        self.knots = pairs.map { ($0.input, $0.output) }.sorted { $0.0 < $1.0 }
+        // Route through primary init to enforce monotonicity validation.
+        self.init(knots: pairs.map { ($0.input, $0.output) })
     }
 
     func encode(to encoder: Encoder) throws {
@@ -85,9 +95,15 @@ struct MonotonicCalibrator: Sendable, Codable, Equatable {
         try container.encode(pairs, forKey: .knots)
     }
 
+    /// Exact floating-point equality via bitPattern. Knots are programmatic constants (not
+    /// computed results), so exact equality is correct. Using bitPattern rather than == ensures
+    /// NaN != NaN (IEEE 754), though NaN knots are rejected by the monotonicity precondition.
     static func == (lhs: MonotonicCalibrator, rhs: MonotonicCalibrator) -> Bool {
         guard lhs.knots.count == rhs.knots.count else { return false }
-        return zip(lhs.knots, rhs.knots).allSatisfy { $0.0.input == $0.1.input && $0.0.output == $0.1.output }
+        return zip(lhs.knots, rhs.knots).allSatisfy {
+            $0.0.input.bitPattern == $0.1.input.bitPattern &&
+            $0.0.output.bitPattern == $0.1.output.bitPattern
+        }
     }
 }
 
@@ -133,19 +149,8 @@ struct ScoreCalibrationProfile: Sendable, Codable, Equatable {
         )
     }()
 
-    /// v1 placeholder: slot for real calibrators learned from Phase A/B shadow data.
-    /// Currently uses identity calibrators — real calibrators will be populated in Phase C.
-    static let v1Placeholder: ScoreCalibrationProfile = {
-        var cals: [String: MonotonicCalibrator] = [:]
-        for source in EvidenceSourceType.allCases {
-            cals[source.rawValue] = .identity
-        }
-        return ScoreCalibrationProfile(
-            version: "v1",
-            calibrators: cals,
-            decisionThresholds: .identity
-        )
-    }()
+    // v1+ profiles will be added when real calibrators are learned from shadow-mode data.
+    // Do not add placeholder profiles that are identical to v0 — they create false test coverage.
 }
 
 // MARK: - FeatureFlagMode

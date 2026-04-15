@@ -180,6 +180,7 @@ struct DecisionExplanation: Sendable, Codable, Equatable {
         case .catalog: return config.catalogCap
         case .classifier: return config.classifierCap
         case .fingerprint: return config.fingerprintCap
+        case .fusedScore: return 1.0  // Fused score is post-aggregation; no per-source cap applies.
         }
     }
 }

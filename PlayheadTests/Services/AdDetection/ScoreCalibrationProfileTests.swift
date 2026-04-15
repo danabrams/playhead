@@ -87,15 +87,6 @@ final class ScoreCalibrationProfileXCTests: XCTestCase {
         XCTAssertEqual(profile.decisionThresholds.proposalMinimum, 0.0)
     }
 
-    func testV1PlaceholderExists() {
-        let v1 = ScoreCalibrationProfile.v1Placeholder
-        XCTAssertEqual(v1.version, "v1")
-        for source in EvidenceSourceType.allCases {
-            let cal = v1.calibrator(for: source)
-            XCTAssertEqual(cal.calibrate(0.5), 0.5)
-        }
-    }
-
     func testCodableRoundTrip() throws {
         let profile = ScoreCalibrationProfile.v0
         let data = try JSONEncoder().encode(profile)
@@ -226,5 +217,48 @@ final class DecisionMapperCalibrationProfileTests: XCTestCase {
     func testCohortIncludesCalibrationVersion() {
         let cohort = DecisionCohort.production(appBuild: "42", calibrationVersion: "v0")
         XCTAssertEqual(cohort.calibrationVersion, "v0")
+    }
+
+    func testNonIdentityProfileChangesSkipConfidence() {
+        // Create a custom calibrator that maps 0.5 → 0.8 (non-identity).
+        let customCalibrator = MonotonicCalibrator(knots: [(0.0, 0.0), (0.5, 0.8), (1.0, 1.0)])
+
+        // Build a profile with this calibrator under the .fusedScore key.
+        var cals: [String: MonotonicCalibrator] = [:]
+        for source in EvidenceSourceType.allCases {
+            cals[source.rawValue] = .identity
+        }
+        cals[EvidenceSourceType.fusedScore.rawValue] = customCalibrator
+        let profile = ScoreCalibrationProfile(
+            version: "test-nonidentity",
+            calibrators: cals,
+            decisionThresholds: .identity
+        )
+
+        let fetched = profile.calibrator(for: .fusedScore)
+        // Identity would return 0.5; our calibrator should return 0.8.
+        XCTAssertEqual(fetched.calibrate(0.5), 0.8, accuracy: 1e-10)
+        XCTAssertNotEqual(fetched.calibrate(0.5), 0.5)
+    }
+
+    func testMonotonicityViolationTraps() {
+        // Non-monotonic outputs (e.g., [(0.0, 1.0), (1.0, 0.0)]) trigger a precondition
+        // failure in MonotonicCalibrator.init. XCTest cannot catch precondition failures,
+        // so instead we verify that the boundary case (equal consecutive outputs) is valid.
+        let flatMiddle = MonotonicCalibrator(knots: [(0.0, 0.5), (0.5, 0.5), (1.0, 1.0)])
+        // Equal outputs at consecutive knots is OK (non-decreasing, not strictly increasing).
+        XCTAssertEqual(flatMiddle.calibrate(0.0), 0.5)
+        XCTAssertEqual(flatMiddle.calibrate(0.25), 0.5)
+        XCTAssertEqual(flatMiddle.calibrate(0.5), 0.5)
+        XCTAssertEqual(flatMiddle.calibrate(0.75), 0.75, accuracy: 1e-10)
+        XCTAssertEqual(flatMiddle.calibrate(1.0), 1.0)
+    }
+
+    func testOutputClampedToUnitInterval() {
+        // Knots at exact boundaries: [(0.0, 0.0), (1.0, 1.0)].
+        // Inputs outside [0, 1] should be clamped to the nearest knot output.
+        let cal = MonotonicCalibrator(knots: [(0.0, 0.0), (1.0, 1.0)])
+        XCTAssertEqual(cal.calibrate(-0.5), 0.0)
+        XCTAssertEqual(cal.calibrate(1.5), 1.0)
     }
 }

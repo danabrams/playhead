@@ -247,6 +247,9 @@ struct SponsorEntityGraph: Sendable {
     /// All identity nodes in the graph.
     let nodes: [SponsorIdentityNode]
 
+    /// Lookup: canonical sponsor ID -> identity node (O(1) access).
+    private let nodeByCanonicalId: [String: SponsorIdentityNode]
+
     /// Lookup: entry ID -> canonical sponsor ID.
     private let entryToCanonical: [String: String]
 
@@ -405,6 +408,9 @@ struct SponsorEntityGraph: Sendable {
         }
 
         self.nodes = builtNodes
+        self.nodeByCanonicalId = Dictionary(
+            uniqueKeysWithValues: builtNodes.map { ($0.canonicalSponsorId, $0) }
+        )
         self.entryToCanonical = builtEntryToCanonical
         self.nameToCanonical = builtNameToCanonical
         self.domainToCanonical = builtDomainToCanonical
@@ -417,10 +423,10 @@ struct SponsorEntityGraph: Sendable {
         entryToCanonical[entryId]
     }
 
-    /// Get the full identity node for a knowledge entry.
+    /// Get the full identity node for a knowledge entry. O(1) via dictionary lookup.
     func canonicalNode(forEntryId entryId: String) -> SponsorIdentityNode? {
         guard let canonId = entryToCanonical[entryId] else { return nil }
-        return nodes.first { $0.canonicalSponsorId == canonId }
+        return nodeByCanonicalId[canonId]
     }
 
     /// Get the canonical sponsor ID by normalized sponsor name.
@@ -480,7 +486,7 @@ struct CoOccurrenceTracker: Sendable {
     func records(minCount: Int = 1) -> [CoOccurrenceRecord] {
         counts.compactMap { key, count in
             guard count >= minCount else { return nil }
-            let parts = key.split(separator: "\t").map(String.init)
+            let parts = key.split(separator: "\u{001F}").map(String.init)
             guard parts.count == 2 else { return nil }
             return CoOccurrenceRecord(valueA: parts[0], valueB: parts[1], count: count)
         }
@@ -489,8 +495,9 @@ struct CoOccurrenceTracker: Sendable {
     // MARK: - Private
 
     /// Create a stable pair key (alphabetically ordered).
+    /// Uses U+001F (Unit Separator) as delimiter — cannot appear in normalized entity values.
     private static func pairKey(_ a: String, _ b: String) -> String {
-        a < b ? "\(a)\t\(b)" : "\(b)\t\(a)"
+        a < b ? "\(a)\u{001F}\(b)" : "\(b)\u{001F}\(a)"
     }
 
     /// Check if two ordinal arrays have any overlap or are adjacent
@@ -506,7 +513,7 @@ struct CoOccurrenceTracker: Sendable {
 // MARK: - Union-Find (internal)
 
 /// Simple union-find / disjoint-set for graph component merging.
-private final class UnionFind: @unchecked Sendable {
+private final class UnionFind {
     private var parent: [Int]
     private var rank: [Int]
 

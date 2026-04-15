@@ -70,13 +70,8 @@ struct OwnershipGraphConfig: Sendable {
     /// via frequency signal alone.
     let showOwnedFrequencyThreshold: Int
 
-    /// Domains that appear in every episode (ratio >= this) are almost
-    /// certainly show-owned infrastructure.
-    let ubiquitousPresenceRatio: Double
-
     static let `default` = OwnershipGraphConfig(
-        showOwnedFrequencyThreshold: 3,
-        ubiquitousPresenceRatio: 0.8
+        showOwnedFrequencyThreshold: 3
     )
 }
 
@@ -87,7 +82,7 @@ struct OwnershipGraphConfig: Sendable {
 /// and sponsor entity linking.
 ///
 /// Value type. For shared mutable access across pipeline stages, wrap
-/// in an actor or use the OwnershipGraphStore actor below.
+/// in an actor (persistence layer is planned for a future ef2.x phase).
 struct OwnershipGraph: Sendable, Equatable {
 
     /// The podcast this graph belongs to.
@@ -314,6 +309,8 @@ struct OwnershipGraph: Sendable, Equatable {
 
     // MARK: - Equatable
 
+    /// Config is intentionally excluded: it is a construction-time tuning knob, not graph state.
+    /// Two graphs with the same podcastId and entries represent the same ownership knowledge.
     static func == (lhs: OwnershipGraph, rhs: OwnershipGraph) -> Bool {
         lhs.podcastId == rhs.podcastId && lhs.entries == rhs.entries
     }

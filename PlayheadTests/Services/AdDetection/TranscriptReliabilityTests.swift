@@ -43,7 +43,7 @@ private func makeChunk(
         startTime: startTime,
         endTime: endTime,
         text: text,
-        normalizedText: text.lowercased(),
+        normalizedText: text.lowercased(),  // Matches production: normalizedText is for hashing, raw text is for quality assessment
         pass: "final",
         modelVersion: "speech-v1",
         transcriptVersion: nil,
@@ -201,6 +201,22 @@ final class NormalizationQualityAssessorTests: XCTestCase {
         )
         XCTAssertEqual(quality, .good)
     }
+
+    func testDisclosurePhraseYieldsGoodNormalizationQuality() {
+        let quality = NormalizationQualityAssessor.assess(
+            atomText: "this episode is sponsored by Acme Corp",
+            evidenceCategories: [.disclosurePhrase]
+        )
+        XCTAssertEqual(quality, .good)
+    }
+
+    func testCtaPhraseAloneYieldsPartialQuality() {
+        let quality = NormalizationQualityAssessor.assess(
+            atomText: "go check it out right now",
+            evidenceCategories: [.ctaPhrase]
+        )
+        XCTAssertEqual(quality, .partial)
+    }
 }
 
 // MARK: - Reliability gating
@@ -293,6 +309,20 @@ final class ReliabilityGateTests: XCTestCase {
         XCTAssertTrue(ReliabilityGate.shouldIncludeInFingerprintMatch(good))
         XCTAssertTrue(ReliabilityGate.shouldIncludeInFMScheduling(good))
         XCTAssertTrue(ReliabilityGate.shouldIncludeInCorroboration(good))
+    }
+
+    func testDegradedQualityReliabilityGate() {
+        let degraded = TranscriptReliability(
+            chunkQuality: .degraded,
+            chunkQualityScore: 0.45,
+            normalizationQuality: .partial,
+            alternativeCount: 1
+        )
+        // Phase 0: all gates return true regardless of quality level.
+        XCTAssertTrue(ReliabilityGate.shouldIncludeInLexicalScan(degraded))
+        XCTAssertTrue(ReliabilityGate.shouldIncludeInFingerprintMatch(degraded))
+        XCTAssertTrue(ReliabilityGate.shouldIncludeInFMScheduling(degraded))
+        XCTAssertTrue(ReliabilityGate.shouldIncludeInCorroboration(degraded))
     }
 }
 

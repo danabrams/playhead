@@ -180,6 +180,10 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
     case catalog
     case classifier
     case fingerprint
+    /// Calibration key for the fused aggregate score (proposalConfidence → skipConfidence).
+    /// Distinct from `.classifier` to avoid conflating per-source classifier calibration
+    /// with the post-fusion score mapping.
+    case fusedScore
 }
 
 struct EvidenceEvent: Sendable, Equatable {

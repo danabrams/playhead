@@ -147,8 +147,7 @@ final class OwnershipGraphShowNotesTests: XCTestCase {
 
     func testCustomThreshold() {
         let config = OwnershipGraphConfig(
-            showOwnedFrequencyThreshold: 1,
-            ubiquitousPresenceRatio: 0.8
+            showOwnedFrequencyThreshold: 1
         )
         var graph = OwnershipGraph(podcastId: "pod1", config: config)
         graph.recordShowNotesDomain("https://instant.com")
@@ -340,7 +339,18 @@ final class OwnershipGraphEndToEndTests: XCTestCase {
     func testConfigDefaultValues() {
         let config = OwnershipGraphConfig.default
         XCTAssertEqual(config.showOwnedFrequencyThreshold, 3)
-        XCTAssertEqual(config.ubiquitousPresenceRatio, 0.8)
+    }
+
+    func testConfigDefaultHasNoUbiquitousPresenceRatio() {
+        // Verify OwnershipGraphConfig.default only has showOwnedFrequencyThreshold.
+        // The old ubiquitousPresenceRatio field was removed; this test ensures
+        // the struct contains only the expected property.
+        let config = OwnershipGraphConfig.default
+        let mirror = Mirror(reflecting: config)
+        let propertyNames = mirror.children.compactMap(\.label)
+        XCTAssertTrue(propertyNames.contains("showOwnedFrequencyThreshold"))
+        XCTAssertFalse(propertyNames.contains("ubiquitousPresenceRatio"),
+                       "ubiquitousPresenceRatio should have been removed from OwnershipGraphConfig")
     }
 
     func testSignalPriorityOrder() {

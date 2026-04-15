@@ -334,6 +334,49 @@ final class CounterfactualEvaluatorTests: XCTestCase {
         XCTAssertTrue(result.diffs[1].decisionFlipped)
         XCTAssertEqual(result.diffs[1].confidenceDelta, -0.4, accuracy: 0.001)
     }
+
+    func testCounterfactualUnmatchedNonAdNewSpanDoesNotInflateFlippedCount() {
+        // Baseline has 1 ad span. New pipeline returns the same span + a second non-ad span.
+        // The unmatched non-ad span should NOT inflate flippedCount or regret.
+        let baseline = [
+            SpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
+        ]
+        let trace = makeTrace(baselineSpans: baseline)
+        let newDecisions = [
+            SpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "new"),
+            SpanDecision(startTime: 300, endTime: 360, confidence: 0.4, isAd: false, sourceTag: "new"),
+        ]
+
+        let result = CounterfactualEvaluator.compare(trace: trace, newDecisions: newDecisions)
+        // totalSpanCount = max(1, 2) = 2; 2 diffs total
+        XCTAssertEqual(result.diffs.count, 2)
+        // First span: matched, same decision
+        XCTAssertFalse(result.diffs[0].decisionFlipped)
+        // Second span: unmatched new, but isAd=false so decisionFlipped=false
+        XCTAssertFalse(result.diffs[1].decisionFlipped)
+        // flippedCount = 0, so disagreementRate = 0/2 = 0
+        XCTAssertEqual(result.metrics.shadowLiveDisagreementRate, 0, accuracy: 0.001)
+        // regret = 0 (no flipped decisions)
+        XCTAssertEqual(result.metrics.counterfactualRegret, 0, accuracy: 0.001)
+    }
+
+    func testCounterfactualNewNonAdSpansProduceZeroRegret() {
+        // Baseline has 0 spans, new pipeline returns 2 non-ad spans.
+        // Non-ad additions should produce zero regret and zero flippedCount.
+        let trace = makeTrace(baselineSpans: [])
+        let newDecisions = [
+            SpanDecision(startTime: 100, endTime: 150, confidence: 0.5, isAd: false, sourceTag: "new"),
+            SpanDecision(startTime: 200, endTime: 250, confidence: 0.6, isAd: false, sourceTag: "new"),
+        ]
+
+        let result = CounterfactualEvaluator.compare(trace: trace, newDecisions: newDecisions)
+        XCTAssertEqual(result.metrics.counterfactualRegret, 0, accuracy: 0.001)
+        XCTAssertEqual(result.metrics.shadowLiveDisagreementRate, 0, accuracy: 0.001)
+        // Both diffs should show decisionFlipped=false since isAd=false
+        XCTAssertEqual(result.diffs.count, 2)
+        XCTAssertFalse(result.diffs[0].decisionFlipped)
+        XCTAssertFalse(result.diffs[1].decisionFlipped)
+    }
 }
 
 // MARK: - Holdout Infrastructure Tests
@@ -388,6 +431,18 @@ final class HoldoutDesignationTests: XCTestCase {
         let designated = TraceCorpus.designateHoldout(traces, fraction: 1.0, seed: 1)
         let holdoutCount = designated.filter { $0.holdoutDesignation == .holdout }.count
         XCTAssertEqual(holdoutCount, 5)
+    }
+
+    func testDifferentSeedsProduceDifferentSplits() {
+        // Verify the hash is seed-dependent: different seeds should produce different orderings.
+        // Use 50 traces with distinct IDs to make collision astronomically unlikely.
+        let traces = (0..<50).map { makeMinimalTrace(id: "podcast-episode-\($0)-abc", holdout: false) }
+        let splitA = TraceCorpus.designateHoldout(traces, fraction: 0.3, seed: 1)
+        let splitB = TraceCorpus.designateHoldout(traces, fraction: 0.3, seed: 1_000_000)
+        let holdoutIdsA = Set(splitA.filter { $0.holdoutDesignation == .holdout }.map(\.episodeId))
+        let holdoutIdsB = Set(splitB.filter { $0.holdoutDesignation == .holdout }.map(\.episodeId))
+        XCTAssertNotEqual(holdoutIdsA, holdoutIdsB,
+                          "Different seeds must produce different holdout assignments")
     }
 
     private func makeMinimalTrace(id: String, holdout: Bool) -> FrozenTrace {

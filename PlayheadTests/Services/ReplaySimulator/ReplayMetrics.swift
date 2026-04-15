@@ -656,6 +656,25 @@ struct FrozenTrace: Sendable, Codable {
     /// Whether this trace is held out from calibrator training.
     let holdoutDesignation: HoldoutDesignation
 
+    /// Return a copy with a different holdout designation.
+    /// Centralizes the copy logic so new fields don't get silently dropped.
+    func withHoldoutDesignation(_ designation: HoldoutDesignation) -> FrozenTrace {
+        FrozenTrace(
+            episodeId: episodeId,
+            podcastId: podcastId,
+            episodeDuration: episodeDuration,
+            traceVersion: traceVersion,
+            capturedAt: capturedAt,
+            featureWindows: featureWindows,
+            atoms: atoms,
+            evidenceCatalog: evidenceCatalog,
+            corrections: corrections,
+            decisionEvents: decisionEvents,
+            baselineSpanDecisions: baselineSpanDecisions,
+            holdoutDesignation: designation
+        )
+    }
+
     // MARK: - Nested Codable types
 
     struct FrozenFeatureWindow: Sendable, Codable {
@@ -735,22 +754,8 @@ enum TraceCorpus {
             return lhsHash < rhsHash
         }
         return sorted.enumerated().map { index, pair in
-            let trace = pair.element
             let designation: HoldoutDesignation = index < holdoutCount ? .holdout : .training
-            return FrozenTrace(
-                episodeId: trace.episodeId,
-                podcastId: trace.podcastId,
-                episodeDuration: trace.episodeDuration,
-                traceVersion: trace.traceVersion,
-                capturedAt: trace.capturedAt,
-                featureWindows: trace.featureWindows,
-                atoms: trace.atoms,
-                evidenceCatalog: trace.evidenceCatalog,
-                corrections: trace.corrections,
-                decisionEvents: trace.decisionEvents,
-                baselineSpanDecisions: trace.baselineSpanDecisions,
-                holdoutDesignation: designation
-            )
+            return pair.element.withHoldoutDesignation(designation)
         }
     }
 
@@ -813,7 +818,8 @@ struct CounterfactualResult: Sendable, Codable {
 enum CounterfactualEvaluator {
 
     /// Compare new decisions against the baseline stored in the trace.
-    /// Spans are matched by time overlap (startTime/endTime).
+    /// Spans are matched by index position (assumes aligned time ordering).
+    /// Unmatched tails (count mismatch) are treated as implicit disagreements.
     static func compare(
         trace: FrozenTrace,
         newDecisions: [SpanDecision]
@@ -830,7 +836,7 @@ enum CounterfactualEvaluator {
                 metrics: CounterfactualMetrics(
                     counterfactualRegret: 0,
                     scoreDistributionShift: 0,
-                    perSourceCalibrationError: computeCalibrationError(trace: trace),
+                    perSourceCalibrationError: [:],
                     shadowLiveDisagreementRate: 0
                 )
             )
@@ -883,8 +889,10 @@ enum CounterfactualEvaluator {
         // Unmatched new spans (new pipeline added them).
         for i in pairedCount..<newDecisions.count {
             let n = newDecisions[i]
-            flippedCount += 1
-            totalRegret += n.confidence
+            if n.isAd {
+                flippedCount += 1
+                totalRegret += n.confidence
+            }
             diffs.append(SpanDecisionDiff(
                 startTime: n.startTime,
                 endTime: n.endTime,
@@ -916,9 +924,12 @@ enum CounterfactualEvaluator {
         )
     }
 
-    /// Compute per-source Brier-like calibration error.
-    /// For each evidence source, compares evidence weight (as a probability) against
-    /// the actual binary outcome from baseline decisions.
+    /// Compute per-source Brier-like calibration error against the **baseline** decisions.
+    /// This measures how well the evidence weights in the frozen trace predicted the
+    /// baseline outcomes — it is a fixed reference metric, not a counterfactual comparison.
+    /// The `newDecisions` parameter is intentionally not used here; per-source calibration
+    /// against new decisions would require re-running evidence extraction, which is outside
+    /// the scope of the counterfactual evaluator.
     private static func computeCalibrationError(
         trace: FrozenTrace
     ) -> [String: Double] {
