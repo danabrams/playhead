@@ -310,6 +310,20 @@ struct SpanFinalizerTests {
         #expect(!result[0].constraintTrace.contains(.chapterPenaltyApplied))
     }
 
+    @Test("Chapter penalty does not promote already-blocked gate")
+    func chapterPenaltyDoesNotPromoteBlockedGate() {
+        let chapters = [ChapterMarker(startTime: 20, endTime: 60, isContent: true)]
+        let candidates = [
+            makeCandidate(startTime: 10, endTime: 40,
+                          eligibilityGate: .blockedByEvidenceQuorum, ordinalBase: 100),
+        ]
+        let result = makeFinalizer(chapters: chapters).finalize(candidates)
+
+        // Gate should stay blockedByEvidenceQuorum, NOT be promoted to markOnly.
+        #expect(result[0].decision.eligibilityGate == .blockedByEvidenceQuorum)
+        #expect(!result[0].constraintTrace.contains(.chapterPenaltyApplied))
+    }
+
     @Test("Non-content chapter does not trigger penalty")
     func nonContentChapterIgnored() {
         let chapters = [ChapterMarker(startTime: 20, endTime: 60, isContent: false)]

@@ -379,6 +379,10 @@ private struct WorkingSpan {
     }
 
     mutating func capEligibility(_ gate: SkipEligibilityGate, constraint: FinalizerConstraint) {
+        // Only apply the cap if it makes the gate more restrictive.
+        // .eligible is the least restrictive; any other value is a demotion.
+        // Don't "promote" an already-blocked gate (e.g. blockedByEvidenceQuorum → markOnly).
+        guard eligibilityGate == .eligible else { return }
         eligibilityGate = gate
         addConstraint(constraint)
     }
