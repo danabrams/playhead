@@ -608,6 +608,7 @@ actor AnalysisStore {
             )
             try migrateSponsorKnowledgeV7IfNeeded()
             try migrateFingerprintStoreV8IfNeeded()
+            try migrateBracketTrustV9IfNeeded()
             try addColumnIfNeeded(
                 table: "feature_windows",
                 column: "speakerChangeProxyScore",
@@ -696,6 +697,7 @@ actor AnalysisStore {
         try migrateCorrectionEventsV6IfNeeded()
         try migrateSponsorKnowledgeV7IfNeeded()
         try migrateFingerprintStoreV8IfNeeded()
+        try migrateBracketTrustV9IfNeeded()
         try exec("""
             CREATE TABLE IF NOT EXISTS feature_windows (
                 analysisAssetId   TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
@@ -1341,6 +1343,22 @@ actor AnalysisStore {
         try exec("CREATE INDEX IF NOT EXISTS idx_fse_created ON fingerprint_source_events(createdAt)")
 
         try setSchemaVersion(8)
+    }
+
+    // MARK: - V9: Music Bracket Trust Table (ef2.3.6)
+
+    private func migrateBracketTrustV9IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 9 else { return }
+
+        try exec("""
+            CREATE TABLE IF NOT EXISTS music_bracket_trust (
+                showId  TEXT PRIMARY KEY,
+                alpha   REAL NOT NULL,
+                beta    REAL NOT NULL
+            )
+            """)
+
+        try setSchemaVersion(9)
     }
 
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
@@ -5602,5 +5620,34 @@ actor AnalysisStore {
             ))
         }
         return results
+    }
+
+    // MARK: - CRUD: music_bracket_trust (ef2.3.6)
+
+    /// Load Beta parameters for a show's bracket trust. Returns nil if no record exists.
+    func loadBracketTrust(forShow showId: String) throws -> BetaParameters? {
+        let sql = "SELECT alpha, beta FROM music_bracket_trust WHERE showId = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, showId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let alpha = sqlite3_column_double(stmt, 0)
+        let beta = sqlite3_column_double(stmt, 1)
+        return BetaParameters(alpha: alpha, beta: beta)
+    }
+
+    /// Save or update Beta parameters for a show's bracket trust.
+    func saveBracketTrust(showId: String, alpha: Double, beta: Double) throws {
+        let sql = """
+            INSERT INTO music_bracket_trust (showId, alpha, beta)
+            VALUES (?, ?, ?)
+            ON CONFLICT(showId) DO UPDATE SET alpha = excluded.alpha, beta = excluded.beta
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, showId)
+        bind(stmt, 2, alpha)
+        bind(stmt, 3, beta)
+        try step(stmt, expecting: SQLITE_DONE)
     }
 }
