@@ -59,4 +59,20 @@ struct EvidenceLedgerEntry: Sendable {
     let weight: Double
     /// Source-specific metadata for diagnostics and logging.
     let detail: EvidenceLedgerDetail
+    /// ef2.4.5: Classification trust factor from (CommercialIntent × Ownership) lookup.
+    /// Applied by `BackfillEvidenceFusion.buildLedger()` to modulate FM evidence weight.
+    /// Default of 1.0 means no modulation (backward compatible with pre-ef2.4.5 entries).
+    let classificationTrust: Double
+
+    init(
+        source: EvidenceSourceType,
+        weight: Double,
+        detail: EvidenceLedgerDetail,
+        classificationTrust: Double = 1.0
+    ) {
+        self.source = source
+        self.weight = weight
+        self.detail = detail
+        self.classificationTrust = classificationTrust
+    }
 }

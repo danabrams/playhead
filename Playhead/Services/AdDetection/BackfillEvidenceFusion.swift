@@ -13,6 +13,49 @@
 import Foundation
 import OSLog
 
+// MARK: - ClassificationTrustMatrix (ef2.4.5)
+
+/// Pure lookup mapping (CommercialIntent × Ownership) → classificationTrust.
+///
+/// Trust modulates FM evidence weight in `BackfillEvidenceFusion.buildLedger()`.
+/// Whether to *skip* host-reads is a policy decision (SkipPolicyMatrix, ef2.4.1),
+/// NOT a classification decision — hence `paid|show` returns 1.0 (not discounted).
+///
+/// | CommercialIntent | Ownership   | classificationTrust |
+/// |-----------------|-------------|---------------------|
+/// | paid            | thirdParty  | 1.0                 |
+/// | paid            | show        | 1.0                 |
+/// | owned           | show        | 0.7                 |
+/// | affiliate       | thirdParty  | 0.9                 |
+/// | organic         | any         | 0.15                |
+/// | unknown         | any         | 0.6                 |
+enum ClassificationTrustMatrix {
+    /// Fallback trust for unmapped (CommercialIntent × Ownership) combinations.
+    static let fallback: Double = 0.6
+
+    /// Look up classificationTrust for a given (CommercialIntent, Ownership) pair.
+    static func trust(
+        commercialIntent: CommercialIntent,
+        ownership: Ownership
+    ) -> Double {
+        switch commercialIntent {
+        case .paid:
+            // paid|thirdParty = 1.0, paid|show = 1.0, paid|anything = 1.0
+            return 1.0
+        case .owned:
+            if ownership == .show { return 0.7 }
+            return fallback
+        case .affiliate:
+            if ownership == .thirdParty { return 0.9 }
+            return fallback
+        case .organic:
+            return 0.15
+        case .unknown:
+            return fallback
+        }
+    }
+}
+
 // MARK: - FusionWeightConfig
 
 /// Per-source weight caps for evidence fusion. v1 defaults reflect initial calibration.
@@ -115,10 +158,15 @@ struct BackfillEvidenceFusion: Sendable {
                 Self.logger.info("FM Positive-Only Rule dropped \(droppedCount)/\(allFMEntries.count) FM entries (non-containsAd dispositions).")
             }
             for entry in positiveOnlyFMEntries {
+                // ef2.4.5: modulate FM weight by classificationTrust before capping.
+                // Trust is derived from (CommercialIntent × Ownership) at entry creation
+                // time and stored on the entry. Default of 1.0 preserves pre-ef2.4.5 behavior.
+                let trustModulatedWeight = entry.weight * entry.classificationTrust
                 let capped = EvidenceLedgerEntry(
                     source: .fm,
-                    weight: min(entry.weight, config.fmCap),
-                    detail: entry.detail
+                    weight: min(trustModulatedWeight, config.fmCap),
+                    detail: entry.detail,
+                    classificationTrust: entry.classificationTrust
                 )
                 ledger.append(capped)
             }

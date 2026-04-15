@@ -727,6 +727,272 @@ struct BackfillEvidenceFusionTests {
         #expect(config.acousticCap == 0.3)
         #expect(config.catalogCap == 0.25)
     }
+
+    // MARK: - ClassificationTrustMatrix (ef2.4.5)
+
+    @Test("ClassificationTrustMatrix: paid|thirdParty returns 1.0")
+    func trustPaidThirdParty() {
+        let trust = ClassificationTrustMatrix.trust(commercialIntent: .paid, ownership: .thirdParty)
+        #expect(trust == 1.0)
+    }
+
+    @Test("ClassificationTrustMatrix: paid|show returns 1.0 (NOT discounted — skip is policy)")
+    func trustPaidShow() {
+        let trust = ClassificationTrustMatrix.trust(commercialIntent: .paid, ownership: .show)
+        #expect(trust == 1.0, "paid|show must NOT be discounted — skip behavior is policy, not classification")
+    }
+
+    @Test("ClassificationTrustMatrix: owned|show returns 0.7")
+    func trustOwnedShow() {
+        let trust = ClassificationTrustMatrix.trust(commercialIntent: .owned, ownership: .show)
+        #expect(trust == 0.7)
+    }
+
+    @Test("ClassificationTrustMatrix: affiliate|thirdParty returns 0.9")
+    func trustAffiliateThirdParty() {
+        let trust = ClassificationTrustMatrix.trust(commercialIntent: .affiliate, ownership: .thirdParty)
+        #expect(trust == 0.9)
+    }
+
+    @Test("ClassificationTrustMatrix: organic returns 0.15 for any ownership")
+    func trustOrganicAny() {
+        let allOwnerships: [Ownership] = [.thirdParty, .show, .network, .guest, .unknown]
+        for ownership in allOwnerships {
+            let trust = ClassificationTrustMatrix.trust(commercialIntent: .organic, ownership: ownership)
+            #expect(trust == 0.15, "organic|\(ownership) should return 0.15")
+        }
+    }
+
+    @Test("ClassificationTrustMatrix: unknown returns 0.6 for any ownership")
+    func trustUnknownAny() {
+        let allOwnerships: [Ownership] = [.thirdParty, .show, .network, .guest, .unknown]
+        for ownership in allOwnerships {
+            let trust = ClassificationTrustMatrix.trust(commercialIntent: .unknown, ownership: ownership)
+            #expect(trust == 0.6, "unknown|\(ownership) should return 0.6")
+        }
+    }
+
+    @Test("ClassificationTrustMatrix: unmapped combinations fall back to 0.6")
+    func trustUnmappedFallback() {
+        // owned|thirdParty is not explicitly mapped — should fall back to 0.6
+        let trust = ClassificationTrustMatrix.trust(commercialIntent: .owned, ownership: .thirdParty)
+        #expect(trust == ClassificationTrustMatrix.fallback)
+        #expect(trust == 0.6)
+    }
+
+    @Test("ClassificationTrustMatrix: unknown×unknown returns fallback")
+    func trustUnknownUnknown() {
+        let trust = ClassificationTrustMatrix.trust(commercialIntent: .unknown, ownership: .unknown)
+        #expect(trust == 0.6)
+    }
+
+    @Test("ClassificationTrustMatrix: all CommercialIntent cases covered")
+    func trustAllIntentsCovered() {
+        // Verify no crash for all combinations
+        let allOwnerships: [Ownership] = [.thirdParty, .show, .network, .guest, .unknown]
+        for intent in CommercialIntent.allCases {
+            for ownership in allOwnerships {
+                let trust = ClassificationTrustMatrix.trust(commercialIntent: intent, ownership: ownership)
+                #expect(trust > 0.0 && trust <= 1.0, "\(intent)|\(ownership) trust should be in (0, 1]")
+            }
+        }
+    }
+
+    // MARK: - classificationTrust modulation in buildLedger (ef2.4.5)
+
+    @Test("FM entry with classificationTrust < 1.0 has weight modulated in buildLedger")
+    func fmTrustModulatesWeight() {
+        let span = makeSpan()
+        // Weight 0.3 with trust 0.7 → modulated weight = 0.21
+        let fmEntry = EvidenceLedgerEntry(
+            source: .fm,
+            weight: 0.3,
+            detail: .fm(disposition: .containsAd, band: .moderate, cohortPromptLabel: "v1"),
+            classificationTrust: 0.7
+        )
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.0,
+            fmEntries: [fmEntry],
+            lexicalEntries: [],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .full,
+            config: defaultConfig()
+        )
+        let ledger = fusion.buildLedger()
+        let fmEntries = ledger.filter { $0.source == .fm }
+        #expect(fmEntries.count == 1)
+        #expect(abs(fmEntries[0].weight - 0.21) < 0.001, "weight should be 0.3 * 0.7 = 0.21")
+        #expect(fmEntries[0].classificationTrust == 0.7)
+    }
+
+    @Test("FM entry with classificationTrust 1.0 has weight unchanged in buildLedger")
+    func fmTrustOneDoesNotModulate() {
+        let span = makeSpan()
+        let fmEntry = EvidenceLedgerEntry(
+            source: .fm,
+            weight: 0.3,
+            detail: .fm(disposition: .containsAd, band: .moderate, cohortPromptLabel: "v1"),
+            classificationTrust: 1.0
+        )
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.0,
+            fmEntries: [fmEntry],
+            lexicalEntries: [],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .full,
+            config: defaultConfig()
+        )
+        let ledger = fusion.buildLedger()
+        let fmEntries = ledger.filter { $0.source == .fm }
+        #expect(fmEntries.count == 1)
+        #expect(abs(fmEntries[0].weight - 0.3) < 0.001, "trust=1.0 should not change weight")
+    }
+
+    @Test("FM entry with organic trust 0.15 dramatically reduces weight")
+    func fmOrganicTrustReducesWeight() {
+        let span = makeSpan()
+        // Weight 0.4 (fmCap) with trust 0.15 → modulated = 0.06
+        let fmEntry = EvidenceLedgerEntry(
+            source: .fm,
+            weight: 0.4,
+            detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1"),
+            classificationTrust: 0.15
+        )
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.0,
+            fmEntries: [fmEntry],
+            lexicalEntries: [],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .full,
+            config: defaultConfig()
+        )
+        let ledger = fusion.buildLedger()
+        let fmEntries = ledger.filter { $0.source == .fm }
+        #expect(fmEntries.count == 1)
+        #expect(abs(fmEntries[0].weight - 0.06) < 0.001, "organic trust should reduce 0.4 to 0.06")
+    }
+
+    @Test("FM trust modulation happens before fmCap capping")
+    func fmTrustModulationBeforeCapping() {
+        let span = makeSpan()
+        // Weight 0.5 (above fmCap 0.4) with trust 0.7 → modulated = 0.35, then capped at 0.4 → 0.35
+        let fmEntry = EvidenceLedgerEntry(
+            source: .fm,
+            weight: 0.5,
+            detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1"),
+            classificationTrust: 0.7
+        )
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.0,
+            fmEntries: [fmEntry],
+            lexicalEntries: [],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .full,
+            config: defaultConfig()
+        )
+        let ledger = fusion.buildLedger()
+        let fmEntries = ledger.filter { $0.source == .fm }
+        #expect(fmEntries.count == 1)
+        // 0.5 * 0.7 = 0.35, which is below fmCap 0.4, so no capping
+        #expect(abs(fmEntries[0].weight - 0.35) < 0.001)
+    }
+
+    @Test("Default classificationTrust of 1.0 preserves backward compatibility")
+    func defaultTrustBackwardCompatible() {
+        let entry = EvidenceLedgerEntry(
+            source: .fm,
+            weight: 0.3,
+            detail: .fm(disposition: .containsAd, band: .moderate, cohortPromptLabel: "v1")
+        )
+        #expect(entry.classificationTrust == 1.0, "Default trust must be 1.0 for backward compat")
+    }
+
+    @Test("Non-FM entries are not affected by classificationTrust in buildLedger")
+    func nonFMEntriesUnaffectedByTrust() {
+        let span = makeSpan()
+        // Even if someone set trust on a non-FM entry, buildLedger should not modulate it
+        let lexEntry = EvidenceLedgerEntry(
+            source: .lexical,
+            weight: 0.18,
+            detail: .lexical(matchedCategories: ["url"]),
+            classificationTrust: 0.5  // should be ignored for non-FM
+        )
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.0,
+            fmEntries: [],
+            lexicalEntries: [lexEntry],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .off,
+            config: defaultConfig()
+        )
+        let ledger = fusion.buildLedger()
+        let lexEntries = ledger.filter { $0.source == .lexical }
+        #expect(lexEntries.count == 1)
+        #expect(abs(lexEntries[0].weight - 0.18) < 0.001, "Lexical weight should not be modulated by trust")
+    }
+}
+
+// MARK: - ClassificationTrustMatrix integration with fusion pipeline (ef2.4.5)
+
+@Suite("ClassificationTrustMatrix Integration")
+struct ClassificationTrustMatrixIntegrationTests {
+
+    private func makeSpan(
+        startTime: Double = 10.0,
+        endTime: Double = 40.0
+    ) -> DecodedSpan {
+        DecodedSpan(
+            id: DecodedSpan.makeId(assetId: "asset-1", firstAtomOrdinal: 100, lastAtomOrdinal: 200),
+            assetId: "asset-1",
+            firstAtomOrdinal: 100,
+            lastAtomOrdinal: 200,
+            startTime: startTime,
+            endTime: endTime,
+            anchorProvenance: [.fmConsensus(regionId: "r1", consensusStrength: 0.9)]
+        )
+    }
+
+    @Test("Trust-modulated FM entry flows through to DecisionMapper proposalConfidence")
+    func trustModulationAffectsProposalConfidence() {
+        let span = makeSpan()
+        // FM entry with trust 0.5: weight 0.4 * 0.5 = 0.2
+        let fmEntry = EvidenceLedgerEntry(
+            source: .fm,
+            weight: 0.4,
+            detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1"),
+            classificationTrust: 0.5
+        )
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.0,
+            fmEntries: [fmEntry],
+            lexicalEntries: [],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .full,
+            config: FusionWeightConfig()
+        )
+        let ledger = fusion.buildLedger()
+
+        // Classifier contributes 0.0, FM contributes 0.2 (0.4 * 0.5)
+        let fmWeight = ledger.filter { $0.source == .fm }.map(\.weight).reduce(0, +)
+        #expect(abs(fmWeight - 0.2) < 0.001)
+
+        let mapper = DecisionMapper(span: span, ledger: ledger, config: FusionWeightConfig(), transcriptQuality: .good)
+        let result = mapper.map()
+        // proposalConfidence should reflect the reduced FM weight
+        #expect(result.proposalConfidence < 0.4, "Trust-modulated weight should reduce proposalConfidence")
+    }
 }
 
 // MARK: - AdDetectionService.estimateTranscriptQuality threshold

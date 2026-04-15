@@ -1129,6 +1129,33 @@ actor AdDetectionService {
 
     /// Build FM ledger entries from SemanticScanResults overlapping the span.
     /// Applies the Positive-Only Rule: only containsAd dispositions contribute.
+    /// ef2.4.5: Minimal decode struct for extracting (commercialIntent, ownership)
+    /// from `SemanticScanResult.spansJSON`. Mirrors the encoding in
+    /// `BackfillJobRunner.EncodedRefinedSpan` but decodes only the two fields
+    /// needed for `ClassificationTrustMatrix` lookup.
+    private struct SpanTrustDecode: Decodable {
+        let commercialIntent: String
+        let ownership: String
+    }
+
+    /// ef2.4.5: Extract the dominant classificationTrust from a scan result's spansJSON.
+    /// Decodes the refined spans, maps each to a trust value, and returns the maximum
+    /// (most commercially confident span wins). Returns 1.0 if spansJSON is empty or
+    /// cannot be decoded (backward-compatible default).
+    private func classificationTrust(from spansJSON: String) -> Double {
+        guard let data = spansJSON.data(using: .utf8),
+              let spans = try? JSONDecoder().decode([SpanTrustDecode].self, from: data),
+              !spans.isEmpty else {
+            return 1.0
+        }
+
+        return spans.map { span in
+            let intent = CommercialIntent(rawValue: span.commercialIntent) ?? .unknown
+            let owner = Ownership(rawValue: span.ownership) ?? .unknown
+            return ClassificationTrustMatrix.trust(commercialIntent: intent, ownership: owner)
+        }.max() ?? 1.0
+    }
+
     private func buildFMLedgerEntries(
         span: DecodedSpan,
         scanResults: [SemanticScanResult],
@@ -1159,6 +1186,9 @@ actor AdDetectionService {
             case .weak: weight = fusionConfig.fmCap * 0.5
             }
 
+            // ef2.4.5: look up classificationTrust from refinement data in spansJSON.
+            let trust = classificationTrust(from: result.spansJSON)
+
             return EvidenceLedgerEntry(
                 source: .fm,
                 weight: weight,
@@ -1166,7 +1196,8 @@ actor AdDetectionService {
                     disposition: .containsAd,
                     band: band,
                     cohortPromptLabel: result.scanCohortJSON
-                )
+                ),
+                classificationTrust: trust
             )
         }
     }
