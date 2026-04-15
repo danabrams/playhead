@@ -416,6 +416,7 @@ struct MinimalContiguousSpanDecoder {
         case .fmConsensus(let id, let s): return "fmC:\(id):\(s)"
         case .evidenceCatalog(let e): return "ev:\(e.evidenceRef):\(e.atomOrdinal)"
         case .fmAcousticCorroborated(let id, let s): return "fmA:\(id):\(s)"
+        case .userCorrection(let id, let t): return "uC:\(id):\(t)"
         }
     }
 }
@@ -431,6 +432,7 @@ private extension Array where Element == AnchorRef {
             case .fmConsensus(let id, let s): key = "fmC:\(id):\(s)"
             case .evidenceCatalog(let e): key = "ev:\(e.evidenceRef):\(e.atomOrdinal)"
             case .fmAcousticCorroborated(let id, let s): key = "fmA:\(id):\(s)"
+            case .userCorrection(let id, let t): key = "uC:\(id):\(t)"
             }
             return seen.insert(key).inserted
         }
