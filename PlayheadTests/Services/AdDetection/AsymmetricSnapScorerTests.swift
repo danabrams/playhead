@@ -43,7 +43,6 @@ struct AsymmetricSnapScorerTests {
     @Test("score applies correct asymmetric penalty for start-too-early")
     func scoreStartTooEarly() {
         let result = AsymmetricSnapScorer.score(
-            candidateTime: 10.0,
             snapTarget: 8.0,
             direction: .adStart,
             signedError: -2.0
@@ -55,7 +54,6 @@ struct AsymmetricSnapScorerTests {
     @Test("score applies baseline penalty for start-too-late")
     func scoreStartTooLate() {
         let result = AsymmetricSnapScorer.score(
-            candidateTime: 10.0,
             snapTarget: 12.0,
             direction: .adStart,
             signedError: 2.0
@@ -67,7 +65,6 @@ struct AsymmetricSnapScorerTests {
     @Test("score applies correct asymmetric penalty for end-too-late")
     func scoreEndTooLate() {
         let result = AsymmetricSnapScorer.score(
-            candidateTime: 60.0,
             snapTarget: 63.0,
             direction: .adEnd,
             signedError: 3.0
@@ -79,7 +76,6 @@ struct AsymmetricSnapScorerTests {
     @Test("score applies baseline penalty for end-too-early")
     func scoreEndTooEarly() {
         let result = AsymmetricSnapScorer.score(
-            candidateTime: 60.0,
             snapTarget: 57.0,
             direction: .adEnd,
             signedError: -3.0
@@ -286,10 +282,10 @@ struct AsymmetricSnapScorerTests {
     func asymmetryBiasVerification() {
         // Same magnitude error, different directions
         let clipEditorial = AsymmetricSnapScorer.score(
-            candidateTime: 10, snapTarget: 8, direction: .adStart, signedError: -2.0
+            snapTarget: 8, direction: .adStart, signedError: -2.0
         )
         let leakAd = AsymmetricSnapScorer.score(
-            candidateTime: 10, snapTarget: 12, direction: .adStart, signedError: 2.0
+            snapTarget: 12, direction: .adStart, signedError: 2.0
         )
         // Clipping editorial should score worse (higher penalty)
         #expect(clipEditorial > leakAd)

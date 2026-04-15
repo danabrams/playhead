@@ -301,6 +301,79 @@ struct BracketDetectorTests {
             #expect(evidence.templateClass == .hardInFadeOut)
         }
     }
+    @Test("dryInStingOut template: soft onset, strong offset sting")
+    func dryInStingOutTemplate() {
+        var windows: [FeatureWindow] = []
+        // Pre-silence
+        windows.append(syntheticWindow(startTime: 0.0, rms: 0.05))
+        // Soft onset: low RMS relative to local mean, modest onset score
+        windows.append(syntheticWindow(
+            startTime: 2.0, rms: 0.08,
+            musicProbability: 0.4, musicBedOnsetScore: 0.35
+        ))
+        // Bed
+        windows.append(syntheticWindow(
+            startTime: 4.0, rms: 0.1, musicProbability: 0.4
+        ))
+        windows.append(syntheticWindow(
+            startTime: 6.0, rms: 0.1, musicProbability: 0.35
+        ))
+        // Strong offset sting: high offset score > onset score, no fade-out
+        windows.append(syntheticWindow(
+            startTime: 8.0, rms: 0.1,
+            musicProbability: 0.1, musicBedOffsetScore: 0.8
+        ))
+        // Flat RMS after offset (no fade-out pattern)
+        windows.append(syntheticWindow(startTime: 10.0, rms: 0.1))
+        windows.append(syntheticWindow(startTime: 12.0, rms: 0.1))
+        windows.append(syntheticWindow(startTime: 14.0, rms: 0.1))
+
+        let result = BracketDetector.scanForBrackets(
+            around: 2.0, candidateEnd: 10.0, using: windows, showTrust: 0.8
+        )
+
+        #expect(result != nil)
+        if let evidence = result {
+            #expect(evidence.templateClass == .dryInStingOut)
+        }
+    }
+
+    @Test("symmetricBracket template: similar onset and offset magnitudes")
+    func symmetricBracketTemplate() {
+        var windows: [FeatureWindow] = []
+        // Pre-silence
+        windows.append(syntheticWindow(startTime: 0.0, rms: 0.05))
+        // Soft onset: low RMS (not sharp), moderate onset score
+        windows.append(syntheticWindow(
+            startTime: 2.0, rms: 0.08,
+            musicProbability: 0.5, musicBedOnsetScore: 0.5
+        ))
+        // Bed
+        windows.append(syntheticWindow(
+            startTime: 4.0, rms: 0.1, musicProbability: 0.4
+        ))
+        windows.append(syntheticWindow(
+            startTime: 6.0, rms: 0.1, musicProbability: 0.35
+        ))
+        // Symmetric offset: similar magnitude to onset, no fade-out
+        windows.append(syntheticWindow(
+            startTime: 8.0, rms: 0.1,
+            musicProbability: 0.1, musicBedOffsetScore: 0.5
+        ))
+        // Flat RMS after offset (no fade-out)
+        windows.append(syntheticWindow(startTime: 10.0, rms: 0.1))
+        windows.append(syntheticWindow(startTime: 12.0, rms: 0.1))
+        windows.append(syntheticWindow(startTime: 14.0, rms: 0.1))
+
+        let result = BracketDetector.scanForBrackets(
+            around: 2.0, candidateEnd: 10.0, using: windows, showTrust: 0.8
+        )
+
+        #expect(result != nil)
+        if let evidence = result {
+            #expect(evidence.templateClass == .symmetricBracket)
+        }
+    }
 }
 
 // MARK: - BracketEvidence Tests

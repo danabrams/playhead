@@ -170,13 +170,17 @@ enum FineBoundaryRefiner {
             guardMargin: config.guardMargin
         )
 
+        // Clamp to non-negative times (candidate near episode start).
+        let clampedLower = max(0, guardedLower)
+        let clampedTime = max(0, guardedTime)
+
         // Build cue breakdown: normalize so weights sum to 1.0 (or all zero).
         let breakdown = normalizeCueBreakdown(best.cues)
 
         return BoundaryEstimate(
-            time: guardedTime,
+            time: clampedTime,
             confidence: confidence,
-            lowerBound: guardedLower,
+            lowerBound: clampedLower,
             upperBound: guardedUpper,
             cueBreakdown: breakdown
         )
@@ -331,9 +335,9 @@ enum FineBoundaryRefiner {
             guardMargin: config.guardMargin
         )
         return BoundaryEstimate(
-            time: guardedTime,
+            time: max(0, guardedTime),
             confidence: 0.0,
-            lowerBound: guardedLower,
+            lowerBound: max(0, guardedLower),
             upperBound: guardedUpper,
             cueBreakdown: [.coarseFallback: 1.0]
         )

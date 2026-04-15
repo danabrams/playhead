@@ -56,13 +56,11 @@ enum AsymmetricSnapScorer {
     /// Score a snap candidate with directional error penalty.
     ///
     /// - Parameters:
-    ///   - candidateTime: The candidate snap position (seconds).
     ///   - snapTarget: The target position we snapped to (seconds).
     ///   - direction: Whether this is a `.adStart` or `.adEnd` boundary.
     ///   - signedError: `(snapTarget - trueTime)`: positive = snapped too late, negative = too early.
     /// - Returns: Penalized error magnitude (lower is better).
     static func score(
-        candidateTime: Double,
         snapTarget: Double,
         direction: BoundaryDirection,
         signedError: Double

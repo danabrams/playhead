@@ -269,6 +269,44 @@ struct FineBoundaryRefinerTests {
         #expect(abs(total - 1.0) < 0.001)
     }
 
+    // MARK: - Boundary near episode start
+
+    @Test("candidate at episode start does not produce negative lowerBound")
+    func boundaryAtEpisodeStart() {
+        let features = [
+            makeWindow(start: 0.0, end: 2.0, rms: 0.01, pauseProbability: 0.95),
+            makeWindow(start: 2.0, end: 4.0, rms: 0.3, pauseProbability: 0.1),
+            makeWindow(start: 4.0, end: 6.0, rms: 0.3, pauseProbability: 0.1),
+        ]
+
+        // candidate at 0.5 — search window extends to negative times
+        let result = FineBoundaryRefiner.refineBoundary(
+            candidate: 0.5,
+            features: features,
+            direction: .adEnd  // adEnd shifts bounds earlier, maximizing negative risk
+        )
+
+        #expect(result.lowerBound >= 0.0, "lowerBound must not be negative")
+        #expect(result.time >= 0.0, "time must not be negative")
+    }
+
+    @Test("candidate at 0.0 with adEnd direction clamps to zero")
+    func boundaryAtZero() {
+        let features = [
+            makeWindow(start: 0.0, end: 2.0, rms: 0.01, pauseProbability: 0.95),
+            makeWindow(start: 2.0, end: 4.0, rms: 0.3, pauseProbability: 0.1),
+        ]
+
+        let result = FineBoundaryRefiner.refineBoundary(
+            candidate: 0.0,
+            features: features,
+            direction: .adEnd
+        )
+
+        #expect(result.lowerBound >= 0.0, "lowerBound must not go negative at episode start")
+        #expect(result.time >= 0.0, "time must not go negative at episode start")
+    }
+
     // MARK: - BoundaryCue enum
 
     @Test("BoundaryCue has expected cases in preference order")

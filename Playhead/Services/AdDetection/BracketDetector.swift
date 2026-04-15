@@ -180,6 +180,7 @@ enum BracketDetector {
                     ctx.onsetWindowIndex = nil
                     ctx.onsetTime = nil
                     ctx.onsetRMS = nil
+                    ctx.onsetMusicOnsetScore = 0
                 }
 
             case .bedSustained:
