@@ -644,6 +644,7 @@ actor AnalysisStore {
                 column: "anchorLandmarks",
                 definition: "TEXT"
             )
+            try migrateImplicitFeedbackV9IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -696,6 +697,7 @@ actor AnalysisStore {
         try migrateCorrectionEventsV6IfNeeded()
         try migrateSponsorKnowledgeV7IfNeeded()
         try migrateFingerprintStoreV8IfNeeded()
+        try migrateImplicitFeedbackV9IfNeeded()
         try exec("""
             CREATE TABLE IF NOT EXISTS feature_windows (
                 analysisAssetId   TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
@@ -1341,6 +1343,33 @@ actor AnalysisStore {
         try exec("CREATE INDEX IF NOT EXISTS idx_fse_created ON fingerprint_source_events(createdAt)")
 
         try setSchemaVersion(8)
+    }
+
+    // MARK: - V9: Implicit Feedback Events (Phase ef2, playhead-ef2.3.4)
+
+    /// Create the `implicit_feedback_events` table for behavioral weak labels.
+    ///
+    /// Weak labels (weight 0.3) capture user behaviors that suggest ad detection
+    /// quality issues. They NEVER create permanent vetoes alone — they contribute
+    /// to support/diversity counts and (future) trust scoring.
+    private func migrateImplicitFeedbackV9IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 9 else { return }
+
+        try exec("""
+            CREATE TABLE IF NOT EXISTS implicit_feedback_events (
+                id               TEXT PRIMARY KEY,
+                signal           TEXT NOT NULL,
+                analysisAssetId  TEXT NOT NULL,
+                podcastId        TEXT,
+                spanId           TEXT,
+                timestamp        REAL NOT NULL,
+                weight           REAL NOT NULL DEFAULT 0.3
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_ife_asset ON implicit_feedback_events(analysisAssetId)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_ife_podcast ON implicit_feedback_events(podcastId)")
+
+        try setSchemaVersion(9)
     }
 
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
@@ -4985,6 +5014,99 @@ actor AnalysisStore {
             result.insert(text(stmt, 0))
         }
         return result
+    }
+
+    // MARK: - CRUD: implicit_feedback_events (Phase ef2, playhead-ef2.3.4)
+
+    /// Persist an implicit behavioral feedback event.
+    func appendImplicitFeedbackEvent(_ event: ImplicitFeedbackEvent) throws {
+        let sql = """
+            INSERT OR IGNORE INTO implicit_feedback_events
+            (id, signal, analysisAssetId, podcastId, spanId, timestamp, weight)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, event.id)
+        bind(stmt, 2, event.signal.rawValue)
+        bind(stmt, 3, event.analysisAssetId)
+        bind(stmt, 4, event.podcastId)
+        bind(stmt, 5, event.spanId)
+        bind(stmt, 6, event.timestamp)
+        bind(stmt, 7, event.weight)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Load all implicit feedback events for an asset, ordered by timestamp ascending.
+    func loadImplicitFeedbackEvents(analysisAssetId: String) throws -> [ImplicitFeedbackEvent] {
+        let sql = """
+            SELECT id, signal, analysisAssetId, podcastId, spanId, timestamp, weight
+            FROM implicit_feedback_events
+            WHERE analysisAssetId = ?
+            ORDER BY timestamp ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+
+        var results: [ImplicitFeedbackEvent] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id = text(stmt, 0)
+            let signalRaw = text(stmt, 1)
+            let assetId = text(stmt, 2)
+            let podcastId = optionalText(stmt, 3)
+            let spanId = optionalText(stmt, 4)
+            let timestamp = sqlite3_column_double(stmt, 5)
+            let weight = sqlite3_column_double(stmt, 6)
+            guard let signal = ImplicitFeedbackSignal(rawValue: signalRaw) else { continue }
+            results.append(ImplicitFeedbackEvent(
+                id: id,
+                signal: signal,
+                analysisAssetId: assetId,
+                podcastId: podcastId,
+                spanId: spanId,
+                timestamp: timestamp,
+                storedWeight: weight
+            ))
+        }
+        return results
+    }
+
+    /// Load recent implicit feedback events for a podcast, ordered by timestamp descending.
+    func loadRecentImplicitFeedbackEvents(podcastId: String, limit: Int) throws -> [ImplicitFeedbackEvent] {
+        let sql = """
+            SELECT id, signal, analysisAssetId, podcastId, spanId, timestamp, weight
+            FROM implicit_feedback_events
+            WHERE podcastId = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, podcastId)
+        sqlite3_bind_int(stmt, 2, Int32(limit))
+
+        var results: [ImplicitFeedbackEvent] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id = text(stmt, 0)
+            let signalRaw = text(stmt, 1)
+            let assetId = text(stmt, 2)
+            let podId = optionalText(stmt, 3)
+            let spanId = optionalText(stmt, 4)
+            let timestamp = sqlite3_column_double(stmt, 5)
+            let weight = sqlite3_column_double(stmt, 6)
+            guard let signal = ImplicitFeedbackSignal(rawValue: signalRaw) else { continue }
+            results.append(ImplicitFeedbackEvent(
+                id: id,
+                signal: signal,
+                analysisAssetId: assetId,
+                podcastId: podId,
+                spanId: spanId,
+                timestamp: timestamp,
+                storedWeight: weight
+            ))
+        }
+        return results
     }
 
     // MARK: - CRUD: sponsor_knowledge_entries (Phase 8, playhead-4my.8.1)
