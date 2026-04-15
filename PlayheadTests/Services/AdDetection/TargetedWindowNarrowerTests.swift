@@ -532,14 +532,15 @@ struct TargetedWindowNarrowerTests {
 
     // MARK: - Cycle 2 Rev3-M2: BackfillJobPhase enumeration is pinned
 
-    @Test("Cycle 2 Rev3-M2: BackfillJobPhase.allCases set is exactly the four known cases")
+    @Test("Cycle 2 Rev3-M2: BackfillJobPhase.allCases set is exactly the five known cases")
     func backfillJobPhaseAllCasesPinned() {
         let observed = Set(BackfillJobPhase.allCases)
         let expected: Set<BackfillJobPhase> = [
             .fullEpisodeScan,
             .scanHarvesterProposals,
             .scanLikelyAdSlots,
-            .scanRandomAuditWindows
+            .scanRandomAuditWindows,
+            .metadataSeededRegion
         ]
         #expect(observed == expected, "Adding a new BackfillJobPhase requires updating predictedTargetedLineRefs and the narrowing exclusion set")
     }

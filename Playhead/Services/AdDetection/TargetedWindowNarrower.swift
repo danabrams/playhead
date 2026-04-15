@@ -174,6 +174,16 @@ enum TargetedWindowNarrower {
             )
         case .scanRandomAuditWindows:
             return .narrowed(auditSegments(orderedSegments: ordered, inputs: inputs))
+        case .metadataSeededRegion:
+            // ef2.4.7: metadata-seeded regions use the same narrowing as harvester
+            // proposals — evidence line refs define the window around seeded regions.
+            return narrowedResult(
+                lineRefs: evidenceLineRefs(inputs: inputs),
+                orderedSegments: ordered,
+                acousticBreaks: inputs.acousticBreaks,
+                config: config,
+                phaseLabel: "metadataSeededRegion"
+            )
         }
     }
 
