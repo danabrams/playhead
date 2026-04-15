@@ -1,163 +1,212 @@
-# Playhead — Top 5 Improvement Ideas
+# Playhead Ad Detection — Wizard Ideas (Claude Code)
 
-**Author:** Claude Code (Opus 4.6)
-**Date:** 2026-04-09
-**Context:** Ideas selected for being *obviously accretive and pragmatic* — each leverages infrastructure Playhead has already built (Phase 3 shadow mode, TrustScoring, AnalysisStore, pre-analysis scheduler) and targets a concrete trust, adoption, or value-perception problem on the critical path to MVP.
-
-Ranked best to worst. Each entry explains the concept, the mechanism, expected user perception, implementation leverage, and why I'm confident.
+**Date:** 2026-04-14
+**Scope:** Improvements to the on-device ad-detection pipeline and the UX surrounding it. Proposals respect the on-device mandate, the precision-over-recall posture, and the "no unilateral framework swaps" rule. Each idea is designed to be *obviously* accretive — no speculative re-architectures.
 
 ---
 
-## 1. Ghost Mode — Shadow Skip Results as a Visible Timeline Overlay
+## The 30 Candidate Ideas (brainstorm, brief)
 
-### The concept
-The app already runs Foundation Models in shadow mode (`FMBackfillMode.shadow`) and Phase 3 ad detection whose results are *persisted but never influence the skip UI*. Right now that data is invisible to the user. **Ghost Mode surfaces it.**
-
-On the NowPlaying timeline, render the shadow-mode detection regions as faint "ghost" markers alongside whatever the live system is actually doing. Tapping a ghost marker reveals: "I would have skipped 47 seconds here at 92% confidence — brought to you by Athletic Greens." A per-episode summary appears on completion: "I would have skipped 3 ads totaling 2m 14s this episode. I was right on 3/3 of the ones you manually confirmed."
-
-### How it works
-- **Data source:** The `RegionShadowPhase` + `BackfillJobRunner` already write shadow results to `AnalysisStore`. No new ML work required.
-- **UI:** New overlay layer on the existing `NowPlaying` timeline in `Playhead/Views/NowPlaying/`. Ghost regions rendered in a muted tint with a dashed border so they're visually distinct from actual (skipped) regions.
-- **Accuracy tracking:** When the user manually skips or scrubs past a region, cross-reference against the ghost marker at that time range. Accumulate per-show precision/recall in `TrustScoringService`. Display as "Joe Rogan Experience shadow accuracy: 94% (47/50 matches)."
-- **Trust graduation moment:** When a show's shadow accuracy exceeds a threshold (e.g. 90% precision over 20+ samples), surface a one-tap prompt: **"Joe Rogan Experience is ready for auto-skip. Turn it on?"** This becomes the explicit gate between shadow → manual → auto modes the project already envisions.
-
-### Why users will love it
-- Solves the #1 objection to auto-skip podcast tools: *"How do I know it won't skip something I want to hear?"* Users get to watch the system work before giving it agency. This is the **"trust but verify" UX** that every adjacent product (Tesla Autopilot, iOS autocorrect suggestions, GitHub Copilot ghost text) has converged on for a reason.
-- Feels magical: the app is demonstrating competence *before* asking for trust, not after failing.
-- Converts the entire Phase 3 shadow investment — which is pure cost with zero user-visible payoff today — into the product's core trust-building mechanic.
-
-### Why I'm confident
-- **Zero new ML risk.** The data already exists; we're just drawing it.
-- **Exact fit for the existing shadow→manual→auto progression** described in SkipOrchestrator and PLAN.md. Ghost Mode is the missing UI glue for that ladder.
-- **Aligns with project philosophy** from memory: "Ads exist on a skip-worthiness gradient; banner UX handles borderline cases." Ghost Mode is the gradient made visible.
-- **High leverage-to-effort ratio.** Implementation touches the timeline view, one query on `AnalysisStore`, and a new accuracy accumulator on `TrustScoringService`. Probably the highest user-perceived-value-per-line-of-code feature available right now.
-- **Unblocks the graduation flip.** Today, deciding when to flip `fmBackfillMode` from `.shadow` to `.enabled` requires a human judgment call from aggregate metrics. Ghost Mode gives users a per-show signal and lets the graduation happen organically, one show at a time.
-
----
-
-## 2. Skip Correction + Undo Feedback Loop
-
-### The concept
-Two linked micro-features that together turn the trust problem from "irreversible and opaque" into "reversible and improving":
-
-1. **Undo Skip:** When an auto-skip happens, a brief, dismissable "Skipped 47s. **Undo**" toast appears for ~8 seconds. Tapping it rewinds to the start of the skipped region. A swipe-back gesture anywhere in the player does the same thing — with a satisfying haptic.
-2. **Boundary Correction:** After an auto-skip, if the user scrubs backward into the skipped region or forward just past it, the app infers the boundary was off. Offer a lightweight "Fix this skip" affordance: drag handles on the skipped range. Confirming writes a correction back to `AnalysisStore` and nudges the per-show boundary-refinement feature bank.
-
-### How it works
-- **Undo:** Hook into `SkipOrchestrator`'s skip emission. When a skip executes, push a `SkipHistoryEntry { episodeId, range, skippedAt }` onto a small in-memory ring buffer. The toast reads from this. Undoing calls `PlaybackService.seek(to: range.lowerBound - 2s)` and marks the entry as `undone`.
-- **Correction:** Reuse `RegionProposalBuilder`'s window-narrowing infrastructure. The drag handles snap to acoustic breakpoints detected by `AcousticBreakDetector` (which, per the codebase notes, is currently underused — this gives it a real job). Corrections persist as `BoundaryCorrection` rows keyed by `(episodeId, regionId)`.
-- **Feedback into trust:** `TrustScoringService` already tracks skip confidence per show. Undos become false-positive signals; corrections become boundary-quality signals. A simple exponential moving average per show dials auto-skip thresholds up (fewer undos) or down (many undos).
-
-### Why users will love it
-- **Auto-skip becomes a zero-risk feature.** Today, an incorrect skip means the user loses content and trust simultaneously. With undo, the worst case is a ~1s annoyance and a tap. That transforms the felt-risk curve.
-- **Corrections feel like teaching.** "I fixed this" creates psychological ownership. Users who invest effort into correcting a tool become advocates for it.
-- **Haptic undo + transcript peek (already in the app) combine into a best-in-class scrub experience.** You glance at the transcript, see you missed something, swipe back, hear it. No podcast app does this well today.
-
-### Why I'm confident
-- **Industry-validated pattern.** Every successful "AI does something on your behalf" product (Gmail undo send, iOS autocorrect revert-on-backspace, Tesla lane-change cancel) has exactly this shape. It's not a guess — it's a known-winning pattern applied to a domain that currently lacks it.
-- **Closes Playhead's ML learning loop.** Today, TrustScoring is updated by... what, exactly? Implicit signals. Explicit signals from corrections/undos are dramatically higher quality and cost almost nothing to collect.
-- **Pragmatic scope.** Undo is ~1 day of work. Boundary correction is ~1 week. Neither requires new models, new schemas, or cloud work. `AcousticBreakDetector` stops being dead code.
-- **Creates the data Phase 4 graduation needs.** To safely flip from shadow to enabled, the project needs per-show false-positive rates. This feature *generates* that data as a byproduct.
+1. Per-show positional heatmap of ad-break locations (richer than current slot priors).
+2. Host-voice negative fingerprint: identify the primary host's voice from sustained editorial; use as an anti-signal.
+3. On-device prosody model for "ad-read voice" (elevated rate, higher pitch variance, emphatic sponsor stress).
+4. Cross-episode sponsor carry-forward tightening (decay-weighted prior from last N episodes).
+5. Near-real-time user-correction learning loop (one-tap feedback → per-show priors).
+6. Dual-ended ad-break pair inference (HMM forward-backward joint decoding of content↔ad transitions).
+7. **ID3 / Podcasting 2.0 chapter-marker ingestion** (keywords: "Sponsor", "Ad", "Break").
+8. **RSS feed / show-notes sponsor pre-seeding** — parse sponsor names from episode description at enqueue time, extend per-episode lexicon.
+9. Pre-decoded fingerprint cache warmup.
+10. Progressive skip countdown UI ("skipping in 3…2…1, tap to cancel").
+11. One-tap "you missed an ad" long-press gesture on waveform.
+12. Ad-type taxonomy in banners (Promo / Pharma / Host-read / Network).
+13. Skip-preview: tap banner to hear 3s at head and 3s at tail of the skipped region.
+14. Boundary uncertainty rendered as a gradient edge in the timeline rail.
+15. 300ms crossfade on skip to mask small boundary errors.
+16. **Music-bed envelope bracketing as dominant boundary cue** (jingle onset/offset drives snap).
+17. Pre-roll heuristic: lower confirmation threshold for anchor-rich candidates within first 30s.
+18. Expanded return-marker lexicon ("welcome back", "alright so", "where were we").
+19. FM backfill priority queue keyed to imminent listening (play-now / top-of-queue first).
+20. Real speaker diarization via Apple voice embeddings (replaces proxy).
+21. Pause-fingerprint alignment against per-show break templates.
+22. Deferred-skip mode for 0.40–0.69 band: one-tap skip banner rather than auto-skip.
+23. FM prompt-prefix reuse across windows within a session.
+24. Language detection + per-language lexicons.
+25. Counter-classifier explicitly trained on "this is editorial, not an ad".
+26. Seek-time skip prompt when user scrubs into a candidate region.
+27. Overnight / on-charge pre-analysis of subscribed episodes.
+28. Confidence-adjusted banner dwell time.
+29. Dual-prompt FM consensus (two framings on same window must agree).
+30. **Episode-level ad-inventory sanity check** (outlier detection on total ad time vs per-show history).
 
 ---
 
-## 3. OPML Subscription Import (And a Real Onboarding Flow Around It)
+## Winnowing Criteria
 
-### The concept
-First-launch onboarding lets users import subscriptions from Apple Podcasts, Overcast, Pocket Casts, or any OPML file. While the import runs in the background, the T0 pre-analysis tier (already built) warms up ad detection for the most recent episode of each imported show. By the time onboarding completes (~60s), the user's library is populated *and* a handful of episodes already have ads pre-detected and ready to demo.
+I evaluated each idea against five axes:
 
-### How it works
-- **Apple Podcasts sync:** Use `MPMediaLibrary`-equivalent or the MusicKit podcasts API where available; fall back to OPML export instructions. Apple's podcast subscription API is restricted, so OPML is the practical universal path.
-- **OPML parser:** Lightweight XML parser mapped to existing `Podcast` SwiftData model. Ingest feed URLs, then kick off normal feed refresh via `PodcastFeedService` / iTunes Search.
-- **Warm-start pre-analysis:** As each feed resolves, enqueue its most recent episode into `AnalysisWorkScheduler` with a "onboarding priority" tag that jumps the T0 queue. Run in parallel, thermal-aware, capped at N=5 concurrent.
-- **Onboarding UX:** A progress flow — "Importing 34 shows... Analyzing recent episodes... Ready!" — that ends on a library view where some episodes display a freshly-detected "⏩ 3 ads" badge. This is the "aha" moment.
-- **Skip OPML path:** For users without OPML, offer a top-10 curated seed list + iTunes search (already built) as fallback.
+1. **Expected quality lift** (recall, precision, boundary accuracy) — how much does this actually move the numbers?
+2. **On-device compatibility** — no cloud, no legal issue.
+3. **Architectural risk** — does it force a framework swap or large rewrite? (The CLAUDE.md authority rule penalizes these.)
+4. **Implementation cost** vs the lift.
+5. **User perception / trust** — does the win show up in how the product *feels*?
 
-### Why users will love it
-- **No more empty-library problem.** The #1 reason podcast apps fail to retain users is that switching apps means re-adding 30 shows by hand. Any friction here and users bounce.
-- **First-run demo is generated from THEIR content.** Instead of a canned tutorial, the first thing they see is an ad detected in an episode they already wanted to listen to. That's the most persuasive possible product demo.
-- **T0 pre-analysis finally has a visible purpose.** Today, pre-analysis is invisible back-end plumbing. Onboarding turns it into the first "wow."
+Ideas that are partial duplicates of existing infrastructure (4, 5, 9, 11, 27) scored low because "more of what you already do" is rarely obviously accretive. Ideas requiring on-device model training (3, 25) scored low on pragmatism. Ideas that force framework decisions (6, 20) scored low on architectural risk. UX polish that doesn't change detection (10, 12, 13, 14, 15, 28) was interesting but off-target for a brief that is primarily about the detection pipeline.
 
-### Why I'm confident
-- **This is table stakes.** Every serious podcast app has import. Launching without it isn't a product decision, it's a defect. Including it here isn't exciting — it's mandatory pragmatism.
-- **Zero architectural risk.** OPML is a solved problem (decades-old XML format, dozens of Swift parsers). It slots into existing `PodcastFeedService` with minimal surface area.
-- **Huge activation leverage.** The difference between "user imports 30 shows" and "user adds 2 shows by hand before getting bored" is probably 10x on D7 retention. No other listed idea touches activation this directly.
-- **Couples cleanly with Ghost Mode (#1).** Importing a library + shadow-mode running across it = Ghost Mode has rich data to show the moment users hit play.
+The five that dominate the Pareto frontier are below, ranked by overall confidence that they are **obviously, unambiguously better** for the product.
 
 ---
 
-## 4. Time-Saved / Value Dashboard
+# Top 5 — Best to Worst
 
-### The concept
-A Settings → "Your Ad-Skip Stats" screen (and a subtle home-screen pill on NowPlaying) that surfaces cumulative value:
+## 1. RSS / Show-Notes Sponsor Pre-Seeding
 
-- **"You've reclaimed 12h 47m of your life this month."**
-- **Per-show breakdown:** "Joe Rogan: 4h 12m saved across 18 episodes."
-- **Accuracy bar:** "97% of skips were kept (3 undos out of 124)."
-- **Privacy line:** "0 bytes sent to the cloud. All 124 skips detected on-device."
-- **Shareable card:** One-tap share to generate a screenshot-ready "I saved X hours with Playhead this month" card.
+**What it is.** At episode enqueue time, parse the RSS feed entry — specifically the `<description>`, `<itunes:summary>`, and `<content:encoded>` fields — for sponsor disclosures. Extract candidate sponsor brand names, promo codes, and URLs. Inject these into a **per-episode ephemeral sponsor lexicon** that augments `CompiledSponsorLexicon` for that episode only. The lexicon is built *before the audio is decoded* and is consumed by `LexicalScanner` during the hot path.
 
-### How it works
-- **Data source:** `AnalysisStore` already logs every detected region with timestamps. Query-and-sum over the last N days per show.
-- **Undo-aware accounting:** Subtract undone skips from the "reclaimed" total. This both ensures honesty and visibly rewards accuracy. If the number goes up when accuracy goes up, users emotionally align with the system improving.
-- **Privacy proof line:** Literally just a zero, but computed from a real network byte counter hooked into `URLSession` metrics (excluding feed refresh + iTunes search, which are categorized separately and shown transparently).
-- **Widget:** Small home-screen widget showing the current-week reclaim number. Effectively free retention marketing on the user's home screen.
+**How it works.**
+- A tiny parser runs on the RSS item body. It targets three deterministic patterns that appear in ~70% of modern podcast show notes:
+  - `this episode is (?:brought to you by|sponsored by|supported by) ([A-Z][\w &.-]{2,})`
+  - Bare URLs pointing at known advertiser domains (`betterhelp.com/<slug>`, `squarespace.com/<slug>`, `factor75.com/<slug>`, etc.) where the path segment after the host is the show slug.
+  - Promo-code patterns (`code\s+([A-Z0-9]{3,})`).
+- Extracted entities flow into `EvidenceCatalogBuilder` as **pre-anchored evidence** before transcription even starts. They get `evidenceRef` IDs just like any other catalog entry.
+- A `provenance: .rssShowNotes` tag distinguishes them from in-audio evidence so downstream fusion can weight them appropriately (suggested: contribute to fusion only when corroborated by at least one audio signal, to prevent show-notes-only false positives).
+- The ephemeral lexicon lives for the episode's session; it does *not* promote to the global `SponsorKnowledgeStore` until the ad read is actually observed in audio. This preserves the store's integrity.
 
-### Why users will love it
-- **Converts the one-time purchase into ongoing felt value.** The monetization memory note says: "Free preview + one-time purchase; viable because zero marginal cost." That's a rational argument; the dashboard is the *emotional* one. "This app has given me back 47 hours this year" is what makes someone recommend it to friends.
-- **Privacy proof is a killer differentiator.** Every competitor that does ad detection (or transcription) does it in the cloud. Showing a real, live "0 bytes" counter is extraordinary in the current market and ties directly to the on-device mandate from legal/memory.
-- **Gamifies accuracy.** Users become invested in correcting mistakes because they see the number improve.
+**Why it's obviously accretive.**
+- Show notes are **free, deterministic ground truth** for a large fraction of ads. The sponsor says "this episode is brought to you by Squarespace" in the description, and the host says it in the audio thirty seconds later. Today the lexical scanner has to rediscover "Squarespace" from prosody and weak priors. Pre-seeding collapses that search problem.
+- The lexical layer currently catches ~60–70% of ads according to the deep dive. Even a 10–15 percentage-point lift on that layer cascades: more lexical hits → stronger classifier scores → more corroborated anchors → more FM-confirmed spans. This is a recall win at the *cheapest* layer in the stack.
+- It **respects the on-device mandate trivially**: RSS metadata is public, non-audio, non-transcript text. No legal exposure.
+- It is **architecturally cheap**: new parser + new provenance tag + a lexicon-merge point. No existing type needs to change shape. No framework is swapped.
+- It meaningfully helps **first-episode** and **new-show** cases, which today rely entirely on in-audio discovery. That's a cold-start win the per-show priors system structurally cannot deliver.
 
-### Why I'm confident
-- **Rides pure existing data.** No new detection, no new models, no new schemas. It's a query layer + a UI.
-- **Strong psychological precedent.** Screen Time, Apple Fitness rings, Spotify Wrapped — users respond powerfully to "here's what you accumulated" summaries. The pattern is well understood.
-- **Compounds with #1 and #2.** Ghost Mode produces the accuracy signal; Undo produces the honest accounting; the dashboard turns both into a story.
-- **Cheap to build, hard to build wrong.** The risk surface is tiny — it's a read-only view. Worst case: numbers look small and get hidden behind a feature flag until usage grows.
+**User perception.** Invisible when it works — users just notice that "Playhead caught the sponsor read even though I'd never listened to this show before." The only visible consequence is banners showing sponsor names more often and earlier.
 
----
+**Confidence this is clearly better.** Very high. The mechanism is deterministic, the data is free, the integration is contained, and the failure mode (a bogus sponsor name from show notes) is gated behind a corroboration requirement. The worst case is no-op.
 
-## 5. Per-Show Ad Intensity Dial (Skip-Worthiness Gradient, Exposed)
-
-### The concept
-A per-show slider that lets users choose where on the ad-gradient they want the skip threshold:
-
-- **Purist:** Skip only unambiguous pre-rolls and mid-roll sponsor blocks.
-- **Balanced** (default): Skip clear ads and sponsored reads. Leave host chit-chat and cross-promos alone.
-- **Aggressive:** Skip everything ad-adjacent, including host-read sponsor segments and cross-promos.
-
-Slider sits on the podcast detail view and remembers per show. A small preview shows "At Balanced, the Kelly Ripa cross-promo would NOT be skipped. At Aggressive, it would."
-
-### How it works
-- **Single knob, real mechanism:** The slider maps to a confidence threshold and a category mask (`adKinds: Set<AdCategory>`) passed through `SkipOrchestrator`. `AdCategory` already needs to exist internally to distinguish "pre-roll network ad" from "host-read sponsor" from "cross-promo" from "product mention"; this feature forces that categorization to the surface, which is itself architecturally healthy.
-- **Classifier thresholds:** `PermissiveAdClassifier` already emits a confidence score. Threshold per category per show.
-- **Live preview on detail view:** Run against the most recent analyzed episode to show "here's what this setting would do" — this is the Ghost Mode pattern applied at configuration time.
-- **Default seeding:** New shows start at Balanced. A show with high trust accuracy + lots of user undos on borderline cases nudges the default toward Purist; few undos nudge toward Aggressive.
-
-### Why users will love it
-- **Directly answers the Kelly Ripa problem.** The project has documented that the FM safety classifier misfires on benign celebrity-mention cross-promos. The intensity dial lets users decide whether that cross-promo is "an ad I want skipped" or "content I want to hear" — without waiting for Apple to fix Foundation Models.
-- **Matches how real listeners think.** Some people fast-forward host-read sponsors because they enjoy the host's delivery; others hate all ads uniformly. A single global threshold can never satisfy both. The dial legitimizes both preferences and makes the product feel empathetic.
-- **Ends the "is it on or off" debate.** Instead of an all-or-nothing auto-skip toggle per show, the dial gives users a productive middle ground, dramatically expanding the set of shows where auto-skip is viable.
-
-### Why I'm confident
-- **Directly aligned with an explicit project philosophy already in memory:** "Ads exist on a skip-worthiness gradient; banner UX handles borderline cases." This feature is that philosophy, operationalized. It doesn't add a new concept — it implements a concept the project has already committed to.
-- **Pragmatic workaround for a real, documented blocker.** The Foundation Models safety-classifier issue is outside Playhead's control. The intensity dial routes around it by converting a classifier limitation into a user choice. That's far more robust than waiting for Apple or trying to trick the classifier.
-- **Forces healthy internal categorization.** Even if the dial shipped with just two settings (Balanced / Aggressive), the refactor to make `AdCategory` explicit throughout `AdDetectionService` would pay dividends for every future feature — analytics, banners, trust scoring, corrections.
-- **Cheap to validate.** Ship with two positions first (Balanced default, Aggressive opt-in), measure uptake and undo rates per position, then decide whether to expose a third.
+**Risk and mitigation.** Show notes sometimes list *previous* episode sponsors or cross-promotional content. The corroboration gate (require at least one audio signal before pre-seeded evidence contributes to fusion) handles this cleanly. A second mitigation: cap total pre-seeded contribution to 0.15 of the fusion budget.
 
 ---
 
-## Summary Table
+## 2. ID3 / Podcasting 2.0 Chapter-Marker Ingestion
 
-| # | Idea | Primary Problem Solved | Existing Infra Leveraged | Risk |
-|---|------|------------------------|---------------------------|------|
-| 1 | Ghost Mode timeline | Trust before auto-skip | `RegionShadowPhase`, `AnalysisStore`, timeline UI | Very low |
-| 2 | Undo + boundary correction | Reversibility + ML learning signal | `SkipOrchestrator`, `TrustScoring`, `AcousticBreakDetector` | Low |
-| 3 | OPML onboarding + warm-start | Activation / empty library | `PodcastFeedService`, T0 pre-analysis | Very low |
-| 4 | Time-saved dashboard | Ongoing felt value + privacy proof | `AnalysisStore` queries | Very low |
-| 5 | Ad intensity dial | Ad gradient + FM classifier limits | `PermissiveAdClassifier`, `AdCategory` (forced explicit) | Low-medium (refactor) |
+**What it is.** Many podcasts publish chapters inside the MP3 (ID3 `CHAP` frames) or as `<podcast:chapters>` JSON via Podcasting 2.0. A meaningful fraction label ad breaks literally: "Sponsor: Squarespace", "Ad Break", "Mid-Roll", "Support the Show". Harvest these at ingest time and treat chapters whose title matches an ad lexicon as **high-confidence bounded regions**.
+
+**How it works.**
+- Extend the existing episode-ingestion step to parse ID3 `CHAP`/`CTOC` frames and the Podcasting 2.0 chapters JSON if the feed advertises one.
+- A `ChapterEvidence` record contains `(startTime, endTime, title, source: .id3 | .pc20)`.
+- Titles are normalized and matched against a small dedicated regex set (`sponsor|ad(s|\s+break)?|promo|support|mid-roll|pre-roll|post-roll`). Matches are registered in the evidence catalog with provenance `.chapter`.
+- In the span decoder, chapter-backed evidence gets **a preferred snap target** — boundary resolver treats chapter edges as strong cues with a wide-but-capped snap radius (±12s on both ends). The chapter title that *disambiguates* the span ("Sponsor: Athletic Greens") also extends the per-episode lexicon à la idea #1.
+- A chapter that labels *content* ("Main Interview", "Q&A", "Lightning Round") is equally valuable — it acts as a hard *negative* signal. No ad span should cross into a chapter explicitly labeled as a content segment unless strongly corroborated.
+
+**Why it's obviously accretive.**
+- Chapters are **precision gold**: when a publisher bothers to label a chapter "Sponsor Break", the boundaries are usually accurate to a second or two.
+- Today the system rediscovers these boundaries from audio. Every hour of chapter-rich podcasts analyzed is hours of FM compute saved and boundary snaps avoided.
+- It catches a category of ads that are otherwise hard: **short host promos for network shows** ("go check out our sister show X") often lack sponsor-language but are explicitly labeled "Network Promo" in chapters.
+- Integration surface is small: a parser, an evidence type, a boundary-cue weight, a negative-region check in the span decoder.
+- It improves the *backfill-complete* experience asymmetrically — full chapter data yields near-perfect boundaries and near-zero FM budget spend on those spans, freeing FM compute for episodes without chapters.
+
+**User perception.** "How does Playhead know the exact ad boundaries on this show?" For chapter-labeled podcasts, skip confidence will routinely be `high` with boundary errors under 2s. Users will feel a step-function improvement on certain shows.
+
+**Confidence this is clearly better.** Very high. Chapter data is a publisher-declared hint. We are not trusting it blindly — the corroboration and negative-chapter logic bound the downside. When chapters are wrong or absent, the system degrades gracefully to today's behavior.
+
+**Risk and mitigation.** Some shows use chapters for editorial segments that *contain* sponsor mentions ("Cold Open" might start with "This episode is brought to you by…"). Rule: chapter evidence is a strong *cue*, not a hard boundary. The boundary resolver already has `minImprovementOverOriginal: 0.1` — chapter cues should flow through that gate like any other cue.
+
+---
+
+## 3. Host-Voice Editorial Counter-Classifier
+
+**What it is.** Every podcast has one or two primary hosts. Their voices recur across episodes. Build a lightweight on-device embedding of the host's voice from the first 90–120 seconds of sustained editorial speech in each new episode (or carry it from prior episodes of the same show). During classification, regions where the *host is clearly speaking in their normal editorial register* receive a **negative signal** — a confidence penalty that actively argues against the region being an ad.
+
+Crucially, this is a *counter-classifier*, not an ad detector. It answers one question well: "Is this the host in their normal editorial mode?" and nothing else.
+
+**How it works.**
+- Use Apple's speech framework voice-analytics features (or `SNClassifySoundRequest` with a custom embedding head if available) to extract a compact speaker embedding per 2-second window. This slots into the existing feature extraction cadence.
+- `HostVoiceProfile` is built progressively: seed it from the episode's first clean editorial segment, refine across episodes of the same show (persist in `SponsorKnowledgeStore`'s per-show store — it already has the right lifecycle).
+- For each candidate ad region, compute the mean cosine similarity between the region's speaker embeddings and the host profile. If similarity is high **and** the region lacks sponsor-language anchors **and** acoustic break strength is low, apply a penalty to `adProbability` (capped at 0.20 so it never alone suppresses a genuine ad).
+- Host-read ads (a real ambiguity) are protected because they typically *do* have lexical anchors (URL, promo code, disclosure) — the penalty is conditioned on anchor absence.
+
+**Why it's obviously accretive.**
+- The precision-over-recall posture means the worst failure mode today is false positives that erode trust in the skip banner. A host-voice counter-signal directly attacks the most common FP pattern: extended editorial tangents that happen to score high on transition markers ("so anyway, back to what we were saying about…") or spectral changes (laughter, theme-music interludes).
+- The mechanism is **architecturally symmetric** to the existing `SpanHypothesisEngine` — we already model evidence that argues *for* an ad; this is evidence that argues *against*. Adding a per-atom negative term to fusion is a natural extension.
+- It leverages the existing feature-extraction cadence and SoundAnalysis framework — no new framework dependency. Speaker embeddings are already used as a "proxy"; this path upgrades the proxy into a real signal but scoped narrowly (host identification, not full diarization) so it doesn't trigger the framework-swap rule.
+- Per-show profiles improve over time. Episode N+1 has a better host profile than episode N, so precision climbs with user engagement — a virtuous loop.
+
+**User perception.** Fewer "why did it skip the host talking about the story structure?" moments. Users don't perceive the counter-classifier directly; they perceive an overall reduction in baffling skips.
+
+**Confidence this is clearly better.** High. The signal has clear statistical footing (host voice is the most recurrent acoustic feature of any podcast). The cap on penalty magnitude bounds the downside. The conditioning on anchor absence protects the hard case (host-read ads). The per-show persistence reuses existing infrastructure.
+
+**Risk and mitigation.** Co-hosted shows with variable lineups: profile needs to represent a *set* of host embeddings, not one. The `SponsorKnowledgeStore` already handles multi-entity per-show state; extend the same pattern. Second risk: a show's host *is* the advertiser (indie podcasts pitching their own products). The anchor-absence condition handles this: owned-product ads still have URL/promo/CTA anchors.
+
+---
+
+## 4. Music-Bed Envelope as Dominant Boundary Cue
+
+**What it is.** In a very large fraction of produced podcasts, ad breaks are bracketed by a rising→plateau→falling music bed (the jingle envelope). The existing `MusicBedClassifier` already detects onset/offset scores per window. Today those scores are one cue among many in `TimeBoundaryResolver`. Promote them: when a candidate ad region is flanked by a clean music-envelope onset at the start and a symmetric offset at the end, **treat the envelope peaks as the primary boundary and snap to them preferentially** with a higher snap weight and a larger snap radius.
+
+**How it works.**
+- Add an `envelopeBracket: BracketEvidence?` field to the span hypothesis, computed by a small finite-state scanner over the music probability stream around candidate boundaries.
+- `BracketEvidence` contains `(onsetTime, onsetScore, offsetTime, offsetScore, symmetryScore)`. Symmetry is a match between onset shape and offset shape — strong brackets have similar rise/fall profiles.
+- If `symmetryScore ≥ 0.6` and both onset and offset scores are ≥ 0.7, the boundary resolver uses envelope peaks as the snap anchor with weight **0.45** (higher than any current single cue) and a 10s snap radius at both ends.
+- If only one side of the bracket is strong (common for outro fades that blend into content), the stronger side drives its boundary; the weaker side falls back to the current cue-weighted snap.
+- The envelope signal also promotes the candidate to "precise boundary" in the refinement pass, which the UI and skip gate can use to route to shorter banner dwell and higher skip confidence.
+
+**Why it's obviously accretive.**
+- Boundary accuracy is the **most visible precision lever** to users. A span that's off by 6 seconds at the start means the listener hears "…and if you go to betterhelp.com/—" before the skip fires. That's the single most trust-destroying event in an ad-skip product.
+- The music bed signal already exists and is reliable. The current cue-weighted resolver dilutes a strong signal by averaging it with weaker ones. Elevating a *symmetric* envelope to primary-cue status captures a real acoustic regularity.
+- The symmetry condition is the key safety: random music (theme music, interview music, mid-story stingers) won't produce a symmetric bracket around a lexically-anchored region. Only produced ad breaks do.
+- Implementation is a **new scanner + a new cue class + a branch in the resolver**. No framework change, no model training, no data collection.
+- It specifically improves the high-production shows most users gravitate to — NPR, Wondery, Gimlet, major independents — where jingles are ubiquitous.
+
+**User perception.** "The skip is dead on." On jingle-heavy shows, boundary errors drop from seconds to hundreds of milliseconds. The crossfade-on-skip UX polish that would otherwise mask errors becomes a genuinely transparent transition.
+
+**Confidence this is clearly better.** High. The underlying signal is already computed; we're using it more precisely. The symmetry gate bounds downside. Even if the bracket analysis is wrong, the resolver falls back to today's weighted-cue behavior.
+
+**Risk and mitigation.** Some editorial segments (DJ-style music shows, some narrative podcasts) have music envelopes that aren't ad-related. The symmetry + lexical-anchor co-occurrence gate resolves this: elevate envelope to primary cue only when the region also carries at least one non-envelope anchor. Belt and suspenders.
+
+---
+
+## 5. Episode-Level Ad-Inventory Sanity Check
+
+**What it is.** After backfill completes, run a lightweight reconciliation pass: compare the total detected ad time and ad-break count for the episode against the per-show historical distribution stored in `SponsorKnowledgeStore`. If the episode is a statistical outlier — zero ads detected on a show that averages 4 breaks per episode, or 18 minutes of ads detected on a 45-minute show — **flag the episode as "review recommended"** and adjust UX accordingly: temporarily downgrade auto-skip to one-tap skip, surface a gentle "help us get this one right" affordance, and deprioritize contributions from this episode to the sponsor knowledge store until user feedback arrives.
+
+This is a meta-safeguard, not a detection improvement per se. It catches the catastrophic failures that individual layers miss.
+
+**How it works.**
+- Per show, maintain a running distribution of `(totalAdSeconds, breakCount, meanBreakDuration)` across the last N=20 analyzed episodes. Stored alongside existing per-show priors.
+- After backfill, compute z-scores for the current episode on each axis. If any axis exceeds ±2σ **and** the show has ≥5 episodes in history, set `episode.detectionHealth = .suspicious`.
+- The UI layer (`NowPlayingView`, `AdBannerView`) reads `detectionHealth`:
+  - `.healthy` (default): current behavior, auto-skip on eligible candidates.
+  - `.suspicious`: downgrade to one-tap skip banner regardless of score. Show a subtle "Does this look right?" prompt in the transcript peek view.
+  - `.cold` (first 3 episodes of a show): similar to suspicious but more permissive on the skip threshold — we need data to build priors.
+- User corrections on suspicious episodes carry extra weight in the trust-scoring service (they're diagnosing known-uncertain territory).
+- After 5 suspicious episodes in a row on the same show, `AnalysisCoordinator` can trigger a **full FM re-analysis** of the most recent episode rather than silently accumulating bad priors.
+
+**Why it's obviously accretive.**
+- The system today has **no self-awareness**. If the FM coarse classifier silently starts refusing more often on a particular show's content (a real risk given Apple's FM safety classifier is opaque and changes across iOS updates), detection quality degrades silently. This idea makes silent degradation visible.
+- It converts the **per-show learning asymmetry** (which currently only flows one way — we learn sponsors) into a two-way loop: we also learn when we're failing on a show.
+- It's a **layered-system safeguard** in the spirit of the existing architecture. Each layer (lexical, acoustic, FM, fingerprint) can fail independently; this is the meta-layer that notices when the stack as a whole produces an anomalous result.
+- Implementation surface: a distribution store, a z-score pass in the backfill completion hook, a `detectionHealth` field propagated to UI, a gentle UI affordance. No ML. No framework change.
+- It gives the user a productive outlet for the inevitable failures: a targeted "help us get this one right" prompt feels respectful in a way that a silent bad skip does not.
+
+**User perception.** Rare but powerful. On the ~3% of episodes that would otherwise produce catastrophic detection failures, the user gets a visible, honest "we're uncertain about this one — tap to help" prompt instead of a silently-broken experience. That single behavior does enormous work for trust.
+
+**Confidence this is clearly better.** High. The mechanism is purely additive — it doesn't change any detection output, it only modulates UX and feedback weighting when the system would otherwise produce anomalous results. The downside is essentially zero.
+
+**Risk and mitigation.** Legitimately ad-free episodes (Q&A specials, live shows, patron-exclusive cuts) would trigger the low-outlier branch. Solution: allow the per-show prior to include a bimodal distribution (regular episodes vs. specials) or mark episodes tagged `bonus`/`special`/`live` in the RSS feed as exempt from sanity-check. This reuses idea #1's RSS parsing.
+
+---
 
 ## Why These Five Together
 
-These ideas are individually strong but they also **compound**. Ghost Mode (#1) generates per-show accuracy data. Undo (#2) refines that data with explicit correction signals. Onboarding (#3) fills the library that Ghost Mode will decorate on first launch. The dashboard (#4) turns accumulated Ghost + Undo data into felt monthly value. The intensity dial (#5) gives users a per-show knob that is only useful *because* Ghost Mode and the dashboard make its effects visible.
+These five ideas are not independent — they reinforce each other:
 
-None of the five require new ML models, new cloud services, new entitlements, or changes to the on-device mandate. Every one is pure UX + data-plumbing work on top of infrastructure Playhead has already built or mostly built. That's the definition of "obviously accretive and pragmatic."
+- Idea #1 (RSS pre-seeding) and Idea #2 (chapter markers) are both **pre-audio metadata harvests**. They share a parsing pass at enqueue time and feed the same `EvidenceCatalogBuilder`. Build one, the other is trivial.
+- Idea #3 (host-voice counter) and Idea #4 (music envelope boundary) both operate on feature windows and use existing SoundAnalysis infrastructure. They share the feature-extraction cadence and validate each other: music-bracketed regions where the host voice *does* appear are a strong "host-read sponsor" signal (a known ambiguity) and can be routed to a different banner style.
+- Idea #5 (inventory sanity) is the **meta-loop** that makes the other four provably good — it surfaces the episodes where the improvements didn't improve things, funneling those into the correction pipeline.
+
+All five are:
+- Compatible with the on-device mandate.
+- Free of framework swaps (CLAUDE.md rule).
+- Incremental on top of existing services — no new pipeline stage or module is required.
+- Testable with existing test plans (`PlayheadFastTests` for unit, `PlayheadIntegrationTests` for corpus validation).
+
+Implementation-order recommendation: **#1 first** (largest lift, smallest surface), then **#2** (same parser pass), then **#5** (provides telemetry to validate #3 and #4 rollouts), then **#4**, then **#3**.

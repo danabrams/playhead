@@ -415,7 +415,7 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 10
+    nonisolated private static let currentSchemaVersion = 11
 
     /// bd-m8k / Cycle 2 C4: Maximum number of recent full-rescan **recall**
     /// samples retained for the `stable_recall_flag` ring. Must match the
@@ -662,6 +662,7 @@ actor AnalysisStore {
                     definition: "TEXT"
                 )
             }
+            try migrateSourceDemotionsV11IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -721,6 +722,7 @@ actor AnalysisStore {
         try migrateFingerprintStoreV8IfNeeded()
         try migrateBoundaryPriorsV9IfNeeded()
         try migrateBracketTrustV10IfNeeded()
+        try migrateSourceDemotionsV11IfNeeded()
         try exec("""
             CREATE TABLE IF NOT EXISTS feature_windows (
                 analysisAssetId   TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
@@ -1409,6 +1411,39 @@ actor AnalysisStore {
             """)
 
         try setSchemaVersion(10)
+    }
+
+    // MARK: - V11: Source Demotions + Fingerprint Disputes (ef2.3.3)
+
+    private func migrateSourceDemotionsV11IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 11 else { return }
+
+        try exec("""
+            CREATE TABLE IF NOT EXISTS source_demotions (
+                showId            TEXT NOT NULL,
+                causalSource      TEXT NOT NULL,
+                currentMultiplier REAL NOT NULL DEFAULT 1.0,
+                floor             REAL NOT NULL,
+                updatedAt         REAL NOT NULL,
+                PRIMARY KEY (showId, causalSource)
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_sd_show ON source_demotions(showId)")
+
+        try exec("""
+            CREATE TABLE IF NOT EXISTS fingerprint_disputes (
+                fingerprintId     TEXT NOT NULL,
+                showId            TEXT NOT NULL,
+                disputeCount      INTEGER NOT NULL DEFAULT 0,
+                confirmationCount INTEGER NOT NULL DEFAULT 0,
+                status            TEXT NOT NULL DEFAULT 'disputed',
+                updatedAt         REAL NOT NULL,
+                PRIMARY KEY (fingerprintId, showId)
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_fd_show ON fingerprint_disputes(showId)")
+
+        try setSchemaVersion(11)
     }
 
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
@@ -5819,5 +5854,131 @@ actor AnalysisStore {
         bind(stmt, 2, alpha)
         bind(stmt, 3, beta)
         try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    // MARK: - Source Demotion Persistence (ef2.3.3)
+
+    func loadSourceDemotionMultiplier(source: String, showId: String) throws -> Double? {
+        let stmt = try prepare("""
+            SELECT currentMultiplier FROM source_demotions
+            WHERE showId = ? AND causalSource = ?
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, showId)
+        bind(stmt, 2, source)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return sqlite3_column_double(stmt, 0)
+    }
+
+    func upsertSourceDemotion(
+        source: String,
+        showId: String,
+        currentMultiplier: Double,
+        floor: Double,
+        updatedAt: Double
+    ) throws {
+        let stmt = try prepare("""
+            INSERT INTO source_demotions (showId, causalSource, currentMultiplier, floor, updatedAt)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(showId, causalSource)
+            DO UPDATE SET currentMultiplier = excluded.currentMultiplier,
+                         floor = excluded.floor,
+                         updatedAt = excluded.updatedAt
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, showId)
+        bind(stmt, 2, source)
+        bind(stmt, 3, currentMultiplier)
+        bind(stmt, 4, floor)
+        bind(stmt, 5, updatedAt)
+        let rc = sqlite3_step(stmt)
+        guard rc == SQLITE_DONE else {
+            throw AnalysisStoreError.queryFailed("upsertSourceDemotion: \(String(cString: sqlite3_errmsg(db)))")
+        }
+    }
+
+    func upsertFingerprintDispute(
+        fingerprintId: String,
+        showId: String,
+        incrementDispute: Bool,
+        incrementConfirmation: Bool,
+        now: Double
+    ) throws {
+        let existing = try loadFingerprintDisputeRow(fingerprintId: fingerprintId, showId: showId)
+
+        if let existing {
+            var disputeCount = existing.disputeCount
+            var confirmationCount = existing.confirmationCount
+            if incrementDispute { disputeCount += 1 }
+            if incrementConfirmation { confirmationCount += 1 }
+            let status = confirmationCount >= 2 ? "cleared" : "disputed"
+
+            let stmt = try prepare("""
+                UPDATE fingerprint_disputes
+                SET disputeCount = ?, confirmationCount = ?, status = ?, updatedAt = ?
+                WHERE fingerprintId = ? AND showId = ?
+                """)
+            defer { sqlite3_finalize(stmt) }
+            bind(stmt, 1, disputeCount)
+            bind(stmt, 2, confirmationCount)
+            bind(stmt, 3, status)
+            bind(stmt, 4, now)
+            bind(stmt, 5, fingerprintId)
+            bind(stmt, 6, showId)
+            let rc = sqlite3_step(stmt)
+            guard rc == SQLITE_DONE else {
+                throw AnalysisStoreError.queryFailed("updateFingerprintDispute: \(String(cString: sqlite3_errmsg(db)))")
+            }
+        } else {
+            let disputeCount = incrementDispute ? 1 : 0
+            let confirmationCount = incrementConfirmation ? 1 : 0
+            let status = confirmationCount >= 2 ? "cleared" : "disputed"
+
+            let stmt = try prepare("""
+                INSERT INTO fingerprint_disputes (fingerprintId, showId, disputeCount, confirmationCount, status, updatedAt)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """)
+            defer { sqlite3_finalize(stmt) }
+            bind(stmt, 1, fingerprintId)
+            bind(stmt, 2, showId)
+            bind(stmt, 3, disputeCount)
+            bind(stmt, 4, confirmationCount)
+            bind(stmt, 5, status)
+            bind(stmt, 6, now)
+            let rc = sqlite3_step(stmt)
+            guard rc == SQLITE_DONE else {
+                throw AnalysisStoreError.queryFailed("insertFingerprintDispute: \(String(cString: sqlite3_errmsg(db)))")
+            }
+        }
+    }
+
+    func loadFingerprintDisputeStatus(fingerprintId: String, showId: String) throws -> String? {
+        let stmt = try prepare("""
+            SELECT status FROM fingerprint_disputes
+            WHERE fingerprintId = ? AND showId = ?
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, fingerprintId)
+        bind(stmt, 2, showId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return optionalText(stmt, 0)
+    }
+
+    private func loadFingerprintDisputeRow(
+        fingerprintId: String,
+        showId: String
+    ) throws -> (disputeCount: Int, confirmationCount: Int, status: String)? {
+        let stmt = try prepare("""
+            SELECT disputeCount, confirmationCount, status FROM fingerprint_disputes
+            WHERE fingerprintId = ? AND showId = ?
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, fingerprintId)
+        bind(stmt, 2, showId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let dc = Int(sqlite3_column_int(stmt, 0))
+        let cc = Int(sqlite3_column_int(stmt, 1))
+        let status = text(stmt, 2)
+        return (disputeCount: dc, confirmationCount: cc, status: status)
     }
 }

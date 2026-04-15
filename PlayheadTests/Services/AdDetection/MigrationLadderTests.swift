@@ -34,7 +34,7 @@ struct MigrationLadderTests {
         try await store.migrate()
 
         // Reaches v5 (current).
-        #expect(try await store.schemaVersion() == 10)
+        #expect(try await store.schemaVersion() == 11)
 
         // analysis_sessions has the camelCase column (H10).
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
@@ -85,7 +85,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 10)
+        #expect(try await store.schemaVersion() == 11)
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "shadowRetryPodcastId"))
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
@@ -128,7 +128,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 10)
+        #expect(try await store.schemaVersion() == 11)
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "shadowRetryPodcastId"))
@@ -154,7 +154,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 10)
+        #expect(try await store.schemaVersion() == 11)
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "shadowRetryPodcastId"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_sessions_shadow_retry"))
@@ -191,7 +191,7 @@ struct MigrationLadderTests {
         try await store.migrateOnlyForTesting()
 
         // V2 → v3 → v4 → v5 ladder must have run, reaching the target version.
-        #expect(try await store.schemaVersion() == 10)
+        #expect(try await store.schemaVersion() == 11)
         // V3 added transcriptVersion to evidence_events.
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
         // V4 added needsShadowRetry + shadowRetryPodcastId + the partial
@@ -231,7 +231,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrateOnlyForTesting()
 
-        #expect(try await store.schemaVersion() == 10)
+        #expect(try await store.schemaVersion() == 11)
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "runMode"))
@@ -251,7 +251,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrateOnlyForTesting()
 
-        #expect(try await store.schemaVersion() == 10)
+        #expect(try await store.schemaVersion() == 11)
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "shadowRetryPodcastId"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "evidenceSources"))
@@ -305,7 +305,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 10)
+        #expect(try await store.schemaVersion() == 11)
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "evidenceSources"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "eligibilityGate"))

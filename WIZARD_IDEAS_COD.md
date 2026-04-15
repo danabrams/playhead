@@ -1,514 +1,399 @@
-# Playhead Improvement Ideas
+# Playhead Ad Detection Pipeline — Wizard Ideas (Codex)
 
-This document is grounded in the current codebase, not just the original plan.
+This document focuses only on ad detection and skip quality in the existing on-device Playhead pipeline.
 
-Selection criteria used for ranking:
-- Must be obviously accretive to the current architecture
-- Must improve the product in ways users will actually notice
-- Must be pragmatic to implement incrementally
-- Must improve one or more of: trust, readiness, recall, usefulness, or operational safety
-- Should prefer ideas that compound with the existing pipeline rather than replace it
+Context used:
+- `CLAUDE.md`
+- `Ad Detection System - Technical Deep Dive.md`
+- current pipeline modules (`BackfillEvidenceFusion`, `DecisionMapper`, `SkipPolicyMatrix`, `MinimalContiguousSpanDecoder`, `TimeBoundaryResolver`, `SensitiveWindowRouter`, `PermissiveAdClassifier`, `SponsorKnowledgeStore`, `AdCopyFingerprintMatcher`, `UserCorrectionStore`, `SkipOrchestrator`)
 
-## Candidate Pool: 30 Ideas
+Evaluation criteria for winnowing:
+1. Improves user-visible trust (fewer bad skips, fewer obvious misses)
+2. Improves core quality metrics (recall, precision, boundary MAE)
+3. Is accretive to current architecture (no risky rewrite)
+4. Has a realistic implementation path with phased rollout and replay validation
 
-### 1. Download-time pre-analysis with visible readiness
-Make downloaded episodes analyze themselves before first play, then surface a simple readiness state in the library. Users would perceive the app as much faster and more reliable because skips and transcript features would already be there when playback starts. Implementation would mostly extend the existing `AnalysisWorkScheduler`, `AnalysisJobRunner`, `SkipCueMaterializer`, and SwiftData `analysisSummary` bridge rather than introduce a new system.
+## 30 Ideas (Longlist)
 
-### 2. User correction loop with scoped learning
-Let users say "not an ad", "skip was too early", "skip was too long", "this self-promo is fine", or "always skip this sponsor on this show". Users would trust the app more because mistakes become fixable instead of mysterious. Implementation would build on existing `recordListenRewind`, `TrustScoringService`, `PodcastProfile`, and skip decision logs, but add explicit correction scopes and a durable correction store.
+### 1) Replay-Calibrated Skip Confidence
+How it works: Replace identity-clamped skip confidence with calibration curves learned from replay corpus outcomes (per source mix and per show maturity bucket).
 
-### 3. Sponsor memory and compiled hot-path lexicon
-Turn confirmed backfill results into deterministic future wins: sponsor names, repeated CTA fragments, first-party suppressions, jingle fingerprints, and recurring slot priors should compile into a fast per-show artifact. Users would experience this as the app "learning their favorite shows" and catching ads earlier. Implementation fits the existing `PodcastProfile`, `LexicalScanner`, evidence catalog, and backfill path cleanly.
+User perception: Fewer confusing “high-confidence but wrong” skips, more consistent behavior across shows.
 
-### 4. Full transcript view with search and ad markers
-Promote the current transcript peek into a full transcript surface with search, ad markers, and jump-to-playhead actions. Users would value the app even when skip quality is imperfect, because the transcript becomes useful in its own right. Implementation is pragmatic because the app already stores transcript chunks and has an FTS5-oriented analysis store design.
+Implementation: Add calibration layer after `BackfillEvidenceFusion` in `DecisionMapper`, with cohort-gated lookup tables and fallback to current identity mapping.
 
-### 5. FM refusal-resistant fallback for medical/pharma/therapy ads
-Treat Foundation Models refusal as a routing problem, not a dead end. Users would notice fewer "obvious ad but not skipped" misses, especially for CVS/Walgreens/therapy-style reads. Implementation would deepen the current `SensitiveWindowRouter`, `PromptRedactor`, `PermissiveAdClassifier`, and evidence-resolution path rather than invent a second ad detector from scratch.
+### 2) Uncertainty Band With Deferred Action
+How it works: Add an explicit uncertainty zone (for example 0.55–0.72) that renders markers but defers auto-skip until additional evidence arrives (next FM pass, fingerprint hit, user correction prior).
 
-### 6. First-party and house-promo suppression
-Teach the system to distinguish third-party ads from show/network promos and first-party calls to action. Users would perceive fewer annoying false positives and the app would feel smarter, not just more aggressive. Implementation would extend domain/sponsor ownership logic in the evidence catalog and profile layer.
+User perception: Better precision without feeling like ads are ignored; users still see candidate context.
 
-### 7. "Why was this skipped?" evidence inspector
-Provide a compact explanation view showing sponsor phrases, CTA text, URL hits, confidence, and whether the skip came from live detection or pre-analysis. Users would trust the product more because it would stop behaving like a black box. Implementation would mostly be UI over existing evidence and decision records.
+Implementation: Extend `SkipEligibilityGate` and `SkipPolicyMatrix` to support `defer` state, then re-evaluate spans during backfill checkpoints.
 
-### 8. Library-level episode intelligence summaries
-Show "Ready to skip", "Transcript ready", "Analyzing", or "Needs download" directly in episode lists. Users would understand what the app has prepared without trial and error. Implementation would extend `Episode.analysisSummary` and pre-analysis progress plumbing.
+### 3) Negative-Evidence Scoring (Not Just Positive Evidence)
+How it works: Model anti-ad evidence (organic editorial continuity, chapter topic continuity, no CTA/disclosure over long spans, stable host discourse) so non-ads can be actively protected.
 
-### 9. Progressive analysis from partial downloads
-Start useful analysis from sufficiently buffered partial audio instead of waiting for full download completion whenever possible. Users would get skips sooner on streamed episodes. Implementation would build on `StreamingAudioDecoder`, transcript append paths, and the existing progressive loader setup, but it requires careful truncation and cache-invalidating rules.
+User perception: Fewer false positives on interviews and advice segments that sound promotional.
 
-### 10. User-tunable skip aggressiveness
-Offer modes like conservative, balanced, and aggressive on top of the existing auto/manual/off framing. Users who hate false positives and users who hate hearing ads could each get what they want. Implementation would mostly parameterize thresholds and suppression policy, but would need careful defaults.
+Implementation: Add bounded negative contributions in fusion, with hard floor so negative evidence can dampen but not erase strong deterministic anchors.
 
-### 11. Boundary feedback from seek/rewind behavior
-Use "rewind into skipped segment" and immediate post-skip back-seeks to improve boundary snapping, not just trust scores. Users would perceive fewer clipped jokes and fewer awkwardly late exits from ads. Implementation would extend the current `SkipOrchestrator` logging and backfill refiners.
+### 4) Correction Scope Precision Upgrade
+How it works: Replace broad correction ranges with typed scopes (`episode-span`, `phrase-on-show`, `sponsor-on-show`, `domain-ownership-on-show`) and expiration semantics.
 
-### 12. Explicit background queue management
-Expose which episodes are queued for pre-analysis and allow pause/resume/prioritize actions. Users who download lots of podcasts would understand why some episodes are ready and others are not. Implementation would mainly be UI over `analysis_jobs` and `BackgroundProcessingService`.
+User perception: “It learned exactly what I corrected” instead of broad unpredictable behavior.
 
-### 13. Real-episode benchmark gates in CI
-Add durable pass/fail thresholds around real-fixture recall and false-positive rates instead of treating all benchmarks as informational only. Users would not see this directly, but they would feel it through fewer regressions. Implementation is highly pragmatic given the existing replay and benchmark tests.
+Implementation: Extend `UserCorrectionStore` schema and consume it in `SkipOrchestrator`, `DecisionMapper`, and backfill rescoring.
 
-### 14. Replay harness fed by exported real episodes
-Turn the debug episode exporter into a steady corpus-generation tool for regression testing. Users benefit because fixes stop breaking older shows. Implementation would extend the current export feature and fixture loaders rather than invent a new evaluation system.
+### 5) Boundary Feedback From Post-Skip Seek Behavior
+How it works: Treat immediate rewind/forward after a skip as supervised boundary signals and feed into boundary offset estimators.
 
-### 15. Production-grade model manifest and asset delivery
-Replace placeholder `example.com` URLs and zero hashes with a real model distribution workflow. Users would perceive onboarding as credible and dependable instead of fragile. Implementation is straightforward but operationally important.
+User perception: Fewer clipped host intros/outros and fewer late exits from ads.
 
-### 16. Self-healing repair center for stores and caches
-Offer a settings/debug action that validates SwiftData, SQLite, model files, and cache directories, then proposes safe repairs. Users would recover from corrupted local state without reinstalling. Implementation would formalize logic that already exists informally in startup recovery paths.
+Implementation: Mine `recordListenRewind` style telemetry, update `TimeBoundaryResolver` edge priors per show.
 
-### 17. Better storage management UI
-Show how much space is used by audio cache, transcript/analysis data, staged models, and rollback models, with reclaim actions. Users would understand the cost of the intelligence features and feel in control. Implementation would extend the current settings storage computations.
+### 6) Two-Pass Boundary Snap (Coarse Then Fine)
+How it works: First snap to robust structural breaks, then run a fine local search near discourse transitions and cue phrases.
 
-### 18. Stronger metadata priors from feeds and chapters
-Use show notes, chapters, enclosure metadata, and feed-level patterns as weak priors for sponsor detection and boundary hints. Users would experience slightly better recall with minimal risk if priors stay weak. Implementation is low-risk because the parser already sees most of this data.
+User perception: Cleaner boundaries on host-read ads with soft transitions.
 
-### 19. Shareable transcript moments
-Let users select transcript regions and share text or deep links into playback timecodes. Users would find the app more useful even outside ad skipping. Implementation depends on stronger transcript UI but not on any backend.
+Implementation: Keep current snap step, then add a cheap second local optimization pass bounded to +/- 3 seconds.
 
-### 20. CarPlay and remote-control polish
-Deepen remote command, lock-screen, and vehicle behavior so skip cues and transport feel native in all listening contexts. Users would perceive polish and seriousness. Implementation builds directly on the existing `PlaybackService` remote command support.
+### 7) Dynamic Ad Length Priors Per Show
+How it works: Learn per-show distributions for preroll/midroll/postroll length and use as priors during merge/split decisions.
 
-### 21. Accessibility-first transcript and ad UX pass
-Improve VoiceOver grouping, focus order, spoken time labels, and transcript navigation affordances. Users who depend on accessibility would get a materially better experience, and everyone benefits from cleaner structure. Implementation is highly pragmatic because most surfaces already exist.
+User perception: Fewer absurdly short fragments and fewer merged mega-spans.
 
-### 22. Sponsor cards/history
-Keep a lightweight per-episode history of skipped sponsors with dismissible cards and optional revisit actions. Users would appreciate not losing useful sponsor info just because an ad was skipped. Implementation builds naturally on `AdBannerView`, metadata extraction, and `AdWindow` fields.
+Implementation: Integrate priors into `MinimalContiguousSpanDecoder` split/merge thresholds and `SpanHypothesis` lifecycle scoring.
 
-### 23. Per-show controls and episode exceptions
-Allow users to force manual mode, disable skipping, or trust a show more aggressively on a per-show basis. Users would feel ownership over the product rather than subject to its defaults. Implementation is an incremental extension of `PodcastProfile.mode`.
+### 8) Hard-Negative Mining Loop
+How it works: Continuously collect false positives (especially “informational CTA” content) and auto-generate challenge fixtures for replay tests.
 
-### 24. Smarter library sort and surfacing
-Prioritize unfinished episodes, analysis-ready episodes, and recent releases instead of only simple browsing order. Users would find the library more helpful as a listening cockpit. Implementation is mostly query/view-model work.
+User perception: Steady reduction of embarrassing over-skips over time.
 
-### 25. Detection health and status surface
-Show clear reasons when an episode is not yet analyzed: downloading, low battery deferral, thermal pause, missing model, or Apple Intelligence unavailable. Users would stop interpreting "no skip happened" as "the app failed silently". Implementation would expose current scheduler/capability state in a user-readable way.
+Implementation: Add false-positive harvesting from correction events into replay fixture pipeline and CI thresholds.
 
-### 26. Stronger anti-churn policy for cues
-Keep skip cues stable once surfaced unless there is materially stronger counterevidence. Users would perceive less jitter and fewer changing skip markers between sessions. Implementation would deepen already-present anti-churn ideas in the detection/backfill flow.
+### 9) Evidence Quality Weighting by Anchor Reliability
+How it works: Weight anchors by historical precision (`url > promo code > disclosure > CTA phrase`) and by local context quality.
 
-### 27. Suspicious-window quarantine
-When windows are high-risk for false positives, keep them in shadow/manual mode until corroborated instead of letting them behave like normal candidates. Users would see fewer embarrassing skips on borderline content. Implementation would reuse confidence/evidence signals already produced by the pipeline.
+User perception: Strong deterministic anchors stay powerful while weak textual hints stop overfiring.
 
-### 28. FM cohort canarying and kill switches
-Treat `(OS build, prompt cohort, schema cohort)` as rollout units that can be shadowed, disabled, or promoted based on replay performance. Users would be protected from silent OS-model regressions. Implementation fits the current `ScanCohort` and shadow infrastructure extremely well.
+Implementation: Introduce anchor reliability table consumed by fusion and span decoder anchor gating.
 
-### 29. Deterministic CTA/URL pattern expansion
-Mine existing misses and extend deterministic sponsor/CTA/url patterns so more obvious ads are caught without waiting for FM. Users would perceive better recall immediately. Implementation is cheap and should be part of routine detector maintenance.
+### 10) Sponsor Alias Canonicalization
+How it works: Normalize sponsor mentions (“AG1”, “Athletic Greens”, “drinkag1”) into one canonical entity per show.
 
-### 30. Feed-driven identity enrichment
-Persist stronger identities for podcasts, episodes, and recurring sponsors so cross-episode learning is more robust under feed churn and dynamic ad insertion. Users would not notice the mechanism directly, but they would feel the system become less brittle over time. Implementation would deepen canonicalization and fingerprint bridging already present in the models and download manager.
+User perception: Better recurring-ad recall with fewer duplicate or missed matches.
 
-## Winnowing Logic
+Implementation: Extend `SponsorKnowledgeStore` with alias graph + confidence promotion rules.
 
-I filtered the 30 ideas through four questions:
+### 11) Multi-Feature Fingerprinting
+How it works: Combine text MinHash with lightweight acoustic signature and CTA token sequence patterns.
 
-1. Does this make the core experience noticeably better for real users, not just developers?
-2. Can it be built incrementally from systems already in the repo?
-3. Does it compound with the ad-skip pipeline instead of distracting from it?
-4. Am I confident it would still look like a good decision six months from now?
+User perception: Recurring ads are caught earlier even when script wording varies slightly.
 
-That pushes the ranking toward ideas that improve:
-- first-play success
-- trust after mistakes
-- future episode learning
-- fallback utility when skipping is imperfect
-- robustness around the known FM blind spot
+Implementation: Extend `AdCopyFingerprintMatcher` scoring to late-fuse text and acoustic similarity with strict transfer guardrails.
 
-## Top 5 Ideas
+### 12) Boundary Transfer Confidence Tiers for Fingerprints
+How it works: Keep current transfer, but classify matches into strict/full transfer vs partial transfer vs seed-only based on alignment diagnostics.
 
-## 1. Make Downloaded Episodes Analysis-Ready Before First Play
+User perception: Higher precision for “seen before” matches.
 
-### What it is
+Implementation: Add explicit tiers and guardrails in fingerprint transfer path before decoded span upserts.
 
-Shift the product from reactive intelligence to proactive intelligence. If an episode is downloaded, or is obviously likely to be played soon, the app should precompute enough of the pipeline that the first actual playback session already has:
-- initial skip cues
-- transcript coverage for the opening segment
-- an accurate readiness summary in the library
+### 13) Sensitive Window Router Expansion
+How it works: Broaden refusal-risk routing triggers (medical terms, regulated claims patterns, known refusal contexts) before FM call.
 
-This should not mean "analyze everything to completion all the time." It should mean "finish the first useful tranche early, then deepen opportunistically."
+User perception: Fewer obvious misses in pharma/therapy/medical ad reads.
 
-### Why this is the best idea
+Implementation: Enhance `SensitiveWindowRouter` pre-classification rules with deterministic lexical probes.
 
-This idea improves the single most important product moment: the first listen.
+### 14) Deterministic Fallback When FM Abstains
+How it works: When FM returns `abstain`/refusal, run a strict deterministic classifier requiring high-confidence commercial anchors + acoustic corroboration.
 
-Right now, Playhead has a lot of intelligence, but much of it is still architected as something that wakes up when playback begins. That creates a perception problem. Even if the detector is good, the user can still experience the app as late, uncertain, or inconsistent if the episode is not ready when they hit play.
+User perception: Ads do not vanish just because FM declined to answer.
 
-Pre-analysis changes that psychology completely:
-- the app feels fast, not busy
-- the user sees evidence that the product prepared for them
-- the first ad-skip moment becomes much more likely to land
-- transcript features stop feeling like "eventually consistent" and start feeling intentional
+Implementation: Add abstain fallback branch in backfill, with conservative thresholds and shadow-mode rollout.
 
-In other words, this does not just improve latency. It improves trust, product feel, and perceived quality all at once.
+### 15) Loudness-Normalized Acoustic Breaks
+How it works: Normalize energy features by rolling LUFS and route-specific gain context before break detection.
 
-### How users would perceive it
+User perception: Better stability across loudness-compressed and inconsistent episodes.
 
-Users would notice:
-- episodes often begin with skip intelligence already available
-- the library communicates readiness clearly instead of leaving them to guess
-- downloaded episodes feel "premium" and prepared
-- there is less waiting, less pipeline warmup noise, and less disappointment
+Implementation: Insert normalization in feature extraction before acoustic break thresholds are applied.
 
-This is especially valuable for commute-style listening where the user opens the app, taps play, and expects everything to just work.
+### 16) Return-to-Show Transition Detector
+How it works: Dedicated detector for “back to the show” patterns using discourse markers + speaker/music transitions.
 
-### Why I am confident it is accretive and pragmatic
+User perception: Better end boundaries and less overrun past ad exits.
 
-The repo already has most of the machinery:
-- `AnalysisWorkScheduler`
-- `AnalysisJobRunner`
-- `AnalysisJobReconciler`
-- `BackgroundProcessingService`
-- `SkipCueMaterializer`
-- `Episode.analysisSummary`
+Implementation: Add explicit end-anchor channel into evidence catalog and boundary resolver.
 
-This means the right move is not to invent a new subsystem. It is to promote the existing pre-analysis path from a background convenience into a first-class product behavior.
+### 17) Chapter/Show-Notes Weak Priors
+How it works: Use chapter titles or show notes as weak priors for likely ad zones without allowing direct auto-skip decisions.
 
-### How I would implement it
+User perception: Higher recall in structured podcasts with chaptered ad slots.
 
-1. Define explicit readiness tiers at the product level.
-   Example:
-   - `not_ready`
-   - `preparing`
-   - `ready_initial_skip`
-   - `ready_transcript_opening`
-   - `ready_full_backfill`
+Implementation: Add metadata priors as low-weight inputs in classifier/fusion.
 
-2. Store those tiers in the SwiftData-facing `analysisSummary` so library and episode views can show them cheaply.
+### 18) Multilingual and Code-Switch Lexical Expansion
+How it works: Expand lexical detector to multilingual CTA/disclosure templates and transliterated promo constructs.
 
-3. On explicit download completion, enqueue a higher-priority pre-analysis job automatically.
-   - first target: enough coverage to make the opening minutes intelligent
-   - second target: deeper coverage while charging / idle / background-eligible
+User perception: Better performance on bilingual shows and non-English ad reads.
 
-4. Add a small but prominent readiness chip in `EpisodeListView` and optionally `LibraryView`.
+Implementation: Add locale-aware pattern packs with confidence caps until replay-validated.
 
-5. Teach the scheduler to prioritize:
-   - explicitly downloaded episodes
-   - most recently interacted episodes
-   - unfinished episodes
+### 19) Micro-Ad Detector (<15s)
+How it works: Explicit short-span decoder mode for brief injected stingers and one-line promos.
 
-6. Keep power discipline:
-   - respect current battery/thermal gating
-   - separate "first useful tranche" from "full luxury backfill"
+User perception: More complete skip coverage on dynamic insertion inventories.
 
-### Why it beats the other candidates
+Implementation: Relax minimum span constraints only when strong anchor patterns exist.
 
-It has unusually high impact for relatively low architectural disruption. It directly improves the first-run and everyday listening experience, and it uses systems the project already built. That combination is rare.
+### 20) Branded Segment Detector (>120s)
+How it works: Handle long branded “storytelling ads” using continuity cues and intent/ownership refinement.
 
-## 2. Add a Real User Correction Loop With Scoped Learning
+User perception: Better handling of native-style reads that exceed normal ad length assumptions.
 
-### What it is
+Implementation: Extend split logic to preserve long spans when commercial intent remains consistently high.
 
-Turn mistakes into training signals the product can actually use.
+### 21) Discourse-Aware Span Stitching
+How it works: Merge adjacent candidate spans based on discourse continuity and sponsor entity continuity, not only fixed time gaps.
 
-The current architecture already has pieces of this idea:
-- trust scoring
-- rewind/listen signals
-- decision logs
-- per-show profiles
+User perception: Less fragmented markers and cleaner skip UX.
 
-The missing piece is an explicit, user-facing correction model with durable scopes. The app should let a correction mean something more precise than "trust went down a bit."
+Implementation: Add stitching heuristic in decoder post-processing stage.
 
-Useful scopes would include:
-- exact span in this episode
-- this phrase on this show
-- this sponsor on this show
-- this domain is first-party for this show
-- never auto-skip this show, only suggest
+### 22) Budget-Aware FM Window Selection
+How it works: Allocate FM compute budget to highest-uncertainty windows and candidate boundaries rather than uniform scanning.
 
-### Why it is ranked second
+User perception: Better quality under same compute budget; fewer misses where it matters.
 
-Ad-skipping products live or die on trust. Not recall alone. Not elegance alone. Trust.
+Implementation: Add priority scheduler for FM backfill windows using uncertainty and potential impact scores.
 
-A miss is annoying. A false positive is much worse. And a false positive that cannot be corrected in a meaningful way is how users stop believing the product.
+### 23) First-Minutes Preflight Focus
+How it works: Prioritize aggressive analysis for first N minutes (where user trust is most sensitive) before deeper episode coverage.
 
-This idea creates a clear product promise:
-"If we get it wrong, you can teach us quickly, locally, and durably."
+User perception: Early playback feels reliable quickly.
 
-That is one of the strongest trust-building moves available.
+Implementation: Re-prioritize hot-path + backfill queue ordering for near-playhead early segments.
 
-### How users would perceive it
+### 24) Explainability Reason Codes In UI
+How it works: Every skip marker exposes concise reason codes (URL anchor, FM consensus, fingerprint match, user rule).
 
-Users would experience:
-- less helplessness when a skip feels wrong
-- a sense that the app adapts to their actual preferences
-- fewer repeated mistakes on favorite shows
-- more confidence leaving auto-skip enabled
+User perception: Higher trust and easier correction decisions.
 
-The key is not to make the UX heavy. Corrections must feel like small, obvious actions taken at the moment of annoyance.
+Implementation: Surface existing provenance in lightweight UX components.
 
-### Why I am confident it would work
+### 25) One-Tap Skip Undo and Boundary Nudge
+How it works: Let users instantly undo a skip and optionally indicate “start too early” or “end too late.”
 
-The repo already has the underlying primitives:
-- `recordListenRewind`
-- `TrustScoringService`
-- `PodcastProfile`
-- `SkipOrchestrator` decision logs
-- ad banners that can serve as correction surfaces
+User perception: Mistakes feel recoverable and app feels cooperative.
 
-So the work is additive:
-- add correction types
-- persist them
-- teach detector/orchestrator paths to honor them
+Implementation: Add ergonomic controls in now playing and pipe corrections into boundary feedback loop.
 
-This is much safer than trying to solve trust entirely through better model thresholds.
+### 26) Per-Show Aggressiveness and Intent Policy Presets
+How it works: Offer simple presets (Conservative/Balanced/Aggressive) plus intent policy toggles (skip third-party only vs include house promos).
 
-### How I would implement it
+User perception: Users keep control over what “ad” means for them.
 
-1. Introduce a correction store or append-only correction event table.
+Implementation: Map presets to threshold/policy profiles in `SkipPolicyMatrix` and fusion thresholds.
 
-2. Define correction scopes explicitly.
-   Example:
-   - `exact_span`
-   - `phrase_on_show`
-   - `sponsor_on_show`
-   - `first_party_domain_on_show`
-   - `show_mode_override`
+### 27) Replay Quality Gates for Precision/Recall/Boundary
+How it works: Enforce minimum precision/recall and boundary MAE thresholds in CI; block regressions on real fixtures.
 
-3. Extend the banner and now-playing surfaces with lightweight correction options.
-   Example:
-   - "Not an ad"
-   - "Too early"
-   - "Too late"
-   - "This is just a show promo"
-   - "Always skip this sponsor on this show"
+User perception: Fewer regressions between app updates.
 
-4. Apply corrections in three places:
-   - skip suppression in `SkipOrchestrator`
-   - candidate suppression / promotion in backfill
-   - profile compilation for future episodes
+Implementation: Expand existing replay harness assertions and rollout checks.
 
-5. Expose a minimal per-show settings page where users can review or clear learned rules.
+### 28) Cohort Canarying by OS + Prompt + Schema
+How it works: Ship detection cohorts as explicit rollout units with automated canary metrics and kill switches.
 
-### Why it is not #1
+User perception: More stable behavior across iOS updates.
 
-Pre-analysis readiness improves the first-play experience for almost everyone, even if they never touch settings or corrections. Corrections are slightly more reactive. But after readiness, this is the strongest trust multiplier in the project.
+Implementation: Extend current cohort controls and telemetry aggregation around FM and fallback behavior.
 
-## 3. Build Sponsor Memory That Compiles Into Faster Future Catches
+### 29) Edge-Case Fixture Expansion
+How it works: Add dedicated fixture sets for dynamic insertion seams, bilingual reads, no-music host reads, and regulated medical copy.
 
-### What it is
+User perception: Better reliability in edge scenarios that currently create surprises.
 
-Use high-confidence confirmed backfill results to create a per-show sponsor memory that feeds the hot path.
+Implementation: Expand fixture corpus and targeted replay suites.
 
-This memory should include:
-- sponsor names
-- repeated CTA fragments
-- known domains
-- first-party suppressions
-- common slot priors
-- repeated disclaimers
-- jingle hashes when available
+### 30) Pipeline Watchdog and Graceful Degradation
+How it works: Detect failing subsystems (FM unavailable, SoundAnalysis degraded, transcription lag) and switch to safe fallback modes with clear status.
 
-The critical design requirement is compilation. The hot path should not query a rich fuzzy store every time. It should consume a compact, deterministic, low-latency artifact.
+User perception: Predictable behavior instead of silent failures.
 
-### Why this idea matters so much
+Implementation: Add subsystem health scoring and fallback policy routing.
 
-This is the cleanest way to make the system better over time without making it slower over time.
+## Winnowing Process
 
-Many ad detectors can be good on one episode. Much fewer become structurally better on a show after observing a few episodes. That is where the compounding value is.
+I scored each idea on six dimensions (1–5 each):
+1. User trust impact
+2. Recall and precision lift potential
+3. Boundary quality lift
+4. Implementation pragmatism
+5. Architectural fit with current code
+6. Rollout safety
 
-If Playhead learns a show locally and improves its future detection speed and recall, the app becomes:
-- more accurate
-- faster at first useful detection
-- less dependent on expensive backfill for recurring sponsor styles
-- more differentiated from naive one-shot detectors
+The strongest ideas were those with high trust impact and high architectural fit that can ship in phases.
 
-### How users would perceive it
+## Top 5 (Best to Worst)
 
-Users are likely to experience this as:
-- "this app really understands the shows I listen to most"
-- earlier and more reliable ad skips on familiar podcasts
-- fewer misses on recurring sponsors
-- fewer weird classifications of house promos or first-party links
+## 1) Replay-Calibrated Confidence + Uncertainty Defer Band
 
-They do not need to know the mechanism. They only need to feel the pattern.
+Why this is #1:
+- Today, several decisions are effectively thresholded on partly uncalibrated scores. Calibrating those scores and adding a defer zone directly attacks the most user-visible failure mode: confident wrong skips.
+- It improves both precision and trust without sacrificing recall, because uncertain cases become “detect/show/defer” instead of “act and risk bad skip.”
+- It is highly accretive: this sits on top of `BackfillEvidenceFusion`, `DecisionMapper`, and `SkipEligibilityGate` rather than replacing them.
 
-### Why I am confident it is a good fit
+How it would work:
+- Build calibration tables from replay outcomes by source composition buckets (for example: FM+anchor, lexical+acoustic only, fingerprint transfer).
+- Map raw score to calibrated probability.
+- Introduce uncertainty defer band where markers remain visible but auto-skip is delayed until more evidence arrives.
+- Re-run deferred decisions at backfill checkpoints and after new evidence arrives.
 
-The architecture already points in this direction:
-- `PodcastProfile`
-- `LexicalScanner`
-- show priors
-- evidence catalogs
-- slot priors
-- backfill metadata extraction
+User-perceived outcome:
+- Fewer “why did it skip that?” moments.
+- More stable confidence semantics.
+- Better confidence in leaving auto-skip on.
 
-So this is not a speculative pivot. It is the natural next layer over systems already present.
+Implementation path:
+1. Add offline calibration job from replay logs.
+2. Introduce calibration lookup in `DecisionMapper` behind feature flag.
+3. Add `defer` eligibility in `SkipPolicyMatrix` and orchestrator logic.
+4. Roll out in shadow mode, compare precision/recall/MAE before promotion.
 
-### How I would implement it
+Why I’m confident:
+- This is a classic high-leverage improvement in probabilistic systems.
+- It needs no new model dependency and can be validated entirely with existing replay infrastructure.
 
-1. Expand the profile/materialization layer to store only high-confidence, grounded knowledge.
+## 2) Granular User Correction Learning (Scoped, Durable, Safe)
 
-2. Distinguish positive memory from suppressive memory.
-   - positive: sponsor, CTA, URL, recurring phrase
-   - suppressive: first-party domain, known house-promo marker, user correction rule
+Why this is #2:
+- Ad-skip products are trust products. Correction handling is the trust flywheel.
+- The pipeline already has correction primitives, but broad scopes create overgeneralization risk; making scopes precise is a direct quality improvement.
+- It reduces repeat mistakes and gives users agency without requiring them to tune complex settings.
 
-3. Compile the profile into a hot-path artifact after qualifying updates.
-   - flattened sponsor lexicon
-   - normalized CTA phrase list
-   - domain ownership map
-   - slot prior table
+How it would work:
+- Persist corrections with explicit scope and TTL/decay:
+  - exact span
+  - phrase on show
+  - sponsor on show
+  - domain ownership on show
+- Apply corrections in three places:
+  - suppression/boost in skip decisions
+  - boundary adjustments
+  - sponsor memory promotion/demotion
+- Protect against poisoning by requiring repeated confirmations for global-ish rules.
 
-4. Make `LexicalScanner` and classifier input consult that compiled artifact directly.
+User-perceived outcome:
+- “When I correct it, it stays corrected.”
+- Fewer repeated false positives on the same show.
+- More confidence that auto-skip aligns with user intent.
 
-5. Add poisoning protections:
-   - only materialize from confirmed windows
-   - require corroboration or repetition
-   - honor user corrections as stronger-than-model signals
+Implementation path:
+1. Extend `UserCorrectionStore` schema and migration.
+2. Wire scoped lookups into `SkipOrchestrator` and backfill fusion path.
+3. Add one-tap correction affordances in now playing and ad marker UI.
+4. Add replay tests for correction scope behavior.
 
-### Why it is ranked below corrections
+Why I’m confident:
+- The infrastructure already exists; this is primarily a precision and ergonomics upgrade.
+- User trust gains are immediate and compounding.
 
-This is a huge leverage idea, but its payoff is slightly less immediate than explicit corrections and readiness. It compounds over repeated listening, which is excellent, but not as universal on day one.
+## 3) Boundary Accuracy Loop From Real Listening Behavior
 
-## 4. Ship the Full Transcript Experience, Not Just a Peek
+Why this is #3:
+- Boundary errors are often more annoying than outright misses because they clip content.
+- Playhead already logs behavior that can be converted into supervisory signals.
+- This improves UX quality even when recall/precision stay constant.
 
-### What it is
+How it would work:
+- Use immediate post-skip seeks as boundary feedback:
+  - rewind soon after skip suggests start was too early
+  - quick forward suggests end was too late
+- Feed offsets into per-show boundary priors and a two-pass resolver:
+  - pass 1 structural cues (pause/music/speaker)
+  - pass 2 local discourse-aware fine alignment
+- Keep hard bounds to avoid drift/overfitting.
 
-Take the existing transcript peek and turn it into a real feature:
-- full synced transcript
-- search
-- jump-to-line
-- visible ad markers
-- highlighted skipped segments
-- lightweight sponsor/evidence callouts where appropriate
+User-perceived outcome:
+- Less clipped host speech.
+- Cleaner return points after ads.
+- Skips feel “human tuned” rather than robotic.
 
-This should become an "episode intelligence" surface, not merely a diagnostic sheet.
+Implementation path:
+1. Add boundary feedback extraction from playback telemetry.
+2. Extend `TimeBoundaryResolver` with per-show offset priors.
+3. Add second local snap pass with small search window.
+4. Validate via boundary MAE metrics in replay harness.
 
-### Why it belongs in the top 5
+Why I’m confident:
+- Uses high-signal real behavior data already available.
+- Can be rolled out conservatively and measured objectively.
 
-Playhead should not be valuable only when ad-skipping works perfectly.
+## 4) Refusal-Resistant Sensitive-Content Path (FM Abstain Fallback)
 
-A full transcript experience does three important things:
+Why this is #4:
+- Known blind spot: regulated medical/pharma/therapy windows can produce FM refusal/abstain.
+- Users experience these misses as obvious failures, so fixing them has outsized trust value.
+- This extends existing sensitive routing and permissive path rather than introducing risky new external dependencies.
 
-1. It broadens the app's utility beyond a single automation feature.
-2. It gives users a fallback value path when detection is still incomplete.
-3. It makes the intelligence of the system visible and explorable.
+How it would work:
+- Expand `SensitiveWindowRouter` triggers for refusal-prone windows.
+- If FM abstains/refuses, run strict deterministic fallback requiring:
+  - strong commercial anchors (URL/promo/disclosure)
+  - corroborating acoustic/transition cues
+  - conservative threshold for skip eligibility
+- Keep fallback cohort-gated and monitored.
 
-That matters because skip quality can improve over time, but the product still needs to feel compelling right now.
+User-perceived outcome:
+- Fewer conspicuous misses on certain ad categories.
+- Better consistency of skip behavior across content types.
 
-### How users would perceive it
+Implementation path:
+1. Add refusal-risk lexical probes.
+2. Implement abstain fallback branch in backfill decision path.
+3. Expand edge-case replay fixtures for regulated ad reads.
+4. Roll out via shadow cohort with kill switch.
 
-Users would get:
-- searchable memory for episodes
-- a better way to revisit moments
-- immediate clarity about what was skipped and why
-- a differentiated reason to prefer Playhead even when ads are sparse
+Why I’m confident:
+- Architecture already has most primitives (`SensitiveWindowRouter`, permissive classifier, redaction paths).
+- Conservative gating keeps false-positive risk bounded.
 
-This is the kind of feature that makes the product feel richer, not just smarter.
+## 5) Sponsor Memory + Multi-Feature Fingerprint Upgrade
 
-### Why I am confident it is pragmatic
+Why this is #5:
+- Recurring ad copy is one of the easiest compounding wins in podcast ad detection.
+- Current sponsor and fingerprint systems are solid but can capture more repeat value with aliasing and multi-feature matching.
+- This improves recall and early detection particularly for frequent shows.
 
-The repo already has:
-- transcript persistence
-- transcript peek UI
-- transcript time anchoring
-- planned FTS5 storage model
-- ad window persistence
+How it would work:
+- Canonicalize sponsor aliases in `SponsorKnowledgeStore`.
+- Upgrade fingerprint scoring to combine text MinHash, acoustic signature hints, and CTA sequence features.
+- Add transfer confidence tiers (full transfer, partial transfer, seed-only) to protect precision.
 
-That means most of the hard data plumbing is already there. The remaining work is turning existing analysis artifacts into a coherent user-facing view.
+User-perceived outcome:
+- Faster, earlier catches on recurring sponsors.
+- Fewer misses when ad scripts vary slightly between episodes.
 
-### How I would implement it
+Implementation path:
+1. Add alias graph + promotion rules to sponsor memory.
+2. Extend `AdCopyFingerprintMatcher` with late-fusion scoring.
+3. Implement transfer tiers and stronger alignment diagnostics.
+4. Replay-test with repeated-ad fixtures across multiple shows.
 
-1. Expand `TranscriptPeekView` into a full transcript screen with virtualized loading if needed.
+Why I’m confident:
+- Strong architectural fit with existing memory and fingerprint components.
+- Incremental rollout possible without changing core hot path semantics.
 
-2. Add indexed search over persisted transcript chunks.
+## Why These 5 Win
 
-3. Overlay ad windows and optionally evidence anchors.
+These five together produce the best pragmatic outcome:
+- #1 improves decision reliability globally.
+- #2 turns user corrections into durable quality gains.
+- #3 fixes boundary pain that users notice immediately.
+- #4 closes a known high-visibility blind spot.
+- #5 compounds quality over repeated listening patterns.
 
-4. Support jump-to-time interactions and "resume from here".
-
-5. Add basic actions:
-   - copy text
-   - share quote with timestamp
-   - "report this skip decision" from transcript context
-
-### Why it is not ranked higher
-
-It broadens usefulness and makes the app more compelling, but it does not improve the core "did the ad skip work when I needed it?" moment as directly as the top three ideas do.
-
-## 5. Harden the Medical/Pharma/Therapy Blind Spot With a Dedicated Fallback Path
-
-### What it is
-
-Build a deliberate recovery path for the exact content category currently causing high-value misses: ads that trip Foundation Models safety refusal.
-
-The right framing is not "beat Apple's classifier head-on." The right framing is:
-- detect risky windows early
-- route them differently
-- preserve grounded evidence
-- avoid turning FM refusal into an automatic miss
-
-This likely means combining:
-- sensitive-window routing
-- selective redaction
-- permissive-content-transformations path when appropriate
-- stronger deterministic evidence extraction
-- conservative promotion rules
-
-### Why it still makes the top 5 despite the technical risk
-
-Because this repo already documents the problem in painful detail, and the problem is product-visible.
-
-If a user hears a blatant CVS or therapy ad that Playhead misses, the product's central promise takes a hit. Solving even part of that blind spot is therefore disproportionately valuable.
-
-### How users would perceive it
-
-Users would simply experience fewer absurd misses on obviously commercial content. They do not need to know that Apple guardrails were involved. They only need to feel that the app stopped failing in conspicuous cases.
-
-### Why I did not rank it higher
-
-The problem is real, but this is the least predictable of the top five ideas because it depends on OS behavior outside the app's control. That makes it a high-value but lower-confidence bet than the first four.
-
-### Why I still think it is worth doing
-
-Because the codebase already contains the right primitives:
-- `SensitiveWindowRouter`
-- `PromptRedactor`
-- `PermissiveAdClassifier`
-- `FoundationModelClassifier`
-- evidence catalogs
-- shadow retry machinery
-
-That means the project has already paid much of the conceptual cost. The remaining step is to make this path sharper, more selective, and better validated with regression fixtures.
-
-### How I would implement it
-
-1. Explicitly classify risky content categories at the router boundary.
-
-2. Separate:
-   - refusal avoidance
-   - evidence grounding
-   - final promotion policy
-
-3. If FM still refuses, preserve deterministic evidence and let a conservative fallback score run instead of dropping the window.
-
-4. Add dedicated real-fixture tests for:
-   - pharmacy vaccine ads
-   - therapy ads
-   - regulated medical-test ads
-   - known benign medical discussion
-
-5. Keep this path cohort-gated and replay-validated so OS regressions do not silently spread.
-
-## Why These 5 and Not the Others
-
-These five ideas work together unusually well:
-
-- Idea 1 makes the app feel ready before playback starts.
-- Idea 2 makes the app trustworthy when it gets something wrong.
-- Idea 3 makes the app improve on shows the user actually listens to.
-- Idea 4 makes the product useful even outside ad-skipping.
-- Idea 5 attacks a known, painful reliability hole without requiring an architectural rewrite.
-
-That mix is why I am confident in this ranking. It improves:
-- first impression
-- day-to-day trust
-- long-term compounding quality
-- product usefulness
-- technical robustness around a real failure mode
-
-If I had to choose just one: do idea 1 first.
-If I had to choose the best pair: do ideas 1 and 2 together.
-If I wanted the best medium-term moat: do ideas 1, 2, and 3 in sequence.
+This set is both high-impact and deployable in stages with replay-backed safety gates.
