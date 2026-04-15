@@ -55,6 +55,9 @@
 		CE5561D4E6A0B1BC3D4E5F60 /* ChapterEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE2241A1B3F7D8E90A1B2C3D /* ChapterEvidence.swift */; };
 		CEP671E5F7B1C2CD4E5F6071 /* ChapterEvidenceParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEP341B2C4E8F9FA1B2C3D4E /* ChapterEvidenceParser.swift */; };
 		CET781F6A8C2D3DE5F607182 /* ChapterEvidenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CET451C3D5F9A0AB2C3D4E5F /* ChapterEvidenceTests.swift */; };
+		EMC5561D4E6A0B1BC3D4E5F60 /* EpisodeMetadataCue.swift in Sources */ = {isa = PBXBuildFile; fileRef = EMC2241A1B3F7D8E90A1B2C3D /* EpisodeMetadataCue.swift */; };
+		MCE671E5F7B1C2CD4E5F6071 /* MetadataCueExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = MCE341B2C4E8F9FA1B2C3D4E /* MetadataCueExtractor.swift */; };
+		MCT781F6A8C2D3DE5F607182 /* MetadataCueExtractorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MCT451C3D5F9A0AB2C3D4E5F /* MetadataCueExtractorTests.swift */; };
 		23FB447679E198CDA3CDDE11 /* BrowseViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCAE6DF40B51FB007DAA00EC /* BrowseViewModel.swift */; };
 		25B48B3C6AA3CB296CCF8B2B /* TimeBoundaryResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1703701EB0708C2D97223D40 /* TimeBoundaryResolverTests.swift */; };
 		25B8669BB1BD540162C64C01 /* FeatureExtraction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 342EA74C989F8824D9A9BDDF /* FeatureExtraction.swift */; };
@@ -356,6 +359,9 @@
 		CE2241A1B3F7D8E90A1B2C3D /* ChapterEvidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChapterEvidence.swift; sourceTree = "<group>"; };
 		CEP341B2C4E8F9FA1B2C3D4E /* ChapterEvidenceParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChapterEvidenceParser.swift; sourceTree = "<group>"; };
 		CET451C3D5F9A0AB2C3D4E5F /* ChapterEvidenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChapterEvidenceTests.swift; sourceTree = "<group>"; };
+		EMC2241A1B3F7D8E90A1B2C3D /* EpisodeMetadataCue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EpisodeMetadataCue.swift; sourceTree = "<group>"; };
+		MCE341B2C4E8F9FA1B2C3D4E /* MetadataCueExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataCueExtractor.swift; sourceTree = "<group>"; };
+		MCT451C3D5F9A0AB2C3D4E5F /* MetadataCueExtractorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataCueExtractorTests.swift; sourceTree = "<group>"; };
 		342EA74C989F8824D9A9BDDF /* FeatureExtraction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeatureExtraction.swift; sourceTree = "<group>"; };
 		3615D0BEAFE62AA2FFF3FA53 /* FoundationModelsUsabilityProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoundationModelsUsabilityProbe.swift; sourceTree = "<group>"; };
 		3754D36CCCA4C878D0551C61 /* AppNavigationStructureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppNavigationStructureTests.swift; sourceTree = "<group>"; };
@@ -847,6 +853,8 @@
 					SEG451C3D5F9A0AB2C3D4E5F /* SponsorEntityGraph.swift */,
 					CE2241A1B3F7D8E90A1B2C3D /* ChapterEvidence.swift */,
 					CEP341B2C4E8F9FA1B2C3D4E /* ChapterEvidenceParser.swift */,
+					EMC2241A1B3F7D8E90A1B2C3D /* EpisodeMetadataCue.swift */,
+					MCE341B2C4E8F9FA1B2C3D4E /* MetadataCueExtractor.swift */,
 				B742D1D0018FC68E6BC19870 /* AdDetector.swift */,
 				5D0FD856EFFA8BCB019E3CFE /* AdOwnership.swift */,
 				2069231A680294741D9A16B3 /* AtomEvidence.swift */,
@@ -1089,6 +1097,7 @@
 				572C615FA2B47BBBC3690F73 /* AdDetectionConfigTests.swift */,
 				6BA9BD77BCE57AA045C1A449 /* AdDetectionServiceShadowModeTests.swift */,
 					CET451C3D5F9A0AB2C3D4E5F /* ChapterEvidenceTests.swift */,
+					MCT451C3D5F9A0AB2C3D4E5F /* MetadataCueExtractorTests.swift */,
 				EF0787BEA4DF8AE02E3ABFAE /* AtomEvidenceProjectorTests.swift */,
 				D343BF00CCF840A2395C2D69 /* B10FingerprintSpanRecoveryTests.swift */,
 				40D43FFE3E323CC58F4AFE3B /* BackfillEvidenceFusionTests.swift */,
@@ -1440,6 +1449,8 @@
 				SEG781F6A8C2D3DE5F607182 /* SponsorEntityGraph.swift in Sources */,
 				CE5561D4E6A0B1BC3D4E5F60 /* ChapterEvidence.swift in Sources */,
 				CEP671E5F7B1C2CD4E5F6071 /* ChapterEvidenceParser.swift in Sources */,
+				EMC5561D4E6A0B1BC3D4E5F60 /* EpisodeMetadataCue.swift in Sources */,
+				MCE671E5F7B1C2CD4E5F6071 /* MetadataCueExtractor.swift in Sources */,
 				17CF42B7B51B8524A44FBE44 /* AdDetector.swift in Sources */,
 				A7C26475130F780D33C09853 /* AdOwnership.swift in Sources */,
 				F2D4990F40B4D41E988A2CBD /* AdRegionPopover.swift in Sources */,
@@ -1569,6 +1580,7 @@
 				E4BEE03F420932581B081221 /* AdDecisionResultTests.swift in Sources */,
 				B9A665EEBF95298E6EDFAE6E /* AdDetectionConfigTests.swift in Sources */,
 				CET781F6A8C2D3DE5F607182 /* ChapterEvidenceTests.swift in Sources */,
+				MCT781F6A8C2D3DE5F607182 /* MetadataCueExtractorTests.swift in Sources */,
 				B4F7A58DDC21F3215ED15F7F /* AdDetectionServiceShadowModeTests.swift in Sources */,
 				ED5557A6EED1D94DA1726472 /* AdmissionControllerTests.swift in Sources */,
 				56FDC181CF26095DB127683C /* AnalysisJobReconcilerTests.swift in Sources */,
