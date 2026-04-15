@@ -221,7 +221,7 @@ struct BackfillEvidenceFusion: Sendable {
 /// The output of `DecisionMapper`: three orthogonal decision signals.
 ///
 /// `eligibilityGate` can block action without affecting the honesty of `skipConfidence`.
-struct DecisionResult: Sendable {
+struct DecisionResult: Sendable, Equatable {
     /// Raw confidence estimate from summing all ledger entry weights, capped at 1.0.
     let proposalConfidence: Double
     /// Calibrated score for SkipOrchestrator (0–1 scale). Derived from proposalConfidence

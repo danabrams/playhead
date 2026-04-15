@@ -21,6 +21,8 @@ enum SkipEligibilityGate: String, Sendable, Codable, Equatable {
     case blockedByEvidenceQuorum
     /// External policy (e.g. content type, show-level overrides) prevents skip.
     case blockedByPolicy
+    /// Span crosses a high-quality content chapter; eligible for banner only, not auto-skip.
+    case markOnly
     /// User previously vetoed this span or region.
     case blockedByUserCorrection
     /// FM noAds consensus suppression: no strong proposal survived, capped to mark-only.
