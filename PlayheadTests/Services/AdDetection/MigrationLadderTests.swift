@@ -275,7 +275,7 @@ struct MigrationLadderTests {
         let v2 = try await store.schemaVersion()
 
         #expect(v1 == v2)
-        #expect(v2 == 10)
+        #expect(v2 == 11)
     }
 
     // MARK: - C6: seeded v4 _meta-less data path

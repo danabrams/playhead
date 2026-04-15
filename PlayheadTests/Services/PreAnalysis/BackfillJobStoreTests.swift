@@ -239,9 +239,9 @@ struct BackfillJobStoreTests {
     func testSchemaVersionRecorded() async throws {
         let store = try await makeTestStore()
         let version = try await store.schemaVersion()
-        // Current schema is v8, which adds fingerprint store tables (Phase 9)
-        // on top of the earlier v7 sponsor knowledge tables.
-        #expect(version == 8)
+        // Current schema is v11, after ef2.3 additions (boundary priors v9,
+        // bracket trust v10, source demotions v11).
+        #expect(version == 11)
     }
 
     @Test("M8: deleting an asset cascades to its backfill_jobs rows")
