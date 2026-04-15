@@ -1374,7 +1374,7 @@ struct SemanticScanPersistenceTests {
         try await store.migrate()
         // Current schema is v7 (v6 adds correction columns, v7 adds sponsor
         // knowledge tables for Phase 8).
-        #expect(try await store.schemaVersion() == 11)
+        #expect(try await store.schemaVersion() == 12)
 
         try await store.insertAsset(makePersistenceTestAsset())
 
@@ -1478,7 +1478,7 @@ struct SemanticScanPersistenceTests {
         try await store.migrate()
         // Current schema is v7 (v6 adds correction columns, v7 adds sponsor
         // knowledge tables for Phase 8).
-        #expect(try await store.schemaVersion() == 11)
+        #expect(try await store.schemaVersion() == 12)
 
         try await store.insertAsset(makePersistenceTestAsset())
 

@@ -415,7 +415,7 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 11
+    nonisolated private static let currentSchemaVersion = 12
 
     /// bd-m8k / Cycle 2 C4: Maximum number of recent full-rescan **recall**
     /// samples retained for the `stable_recall_flag` ring. Must match the
@@ -663,6 +663,7 @@ actor AnalysisStore {
                 )
             }
             try migrateSourceDemotionsV11IfNeeded()
+            try migrateImplicitFeedbackV12IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -723,6 +724,7 @@ actor AnalysisStore {
         try migrateBoundaryPriorsV9IfNeeded()
         try migrateBracketTrustV10IfNeeded()
         try migrateSourceDemotionsV11IfNeeded()
+        try migrateImplicitFeedbackV12IfNeeded()
         try exec("""
             CREATE TABLE IF NOT EXISTS feature_windows (
                 analysisAssetId   TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
@@ -1444,6 +1446,28 @@ actor AnalysisStore {
         try exec("CREATE INDEX IF NOT EXISTS idx_fd_show ON fingerprint_disputes(showId)")
 
         try setSchemaVersion(11)
+    }
+
+    // MARK: - V12: Implicit Feedback Events (ef2.3.4)
+
+    private func migrateImplicitFeedbackV12IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 12 else { return }
+
+        try exec("""
+            CREATE TABLE IF NOT EXISTS implicit_feedback_events (
+                id               TEXT PRIMARY KEY,
+                signal           TEXT NOT NULL,
+                analysisAssetId  TEXT NOT NULL,
+                podcastId        TEXT,
+                spanId           TEXT,
+                timestamp        REAL NOT NULL,
+                weight           REAL NOT NULL DEFAULT 0.3
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_ife_asset ON implicit_feedback_events(analysisAssetId)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_ife_podcast ON implicit_feedback_events(podcastId)")
+
+        try setSchemaVersion(12)
     }
 
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
@@ -5980,5 +6004,79 @@ actor AnalysisStore {
         let cc = Int(sqlite3_column_int(stmt, 1))
         let status = text(stmt, 2)
         return (disputeCount: dc, confirmationCount: cc, status: status)
+    }
+
+    // MARK: - CRUD: implicit_feedback_events (ef2.3.4)
+
+    func appendImplicitFeedbackEvent(_ event: ImplicitFeedbackEvent) throws {
+        let sql = """
+            INSERT OR IGNORE INTO implicit_feedback_events
+            (id, signal, analysisAssetId, podcastId, spanId, timestamp, weight)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, event.id)
+        bind(stmt, 2, event.signal.rawValue)
+        bind(stmt, 3, event.analysisAssetId)
+        bind(stmt, 4, event.podcastId)
+        bind(stmt, 5, event.spanId)
+        bind(stmt, 6, event.timestamp)
+        bind(stmt, 7, event.weight)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func loadImplicitFeedbackEvents(analysisAssetId: String) throws -> [ImplicitFeedbackEvent] {
+        let sql = """
+            SELECT id, signal, analysisAssetId, podcastId, spanId, timestamp, weight
+            FROM implicit_feedback_events
+            WHERE analysisAssetId = ?
+            ORDER BY timestamp ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        var results: [ImplicitFeedbackEvent] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let signal = ImplicitFeedbackSignal(rawValue: text(stmt, 1)) else { continue }
+            results.append(ImplicitFeedbackEvent(
+                id: text(stmt, 0),
+                signal: signal,
+                analysisAssetId: text(stmt, 2),
+                podcastId: optionalText(stmt, 3),
+                spanId: optionalText(stmt, 4),
+                timestamp: sqlite3_column_double(stmt, 5),
+                storedWeight: sqlite3_column_double(stmt, 6)
+            ))
+        }
+        return results
+    }
+
+    func loadImplicitFeedbackEvents(podcastId: String, limit: Int) throws -> [ImplicitFeedbackEvent] {
+        let sql = """
+            SELECT id, signal, analysisAssetId, podcastId, spanId, timestamp, weight
+            FROM implicit_feedback_events
+            WHERE podcastId = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, podcastId)
+        bind(stmt, 2, limit)
+        var results: [ImplicitFeedbackEvent] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let signal = ImplicitFeedbackSignal(rawValue: text(stmt, 1)) else { continue }
+            results.append(ImplicitFeedbackEvent(
+                id: text(stmt, 0),
+                signal: signal,
+                analysisAssetId: text(stmt, 2),
+                podcastId: optionalText(stmt, 3),
+                spanId: optionalText(stmt, 4),
+                timestamp: sqlite3_column_double(stmt, 5),
+                storedWeight: sqlite3_column_double(stmt, 6)
+            ))
+        }
+        return results
     }
 }

@@ -241,7 +241,7 @@ struct BackfillJobStoreTests {
         let version = try await store.schemaVersion()
         // Current schema is v11, after ef2.3 additions (boundary priors v9,
         // bracket trust v10, source demotions v11).
-        #expect(version == 11)
+        #expect(version == 12)
     }
 
     @Test("M8: deleting an asset cascades to its backfill_jobs rows")
