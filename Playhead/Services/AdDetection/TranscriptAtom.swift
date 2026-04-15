@@ -19,6 +19,7 @@ struct TranscriptAtom: Sendable {
     let text: String
     let chunkIndex: Int              // diagnostic convenience
     let speakerId: Int?              // B7: validated speaker label, nil when unavailable
+    let reliability: TranscriptReliability  // ef2.1.3: per-atom reliability signals
 
     init(
         atomKey: TranscriptAtomKey,
@@ -27,7 +28,8 @@ struct TranscriptAtom: Sendable {
         endTime: Double,
         text: String,
         chunkIndex: Int,
-        speakerId: Int? = nil
+        speakerId: Int? = nil,
+        reliability: TranscriptReliability = .default
     ) {
         self.atomKey = atomKey
         self.contentHash = contentHash
@@ -36,6 +38,7 @@ struct TranscriptAtom: Sendable {
         self.text = text
         self.chunkIndex = chunkIndex
         self.speakerId = speakerId
+        self.reliability = reliability
     }
 }
 
@@ -100,18 +103,44 @@ enum TranscriptAtomizer {
             let atomHash = SHA256.hash(data: Data(chunk.normalizedText.utf8))
                 .prefix(8).map { String(format: "%02x", $0) }.joined()
 
-            return TranscriptAtom(
-                atomKey: TranscriptAtomKey(
-                    analysisAssetId: analysisAssetId,
-                    transcriptVersion: versionHash,
-                    atomOrdinal: ordinal
-                ),
+            let atomKey = TranscriptAtomKey(
+                analysisAssetId: analysisAssetId,
+                transcriptVersion: versionHash,
+                atomOrdinal: ordinal
+            )
+
+            // ef2.1.3: Propagate chunk-level quality to atom reliability.
+            // Build a temporary atom (with default reliability) for the quality
+            // estimator, then construct the final atom with the assessed reliability.
+            // NormalizationQuality stays .unknown until EvidenceCatalogBuilder runs.
+            let tempAtom = TranscriptAtom(
+                atomKey: atomKey,
                 contentHash: atomHash,
                 startTime: chunk.startTime,
                 endTime: chunk.endTime,
                 text: chunk.text,
                 chunkIndex: chunk.chunkIndex,
                 speakerId: chunk.speakerId
+            )
+            let assessment = TranscriptQualityEstimator.assess(
+                segment: AdTranscriptSegment(atoms: [tempAtom], segmentIndex: ordinal)
+            )
+            let reliability = TranscriptReliability(
+                chunkQuality: assessment.quality,
+                chunkQualityScore: assessment.qualityScore,
+                normalizationQuality: .unknown,
+                alternativeCount: 0
+            )
+
+            return TranscriptAtom(
+                atomKey: atomKey,
+                contentHash: atomHash,
+                startTime: chunk.startTime,
+                endTime: chunk.endTime,
+                text: chunk.text,
+                chunkIndex: chunk.chunkIndex,
+                speakerId: chunk.speakerId,
+                reliability: reliability
             )
         }
 

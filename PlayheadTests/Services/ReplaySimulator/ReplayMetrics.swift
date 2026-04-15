@@ -290,6 +290,8 @@ struct EpisodeReplayReport: Sendable, Codable {
     let generatedAt: Date
     /// Duration of the simulated replay (wall clock).
     let replayDurationSeconds: Double
+    /// Counterfactual evaluation result, if a comparison was run.
+    let counterfactualResult: CounterfactualResult?
 
     static let currentSimulatorVersion = "replay-sim-v1"
 
@@ -307,7 +309,8 @@ struct EpisodeReplayReport: Sendable, Codable {
         samples: [MetricSample],
         simulatorVersion: String,
         generatedAt: Date,
-        replayDurationSeconds: Double
+        replayDurationSeconds: Double,
+        counterfactualResult: CounterfactualResult? = nil
     ) {
         self.episodeId = episodeId
         self.episodeTitle = episodeTitle
@@ -323,6 +326,7 @@ struct EpisodeReplayReport: Sendable, Codable {
         self.simulatorVersion = simulatorVersion
         self.generatedAt = generatedAt
         self.replayDurationSeconds = replayDurationSeconds
+        self.counterfactualResult = counterfactualResult
     }
 }
 
@@ -532,6 +536,7 @@ extension EpisodeReplayReport {
         case simulatorVersion
         case generatedAt
         case replayDurationSeconds
+        case counterfactualResult
     }
 
     init(from decoder: Decoder) throws {
@@ -550,7 +555,8 @@ extension EpisodeReplayReport {
             samples: try container.decodeIfPresent([MetricSample].self, forKey: .samples) ?? [],
             simulatorVersion: try container.decode(String.self, forKey: .simulatorVersion),
             generatedAt: try container.decode(Date.self, forKey: .generatedAt),
-            replayDurationSeconds: try container.decode(Double.self, forKey: .replayDurationSeconds)
+            replayDurationSeconds: try container.decode(Double.self, forKey: .replayDurationSeconds),
+            counterfactualResult: try container.decodeIfPresent(CounterfactualResult.self, forKey: .counterfactualResult)
         )
     }
 }
@@ -603,4 +609,347 @@ enum MetricMath {
 /// Convenience free-function wrapper for backward compatibility with existing call sites.
 func percentile(_ values: [Double], _ p: Double) -> Double {
     MetricMath.percentile(values, p)
+}
+
+// MARK: - Span Decision
+
+/// A single ad span decision — the atomic unit that counterfactual comparison diffs against.
+struct SpanDecision: Sendable, Codable, Equatable {
+    /// Start of the span in episode seconds.
+    let startTime: Double
+    /// End of the span in episode seconds.
+    let endTime: Double
+    /// Pipeline confidence for this span.
+    let confidence: Double
+    /// Whether the pipeline classified this span as an ad.
+    let isAd: Bool
+    /// Tag identifying which pipeline produced this decision (e.g. "baseline", "new").
+    let sourceTag: String
+}
+
+// MARK: - Frozen Trace
+
+/// Canonical serializable artifact capturing a complete episode analysis trace.
+/// Used for offline counterfactual evaluation: replay a new pipeline configuration
+/// against the same inputs and diff the resulting SpanDecisions.
+struct FrozenTrace: Sendable, Codable {
+    static let currentTraceVersion = "frozen-trace-v1"
+
+    let episodeId: String
+    let podcastId: String
+    let episodeDuration: Double
+    let traceVersion: String
+    let capturedAt: Date
+
+    /// Snapshot of audio feature windows at capture time.
+    let featureWindows: [FrozenFeatureWindow]
+    /// Transcript atoms (chunks) at capture time.
+    let atoms: [FrozenAtom]
+    /// Evidence catalog entries that contributed to decisions.
+    let evidenceCatalog: [FrozenEvidenceEntry]
+    /// User corrections recorded for this episode.
+    let corrections: [FrozenCorrection]
+    /// Decision events with optional explanation traces.
+    let decisionEvents: [FrozenDecisionEvent]
+    /// The baseline span decisions to diff against.
+    let baselineSpanDecisions: [SpanDecision]
+    /// Whether this trace is held out from calibrator training.
+    let holdoutDesignation: HoldoutDesignation
+
+    /// Return a copy with a different holdout designation.
+    /// Centralizes the copy logic so new fields don't get silently dropped.
+    func withHoldoutDesignation(_ designation: HoldoutDesignation) -> FrozenTrace {
+        FrozenTrace(
+            episodeId: episodeId,
+            podcastId: podcastId,
+            episodeDuration: episodeDuration,
+            traceVersion: traceVersion,
+            capturedAt: capturedAt,
+            featureWindows: featureWindows,
+            atoms: atoms,
+            evidenceCatalog: evidenceCatalog,
+            corrections: corrections,
+            decisionEvents: decisionEvents,
+            baselineSpanDecisions: baselineSpanDecisions,
+            holdoutDesignation: designation
+        )
+    }
+
+    // MARK: - Nested Codable types
+
+    struct FrozenFeatureWindow: Sendable, Codable {
+        let startTime: Double
+        let endTime: Double
+        let rms: Double
+        let spectralFlux: Double
+        let musicProbability: Double
+    }
+
+    struct FrozenAtom: Sendable, Codable {
+        let startTime: Double
+        let endTime: Double
+        let text: String
+    }
+
+    struct FrozenEvidenceEntry: Sendable, Codable {
+        let source: String
+        let weight: Double
+        let windowStart: Double
+        let windowEnd: Double
+    }
+
+    struct FrozenCorrection: Sendable, Codable {
+        let source: String
+        let scope: String
+        let createdAt: Double
+    }
+
+    struct FrozenDecisionEvent: Sendable, Codable {
+        let windowId: String
+        let proposalConfidence: Double
+        let skipConfidence: Double
+        let eligibilityGate: String
+        let policyAction: String
+        /// Serialized explanation from DecisionExplanation system (ef2.1.4).
+        let explanationJSON: String?
+    }
+}
+
+// MARK: - Holdout Designation
+
+/// Whether a frozen trace is reserved for trust validation (holdout)
+/// or available for calibrator training.
+enum HoldoutDesignation: String, Sendable, Codable {
+    case training
+    case holdout
+}
+
+// MARK: - Trace Corpus Utilities
+
+/// Utilities for partitioning and filtering trace corpora.
+enum TraceCorpus {
+    /// Return only training-designated traces.
+    static func filterTraining(_ traces: [FrozenTrace]) -> [FrozenTrace] {
+        traces.filter { $0.holdoutDesignation == .training }
+    }
+
+    /// Return only holdout-designated traces.
+    static func filterHoldout(_ traces: [FrozenTrace]) -> [FrozenTrace] {
+        traces.filter { $0.holdoutDesignation == .holdout }
+    }
+
+    /// Deterministically designate a fraction of traces as holdout.
+    /// Uses a seeded PRNG for reproducibility.
+    static func designateHoldout(
+        _ traces: [FrozenTrace],
+        fraction: Double,
+        seed: UInt64
+    ) -> [FrozenTrace] {
+        guard !traces.isEmpty else { return [] }
+        let holdoutCount = Int((Double(traces.count) * fraction).rounded())
+        // Deterministic shuffle: hash episodeId with seed for stable ordering.
+        let sorted = traces.enumerated().sorted { lhs, rhs in
+            let lhsHash = stableHash(lhs.element.episodeId, seed: seed)
+            let rhsHash = stableHash(rhs.element.episodeId, seed: seed)
+            return lhsHash < rhsHash
+        }
+        return sorted.enumerated().map { index, pair in
+            let designation: HoldoutDesignation = index < holdoutCount ? .holdout : .training
+            return pair.element.withHoldoutDesignation(designation)
+        }
+    }
+
+    /// Simple deterministic hash for stable ordering.
+    private static func stableHash(_ string: String, seed: UInt64) -> UInt64 {
+        var hash: UInt64 = seed
+        for byte in string.utf8 {
+            hash = hash &* 31 &+ UInt64(byte)
+        }
+        return hash
+    }
+}
+
+// MARK: - Counterfactual Metrics
+
+/// Metrics comparing a new pipeline configuration against a frozen baseline.
+struct CounterfactualMetrics: Sendable, Codable {
+    /// Weighted decision regret: sum of |confidenceDelta| for flipped decisions,
+    /// normalized by total span count. Zero means no regressions.
+    let counterfactualRegret: Double
+    /// Shift in mean confidence between new and baseline decisions.
+    /// Negative means the new pipeline is less confident on average.
+    let scoreDistributionShift: Double
+    /// Per-source Brier-like calibration error. Key is source name (e.g. "fm", "lexical").
+    /// Value is mean squared error between evidence weight and actual outcome.
+    let perSourceCalibrationError: [String: Double]
+    /// Fraction of spans where baseline and new pipeline disagree on isAd.
+    let shadowLiveDisagreementRate: Double
+}
+
+// MARK: - Span Decision Diff
+
+/// Per-span comparison between baseline and new pipeline decisions.
+struct SpanDecisionDiff: Sendable, Codable {
+    let startTime: Double
+    let endTime: Double
+    let baselineConfidence: Double
+    let newConfidence: Double
+    let baselineIsAd: Bool
+    let newIsAd: Bool
+    /// newConfidence - baselineConfidence.
+    let confidenceDelta: Double
+    /// Whether the isAd classification flipped.
+    let decisionFlipped: Bool
+}
+
+// MARK: - Counterfactual Result
+
+/// Complete result of running a counterfactual comparison on a single trace.
+struct CounterfactualResult: Sendable, Codable {
+    let traceEpisodeId: String
+    let diffs: [SpanDecisionDiff]
+    let metrics: CounterfactualMetrics
+}
+
+// MARK: - Counterfactual Evaluator
+
+/// Runs counterfactual comparison: diffs new pipeline SpanDecisions against
+/// baseline decisions stored in a FrozenTrace, and computes regression metrics.
+enum CounterfactualEvaluator {
+
+    /// Compare new decisions against the baseline stored in the trace.
+    /// Spans are matched by index position (assumes aligned time ordering).
+    /// Unmatched tails (count mismatch) are treated as implicit disagreements.
+    static func compare(
+        trace: FrozenTrace,
+        newDecisions: [SpanDecision]
+    ) -> CounterfactualResult {
+        let baseline = trace.baselineSpanDecisions
+
+        // Match spans by index (assumes aligned ordering).
+        // Unmatched tails (count mismatch) are treated as implicit disagreements.
+        let totalSpanCount = max(baseline.count, newDecisions.count)
+        guard totalSpanCount > 0 else {
+            return CounterfactualResult(
+                traceEpisodeId: trace.episodeId,
+                diffs: [],
+                metrics: CounterfactualMetrics(
+                    counterfactualRegret: 0,
+                    scoreDistributionShift: 0,
+                    perSourceCalibrationError: [:],
+                    shadowLiveDisagreementRate: 0
+                )
+            )
+        }
+
+        var diffs: [SpanDecisionDiff] = []
+        var flippedCount = 0
+        var totalRegret = 0.0
+
+        // Paired spans: both baseline and new exist at this index.
+        let pairedCount = min(baseline.count, newDecisions.count)
+        for i in 0..<pairedCount {
+            let b = baseline[i]
+            let n = newDecisions[i]
+            let delta = n.confidence - b.confidence
+            let flipped = b.isAd != n.isAd
+            if flipped {
+                flippedCount += 1
+                totalRegret += abs(delta)
+            }
+            diffs.append(SpanDecisionDiff(
+                startTime: b.startTime,
+                endTime: b.endTime,
+                baselineConfidence: b.confidence,
+                newConfidence: n.confidence,
+                baselineIsAd: b.isAd,
+                newIsAd: n.isAd,
+                confidenceDelta: delta,
+                decisionFlipped: flipped
+            ))
+        }
+
+        // Unmatched baseline spans (new pipeline dropped them).
+        for i in pairedCount..<baseline.count {
+            let b = baseline[i]
+            flippedCount += 1
+            totalRegret += b.confidence
+            diffs.append(SpanDecisionDiff(
+                startTime: b.startTime,
+                endTime: b.endTime,
+                baselineConfidence: b.confidence,
+                newConfidence: 0,
+                baselineIsAd: b.isAd,
+                newIsAd: false,
+                confidenceDelta: -b.confidence,
+                decisionFlipped: b.isAd
+            ))
+        }
+
+        // Unmatched new spans (new pipeline added them).
+        for i in pairedCount..<newDecisions.count {
+            let n = newDecisions[i]
+            if n.isAd {
+                flippedCount += 1
+                totalRegret += n.confidence
+            }
+            diffs.append(SpanDecisionDiff(
+                startTime: n.startTime,
+                endTime: n.endTime,
+                baselineConfidence: 0,
+                newConfidence: n.confidence,
+                baselineIsAd: false,
+                newIsAd: n.isAd,
+                confidenceDelta: n.confidence,
+                decisionFlipped: n.isAd
+            ))
+        }
+
+        let baselineMeanConf = baseline.isEmpty ? 0 : baseline.map(\.confidence).reduce(0, +) / Double(baseline.count)
+        let newMeanConf = newDecisions.isEmpty ? 0 : newDecisions.map(\.confidence).reduce(0, +) / Double(newDecisions.count)
+        let shift = (baseline.isEmpty && newDecisions.isEmpty) ? 0 : newMeanConf - baselineMeanConf
+
+        let regret = totalRegret / Double(totalSpanCount)
+        let disagreement = Double(flippedCount) / Double(totalSpanCount)
+
+        return CounterfactualResult(
+            traceEpisodeId: trace.episodeId,
+            diffs: diffs,
+            metrics: CounterfactualMetrics(
+                counterfactualRegret: regret,
+                scoreDistributionShift: shift,
+                perSourceCalibrationError: computeCalibrationError(trace: trace),
+                shadowLiveDisagreementRate: disagreement
+            )
+        )
+    }
+
+    /// Compute per-source Brier-like calibration error against the **baseline** decisions.
+    /// This measures how well the evidence weights in the frozen trace predicted the
+    /// baseline outcomes — it is a fixed reference metric, not a counterfactual comparison.
+    /// The `newDecisions` parameter is intentionally not used here; per-source calibration
+    /// against new decisions would require re-running evidence extraction, which is outside
+    /// the scope of the counterfactual evaluator.
+    private static func computeCalibrationError(
+        trace: FrozenTrace
+    ) -> [String: Double] {
+        // Group evidence entries by source.
+        var sourceErrors: [String: [Double]] = [:]
+        for entry in trace.evidenceCatalog {
+            // Find baseline span overlapping this evidence window.
+            let outcome: Double
+            if let span = trace.baselineSpanDecisions.first(where: { s in
+                s.startTime <= entry.windowEnd && s.endTime >= entry.windowStart
+            }) {
+                outcome = span.isAd ? 1.0 : 0.0
+            } else {
+                outcome = 0.0
+            }
+            let brierTerm = (entry.weight - outcome) * (entry.weight - outcome)
+            sourceErrors[entry.source, default: []].append(brierTerm)
+        }
+        return sourceErrors.mapValues { errors in
+            errors.isEmpty ? 0 : errors.reduce(0, +) / Double(errors.count)
+        }
+    }
 }

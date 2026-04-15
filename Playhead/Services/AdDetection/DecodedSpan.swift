@@ -50,7 +50,7 @@ enum DecoderConstants {
 /// Used for JSON encoding/decoding of anchorProvenance in the `decoded_spans` table.
 extension AnchorRef: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, regionId, consensusStrength, entry, breakStrength
+        case type, regionId, consensusStrength, entry, breakStrength, correctionId, reportedTime
     }
 
     init(from decoder: Decoder) throws {
@@ -68,6 +68,10 @@ extension AnchorRef: Codable {
             let regionId = try container.decode(String.self, forKey: .regionId)
             let strength = try container.decode(Double.self, forKey: .breakStrength)
             self = .fmAcousticCorroborated(regionId: regionId, breakStrength: strength)
+        case "userCorrection":
+            let correctionId = try container.decode(String.self, forKey: .correctionId)
+            let reportedTime = try container.decode(Double.self, forKey: .reportedTime)
+            self = .userCorrection(correctionId: correctionId, reportedTime: reportedTime)
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown AnchorRef type: \(type)")
         }
@@ -87,6 +91,10 @@ extension AnchorRef: Codable {
             try container.encode("fmAcousticCorroborated", forKey: .type)
             try container.encode(regionId, forKey: .regionId)
             try container.encode(strength, forKey: .breakStrength)
+        case .userCorrection(let correctionId, let reportedTime):
+            try container.encode("userCorrection", forKey: .type)
+            try container.encode(correctionId, forKey: .correctionId)
+            try container.encode(reportedTime, forKey: .reportedTime)
         }
     }
 }

@@ -212,19 +212,23 @@ struct DecisionMapper: Sendable {
     /// > 1.0 = false-negative boost (user said "hearing an ad").
     /// Default of 1.0 means no active corrections.
     let correctionFactor: Double
+    /// Calibration profile for score mapping. Defaults to v0 (identity).
+    let calibrationProfile: ScoreCalibrationProfile
 
     init(
         span: DecodedSpan,
         ledger: [EvidenceLedgerEntry],
         config: FusionWeightConfig,
         transcriptQuality: TranscriptQuality = .good,
-        correctionFactor: Double = 1.0
+        correctionFactor: Double = 1.0,
+        calibrationProfile: ScoreCalibrationProfile = .v0
     ) {
         self.span = span
         self.ledger = ledger
         self.config = config
         self.transcriptQuality = transcriptQuality
         self.correctionFactor = correctionFactor
+        self.calibrationProfile = calibrationProfile
     }
 
     func map() -> DecisionResult {
@@ -240,6 +244,9 @@ struct DecisionMapper: Sendable {
         // < 1.0 = false-positive suppression; if effective confidence drops below 0.40,
         //         gate the span as blockedByUserCorrection.
         // > 1.0 = false-negative boost; caps at 1.0 to avoid over-confident decisions.
+        // TODO: ef2.1.7 — Apply calibrationProfile.decisionThresholds here.
+        // v0 thresholds are zero (no-op). When a real v1 profile ships with non-zero
+        // skipMinimum/proposalMinimum, gate the score before correction factor.
         let rawSkipConfidence = calibrate(proposalConfidence)
         let effectiveConfidence = min(1.0, rawSkipConfidence * max(0.0, correctionFactor))
         let gate: SkipEligibilityGate
@@ -259,16 +266,21 @@ struct DecisionMapper: Sendable {
 
     // MARK: - Private
 
-    /// Linear calibration from proposalConfidence to skipConfidence.
-    /// v1: identity mapping (direct pass-through). Configurable in future via config.
+    /// Calibration from proposalConfidence to skipConfidence via the active profile.
+    /// v0 profile: identity mapping (direct pass-through). Future profiles apply
+    /// piecewise-linear calibration learned from shadow-mode data.
+    ///
+    /// Non-finite guard is retained as a safety belt: NaN/Inf inputs always return 0.0
+    /// regardless of the profile's calibrator (a computationally overflowed ledger is a
+    /// data integrity error — err on the conservative side).
     private func calibrate(_ raw: Double) -> Double {
-        // Guard non-finite values first: NaN/Inf propagate through max/min in Swift
-        // (IEEE 754 fmax semantics), so an explicit .isFinite check is required.
-        // Both NaN and Inf return 0.0 (no confidence) rather than 1.0 for Inf:
-        // a computationally overflowed ledger is a data integrity error, so we
-        // err on the conservative side (don't promote a span with invalid evidence).
         guard raw.isFinite else { return 0.0 }
-        return max(0.0, min(1.0, raw))
+        // The profile's calibrator handles [0,1] clamping internally.
+        // We use .fusedScore (not .classifier) because proposalConfidence is a post-fusion
+        // aggregate, not a raw per-source classifier score. Using a distinct key prevents
+        // future non-identity profiles from conflating the two distributions.
+        let clamped = max(0.0, min(1.0, raw))
+        return calibrationProfile.calibrator(for: .fusedScore).calibrate(clamped)
     }
 
     /// Determine the eligibility gate by reading `anchorProvenance` directly.

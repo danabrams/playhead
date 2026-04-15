@@ -84,18 +84,21 @@ struct DecisionCohort: Sendable, Codable, Hashable {
     let policyHash: String
     let stabilityHash: String
     let appBuild: String
+    /// Calibration profile version used for this decision (e.g. "v0", "v1").
+    let calibrationVersion: String
 
     // IMPORTANT: bump each hash string manually whenever the corresponding
     // pipeline component changes. The date suffix is a documentation aid, not
     // a machine-readable field — there is no automated enforcement.
-    static func production(appBuild: String) -> DecisionCohort {
+    static func production(appBuild: String, calibrationVersion: String = "v0") -> DecisionCohort {
         precondition(!appBuild.isEmpty, "appBuild must be non-empty — pass the real build number")
         return DecisionCohort(
             featurePipelineHash: "feature-v1-2026-04-10",
             fusionHash: "fusion-v1-2026-04-10",
             policyHash: "policy-v1-2026-04-10",
             stabilityHash: "stability-v1-2026-04-10",
-            appBuild: appBuild
+            appBuild: appBuild,
+            calibrationVersion: calibrationVersion
         )
     }
 }

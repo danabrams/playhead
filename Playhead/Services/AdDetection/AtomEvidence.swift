@@ -23,6 +23,9 @@ enum AnchorRef: Sendable {
     case evidenceCatalog(entry: EvidenceEntry)
     /// Use C corroboration: single-window FM + co-located acoustic break both fired.
     case fmAcousticCorroborated(regionId: String, breakStrength: Double)
+    /// User-reported false negative: user tapped "missed ad here" at a specific time.
+    /// Creates an episode-local synthetic anchor so the correction takes effect immediately.
+    case userCorrection(correctionId: String, reportedTime: Double)
 }
 
 extension AnchorRef: Equatable {
@@ -34,6 +37,8 @@ extension AnchorRef: Equatable {
             return le.evidenceRef == re.evidenceRef && le.atomOrdinal == re.atomOrdinal
         case (.fmAcousticCorroborated(let lid, let ls), .fmAcousticCorroborated(let rid, let rs)):
             return lid == rid && ls == rs
+        case (.userCorrection(let lid, let lt), .userCorrection(let rid, let rt)):
+            return lid == rid && lt == rt
         default:
             return false
         }

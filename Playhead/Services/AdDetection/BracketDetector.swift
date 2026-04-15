@@ -325,7 +325,7 @@ enum BracketDetector {
     ) -> Double {
         var score = 0.0
 
-        // Completeness: full bracket = 0.5 base, partial = 0.25.
+        // Completeness: full bracket = 0.4 base, partial = 0.15.
         if hasOnset && hasOffset {
             score += 0.4
         } else {
