@@ -6,29 +6,32 @@
 //      leaking ad audio (1.0× baseline).
 //   2. Dynamic snap radius driven by bracket score and cue quality.
 //   3. SignedBoundaryError tracking for offline replay harness analysis.
-//
-// Dependencies (on main):
-//   - BracketDetector.swift (ef2.3.6) — BracketEvidence, coarseScore
-//   - FineBoundaryRefiner.swift (ef2.3.7) — BoundaryCue, BoundaryDirection, BoundaryEstimate
-//   - BoundaryPriorStore.swift (ef2.3.5) — BoundaryPriorDistribution.snapRadiusGuidance
 
 import Foundation
 
-// MARK: - Forward-compatible types for ef2.3.5/6/7 dependencies
+// MARK: - BoundaryCue
 
-/// Direction of an ad-boundary edge. Will be provided by FineBoundaryRefiner (ef2.3.7).
-enum BoundaryDirection: String, Sendable, Equatable {
-    case start
-    case end
+/// Signal types that contribute to a boundary estimate, in snap preference order.
+enum BoundaryCue: String, Sendable, CaseIterable, Hashable {
+    /// Silence gap detected (highest priority — cleanest edit point).
+    case silenceGap
+    /// Local energy minimum (valley between loud segments).
+    case energyValley
+    /// Sharp spectral flux change (timbral discontinuity).
+    case spectralDiscontinuity
+    /// No acoustic cue found; falls back to coarse candidate position.
+    case coarseFallback
 }
 
-/// Cue type used for boundary refinement. Will be provided by FineBoundaryRefiner (ef2.3.7).
-enum BoundaryCue: String, Sendable, Hashable {
-    case bracket        // ef2.3.6 bracket detection
-    case silenceGap     // VAD silence
-    case spectral       // spectral change point
-    case musicBed       // music bed transition
-    case lexicalDensity // lexical density delta
+// MARK: - BoundaryDirection
+
+/// Whether this boundary is the start or end of an ad segment.
+/// Drives asymmetric guard margin and penalty logic.
+enum BoundaryDirection: Sendable, Equatable {
+    /// Start of ad: prefer later (let a fraction of ad leak at the beginning).
+    case adStart
+    /// End of ad: prefer earlier (let a fraction of ad leak at the end).
+    case adEnd
 }
 
 // MARK: - SignedBoundaryError (replay harness tracking)
@@ -78,7 +81,7 @@ enum AsymmetricSnapScorer {
     /// - Parameters:
     ///   - candidateTime: The candidate snap position (seconds).
     ///   - snapTarget: The target position we snapped to (seconds).
-    ///   - direction: Whether this is a `.start` or `.end` boundary.
+    ///   - direction: Whether this is a `.adStart` or `.adEnd` boundary.
     ///   - signedError: `(snapTarget - trueTime)`: positive = snapped too late, negative = too early.
     /// - Returns: Penalized error magnitude (lower is better).
     static func score(
@@ -93,18 +96,18 @@ enum AsymmetricSnapScorer {
 
     /// Determine the penalty multiplier for a given direction and signed error.
     ///
-    /// For start boundaries: too-early (negative error) clips editorial → 1.5×.
-    /// For end boundaries: too-late (positive error) clips editorial → 1.5×.
+    /// For adStart boundaries: too-early (negative error) clips editorial → 1.5×.
+    /// For adEnd boundaries: too-late (positive error) clips editorial → 1.5×.
     /// All other cases: ad leak → 1.0× baseline.
     static func penaltyMultiplier(
         direction: BoundaryDirection,
         signedError: Double
     ) -> Double {
         switch direction {
-        case .start:
+        case .adStart:
             // Negative error = snapped too early = clips editorial before ad starts
             return signedError < 0 ? editorialClipPenalty : adLeakPenalty
-        case .end:
+        case .adEnd:
             // Positive error = snapped too late = clips editorial after ad ends
             return signedError > 0 ? editorialClipPenalty : adLeakPenalty
         }
@@ -164,7 +167,7 @@ enum AsymmetricSnapScorer {
         if let score = bracketScore, score >= 0.4 {
             return .moderate
         }
-        let hasSpectral = (boundaryCues[.spectral] ?? 0) > 0.3
+        let hasSpectral = (boundaryCues[.spectralDiscontinuity] ?? 0) > 0.3
         if hasSpectral {
             return .moderate
         }
@@ -199,7 +202,7 @@ extension AsymmetricSnapScorer {
     ///
     /// - Parameters:
     ///   - spanId: The decoded span ID.
-    ///   - direction: Boundary direction (.start or .end).
+    ///   - direction: Boundary direction (.adStart or .adEnd).
     ///   - snapTarget: Where the boundary was snapped to.
     ///   - trueTime: Ground-truth boundary time from the corpus.
     /// - Returns: A `SignedBoundaryError` with the appropriate penalty multiplier.

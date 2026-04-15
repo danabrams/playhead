@@ -10,32 +10,32 @@ struct AsymmetricSnapScorerTests {
 
     @Test("start boundary: too-early gets editorial clip penalty (1.5×)")
     func startTooEarlyClipsEditorial() {
-        let mult = AsymmetricSnapScorer.penaltyMultiplier(direction: .start, signedError: -2.0)
+        let mult = AsymmetricSnapScorer.penaltyMultiplier(direction: .adStart, signedError: -2.0)
         #expect(mult == 1.5)
     }
 
     @Test("start boundary: too-late gets ad leak penalty (1.0×)")
     func startTooLateLeaksAd() {
-        let mult = AsymmetricSnapScorer.penaltyMultiplier(direction: .start, signedError: 2.0)
+        let mult = AsymmetricSnapScorer.penaltyMultiplier(direction: .adStart, signedError: 2.0)
         #expect(mult == 1.0)
     }
 
     @Test("end boundary: too-late gets editorial clip penalty (1.5×)")
     func endTooLateClipsEditorial() {
-        let mult = AsymmetricSnapScorer.penaltyMultiplier(direction: .end, signedError: 2.0)
+        let mult = AsymmetricSnapScorer.penaltyMultiplier(direction: .adEnd, signedError: 2.0)
         #expect(mult == 1.5)
     }
 
     @Test("end boundary: too-early gets ad leak penalty (1.0×)")
     func endTooEarlyLeaksAd() {
-        let mult = AsymmetricSnapScorer.penaltyMultiplier(direction: .end, signedError: -2.0)
+        let mult = AsymmetricSnapScorer.penaltyMultiplier(direction: .adEnd, signedError: -2.0)
         #expect(mult == 1.0)
     }
 
     @Test("zero error always gets baseline penalty")
     func zeroErrorBaseline() {
-        #expect(AsymmetricSnapScorer.penaltyMultiplier(direction: .start, signedError: 0.0) == 1.0)
-        #expect(AsymmetricSnapScorer.penaltyMultiplier(direction: .end, signedError: 0.0) == 1.0)
+        #expect(AsymmetricSnapScorer.penaltyMultiplier(direction: .adStart, signedError: 0.0) == 1.0)
+        #expect(AsymmetricSnapScorer.penaltyMultiplier(direction: .adEnd, signedError: 0.0) == 1.0)
     }
 
     // MARK: - Score function tests
@@ -45,7 +45,7 @@ struct AsymmetricSnapScorerTests {
         let result = AsymmetricSnapScorer.score(
             candidateTime: 10.0,
             snapTarget: 8.0,
-            direction: .start,
+            direction: .adStart,
             signedError: -2.0
         )
         // abs(-2.0) * 1.5 = 3.0
@@ -57,7 +57,7 @@ struct AsymmetricSnapScorerTests {
         let result = AsymmetricSnapScorer.score(
             candidateTime: 10.0,
             snapTarget: 12.0,
-            direction: .start,
+            direction: .adStart,
             signedError: 2.0
         )
         // abs(2.0) * 1.0 = 2.0
@@ -69,7 +69,7 @@ struct AsymmetricSnapScorerTests {
         let result = AsymmetricSnapScorer.score(
             candidateTime: 60.0,
             snapTarget: 63.0,
-            direction: .end,
+            direction: .adEnd,
             signedError: 3.0
         )
         // abs(3.0) * 1.5 = 4.5
@@ -81,7 +81,7 @@ struct AsymmetricSnapScorerTests {
         let result = AsymmetricSnapScorer.score(
             candidateTime: 60.0,
             snapTarget: 57.0,
-            direction: .end,
+            direction: .adEnd,
             signedError: -3.0
         )
         // abs(-3.0) * 1.0 = 3.0
@@ -121,7 +121,7 @@ struct AsymmetricSnapScorerTests {
     func moderateTierSpectral() {
         let tier = AsymmetricSnapScorer.signalTier(
             bracketScore: nil,
-            boundaryCues: [.spectral: 0.6]
+            boundaryCues: [.spectralDiscontinuity: 0.6]
         )
         #expect(tier == .moderate)
     }
@@ -148,7 +148,7 @@ struct AsymmetricSnapScorerTests {
     func weakTierLowConfidenceCues() {
         let tier = AsymmetricSnapScorer.signalTier(
             bracketScore: nil,
-            boundaryCues: [.silenceGap: 0.1, .spectral: 0.2]
+            boundaryCues: [.silenceGap: 0.1, .spectralDiscontinuity: 0.2]
         )
         #expect(tier == .weak)
     }
@@ -159,7 +159,7 @@ struct AsymmetricSnapScorerTests {
     func dynamicRadiusStrong() {
         let radius = AsymmetricSnapScorer.dynamicSnapRadius(
             bracketScore: 0.9,
-            boundaryCues: [.bracket: 0.9],
+            boundaryCues: [:],
             priorSpread: nil
         )
         #expect(radius >= 3.0 && radius <= 6.0)
@@ -227,12 +227,12 @@ struct AsymmetricSnapScorerTests {
     func buildErrorStartTooEarly() {
         let error = AsymmetricSnapScorer.buildError(
             spanId: "test-span-1",
-            direction: .start,
+            direction: .adStart,
             snapTarget: 8.0,
             trueTime: 10.0
         )
         #expect(error.spanId == "test-span-1")
-        #expect(error.direction == .start)
+        #expect(error.direction == .adStart)
         #expect(error.signedErrorSeconds == -2.0) // 8 - 10 = -2
         #expect(error.penaltyMultiplier == 1.5)   // start + negative = editorial clip
         #expect(error.penalizedError == 3.0)       // abs(-2) * 1.5
@@ -242,7 +242,7 @@ struct AsymmetricSnapScorerTests {
     func buildErrorEndTooLate() {
         let error = AsymmetricSnapScorer.buildError(
             spanId: "test-span-2",
-            direction: .end,
+            direction: .adEnd,
             snapTarget: 65.0,
             trueTime: 60.0
         )
@@ -254,12 +254,12 @@ struct AsymmetricSnapScorerTests {
     @Test("buildError ad leak cases get 1.0× multiplier")
     func buildErrorAdLeak() {
         let startLate = AsymmetricSnapScorer.buildError(
-            spanId: "s", direction: .start, snapTarget: 12.0, trueTime: 10.0
+            spanId: "s", direction: .adStart, snapTarget: 12.0, trueTime: 10.0
         )
         #expect(startLate.penaltyMultiplier == 1.0) // start + positive = ad leak
 
         let endEarly = AsymmetricSnapScorer.buildError(
-            spanId: "s", direction: .end, snapTarget: 58.0, trueTime: 60.0
+            spanId: "s", direction: .adEnd, snapTarget: 58.0, trueTime: 60.0
         )
         #expect(endEarly.penaltyMultiplier == 1.0) // end + negative = ad leak
     }
@@ -267,8 +267,8 @@ struct AsymmetricSnapScorerTests {
     @Test("aggregate penalized error computes mean")
     func aggregateError() {
         let errors = [
-            SignedBoundaryError(spanId: "a", direction: .start, signedErrorSeconds: -2.0, penaltyMultiplier: 1.5),
-            SignedBoundaryError(spanId: "b", direction: .end, signedErrorSeconds: 4.0, penaltyMultiplier: 1.5),
+            SignedBoundaryError(spanId: "a", direction: .adStart, signedErrorSeconds: -2.0, penaltyMultiplier: 1.5),
+            SignedBoundaryError(spanId: "b", direction: .adEnd, signedErrorSeconds: 4.0, penaltyMultiplier: 1.5),
         ]
         // penalized: 3.0 + 6.0 = 9.0, mean = 4.5
         let agg = AsymmetricSnapScorer.aggregatePenalizedError(errors)
@@ -286,10 +286,10 @@ struct AsymmetricSnapScorerTests {
     func asymmetryBiasVerification() {
         // Same magnitude error, different directions
         let clipEditorial = AsymmetricSnapScorer.score(
-            candidateTime: 10, snapTarget: 8, direction: .start, signedError: -2.0
+            candidateTime: 10, snapTarget: 8, direction: .adStart, signedError: -2.0
         )
         let leakAd = AsymmetricSnapScorer.score(
-            candidateTime: 10, snapTarget: 12, direction: .start, signedError: 2.0
+            candidateTime: 10, snapTarget: 12, direction: .adStart, signedError: 2.0
         )
         // Clipping editorial should score worse (higher penalty)
         #expect(clipEditorial > leakAd)
