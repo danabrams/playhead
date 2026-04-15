@@ -83,11 +83,13 @@ struct DecisionCohortTests {
     func equalCohortsHashEqual() {
         let a = DecisionCohort(
             featurePipelineHash: "fp1", fusionHash: "fu1",
-            policyHash: "p1", stabilityHash: "s1", appBuild: "42"
+            policyHash: "p1", stabilityHash: "s1", appBuild: "42",
+            calibrationVersion: "v0"
         )
         let b = DecisionCohort(
             featurePipelineHash: "fp1", fusionHash: "fu1",
-            policyHash: "p1", stabilityHash: "s1", appBuild: "42"
+            policyHash: "p1", stabilityHash: "s1", appBuild: "42",
+            calibrationVersion: "v0"
         )
         #expect(a == b)
         #expect(a.hashValue == b.hashValue)
@@ -97,11 +99,13 @@ struct DecisionCohortTests {
     func differentCohortsAreNotEqual() {
         let a = DecisionCohort(
             featurePipelineHash: "fp1", fusionHash: "fu1",
-            policyHash: "p1", stabilityHash: "s1", appBuild: "42"
+            policyHash: "p1", stabilityHash: "s1", appBuild: "42",
+            calibrationVersion: "v0"
         )
         let b = DecisionCohort(
             featurePipelineHash: "fp2", fusionHash: "fu1",
-            policyHash: "p1", stabilityHash: "s1", appBuild: "42"
+            policyHash: "p1", stabilityHash: "s1", appBuild: "42",
+            calibrationVersion: "v0"
         )
         #expect(a != b)
     }
