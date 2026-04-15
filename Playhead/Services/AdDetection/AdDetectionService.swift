@@ -845,14 +845,36 @@ actor AdDetectionService {
                 fusionConfig: fusionConfig
             )
 
-            let mapper = DecisionMapper(
+            // Phase ef2.4.6: FM suppression — targeted downweight of weak evidence
+            // when FM strongly says noAds with consensus. Applied after ledger build
+            // but before DecisionMapper, preserving strong positive anchors.
+            let suppressionResult = applyFMSuppression(
                 span: refinedSpan,
                 ledger: ledger,
+                semanticScanResults: semanticScanResults
+            )
+            let effectiveLedger = suppressionResult.suppressedLedger
+
+            let mapper = DecisionMapper(
+                span: refinedSpan,
+                ledger: effectiveLedger,
                 config: fusionConfig,
                 transcriptQuality: transcriptQuality,
                 correctionFactor: assetCorrectionFactor
             )
-            let decision = mapper.map()
+            let rawDecision = mapper.map()
+
+            // If FM suppression capped to markOnly, override the gate.
+            let decision: DecisionResult
+            if suppressionResult.cappedToMarkOnly {
+                decision = DecisionResult(
+                    proposalConfidence: rawDecision.proposalConfidence,
+                    skipConfidence: rawDecision.skipConfidence,
+                    eligibilityGate: .cappedByFMSuppression
+                )
+            } else {
+                decision = rawDecision
+            }
 
             // Step 14: SkipPolicyMatrix + confidence promotion.
             // Phase 6.5 (playhead-4my.16): (.unknown, .unknown) → .detectOnly so Phase 7
@@ -1042,6 +1064,41 @@ actor AdDetectionService {
             config: fusionConfig
         )
         return fusion.buildLedger()
+    }
+
+    // MARK: - FM Suppression (Phase ef2.4.6)
+
+    /// Apply targeted FM suppression to a ledger when FM strongly says noAds.
+    ///
+    /// Builds FMSuppressionWindow entries from overlapping scan results, evaluates
+    /// the suppression guard, and applies downweighting if all guards pass.
+    private func applyFMSuppression(
+        span: DecodedSpan,
+        ledger: [EvidenceLedgerEntry],
+        semanticScanResults: [SemanticScanResult]
+    ) -> FMSuppressionResult {
+        // Build suppression windows from FM scan results overlapping this span.
+        let overlappingWindows: [FMSuppressionWindow] = semanticScanResults.compactMap { result in
+            let overlapStart = max(span.startTime, result.windowStartTime)
+            let overlapEnd = min(span.endTime, result.windowEndTime)
+            guard overlapEnd > overlapStart else { return nil }
+
+            let band: CertaintyBand = result.transcriptQuality == .good ? .moderate : .weak
+            return FMSuppressionWindow(
+                disposition: result.disposition,
+                band: band
+            )
+        }
+
+        let guard_ = FMSuppressionGuard(
+            overlappingFMResults: overlappingWindows,
+            ledger: ledger,
+            anchorProvenance: span.anchorProvenance
+        )
+        let guardResult = guard_.evaluate()
+
+        let applicator = FMSuppressionApplicator()
+        return applicator.apply(guardResult: guardResult, ledger: ledger)
     }
 
     /// Find the best-matching ClassifierResult for a DecodedSpan (by time overlap).

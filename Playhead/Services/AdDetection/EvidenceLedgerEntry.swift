@@ -23,6 +23,8 @@ enum SkipEligibilityGate: String, Sendable, Codable, Equatable {
     case blockedByPolicy
     /// User previously vetoed this span or region.
     case blockedByUserCorrection
+    /// FM noAds consensus suppression: no strong proposal survived, capped to mark-only.
+    case cappedByFMSuppression
 }
 
 // MARK: - EvidenceLedgerDetail
