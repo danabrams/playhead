@@ -239,14 +239,16 @@ struct Phase6DecisionCohortRecomputationTests {
             fusionHash: "fusion-v1",
             policyHash: "policy-v1",
             stabilityHash: "stability-v1",
-            appBuild: "100"
+            appBuild: "100",
+            calibrationVersion: "v0"
         )
         let cohortB = DecisionCohort(
             featurePipelineHash: "feature-v2",  // changed
             fusionHash: "fusion-v1",
             policyHash: "policy-v1",
             stabilityHash: "stability-v1",
-            appBuild: "100"
+            appBuild: "100",
+            calibrationVersion: "v0"
         )
         #expect(cohortA != cohortB, "Changed featurePipelineHash must produce different cohort")
     }
@@ -258,14 +260,16 @@ struct Phase6DecisionCohortRecomputationTests {
             fusionHash: "fusion-v1",
             policyHash: "p1",
             stabilityHash: "s1",
-            appBuild: "100"
+            appBuild: "100",
+            calibrationVersion: "v0"
         )
         let cohortB = DecisionCohort(
             featurePipelineHash: "fp1",
             fusionHash: "fusion-v2",  // changed
             policyHash: "p1",
             stabilityHash: "s1",
-            appBuild: "100"
+            appBuild: "100",
+            calibrationVersion: "v0"
         )
         #expect(cohortA != cohortB, "Changed fusionHash must produce different cohort")
     }
@@ -277,14 +281,16 @@ struct Phase6DecisionCohortRecomputationTests {
             fusionHash: "fu1",
             policyHash: "policy-v1",
             stabilityHash: "s1",
-            appBuild: "100"
+            appBuild: "100",
+            calibrationVersion: "v0"
         )
         let cohortB = DecisionCohort(
             featurePipelineHash: "fp1",
             fusionHash: "fu1",
             policyHash: "policy-v2",  // changed
             stabilityHash: "s1",
-            appBuild: "100"
+            appBuild: "100",
+            calibrationVersion: "v0"
         )
         #expect(cohortA != cohortB, "Changed policyHash must produce different cohort")
     }
@@ -308,14 +314,16 @@ struct Phase6DecisionCohortRecomputationTests {
             fusionHash: "fusion-v1",
             policyHash: "policy-v1",
             stabilityHash: "stability-v1",
-            appBuild: "1"
+            appBuild: "1",
+            calibrationVersion: "v0"
         )
         let newDecisionCohort = DecisionCohort(
             featurePipelineHash: "feature-v1",
             fusionHash: "fusion-v2",  // fusion policy changed — recompute decisions
             policyHash: "policy-v1",
             stabilityHash: "stability-v1",
-            appBuild: "1"
+            appBuild: "1",
+            calibrationVersion: "v0"
         )
 
         // Different cohort → consumer must recompute from cached scan results
