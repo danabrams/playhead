@@ -30,6 +30,12 @@ enum CorrectionScope: Sendable, Equatable {
     case phraseOnShow(podcastId: String, phrase: String)
     /// Campaign veto across all episodes of a podcast.
     case campaignOnShow(podcastId: String, campaign: String)
+    /// Domain ownership veto: the podcast owns this domain (e.g. "nytimes.com"),
+    /// so mentions of it are not third-party ads. Layer B scope.
+    case domainOwnershipOnShow(podcastId: String, domain: String)
+    /// Jingle fingerprint veto: a recurring audio jingle on this show is not an
+    /// ad indicator. Layer B scope.
+    case jingleOnShow(podcastId: String, jingleId: String)
 
     // MARK: Serialization
 
@@ -44,6 +50,10 @@ enum CorrectionScope: Sendable, Equatable {
             return "phraseOnShow:\(podcastId):\(phrase)"
         case .campaignOnShow(let podcastId, let campaign):
             return "campaignOnShow:\(podcastId):\(campaign)"
+        case .domainOwnershipOnShow(let podcastId, let domain):
+            return "domainOwnershipOnShow:\(podcastId):\(domain)"
+        case .jingleOnShow(let podcastId, let jingleId):
+            return "jingleOnShow:\(podcastId):\(jingleId)"
         }
     }
 
@@ -86,7 +96,32 @@ enum CorrectionScope: Sendable, Equatable {
             let podcastId = String(remainder[remainder.startIndex..<sep])
             let campaign = String(remainder[remainder.index(after: sep)...])
             return .campaignOnShow(podcastId: podcastId, campaign: campaign)
+        case "domainOwnershipOnShow":
+            guard let sep = remainder.firstIndex(of: ":") else { return nil }
+            let podcastId = String(remainder[remainder.startIndex..<sep])
+            let domain = String(remainder[remainder.index(after: sep)...])
+            return .domainOwnershipOnShow(podcastId: podcastId, domain: domain)
+        case "jingleOnShow":
+            guard let sep = remainder.firstIndex(of: ":") else { return nil }
+            let podcastId = String(remainder[remainder.startIndex..<sep])
+            let jingleId = String(remainder[remainder.index(after: sep)...])
+            return .jingleOnShow(podcastId: podcastId, jingleId: jingleId)
         default:
+            return nil
+        }
+    }
+
+    // MARK: - Layer B Mapping
+
+    /// Returns the corresponding `BroadCorrectionScope` for Layer B scopes,
+    /// or `nil` for Layer A scopes (exactSpan, campaignOnShow).
+    var broadScope: BroadCorrectionScope? {
+        switch self {
+        case .phraseOnShow:            return .phraseOnShow
+        case .sponsorOnShow:           return .sponsorOnShow
+        case .domainOwnershipOnShow:   return .domainOwnershipOnShow
+        case .jingleOnShow:            return .jingleOnShow
+        case .exactSpan, .campaignOnShow:
             return nil
         }
     }
