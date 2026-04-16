@@ -5,7 +5,7 @@
 // sources (iTunes author, managing editor, feed URL domain, publisher,
 // title prefix). Confidence increases when multiple sources agree.
 //
-// Not wired into the live pipeline — ef2.5.3 handles integration.
+// Consumed by PriorHierarchyResolver (ef2.5.3).
 
 import Foundation
 
@@ -25,7 +25,7 @@ enum NetworkIdentitySource: String, Sendable, Codable, CaseIterable {
 /// A derived network identity for a podcast, representing which network
 /// or publisher produced the show. Confidence is higher when multiple
 /// independent metadata sources agree on the same identity.
-struct NetworkIdentity: Sendable, Equatable {
+struct NetworkIdentity: Sendable, Equatable, Codable {
     /// Normalized lowercase identifier suitable for grouping (e.g. "npr", "gimlet").
     let networkId: String
     /// Human-readable network name preserving original casing.
@@ -107,10 +107,7 @@ enum NetworkIdentityExtractor {
         // Prefer the longest human-readable name from the winning cluster.
         let displayName = best.value.max(by: { $0.name.count < $1.name.count })!.name
 
-        let confidence = computeConfidence(
-            sourceCount: sources.count,
-            totalPossible: candidates.count
-        )
+        let confidence = computeConfidence(sourceCount: sources.count)
 
         return NetworkIdentity(
             networkId: best.key,
@@ -127,12 +124,18 @@ enum NetworkIdentityExtractor {
     /// collapsing whitespace.
     static func normalize(_ name: String) -> String {
         var s = name.lowercased()
-        // Strip common corporate suffixes.
+        // Strip common corporate suffixes. Loop until no more suffixes match,
+        // so compound names like "Gimlet Podcast Network" fully reduce.
         let suffixes = [" media", " podcasts", " podcast", " network", " studios",
                         " entertainment", " inc", " llc", " ltd", " corp"]
-        for suffix in suffixes {
-            if s.hasSuffix(suffix) {
-                s = String(s.dropLast(suffix.count))
+        var changed = true
+        while changed {
+            changed = false
+            for suffix in suffixes {
+                if s.hasSuffix(suffix) {
+                    s = String(s.dropLast(suffix.count))
+                    changed = true
+                }
             }
         }
         // Remove non-alphanumeric except spaces, then collapse whitespace.
@@ -249,7 +252,7 @@ enum NetworkIdentityExtractor {
     }
 
     /// Compute confidence based on how many independent sources agree.
-    static func computeConfidence(sourceCount: Int, totalPossible: Int) -> Float {
+    static func computeConfidence(sourceCount: Int) -> Float {
         // Single source: 0.4 base. Each additional agreeing source adds 0.2, capped at 1.0.
         let base: Float = 0.4
         let perSource: Float = 0.2

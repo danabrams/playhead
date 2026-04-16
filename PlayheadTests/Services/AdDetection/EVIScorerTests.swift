@@ -153,4 +153,17 @@ struct EVIScorerTests {
             #expect(rebuilt == reason)
         }
     }
+
+    @Test("EVIScore clamps out-of-range fields at init")
+    func testEVIScoreClamping() {
+        let s = EVIScore(
+            decisionFlipProbability: 1.5,
+            utilityGain: -2.0,
+            computeCost: 3.0,
+            reason: nil
+        )
+        #expect(s.decisionFlipProbability == 1.0)
+        #expect(s.utilityGain == 0.0)
+        #expect(s.computeCost == 1.0)
+    }
 }

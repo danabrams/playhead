@@ -225,6 +225,17 @@ struct BudgetCoordinatorConfigTests {
         #expect(config.fmCapacity == 50)
         #expect(config.nearPlayheadWindowSeconds == 30)
     }
+
+    @Test("negative config values are clamped to zero")
+    func testNegativeClamping() {
+        let config = BudgetCoordinatorConfig(
+            fmCapacity: -10, dspCapacity: -5, thermalCapacity: -1, nearPlayheadWindowSeconds: -30
+        )
+        #expect(config.fmCapacity == 0)
+        #expect(config.dspCapacity == 0)
+        #expect(config.thermalCapacity == 0)
+        #expect(config.nearPlayheadWindowSeconds == 0)
+    }
 }
 
 // MARK: - BudgetAllocationPolicy Tests

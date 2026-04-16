@@ -272,8 +272,7 @@ struct PriorHierarchyTests {
     func showLocalActivates() {
         let local = makeShowLocalPriors(episodeCount: 10)
         let result = PriorHierarchyResolver.resolve(
-            showLocalPriors: local,
-            showEpisodeCount: 10
+            showLocalPriors: local
         )
 
         #expect(result.activeLevel == .showLocal)
@@ -284,8 +283,7 @@ struct PriorHierarchyTests {
     func showLocalBelowThreshold() {
         let local = makeShowLocalPriors(episodeCount: 4)
         let result = PriorHierarchyResolver.resolve(
-            showLocalPriors: local,
-            showEpisodeCount: 4
+            showLocalPriors: local
         )
 
         #expect(result.activeLevel == .global)
@@ -304,8 +302,7 @@ struct PriorHierarchyTests {
             episodeCount: 10
         )
         let result = PriorHierarchyResolver.resolve(
-            showLocalPriors: partial,
-            showEpisodeCount: 10
+            showLocalPriors: partial
         )
 
         #expect(result.activeLevel == .showLocal)
@@ -336,8 +333,7 @@ struct PriorHierarchyTests {
             networkPriors: net,
             networkDecay: decay,
             traitProfile: traits,
-            showLocalPriors: local,
-            showEpisodeCount: 10
+            showLocalPriors: local
         )
 
         #expect(result.activeLevel == .showLocal)
@@ -358,8 +354,7 @@ struct PriorHierarchyTests {
             networkPriors: net,
             networkDecay: 0.3,
             traitProfile: traits,
-            showLocalPriors: local,
-            showEpisodeCount: 8
+            showLocalPriors: local
         )
 
         let total = result.levelContributions.values.reduce(0, +)
@@ -374,8 +369,7 @@ struct PriorHierarchyTests {
         let result = PriorHierarchyResolver.resolve(
             networkPriors: net,
             networkDecay: 0.3,
-            traitProfile: traits,
-            showEpisodeCount: 4
+            traitProfile: traits
         )
 
         #expect(result.activeLevel == .traitDerived)
@@ -418,8 +412,7 @@ struct PriorHierarchyTests {
             networkPriors: nil,
             networkDecay: 0,
             traitProfile: .unknown,
-            showLocalPriors: nil,
-            showEpisodeCount: 0
+            showLocalPriors: nil
         )
         #expect(result.activeLevel == .global)
         #expect(result.levelContributions == [.global: 1.0])
@@ -429,8 +422,7 @@ struct PriorHierarchyTests {
     func showLocalExactThreshold() {
         let local = makeShowLocalPriors(episodeCount: 5)
         let result = PriorHierarchyResolver.resolve(
-            showLocalPriors: local,
-            showEpisodeCount: 5
+            showLocalPriors: local
         )
         #expect(result.activeLevel == .showLocal)
     }
@@ -439,8 +431,7 @@ struct PriorHierarchyTests {
     func showLocalJustBelowThreshold() {
         let local = makeShowLocalPriors(episodeCount: 4)
         let result = PriorHierarchyResolver.resolve(
-            showLocalPriors: local,
-            showEpisodeCount: 4
+            showLocalPriors: local
         )
         #expect(result.activeLevel == .global)
     }
@@ -486,6 +477,50 @@ struct PriorHierarchyTests {
         )
         // blend(0.5, 1.0, weight: 0.01) = 0.505
         #expect(abs(result.musicBracketTrust - 0.505) < 0.001)
+    }
+
+    @Test("network decay values outside [0,1] are clamped")
+    func networkDecayClamping() {
+        let net = makeNetworkPriors(musicBracketPrevalence: 1.0, metadataTrustAverage: 1.0)
+        // decay > 1.0 should be clamped to 1.0
+        let overResult = PriorHierarchyResolver.resolve(
+            networkPriors: net, networkDecay: 1.5
+        )
+        // blend(0.5, 1.0, weight: 1.0) = 1.0
+        #expect(abs(overResult.musicBracketTrust - 1.0) < 0.001)
+        let total = overResult.levelContributions.values.reduce(0, +)
+        #expect(abs(total - 1.0) < 0.01)
+
+        // decay < 0 should be clamped to 0 (network inactive)
+        let underResult = PriorHierarchyResolver.resolve(
+            networkPriors: net, networkDecay: -0.5
+        )
+        #expect(underResult.activeLevel == .global)
+    }
+
+    @Test("network sponsor recurrence formula at boundaries")
+    func sponsorRecurrenceBoundaries() {
+        // 0 sponsors -> 0 recurrence
+        let emptyNet = makeNetworkPriors(commonSponsors: [:])
+        let r0 = PriorHierarchyResolver.resolve(networkPriors: emptyNet, networkDecay: 0.5)
+        #expect(r0.sponsorRecurrenceExpectation < 0.3)
+
+        // 7 sponsors -> capped at 1.0 before blending
+        let manySponsors = (0..<7).reduce(into: [String: Float]()) { dict, i in
+            dict["sponsor\(i)"] = 0.5
+        }
+        let bigNet = makeNetworkPriors(commonSponsors: manySponsors)
+        let r7 = PriorHierarchyResolver.resolve(networkPriors: bigNet, networkDecay: 0.5)
+        #expect(r7.sponsorRecurrenceExpectation > r0.sponsorRecurrenceExpectation)
+    }
+
+    @Test("contributions sum to ~1.0 with only global + show-local (two levels)")
+    func twoLevelContributions() {
+        let local = makeShowLocalPriors(episodeCount: 10)
+        let result = PriorHierarchyResolver.resolve(showLocalPriors: local)
+        let total = result.levelContributions.values.reduce(0, +)
+        #expect(abs(total - 1.0) < 0.01)
+        #expect(result.activeLevel == .showLocal)
     }
 
     @Test("typicalAdDuration blends between levels")

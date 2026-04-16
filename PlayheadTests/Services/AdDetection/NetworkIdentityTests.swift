@@ -199,6 +199,13 @@ struct NetworkIdentityTests {
         #expect(NetworkIdentityExtractor.normalize("Wondery Studios") == "wondery")
     }
 
+    @Test("normalize strips multiple chained suffixes")
+    func normalizeMultipleSuffixes() {
+        #expect(NetworkIdentityExtractor.normalize("Gimlet Podcast Network") == "gimlet")
+        #expect(NetworkIdentityExtractor.normalize("Acme Media Podcasts") == "acme")
+        #expect(NetworkIdentityExtractor.normalize("Big Studios Entertainment") == "big")
+    }
+
     @Test("normalize lowercases and strips punctuation")
     func normalizeCasing() {
         #expect(NetworkIdentityExtractor.normalize("The New York Times") == "the new york times")
@@ -224,8 +231,20 @@ struct NetworkIdentityTests {
             derivedFrom: [.itunesAuthor],
             confidence: 0.5
         )
-        // Compile-time check: assign to a Sendable-requiring context.
         let _: any Sendable = identity
         #expect(identity.networkId == "test")
+    }
+
+    @Test("NetworkIdentity survives JSON encode/decode round-trip")
+    func codableRoundTrip() throws {
+        let identity = NetworkIdentity(
+            networkId: "npr",
+            networkName: "NPR",
+            derivedFrom: [.itunesAuthor, .feedDomain],
+            confidence: 0.6
+        )
+        let data = try JSONEncoder().encode(identity)
+        let decoded = try JSONDecoder().decode(NetworkIdentity.self, from: data)
+        #expect(decoded == identity)
     }
 }

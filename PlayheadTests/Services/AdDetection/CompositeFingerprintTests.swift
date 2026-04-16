@@ -231,7 +231,8 @@ struct SponsorMarkerSignatureTests {
             disclosurePosition: nil
         )
         let sim = sig1.similarity(to: sig2)
-        #expect(sim < 0.1, "All mismatched markers should produce very low similarity, got \(sim)")
+        // Presence: 0/3 match -> 0. Position fallback: 0.5 (neutral). Score = 0*0.6 + 0.5*0.4 = 0.2
+        #expect(sim < 0.25, "All mismatched markers should produce very low similarity, got \(sim)")
     }
 
     @Test("Position alignment affects score")
@@ -610,7 +611,7 @@ struct CompositeFingerprintEdgeCaseTests {
         #expect(sim > 0.5, "Should handle empty arrays gracefully, got \(sim)")
     }
 
-    @Test("Mismatched contour lengths handled via cosine similarity min-length")
+    @Test("Mismatched contour lengths reduce similarity via zero-padding")
     func mismatchedContourLengths() {
         let sig1 = AcousticSignature(
             hasMusicBed: true,
@@ -624,8 +625,83 @@ struct CompositeFingerprintEdgeCaseTests {
             avgProsodySteadiness: 0.5,
             spectralSketch: nil
         )
-        // Should not crash
         let sim = sig1.similarity(to: sig2)
+        // Zero-padded shorter vector means extra elements in longer reduce cosine
         #expect(sim > 0.5)
+        #expect(sim < 1.0, "Mismatched lengths should not produce perfect similarity")
+    }
+
+    @Test("Both-absent sponsor markers produce moderate score, not perfect")
+    func bothAbsentMarkersNotPerfect() {
+        let sig1 = SponsorMarkerSignature(
+            hasURL: false, hasPromoCode: false, hasDisclosure: false,
+            urlPosition: nil, promoCodePosition: nil, disclosurePosition: nil
+        )
+        let sig2 = SponsorMarkerSignature(
+            hasURL: false, hasPromoCode: false, hasDisclosure: false,
+            urlPosition: nil, promoCodePosition: nil, disclosurePosition: nil
+        )
+        let sim = sig1.similarity(to: sig2)
+        // Presence match = 1.0 (all agree on absent), position fallback = 0.5
+        // Total = 1.0 * 0.6 + 0.5 * 0.4 = 0.8
+        #expect(abs(sim - 0.8) < 0.01, "Both-absent should score 0.8, not 1.0, got \(sim)")
+    }
+
+    @Test("Composite score with out-of-range reliability is clamped")
+    func outOfRangeReliability() {
+        let fp = CompositeFingerprintBuilder.build(
+            text: "some text here for testing purposes",
+            transcriptReliability: 1.0,
+            hasMusicBed: false,
+            avgProsodySteadiness: 0.5
+        )
+        let highScore = fp.compositeScore(against: fp, transcriptReliability: 5.0)
+        let normalScore = fp.compositeScore(against: fp, transcriptReliability: 1.0)
+        // Clamped to 1.0, so should be the same
+        #expect(abs(highScore - normalScore) < 0.01)
+
+        let negScore = fp.compositeScore(against: fp, transcriptReliability: -1.0)
+        // Clamped to 0.0 which is < 0.3 gate, text dropped, acoustic only
+        #expect(negScore > 0)
+    }
+
+    @Test("cosineSimilarity: identical vectors produce 1.0")
+    func cosineSimilarityIdentical() {
+        let a: [Float] = [1.0, 2.0, 3.0]
+        let sim = cosineSimilarity(a, a)
+        #expect(abs(sim - 1.0) < 0.001)
+    }
+
+    @Test("cosineSimilarity: orthogonal vectors produce 0.0")
+    func cosineSimilarityOrthogonal() {
+        let a: [Float] = [1.0, 0.0]
+        let b: [Float] = [0.0, 1.0]
+        let sim = cosineSimilarity(a, b)
+        #expect(sim == 0.0)
+    }
+
+    @Test("cosineSimilarity: anti-correlated vectors clamped to 0.0")
+    func cosineSimilarityAntiCorrelated() {
+        let a: [Float] = [1.0, 0.0]
+        let b: [Float] = [-1.0, 0.0]
+        let sim = cosineSimilarity(a, b)
+        #expect(sim == 0.0, "Negative cosine should be clamped to 0")
+    }
+
+    @Test("cosineSimilarity: mismatched lengths zero-pad correctly")
+    func cosineSimilarityMismatchedLengths() {
+        let short: [Float] = [1.0, 0.0]
+        let long: [Float] = [1.0, 0.0, 1.0, 1.0]
+        let sim = cosineSimilarity(short, long)
+        // short zero-padded to [1,0,0,0]. Dot=1, normA=1, normB=sqrt(3).
+        // cosine = 1/sqrt(3) ≈ 0.577
+        #expect(sim > 0.5)
+        #expect(sim < 0.6)
+    }
+
+    @Test("cosineSimilarity: empty vectors produce 0.0")
+    func cosineSimilarityEmpty() {
+        #expect(cosineSimilarity([], []) == 0.0)
+        #expect(cosineSimilarity([], [1.0]) == 0.0)
     }
 }

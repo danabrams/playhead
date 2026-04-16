@@ -19,10 +19,10 @@ struct BudgetCoordinatorConfig: Sendable, Equatable {
         thermalCapacity: Float = 1.0,
         nearPlayheadWindowSeconds: Float = 60
     ) {
-        self.fmCapacity = fmCapacity
-        self.dspCapacity = dspCapacity
-        self.thermalCapacity = thermalCapacity
-        self.nearPlayheadWindowSeconds = nearPlayheadWindowSeconds
+        self.fmCapacity = max(fmCapacity, 0)
+        self.dspCapacity = max(dspCapacity, 0)
+        self.thermalCapacity = max(thermalCapacity, 0)
+        self.nearPlayheadWindowSeconds = max(nearPlayheadWindowSeconds, 0)
     }
 }
 
@@ -63,13 +63,19 @@ struct BudgetPool: Sendable, Equatable {
     }
 
     /// Commit a reservation: move from reserved to consumed.
+    /// Caller must not commit the same reservation twice.
     mutating func commit(_ reservation: BudgetReservation) {
+        assert(reserved >= reservation.cost,
+               "BudgetPool.commit: reservation cost \(reservation.cost) exceeds reserved \(reserved) — possible double-commit")
         reserved = max(reserved - reservation.cost, 0)
         consumed += reservation.cost
     }
 
     /// Release a reservation without consuming.
+    /// Caller must not release the same reservation twice.
     mutating func release(_ reservation: BudgetReservation) {
+        assert(reserved >= reservation.cost,
+               "BudgetPool.release: reservation cost \(reservation.cost) exceeds reserved \(reserved) — possible double-release")
         reserved = max(reserved - reservation.cost, 0)
     }
 }

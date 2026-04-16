@@ -17,7 +17,8 @@ import Foundation
 
 /// Per-episode trait measurements fed into the running ShowTraitProfile.
 /// Each field mirrors the corresponding ShowTraitProfile dimension but
-/// captures a single episode's observation.
+/// captures a single episode's observation. All [0,1] fields are clamped
+/// at init; `speakerTurnRate` is clamped to non-negative.
 struct EpisodeTraitSnapshot: Sendable, Codable, Equatable {
     /// Fraction of episode audio classified as music (0-1).
     let musicDensity: Float
@@ -33,6 +34,24 @@ struct EpisodeTraitSnapshot: Sendable, Codable, Equatable {
     let insertionVolatility: Float
     /// ASR transcript quality estimate for this episode (0-1).
     let transcriptReliability: Float
+
+    init(
+        musicDensity: Float,
+        speakerTurnRate: Float,
+        singleSpeakerDominance: Float,
+        structureRegularity: Float,
+        sponsorRecurrence: Float,
+        insertionVolatility: Float,
+        transcriptReliability: Float
+    ) {
+        self.musicDensity = min(max(musicDensity, 0), 1)
+        self.speakerTurnRate = max(speakerTurnRate, 0)
+        self.singleSpeakerDominance = min(max(singleSpeakerDominance, 0), 1)
+        self.structureRegularity = min(max(structureRegularity, 0), 1)
+        self.sponsorRecurrence = min(max(sponsorRecurrence, 0), 1)
+        self.insertionVolatility = min(max(insertionVolatility, 0), 1)
+        self.transcriptReliability = min(max(transcriptReliability, 0), 1)
+    }
 }
 
 // MARK: - ShowTraitProfile

@@ -33,6 +33,18 @@ struct EVIScore: Sendable, Equatable {
     var score: Float {
         decisionFlipProbability * utilityGain / max(computeCost, 0.01)
     }
+
+    init(
+        decisionFlipProbability: Float,
+        utilityGain: Float,
+        computeCost: Float,
+        reason: EVIPriorityReason?
+    ) {
+        self.decisionFlipProbability = min(max(decisionFlipProbability, 0), 1)
+        self.utilityGain = max(utilityGain, 0)
+        self.computeCost = min(max(computeCost, 0), 1)
+        self.reason = reason
+    }
 }
 
 /// Heuristic EVI computation for backfill budget allocation.

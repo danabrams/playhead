@@ -351,4 +351,24 @@ struct ShowTraitProfileTests {
     func emaAlphaValue() {
         #expect(ShowTraitProfile.emaAlpha == 0.3)
     }
+
+    @Test("out-of-range snapshot values are clamped")
+    func snapshotClamping() {
+        let snapshot = EpisodeTraitSnapshot(
+            musicDensity: 1.5,
+            speakerTurnRate: -2.0,
+            singleSpeakerDominance: -0.1,
+            structureRegularity: 2.0,
+            sponsorRecurrence: -1.0,
+            insertionVolatility: 5.0,
+            transcriptReliability: -0.5
+        )
+        #expect(snapshot.musicDensity == 1.0)
+        #expect(snapshot.speakerTurnRate == 0.0)
+        #expect(snapshot.singleSpeakerDominance == 0.0)
+        #expect(snapshot.structureRegularity == 1.0)
+        #expect(snapshot.sponsorRecurrence == 0.0)
+        #expect(snapshot.insertionVolatility == 1.0)
+        #expect(snapshot.transcriptReliability == 0.0)
+    }
 }

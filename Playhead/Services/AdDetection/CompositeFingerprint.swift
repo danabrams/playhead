@@ -147,7 +147,9 @@ struct SponsorMarkerSignature: Sendable, Equatable {
         }
 
         let normalizedPresence = presenceCount > 0 ? presenceScore / presenceCount : 0
-        let normalizedPosition = positionCount > 0 ? positionScore / positionCount : normalizedPresence
+        // When no positions are available, use a neutral midpoint rather than
+        // echoing presence score (which would double-count presence match).
+        let normalizedPosition = positionCount > 0 ? positionScore / positionCount : 0.5
 
         return normalizedPresence * 0.6 + normalizedPosition * 0.4
     }
@@ -353,19 +355,24 @@ enum CompositeFingerprintBuilder {
 
 // MARK: - Cosine similarity helper
 
-/// Cosine similarity between two Float vectors. Returns 0 for zero-length
-/// or zero-norm vectors.
-private func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
-    let len = min(a.count, b.count)
+/// Cosine similarity between two Float vectors. Mismatched lengths are
+/// handled by zero-padding the shorter vector (extra dimensions in the
+/// longer vector contribute to its norm, reducing similarity). Returns 0
+/// for zero-length or zero-norm vectors. Negative cosine values are
+/// clamped to 0 since anti-correlation is not meaningful for this use case.
+func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
+    let len = max(a.count, b.count)
     guard len > 0 else { return 0 }
 
     var dot: Float = 0
     var normA: Float = 0
     var normB: Float = 0
     for i in 0..<len {
-        dot += a[i] * b[i]
-        normA += a[i] * a[i]
-        normB += b[i] * b[i]
+        let va = i < a.count ? a[i] : 0
+        let vb = i < b.count ? b[i] : 0
+        dot += va * vb
+        normA += va * va
+        normB += vb * vb
     }
     let denom = (normA * normB).squareRoot()
     guard denom > 0 else { return 0 }

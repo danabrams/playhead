@@ -6,7 +6,7 @@
 // and metadata trust. Uses confidence-weighted aggregation with outlier
 // trimming (not raw averages).
 //
-// Not wired into the live pipeline — ef2.5.3 handles integration.
+// Consumed by PriorHierarchyResolver (ef2.5.3).
 
 import Foundation
 
@@ -33,14 +33,15 @@ struct NetworkPriors: Sendable, Equatable {
     ///
     /// Formula: `0.5 × max(0, 1 - episodesObserved / 10)`
     static func decayedWeight(episodesObserved: Int) -> Float {
-        0.5 * max(0, 1.0 - Float(episodesObserved) / 10.0)
+        let clamped = max(episodesObserved, 0)
+        return 0.5 * max(0, 1.0 - Float(clamped) / 10.0)
     }
 }
 
 // MARK: - ShowPriorSnapshot
 
 /// A snapshot of a single show's priors, used as input to the aggregator.
-struct ShowPriorSnapshot: Sendable {
+struct ShowPriorSnapshot: Sendable, Equatable {
     /// Sponsors observed on this show, lowercased → frequency (0-1).
     let sponsors: [String: Float]
     /// Normalized ad slot positions observed (0-1).
@@ -153,7 +154,7 @@ enum NetworkPriorAggregator {
     static func aggregateDuration(_ snapshots: [ShowPriorSnapshot]) -> ClosedRange<TimeInterval> {
         let durations: [(value: Float, weight: Float)] = snapshots.map {
             (Float($0.averageAdDuration), $0.weight)
-        }
+        }.sorted(by: { $0.value < $1.value })
 
         guard !durations.isEmpty else { return 30...90 }
 

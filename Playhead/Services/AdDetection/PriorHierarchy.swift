@@ -115,16 +115,18 @@ enum PriorHierarchyResolver {
     ///   - networkDecay: Pre-computed network decay weight (from `NetworkPriors.decayedWeight`).
     ///   - traitProfile: Level-2 show trait profile (checked via `isReliable`).
     ///   - showLocalPriors: Level-3 per-show observations, nil if unavailable.
-    ///   - showEpisodeCount: Total episodes observed for this show.
+    ///     The `episodeCount` on `ShowLocalPriors` gates activation (>= 5).
     /// - Returns: Fully resolved priors with provenance tracking.
     static func resolve(
         globalDefaults: GlobalPriorDefaults = .standard,
         networkPriors: NetworkPriors? = nil,
         networkDecay: Float = 0,
         traitProfile: ShowTraitProfile = .unknown,
-        showLocalPriors: ShowLocalPriors? = nil,
-        showEpisodeCount: Int = 0
+        showLocalPriors: ShowLocalPriors? = nil
     ) -> ResolvedPriors {
+        // Clamp networkDecay to [0, 1] defensively.
+        let networkDecay = max(0, min(1, networkDecay))
+
         // Start with global defaults.
         var musicBracketTrust = globalDefaults.musicBracketTrust
         var metadataTrust = globalDefaults.metadataTrust
@@ -176,8 +178,8 @@ enum PriorHierarchyResolver {
         }
 
         // Level 3: Show-local priors (wins at >= 5 episodes).
-        if let local = showLocalPriors, showEpisodeCount >= showLocalThreshold {
-            let localWeight = showLocalBlendWeight(episodeCount: showEpisodeCount)
+        if let local = showLocalPriors, local.episodeCount >= showLocalThreshold {
+            let localWeight = showLocalBlendWeight(episodeCount: local.episodeCount)
 
             if let v = local.musicBracketTrust {
                 musicBracketTrust = blend(musicBracketTrust, v, weight: localWeight)

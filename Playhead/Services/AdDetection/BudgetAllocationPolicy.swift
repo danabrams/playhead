@@ -37,7 +37,8 @@ enum BudgetAllocationPolicy {
         var background: [AllocationCandidate] = []
 
         for item in items {
-            if item.distanceFromPlayhead <= config.nearPlayheadWindowSeconds {
+            let distance = max(item.distanceFromPlayhead, 0)
+            if distance <= config.nearPlayheadWindowSeconds {
                 nearPlayhead.append(item)
             } else {
                 background.append(item)
@@ -45,7 +46,7 @@ enum BudgetAllocationPolicy {
         }
 
         // Near-playhead items sorted by distance (closest first).
-        nearPlayhead.sort { $0.distanceFromPlayhead < $1.distanceFromPlayhead }
+        nearPlayhead.sort { max($0.distanceFromPlayhead, 0) < max($1.distanceFromPlayhead, 0) }
 
         // Background sorted by EVI (highest first).
         background.sort { $0.eviScore.score > $1.eviScore.score }

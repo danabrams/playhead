@@ -152,6 +152,24 @@ struct NetworkPriorTests {
         #expect(result.typicalAdDuration.upperBound > result.typicalAdDuration.lowerBound)
     }
 
+    @Test("duration aggregation trims outliers correctly even with unsorted input")
+    func durationUnsortedInput() {
+        // Shuffled durations: outlier trimming must sort before trimming.
+        let durations: [Double] = [120, 30, 90, 45, 60, 150, 35, 55, 80, 70]
+        let snaps = durations.map { d in
+            ShowPriorSnapshot(
+                sponsors: [:], slotPositions: [],
+                averageAdDuration: d,
+                musicBracketRate: 0.5, metadataTrust: 0.8, weight: 1.0
+            )
+        }
+        let result = NetworkPriorAggregator.aggregate(snaps)!
+        // After sorting [30,35,45,55,60,70,80,90,120,150] and trimming 10% (1 each end),
+        // range should be based on [35,45,55,60,70,80,90,120], so ~35...120.
+        #expect(result.typicalAdDuration.lowerBound < 40)
+        #expect(result.typicalAdDuration.upperBound > 100)
+    }
+
     @Test("duration range has minimum width of 10 seconds")
     func durationMinimumWidth() {
         let snaps = [
