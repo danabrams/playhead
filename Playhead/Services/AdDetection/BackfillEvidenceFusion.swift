@@ -119,7 +119,7 @@ struct BackfillEvidenceFusion: Sendable {
     /// Pre-constructed catalog ledger entries.
     let catalogEntries: [EvidenceLedgerEntry]
     /// Pre-constructed fingerprint ledger entries (Phase 9).
-    var fingerprintEntries: [EvidenceLedgerEntry] = []
+    private(set) var fingerprintEntries: [EvidenceLedgerEntry] = []
     let mode: FMBackfillMode
     let config: FusionWeightConfig
 

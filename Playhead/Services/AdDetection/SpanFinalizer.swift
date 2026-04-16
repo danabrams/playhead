@@ -87,7 +87,8 @@ struct SpanFinalizer: Sendable {
         // Sort by start time for deterministic processing.
         // Secondary sort by span id for determinism when start times are equal.
         let sorted = candidates.sorted { a, b in
-            if a.span.startTime != b.span.startTime { return a.span.startTime < b.span.startTime }
+            if a.span.startTime < b.span.startTime { return true }
+            if a.span.startTime > b.span.startTime { return false }
             return a.span.id < b.span.id
         }
 
@@ -118,7 +119,8 @@ struct SpanFinalizer: Sendable {
         while changed {
             changed = false
             result.sort { a, b in
-                if a.startTime != b.startTime { return a.startTime < b.startTime }
+                if a.startTime < b.startTime { return true }
+                if a.startTime > b.startTime { return false }
                 return a.spanId < b.spanId
             }
 
@@ -148,7 +150,7 @@ struct SpanFinalizer: Sendable {
                     }
                 } else {
                     // Trim a's end to b's start.
-                    if b.startTime <= a.startTime {
+                    if b.startTime <= a.startTime && b.endTime >= a.endTime {
                         // a is fully contained — suppress it.
                         Self.logger.info("Overlap: suppressing span \(a.spanId) (fully contained by \(b.spanId))")
                         result[i].suppress(.overlapSuppressed)
@@ -292,7 +294,8 @@ struct SpanFinalizer: Sendable {
         // Sort by ascending confidence — demote lowest confidence first.
         // Secondary sort by index for determinism when confidences are equal.
         let sorted = autoSkipSpans.sorted { a, b in
-            if a.confidence != b.confidence { return a.confidence < b.confidence }
+            if a.confidence < b.confidence { return true }
+            if a.confidence > b.confidence { return false }
             return a.index > b.index  // higher index demoted first (later in episode)
         }
 
@@ -379,10 +382,10 @@ private struct WorkingSpan {
     }
 
     mutating func capEligibility(_ gate: SkipEligibilityGate, constraint: FinalizerConstraint) {
-        // Only apply the cap if it makes the gate more restrictive.
-        // .eligible is the least restrictive; any other value is a demotion.
-        // Don't "promote" an already-blocked gate (e.g. blockedByEvidenceQuorum → markOnly).
-        guard eligibilityGate == .eligible else { return }
+        // Only apply the cap if it makes the gate more restrictive (demotion).
+        // Severity ordering: eligible < markOnly < blocked states.
+        // A demotion (higher severity) is always allowed; a promotion (lower severity) is not.
+        guard gate.severity > eligibilityGate.severity else { return }
         eligibilityGate = gate
         addConstraint(constraint)
     }
@@ -395,9 +398,7 @@ private struct WorkingSpan {
     }
 
     mutating func addConstraint(_ constraint: FinalizerConstraint) {
-        if !constraintTrace.contains(constraint) {
-            constraintTrace.append(constraint)
-        }
+        constraintTrace.append(constraint)
     }
 
     func copy(startTime: Double, endTime: Double) -> WorkingSpan {

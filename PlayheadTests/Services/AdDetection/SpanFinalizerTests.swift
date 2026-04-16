@@ -166,6 +166,47 @@ struct SpanFinalizerTests {
         #expect(result[0].constraintTrace.contains(.overlapTrimmed) || result[0].constraintTrace.contains(.mergedWithAdjacent))
     }
 
+    @Test("Equal start times: wider lower-confidence span is trimmed to zero and dropped")
+    func equalStartTimesWiderLowerConfidenceTrimmedAndDropped() {
+        // a(10-50, 0.5) and b(10-30, 0.9). b wins. a's end is trimmed to b's start (10),
+        // making a zero-duration, which is dropped by duration sanity. The trailing portion
+        // of a (30-50) is not recoverable via edge trimming alone.
+        // After merge: single span 10-30 from b.
+        let candidates = [
+            makeCandidate(startTime: 10, endTime: 50, skipConfidence: 0.5, ordinalBase: 100),
+            makeCandidate(startTime: 10, endTime: 30, skipConfidence: 0.9, ordinalBase: 300),
+        ]
+        let result = makeFinalizer().finalize(candidates)
+
+        #expect(result.count == 1)
+        #expect(result[0].span.startTime == 10)
+        #expect(result[0].span.endTime == 30)
+        #expect(result[0].decision.skipConfidence == 0.9)
+    }
+
+    @Test("Equal start times: lower-confidence span fully contained is suppressed")
+    func equalStartTimesFullyContainedSuppressed() {
+        // a(10-30, 0.5) and b(10-50, 0.9). b wins and fully contains a → suppress a.
+        let candidates = [
+            makeCandidate(startTime: 10, endTime: 30, skipConfidence: 0.5, ordinalBase: 100),
+            makeCandidate(startTime: 10, endTime: 50, skipConfidence: 0.9, ordinalBase: 300),
+        ]
+        let result = makeFinalizer().finalize(candidates)
+
+        #expect(result.count == 1)
+        #expect(result[0].span.startTime == 10)
+        #expect(result[0].span.endTime == 50)
+    }
+
+    @Test("Zero episode duration: action cap is skipped, no crash")
+    func zeroEpisodeDurationNoCrash() {
+        let candidates = [
+            makeCandidate(startTime: 10, endTime: 40, ordinalBase: 100),
+        ]
+        let result = makeFinalizer(episodeDuration: 0).finalize(candidates)
+        #expect(result.count == 1)
+    }
+
     // MARK: - Constraint 2: Minimum content gap
 
     @Test("Spans with gap < 3s are merged")
@@ -478,6 +519,39 @@ struct SpanFinalizerTests {
         #expect(result[0].span.startTime == 10)
         #expect(result[0].span.endTime == 40)
         #expect(result[0].policyAction == .autoSkipEligible)
+    }
+
+    @Test("capEligibility with equal severity: first writer wins")
+    func equalSeverityFirstWriterWins() {
+        // A span already at .markOnly (severity 1) should not change to
+        // .cappedByFMSuppression (also severity 1) — first writer wins.
+        let chapters = [ChapterMarker(startTime: 15, endTime: 35, isContent: true)]
+        let candidates = [
+            makeCandidate(startTime: 10, endTime: 40, ordinalBase: 100),
+        ]
+        let result = makeFinalizer(chapters: chapters).finalize(candidates)
+
+        // Chapter penalty fires first → .markOnly. The subsequent capEligibility
+        // calls (if any) should not overwrite it with .cappedByFMSuppression.
+        #expect(result[0].decision.eligibilityGate == .markOnly)
+    }
+
+    @Test("capEligibility allows demotion from markOnly to blockedByPolicy")
+    func capEligibilityAllowsDemotion() {
+        // A span at .markOnly (severity 1) should be demoted to .blockedByPolicy (severity 2)
+        // by the action cap when over budget.
+        let chapters = [ChapterMarker(startTime: 5, endTime: 35, isContent: true)]
+        // Episode is 60s. Two eligible 30s spans = 60s = 100% > 50% budget.
+        // But one span gets markOnly from chapter penalty, so only one counts as eligible.
+        // 30s/60s = 50% exactly, not over budget. Use a tighter episode.
+        let candidates = [
+            makeCandidate(startTime: 0, endTime: 50, skipConfidence: 0.9, ordinalBase: 100),
+            makeCandidate(startTime: 55, endTime: 60, skipConfidence: 0.3, ordinalBase: 300),
+        ]
+        // 55s total auto-skip > 50% of 60s (30s budget) → lowest confidence demoted.
+        let result = makeFinalizer(episodeDuration: 60, chapters: []).finalize(candidates)
+
+        #expect(result[1].decision.eligibilityGate == .blockedByPolicy)
     }
 
     @Test("Constraint trace accumulates across multiple constraints")

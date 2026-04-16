@@ -68,15 +68,19 @@ struct FMSuppressionGuard: Sendable {
 
     // MARK: - Private
 
-    /// Strong anchors are URL, promoCode, or disclosurePhrase categories in lexical
-    /// or catalog entries. These represent high-trust positive evidence that must
-    /// never be suppressed.
+    /// Strong anchors are urlCTA, promoCode, or sponsor categories in lexical entries,
+    /// or any positive catalog entry. These represent high-trust positive evidence
+    /// that must never be suppressed.
     private var hasStrongAnchors: Bool {
-        let strongLexicalCategories: Set<String> = ["url", "urlCTA", "promoCode", "disclosurePhrase", "disclosure"]
+        let strongLexicalCategories: Set<String> = [
+            LexicalPatternCategory.urlCTA.rawValue,
+            LexicalPatternCategory.promoCode.rawValue,
+            LexicalPatternCategory.sponsor.rawValue,
+        ]
         for entry in ledger {
             switch entry.detail {
             case .lexical(let matchedCategories):
-                if !matchedCategories.filter({ strongLexicalCategories.contains($0) }).isEmpty {
+                if matchedCategories.contains(where: { strongLexicalCategories.contains($0) }) {
                     return true
                 }
             case .catalog(let entryCount):
@@ -212,7 +216,8 @@ struct FMSuppressionApplicator: Sendable {
                 let suppressed = EvidenceLedgerEntry(
                     source: entry.source,
                     weight: suppressedWeight,
-                    detail: entry.detail
+                    detail: entry.detail,
+                    classificationTrust: entry.classificationTrust
                 )
                 suppressedLedger.append(suppressed)
                 downweightedCount += 1

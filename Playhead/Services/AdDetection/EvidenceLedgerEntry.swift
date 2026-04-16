@@ -27,6 +27,20 @@ enum SkipEligibilityGate: String, Sendable, Codable, Equatable {
     case blockedByUserCorrection
     /// FM noAds consensus suppression: no strong proposal survived, capped to mark-only.
     case cappedByFMSuppression
+
+    /// Restriction severity for ordering: higher means more restrictive.
+    /// Used by SpanFinalizer.capEligibility to allow demotions but prevent promotions.
+    /// Gates at the same severity level cannot override each other (first writer wins).
+    var severity: Int {
+        switch self {
+        case .eligible: return 0
+        case .markOnly: return 1
+        case .blockedByEvidenceQuorum: return 2
+        case .blockedByPolicy: return 2
+        case .blockedByUserCorrection: return 3
+        case .cappedByFMSuppression: return 1
+        }
+    }
 }
 
 // MARK: - EvidenceLedgerDetail

@@ -100,16 +100,17 @@ struct BackfillEvidenceFusionTests {
 
     // MARK: - SkipEligibilityGate
 
-    @Test("SkipEligibilityGate has all five required cases")
+    @Test("SkipEligibilityGate has all six required cases")
     func eligibilityGateCases() {
         let cases: [SkipEligibilityGate] = [
             .eligible,
             .blockedByEvidenceQuorum,
             .blockedByPolicy,
+            .markOnly,
             .blockedByUserCorrection,
             .cappedByFMSuppression
         ]
-        #expect(cases.count == 5)
+        #expect(cases.count == 6)
 
         // Codable round-trip
         for gate in cases {

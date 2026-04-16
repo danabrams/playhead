@@ -23,7 +23,7 @@ struct FMSuppressionGuardTests {
     private func makeStrongAnchorLedger() -> [EvidenceLedgerEntry] {
         [
             EvidenceLedgerEntry(source: .classifier, weight: 0.25, detail: .classifier(score: 0.7)),
-            EvidenceLedgerEntry(source: .lexical, weight: 0.18, detail: .lexical(matchedCategories: ["url"])),
+            EvidenceLedgerEntry(source: .lexical, weight: 0.18, detail: .lexical(matchedCategories: ["urlCTA"])),
         ]
     }
 
@@ -198,11 +198,11 @@ struct FMSuppressionGuardTests {
         #expect(!result.isTriggered, "promoCode anchor should block suppression")
     }
 
-    @Test("Suppression does NOT trigger when disclosure lexical anchor present")
-    func disclosureAnchorBlocksSuppression() {
+    @Test("Suppression does NOT trigger when sponsor lexical anchor present")
+    func sponsorAnchorBlocksSuppression() {
         let ledger = [
             EvidenceLedgerEntry(source: .classifier, weight: 0.20, detail: .classifier(score: 0.6)),
-            EvidenceLedgerEntry(source: .lexical, weight: 0.18, detail: .lexical(matchedCategories: ["disclosurePhrase"])),
+            EvidenceLedgerEntry(source: .lexical, weight: 0.18, detail: .lexical(matchedCategories: ["sponsor"])),
         ]
         let guard_ = FMSuppressionGuard(
             overlappingFMResults: twoModerateNoAdsWindows(),
@@ -210,7 +210,7 @@ struct FMSuppressionGuardTests {
             anchorProvenance: []
         )
         let result = guard_.evaluate()
-        #expect(!result.isTriggered, "disclosure anchor should block suppression")
+        #expect(!result.isTriggered, "sponsor anchor should block suppression")
     }
 
     @Test("Suppression does NOT trigger when catalog entry present")
@@ -248,6 +248,21 @@ struct FMSuppressionGuardTests {
         )
         let result = guard_.evaluate()
         #expect(!result.isTriggered, "evidenceCatalog provenance should block suppression")
+    }
+
+    @Test("Weak lexical categories (transitionMarker, purchaseLanguage) do NOT block suppression")
+    func weakLexicalCategoriesDoNotBlockSuppression() {
+        let ledger = [
+            EvidenceLedgerEntry(source: .lexical, weight: 0.15,
+                                detail: .lexical(matchedCategories: ["transitionMarker", "purchaseLanguage"])),
+        ]
+        let guard_ = FMSuppressionGuard(
+            overlappingFMResults: twoModerateNoAdsWindows(),
+            ledger: ledger,
+            anchorProvenance: []
+        )
+        let result = guard_.evaluate()
+        #expect(result.isTriggered, "weak lexical categories should NOT block suppression")
     }
 
     // MARK: - Guard 4: No fingerprint match
@@ -507,5 +522,25 @@ struct CappedByFMSuppressionGateTests {
     @Test("cappedByFMSuppression rawValue is correct")
     func rawValue() {
         #expect(SkipEligibilityGate.cappedByFMSuppression.rawValue == "cappedByFMSuppression")
+    }
+
+    // MARK: - classificationTrust preservation
+
+    @Test("Suppression preserves classificationTrust on downweighted entries")
+    func classificationTrustPreservedThroughSuppression() {
+        let ledger = [
+            EvidenceLedgerEntry(source: .classifier, weight: 0.25,
+                                detail: .classifier(score: 0.7), classificationTrust: 0.85),
+            EvidenceLedgerEntry(source: .lexical, weight: 0.15,
+                                detail: .lexical(matchedCategories: ["transitionMarker"]),
+                                classificationTrust: 0.6),
+        ]
+        let applicator = FMSuppressionApplicator(suppressionFactor: 0.3)
+        let result = applicator.apply(guardResult: .triggered, ledger: ledger)
+
+        #expect(result.suppressedLedger[0].classificationTrust == 0.85,
+                "classificationTrust must be forwarded, not reset to default")
+        #expect(result.suppressedLedger[1].classificationTrust == 0.6,
+                "classificationTrust must be forwarded, not reset to default")
     }
 }

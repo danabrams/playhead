@@ -38,8 +38,11 @@ struct BetaPosterior: Sendable, Equatable, Codable {
     }
 
     /// Posterior variance: Var[theta] = ab / ((a+b)^2 * (a+b+1)).
+    /// Returns 0.0 when both alpha and beta are zero (degenerate case).
     var variance: Double {
-        (alpha * beta) / ((alpha + beta) * (alpha + beta) * (alpha + beta + 1))
+        let total = alpha + beta
+        guard total > 0 else { return 0.0 }
+        return (alpha * beta) / (total * total * (total + 1))
     }
 
     /// Total pseudo-observations backing this posterior.
@@ -185,8 +188,7 @@ struct UpdateTrace: Sendable, Equatable, Codable {
 /// dampened because their posteriors are pulled toward 0.5 by the prior.
 struct SourceTrustProfile: Sendable, Equatable {
 
-    /// Per-source Beta posteriors. Keyed by EvidenceSourceType raw value
-    /// for Codable stability.
+    /// Per-source Beta posteriors. Keyed by EvidenceSourceType.
     private var posteriors: [EvidenceSourceType: BetaPosterior]
 
     /// Ordered log of all accepted corroboration events.
@@ -214,13 +216,14 @@ struct SourceTrustProfile: Sendable, Equatable {
         .fingerprint: BetaPosterior(alpha: 7, beta: 3),   // 0.70
         .fm:          BetaPosterior(alpha: 8, beta: 2),   // 0.80
         .lexical:     BetaPosterior(alpha: 17, beta: 3),  // 0.85
+        .fusedScore:  BetaPosterior(alpha: 1, beta: 1),   // 0.50 — uninformative (post-fusion aggregate)
     ]
 
     // MARK: - Query
 
     /// Return the current Beta posterior for a source.
     func posterior(for source: EvidenceSourceType) -> BetaPosterior {
-        posteriors[source] ?? Self.defaultPriors[source]!
+        posteriors[source] ?? Self.defaultPriors[source] ?? BetaPosterior(alpha: 1, beta: 1)
     }
 
     /// Effective trust: posteriorMean * confidence.

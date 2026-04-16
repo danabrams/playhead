@@ -42,6 +42,45 @@ struct BetaPosteriorTests {
         #expect(updated.mean < prior.mean)
     }
 
+    @Test("degenerate (0,0) posterior: mean is 0.5, variance is 0 (not NaN)")
+    func degeneratePosterior() {
+        let p = BetaPosterior(alpha: 0, beta: 0)
+        #expect(p.mean == 0.5)
+        #expect(p.variance == 0.0)
+        #expect(!p.variance.isNaN)
+    }
+
+    @Test("Codable round-trip preserves BetaPosterior")
+    func codableRoundTrip() throws {
+        let original = BetaPosterior(alpha: 8, beta: 2)
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(BetaPosterior.self, from: data)
+        #expect(decoded == original)
+    }
+
+    @Test("updated() clamps negative inputs to zero")
+    func updatedClampsNegatives() {
+        let prior = BetaPosterior(alpha: 5, beta: 5)
+        let updated = prior.updated(successes: -3, failures: -2)
+        #expect(updated.alpha == 5, "Negative successes should be clamped to 0")
+        #expect(updated.beta == 5, "Negative failures should be clamped to 0")
+    }
+
+    @Test("Codable round-trip preserves UpdateTrace")
+    func updateTraceCodableRoundTrip() throws {
+        let trace = UpdateTrace(
+            sourceToUpdate: .fm,
+            corroboratingSource: .lexical,
+            sourceEpisodeId: "ep-1",
+            corroboratingEpisodeId: "ep-2",
+            success: true,
+            timestamp: Date(timeIntervalSince1970: 1000)
+        )
+        let data = try JSONEncoder().encode(trace)
+        let decoded = try JSONDecoder().decode(UpdateTrace.self, from: data)
+        #expect(decoded == trace)
+    }
+
     @Test("observation count is alpha + beta")
     func observationCountIsCorrect() {
         let posterior = BetaPosterior(alpha: 17, beta: 3)
@@ -284,6 +323,28 @@ struct SourceTrustProfileTests {
             #expect(posterior.observationCount > 0,
                     "Missing default prior for \(source)")
         }
+    }
+
+    @Test("blocked corroboration does not append trace")
+    func blockedCorroborationNoTrace() {
+        var profile = SourceTrustProfile()
+        _ = profile.recordCorroboration(
+            sourceToUpdate: .lexical,
+            corroboratingSource: .classifier,
+            sourceEpisodeId: "ep-1",
+            corroboratingEpisodeId: "ep-2",
+            success: true
+        )
+        #expect(profile.updateTraces.isEmpty, "Same-family block should not record a trace")
+    }
+
+    @Test("fusedScore has an uninformative prior: Beta(1,1) -> 0.50")
+    func fusedScorePrior() {
+        let profile = SourceTrustProfile()
+        let fused = profile.posterior(for: .fusedScore)
+        #expect(fused.alpha == 1)
+        #expect(fused.beta == 1)
+        #expect(abs(fused.mean - 0.50) < 1e-10)
     }
 
     @Test("update trace is recorded for holdout validation")
