@@ -332,6 +332,15 @@
 		FCB8EC41099FACE4DDEE1EF5 /* DecisionExplanationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FE97FF9470D2FE4847C596F /* DecisionExplanationTests.swift */; };
 		FE094685E4D4030EAC60F3DE /* DownloadManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4EF478F6703172C462A0057 /* DownloadManagerTests.swift */; };
 		FEFCC10CFF7EF39FD043123F /* SensitiveWindowRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 117F1E41DE084B613166D952 /* SensitiveWindowRouter.swift */; };
+		D97F07C60C4D4F4C907A7B3E /* SLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F45987748354DDB840307C8 /* SLI.swift */; };
+		6110BFE431D34DE194A3F790 /* SLICohortAxes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF71F565624B4A01A1B6FCE2 /* SLICohortAxes.swift */; };
+		30D5D99526E2446D9F553811 /* ExecutionConditionClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B195457F01B448CBA4A5E05 /* ExecutionConditionClassifier.swift */; };
+		502FA23972174FE5A55F216A /* EpisodeDurationBucketClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11E44612BBF44BE9A4F91F5 /* EpisodeDurationBucketClassifier.swift */; };
+		22E6ED74839648E58ECDA0C1 /* SLICohortMeaningfulness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DF395FE23334CCB913697CD /* SLICohortMeaningfulness.swift */; };
+		7B7F31E2BE024917B1E84292 /* ExecutionConditionClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B56A7C8A2464AFE9ED25E25 /* ExecutionConditionClassifierTests.swift */; };
+		49273125D7EF42009910332E /* EpisodeDurationBucketClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FFB9CE49AD8438FA101F087 /* EpisodeDurationBucketClassifierTests.swift */; };
+		A59656CCBF434B63A187131F /* SLIThresholdsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46C10201D8124310A42FF669 /* SLIThresholdsTests.swift */; };
+		A734D218790C42C282939674 /* SLICohortMeaningfulnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53D55FD7091B4F63AF7B6AC2 /* SLICohortMeaningfulnessTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -673,6 +682,15 @@
 		FE5DD1A344E740FC5E1E183E /* BackfillProgressCursorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackfillProgressCursorTests.swift; sourceTree = "<group>"; };
 		FE60055EE7FD54970B500C31 /* BrowseView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowseView.swift; sourceTree = "<group>"; };
 		FF38243D35CA07BE595A877C /* FoundationModelExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoundationModelExtractor.swift; sourceTree = "<group>"; };
+		9F45987748354DDB840307C8 /* SLI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SLI.swift; sourceTree = "<group>"; };
+		DF71F565624B4A01A1B6FCE2 /* SLICohortAxes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SLICohortAxes.swift; sourceTree = "<group>"; };
+		1B195457F01B448CBA4A5E05 /* ExecutionConditionClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecutionConditionClassifier.swift; sourceTree = "<group>"; };
+		B11E44612BBF44BE9A4F91F5 /* EpisodeDurationBucketClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EpisodeDurationBucketClassifier.swift; sourceTree = "<group>"; };
+		7DF395FE23334CCB913697CD /* SLICohortMeaningfulness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SLICohortMeaningfulness.swift; sourceTree = "<group>"; };
+		7B56A7C8A2464AFE9ED25E25 /* ExecutionConditionClassifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecutionConditionClassifierTests.swift; sourceTree = "<group>"; };
+		5FFB9CE49AD8438FA101F087 /* EpisodeDurationBucketClassifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EpisodeDurationBucketClassifierTests.swift; sourceTree = "<group>"; };
+		46C10201D8124310A42FF669 /* SLIThresholdsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SLIThresholdsTests.swift; sourceTree = "<group>"; };
+		53D55FD7091B4F63AF7B6AC2 /* SLICohortMeaningfulnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SLICohortMeaningfulnessTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -747,6 +765,7 @@
 				5B690F9FF697EE4DD8086FC7 /* Capabilities */,
 				1E742C6FF8AD220FC5DD7E8C /* Downloads */,
 				4E4788849E96C337DA695CF0 /* FeatureExtraction */,
+				FC7354CBB7534D10B220D8B9 /* Observability */,
 				7D11600A21A244E53D1ABA6D /* PlaybackTransport */,
 				3E8FCE7515C5849FBBE124B4 /* PodcastFeed */,
 				798E603886D4701020B765CA /* PreAnalysis */,
@@ -839,6 +858,29 @@
 				3615D0BEAFE62AA2FFF3FA53 /* FoundationModelsUsabilityProbe.swift */,
 			);
 			path = Capabilities;
+			sourceTree = "<group>";
+		};
+		EC5C913945F149C2B9A79D2B /* Observability */ = {
+			isa = PBXGroup;
+			children = (
+				1B195457F01B448CBA4A5E05 /* ExecutionConditionClassifier.swift */,
+				B11E44612BBF44BE9A4F91F5 /* EpisodeDurationBucketClassifier.swift */,
+				9F45987748354DDB840307C8 /* SLI.swift */,
+				DF71F565624B4A01A1B6FCE2 /* SLICohortAxes.swift */,
+				7DF395FE23334CCB913697CD /* SLICohortMeaningfulness.swift */,
+			);
+			path = Observability;
+			sourceTree = "<group>";
+		};
+		FC7354CBB7534D10B220D8B9 /* Observability */ = {
+			isa = PBXGroup;
+			children = (
+				7B56A7C8A2464AFE9ED25E25 /* ExecutionConditionClassifierTests.swift */,
+				5FFB9CE49AD8438FA101F087 /* EpisodeDurationBucketClassifierTests.swift */,
+				46C10201D8124310A42FF669 /* SLIThresholdsTests.swift */,
+				53D55FD7091B4F63AF7B6AC2 /* SLICohortMeaningfulnessTests.swift */,
+			);
+			path = Observability;
 			sourceTree = "<group>";
 		};
 		3E8FCE7515C5849FBBE124B4 /* PodcastFeed */ = {
@@ -1084,6 +1126,7 @@
 				2B0E2B910983C8387566A3BB /* Downloads */,
 				9C0E9816F207942BEF585B33 /* Entitlements */,
 				67663D195A37E8940378D0B9 /* FeatureExtraction */,
+				EC5C913945F149C2B9A79D2B /* Observability */,
 				5013909EEAE6CC69E596DBCF /* PlaybackTransport */,
 				09327D298346A3F39029267A /* PodcastFeed */,
 				60B93A544AAE710E1E1FD2FC /* PreAnalysis */,
@@ -1730,6 +1773,11 @@
 				B9B63518E65DDE127FBEC75F /* Typography.swift in Sources */,
 				8EF6DEABE12727DEE137E015 /* UserCorrectionStore.swift in Sources */,
 				1E96C274F4B8282CC3B8374B /* UserPreferences.swift in Sources */,
+				30D5D99526E2446D9F553811 /* ExecutionConditionClassifier.swift in Sources */,
+				502FA23972174FE5A55F216A /* EpisodeDurationBucketClassifier.swift in Sources */,
+				D97F07C60C4D4F4C907A7B3E /* SLI.swift in Sources */,
+				6110BFE431D34DE194A3F790 /* SLICohortAxes.swift in Sources */,
+				22E6ED74839648E58ECDA0C1 /* SLICohortMeaningfulness.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1905,6 +1953,10 @@
 				92C793FF828E41813FC459A8 /* UserCorrectionStoreTests.swift in Sources */,
 				5C3F9263DAECCFCCEE8B91A7 /* UserMarkedAdInjectionTests.swift in Sources */,
 				2934CB0BDEFD261C285BD3AC /* WithTestRuntime.swift in Sources */,
+				7B7F31E2BE024917B1E84292 /* ExecutionConditionClassifierTests.swift in Sources */,
+				49273125D7EF42009910332E /* EpisodeDurationBucketClassifierTests.swift in Sources */,
+				A59656CCBF434B63A187131F /* SLIThresholdsTests.swift in Sources */,
+				A734D218790C42C282939674 /* SLICohortMeaningfulnessTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
