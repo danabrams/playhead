@@ -287,9 +287,9 @@ struct SkipPolicyMatrixUnlistedCellsTests {
 @Suite("AdDetectionConfig — autoSkipConfidenceThreshold")
 struct AutoSkipConfidenceThresholdTests {
 
-    @Test("default autoSkipConfidenceThreshold is 0.75")
-    func defaultThresholdIs075() {
-        #expect(AdDetectionConfig.default.autoSkipConfidenceThreshold == 0.75)
+    @Test("default autoSkipConfidenceThreshold is 0.80 (ef2.6.3: raised from 0.75)")
+    func defaultThresholdIs080() {
+        #expect(AdDetectionConfig.default.autoSkipConfidenceThreshold == 0.80)
     }
 
     @Test("custom autoSkipConfidenceThreshold is stored correctly")

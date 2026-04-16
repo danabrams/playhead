@@ -35,11 +35,25 @@ struct AdDetectionConfig: Sendable {
     let fmScanBudgetSeconds: TimeInterval
     /// Minimum overlapping FM windows needed to count as consensus.
     let fmConsensusThreshold: Int
+    /// ef2.6.3: Minimum skipConfidence to show a lightweight gray-band marker
+    /// (no auto-skip). Spans in [markOnlyThreshold, autoSkipConfidenceThreshold)
+    /// surface a "likely sponsor segment" marker with one-tap user actions.
+    let markOnlyThreshold: Double
     /// Phase 6.5b (playhead-4my.17): skipConfidence threshold above which an otherwise
     /// detectOnly/logOnly eligible span is promoted to autoSkipEligible. Promotion
     /// applies only when eligibilityGate == .eligible and policyAction is not .suppress.
-    /// Default 0.75 is conservative; lower as calibration improves.
+    /// ef2.6.3: raised from 0.75 to 0.80 per product-approved band spec.
     let autoSkipConfidenceThreshold: Double
+
+    /// ef2.6.3: Derive ConfidenceBandThresholds from config fields for band classification.
+    var bandThresholds: ConfidenceBandThresholds {
+        ConfidenceBandThresholds(
+            candidate: candidateThreshold,
+            markOnly: markOnlyThreshold,
+            confirm: confirmationThreshold,
+            autoSkip: autoSkipConfidenceThreshold
+        )
+    }
 
     init(
         candidateThreshold: Double,
@@ -50,7 +64,8 @@ struct AdDetectionConfig: Sendable {
         fmBackfillMode: FMBackfillMode = .full,
         fmScanBudgetSeconds: TimeInterval = 300,
         fmConsensusThreshold: Int = 2,
-        autoSkipConfidenceThreshold: Double = 0.75
+        markOnlyThreshold: Double = 0.60,
+        autoSkipConfidenceThreshold: Double = 0.80
     ) {
         self.candidateThreshold = candidateThreshold
         self.confirmationThreshold = confirmationThreshold
@@ -60,6 +75,7 @@ struct AdDetectionConfig: Sendable {
         self.fmBackfillMode = fmBackfillMode
         self.fmScanBudgetSeconds = fmScanBudgetSeconds
         self.fmConsensusThreshold = fmConsensusThreshold
+        self.markOnlyThreshold = markOnlyThreshold
         self.autoSkipConfidenceThreshold = autoSkipConfidenceThreshold
     }
 
@@ -72,7 +88,8 @@ struct AdDetectionConfig: Sendable {
         fmBackfillMode: .full,
         fmScanBudgetSeconds: 300,
         fmConsensusThreshold: 2,
-        autoSkipConfidenceThreshold: 0.75
+        markOnlyThreshold: 0.60,
+        autoSkipConfidenceThreshold: 0.80
     )
 }
 
@@ -617,7 +634,7 @@ actor AdDetectionService {
     ///   11. MinimalContiguousSpanDecoder
     ///   12. BackfillEvidenceFusion + DecisionMapper
     ///   13. BoundaryRefiner
-    ///   14. SkipPolicyMatrix + confidence promotion (Phase 6.5: detectOnly for unknown spans; autoSkipEligible at >=0.75)
+    ///   14. SkipPolicyMatrix + confidence promotion (Phase 6.5: detectOnly for unknown spans; autoSkipEligible at >=0.80)
     ///   15. MetadataExtractor
     ///   16. EvidenceEvent + DecisionEvent logging
     ///   17. Forward eligible results to SkipOrchestrator (Phase 6.5)
