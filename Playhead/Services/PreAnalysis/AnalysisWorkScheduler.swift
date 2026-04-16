@@ -10,11 +10,40 @@ actor AnalysisWorkScheduler {
     private static let coverageProgressEpsilon = 0.001
     private let store: AnalysisStore
     private let jobRunner: AnalysisJobRunner
-    private let capabilitiesService: CapabilitiesService
+    private let capabilitiesService: any CapabilitiesProviding
     private let downloadManager: any DownloadProviding
     private let batteryProvider: any BatteryStateProviding
     private let config: PreAnalysisConfig
     private let logger = Logger(subsystem: "com.playhead", category: "WorkScheduler")
+
+    /// Admission decision the scheduler derives from the current QualityProfile
+    /// and applies to every loop iteration. Consolidates thermal/battery/
+    /// low-power gating into a single surface — see `QualityProfile.derive`.
+    struct LaneAdmission: Sendable, Equatable {
+        let qualityProfile: QualityProfile
+        let policy: QualityProfile.SchedulerPolicy
+
+        /// Whether any work at all may run. Mirrors `policy.pauseAllWork` for
+        /// readability at call sites.
+        var pauseAllWork: Bool { policy.pauseAllWork }
+
+        /// Whether a deferred job of the given coverage depth is allowed
+        /// under the current QualityProfile. T0 (playback) jobs are never
+        /// gated here — the store selects them on the hot-path criteria;
+        /// only `pauseAllWork` can stop them.
+        ///
+        /// A job is classified as Background when its desired coverage is at
+        /// or above `t2Threshold`. Anything below that is Soon lane.
+        func allowsDeferredJob(desiredCoverageSec: Double, t2Threshold: Double) -> Bool {
+            if pauseAllWork { return false }
+            let isBackgroundLane = desiredCoverageSec >= t2Threshold
+            if isBackgroundLane {
+                return policy.allowBackgroundLane
+            } else {
+                return policy.allowSoonLane
+            }
+        }
+    }
 
     private var schedulerTask: Task<Void, Never>?
     private var currentRunningTask: Task<Void, Never>?
@@ -34,7 +63,7 @@ actor AnalysisWorkScheduler {
     init(
         store: AnalysisStore,
         jobRunner: AnalysisJobRunner,
-        capabilitiesService: CapabilitiesService,
+        capabilitiesService: any CapabilitiesProviding,
         downloadManager: any DownloadProviding,
         batteryProvider: any BatteryStateProviding = UIDeviceBatteryProvider(),
         config: PreAnalysisConfig = .load()
@@ -195,25 +224,22 @@ actor AnalysisWorkScheduler {
                 continue
             }
 
-            let snapshot = await capabilitiesService.currentSnapshot
-            let batteryState = await batteryProvider.currentBatteryState()
-            let admissionSnapshot = CapabilitySnapshot(
-                foundationModelsAvailable: snapshot.foundationModelsAvailable,
-                foundationModelsUsable: snapshot.foundationModelsUsable,
-                appleIntelligenceEnabled: snapshot.appleIntelligenceEnabled,
-                foundationModelsLocaleSupported: snapshot.foundationModelsLocaleSupported,
-                thermalState: snapshot.thermalState,
-                isLowPowerMode: snapshot.isLowPowerMode,
-                isCharging: batteryState.isCharging,
-                backgroundProcessingSupported: snapshot.backgroundProcessingSupported,
-                availableDiskSpaceBytes: snapshot.availableDiskSpaceBytes,
-                capturedAt: snapshot.capturedAt
-            )
-            let deferredWorkAllowed =
-                DeviceAdmissionPolicy.evaluate(
-                    snapshot: admissionSnapshot,
-                    batteryLevel: batteryState.level
-                ) == .admit
+            let admission = await currentLaneAdmission()
+
+            // Critical thermal (or equivalent) pauses every lane, including
+            // T0 playback drains. Wait for the next wake/capability change.
+            if admission.pauseAllWork {
+                await sleepOrWake(seconds: 5)
+                continue
+            }
+
+            // `deferredWorkAllowed` gates the store's deferred (T1+) selection.
+            // Critical cases where T2 is paused but Soon is allowed are handled
+            // after fetch via `admission.allowsDeferredJob`, because the store
+            // predicate only distinguishes T0 vs. deferred, not Soon vs.
+            // Background.
+            let deferredWorkAllowed = admission.policy.allowSoonLane
+                || admission.policy.allowBackgroundLane
             let now = Date().timeIntervalSince1970
 
             guard let job = try? await store.fetchNextEligibleJob(
@@ -225,8 +251,48 @@ actor AnalysisWorkScheduler {
                 continue
             }
 
+            // Secondary filter for the Soon-vs-Background lane split. Only
+            // deferred jobs are subject to this; T0 playback jobs are always
+            // admitted when not paused-all (checked above). We back off
+            // longer here (30s) rather than the default 5s because the store
+            // predicate can't express "Soon only," so the same Background
+            // job will come back to the top of the queue on every re-fetch —
+            // a short sleep would produce a hot log/poll loop. A capability
+            // change or an explicit wake() will preempt the sleep.
+            if job.jobType != "playback",
+               !admission.allowsDeferredJob(
+                    desiredCoverageSec: job.desiredCoverageSec,
+                    t2Threshold: config.t2DepthSeconds
+               ) {
+                logger.info("Skipping job \(job.jobId) (depth=\(job.desiredCoverageSec)s) under QualityProfile \(admission.qualityProfile.rawValue, privacy: .public)")
+                await sleepOrWake(seconds: 30)
+                continue
+            }
+
             await processJob(job)
         }
+    }
+
+    /// Evaluate the current `LaneAdmission` from the capabilities snapshot and
+    /// a live battery reading. Exposed internally so tests (and integrators
+    /// like BackgroundProcessingService) can ask what the scheduler would do
+    /// right now without driving the full loop.
+    ///
+    /// All thermal/battery/low-power reads route through `QualityProfile` —
+    /// there are no direct `ProcessInfo.thermalState` or `isLowPowerMode`
+    /// reads in this actor.
+    func currentLaneAdmission() async -> LaneAdmission {
+        let snapshot = await capabilitiesService.currentSnapshot
+        let batteryState = await batteryProvider.currentBatteryState()
+        // Route every thermal/battery/low-power read through the snapshot's
+        // QualityProfile surface. The `isCharging:` overload is preferred
+        // because the battery provider's charging signal is fresher than the
+        // snapshot's (which only refreshes on `batteryStateDidChange`).
+        let profile = snapshot.qualityProfile(
+            batteryLevel: batteryState.level,
+            isCharging: batteryState.isCharging
+        )
+        return LaneAdmission(qualityProfile: profile, policy: profile.schedulerPolicy)
     }
 
     private func sleepOrWake(seconds: UInt64) async {
