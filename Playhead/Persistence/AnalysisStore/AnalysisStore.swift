@@ -709,6 +709,37 @@ actor AnalysisStore {
                 column: "traitProfileJSON",
                 definition: "TEXT"
             )
+            // playhead-7mq: model/policy/feature-schema version columns on
+            // the six tables whose row validity depends on model, policy,
+            // or feature-schema versions. Foundation for B4 fast
+            // revalidation (playhead-zx6i).
+            //
+            // Sentinels: pre-existing rows are backfilled via SQLite's
+            // `ALTER TABLE ADD COLUMN ... DEFAULT <sentinel>` semantics,
+            // which applies the default value to every existing row.
+            //   - model_version           TEXT NOT NULL DEFAULT 'pre-instrumentation'
+            //   - policy_version          INTEGER NOT NULL DEFAULT 0
+            //   - feature_schema_version  INTEGER NOT NULL DEFAULT 0
+            //
+            // Placement: columns are appended to the END of each table
+            // (SQLite's only supported position for ADD COLUMN). Three
+            // `SELECT * FROM {transcript_chunks, ad_windows, skip_cues}`
+            // readers in this file (lines ~2610/2643, ~2747, ~2993) use
+            // positional column indices 0..N-1; appending at index N,
+            // N+1, N+2 leaves them correct. A test
+            // (`AnalysisStoreVersionColumnsMigrationTests.selectStarReadersTolerateNewColumns`)
+            // locks that contract.
+            //
+            // Rollback: `ADD COLUMN` is additive-only. There is no
+            // destructive rollback path. A schema-version downgrade
+            // leaves the columns in place but unread; existing INSERT
+            // paths all use explicit column lists and so continue to
+            // work unchanged.
+            //
+            // Indexes: intentionally NONE. Default per bead spec is no
+            // index on these columns; revisit only if profiling under
+            // revalidation load (playhead-zx6i) proves need.
+            try addModelPolicyFeatureSchemaVersionColumnsIfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -875,8 +906,48 @@ actor AnalysisStore {
             column: "jobPhase",
             definition: "TEXT NOT NULL DEFAULT 'shadow'"
         )
+        // playhead-7mq: mirror the `addModelPolicyFeatureSchemaVersionColumnsIfNeeded`
+        // call from `migrate()` so the isolated ladder test seam also
+        // exercises the new columns. Guarded by tableExists() because
+        // `migrateOnlyForTesting()` intentionally skips `createTables()`
+        // and some seeded fixtures may not include every in-scope table.
+        try addModelPolicyFeatureSchemaVersionColumnsIfNeededForExistingTables()
     }
     #endif
+
+    /// playhead-7mq: variant of
+    /// `addModelPolicyFeatureSchemaVersionColumnsIfNeeded` that only
+    /// touches tables that actually exist. Used by
+    /// `migrateOnlyForTesting()` where fixtures may omit some tables.
+    /// Production callers use the unguarded helper because
+    /// `createTables()` has already built every table.
+    private func addModelPolicyFeatureSchemaVersionColumnsIfNeededForExistingTables() throws {
+        let inScopeTables = [
+            "analysis_sessions",
+            "transcript_chunks",
+            "feature_windows",
+            "feature_extraction_state",
+            "ad_windows",
+            "skip_cues",
+        ]
+        for table in inScopeTables where try tableExists(table) {
+            try addColumnIfNeeded(
+                table: table,
+                column: "model_version",
+                definition: "TEXT NOT NULL DEFAULT 'pre-instrumentation'"
+            )
+            try addColumnIfNeeded(
+                table: table,
+                column: "policy_version",
+                definition: "INTEGER NOT NULL DEFAULT 0"
+            )
+            try addColumnIfNeeded(
+                table: table,
+                column: "feature_schema_version",
+                definition: "INTEGER NOT NULL DEFAULT 0"
+            )
+        }
+    }
 
     /// Probes `sqlite_master` for a table by name. Used by `migrate()` to
     /// detect a stale `migratedPaths` cache entry pointing at a file that
@@ -994,6 +1065,54 @@ actor AnalysisStore {
             return
         }
         try exec("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)")
+    }
+
+    /// playhead-7mq: add `model_version`, `policy_version`, and
+    /// `feature_schema_version` columns to each of the six tables
+    /// whose row validity depends on model / policy / feature-schema
+    /// versions (the foundation for B4 fast revalidation in
+    /// playhead-zx6i). Idempotent — re-running is a no-op.
+    ///
+    /// Pre-existing rows are backfilled with sentinel values via the
+    /// `DEFAULT` clause on `ALTER TABLE ADD COLUMN`:
+    ///   - `model_version`           → `'pre-instrumentation'`
+    ///   - `policy_version`          → `0`
+    ///   - `feature_schema_version`  → `0`
+    ///
+    /// B4 revalidation logic (OUT of scope here, implemented in
+    /// playhead-zx6i) treats these sentinels as "always revalidate".
+    ///
+    /// Invariant: columns are NOT NULL with a default; the default
+    /// backfills existing rows, and future INSERTs that omit the
+    /// columns (all existing call-sites do) inherit the default.
+    /// Call-sites that want explicit versions will add bind positions
+    /// when playhead-zx6i wires revalidation.
+    private func addModelPolicyFeatureSchemaVersionColumnsIfNeeded() throws {
+        let inScopeTables = [
+            "analysis_sessions",
+            "transcript_chunks",
+            "feature_windows",
+            "feature_extraction_state",
+            "ad_windows",
+            "skip_cues",
+        ]
+        for table in inScopeTables {
+            try addColumnIfNeeded(
+                table: table,
+                column: "model_version",
+                definition: "TEXT NOT NULL DEFAULT 'pre-instrumentation'"
+            )
+            try addColumnIfNeeded(
+                table: table,
+                column: "policy_version",
+                definition: "INTEGER NOT NULL DEFAULT 0"
+            )
+            try addColumnIfNeeded(
+                table: table,
+                column: "feature_schema_version",
+                definition: "INTEGER NOT NULL DEFAULT 0"
+            )
+        }
     }
 
     /// Seeds `_meta.schema_version = '1'` on a brand-new database so the
