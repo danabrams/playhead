@@ -3,6 +3,7 @@
 // Persisted as JSON in the analysis_assets table alongside each analysis run.
 
 import Foundation
+import UIKit
 
 /// A point-in-time record of device capabilities relevant to analysis.
 struct CapabilitySnapshot: Codable, Sendable, Equatable {
@@ -59,6 +60,47 @@ struct CapabilitySnapshot: Codable, Sendable, Equatable {
     /// Whether deferred (T1+) analysis work can run: charging and not thermally throttled.
     var canRunDeferredWork: Bool {
         isCharging && !shouldThrottleAnalysis
+    }
+
+    // MARK: - QualityProfile Surface
+
+    /// The consolidated `QualityProfile` derived from the snapshot and a live
+    /// battery-level reading. Schedulers should call this rather than reading
+    /// `thermalState` / `isLowPowerMode` / `isCharging` piecewise.
+    ///
+    /// - Parameter batteryLevel: The most recent battery reading the caller
+    ///   has (0.0–1.0). Pass a negative value when unknown; unknown is
+    ///   treated as "not low" (see `QualityProfile.derive`).
+    func qualityProfile(batteryLevel: Float) -> QualityProfile {
+        QualityProfile.derive(
+            thermalState: thermalState.processInfoValue,
+            batteryLevel: batteryLevel,
+            batteryState: isCharging ? .charging : .unplugged,
+            isLowPowerMode: isLowPowerMode
+        )
+    }
+
+    /// The consolidated `QualityProfile` derived from the snapshot using a
+    /// freshly-provided battery level AND charging state. Prefer this over
+    /// `qualityProfile(batteryLevel:)` when the caller has a live
+    /// `BatteryStateProviding` read — charging state in `CapabilitySnapshot`
+    /// only refreshes on `batteryStateDidChangeNotification`, and schedulers
+    /// polling a `BatteryStateProviding` have a fresher reading.
+    func qualityProfile(batteryLevel: Float, isCharging: Bool) -> QualityProfile {
+        QualityProfile.derive(
+            thermalState: thermalState.processInfoValue,
+            batteryLevel: batteryLevel,
+            batteryState: isCharging ? .charging : .unplugged,
+            isLowPowerMode: isLowPowerMode
+        )
+    }
+
+    /// Convenience property: `QualityProfile` derived using only the snapshot's
+    /// stored data. Treats battery level as unknown (no level-based demotion).
+    /// Use `qualityProfile(batteryLevel:)` when a live battery reading is
+    /// available — it is the preferred scheduler entry point.
+    var qualityProfile: QualityProfile {
+        qualityProfile(batteryLevel: -1)
     }
 
     // MARK: - Initializers
@@ -130,6 +172,18 @@ enum ThermalState: Int, Codable, Sendable, Equatable, CustomStringConvertible {
         case .serious: self = .serious
         case .critical: self = .critical
         @unknown default: self = .nominal
+        }
+    }
+
+    /// Round-trip back to `ProcessInfo.ThermalState` so `QualityProfile.derive`
+    /// can consume the snapshot's stored thermal reading without re-querying
+    /// `ProcessInfo`.
+    var processInfoValue: ProcessInfo.ThermalState {
+        switch self {
+        case .nominal: return .nominal
+        case .fair: return .fair
+        case .serious: return .serious
+        case .critical: return .critical
         }
     }
 }
