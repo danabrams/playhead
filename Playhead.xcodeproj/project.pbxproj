@@ -332,6 +332,10 @@
 		FCB8EC41099FACE4DDEE1EF5 /* DecisionExplanationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FE97FF9470D2FE4847C596F /* DecisionExplanationTests.swift */; };
 		FE094685E4D4030EAC60F3DE /* DownloadManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4EF478F6703172C462A0057 /* DownloadManagerTests.swift */; };
 		FEFCC10CFF7EF39FD043123F /* SensitiveWindowRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 117F1E41DE084B613166D952 /* SensitiveWindowRouter.swift */; };
+		F6E592018C924C57A2556E38 /* CauseTaxonomy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 127C55492DDA4FFEAE6C3E85 /* CauseTaxonomy.swift */; };
+		C0BAA5090AAA445D946E7507 /* CauseAttributionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCEB4237C9314F6C81DA0515 /* CauseAttributionPolicy.swift */; };
+		E40C9E4F5EE0476CA38D25D4 /* CauseTaxonomyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D89ADD3746A4B02A3BC8605 /* CauseTaxonomyTests.swift */; };
+		8D96DFD3D6F94A0B9FACA9D4 /* CauseAttributionPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB4A135F6C334D48B9AD1D01 /* CauseAttributionPolicyTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -673,6 +677,10 @@
 		FE5DD1A344E740FC5E1E183E /* BackfillProgressCursorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackfillProgressCursorTests.swift; sourceTree = "<group>"; };
 		FE60055EE7FD54970B500C31 /* BrowseView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowseView.swift; sourceTree = "<group>"; };
 		FF38243D35CA07BE595A877C /* FoundationModelExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoundationModelExtractor.swift; sourceTree = "<group>"; };
+		127C55492DDA4FFEAE6C3E85 /* CauseTaxonomy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CauseTaxonomy.swift; sourceTree = "<group>"; };
+		BCEB4237C9314F6C81DA0515 /* CauseAttributionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CauseAttributionPolicy.swift; sourceTree = "<group>"; };
+		5D89ADD3746A4B02A3BC8605 /* CauseTaxonomyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CauseTaxonomyTests.swift; sourceTree = "<group>"; };
+		EB4A135F6C334D48B9AD1D01 /* CauseAttributionPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CauseAttributionPolicyTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -783,6 +791,8 @@
 			children = (
 				38E0CFFDA6C482D8221FC32E /* AnalysisCoordinator.swift */,
 				8FF386614C954C71D052A28C /* BackgroundProcessingService.swift */,
+				BCEB4237C9314F6C81DA0515 /* CauseAttributionPolicy.swift */,
+				127C55492DDA4FFEAE6C3E85 /* CauseTaxonomy.swift */,
 			);
 			path = AnalysisCoordinator;
 			sourceTree = "<group>";
@@ -1378,6 +1388,8 @@
 		CE2B2C9E2FC8625A4373838D /* AnalysisCoordinator */ = {
 			isa = PBXGroup;
 			children = (
+				EB4A135F6C334D48B9AD1D01 /* CauseAttributionPolicyTests.swift */,
+				5D89ADD3746A4B02A3BC8605 /* CauseTaxonomyTests.swift */,
 				BDFA5CCB9F3DA6BE36340D4D /* PipelineSnapshotTests.swift */,
 			);
 			path = AnalysisCoordinator;
@@ -1618,6 +1630,8 @@
 				DC0F2AB351019294781DEA6F /* CapabilitiesService.swift in Sources */,
 				F16058900DDD4F713351D2CA /* CapabilitySnapshot.swift in Sources */,
 				BE4FEEB7CBC92ADF3B1C8D62 /* CausalSourceDemotionStore.swift in Sources */,
+				C0BAA5090AAA445D946E7507 /* CauseAttributionPolicy.swift in Sources */,
+				F6E592018C924C57A2556E38 /* CauseTaxonomy.swift in Sources */,
 				BBD14284EECCA3C46E510EA5 /* ChapterEvidence.swift in Sources */,
 				7F1144B8E4C5812F24C1C28C /* ChapterEvidenceParser.swift in Sources */,
 				5CE803AAA36C98416CC852AC /* ClassifierService.swift in Sources */,
@@ -1771,6 +1785,8 @@
 				9B8508EB01B040ABA31842F5 /* BroadCorrectionEvaluatorTests.swift in Sources */,
 				68C9E60662AD5CDD4FA03A4D /* CapabilitySnapshotTests.swift in Sources */,
 				254A210FC8CF2688379158C6 /* CausalSourceDemotionStoreTests.swift in Sources */,
+				8D96DFD3D6F94A0B9FACA9D4 /* CauseAttributionPolicyTests.swift in Sources */,
+				E40C9E4F5EE0476CA38D25D4 /* CauseTaxonomyTests.swift in Sources */,
 				38B04B1A1C8E31637D114B30 /* ChapterEvidenceTests.swift in Sources */,
 				EB1DC4738CAB20275BB19C9A /* CommercialEvidenceResolverTests.swift in Sources */,
 				5363F17B4EB5EDB5ADB55993 /* CompiledSponsorLexiconTests.swift in Sources */,
