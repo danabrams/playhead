@@ -1,11 +1,13 @@
 // ConfidenceBand.swift
 // ef2.6.3: Gray-band markOnly UX — confidence band classification, treatment
-// model, and one-tap actions for spans in the 0.60–0.80 range.
+// model, and one-tap actions for sub-autoSkip spans.
 //
 // Design:
 //   ConfidenceBand maps a continuous skipConfidence score to a discrete treatment
-//   band. Bands below autoSkip (0.80) never auto-skip; the markOnly band (0.60–0.70)
-//   surfaces a lightweight "likely sponsor segment" marker with one-tap actions.
+//   band. Five bands: subCandidate (<0.40), candidate (0.40–0.60), markOnly
+//   (0.60–0.70), confirmed (0.70–0.80), autoSkip (≥0.80). Only autoSkip auto-skips;
+//   the markOnly band surfaces a lightweight "likely sponsor segment" marker with
+//   one-tap actions.
 //
 //   ConfidenceBandThresholds stores the four boundary values; defaults match the
 //   product-approved spec. AdDetectionConfig derives a ConfidenceBandThresholds
@@ -25,6 +27,15 @@ struct ConfidenceBandThresholds: Sendable, Equatable {
     let confirm: Double     // 0.70
     /// Minimum confidence to auto-skip.
     let autoSkip: Double    // 0.80
+
+    init(candidate: Double, markOnly: Double, confirm: Double, autoSkip: Double) {
+        assert(candidate < markOnly && markOnly < confirm && confirm < autoSkip,
+            "ConfidenceBandThresholds should be monotonically increasing: candidate(\(candidate)) < markOnly(\(markOnly)) < confirm(\(confirm)) < autoSkip(\(autoSkip))")
+        self.candidate = candidate
+        self.markOnly = markOnly
+        self.confirm = confirm
+        self.autoSkip = autoSkip
+    }
 
     static let `default` = ConfidenceBandThresholds(
         candidate: 0.40,

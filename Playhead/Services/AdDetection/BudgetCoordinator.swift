@@ -2,6 +2,9 @@
 // Per-episode budget management for FM, DSP, and thermal resources.
 
 import Foundation
+import OSLog
+
+private let budgetLog = Logger(subsystem: "com.playhead", category: "BudgetPool")
 
 // MARK: - Configuration
 
@@ -65,8 +68,10 @@ struct BudgetPool: Sendable, Equatable {
     /// Commit a reservation: move from reserved to consumed.
     /// Caller must not commit the same reservation twice.
     mutating func commit(_ reservation: BudgetReservation) {
-        assert(reserved >= reservation.cost,
-               "BudgetPool.commit: reservation cost \(reservation.cost) exceeds reserved \(reserved) — possible double-commit")
+        if reserved < reservation.cost {
+            budgetLog.warning("BudgetPool.commit: cost \(reservation.cost) exceeds reserved \(self.reserved) — possible double-commit")
+            assertionFailure("BudgetPool.commit: reservation cost \(reservation.cost) exceeds reserved \(reserved)")
+        }
         reserved = max(reserved - reservation.cost, 0)
         consumed += reservation.cost
     }
@@ -74,8 +79,10 @@ struct BudgetPool: Sendable, Equatable {
     /// Release a reservation without consuming.
     /// Caller must not release the same reservation twice.
     mutating func release(_ reservation: BudgetReservation) {
-        assert(reserved >= reservation.cost,
-               "BudgetPool.release: reservation cost \(reservation.cost) exceeds reserved \(reserved) — possible double-release")
+        if reserved < reservation.cost {
+            budgetLog.warning("BudgetPool.release: cost \(reservation.cost) exceeds reserved \(self.reserved) — possible double-release")
+            assertionFailure("BudgetPool.release: reservation cost \(reservation.cost) exceeds reserved \(reserved)")
+        }
         reserved = max(reserved - reservation.cost, 0)
     }
 }

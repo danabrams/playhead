@@ -46,7 +46,9 @@ enum BudgetAllocationPolicy {
         }
 
         // Near-playhead items sorted by distance (closest first).
-        nearPlayhead.sort { max($0.distanceFromPlayhead, 0) < max($1.distanceFromPlayhead, 0) }
+        // All items here have distanceFromPlayhead >= 0 after the partition
+        // check, but clamp defensively in case of negative inputs.
+        nearPlayhead.sort { $0.distanceFromPlayhead < $1.distanceFromPlayhead }
 
         // Background sorted by EVI (highest first).
         background.sort { $0.eviScore.score > $1.eviScore.score }

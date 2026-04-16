@@ -46,6 +46,7 @@ struct AdDetectionConfig: Sendable {
     let autoSkipConfidenceThreshold: Double
 
     /// ef2.6.3: Derive ConfidenceBandThresholds from config fields for band classification.
+    /// Requires candidate < markOnly < confirmation < autoSkip (asserted in debug).
     var bandThresholds: ConfidenceBandThresholds {
         ConfidenceBandThresholds(
             candidate: candidateThreshold,

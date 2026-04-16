@@ -397,6 +397,24 @@ struct BroadCorrectionEvaluatorImplicitTests {
         )
         #expect(result == true)
     }
+    @Test("phraseOnShow: 10 implicit corrections exactly hit threshold (10×0.3=3.0, floating-point safe)")
+    func implicitFloatingPointEdgeCase() {
+        // 10 × 0.3 = 3.0 in exact math, but floating-point accumulation may
+        // produce 2.9999…97. The evaluator must still promote.
+        let entries: [CorrectionLedgerEntry] = (0..<10).map { i in
+            .init(
+                episodeId: i < 5 ? "ep-1" : "ep-2",
+                correctionDate: referenceDate.addingTimeInterval(-86400 * Double(i % 3 + 1)),
+                feedbackKind: .implicit
+            )
+        }
+        let result = BroadCorrectionEvaluator.shouldPromote(
+            scope: .phraseOnShow,
+            entries: entries,
+            referenceDate: referenceDate
+        )
+        #expect(result == true, "10 implicit corrections (10×0.3=3.0) should promote phraseOnShow")
+    }
 }
 
 // MARK: - exactSpan Veto Permanence

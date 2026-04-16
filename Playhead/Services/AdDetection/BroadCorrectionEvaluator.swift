@@ -133,8 +133,10 @@ enum BroadCorrectionEvaluator {
         guard !active.isEmpty else { return false }
 
         // 2. Weighted correction count.
+        // Use a small epsilon to guard against floating-point accumulation
+        // (e.g. 10 × 0.3 = 2.9999…97 must still satisfy a threshold of 3).
         let weightedCount = active.reduce(0.0) { $0 + $1.feedbackKind.weight }
-        guard weightedCount >= Double(scope.requiredCorrectionCount) else { return false }
+        guard weightedCount >= Double(scope.requiredCorrectionCount) - 1e-9 else { return false }
 
         // 3. Episode diversity.
         let distinctEpisodes = Set(active.map(\.episodeId))
@@ -143,8 +145,9 @@ enum BroadCorrectionEvaluator {
         // 4. Date diversity (if required).
         if let requiredDates = scope.requiredDistinctDates {
             let calendar = Calendar(identifier: .gregorian)
+            let utc = TimeZone(identifier: "UTC") ?? .gmt
             let distinctDates = Set(active.map { entry -> DateComponents in
-                calendar.dateComponents(in: TimeZone(identifier: "UTC")!, from: entry.correctionDate)
+                calendar.dateComponents(in: utc, from: entry.correctionDate)
             }.map { components -> String in
                 // Use year-month-day as the calendar day key.
                 "\(components.year ?? 0)-\(components.month ?? 0)-\(components.day ?? 0)"

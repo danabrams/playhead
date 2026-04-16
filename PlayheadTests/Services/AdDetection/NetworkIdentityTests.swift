@@ -189,6 +189,16 @@ struct NetworkIdentityTests {
         #expect(identity == nil)
     }
 
+    @Test("returns nil when metadata normalizes to empty string")
+    func allPunctuationMetadata() {
+        // Input that passes the non-empty check but normalizes to empty string
+        // (all punctuation, no alphanumeric content).
+        let identity = NetworkIdentityExtractor.extractIdentity(
+            itunesAuthor: "!!!"
+        )
+        #expect(identity == nil)
+    }
+
     // MARK: - Normalization
 
     @Test("normalize strips common suffixes")

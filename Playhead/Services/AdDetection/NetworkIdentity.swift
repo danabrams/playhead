@@ -95,17 +95,24 @@ enum NetworkIdentityExtractor {
         guard !candidates.isEmpty else { return nil }
 
         // Group candidates by normalized ID and pick the largest cluster.
+        // Filter out candidates that normalized to empty (all-punctuation names).
         var clusters: [String: [(name: String, source: NetworkIdentitySource)]] = [:]
-        for c in candidates {
+        for c in candidates where !c.normalized.isEmpty {
             clusters[c.normalized, default: []].append((c.name, c.source))
         }
 
-        // Pick the cluster with the most sources.
-        let best = clusters.max(by: { $0.value.count < $1.value.count })!
+        guard let best = clusters.max(by: { $0.value.count < $1.value.count }) else {
+            return nil
+        }
         let sources = Set(best.value.map(\.source))
 
         // Prefer the longest human-readable name from the winning cluster.
-        let displayName = best.value.max(by: { $0.name.count < $1.name.count })!.name
+        // best.value is always non-empty (built via defaulting dictionary append),
+        // but avoid force-unwrap for robustness.
+        guard let displayEntry = best.value.max(by: { $0.name.count < $1.name.count }) else {
+            return nil
+        }
+        let displayName = displayEntry.name
 
         let confidence = computeConfidence(sourceCount: sources.count)
 

@@ -295,11 +295,12 @@ struct AutoSkipConfidenceThresholdTests {
     @Test("custom autoSkipConfidenceThreshold is stored correctly")
     func customThresholdIsStored() {
         let config = AdDetectionConfig(
-            candidateThreshold: 0.40,
-            confirmationThreshold: 0.70,
-            suppressionThreshold: 0.25,
+            candidateThreshold: 0.30,
+            confirmationThreshold: 0.55,
+            suppressionThreshold: 0.20,
             hotPathLookahead: 90.0,
             detectorVersion: "test-v1",
+            markOnlyThreshold: 0.45,
             autoSkipConfidenceThreshold: 0.60
         )
         #expect(config.autoSkipConfidenceThreshold == 0.60)
@@ -339,6 +340,22 @@ struct SkipPolicyOverrideScopeTests {
         let scope = SkipPolicyOverrideScope.showWide(podcastId: "podcast-456")
         let serialized = scope.serialized
         let deserialized = SkipPolicyOverrideScope.deserialize(serialized)
+        #expect(deserialized == scope)
+    }
+
+    @Test("showLevel scope with colons in podcastId round-trips correctly")
+    func showLevelWithColonsInPodcastId() {
+        let scope = SkipPolicyOverrideScope.showLevel(
+            podcastId: "urn:podcast:abc:123", intent: .paid, ownership: .thirdParty
+        )
+        let deserialized = SkipPolicyOverrideScope.deserialize(scope.serialized)
+        #expect(deserialized == scope)
+    }
+
+    @Test("showWide scope with colons in podcastId round-trips correctly")
+    func showWideWithColonsInPodcastId() {
+        let scope = SkipPolicyOverrideScope.showWide(podcastId: "urn:podcast:abc:123")
+        let deserialized = SkipPolicyOverrideScope.deserialize(scope.serialized)
         #expect(deserialized == scope)
     }
 

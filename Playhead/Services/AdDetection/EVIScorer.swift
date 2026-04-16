@@ -78,7 +78,7 @@ enum EVIScorer {
         EVIScore(
             decisionFlipProbability: flipProbability(currentConfidence: currentConfidence),
             utilityGain: utilityGain,
-            computeCost: min(max(computeCost, 0), 1),
+            computeCost: computeCost,
             reason: reason
         )
     }

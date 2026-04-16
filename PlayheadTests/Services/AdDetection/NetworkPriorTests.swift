@@ -29,6 +29,12 @@ struct NetworkPriorTests {
         #expect(NetworkPriors.decayedWeight(episodesObserved: 100) == 0.0)
     }
 
+    @Test("negative episodesObserved is clamped to 0 (returns 0.5)")
+    func decayNegativeEpisodes() {
+        #expect(NetworkPriors.decayedWeight(episodesObserved: -1) == 0.5)
+        #expect(NetworkPriors.decayedWeight(episodesObserved: -100) == 0.5)
+    }
+
     @Test("decay is linear between 0 and 10")
     func decayLinear() {
         let w3 = NetworkPriors.decayedWeight(episodesObserved: 3)
