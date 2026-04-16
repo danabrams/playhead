@@ -281,6 +281,45 @@ struct PodcastProfile: Sendable {
     let observationCount: Int
     let mode: String
     let recentFalseSkipSignals: Int
+    /// ef2.5.1: JSON-encoded `ShowTraitProfile`. `nil` until first episode
+    /// observation populates the profile. Decoded lazily by consumers.
+    let traitProfileJSON: String?
+
+    init(
+        podcastId: String,
+        sponsorLexicon: String?,
+        normalizedAdSlotPriors: String?,
+        repeatedCTAFragments: String?,
+        jingleFingerprints: String?,
+        implicitFalsePositiveCount: Int,
+        skipTrustScore: Double,
+        observationCount: Int,
+        mode: String,
+        recentFalseSkipSignals: Int,
+        traitProfileJSON: String? = nil
+    ) {
+        self.podcastId = podcastId
+        self.sponsorLexicon = sponsorLexicon
+        self.normalizedAdSlotPriors = normalizedAdSlotPriors
+        self.repeatedCTAFragments = repeatedCTAFragments
+        self.jingleFingerprints = jingleFingerprints
+        self.implicitFalsePositiveCount = implicitFalsePositiveCount
+        self.skipTrustScore = skipTrustScore
+        self.observationCount = observationCount
+        self.mode = mode
+        self.recentFalseSkipSignals = recentFalseSkipSignals
+        self.traitProfileJSON = traitProfileJSON
+    }
+
+    /// Convenience: decode the stored trait profile, falling back to
+    /// `ShowTraitProfile.unknown` when absent or corrupt.
+    var traitProfile: ShowTraitProfile {
+        guard let json = traitProfileJSON,
+              let data = json.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(ShowTraitProfile.self, from: data)
+        else { return .unknown }
+        return decoded
+    }
 }
 
 /// bd-m8k: Per-podcast CoveragePlanner state. Sibling row to
@@ -642,6 +681,12 @@ actor AnalysisStore {
             try addColumnIfNeeded(
                 table: "ad_copy_fingerprints",
                 column: "anchorLandmarks",
+                definition: "TEXT"
+            )
+            // ef2.5.1: ShowTraitProfile JSON on podcast_profiles.
+            try addColumnIfNeeded(
+                table: "podcast_profiles",
+                column: "traitProfileJSON",
                 definition: "TEXT"
             )
             try exec("COMMIT")
@@ -1567,7 +1612,8 @@ actor AnalysisStore {
                 skipTrustScore              REAL NOT NULL DEFAULT 0.5,
                 observationCount            INTEGER NOT NULL DEFAULT 0,
                 mode                        TEXT NOT NULL DEFAULT 'shadow',
-                recentFalseSkipSignals      INTEGER NOT NULL DEFAULT 0
+                recentFalseSkipSignals      INTEGER NOT NULL DEFAULT 0,
+                traitProfileJSON            TEXT
             )
             """)
 
@@ -2832,8 +2878,8 @@ actor AnalysisStore {
             INSERT INTO podcast_profiles
             (podcastId, sponsorLexicon, normalizedAdSlotPriors, repeatedCTAFragments,
              jingleFingerprints, implicitFalsePositiveCount, skipTrustScore,
-             observationCount, mode, recentFalseSkipSignals)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             observationCount, mode, recentFalseSkipSignals, traitProfileJSON)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(podcastId) DO UPDATE SET
                 sponsorLexicon = excluded.sponsorLexicon,
                 normalizedAdSlotPriors = excluded.normalizedAdSlotPriors,
@@ -2843,7 +2889,8 @@ actor AnalysisStore {
                 skipTrustScore = excluded.skipTrustScore,
                 observationCount = excluded.observationCount,
                 mode = excluded.mode,
-                recentFalseSkipSignals = excluded.recentFalseSkipSignals
+                recentFalseSkipSignals = excluded.recentFalseSkipSignals,
+                traitProfileJSON = excluded.traitProfileJSON
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -2857,6 +2904,7 @@ actor AnalysisStore {
         bind(stmt, 8, profile.observationCount)
         bind(stmt, 9, profile.mode)
         bind(stmt, 10, profile.recentFalseSkipSignals)
+        bind(stmt, 11, profile.traitProfileJSON)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -2876,7 +2924,8 @@ actor AnalysisStore {
             skipTrustScore: sqlite3_column_double(stmt, 6),
             observationCount: Int(sqlite3_column_int(stmt, 7)),
             mode: text(stmt, 8),
-            recentFalseSkipSignals: Int(sqlite3_column_int(stmt, 9))
+            recentFalseSkipSignals: Int(sqlite3_column_int(stmt, 9)),
+            traitProfileJSON: optionalText(stmt, 10)
         )
     }
 
