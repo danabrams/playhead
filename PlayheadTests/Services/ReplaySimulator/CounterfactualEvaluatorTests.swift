@@ -40,7 +40,7 @@ final class FrozenTraceTests: XCTestCase {
                 explanationJSON: "{\"dominant_source\":\"fm\",\"margin\":0.3}"
             ),
         ]
-        let baselineSpans: [SpanDecision] = [
+        let baselineSpans: [ReplaySpanDecision] = [
             .init(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
         ]
         return FrozenTrace(
@@ -54,7 +54,7 @@ final class FrozenTraceTests: XCTestCase {
             evidenceCatalog: evidence,
             corrections: corrections,
             decisionEvents: decisions,
-            baselineSpanDecisions: baselineSpans,
+            baselineReplaySpanDecisions: baselineSpans,
             holdoutDesignation: holdout ? .holdout : .training
         )
     }
@@ -77,7 +77,7 @@ final class FrozenTraceTests: XCTestCase {
         XCTAssertEqual(decoded.evidenceCatalog.count, 2)
         XCTAssertEqual(decoded.corrections.count, 1)
         XCTAssertEqual(decoded.decisionEvents.count, 1)
-        XCTAssertEqual(decoded.baselineSpanDecisions.count, 1)
+        XCTAssertEqual(decoded.baselineReplaySpanDecisions.count, 1)
         XCTAssertEqual(decoded.holdoutDesignation, .training)
     }
 
@@ -96,10 +96,10 @@ final class FrozenTraceTests: XCTestCase {
         XCTAssertEqual(event.explanationJSON, "{\"dominant_source\":\"fm\",\"margin\":0.3}")
     }
 
-    func testSpanDecisionCodableRoundTrip() throws {
-        let span = SpanDecision(startTime: 10, endTime: 20, confidence: 0.75, isAd: true, sourceTag: "test")
+    func testReplaySpanDecisionCodableRoundTrip() throws {
+        let span = ReplaySpanDecision(startTime: 10, endTime: 20, confidence: 0.75, isAd: true, sourceTag: "test")
         let data = try JSONEncoder().encode(span)
-        let decoded = try JSONDecoder().decode(SpanDecision.self, from: data)
+        let decoded = try JSONDecoder().decode(ReplaySpanDecision.self, from: data)
         XCTAssertEqual(decoded.startTime, 10)
         XCTAssertEqual(decoded.endTime, 20)
         XCTAssertEqual(decoded.confidence, 0.75)
@@ -119,14 +119,14 @@ final class FrozenTraceTests: XCTestCase {
             evidenceCatalog: [],
             corrections: [],
             decisionEvents: [],
-            baselineSpanDecisions: [],
+            baselineReplaySpanDecisions: [],
             holdoutDesignation: .training
         )
         let data = try JSONEncoder().encode(trace)
         let decoded = try JSONDecoder().decode(FrozenTrace.self, from: data)
         XCTAssertTrue(decoded.featureWindows.isEmpty)
         XCTAssertTrue(decoded.atoms.isEmpty)
-        XCTAssertTrue(decoded.baselineSpanDecisions.isEmpty)
+        XCTAssertTrue(decoded.baselineReplaySpanDecisions.isEmpty)
     }
 }
 
@@ -137,7 +137,7 @@ final class CounterfactualEvaluatorTests: XCTestCase {
     // MARK: - Helpers
 
     private func makeTrace(
-        baselineSpans: [SpanDecision],
+        baselineSpans: [ReplaySpanDecision],
         holdout: Bool = false
     ) -> FrozenTrace {
         FrozenTrace(
@@ -163,7 +163,7 @@ final class CounterfactualEvaluatorTests: XCTestCase {
                     explanationJSON: nil
                 ),
             ],
-            baselineSpanDecisions: baselineSpans,
+            baselineReplaySpanDecisions: baselineSpans,
             holdoutDesignation: holdout ? .holdout : .training
         )
     }
@@ -172,11 +172,11 @@ final class CounterfactualEvaluatorTests: XCTestCase {
 
     func testCounterfactualIdenticalDecisionsProduceZeroRegret() {
         let baseline = [
-            SpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
+            ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
         ]
         let trace = makeTrace(baselineSpans: baseline)
         // New pipeline returns identical decisions
-        let newDecisions = baseline.map { SpanDecision(startTime: $0.startTime, endTime: $0.endTime, confidence: $0.confidence, isAd: $0.isAd, sourceTag: "new") }
+        let newDecisions = baseline.map { ReplaySpanDecision(startTime: $0.startTime, endTime: $0.endTime, confidence: $0.confidence, isAd: $0.isAd, sourceTag: "new") }
 
         let result = CounterfactualEvaluator.compare(trace: trace, newDecisions: newDecisions)
         XCTAssertEqual(result.metrics.counterfactualRegret, 0, accuracy: 0.001)
@@ -185,12 +185,12 @@ final class CounterfactualEvaluatorTests: XCTestCase {
 
     func testCounterfactualDivergentDecisionsProduceNonzeroRegret() {
         let baseline = [
-            SpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
+            ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
         ]
         let trace = makeTrace(baselineSpans: baseline)
         // New pipeline says NOT an ad
         let newDecisions = [
-            SpanDecision(startTime: 120, endTime: 180, confidence: 0.3, isAd: false, sourceTag: "new"),
+            ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.3, isAd: false, sourceTag: "new"),
         ]
 
         let result = CounterfactualEvaluator.compare(trace: trace, newDecisions: newDecisions)
@@ -200,13 +200,13 @@ final class CounterfactualEvaluatorTests: XCTestCase {
 
     func testCounterfactualScoreDistributionShift() {
         let baseline = [
-            SpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
-            SpanDecision(startTime: 300, endTime: 360, confidence: 0.8, isAd: true, sourceTag: "baseline"),
+            ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
+            ReplaySpanDecision(startTime: 300, endTime: 360, confidence: 0.8, isAd: true, sourceTag: "baseline"),
         ]
         let trace = makeTrace(baselineSpans: baseline)
         let newDecisions = [
-            SpanDecision(startTime: 120, endTime: 180, confidence: 0.5, isAd: true, sourceTag: "new"),
-            SpanDecision(startTime: 300, endTime: 360, confidence: 0.4, isAd: false, sourceTag: "new"),
+            ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.5, isAd: true, sourceTag: "new"),
+            ReplaySpanDecision(startTime: 300, endTime: 360, confidence: 0.4, isAd: false, sourceTag: "new"),
         ]
 
         let result = CounterfactualEvaluator.compare(trace: trace, newDecisions: newDecisions)
@@ -224,7 +224,7 @@ final class CounterfactualEvaluatorTests: XCTestCase {
 
     func testCounterfactualPerSourceCalibrationError() {
         let baseline = [
-            SpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
+            ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
         ]
         let trace = FrozenTrace(
             episodeId: "ep-cal",
@@ -240,12 +240,12 @@ final class CounterfactualEvaluatorTests: XCTestCase {
             ],
             corrections: [],
             decisionEvents: [],
-            baselineSpanDecisions: baseline,
+            baselineReplaySpanDecisions: baseline,
             holdoutDesignation: .training
         )
 
         let newDecisions = [
-            SpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "new"),
+            ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "new"),
         ]
 
         let result = CounterfactualEvaluator.compare(trace: trace, newDecisions: newDecisions)
@@ -264,12 +264,12 @@ final class CounterfactualEvaluatorTests: XCTestCase {
         // Baseline has 2 spans, new pipeline only returns 1.
         // The dropped span should count as a disagreement.
         let baseline = [
-            SpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
-            SpanDecision(startTime: 300, endTime: 360, confidence: 0.8, isAd: true, sourceTag: "baseline"),
+            ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
+            ReplaySpanDecision(startTime: 300, endTime: 360, confidence: 0.8, isAd: true, sourceTag: "baseline"),
         ]
         let trace = makeTrace(baselineSpans: baseline)
         let newDecisions = [
-            SpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "new"),
+            ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "new"),
         ]
 
         let result = CounterfactualEvaluator.compare(trace: trace, newDecisions: newDecisions)
@@ -285,12 +285,12 @@ final class CounterfactualEvaluatorTests: XCTestCase {
         // Baseline has 1 span, new pipeline returns 2.
         // The added span should count as a disagreement.
         let baseline = [
-            SpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
+            ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
         ]
         let trace = makeTrace(baselineSpans: baseline)
         let newDecisions = [
-            SpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "new"),
-            SpanDecision(startTime: 300, endTime: 360, confidence: 0.7, isAd: true, sourceTag: "new"),
+            ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "new"),
+            ReplaySpanDecision(startTime: 300, endTime: 360, confidence: 0.7, isAd: true, sourceTag: "new"),
         ]
 
         let result = CounterfactualEvaluator.compare(trace: trace, newDecisions: newDecisions)
@@ -304,7 +304,7 @@ final class CounterfactualEvaluatorTests: XCTestCase {
     func testCounterfactualBaselineNonEmptyNewEmpty() {
         // Baseline has spans but new pipeline returns nothing -- full disagreement.
         let baseline = [
-            SpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
+            ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
         ]
         let trace = makeTrace(baselineSpans: baseline)
 
@@ -317,13 +317,13 @@ final class CounterfactualEvaluatorTests: XCTestCase {
 
     func testCounterfactualDiffEntriesArePopulated() {
         let baseline = [
-            SpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
-            SpanDecision(startTime: 300, endTime: 360, confidence: 0.7, isAd: true, sourceTag: "baseline"),
+            ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
+            ReplaySpanDecision(startTime: 300, endTime: 360, confidence: 0.7, isAd: true, sourceTag: "baseline"),
         ]
         let trace = makeTrace(baselineSpans: baseline)
         let newDecisions = [
-            SpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "new"),
-            SpanDecision(startTime: 300, endTime: 360, confidence: 0.3, isAd: false, sourceTag: "new"),
+            ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "new"),
+            ReplaySpanDecision(startTime: 300, endTime: 360, confidence: 0.3, isAd: false, sourceTag: "new"),
         ]
 
         let result = CounterfactualEvaluator.compare(trace: trace, newDecisions: newDecisions)
@@ -339,12 +339,12 @@ final class CounterfactualEvaluatorTests: XCTestCase {
         // Baseline has 1 ad span. New pipeline returns the same span + a second non-ad span.
         // The unmatched non-ad span should NOT inflate flippedCount or regret.
         let baseline = [
-            SpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
+            ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
         ]
         let trace = makeTrace(baselineSpans: baseline)
         let newDecisions = [
-            SpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "new"),
-            SpanDecision(startTime: 300, endTime: 360, confidence: 0.4, isAd: false, sourceTag: "new"),
+            ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "new"),
+            ReplaySpanDecision(startTime: 300, endTime: 360, confidence: 0.4, isAd: false, sourceTag: "new"),
         ]
 
         let result = CounterfactualEvaluator.compare(trace: trace, newDecisions: newDecisions)
@@ -365,8 +365,8 @@ final class CounterfactualEvaluatorTests: XCTestCase {
         // Non-ad additions should produce zero regret and zero flippedCount.
         let trace = makeTrace(baselineSpans: [])
         let newDecisions = [
-            SpanDecision(startTime: 100, endTime: 150, confidence: 0.5, isAd: false, sourceTag: "new"),
-            SpanDecision(startTime: 200, endTime: 250, confidence: 0.6, isAd: false, sourceTag: "new"),
+            ReplaySpanDecision(startTime: 100, endTime: 150, confidence: 0.5, isAd: false, sourceTag: "new"),
+            ReplaySpanDecision(startTime: 200, endTime: 250, confidence: 0.6, isAd: false, sourceTag: "new"),
         ]
 
         let result = CounterfactualEvaluator.compare(trace: trace, newDecisions: newDecisions)
@@ -457,7 +457,7 @@ final class HoldoutDesignationTests: XCTestCase {
             evidenceCatalog: [],
             corrections: [],
             decisionEvents: [],
-            baselineSpanDecisions: [],
+            baselineReplaySpanDecisions: [],
             holdoutDesignation: holdout ? .holdout : .training
         )
     }
@@ -486,7 +486,7 @@ final class CounterfactualMetricsCodableTests: XCTestCase {
         let result = CounterfactualResult(
             traceEpisodeId: "ep-001",
             diffs: [
-                SpanDecisionDiff(
+                ReplaySpanDecisionDiff(
                     startTime: 120,
                     endTime: 180,
                     baselineConfidence: 0.9,

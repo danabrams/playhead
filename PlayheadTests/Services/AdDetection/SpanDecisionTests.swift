@@ -1,17 +1,17 @@
 // SpanDecisionTests.swift
 // ef2.4.1: Tests for the four-stage pipeline output type (SpanDecision).
 //
-// Covers: ProposalAuthority quorum logic, ContentClass enum, SkipEligibility,
-// SkipPolicyMatrixV2, BoundaryEstimate, and SpanDecision composition.
+// Covers: SpanProposalAuthority quorum logic, ContentClass enum, SkipEligibility,
+// SkipPolicyMatrixV2, SpanBoundaryEstimate, and SpanDecision composition.
 
 import Foundation
 import Testing
 @testable import Playhead
 
-// MARK: - ProposalAuthority Tests
+// MARK: - SpanProposalAuthority Tests
 
-@Suite("ProposalAuthority")
-struct ProposalAuthorityTests {
+@Suite("SpanProposalAuthority")
+struct SpanProposalAuthorityTests {
 
     // MARK: - EvidenceFamily classification
 
@@ -165,14 +165,14 @@ struct ContentClassTests {
     }
 }
 
-// MARK: - BoundaryEstimate Tests
+// MARK: - SpanBoundaryEstimate Tests
 
-@Suite("BoundaryEstimate")
-struct BoundaryEstimateTests {
+@Suite("SpanBoundaryEstimate")
+struct SpanBoundaryEstimateTests {
 
-    @Test("BoundaryEstimate stores start and end times with confidence")
+    @Test("SpanBoundaryEstimate stores start and end times with confidence")
     func storesTimesAndConfidence() {
-        let estimate = BoundaryEstimate(
+        let estimate = SpanBoundaryEstimate(
             startTime: 10.0,
             endTime: 40.0,
             startConfidence: 0.9,
@@ -184,9 +184,9 @@ struct BoundaryEstimateTests {
         #expect(estimate.endConfidence == 0.7)
     }
 
-    @Test("BoundaryEstimate duration is computed correctly")
+    @Test("SpanBoundaryEstimate duration is computed correctly")
     func durationIsCorrect() {
-        let estimate = BoundaryEstimate(
+        let estimate = SpanBoundaryEstimate(
             startTime: 15.0,
             endTime: 45.0,
             startConfidence: 0.8,
@@ -265,13 +265,13 @@ struct SkipPolicyMatrixV2Tests {
         #expect(SkipPolicyMatrixV2.eligibility(for: .showPromo, authority: .weak) == .markOnly)
     }
 
-    @Test("ownedProduct + any authority → markOnly", arguments: [ProposalAuthority.strong, ProposalAuthority.weak])
-    func ownedProductIsAlwaysMarkOnly(authority: ProposalAuthority) {
+    @Test("ownedProduct + any authority → markOnly", arguments: [SpanProposalAuthority.strong, SpanProposalAuthority.weak])
+    func ownedProductIsAlwaysMarkOnly(authority: SpanProposalAuthority) {
         #expect(SkipPolicyMatrixV2.eligibility(for: .ownedProduct, authority: authority) == .markOnly)
     }
 
-    @Test("editorialMention + any authority → ineligible", arguments: [ProposalAuthority.strong, ProposalAuthority.weak])
-    func editorialMentionIsAlwaysIneligible(authority: ProposalAuthority) {
+    @Test("editorialMention + any authority → ineligible", arguments: [SpanProposalAuthority.strong, SpanProposalAuthority.weak])
+    func editorialMentionIsAlwaysIneligible(authority: SpanProposalAuthority) {
         #expect(SkipPolicyMatrixV2.eligibility(for: .editorialMention, authority: authority) == .ineligible)
     }
 
@@ -292,21 +292,21 @@ struct SkipPolicyMatrixV2Tests {
         #expect(a == b)
     }
 
-    @Test("all 14 (ContentClass x ProposalAuthority) cells produce a valid SkipEligibility")
+    @Test("all 14 (ContentClass x SpanProposalAuthority) cells produce a valid SkipEligibility")
     func exhaustiveMatrixCoverage() {
-        // Guards against adding a new ContentClass or ProposalAuthority case
+        // Guards against adding a new ContentClass or SpanProposalAuthority case
         // without updating the policy matrix switch (compiler catches the switch,
         // this test catches the test suite).
         var testedCount = 0
         for contentClass in ContentClass.allCases {
-            for authority in ProposalAuthority.allCases {
+            for authority in SpanProposalAuthority.allCases {
                 let result = SkipPolicyMatrixV2.eligibility(for: contentClass, authority: authority)
                 #expect(SkipEligibility.allCases.contains(result),
                     "Unexpected eligibility \(result) for (\(contentClass), \(authority))")
                 testedCount += 1
             }
         }
-        #expect(testedCount == ContentClass.allCases.count * ProposalAuthority.allCases.count)
+        #expect(testedCount == ContentClass.allCases.count * SpanProposalAuthority.allCases.count)
         #expect(testedCount == 14, "Expected 7 content classes x 2 authorities = 14 cells")
     }
 }
@@ -322,7 +322,7 @@ struct SpanDecisionTests {
             proposalAuthority: .strong,
             proposalSignals: [.fmContainsAd, .url],
             contentClass: .thirdPartyPaid,
-            boundary: BoundaryEstimate(
+            boundary: SpanBoundaryEstimate(
                 startTime: 10.0,
                 endTime: 40.0,
                 startConfidence: 0.9,
@@ -344,14 +344,14 @@ struct SpanDecisionTests {
             proposalAuthority: .strong,
             proposalSignals: [.fmContainsAd],
             contentClass: .thirdPartyPaid,
-            boundary: BoundaryEstimate(startTime: 10.0, endTime: 40.0, startConfidence: 0.9, endConfidence: 0.8),
+            boundary: SpanBoundaryEstimate(startTime: 10.0, endTime: 40.0, startConfidence: 0.9, endConfidence: 0.8),
             skipEligibility: .autoSkipEligible
         )
         let b = SpanDecision(
             proposalAuthority: .strong,
             proposalSignals: [.fmContainsAd],
             contentClass: .thirdPartyPaid,
-            boundary: BoundaryEstimate(startTime: 10.0, endTime: 40.0, startConfidence: 0.9, endConfidence: 0.8),
+            boundary: SpanBoundaryEstimate(startTime: 10.0, endTime: 40.0, startConfidence: 0.9, endConfidence: 0.8),
             skipEligibility: .autoSkipEligible
         )
         #expect(a == b)
@@ -363,14 +363,14 @@ struct SpanDecisionTests {
             proposalAuthority: .strong,
             proposalSignals: [.fmContainsAd],
             contentClass: .thirdPartyPaid,
-            boundary: BoundaryEstimate(startTime: 10.0, endTime: 40.0, startConfidence: 0.9, endConfidence: 0.8),
+            boundary: SpanBoundaryEstimate(startTime: 10.0, endTime: 40.0, startConfidence: 0.9, endConfidence: 0.8),
             skipEligibility: .autoSkipEligible
         )
         let b = SpanDecision(
             proposalAuthority: .strong,
             proposalSignals: [.fmContainsAd],
             contentClass: .thirdPartyPaid,
-            boundary: BoundaryEstimate(startTime: 10.0, endTime: 40.0, startConfidence: 0.9, endConfidence: 0.8),
+            boundary: SpanBoundaryEstimate(startTime: 10.0, endTime: 40.0, startConfidence: 0.9, endConfidence: 0.8),
             skipEligibility: .markOnly
         )
         #expect(a != b)

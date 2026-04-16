@@ -212,8 +212,8 @@ struct ScoreCalibrationProfileTests {
         let profile = ScoreCalibrationProfile.v1
         #expect(profile.version == .v1)
 
-        // Every source should have at least one non-identity mapping point
-        for source in EvidenceSourceType.allCases {
+        // Every source (except fusedScore which uses identity) should have a non-identity calibrator
+        for source in EvidenceSourceType.allCases where source != .fusedScore {
             let cal = profile.calibrator(for: source)
             let testValues = [0.1, 0.3, 0.5, 0.7, 0.9]
             let hasNonIdentity = testValues.contains { abs(cal.calibrate($0) - $0) > 1e-6 }

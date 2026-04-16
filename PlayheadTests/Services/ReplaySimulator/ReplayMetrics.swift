@@ -614,7 +614,7 @@ func percentile(_ values: [Double], _ p: Double) -> Double {
 // MARK: - Span Decision
 
 /// A single ad span decision — the atomic unit that counterfactual comparison diffs against.
-struct SpanDecision: Sendable, Codable, Equatable {
+struct ReplaySpanDecision: Sendable, Codable, Equatable {
     /// Start of the span in episode seconds.
     let startTime: Double
     /// End of the span in episode seconds.
@@ -631,7 +631,7 @@ struct SpanDecision: Sendable, Codable, Equatable {
 
 /// Canonical serializable artifact capturing a complete episode analysis trace.
 /// Used for offline counterfactual evaluation: replay a new pipeline configuration
-/// against the same inputs and diff the resulting SpanDecisions.
+/// against the same inputs and diff the resulting ReplaySpanDecisions.
 struct FrozenTrace: Sendable, Codable {
     static let currentTraceVersion = "frozen-trace-v1"
 
@@ -652,7 +652,7 @@ struct FrozenTrace: Sendable, Codable {
     /// Decision events with optional explanation traces.
     let decisionEvents: [FrozenDecisionEvent]
     /// The baseline span decisions to diff against.
-    let baselineSpanDecisions: [SpanDecision]
+    let baselineReplaySpanDecisions: [ReplaySpanDecision]
     /// Whether this trace is held out from calibrator training.
     let holdoutDesignation: HoldoutDesignation
 
@@ -670,7 +670,7 @@ struct FrozenTrace: Sendable, Codable {
             evidenceCatalog: evidenceCatalog,
             corrections: corrections,
             decisionEvents: decisionEvents,
-            baselineSpanDecisions: baselineSpanDecisions,
+            baselineReplaySpanDecisions: baselineReplaySpanDecisions,
             holdoutDesignation: designation
         )
     }
@@ -789,7 +789,7 @@ struct CounterfactualMetrics: Sendable, Codable {
 // MARK: - Span Decision Diff
 
 /// Per-span comparison between baseline and new pipeline decisions.
-struct SpanDecisionDiff: Sendable, Codable {
+struct ReplaySpanDecisionDiff: Sendable, Codable {
     let startTime: Double
     let endTime: Double
     let baselineConfidence: Double
@@ -807,13 +807,13 @@ struct SpanDecisionDiff: Sendable, Codable {
 /// Complete result of running a counterfactual comparison on a single trace.
 struct CounterfactualResult: Sendable, Codable {
     let traceEpisodeId: String
-    let diffs: [SpanDecisionDiff]
+    let diffs: [ReplaySpanDecisionDiff]
     let metrics: CounterfactualMetrics
 }
 
 // MARK: - Counterfactual Evaluator
 
-/// Runs counterfactual comparison: diffs new pipeline SpanDecisions against
+/// Runs counterfactual comparison: diffs new pipeline ReplaySpanDecisions against
 /// baseline decisions stored in a FrozenTrace, and computes regression metrics.
 enum CounterfactualEvaluator {
 
@@ -822,9 +822,9 @@ enum CounterfactualEvaluator {
     /// Unmatched tails (count mismatch) are treated as implicit disagreements.
     static func compare(
         trace: FrozenTrace,
-        newDecisions: [SpanDecision]
+        newDecisions: [ReplaySpanDecision]
     ) -> CounterfactualResult {
-        let baseline = trace.baselineSpanDecisions
+        let baseline = trace.baselineReplaySpanDecisions
 
         // Match spans by index (assumes aligned ordering).
         // Unmatched tails (count mismatch) are treated as implicit disagreements.
@@ -842,7 +842,7 @@ enum CounterfactualEvaluator {
             )
         }
 
-        var diffs: [SpanDecisionDiff] = []
+        var diffs: [ReplaySpanDecisionDiff] = []
         var flippedCount = 0
         var totalRegret = 0.0
 
@@ -857,7 +857,7 @@ enum CounterfactualEvaluator {
                 flippedCount += 1
                 totalRegret += abs(delta)
             }
-            diffs.append(SpanDecisionDiff(
+            diffs.append(ReplaySpanDecisionDiff(
                 startTime: b.startTime,
                 endTime: b.endTime,
                 baselineConfidence: b.confidence,
@@ -874,7 +874,7 @@ enum CounterfactualEvaluator {
             let b = baseline[i]
             flippedCount += 1
             totalRegret += b.confidence
-            diffs.append(SpanDecisionDiff(
+            diffs.append(ReplaySpanDecisionDiff(
                 startTime: b.startTime,
                 endTime: b.endTime,
                 baselineConfidence: b.confidence,
@@ -893,7 +893,7 @@ enum CounterfactualEvaluator {
                 flippedCount += 1
                 totalRegret += n.confidence
             }
-            diffs.append(SpanDecisionDiff(
+            diffs.append(ReplaySpanDecisionDiff(
                 startTime: n.startTime,
                 endTime: n.endTime,
                 baselineConfidence: 0,
@@ -938,7 +938,7 @@ enum CounterfactualEvaluator {
         for entry in trace.evidenceCatalog {
             // Find baseline span overlapping this evidence window.
             let outcome: Double
-            if let span = trace.baselineSpanDecisions.first(where: { s in
+            if let span = trace.baselineReplaySpanDecisions.first(where: { s in
                 s.startTime <= entry.windowEnd && s.endTime >= entry.windowStart
             }) {
                 outcome = span.isAd ? 1.0 : 0.0

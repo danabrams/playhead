@@ -1,9 +1,9 @@
 // SpanDecision.swift
 // ef2.4.1: Four-stage pipeline output type.
 //
-// Stage 1 — Proposal:   ProposalAuthority (.strong / .weak) via ProposalQuorum
+// Stage 1 — Proposal:   SpanProposalAuthority (.strong / .weak) via ProposalQuorum
 // Stage 2 — Classification: ContentClass (7 cases)
-// Stage 3 — Boundary:   BoundaryEstimate (start/end times + confidence)
+// Stage 3 — Boundary:   SpanBoundaryEstimate (start/end times + confidence)
 // Stage 4 — Policy:     SkipEligibility via SkipPolicyMatrixV2
 //
 // Design:
@@ -18,7 +18,7 @@ import Foundation
 // MARK: - Stage 1: Proposal
 
 /// The authority level of a proposal signal.
-enum ProposalAuthority: String, Sendable, Codable, Hashable, CaseIterable {
+enum SpanProposalAuthority: String, Sendable, Codable, Hashable, CaseIterable {
     /// Strong evidence: a single signal suffices for quorum.
     case strong
     /// Weak evidence: requires 2 from different families for quorum.
@@ -53,7 +53,7 @@ enum ProposalSignal: String, Sendable, Codable, Hashable, CaseIterable {
     case musicBracket
     case lexicalWithoutAnchor
 
-    var authority: ProposalAuthority {
+    var authority: SpanProposalAuthority {
         switch self {
         case .url, .promoCode, .disclosure, .fmContainsAd, .fingerprint:
             return .strong
@@ -98,7 +98,7 @@ enum ProposalQuorum {
     ///
     /// Returns `.strong` if any strong signal is present, `.weak` if only weak signals
     /// from different families satisfy quorum, or `nil` if quorum is not met.
-    static func resolvedAuthority(signals: [ProposalSignal]) -> ProposalAuthority? {
+    static func resolvedAuthority(signals: [ProposalSignal]) -> SpanProposalAuthority? {
         guard isMet(signals: signals) else { return nil }
         if signals.contains(where: { $0.authority == .strong }) {
             return .strong
@@ -137,7 +137,7 @@ enum ContentClass: String, Sendable, Codable, Hashable, CaseIterable {
 ///
 /// Reusable across pipeline stages — captures where the span starts and ends
 /// along with how confident the boundary detector is about each edge.
-struct BoundaryEstimate: Sendable, Equatable, Codable, Hashable {
+struct SpanBoundaryEstimate: Sendable, Equatable, Codable, Hashable {
     /// Estimated start time of the span in seconds.
     let startTime: Double
     /// Estimated end time of the span in seconds.
@@ -169,7 +169,7 @@ enum SkipEligibility: String, Sendable, Codable, Hashable, CaseIterable {
     case ineligible
 }
 
-/// Maps (ContentClass, ProposalAuthority) to SkipEligibility.
+/// Maps (ContentClass, SpanProposalAuthority) to SkipEligibility.
 ///
 /// Pure function/lookup — no side effects, no state. Policy NEVER influences
 /// proposal or classification scores.
@@ -180,9 +180,9 @@ struct SkipPolicyMatrixV2: Sendable {
 
     /// Determine skip eligibility from content class and proposal authority.
     ///
-    /// All (ContentClass x ProposalAuthority) combinations are enumerated so the
+    /// All (ContentClass x SpanProposalAuthority) combinations are enumerated so the
     /// compiler catches any future cases added to either enum.
-    static func eligibility(for contentClass: ContentClass, authority: ProposalAuthority) -> SkipEligibility {
+    static func eligibility(for contentClass: ContentClass, authority: SpanProposalAuthority) -> SkipEligibility {
         switch (contentClass, authority) {
 
         // Third-party paid: auto-skip with strong evidence, banner with weak.
@@ -235,13 +235,21 @@ struct SkipPolicyMatrixV2: Sendable {
 ///   4. Skip eligibility (derived from policy matrix, never from proposal/classification scores)
 struct SpanDecision: Sendable, Equatable, Codable, Hashable {
     /// Stage 1: The resolved proposal authority level.
-    let proposalAuthority: ProposalAuthority
+    let proposalAuthority: SpanProposalAuthority
     /// Stage 1: The signals that contributed to the proposal.
     let proposalSignals: [ProposalSignal]
     /// Stage 2: The content classification.
     let contentClass: ContentClass
     /// Stage 3: The estimated boundaries.
-    let boundary: BoundaryEstimate
+    let boundary: SpanBoundaryEstimate
     /// Stage 4: The skip eligibility determined by policy.
     let skipEligibility: SkipEligibility
+
+    init(proposalAuthority: SpanProposalAuthority, proposalSignals: [ProposalSignal], contentClass: ContentClass, boundary: SpanBoundaryEstimate, skipEligibility: SkipEligibility) {
+        self.proposalAuthority = proposalAuthority
+        self.proposalSignals = proposalSignals
+        self.contentClass = contentClass
+        self.boundary = boundary
+        self.skipEligibility = skipEligibility
+    }
 }

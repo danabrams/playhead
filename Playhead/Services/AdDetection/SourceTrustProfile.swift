@@ -74,7 +74,7 @@ struct BetaPosterior: Sendable, Equatable, Codable {
 /// The orthogonal update rule requires that corroboration come from a
 /// *different* family — sources within the same family share too much
 /// underlying signal to provide independent validation.
-enum EvidenceFamily: String, Sendable, Equatable, CaseIterable {
+enum SourceEvidenceFamily: String, Sendable, Equatable, CaseIterable {
     /// Text-derived signals: lexical pattern matching, classifier scores.
     case textual
     /// Audio-derived signals: acoustic break detection, music bed analysis.
@@ -85,7 +85,7 @@ enum EvidenceFamily: String, Sendable, Equatable, CaseIterable {
     case reference
 
     /// Map an evidence source type to its family.
-    static func `for`(_ source: EvidenceSourceType) -> EvidenceFamily {
+    static func `for`(_ source: EvidenceSourceType) -> SourceEvidenceFamily {
         switch source {
         case .lexical, .classifier:
             return .textual
@@ -95,6 +95,8 @@ enum EvidenceFamily: String, Sendable, Equatable, CaseIterable {
             return .model
         case .fingerprint, .catalog:
             return .reference
+        case .fusedScore:
+            return .model
         }
     }
 }
@@ -135,8 +137,8 @@ enum OrthogonalUpdateRule {
     ) -> ValidationResult {
         // Same-family check takes priority: even if episodes differ,
         // same-family corroboration is never valid.
-        let sourceFamily = EvidenceFamily.for(sourceToUpdate)
-        let corroboratingFamily = EvidenceFamily.for(corroboratingSource)
+        let sourceFamily = SourceEvidenceFamily.for(sourceToUpdate)
+        let corroboratingFamily = SourceEvidenceFamily.for(corroboratingSource)
         guard sourceFamily != corroboratingFamily else {
             return .blockedSameFamily
         }

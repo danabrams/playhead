@@ -1,6 +1,6 @@
 // SourceTrustProfileTests.swift
 //
-// Tests for BetaPosterior, EvidenceFamily, OrthogonalUpdateRule,
+// Tests for BetaPosterior, SourceEvidenceFamily, OrthogonalUpdateRule,
 // and SourceTrustProfile (playhead-ef2.4.4).
 
 import Foundation
@@ -64,36 +64,36 @@ struct BetaPosteriorTests {
     }
 }
 
-@Suite("EvidenceFamily")
-struct EvidenceFamilyTests {
+@Suite("SourceEvidenceFamily")
+struct SourceEvidenceFamilyTests {
 
     @Test("lexical and classifier are textual family")
     func textualFamily() {
-        #expect(EvidenceFamily.for(.lexical) == .textual)
-        #expect(EvidenceFamily.for(.classifier) == .textual)
+        #expect(SourceEvidenceFamily.for(.lexical) == .textual)
+        #expect(SourceEvidenceFamily.for(.classifier) == .textual)
     }
 
     @Test("acoustic is acoustic family")
     func acousticFamily() {
-        #expect(EvidenceFamily.for(.acoustic) == .acoustic)
+        #expect(SourceEvidenceFamily.for(.acoustic) == .acoustic)
     }
 
     @Test("fm is model family")
     func modelFamily() {
-        #expect(EvidenceFamily.for(.fm) == .model)
+        #expect(SourceEvidenceFamily.for(.fm) == .model)
     }
 
     @Test("fingerprint and catalog are reference family")
     func referenceFamily() {
-        #expect(EvidenceFamily.for(.fingerprint) == .reference)
-        #expect(EvidenceFamily.for(.catalog) == .reference)
+        #expect(SourceEvidenceFamily.for(.fingerprint) == .reference)
+        #expect(SourceEvidenceFamily.for(.catalog) == .reference)
     }
 
     @Test("every EvidenceSourceType has a family")
     func allSourceTypesHaveFamily() {
         for source in EvidenceSourceType.allCases {
             // Should not crash — all cases are covered.
-            _ = EvidenceFamily.for(source)
+            _ = SourceEvidenceFamily.for(source)
         }
     }
 }

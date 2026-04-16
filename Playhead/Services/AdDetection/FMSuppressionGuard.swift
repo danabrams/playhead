@@ -248,7 +248,7 @@ struct FMSuppressionApplicator: Sendable {
             return false
         case .fingerprint:
             return true
-        case .classifier, .lexical, .acoustic, .catalog:
+        case .classifier, .lexical, .acoustic, .catalog, .fusedScore:
             return false
         }
     }

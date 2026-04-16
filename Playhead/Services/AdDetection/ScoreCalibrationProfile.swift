@@ -154,6 +154,7 @@ struct ScoreCalibrationProfile: Sendable {
         case .acoustic: return acousticCalibrator
         case .catalog: return catalogCalibrator
         case .fingerprint: return fingerprintCalibrator
+        case .fusedScore: return .identity
         }
     }
 
