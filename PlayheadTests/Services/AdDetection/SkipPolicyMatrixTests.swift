@@ -308,3 +308,309 @@ struct AutoSkipConfidenceThresholdTests {
         #expect(SkipPolicyMatrix.action(for: .organic, ownership: .thirdParty) == .suppress)
     }
 }
+
+// MARK: - SkipPolicyOverride (ef2.6.2)
+
+@Suite("SkipPolicyOverride — scope and serialization")
+struct SkipPolicyOverrideScopeTests {
+
+    @Test("adType scope round-trips through serialization")
+    func adTypeScopeRoundTrips() {
+        let scope = SkipPolicyOverrideScope.adType(intent: .paid, ownership: .thirdParty)
+        let serialized = scope.serialized
+        let deserialized = SkipPolicyOverrideScope.deserialize(serialized)
+        #expect(deserialized == scope)
+    }
+
+    @Test("showLevel scope round-trips through serialization")
+    func showLevelScopeRoundTrips() {
+        let scope = SkipPolicyOverrideScope.showLevel(podcastId: "podcast-123", intent: .owned, ownership: .show)
+        let serialized = scope.serialized
+        let deserialized = SkipPolicyOverrideScope.deserialize(serialized)
+        #expect(deserialized == scope)
+    }
+
+    @Test("showWide scope round-trips through serialization")
+    func showWideScopeRoundTrips() {
+        let scope = SkipPolicyOverrideScope.showWide(podcastId: "podcast-456")
+        let serialized = scope.serialized
+        let deserialized = SkipPolicyOverrideScope.deserialize(serialized)
+        #expect(deserialized == scope)
+    }
+
+    @Test("deserialization returns nil for malformed input")
+    func malformedInputReturnsNil() {
+        #expect(SkipPolicyOverrideScope.deserialize("garbage") == nil)
+        #expect(SkipPolicyOverrideScope.deserialize("") == nil)
+        #expect(SkipPolicyOverrideScope.deserialize("adType:bad:bad") == nil)
+    }
+
+    @Test("SkipPolicyOverride is Codable")
+    func overrideCodableRoundTrip() throws {
+        let override = SkipPolicyOverride(
+            scope: .adType(intent: .paid, ownership: .thirdParty),
+            action: .detectOnly,
+            reason: "User prefers to see third-party ads as banners only"
+        )
+        let data = try JSONEncoder().encode(override)
+        let decoded = try JSONDecoder().decode(SkipPolicyOverride.self, from: data)
+        #expect(decoded.scope == override.scope)
+        #expect(decoded.action == override.action)
+        #expect(decoded.reason == override.reason)
+    }
+}
+
+@Suite("SkipPolicyOverrideStore")
+struct SkipPolicyOverrideStoreTests {
+
+    @Test("empty store returns no overrides")
+    func emptyStoreReturnsNone() {
+        let store = InMemorySkipPolicyOverrideStore()
+        let result = store.effectiveAction(for: .paid, ownership: .thirdParty, podcastId: nil)
+        #expect(result == nil)
+    }
+
+    @Test("adType override returns matching action")
+    func adTypeOverrideReturns() {
+        let store = InMemorySkipPolicyOverrideStore()
+        store.addOverride(SkipPolicyOverride(
+            scope: .adType(intent: .paid, ownership: .thirdParty),
+            action: .detectOnly,
+            reason: "never skip third-party"
+        ))
+        let result = store.effectiveAction(for: .paid, ownership: .thirdParty, podcastId: nil)
+        #expect(result == .detectOnly)
+    }
+
+    @Test("adType override does not affect unrelated intent/ownership")
+    func adTypeOverrideDoesNotBleed() {
+        let store = InMemorySkipPolicyOverrideStore()
+        store.addOverride(SkipPolicyOverride(
+            scope: .adType(intent: .paid, ownership: .thirdParty),
+            action: .detectOnly,
+            reason: "never skip third-party"
+        ))
+        // owned + show should be unaffected
+        let result = store.effectiveAction(for: .owned, ownership: .show, podcastId: nil)
+        #expect(result == nil)
+    }
+
+    @Test("showLevel override applies only to matching podcast")
+    func showLevelOverrideMatchesPodcast() {
+        let store = InMemorySkipPolicyOverrideStore()
+        store.addOverride(SkipPolicyOverride(
+            scope: .showLevel(podcastId: "pod-1", intent: .owned, ownership: .show),
+            action: .autoSkipEligible,
+            reason: "skip house promos for this show"
+        ))
+        // Matching podcast + intent + ownership
+        let match = store.effectiveAction(for: .owned, ownership: .show, podcastId: "pod-1")
+        #expect(match == .autoSkipEligible)
+        // Different podcast — no match
+        let noMatch = store.effectiveAction(for: .owned, ownership: .show, podcastId: "pod-2")
+        #expect(noMatch == nil)
+        // No podcast — no match
+        let noPod = store.effectiveAction(for: .owned, ownership: .show, podcastId: nil)
+        #expect(noPod == nil)
+    }
+
+    @Test("showWide override applies to any intent/ownership for that podcast")
+    func showWideOverrideMatchesAnyType() {
+        let store = InMemorySkipPolicyOverrideStore()
+        store.addOverride(SkipPolicyOverride(
+            scope: .showWide(podcastId: "pod-1"),
+            action: .detectOnly,
+            reason: "detect-only for this entire show"
+        ))
+        #expect(store.effectiveAction(for: .paid, ownership: .thirdParty, podcastId: "pod-1") == .detectOnly)
+        #expect(store.effectiveAction(for: .owned, ownership: .show, podcastId: "pod-1") == .detectOnly)
+        // Different podcast — no match
+        #expect(store.effectiveAction(for: .paid, ownership: .thirdParty, podcastId: "pod-2") == nil)
+    }
+
+    @Test("showLevel override takes precedence over adType override")
+    func showLevelPrecedenceOverAdType() {
+        let store = InMemorySkipPolicyOverrideStore()
+        store.addOverride(SkipPolicyOverride(
+            scope: .adType(intent: .paid, ownership: .thirdParty),
+            action: .detectOnly,
+            reason: "global: never skip third-party"
+        ))
+        store.addOverride(SkipPolicyOverride(
+            scope: .showLevel(podcastId: "pod-1", intent: .paid, ownership: .thirdParty),
+            action: .autoSkipEligible,
+            reason: "per-show: allow skipping third-party for this show"
+        ))
+        // Show-level wins for this podcast
+        let result = store.effectiveAction(for: .paid, ownership: .thirdParty, podcastId: "pod-1")
+        #expect(result == .autoSkipEligible)
+        // Another podcast falls back to adType override
+        let other = store.effectiveAction(for: .paid, ownership: .thirdParty, podcastId: "pod-2")
+        #expect(other == .detectOnly)
+    }
+
+    @Test("showLevel override takes precedence over showWide override")
+    func showLevelPrecedenceOverShowWide() {
+        let store = InMemorySkipPolicyOverrideStore()
+        store.addOverride(SkipPolicyOverride(
+            scope: .showWide(podcastId: "pod-1"),
+            action: .detectOnly,
+            reason: "detect-only for this show"
+        ))
+        store.addOverride(SkipPolicyOverride(
+            scope: .showLevel(podcastId: "pod-1", intent: .paid, ownership: .thirdParty),
+            action: .autoSkipEligible,
+            reason: "but allow skipping third-party for this show"
+        ))
+        // Show-level wins for matching intent/ownership
+        let specific = store.effectiveAction(for: .paid, ownership: .thirdParty, podcastId: "pod-1")
+        #expect(specific == .autoSkipEligible)
+        // Other types fall back to showWide
+        let other = store.effectiveAction(for: .owned, ownership: .show, podcastId: "pod-1")
+        #expect(other == .detectOnly)
+    }
+
+    @Test("showWide override takes precedence over adType override")
+    func showWidePrecedenceOverAdType() {
+        let store = InMemorySkipPolicyOverrideStore()
+        store.addOverride(SkipPolicyOverride(
+            scope: .adType(intent: .paid, ownership: .thirdParty),
+            action: .autoSkipEligible,
+            reason: "global: skip third-party"
+        ))
+        store.addOverride(SkipPolicyOverride(
+            scope: .showWide(podcastId: "pod-1"),
+            action: .detectOnly,
+            reason: "per-show: detect-only for this show"
+        ))
+        // showWide wins for this podcast
+        let result = store.effectiveAction(for: .paid, ownership: .thirdParty, podcastId: "pod-1")
+        #expect(result == .detectOnly)
+        // Another podcast falls back to adType override
+        let other = store.effectiveAction(for: .paid, ownership: .thirdParty, podcastId: "pod-2")
+        #expect(other == .autoSkipEligible)
+    }
+
+    @Test("removing an override restores default behavior")
+    func removeOverride() {
+        let store = InMemorySkipPolicyOverrideStore()
+        let scope = SkipPolicyOverrideScope.adType(intent: .paid, ownership: .thirdParty)
+        store.addOverride(SkipPolicyOverride(scope: scope, action: .detectOnly, reason: "test"))
+        #expect(store.effectiveAction(for: .paid, ownership: .thirdParty, podcastId: nil) == .detectOnly)
+        store.removeOverride(for: scope)
+        #expect(store.effectiveAction(for: .paid, ownership: .thirdParty, podcastId: nil) == nil)
+    }
+
+    @Test("allOverrides returns all stored overrides")
+    func allOverridesReturnsAll() {
+        let store = InMemorySkipPolicyOverrideStore()
+        store.addOverride(SkipPolicyOverride(
+            scope: .adType(intent: .paid, ownership: .thirdParty),
+            action: .detectOnly,
+            reason: "a"
+        ))
+        store.addOverride(SkipPolicyOverride(
+            scope: .showWide(podcastId: "pod-1"),
+            action: .suppress,
+            reason: "b"
+        ))
+        #expect(store.allOverrides.count == 2)
+    }
+}
+
+@Suite("SkipPolicyMatrix.action(overrideStore:) — override integration")
+struct SkipPolicyMatrixOverrideIntegrationTests {
+
+    @Test("override changes policy action without affecting what the matrix would return")
+    func overrideChangesAction() {
+        let store = InMemorySkipPolicyOverrideStore()
+        store.addOverride(SkipPolicyOverride(
+            scope: .adType(intent: .paid, ownership: .thirdParty),
+            action: .detectOnly,
+            reason: "never skip third-party"
+        ))
+        // Without override, paid+thirdParty = autoSkipEligible
+        let baseline = SkipPolicyMatrix.action(for: .paid, ownership: .thirdParty)
+        #expect(baseline == .autoSkipEligible)
+        // With override, demoted to detectOnly
+        let overridden = SkipPolicyMatrix.action(
+            for: .paid, ownership: .thirdParty,
+            overrideStore: store, podcastId: nil
+        )
+        #expect(overridden == .detectOnly)
+    }
+
+    @Test("nil override store returns default matrix action")
+    func nilStoreReturnsDefault() {
+        let result = SkipPolicyMatrix.action(
+            for: .paid, ownership: .thirdParty,
+            overrideStore: nil, podcastId: nil
+        )
+        #expect(result == .autoSkipEligible)
+    }
+
+    @Test("override store with no matching override returns default matrix action")
+    func noMatchingOverrideReturnsDefault() {
+        let store = InMemorySkipPolicyOverrideStore()
+        // Add an override for a different type
+        store.addOverride(SkipPolicyOverride(
+            scope: .adType(intent: .owned, ownership: .show),
+            action: .suppress,
+            reason: "suppress house promos"
+        ))
+        let result = SkipPolicyMatrix.action(
+            for: .paid, ownership: .thirdParty,
+            overrideStore: store, podcastId: nil
+        )
+        #expect(result == .autoSkipEligible)
+    }
+
+    @Test("override does not affect confidence score — only policy action")
+    func overrideDoesNotAffectScore() {
+        // This is a design constraint test: skip-policy overrides live at Stage 4
+        // and cannot modify skipConfidence. The DecisionMapper is responsible for
+        // the score; the policy matrix only produces the action.
+        let store = InMemorySkipPolicyOverrideStore()
+        store.addOverride(SkipPolicyOverride(
+            scope: .adType(intent: .paid, ownership: .thirdParty),
+            action: .detectOnly,
+            reason: "never skip third-party"
+        ))
+        // The action is a pure value — no confidence field exists on SkipPolicyAction.
+        // This test documents the invariant: overrides change policy, not score.
+        let action = SkipPolicyMatrix.action(
+            for: .paid, ownership: .thirdParty,
+            overrideStore: store, podcastId: nil
+        )
+        #expect(action == .detectOnly)
+        // Action is a simple enum — no score coupling
+    }
+
+    @Test("classification override vs skip-policy override are distinct concerns")
+    func classificationVsSkipPolicyAreDistinct() {
+        // Classification override: "this IS an ad" or "this ISN'T an ad" —
+        // handled by UserCorrectionStore (correctionFactor in DecisionMapper)
+        // Skip-policy override: "don't skip this TYPE of ad" —
+        // handled by SkipPolicyOverrideStore (action override in SkipPolicyMatrix)
+        //
+        // A user saying "that was a house promo" is a classification override.
+        // A user saying "never skip house promos" is a skip-policy override.
+        // These are orthogonal: you can identify content as an ad (high confidence)
+        // but still choose not to skip it (policy override).
+        let store = InMemorySkipPolicyOverrideStore()
+        store.addOverride(SkipPolicyOverride(
+            scope: .adType(intent: .owned, ownership: .show),
+            action: .detectOnly,
+            reason: "show promos as banners, never skip"
+        ))
+        // owned+show with override → detectOnly (policy override)
+        let action = SkipPolicyMatrix.action(
+            for: .owned, ownership: .show,
+            overrideStore: store, podcastId: nil
+        )
+        #expect(action == .detectOnly)
+        // Without override, the matrix also returns detectOnly for this pair —
+        // but the override enforces it. If the matrix default ever changed,
+        // the override would hold.
+    }
+}
