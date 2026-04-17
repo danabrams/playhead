@@ -314,8 +314,15 @@ extension DownloadManager {
         task.resume()
 
         // The OS owns the transfer from here; drop our blob so a
-        // future force-quit-scan does not re-emit preempted.
-        try deleteResumeData(episodeId: episodeId)
+        // future force-quit-scan does not re-emit preempted. Use
+        // try? — a delete failure here is benign (we'll re-emit on
+        // next launch) and must not surface as a user error after
+        // we've already handed the blob to URLSession.
+        do {
+            try deleteResumeData(episodeId: episodeId)
+        } catch {
+            logger.error("resumeSuspendedTransfer: post-handoff delete failed for \(episodeId, privacy: .public): \(String(describing: error), privacy: .public)")
+        }
         logger.info("resumeSuspendedTransfer: resumed \(episodeId, privacy: .public)")
         return .resumed
     }
