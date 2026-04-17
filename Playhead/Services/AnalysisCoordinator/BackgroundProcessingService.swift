@@ -118,6 +118,29 @@ protocol AnalysisCoordinating: Sendable {
     /// window. This is a best-effort request: if the worker has already
     /// finished or is not registered, the call is a no-op.
     func pauseAtNextCheckpoint(episodeId: String, cause: InternalMissCause) async
+
+    /// playhead-44h1: append a terminal WorkJournal row for the
+    /// foreground-assist hand-off. Called by
+    /// ``BackgroundProcessingService.handleContinuedProcessingTask``
+    /// from two sites:
+    ///
+    /// - Expiration handler (``recordForegroundAssistOutcome`` with
+    ///   `.failed`, cause=`.taskExpired`) so the journal records the
+    ///   OS-forced termination.
+    /// - Success path after `continueForegroundAssist` returns without
+    ///   throwing (``recordForegroundAssistOutcome`` with `.finalized`,
+    ///   cause=nil).
+    ///
+    /// The coordinator resolves the episode's current `{generationID,
+    /// schedulerEpoch}` from `analysis_jobs` and appends via the
+    /// existing `AnalysisStore.appendWorkJournalEntry` API. Best-effort:
+    /// a storage failure is logged and swallowed because the caller
+    /// has no recourse — the BG task is about to complete either way.
+    func recordForegroundAssistOutcome(
+        episodeId: String,
+        eventType: WorkJournalEntry.EventType,
+        cause: InternalMissCause?
+    ) async
 }
 
 extension AnalysisCoordinator: AnalysisCoordinating {}
@@ -653,33 +676,69 @@ actor BackgroundProcessingService {
                     episodeId: episodeId,
                     deadline: deadline
                 )
-                await self?.markComplete(task, success: true)
+                // Spec state-machine step 5: on successful completion
+                // append a `finalized` WorkJournal entry. This is the
+                // canonical emission site for the success path — the
+                // coordinator's internal polling loop returns normally
+                // when either (a) the deadline was reached cleanly or
+                // (b) a pause-observed exit already wrote `failed`
+                // earlier in the expirationHandler path. In case (b)
+                // the `finalized` append is still safe: the store's
+                // `appendWorkJournalEntry` is a non-idempotent
+                // free-standing append and the journal is an
+                // append-only audit trail. The expiration path wins
+                // the `markComplete` race so the OS-visible outcome
+                // agrees with the terminal journal event it wrote.
+                if let self {
+                    await self.coordinator.recordForegroundAssistOutcome(
+                        episodeId: episodeId,
+                        eventType: .finalized,
+                        cause: nil
+                    )
+                    await self.markComplete(task, success: true)
+                }
             } catch {
                 self?.logger.error(
                     "Continued processing failed for episode \(episodeId, privacy: .public): \(String(describing: error), privacy: .public)"
                 )
-                await self?.markComplete(task, success: false)
+                if let self {
+                    await self.coordinator.recordForegroundAssistOutcome(
+                        episodeId: episodeId,
+                        eventType: .failed,
+                        cause: .pipelineError
+                    )
+                    await self.markComplete(task, success: false)
+                }
             }
         }
 
         activeBackgroundTasks[taskID] = workTask
 
         // Expiration handler: request a safe-point pause with
-        // cause=.taskExpired, then mark the task failed and cancel
-        // the in-flight work. Marking complete BEFORE cancellation
-        // wins the `completedTaskIDs` idempotence race — if the work
-        // task's normal return observes the pause and calls
-        // `markComplete(success: true)` afterwards, the duplicate is
-        // dropped and the OS still sees success=false, which is the
-        // correct reporting for an expiration. The cancellation is
-        // the forcing function that makes the work task return
-        // promptly so resources are reclaimed.
+        // cause=.taskExpired, append a `failed` WorkJournal entry
+        // (spec state-machine step 5), then mark the task failed and
+        // cancel the in-flight work. The journal append happens
+        // BEFORE markComplete so a crash between the two still
+        // leaves a durable audit trail of the expiration. Marking
+        // complete BEFORE cancellation wins the `completedTaskIDs`
+        // idempotence race — if the work task's normal return
+        // observes the pause and calls `markComplete(success: true)`
+        // afterwards, the duplicate is dropped and the OS still
+        // sees success=false, which is the correct reporting for an
+        // expiration. The cancellation is the forcing function that
+        // makes the work task return promptly so resources are
+        // reclaimed.
         task.expirationHandler = { [weak self] in
             guard let self else { return }
             Task { [weak self] in
                 guard let self else { return }
                 await self.coordinator.pauseAtNextCheckpoint(
                     episodeId: episodeId,
+                    cause: .taskExpired
+                )
+                await self.coordinator.recordForegroundAssistOutcome(
+                    episodeId: episodeId,
+                    eventType: .failed,
                     cause: .taskExpired
                 )
                 await self.markComplete(task, success: false)

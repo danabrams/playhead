@@ -146,6 +146,72 @@ struct LiveActivityCopyAnalyzingTests {
         #expect(LiveActivityCopy.analyzingText(for: state) == "Analyzing · ~0 min remaining")
     }
 
+    @Test("ETA resolves avgShardDurationMs from device-class profile")
+    func etaUsesDeviceClassProfileAvgShardMs() {
+        // Mocked iPhone 17 Pro profile: avgShardDurationMs = 2500.
+        // 600 s / 20 s = 30 shards. 10 completed → 20 remaining.
+        // 20 * 2500 = 50000 ms → ceil(50/60) = 1 min.
+        let pro = DeviceClassProfile(
+            deviceClass: DeviceClass.iPhone17Pro.rawValue,
+            grantWindowMedianSeconds: 45,
+            grantWindowP95Seconds: 90,
+            nominalSliceSizeBytes: 25_000_000,
+            cpuWindowSeconds: 40,
+            bytesPerCpuSecond: 625_000,
+            avgShardDurationMs: 2500
+        )
+        #expect(LiveActivityCopy.resolveAvgShardDurationMs(from: pro) == 2500)
+
+        let text = LiveActivityCopy.analyzingText(
+            episodeDurationSec: 600,
+            shardsCompleted: 10,
+            nominalShardDurationSec: 20,
+            queuedRemaining: 0,
+            deviceProfile: pro
+        )
+        #expect(text == "Analyzing · ~1 min remaining",
+                "Device-class profile avgShardDurationMs must drive the ETA; got \(text)")
+    }
+
+    @Test("Unknown device-class profile falls back to 4500 ms")
+    func etaFallsBackWhenProfileMissing() {
+        // nil profile → resolver returns fallbackAvgShardDurationMs
+        // (4500 ms). 200 s / 20 = 10 shards. 0 completed → 10
+        // remaining. 10 * 4500 = 45000 ms = 0.75 min → ceil → 1 min.
+        #expect(LiveActivityCopy.resolveAvgShardDurationMs(from: nil)
+                == LiveActivityCopy.fallbackAvgShardDurationMs)
+        #expect(LiveActivityCopy.fallbackAvgShardDurationMs == 4500)
+
+        let text = LiveActivityCopy.analyzingText(
+            episodeDurationSec: 200,
+            shardsCompleted: 0,
+            nominalShardDurationSec: 20,
+            queuedRemaining: 0,
+            deviceProfile: nil
+        )
+        #expect(text == "Analyzing · ~1 min remaining",
+                "nil device-class profile must fall back to 4500 ms; got \(text)")
+    }
+
+    @Test("Zero avgShardDurationMs in profile uses fallback")
+    func etaFallsBackWhenProfileReportsZero() {
+        // A malformed/seed profile with zero avgShardDurationMs must
+        // route through the same fallback so the ETA never divides by
+        // zero downstream. Constructed off iPhone SE3's seed values
+        // but with avgShardDurationMs clobbered to 0.
+        let bad = DeviceClassProfile(
+            deviceClass: DeviceClass.iPhoneSE3.rawValue,
+            grantWindowMedianSeconds: 25,
+            grantWindowP95Seconds: 55,
+            nominalSliceSizeBytes: 10_000_000,
+            cpuWindowSeconds: 20,
+            bytesPerCpuSecond: 500_000,
+            avgShardDurationMs: 0
+        )
+        #expect(LiveActivityCopy.resolveAvgShardDurationMs(from: bad)
+                == LiveActivityCopy.fallbackAvgShardDurationMs)
+    }
+
     @Test("Analyzing copy contains no forbidden lane-label literals")
     func analyzingHasNoLaneLiterals() {
         let running = LiveActivityAnalyzingState(

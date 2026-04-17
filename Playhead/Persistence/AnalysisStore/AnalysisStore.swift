@@ -3912,6 +3912,26 @@ actor AnalysisStore {
         return readJob(stmt)
     }
 
+    /// Returns the most-recently-updated `analysis_jobs` row for an
+    /// episode. Primarily used by the playhead-44h1 foreground-assist
+    /// hand-off so the BG task expiration / completion paths can
+    /// resolve the current `{generationID, schedulerEpoch}` and append
+    /// a terminal WorkJournal row keyed by the episode alone. Returns
+    /// `nil` when the episode has no row.
+    func fetchLatestJobForEpisode(_ episodeId: String) throws -> AnalysisJob? {
+        let sql = """
+            SELECT * FROM analysis_jobs
+            WHERE episodeId = ?
+            ORDER BY updatedAt DESC, rowid DESC
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, episodeId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return readJob(stmt)
+    }
+
     func fetchNextEligibleJob(
         deferredWorkAllowed: Bool,
         t0ThresholdSec: Double,

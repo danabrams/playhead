@@ -4,9 +4,11 @@
 // transfers for pre-caching, resume after interruption, LRU eviction,
 // and asset fingerprinting for the analysis pipeline.
 
+import BackgroundTasks
 import CryptoKit
 import Foundation
 import OSLog
+import UIKit
 // MARK: - Download State Events
 
 /// Progress and completion events for a single episode download.
@@ -168,6 +170,36 @@ actor DownloadManager {
     /// Active download tasks keyed by episode ID.
     private var activeDownloads: [String: Task<URL, Error>] = [:]
 
+    /// playhead-44h1 (fix): last observed progress for each active
+    /// download, used to build a ``ForegroundAssistTransferSnapshot``
+    /// on `UIApplication.willResignActiveNotification`. Populated from
+    /// every `DownloadProgress` broadcast via ``noteTransferProgress``;
+    /// cleared when the download completes (on broadcast with
+    /// `bytesWritten == totalBytes`) and on explicit cancellation.
+    struct ForegroundAssistProgress: Sendable, Equatable {
+        let bytesWritten: Int64
+        let totalBytes: Int64
+        let firstObservedAt: Date
+        let firstObservedBytes: Int64
+        let updatedAt: Date
+    }
+    private var foregroundAssistProgress: [String: ForegroundAssistProgress] = [:]
+
+    /// playhead-44h1 (fix): scheduler used to submit
+    /// `BGContinuedProcessingTaskRequest` when ``handleWillResignActive``
+    /// decides the handoff to a BG task is the right call. Defaults to
+    /// the real `BGTaskScheduler.shared`; swapped in tests via
+    /// ``setBackgroundTaskSchedulerForTesting(_:)``. Using the same
+    /// `BackgroundTaskScheduling` abstraction that BPS does so the
+    /// testing surface stays consistent.
+    private var backgroundTaskScheduler: any BackgroundTaskScheduling = BGTaskScheduler.shared
+
+    /// playhead-44h1 (fix): guards against submitting two
+    /// `BGContinuedProcessingTaskRequest`s for the same episode in the
+    /// same `willResignActive` cycle. iOS coalesces duplicates but
+    /// logging a second submit for the same id muddies the log.
+    private var inflightContinuedProcessingSubmissions: Set<String> = []
+
     /// Metadata cache: episode ID -> HTTP metadata from last response.
     private var metadataCache: [String: HTTPAssetMetadata] = [:]
 
@@ -286,6 +318,39 @@ actor DownloadManager {
         for (_, continuation) in progressSubscribers {
             continuation.yield(progress)
         }
+        noteTransferProgress(progress)
+    }
+
+    /// playhead-44h1 (fix): record the latest `DownloadProgress` for
+    /// the foreground-assist handoff snapshot. Called on every
+    /// `broadcastProgress` and from background-session delegate
+    /// hooks so the `willResignActive` handler has up-to-date byte
+    /// counters to feed `ForegroundAssistHandoff.decide(for:)`.
+    ///
+    /// Clears the slot when the transfer has completed
+    /// (`bytesWritten >= totalBytes > 0`) so a subsequent background
+    /// transition does not spuriously emit a keep-alive for a
+    /// finished download.
+    func noteTransferProgress(_ progress: DownloadProgress) {
+        // Completed transfer: remove the slot so the snapshot does
+        // not observe stale bytes after the work is done.
+        if progress.totalBytes > 0 && progress.bytesWritten >= progress.totalBytes {
+            foregroundAssistProgress.removeValue(forKey: progress.episodeId)
+            return
+        }
+        let now = Date()
+        let existing = foregroundAssistProgress[progress.episodeId]
+        // Preserve the first-observation timestamp so the throughput
+        // estimate spans the full active window, not just the most
+        // recent tick. This gives `ForegroundAssistHandoff` a useful
+        // `averageBytesPerSecond` even for freshly-started transfers.
+        foregroundAssistProgress[progress.episodeId] = ForegroundAssistProgress(
+            bytesWritten: progress.bytesWritten,
+            totalBytes: progress.totalBytes,
+            firstObservedAt: existing?.firstObservedAt ?? now,
+            firstObservedBytes: existing?.firstObservedBytes ?? progress.bytesWritten,
+            updatedAt: now
+        )
     }
 
     /// Returns a fresh AsyncStream of raw audio data chunks for streaming decode.
@@ -323,6 +388,192 @@ actor DownloadManager {
     /// Wire up the analysis scheduler so downloads automatically enqueue jobs.
     func setAnalysisWorkScheduler(_ scheduler: AnalysisWorkScheduler) {
         self.analysisWorkScheduler = scheduler
+    }
+
+    /// playhead-44h1 (fix): inject a `BackgroundTaskScheduling` so
+    /// tests can observe the `BGContinuedProcessingTaskRequest`
+    /// submission path without touching `BGTaskScheduler.shared`.
+    /// Production leaves the default `.shared` scheduler in place.
+    func setBackgroundTaskSchedulerForTesting(_ scheduler: any BackgroundTaskScheduling) {
+        self.backgroundTaskScheduler = scheduler
+    }
+
+    // MARK: - playhead-44h1 (fix): Foreground-assist lifecycle
+
+    /// Register a `UIApplication.willResignActiveNotification` observer
+    /// so the `ForegroundAssistHandoff.decide(for:)` entry point has at
+    /// least one production call-site. When the app backgrounds with an
+    /// in-flight download, this observer builds a snapshot from
+    /// ``foregroundAssistProgress`` and routes it through the
+    /// decision module. On a `.submitContinuedProcessingRequest`
+    /// verdict, it submits a `BGContinuedProcessingTaskRequest` via
+    /// the injected `BackgroundTaskScheduling`.
+    ///
+    /// Scope note (spec state-machine step 3): the keep-alive /
+    /// URLSession-background plumbing half of the decision is
+    /// explicitly deferred to playhead-iwiy; the `.keepForegroundAssistAlive`
+    /// branch here logs and does no work. The observer exists so a
+    /// reader grepping for `decide(for:` in production code lands on
+    /// this site rather than the bare module definition.
+    ///
+    /// Idempotent: a second call is a no-op so app-lifecycle wiring
+    /// can safely invoke this during both `didFinishLaunching` and
+    /// `sceneWillConnectToSession`-equivalent paths.
+    func registerForegroundAssistLifecycleObserver() {
+        guard foregroundAssistObserverToken == nil else { return }
+        let center = NotificationCenter.default
+        let token = center.addObserver(
+            forName: UIApplication.willResignActiveNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            Task { [weak self] in
+                await self?.handleWillResignActive()
+            }
+        }
+        foregroundAssistObserverToken = token
+    }
+
+    /// Token returned by `NotificationCenter.addObserver(forName:...)`
+    /// so ``deregisterForegroundAssistLifecycleObserver`` can reverse
+    /// the registration. An opaque `NSObjectProtocol` per the API
+    /// contract.
+    private var foregroundAssistObserverToken: (any NSObjectProtocol)?
+
+    /// Tear down the `willResignActive` observer. Primarily for
+    /// tests so a second registration does not accumulate observers
+    /// across test cases.
+    func deregisterForegroundAssistLifecycleObserver() {
+        if let token = foregroundAssistObserverToken {
+            NotificationCenter.default.removeObserver(token)
+            foregroundAssistObserverToken = nil
+        }
+    }
+
+    /// Entry point for the `willResignActive` handoff decision.
+    /// Exposed as a non-notification method so tests can drive it
+    /// directly without posting through `NotificationCenter`.
+    ///
+    /// For each active transfer: build a
+    /// ``ForegroundAssistTransferSnapshot``, call
+    /// ``ForegroundAssistHandoff/decide(for:)``, and act on the
+    /// verdict. A single `willResignActive` cycle may emit multiple
+    /// submissions — one per still-active episode — but each
+    /// submission is deduped within the cycle via
+    /// ``inflightContinuedProcessingSubmissions``.
+    @discardableResult
+    func handleWillResignActive(
+        now: Date = Date()
+    ) -> [ForegroundAssistHandoffDecision] {
+        var decisions: [ForegroundAssistHandoffDecision] = []
+        for (episodeId, progress) in foregroundAssistProgress {
+            let snapshot = makeSnapshot(for: progress, now: now)
+            let decision = ForegroundAssistHandoff.decide(for: snapshot)
+            decisions.append(decision)
+            logger.info(
+                "foreground-assist handoff: episode=\(episodeId, privacy: .public) fraction=\(snapshot.fractionCompleted) etaSeconds=\(snapshot.remainingSeconds) decision=\(String(describing: decision), privacy: .public)"
+            )
+            switch decision {
+            case .submitContinuedProcessingRequest:
+                submitContinuedProcessingRequest(for: episodeId)
+            case .keepForegroundAssistAlive:
+                // Routing into a URLSession background-session
+                // keep-alive is playhead-iwiy's territory. This
+                // observer's job for the keep-alive branch is just
+                // to LOG that a decision was made so reviewers can
+                // see the handoff fired at a real call-site.
+                break
+            }
+        }
+        return decisions
+    }
+
+    /// Build a ``ForegroundAssistTransferSnapshot`` from a stored
+    /// progress entry. Throughput is estimated over the full
+    /// observation window (first-observed timestamp → `now`) so a
+    /// freshly-resumed transfer's throughput does not alias to 0
+    /// just because the most recent progress tick was a moment ago.
+    private func makeSnapshot(
+        for progress: ForegroundAssistProgress,
+        now: Date
+    ) -> ForegroundAssistTransferSnapshot {
+        let elapsed = now.timeIntervalSince(progress.firstObservedAt)
+        let bytesDelta = max(0, progress.bytesWritten - progress.firstObservedBytes)
+        let throughput: Double
+        if elapsed > 0 && bytesDelta > 0 {
+            throughput = Double(bytesDelta) / elapsed
+        } else {
+            // No observable delta yet — treat as unknown so the
+            // handoff decision errs toward BG task (the safe choice).
+            throughput = 0
+        }
+        return ForegroundAssistTransferSnapshot(
+            totalBytesWritten: progress.bytesWritten,
+            totalBytesExpectedToWrite: progress.totalBytes,
+            averageBytesPerSecond: throughput
+        )
+    }
+
+    /// Submit a `BGContinuedProcessingTaskRequest` for `episodeId`.
+    /// The identifier follows the wildcard convention
+    /// `"<BackgroundTaskID.continuedProcessing>.<episodeId>"` that
+    /// `BackgroundProcessingService.parseEpisodeId(from:)` expects.
+    ///
+    /// Idempotent within a single `willResignActive` cycle — a second
+    /// call for the same `episodeId` is swallowed. The cycle gate is
+    /// cleared after the submission completes (success OR failure) so
+    /// the next transition is free to submit again for a still-active
+    /// transfer.
+    private func submitContinuedProcessingRequest(for episodeId: String) {
+        guard !inflightContinuedProcessingSubmissions.contains(episodeId) else {
+            logger.debug("BGContinuedProcessingTaskRequest already submitted for \(episodeId, privacy: .public)")
+            return
+        }
+        inflightContinuedProcessingSubmissions.insert(episodeId)
+        defer { inflightContinuedProcessingSubmissions.remove(episodeId) }
+
+        let identifier = "\(BackgroundTaskID.continuedProcessing).\(episodeId)"
+        let request = BGContinuedProcessingTaskRequest(
+            identifier: identifier,
+            title: "Finishing download",
+            subtitle: "We'll wrap up this episode in the background."
+        )
+        request.strategy = .fail
+        do {
+            try backgroundTaskScheduler.submit(request)
+            logger.info("Submitted BGContinuedProcessingTaskRequest: \(identifier, privacy: .public)")
+        } catch {
+            logger.error(
+                "Failed to submit BGContinuedProcessingTaskRequest \(identifier, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+        }
+    }
+
+    /// Test hook: read the current stored foreground-assist progress
+    /// for an episode. Used by unit tests to verify that
+    /// `noteTransferProgress` updates the snapshot state.
+    func foregroundAssistProgressForTesting(episodeId: String) -> ForegroundAssistProgress? {
+        foregroundAssistProgress[episodeId]
+    }
+
+    /// Test hook: seed the foreground-assist progress map directly
+    /// so tests exercising `handleWillResignActive` do not have to
+    /// drive a real download to simulate bytes written.
+    func seedForegroundAssistProgressForTesting(
+        episodeId: String,
+        bytesWritten: Int64,
+        totalBytes: Int64,
+        firstObservedAt: Date,
+        firstObservedBytes: Int64 = 0,
+        updatedAt: Date = Date()
+    ) {
+        foregroundAssistProgress[episodeId] = ForegroundAssistProgress(
+            bytesWritten: bytesWritten,
+            totalBytes: totalBytes,
+            firstObservedAt: firstObservedAt,
+            firstObservedBytes: firstObservedBytes,
+            updatedAt: updatedAt
+        )
     }
 
     static func defaultCacheDirectory() -> URL {

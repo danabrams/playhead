@@ -478,6 +478,56 @@ actor AnalysisCoordinator {
         )
     }
 
+    /// playhead-44h1 (fix): append a terminal WorkJournal row for the
+    /// foreground-assist hand-off. See the protocol doc-comment on
+    /// ``AnalysisCoordinating/recordForegroundAssistOutcome`` for
+    /// semantics and the two BPS call-sites.
+    ///
+    /// Resolution:
+    ///   - Look up the episode's most-recently-updated `analysis_jobs`
+    ///     row to capture the live `{generationID, schedulerEpoch}`.
+    ///   - When no row is found (unusual — a continued-processing
+    ///     task fired for an episode with no job) we still append a
+    ///     row with generationID="" and schedulerEpoch=0 so the
+    ///     journal retains an audit trail of the expire/complete.
+    ///
+    /// Errors from the store are logged and swallowed: the caller is
+    /// the BG task expiration / completion path, which has no
+    /// recourse. An unresolved journal row is strictly less bad than
+    /// a raised error here, which would otherwise have to propagate
+    /// into `setTaskCompleted(success:)`.
+    func recordForegroundAssistOutcome(
+        episodeId: String,
+        eventType: WorkJournalEntry.EventType,
+        cause: InternalMissCause?
+    ) async {
+        do {
+            let job = try await store.fetchLatestJobForEpisode(episodeId)
+            let rawGenerationID = job?.generationID ?? ""
+            let schedulerEpoch = job?.schedulerEpoch ?? 0
+            let generationUUID = UUID(uuidString: rawGenerationID) ?? UUID()
+            let entry = WorkJournalEntry(
+                id: UUID().uuidString,
+                episodeId: episodeId,
+                generationID: generationUUID,
+                schedulerEpoch: schedulerEpoch,
+                timestamp: Date().timeIntervalSince1970,
+                eventType: eventType,
+                cause: cause,
+                metadata: "{}",
+                artifactClass: .scratch
+            )
+            try await store.appendWorkJournalEntry(entry)
+            logger.info(
+                "recordForegroundAssistOutcome: episode=\(episodeId, privacy: .public) event=\(eventType.rawValue, privacy: .public) cause=\(cause?.rawValue ?? "nil", privacy: .public)"
+            )
+        } catch {
+            logger.error(
+                "recordForegroundAssistOutcome failed for episode \(episodeId, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+        }
+    }
+
     // MARK: - Episode Execution Lease (playhead-uzdq)
 
     /// Default lease TTL. Long enough that a cooperatively-scheduled

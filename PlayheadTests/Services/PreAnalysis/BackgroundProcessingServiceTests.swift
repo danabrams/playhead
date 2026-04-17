@@ -295,6 +295,70 @@ struct ContinuedProcessingHandlerTests {
         #expect(firstPause?.episodeId == episodeId)
         #expect(firstPause?.cause == .taskExpired,
                 "Expiration cause MUST be .taskExpired per bead spec")
+
+        // Spec state-machine step 5: expiration MUST write a terminal
+        // `failed` WorkJournal entry with cause=.taskExpired. The
+        // pause request alone is in-memory (see
+        // AnalysisCoordinator.pauseAtNextCheckpoint) — the durable
+        // audit trail lives in the journal row appended here.
+        let failedJournalCalls = coordinator.recordForegroundAssistOutcomeCalls.filter {
+            $0.episodeId == episodeId && $0.eventType == .failed
+        }
+        #expect(!failedJournalCalls.isEmpty,
+                "Expiration handler must append a `failed` WorkJournal row")
+        #expect(failedJournalCalls.first?.cause == .taskExpired,
+                "Expiration WorkJournal row must carry cause=.taskExpired")
+    }
+
+    @Test("Happy path appends `finalized` WorkJournal row on successful completion")
+    func happyPathAppendsFinalizedJournalRow() async throws {
+        // Spec state-machine step 5: when `continueForegroundAssist`
+        // returns without throwing, the handler appends a `finalized`
+        // WorkJournal entry before marking the task complete. The
+        // cause MUST be nil (finalized is a success event; `cause` is
+        // reserved for preempted / failed per WorkJournalEntry).
+        let (bps, coordinator, _, _) = makeBPS()
+        let episodeId = "episode-44h1-final"
+        let task = StubContinuedProcessingTask(identifier: Self.identifierPrefix + episodeId)
+
+        await bps.handleContinuedProcessingTask(task)
+        try await waitForCompletion(of: task)
+
+        #expect(task.completedSuccess == true)
+        let finalizedCalls = coordinator.recordForegroundAssistOutcomeCalls.filter {
+            $0.episodeId == episodeId && $0.eventType == .finalized
+        }
+        #expect(finalizedCalls.count == 1,
+                "Successful completion must append exactly one `finalized` WorkJournal row")
+        #expect(finalizedCalls.first?.cause == nil,
+                "Finalized rows carry no cause (success event)")
+    }
+
+    @Test("Coordinator failure path appends `failed` WorkJournal row")
+    func coordinatorFailureAppendsFailedJournalRow() async throws {
+        // When `continueForegroundAssist` throws, the handler appends
+        // a `failed` row with a pipeline cause (distinct from
+        // .taskExpired, which is reserved for the expirationHandler).
+        let coordinator = StubAnalysisCoordinator()
+        coordinator.continueForegroundAssistError = NSError(
+            domain: "test", code: 2,
+            userInfo: [NSLocalizedDescriptionKey: "synthetic failure"]
+        )
+        let (bps, _, _, _) = makeBPS(coordinator: coordinator)
+        let episodeId = "episode-44h1-failpath"
+        let task = StubContinuedProcessingTask(identifier: Self.identifierPrefix + episodeId)
+
+        await bps.handleContinuedProcessingTask(task)
+        try await waitForCompletion(of: task)
+
+        #expect(task.completedSuccess == false)
+        let failedCalls = coordinator.recordForegroundAssistOutcomeCalls.filter {
+            $0.episodeId == episodeId && $0.eventType == .failed
+        }
+        #expect(!failedCalls.isEmpty,
+                "Failure path must append a `failed` WorkJournal row")
+        #expect(failedCalls.first?.cause != .taskExpired,
+                ".taskExpired is reserved for the expirationHandler path")
     }
 
     @Test("Identifier parser handles valid and invalid inputs")

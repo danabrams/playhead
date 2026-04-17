@@ -1,6 +1,7 @@
 // DownloadManagerTests.swift
 // Unit tests for the audio asset cache and download manager.
 
+import BackgroundTasks
 import Foundation
 import Dispatch
 import CryptoKit
@@ -434,5 +435,132 @@ struct DownloadManagerResumeContractTests {
 
     private static func sha256Hex(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+// MARK: - Foreground Assist Handoff (playhead-44h1 fix)
+
+/// Captures `BGTaskRequest` submissions so tests can assert the
+/// willResignActive path submitted a `BGContinuedProcessingTaskRequest`
+/// with the expected wildcard identifier.
+final class CapturingTaskScheduler: BackgroundTaskScheduling, @unchecked Sendable {
+    var submitted: [BGTaskRequest] = []
+    var shouldThrow: Error?
+
+    func submit(_ taskRequest: BGTaskRequest) throws {
+        if let shouldThrow { throw shouldThrow }
+        submitted.append(taskRequest)
+    }
+}
+
+@Suite("DownloadManager – Foreground-assist handoff (playhead-44h1)")
+struct DownloadManagerForegroundAssistHandoffTests {
+
+    @Test("noteTransferProgress records latest bytes for snapshot construction")
+    func noteTransferProgressUpdatesSlot() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = DownloadManager(cacheDirectory: dir)
+
+        let episodeId = "ep-44h1-progress"
+        await manager.noteTransferProgress(DownloadProgress(
+            episodeId: episodeId, bytesWritten: 1_000_000, totalBytes: 10_000_000
+        ))
+        let progress = await manager.foregroundAssistProgressForTesting(episodeId: episodeId)
+        #expect(progress?.bytesWritten == 1_000_000)
+        #expect(progress?.totalBytes == 10_000_000)
+    }
+
+    @Test("Completed transfer clears the foreground-assist progress slot")
+    func completedTransferClearsSlot() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = DownloadManager(cacheDirectory: dir)
+        let episodeId = "ep-44h1-done"
+
+        await manager.noteTransferProgress(DownloadProgress(
+            episodeId: episodeId, bytesWritten: 500_000, totalBytes: 10_000_000
+        ))
+        await manager.noteTransferProgress(DownloadProgress(
+            episodeId: episodeId,
+            bytesWritten: 10_000_000,
+            totalBytes: 10_000_000
+        ))
+        let progress = await manager.foregroundAssistProgressForTesting(episodeId: episodeId)
+        #expect(progress == nil,
+                "A complete progress event must clear the foreground-assist slot")
+    }
+
+    @Test("willResignActive submits BGContinuedProcessingTaskRequest when transfer is far from done")
+    func willResignActiveSubmitsBGRequest() async throws {
+        // Transfer is only 10% complete at 50 KB/s throughput → ETA
+        // 180 s → both the 80% gate (0.1 < 0.8) AND the 2-min gate
+        // (180 > 120) fail → submit a BGContinuedProcessingTaskRequest.
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = DownloadManager(cacheDirectory: dir)
+        let scheduler = CapturingTaskScheduler()
+        await manager.setBackgroundTaskSchedulerForTesting(scheduler)
+
+        let episodeId = "ep-44h1-faraway"
+        // 10 MB total, 1 MB written over 20 s → 50 KB/s throughput,
+        // 9 MB remaining → 180 s ETA.
+        let startedAt = Date(timeIntervalSinceNow: -20)
+        await manager.seedForegroundAssistProgressForTesting(
+            episodeId: episodeId,
+            bytesWritten: 1_000_000,
+            totalBytes: 10_000_000,
+            firstObservedAt: startedAt,
+            firstObservedBytes: 0
+        )
+
+        let decisions = await manager.handleWillResignActive()
+        #expect(decisions.contains(.submitContinuedProcessingRequest))
+        #expect(scheduler.submitted.count == 1)
+        let identifier = scheduler.submitted.first?.identifier ?? ""
+        #expect(identifier.hasPrefix(BackgroundTaskID.continuedProcessing + "."),
+                "Submitted identifier must follow the wildcard convention")
+        #expect(identifier.hasSuffix("." + episodeId),
+                "Submitted identifier must end with the episode id suffix")
+        #expect(scheduler.submitted.first is BGContinuedProcessingTaskRequest,
+                "Submitted request must be a BGContinuedProcessingTaskRequest")
+    }
+
+    @Test("willResignActive keeps foreground-assist alive when transfer is near done")
+    func willResignActiveKeepsAliveOnHighFraction() async throws {
+        // Transfer 90% complete → keep-alive branch → NO BG task
+        // request submitted. Logs the decision but does not act.
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = DownloadManager(cacheDirectory: dir)
+        let scheduler = CapturingTaskScheduler()
+        await manager.setBackgroundTaskSchedulerForTesting(scheduler)
+
+        let episodeId = "ep-44h1-nearly"
+        await manager.seedForegroundAssistProgressForTesting(
+            episodeId: episodeId,
+            bytesWritten: 9_000_000,
+            totalBytes: 10_000_000,
+            firstObservedAt: Date(timeIntervalSinceNow: -30),
+            firstObservedBytes: 0
+        )
+
+        let decisions = await manager.handleWillResignActive()
+        #expect(decisions.contains(.keepForegroundAssistAlive))
+        #expect(scheduler.submitted.isEmpty,
+                "Keep-alive branch MUST NOT submit a BG task request")
+    }
+
+    @Test("No active transfers → no BG task submission on willResignActive")
+    func willResignActiveNoopsWhenNoTransfers() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = DownloadManager(cacheDirectory: dir)
+        let scheduler = CapturingTaskScheduler()
+        await manager.setBackgroundTaskSchedulerForTesting(scheduler)
+
+        let decisions = await manager.handleWillResignActive()
+        #expect(decisions.isEmpty)
+        #expect(scheduler.submitted.isEmpty)
     }
 }

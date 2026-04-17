@@ -193,6 +193,15 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
     /// drive the expiration → pause → task-failed ordering without
     /// wall-clock races.
     var continueForegroundAssistWaitsForPause: Bool = false
+    /// Captures every `recordForegroundAssistOutcome(episodeId:
+    /// eventType:cause:)` call so tests can assert the expire /
+    /// complete paths wrote the expected WorkJournal row (playhead-
+    /// 44h1 fix — spec state-machine step 5).
+    private(set) var recordForegroundAssistOutcomeCalls: [(
+        episodeId: String,
+        eventType: WorkJournalEntry.EventType,
+        cause: InternalMissCause?
+    )] = []
 
     func startCapabilityObserver() async {
         startCapabilityObserverCallCount += 1
@@ -234,6 +243,16 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
 
     func pauseAtNextCheckpoint(episodeId: String, cause: InternalMissCause) async {
         pauseAtNextCheckpointCalls.append((episodeId: episodeId, cause: cause))
+    }
+
+    func recordForegroundAssistOutcome(
+        episodeId: String,
+        eventType: WorkJournalEntry.EventType,
+        cause: InternalMissCause?
+    ) async {
+        recordForegroundAssistOutcomeCalls.append(
+            (episodeId: episodeId, eventType: eventType, cause: cause)
+        )
     }
 }
 

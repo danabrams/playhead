@@ -137,6 +137,51 @@ enum LiveActivityCopy {
     /// lookup misses (unknown device class). Matches the spec value.
     static let fallbackAvgShardDurationMs: Int = 4500
 
+    /// Resolve the `avgShardDurationMs` value from a device-class
+    /// profile lookup. Returns the profile's value when present and
+    /// positive; falls back to ``fallbackAvgShardDurationMs`` (4500 ms)
+    /// on `nil` or non-positive values.
+    ///
+    /// Kept separate from the `analyzingText(for:)` path so the
+    /// lookup chain is independently testable with mocked profiles
+    /// without constructing the full `LiveActivityAnalyzingState`.
+    /// The production Live Activity plumbing (playhead-iwiy) routes
+    /// its device-class lookup through this helper so the fallback
+    /// rule is enforced in exactly one place.
+    static func resolveAvgShardDurationMs(
+        from profile: DeviceClassProfile?
+    ) -> Int {
+        guard let profile, profile.avgShardDurationMs > 0 else {
+            return fallbackAvgShardDurationMs
+        }
+        return profile.avgShardDurationMs
+    }
+
+    /// Overload of ``analyzingText(for:)`` that takes a
+    /// ``DeviceClassProfile?`` directly instead of a pre-resolved
+    /// `avgShardDurationMs`. Thin wrapper over
+    /// ``resolveAvgShardDurationMs(from:)`` + the Int-taking entry
+    /// point — provided so callers that already hold a device-class
+    /// profile do not have to round-trip through the resolver
+    /// themselves.
+    static func analyzingText(
+        episodeDurationSec: Double,
+        shardsCompleted: Int?,
+        nominalShardDurationSec: Double,
+        queuedRemaining: Int,
+        deviceProfile: DeviceClassProfile?
+    ) -> String {
+        let avgMs = resolveAvgShardDurationMs(from: deviceProfile)
+        let state = LiveActivityAnalyzingState(
+            episodeDurationSec: episodeDurationSec,
+            shardsCompleted: shardsCompleted,
+            nominalShardDurationSec: nominalShardDurationSec,
+            avgShardDurationMs: avgMs,
+            queuedRemaining: queuedRemaining
+        )
+        return analyzingText(for: state)
+    }
+
     /// Format the currently-running-analysis template. Per spec:
     ///
     /// - "Analyzing · ~M min remaining" where M is
