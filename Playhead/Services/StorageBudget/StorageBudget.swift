@@ -96,10 +96,22 @@ struct StorageBudgetAudit: Equatable, Sendable {
     /// (ratio is undefined — no media was evicted this cycle).
     let warmResumeToMediaRatio: Double?
 
-    /// True iff ``warmResumeToMediaRatio`` exceeds
-    /// ``warmResumeToMediaMaxRatio``. When true, admission of new
-    /// warmResumeBundle writes is paused until the next cycle.
+    /// True iff THIS CYCLE actually evaluated the ratio AND the ratio
+    /// exceeded ``warmResumeToMediaMaxRatio``. This is strictly a
+    /// per-cycle signal: it is `false` whenever the ratio was not
+    /// evaluated this cycle (i.e. `evictedMediaBytes == 0`), even if a
+    /// latch from a prior cycle is still held. Telemetry consumers
+    /// should treat ``ratioExceeded`` as a per-cycle event and
+    /// ``latchHeld`` as the persistent admission-pause signal.
     let ratioExceeded: Bool
+
+    /// The persistent state of the warm-resume admission-pause latch
+    /// AT THE END OF THIS CYCLE. When `true`, new warmResumeBundle
+    /// admissions are rejected until a future cycle clears the latch.
+    /// Distinct from ``ratioExceeded``: a cycle that did not evict any
+    /// media will report `ratioExceeded == false` even while
+    /// `latchHeld == true` if a prior cycle's breach is still active.
+    let latchHeld: Bool
 }
 
 // MARK: - StorageBudget
@@ -176,7 +188,14 @@ actor StorageBudget {
         case .media:
             return sizeProvider(.media)
         case .warmResumeBundle, .scratch:
-            return sizeProvider(.warmResumeBundle) &+ sizeProvider(.scratch)
+            // Saturating add: if the analysis pool somehow already
+            // exceeds Int64.max in aggregate, clamp to Int64.max so the
+            // subsequent cap comparison correctly reports cap-exceeded
+            // rather than wrapping to a negative value.
+            let warm = sizeProvider(.warmResumeBundle)
+            let scratch = sizeProvider(.scratch)
+            let (sum, overflow) = warm.addingReportingOverflow(scratch)
+            return overflow ? Int64.max : sum
         }
     }
 
@@ -198,6 +217,14 @@ actor StorageBudget {
     /// admission time — eviction is the only operation that can span
     /// both.
     func admit(class cls: ArtifactClass, sizeBytes: Int64) -> StorageAdmissionDecision {
+        // Cycle-3 hardening: a negative `sizeBytes` is a caller bug.
+        // Without this guard, `current + sizeBytes` would be smaller
+        // than `current` and the admission check would silently accept
+        // a write that the caller has clearly mis-described. Fail fast
+        // so the bug surfaces at the call site rather than in a
+        // confusing downstream cap-budget mystery.
+        precondition(sizeBytes >= 0, "StorageBudget.admit: sizeBytes must be non-negative; got \(sizeBytes)")
+
         // warmResumeBundle admission is gated on the ratio latch first;
         // a cap-available bundle still gets rejected if the previous
         // eviction cycle reported a ratio breach.
@@ -211,8 +238,13 @@ actor StorageBudget {
 
         let cap = cap(for: cls)
         let current = currentBytesGovernedByCap(of: cls)
-        let projected = current &+ sizeBytes
-        if projected > cap {
+        // Checked addition: an overflow on `current + sizeBytes` means
+        // the admission would (mathematically) blow past Int64.max,
+        // which is by definition past any sane cap — treat overflow as
+        // cap-exceeded rather than wrapping to a negative `projected`
+        // that would silently accept the write.
+        let (projected, overflow) = current.addingReportingOverflow(sizeBytes)
+        if overflow || projected > cap {
             return .rejectCapExceeded(
                 class: cls,
                 cap: cap,
@@ -245,7 +277,22 @@ actor StorageBudget {
         var evictedMedia: Int64 = 0
         if mediaBefore > mediaCap {
             let target = mediaBefore - mediaCap
-            evictedMedia = evictor(.media, target)
+            let evictedRaw = evictor(.media, target)
+            // Cycle-3 hardening: the evictor contract guarantees a
+            // non-negative return (bytes actually freed). A negative
+            // value would underflow the ratio math (Double conversion
+            // gives a meaningless ratio) and could quietly hide a bug
+            // in a real evictor. Clamp to 0 in release, assert in
+            // DEBUG so tests catch a bad evictor immediately.
+            if evictedRaw < 0 {
+                logger.error("StorageBudget: media evictor returned negative \(evictedRaw, privacy: .public); clamping to 0")
+                #if DEBUG
+                assertionFailure("evictor must return non-negative bytes; got \(evictedRaw)")
+                #endif
+                evictedMedia = 0
+            } else {
+                evictedMedia = evictedRaw
+            }
             // Do not assert evictor honored the full target — a partial
             // eviction is legal (e.g. in-use files refuse deletion). The
             // next cycle will retry.
@@ -253,14 +300,28 @@ actor StorageBudget {
 
         // Analysis-cap enforcement (class 2/3: scratch is evictable,
         // warmResumeBundle is NOT). We evaluate the combined analysis
-        // pool size; if it's over, we spill scratch only.
+        // pool size; if it's over, we spill scratch only. Saturating
+        // add on the pool sum so a hypothetical Int64-overflow ledger
+        // still triggers cap enforcement instead of wrapping negative.
         let warmBefore = sizeProvider(.warmResumeBundle)
         let scratchBefore = sizeProvider(.scratch)
-        let analysisBefore = warmBefore &+ scratchBefore
+        let (poolSum, poolOverflow) = warmBefore.addingReportingOverflow(scratchBefore)
+        let analysisBefore = poolOverflow ? Int64.max : poolSum
         var evictedScratch: Int64 = 0
         if analysisBefore > analysisCap {
             let target = analysisBefore - analysisCap
-            evictedScratch = evictor(.scratch, target)
+            let evictedRaw = evictor(.scratch, target)
+            // Cycle-3 hardening (mirrors media branch): clamp negative
+            // evictor returns to 0 in release, assert in DEBUG.
+            if evictedRaw < 0 {
+                logger.error("StorageBudget: scratch evictor returned negative \(evictedRaw, privacy: .public); clamping to 0")
+                #if DEBUG
+                assertionFailure("evictor must return non-negative bytes; got \(evictedRaw)")
+                #endif
+                evictedScratch = 0
+            } else {
+                evictedScratch = evictedRaw
+            }
         }
 
         // Warm-resume ratio check. Use the fresh size — the evictor may
@@ -268,33 +329,54 @@ actor StorageBudget {
         // not forbidden by the protocol).
         let warmAfter = sizeProvider(.warmResumeBundle)
         let ratio: Double?
-        let breach: Bool
+        // `ratioExceeded` is strictly per-cycle: only `true` when this
+        // cycle actually evaluated the ratio (i.e. evicted some media)
+        // AND the ratio exceeded the cap. Persistent latch state is
+        // tracked separately.
+        let perCycleBreach: Bool
         if evictedMedia > 0 {
             let r = Double(warmAfter) / Double(evictedMedia)
             ratio = r
-            breach = r > warmResumeToMediaMaxRatio
+            perCycleBreach = r > warmResumeToMediaMaxRatio
         } else {
-            // Ratio is undefined when no media was evicted this cycle;
-            // by spec we don't use it to set the breach latch in that
-            // case. However, an existing latch from a prior cycle is
-            // retained until a non-breaching cycle clears it.
+            // Ratio undefined when no media was evicted this cycle.
             ratio = nil
-            breach = warmResumeAdmissionPaused
+            perCycleBreach = false
         }
 
-        warmResumeAdmissionPaused = breach
+        // Latch transition rules:
+        //   - A per-cycle breach SETS the latch.
+        //   - A per-cycle non-breach (with a real ratio measurement)
+        //     CLEARS the latch — this is the canonical "balance
+        //     restored" signal.
+        //   - A no-pressure cycle (mediaBefore <= mediaCap AND
+        //     warmAfter == 0) CLEARS the latch — covers the idle
+        //     recovery path where warm bundles drained externally
+        //     (manual deletion, app reset, no new podcast downloads).
+        //     Without this, a user whose system stops generating media
+        //     pressure is permanently stuck with admission rejected.
+        //   - Otherwise, the latch carries forward unchanged.
+        if evictedMedia > 0 {
+            warmResumeAdmissionPaused = perCycleBreach
+        } else if mediaBefore <= mediaCap, warmAfter == 0 {
+            warmResumeAdmissionPaused = false
+        }
+        // else: no eviction happened but warm bundles still exist or
+        // media is still over cap — preserve prior latch state.
+
+        let latchHeld = warmResumeAdmissionPaused
 
         let audit = StorageBudgetAudit(
             evictedMediaBytes: evictedMedia,
             evictedScratchBytes: evictedScratch,
             retainedWarmResumeBytes: warmAfter,
             warmResumeToMediaRatio: ratio,
-            ratioExceeded: breach
+            ratioExceeded: perCycleBreach,
+            latchHeld: latchHeld
         )
-        if let sink = auditSink {
-            sink(audit)
-        }
-        if breach {
+        // L4: log BEFORE the audit sink so log-correlated telemetry
+        // observes the same ordering as the audit pipeline.
+        if perCycleBreach {
             logger.error(
                 """
                 Warm-resume ratio breach: retained=\(warmAfter, privacy: .public) bytes, \
@@ -304,6 +386,9 @@ actor StorageBudget {
                 pausing warmResumeBundle admission
                 """
             )
+        }
+        if let sink = auditSink {
+            sink(audit)
         }
         return audit
     }

@@ -72,7 +72,7 @@ enum SurfaceReason: String, Sendable, Hashable, Codable, CaseIterable {
     case storageFull = "storage_full"
     case analysisUnavailable = "analysis_unavailable"
     case resumeInApp = "resume_in_app"
-    case cancelled
+    case cancelled = "cancelled"
     case couldntAnalyze = "couldnt_analyze"
 }
 

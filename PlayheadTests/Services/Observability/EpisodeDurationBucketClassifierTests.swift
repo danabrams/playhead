@@ -111,6 +111,50 @@ struct EpisodeDurationBucketClassifierTests {
         #expect(EpisodeDurationBucketClassifier.bucket(forDurationSeconds: 10 * 60 * 60) == .over90m)
     }
 
+    // MARK: - Non-finite inputs (M4)
+    //
+    // These exercise the documented non-finite → `.over90m` fallback.
+    // The production entrypoint fires a DEBUG `assertionFailure` for
+    // non-finite inputs (silent corruption masks are upstream bugs), so
+    // these tests use the DEBUG-only `bucketIgnoringNonFiniteAssertion`
+    // helper to verify the fallback without crashing the test runner.
+    // The helper is gated behind `#if DEBUG`, so the tests are too.
+
+    #if DEBUG
+    @Test("NaN duration -> over90m (documented choice; classifier is total)")
+    func nanDuration() {
+        // The original `<` / `<=` chain happened to drop NaN through to
+        // `over90m` because NaN compares false against everything; we now
+        // make that explicit so the choice is documented and testable.
+        #expect(
+            EpisodeDurationBucketClassifier.bucketIgnoringNonFiniteAssertion(
+                forDurationSeconds: .nan
+            ) == .over90m
+        )
+    }
+
+    @Test("+Inf duration -> over90m")
+    func positiveInfinityDuration() {
+        #expect(
+            EpisodeDurationBucketClassifier.bucketIgnoringNonFiniteAssertion(
+                forDurationSeconds: .infinity
+            ) == .over90m
+        )
+    }
+
+    @Test("-Inf duration -> over90m (treated as malformed, not as 'shorter than under30m')")
+    func negativeInfinityDuration() {
+        // -Infinity is non-finite; the explicit guard groups it with the
+        // other malformed inputs rather than with negative-finite (which
+        // is handled as the "unknown" sentinel and routes to under30m).
+        #expect(
+            EpisodeDurationBucketClassifier.bucketIgnoringNonFiniteAssertion(
+                forDurationSeconds: -.infinity
+            ) == .over90m
+        )
+    }
+    #endif
+
     // MARK: - Threshold constants sanity
 
     @Test("Threshold constants match the documented minute values")

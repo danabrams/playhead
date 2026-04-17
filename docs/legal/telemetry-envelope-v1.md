@@ -115,6 +115,8 @@ The diagnostics bundle defined in playhead-ghon is a **strict subset** of this e
 - **Opt-in per-episode bundle (user toggles `Episode.diagnosticsOptIn`)** — may additionally include cleartext §2.2 podcast metadata and §2.3 audio-derived numerical representations, but still **may not** include §4 prohibited items (notably, transcript text is forbidden even with opt-in in Version 1 of this envelope — re-authorization requires legal review per playhead-ghon checklist (b)).
 - Transport for both bundles is the user-initiated mail composer. No automatic upload path.
 
+_(Note: `episodeId_hash` and `Episode.diagnosticsOptIn` are forward references to playhead-ghon, which is not yet implemented.)_
+
 ### 5.2 playhead-hqhh (Phase 3 B5 bounded local controller)
 
 The B5 bounded controller is **documented as works-fully-local**. It has **no required-upload fields.** All actuator decisions, EWMA/Beta estimators, hierarchical backoff state, and activation-floor counters live on-device. Any optional telemetry about the controller's behavior that ships with the app MUST ride the §2.1 automatic-upload path (aggregate-only SLIs + cohort-keyed counts) and nothing else. The controller MUST remain fully functional if all upload paths are disabled by the user.

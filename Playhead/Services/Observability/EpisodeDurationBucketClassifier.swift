@@ -40,7 +40,57 @@ enum EpisodeDurationBucketClassifier {
     /// `under30m`. Downstream emitters should prefer not emitting at
     /// all when the duration is truly unknown, but the classifier must
     /// be total — see the measurement-rule comment on ``SLI``.
+    ///
+    /// Non-finite inputs (NaN, +Inf, -Inf) are bucketed as `over90m`.
+    /// This preserves the de-facto behavior of the original `<` /
+    /// `<=` chain (NaN compares false against everything; +Inf falls
+    /// through every upper bound) while making the choice explicit and
+    /// testable. The mapping is documented rather than escalated to a
+    /// new `case malformed` so this fix doesn't force every existing
+    /// caller to handle a new variant — that escalation can happen
+    /// later if non-finite inputs become a real source of skew.
+    ///
+    /// In DEBUG builds, non-finite inputs additionally fire an
+    /// `assertionFailure`: they can only arise from upstream bugs (a
+    /// duration arithmetic error, an unconfigured probe), and silently
+    /// folding them into `.over90m` in dev hides those bugs. Tests that
+    /// intentionally exercise the non-finite path should call
+    /// `bucketIgnoringNonFiniteAssertion(forDurationSeconds:)`.
     static func bucket(forDurationSeconds seconds: TimeInterval) -> SLIEpisodeDurationBucket {
+        if !seconds.isFinite {
+            #if DEBUG
+            assertionFailure(
+                "EpisodeDurationBucketClassifier received non-finite seconds: \(seconds)"
+            )
+            #endif
+            return .over90m
+        }
+        return _bucketAssumingFinite(seconds: seconds)
+    }
+
+    #if DEBUG
+    /// Test-only entrypoint: returns the same bucket as
+    /// `bucket(forDurationSeconds:)` but never fires the DEBUG
+    /// `assertionFailure` for non-finite inputs. Intended for tests that
+    /// explicitly verify the documented non-finite → `.over90m` fallback.
+    /// Compiled out of Release so production code cannot bypass the safety
+    /// net by routing through this helper.
+    static func bucketIgnoringNonFiniteAssertion(
+        forDurationSeconds seconds: TimeInterval
+    ) -> SLIEpisodeDurationBucket {
+        if !seconds.isFinite {
+            return .over90m
+        }
+        return _bucketAssumingFinite(seconds: seconds)
+    }
+    #endif
+
+    /// Shared bucketing body for finite inputs. Both the production and the
+    /// DEBUG-only test entrypoints route through this so the two paths can
+    /// never drift on the finite-domain logic.
+    private static func _bucketAssumingFinite(
+        seconds: TimeInterval
+    ) -> SLIEpisodeDurationBucket {
         let thirty = EpisodeDurationBucketThresholds.thirtyMinutesSeconds
         let sixty = EpisodeDurationBucketThresholds.sixtyMinutesSeconds
         let ninety = EpisodeDurationBucketThresholds.ninetyMinutesSeconds

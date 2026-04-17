@@ -18,13 +18,15 @@ struct ExecutionConditionClassifierTests {
         reachability: SLIReachability = .wifi,
         batteryLevel: Float = 0.80,
         batteryState: SLIBatteryState = .charging,
-        thermalState: ThermalState = .nominal
+        thermalState: ThermalState = .nominal,
+        isLowPowerMode: Bool = false
     ) -> ExecutionConditionInput {
         ExecutionConditionInput(
             reachability: reachability,
             batteryLevel: batteryLevel,
             batteryState: batteryState,
-            thermalState: thermalState
+            thermalState: thermalState,
+            isLowPowerMode: isLowPowerMode
         )
     }
 
@@ -265,7 +267,8 @@ struct ExecutionConditionClassifierTests {
                     reachability: .wifi,
                     batteryLevel: 0.50,
                     batteryState: .notCharging,
-                    thermalState: .nominal
+                    thermalState: .nominal,
+                    isLowPowerMode: false
                 ),
                 expected: .favorable
             ),
@@ -275,7 +278,8 @@ struct ExecutionConditionClassifierTests {
                     reachability: .wifi,
                     batteryLevel: 0.50,
                     batteryState: .notCharging,
-                    thermalState: .fair
+                    thermalState: .fair,
+                    isLowPowerMode: false
                 ),
                 expected: .favorable
             ),
@@ -285,7 +289,8 @@ struct ExecutionConditionClassifierTests {
                     reachability: .wifi,
                     batteryLevel: 0.50,
                     batteryState: .notCharging,
-                    thermalState: .serious
+                    thermalState: .serious,
+                    isLowPowerMode: false
                 ),
                 expected: .constrained
             ),
@@ -295,7 +300,8 @@ struct ExecutionConditionClassifierTests {
                     reachability: .wifi,
                     batteryLevel: 0.20,
                     batteryState: .notCharging,
-                    thermalState: .nominal
+                    thermalState: .nominal,
+                    isLowPowerMode: false
                 ),
                 expected: .mixed
             ),
@@ -305,7 +311,8 @@ struct ExecutionConditionClassifierTests {
                     reachability: .wifi,
                     batteryLevel: 0.1999,
                     batteryState: .notCharging,
-                    thermalState: .nominal
+                    thermalState: .nominal,
+                    isLowPowerMode: false
                 ),
                 expected: .constrained
             ),
@@ -315,7 +322,8 @@ struct ExecutionConditionClassifierTests {
                     reachability: .wifi,
                     batteryLevel: 0.00,
                     batteryState: .notCharging,
-                    thermalState: .nominal
+                    thermalState: .nominal,
+                    isLowPowerMode: false
                 ),
                 expected: .constrained
             ),
@@ -325,7 +333,8 @@ struct ExecutionConditionClassifierTests {
                     reachability: .wifi,
                     batteryLevel: 0.00,
                     batteryState: .charging,
-                    thermalState: .nominal
+                    thermalState: .nominal,
+                    isLowPowerMode: false
                 ),
                 expected: .favorable
             ),
@@ -335,5 +344,64 @@ struct ExecutionConditionClassifierTests {
             let actual = ExecutionConditionClassifier.classify(c.input)
             #expect(actual == c.expected, "case '\(c.name)': expected \(c.expected), got \(actual)")
         }
+    }
+
+    // MARK: - Low Power Mode (H2)
+
+    @Test("Constrained: LPM on overrides Wi-Fi + charging + nominal thermal")
+    func lowPowerModeForcesConstrainedEvenWhenOtherwiseFavorable() {
+        // Without LPM this would be the canonical favorable case. The LPM
+        // axis must override (parallel to "battery < 20% and not charging")
+        // so an OS-throttled device doesn't bias the cohort to favorable.
+        let input = make(
+            reachability: .wifi,
+            batteryLevel: 1.00,
+            batteryState: .charging,
+            thermalState: .nominal,
+            isLowPowerMode: true
+        )
+        #expect(ExecutionConditionClassifier.classify(input) == .constrained)
+    }
+
+    @Test("Favorable: LPM off + Wi-Fi + charging + nominal thermal")
+    func lpmOffPreservesFavorablePath() {
+        // The mirror of the above: with LPM explicitly off the input is
+        // unchanged from the canonical favorable case.
+        let input = make(
+            reachability: .wifi,
+            batteryLevel: 1.00,
+            batteryState: .charging,
+            thermalState: .nominal,
+            isLowPowerMode: false
+        )
+        #expect(ExecutionConditionClassifier.classify(input) == .favorable)
+    }
+
+    @Test("Unknown reachability + thermal serious -> constrained (constrained always wins)")
+    func testUnknownReachabilityCompoundsWithConstrained() {
+        // Unknown reachability falls to mixed on its own, but a constrained
+        // predicate (here: thermal serious) must still force `.constrained`.
+        let input = make(
+            reachability: .unknown,
+            batteryLevel: 1.00,
+            batteryState: .charging,
+            thermalState: .serious
+        )
+        #expect(ExecutionConditionClassifier.classify(input) == .constrained)
+    }
+
+    @Test("LPM still constrained even when reachability/thermal/battery are also constrained")
+    func lpmCompoundsWithOtherConstrainedPredicates() {
+        // Defensive check: LPM should not change the answer in cases where
+        // some other constrained predicate already fires. The bucket stays
+        // `constrained` (not e.g. a hypothetical `verConstrained`).
+        let input = make(
+            reachability: .cellular,
+            batteryLevel: 0.05,
+            batteryState: .notCharging,
+            thermalState: .serious,
+            isLowPowerMode: true
+        )
+        #expect(ExecutionConditionClassifier.classify(input) == .constrained)
     }
 }

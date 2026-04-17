@@ -7,15 +7,24 @@
 //   favorable  = Wi-Fi
 //                 AND (charging OR battery >= 0.50)
 //                 AND thermal <= fair
+//                 AND Low Power Mode disabled
 //   constrained = cellular
 //                 OR (battery < 0.20 AND not charging)
 //                 OR thermal >= serious
+//                 OR Low Power Mode enabled
 //   mixed       = everything else
 //
 // Precedence: `constrained` wins over `favorable` — if any constrained
 // predicate holds, the bucket is `constrained`, even if one or more
 // favorable predicates also hold. This matches the intent of the
 // threshold ("any serious resource pressure pushes us to constrained").
+//
+// Low Power Mode is treated as constrained-on-its-own (same shape as
+// "battery < 20% AND not charging"): the OS itself is throttling work,
+// so even an otherwise-favorable Wi-Fi/charging/nominal device is a
+// constrained execution environment for analysis. This also keeps the
+// `InternalMissCause.lowPowerMode` taxonomy entry honest — without this
+// axis, an LPM-enabled device biases the SLI buckets toward `favorable`.
 
 import Foundation
 
@@ -57,6 +66,9 @@ struct ExecutionConditionInput: Sendable, Equatable {
     /// unknown battery is treated as "not low" and "not >= 50%" — that
     /// is, it satisfies neither the favorable nor constrained battery
     /// predicates on its own.
+    /// (Float, not Double, to match `UIDevice.batteryLevel` and
+    /// `SLI.swift:25-30`'s convention of mirroring `DeviceAdmissionPolicy`'s
+    /// `lowBatteryThreshold` which is itself a Float in [0, 1].)
     let batteryLevel: Float
 
     /// Whether the device is currently charging.
@@ -64,6 +76,14 @@ struct ExecutionConditionInput: Sendable, Equatable {
 
     /// Thermal state at measurement time.
     let thermalState: ThermalState
+
+    /// Whether Low Power Mode is currently enabled.
+    ///
+    /// `true` forces the bucket to `constrained` regardless of the other
+    /// axes (same shape as "battery < 20% and not charging"). The OS
+    /// throttles background work in LPM, so an otherwise-favorable
+    /// device is still a constrained execution environment for analysis.
+    let isLowPowerMode: Bool
 }
 
 /// Favorable battery-level floor (inclusive). Expressed as a ratio in
@@ -110,6 +130,10 @@ enum ExecutionConditionClassifier {
         }
 
         if input.thermalState == .serious || input.thermalState == .critical {
+            return .constrained
+        }
+
+        if input.isLowPowerMode {
             return .constrained
         }
 

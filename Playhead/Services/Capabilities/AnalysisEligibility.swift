@@ -235,13 +235,46 @@ final class AnalysisEligibilityEvaluator: AnalysisEligibilityEvaluating, @unchec
 
     // MARK: - Evaluation
 
+    /// Returns the cached eligibility if still valid, otherwise computes a
+    /// fresh record and caches it.
+    ///
+    /// Locking contract: providers are invoked OUTSIDE the internal lock so
+    /// that a provider may safely re-enter `evaluate()` (or any other locked
+    /// method) without deadlocking the non-recursive `NSLock`. The cost is
+    /// that under thread contention multiple racing callers may each compute
+    /// a fresh snapshot; only one wins the cache slot, the others discard
+    /// their work and return the winner's value. This relaxes the older
+    /// "providers called exactly once per cache miss" contract to "providers
+    /// called at least once per cache miss, possibly more under contention."
+    /// With a 4-hour TTL the redundant-compute window is vanishingly small
+    /// and the providers are required to be non-blocking, so the cost is
+    /// negligible compared to the safety win of removing the deadlock risk.
     func evaluate() -> AnalysisEligibility {
+        // Fast path: cache hit under the lock.
+        lock.lock()
+        if let cached, !isExpiredLocked(cached: cached) {
+            let result = cached
+            lock.unlock()
+            return result
+        }
+        lock.unlock()
+
+        // Slow path: compute outside the lock so providers can re-enter
+        // safely. If two threads race here, both compute; the loser's
+        // snapshot is discarded below.
+        let snapshot = computeSnapshot()
+        let currentOSVersion = osVersionProvider()
+
         lock.lock()
         defer { lock.unlock() }
+        // Re-check: if a competing thread already wrote a fresh entry while
+        // we were computing, prefer theirs and discard ours.
         if let cached, !isExpiredLocked(cached: cached) {
             return cached
         }
-        return recomputeLocked()
+        cached = snapshot
+        cachedOSVersion = currentOSVersion
+        return snapshot
     }
 
     // MARK: - Invalidation hooks
@@ -262,12 +295,26 @@ final class AnalysisEligibilityEvaluator: AnalysisEligibilityEvaluating, @unchec
         defer { lock.unlock() }
         if cachedOSVersion != current {
             cached = nil
+            // Refresh the recorded OS version so a subsequent call with the
+            // same `current` value is correctly observed as unchanged, even
+            // if the caller never invokes `evaluate()` in between (which is
+            // what would otherwise refresh `cachedOSVersion` from inside
+            // `evaluate()`'s commit phase).
+            cachedOSVersion = current
         }
     }
 
     func noteAppleIntelligenceToggled() { invalidate() }
 
     func noteAppForegrounded() {
+        // Foreground-after-TTL must catch an OS version bump that happened
+        // while we were backgrounded (e.g. an overnight OS update), so probe
+        // the OS version first. That probe is cheap and self-locking; we
+        // then take the lock ourselves and unconditionally invalidate when
+        // the cached record is past TTL. (`evaluate()` would also notice
+        // expiry, but invalidating here means a UI surface that consults
+        // the evaluator on a different code path still sees a fresh read.)
+        noteOSVersionChangedIfNeeded()
         lock.lock()
         defer { lock.unlock() }
         guard let cached else { return }
@@ -276,15 +323,18 @@ final class AnalysisEligibilityEvaluator: AnalysisEligibilityEvaluating, @unchec
         }
     }
 
-    // MARK: - Private (lock-held helpers)
+    // MARK: - Private helpers
 
+    /// Lock-held helper. The lock MUST be held by the caller.
     private func isExpiredLocked(cached: AnalysisEligibility) -> Bool {
         clock.now.timeIntervalSince(cached.capturedAt) > ttl
     }
 
-    @discardableResult
-    private func recomputeLocked() -> AnalysisEligibility {
-        let snapshot = AnalysisEligibility(
+    /// Lock-FREE provider sweep. Must NOT be called with the internal lock
+    /// held — the providers are allowed to re-enter the evaluator. See the
+    /// doc-comment on `evaluate()` for the locking contract.
+    private func computeSnapshot() -> AnalysisEligibility {
+        AnalysisEligibility(
             hardwareSupported: hardwareProvider.isHardwareSupported(),
             appleIntelligenceEnabled: appleIntelligenceProvider.isAppleIntelligenceEnabled(),
             regionSupported: regionProvider.isRegionSupported(),
@@ -292,8 +342,19 @@ final class AnalysisEligibilityEvaluator: AnalysisEligibilityEvaluating, @unchec
             modelAvailableNow: modelAvailabilityProvider.isModelAvailableNow(),
             capturedAt: clock.now
         )
-        cached = snapshot
-        cachedOSVersion = osVersionProvider()
-        return snapshot
     }
+
+    // MARK: - Test-only introspection
+
+    #if DEBUG
+    /// Test-only readonly accessor to the internal `cachedOSVersion` baseline
+    /// so that tests can directly assert the M2 fix (the OS-version baseline
+    /// must advance even when `noteOSVersionChangedIfNeeded()` runs without an
+    /// intervening `evaluate()`). Wrapped in `#if DEBUG` to keep it out of
+    /// release builds.
+    internal var _cachedOSVersionForTesting: String? {
+        lock.lock(); defer { lock.unlock() }
+        return cachedOSVersion
+    }
+    #endif
 }

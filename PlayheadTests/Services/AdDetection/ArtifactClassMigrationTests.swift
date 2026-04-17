@@ -187,6 +187,32 @@ struct ArtifactClassMigrationTests {
         }
     }
 
+    // MARK: - 5. SQL-safety CI gate
+
+    @Test("ArtifactClass rawValues are SQL string-literal-safe")
+    func artifactClassRawValuesAreSqlSafe() {
+        // The `addArtifactClassColumnIfNeeded` migration interpolates
+        // `ArtifactClass.media.rawValue` directly into a SQL DEFAULT clause
+        // (see `AnalysisStore.addArtifactClassColumnIfNeeded`). If a future
+        // contributor renames any case to a value containing an apostrophe,
+        // double-quote, backslash, or semicolon, the unescaped interpolation
+        // would produce broken SQL or open an injection hole.
+        //
+        // This is the primary defense (the in-code `assert` in the migration
+        // is only DEBUG-only backup). We check every case, not just
+        // `.media`, because any case may be interpolated into SQL by future
+        // migrations without reviewers catching it.
+        let unsafeCharacters: [Character] = ["'", "\"", "\\", ";"]
+        for cls in ArtifactClass.allCases {
+            for char in unsafeCharacters {
+                #expect(
+                    !cls.rawValue.contains(char),
+                    "ArtifactClass.\(cls).rawValue (\"\(cls.rawValue)\") contains unsafe SQL character '\(char)'; would break unescaped interpolation in addArtifactClassColumnIfNeeded and any future migration that reuses the rawValue"
+                )
+            }
+        }
+    }
+
     // MARK: - Helpers
 
     private func stripArtifactClassColumn(in directory: URL) throws {

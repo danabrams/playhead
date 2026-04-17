@@ -245,3 +245,26 @@ struct QualityProfileSchedulerPolicyTests {
         }
     }
 }
+
+@Suite("QualityProfile — CustomStringConvertible")
+struct QualityProfileDescriptionTests {
+
+    /// L2: QualityProfile must conform to CustomStringConvertible so log
+    /// sites can interpolate it with the same vocabulary as the rest of
+    /// the capability surface (mirrors the ThermalState extension in
+    /// CapabilitySnapshot.swift).
+    @Test("description matches rawValue for every case")
+    func testDescriptionMatchesRawValue() {
+        for profile in QualityProfile.allCases {
+            #expect(profile.description == profile.rawValue,
+                    "description must equal rawValue (\(profile.rawValue))")
+        }
+    }
+
+    @Test("description renders inside string interpolation")
+    func testDescriptionInInterpolation() {
+        let line = "profile=\(QualityProfile.serious)"
+        #expect(line == "profile=serious",
+                "Interpolation must use CustomStringConvertible.description, not enum case shorthand")
+    }
+}

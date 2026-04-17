@@ -1212,14 +1212,33 @@ actor AnalysisStore {
     /// Placement: the column is appended to the END of `analysis_assets`
     /// (SQLite's only supported `ADD COLUMN` position). Existing
     /// `SELECT *` readers in this file (`readAsset`, at the positional
-    /// indices 0..10) remain correct because the new column sits at
-    /// index 11; a dedicated fetch path reads it out when needed.
+    /// indices 0..11, where index 11 is `createdAt`) remain correct
+    /// because the new column sits at index 12; a dedicated fetch path
+    /// reads it out when needed.
     ///
     /// Rollback: `ADD COLUMN` is additive-only. Existing INSERT call-sites
     /// use explicit column lists that now include `artifact_class`, so a
     /// schema downgrade that drops the column would break inserts —
     /// there is no destructive rollback path.
     private func addArtifactClassColumnIfNeeded() throws {
+        // Cycle-3 hardening (downgraded in cycle-4): the rawValue is
+        // interpolated directly into the SQL DEFAULT clause. Today it is
+        // the literal `"media"`, which is safe. If a future contributor
+        // renames the case to a value containing an apostrophe (e.g.
+        // `"podcast's media"`), the unescaped interpolation would produce
+        // broken SQL.
+        //
+        // The primary defense lives in the CI test
+        // `artifactClassRawValuesAreSqlSafe` (see
+        // `ArtifactClassMigrationTests`), which fails the build at PR
+        // time if any rawValue contains a SQL string-literal-breaker.
+        // The check below is DEBUG-only defense-in-depth so a contributor
+        // running tests locally also catches the regression — it must NOT
+        // crash users in Release if the CI gate is somehow bypassed.
+        assert(
+            !ArtifactClass.media.rawValue.contains("'"),
+            "ArtifactClass.media.rawValue must not contain an apostrophe; would break migration SQL. CI test artifactClassRawValuesAreSqlSafe should have caught this earlier."
+        )
         try addColumnIfNeeded(
             table: "analysis_assets",
             column: "artifact_class",

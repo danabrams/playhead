@@ -157,10 +157,46 @@ enum CauseAttributionPolicy {
         context: CauseAttributionContext
     ) -> CauseResolution? {
         let deduped = deduplicatePreservingOrder(causes)
+        guard let primary = _internalSelectPrimary(deduped, context: context)
+        else { return nil }
+
+        let secondary = deduped.filter { $0 != primary }
+
+        // Use the asserting variant: production UI surfaces consume
+        // `resolve(...)` (not `attribute(...)` directly), so the DEBUG
+        // safety net only fires if it stays on this path. Tests that
+        // intentionally exercise unmapped causes must call
+        // `attributeIgnoringPlaceholderAssertion(_:context:)` directly
+        // (DEBUG-only) rather than going through `resolve`.
+        let attribution = attribute(primary, context: context)
+        return CauseResolution(
+            primary: primary,
+            secondary: secondary,
+            attribution: attribution
+        )
+    }
+
+    /// Run the dedup + precedence ladder and return the chosen primary cause.
+    ///
+    /// Production-callable from `resolve(...)` only. The result is JUST the
+    /// primary cause — there is no `PrimarySelection` wrapper exposed to
+    /// production code, so a future contributor cannot grab a primary cause
+    /// from the ladder and wire it into UI without going through
+    /// `attribute(...)` (which fires the H1 safety-net assertion for
+    /// unmapped causes).
+    ///
+    /// Pre: `deduped` has already been run through
+    /// ``deduplicatePreservingOrder(_:)`` — required because `max`'s
+    /// tie-break is undefined for repeated identical entries, and the
+    /// precedence ladder must be a stable total order over distinct causes.
+    private static func _internalSelectPrimary(
+        _ deduped: [InternalMissCause],
+        context: CauseAttributionContext
+    ) -> InternalMissCause? {
         guard !deduped.isEmpty else { return nil }
 
         let declarationIndex = declarationIndexMap()
-        let primary = deduped.max { a, b in
+        return deduped.max { a, b in
             let aTier = tier(for: a, context: context)
             let bTier = tier(for: b, context: context)
             if aTier != bTier {
@@ -173,19 +209,57 @@ enum CauseAttributionPolicy {
             let bIndex = declarationIndex[b] ?? .max
             return aIndex > bIndex
         }
-
-        guard let primary else { return nil }
-
-        let secondary = deduped.filter { $0 != primary }
-        let attribution = attribute(primary, context: context)
-        return CauseResolution(
-            primary: primary,
-            secondary: secondary,
-            attribution: attribution
-        )
     }
 
+    #if DEBUG
+    /// Result of running the precedence ladder without computing the
+    /// `SurfaceAttribution` triple. The two fields mirror the like-named
+    /// fields on ``CauseResolution`` exactly — the only thing missing is
+    /// the attribution mapping.
+    ///
+    /// Test-only; do not wire into UI. Compiled out of Release so production
+    /// code cannot accidentally bypass the H1 safety net by surfacing a
+    /// primary cause without going through ``attribute(_:context:)``.
+    struct PrimarySelection: Sendable, Hashable {
+        let primary: InternalMissCause
+        let secondary: [InternalMissCause]
+    }
+
+    /// Test-only entrypoint for ladder-coverage tests. Production code MUST
+    /// use ``resolve(causes:context:)`` so the H1 safety net fires for
+    /// unmapped causes. Not compiled in Release.
+    ///
+    /// Returns the same primary the ladder picks inside `resolve`, plus the
+    /// dedup'd remaining causes (computed identically to `resolve`'s
+    /// `secondary`).
+    static func selectPrimary(
+        causes: [InternalMissCause],
+        context: CauseAttributionContext
+    ) -> PrimarySelection? {
+        let deduped = deduplicatePreservingOrder(causes)
+        guard let primary = _internalSelectPrimary(deduped, context: context)
+        else { return nil }
+        let secondary = deduped.filter { $0 != primary }
+        return PrimarySelection(primary: primary, secondary: secondary)
+    }
+    #endif
+
     // MARK: - Attribution (three hardest mappings as worked examples)
+
+    /// The set of `InternalMissCause`s for which `attribute(_:context:)` returns
+    /// a real, reviewed mapping (vs the catch-all placeholder triple). Callers
+    /// that wire `resolve(...)` into a UI surface MUST branch on this set and
+    /// fall back to a generic "couldn't analyze" copy path for unmapped causes
+    /// rather than rendering the placeholder verbatim — the placeholder is a
+    /// sentinel for unfinished work, not a copy choice.
+    ///
+    /// Filled in incrementally: this bead lands the three worked examples;
+    /// playhead-dfem will expand the set as it adds the remaining rows.
+    static let mappedCauses: Set<InternalMissCause> = [
+        .modelTemporarilyUnavailable,
+        .taskExpired,
+        .appForceQuitRequiresRelaunch,
+    ]
 
     /// Map an `InternalMissCause` to its `SurfaceAttribution` triple, applying
     /// context where the triple is context-dependent.
@@ -197,12 +271,55 @@ enum CauseAttributionPolicy {
     /// a valid triple to display. This placeholder is intentionally audible
     /// (it looks like a failure) so that missing-mapping bugs show up in
     /// review before ship.
+    ///
+    /// In DEBUG builds, hitting the placeholder path additionally fires an
+    /// `assertionFailure` so any code that wires this result into UI without
+    /// first branching on `mappedCauses` will crash loudly in dev. Tests that
+    /// intentionally exercise the placeholder branch should call
+    /// `attributeIgnoringPlaceholderAssertion(_:context:)` instead, which
+    /// shares the same logic without the assertion.
     static func attribute(
+        _ cause: InternalMissCause,
+        context: CauseAttributionContext
+    ) -> SurfaceAttribution {
+        if !mappedCauses.contains(cause) {
+            assertionFailure(
+                "CauseAttributionPolicy.attribute placeholder hit for \(cause); fill in playhead-dfem"
+            )
+        }
+        return attributeCore(cause, context: context)
+    }
+
+    #if DEBUG
+    /// Test-only entrypoint: returns the same triple as `attribute(_:context:)`
+    /// but never fires the DEBUG `assertionFailure`. Intended for tests that
+    /// explicitly verify the placeholder behavior for unmapped causes.
+    ///
+    /// Compiled out of Release so production code cannot accidentally bypass
+    /// the H1 safety net by routing through this helper.
+    static func attributeIgnoringPlaceholderAssertion(
+        _ cause: InternalMissCause,
+        context: CauseAttributionContext
+    ) -> SurfaceAttribution {
+        attributeCore(cause, context: context)
+    }
+    #endif
+
+    /// Shared mapping body for `attribute(_:context:)` and the test-only
+    /// placeholder-tolerant variant. Keeping the switch in one place ensures
+    /// the two entrypoints can never drift.
+    private static func attributeCore(
         _ cause: InternalMissCause,
         context: CauseAttributionContext
     ) -> SurfaceAttribution {
         switch cause {
         // MARK: Worked example 1: model_temporarily_unavailable
+        /// `retryBudgetRemaining` is intentionally not consulted here:
+        /// availability of the FM runtime is gated on user/system action
+        /// (Apple Intelligence enablement, asset load), not on retry
+        /// attempts within a task. The branch is on `modelAvailableNow`
+        /// because that is the only signal that distinguishes "system will
+        /// recover on its own" from "user must take action to enable".
         case .modelTemporarilyUnavailable:
             if context.modelAvailableNow {
                 // Runtime expected back without user action: present as a

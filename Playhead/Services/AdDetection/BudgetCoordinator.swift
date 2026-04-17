@@ -71,10 +71,11 @@ struct BudgetPool: Sendable, Equatable {
         if reserved < reservation.cost {
             // Swift 6 disallows capturing `self.reserved` in the warning's
             // escaping autoclosure from a mutating context. Snapshot the
-            // value into a local first so the autoclosure captures a copy.
+            // value into a local first so both the warning and the
+            // assertionFailure autoclosures capture the same copy.
             let reservedNow = reserved
             budgetLog.warning("BudgetPool.commit: cost \(reservation.cost) exceeds reserved \(reservedNow) — possible double-commit")
-            assertionFailure("BudgetPool.commit: reservation cost \(reservation.cost) exceeds reserved \(reserved)")
+            assertionFailure("BudgetPool.commit: reservation cost \(reservation.cost) exceeds reserved \(reservedNow)")
         }
         reserved = max(reserved - reservation.cost, 0)
         consumed += reservation.cost
@@ -86,7 +87,7 @@ struct BudgetPool: Sendable, Equatable {
         if reserved < reservation.cost {
             let reservedNow = reserved
             budgetLog.warning("BudgetPool.release: cost \(reservation.cost) exceeds reserved \(reservedNow) — possible double-release")
-            assertionFailure("BudgetPool.release: reservation cost \(reservation.cost) exceeds reserved \(reserved)")
+            assertionFailure("BudgetPool.release: reservation cost \(reservation.cost) exceeds reserved \(reservedNow)")
         }
         reserved = max(reserved - reservation.cost, 0)
     }

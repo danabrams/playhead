@@ -22,11 +22,16 @@ import UIKit
 /// work lanes may run. Variants are named to match ProcessInfo.ThermalState
 /// because thermal state is the primary signal; battery and low-power
 /// conditions can demote the profile by one step (see `derive`).
-enum QualityProfile: String, Codable, Sendable, Equatable, CaseIterable {
+enum QualityProfile: String, Codable, Sendable, Equatable, CaseIterable, CustomStringConvertible {
     case nominal
     case fair
     case serious
     case critical
+
+    /// Human-readable name for logging. Mirrors the `ThermalState` extension
+    /// in `CapabilitySnapshot.swift` so logs across the capability surface
+    /// stay consistent.
+    var description: String { rawValue }
 
     // MARK: - Derivation
 

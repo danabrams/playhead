@@ -1156,7 +1156,17 @@ final class ManualShadowRetryClock: ShadowRetryClock, Sendable {
 
     /// Waits until at least one sleep has been parked. Times out after
     /// `timeoutSeconds` to keep tests from hanging on a missing schedule.
-    func waitForPendingSleep(timeoutSeconds: Double = 5.0) async throws {
+    ///
+    /// playhead-flake: this wait is purely event-driven (a `CheckedContinuation`
+    /// is parked under the lock and resumed by the producer side of
+    /// `sleep(seconds:)`). The timeout is a safety net to avoid a hung test;
+    /// it does NOT affect the happy-path latency. Under heavy parallel-suite
+    /// load the multi-hop pump-task pipeline that drives the observer's
+    /// `scheduleDrain()` (capability AsyncStream → pump task → merged stream
+    /// → consumer task → actor hop → `clock.sleep`) can starve for several
+    /// seconds before the parked sleep arrives, so we use a generous 30s
+    /// budget to swallow scheduler jitter without slowing fast runs.
+    func waitForPendingSleep(timeoutSeconds: Double = 30.0) async throws {
         // Fast path.
         if state.withLock({ !$0.pending.isEmpty }) { return }
         try await withThrowingTaskGroup(of: Void.self) { group in
@@ -1257,7 +1267,14 @@ final class RecordingDrainer: ShadowRetryDraining, Sendable {
         state.withLock { $0.calls.last }
     }
 
-    func waitForCall(timeoutSeconds: Double = 5.0) async throws {
+    /// playhead-flake: like `ManualShadowRetryClock.waitForPendingSleep`, this
+    /// is an event-driven wait (a `CheckedContinuation` parked under the lock
+    /// and resumed by `retryShadowFMPhaseForSession`). The timeout is a safety
+    /// net only; the wake-to-drain path goes through the observer's pump tasks,
+    /// merged stream, and actor hop, all of which can be starved by parallel
+    /// suite execution. 30s gives the scheduler room without slowing happy
+    /// paths.
+    func waitForCall(timeoutSeconds: Double = 30.0) async throws {
         if state.withLock({ !$0.calls.isEmpty }) { return }
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {

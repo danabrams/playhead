@@ -57,7 +57,7 @@ Every SLI is cut by all four of the axes below. The Swift types live in [`SLICoh
 `SLIExecutionCondition`, computed by [`ExecutionConditionClassifier`](../../Playhead/Services/Observability/ExecutionConditionClassifier.swift):
 
 - `favorable` = Wi-Fi **AND** (charging **OR** battery ≥ 50%) **AND** thermal ≤ fair.
-- `constrained` = cellular **OR** (battery < 20% **AND** not charging) **OR** thermal ≥ serious.
+- `constrained` = cellular **OR** (battery < 20% **AND** not charging) **OR** thermal ≥ serious **OR** Low Power Mode enabled.
 - `mixed` = everything else.
 
 Precedence: any constrained predicate wins. Exact-boundary values (50%, 20%, fair vs serious) have explicit boundary tests.
@@ -71,7 +71,7 @@ Precedence: any constrained predicate wins. Exact-boundary values (50%, 20%, fai
 - `between60and90m` — 60 min < duration ≤ 90 min.
 - `over90m` — duration > 90 min.
 
-Exact boundaries (30m, 60m, 90m) belong to the **lower** bucket. The "30–90 min episode" scope shared by the two latency SLIs is the union of `between30and60m` and `between60and90m`.
+Exact boundaries (30m, 60m, 90m) belong to the **lower** bucket. An episode of exactly 30 minutes is the smallest member of the 30–60m bucket. The "30–90 min episode" scope shared by the two latency SLIs is the union of `between30and60m` and `between60and90m`.
 
 ## Meaningfulness table
 
