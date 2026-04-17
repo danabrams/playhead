@@ -232,6 +232,37 @@ struct SchedulerRegressionTests {
         #expect(fetched?.leaseOwner == nil, "Lease should be released after processing")
         #expect(fetched?.leaseExpiresAt == nil, "Lease expiry should be cleared after processing")
     }
+
+    @Test("concurrent cancelCurrentJob calls resolve cause via precedence, not last-writer-wins")
+    func testConcurrentCancelCausePrecedence() async throws {
+        // playhead-1nl6: before this fix, `cancelCurrentJob(cause:)`
+        // did `pendingCancelCause = cause` unconditionally, so two
+        // concurrent cancels with different causes resolved to whichever
+        // call landed second — stomping whatever precedence the
+        // `CauseAttributionPolicy` ladder would have chosen.
+        //
+        // Sequence the calls deterministically (taskExpired first, then
+        // userCancelled) and assert that `userCancelled` — which is in
+        // the `userInitiated` tier and outranks `taskExpired`'s
+        // `environmentalTransient` / `resourceExhausted` tier — wins the
+        // resolution regardless of arrival order.
+        let store = try await makeTestStore()
+        let scheduler = makeScheduler(store: store)
+
+        await scheduler.cancelCurrentJob(cause: .taskExpired)
+        await scheduler.cancelCurrentJob(cause: .userCancelled)
+        let forward = await scheduler.pendingCancelCauseForTesting()
+        #expect(forward == .userCancelled, "userCancelled should outrank taskExpired after taskExpired→userCancelled sequence")
+
+        // Reverse order must resolve to the same precedence winner —
+        // demonstrates the fix is order-independent, not merely
+        // last-write-wins masquerading as correct.
+        let scheduler2 = makeScheduler(store: store)
+        await scheduler2.cancelCurrentJob(cause: .userCancelled)
+        await scheduler2.cancelCurrentJob(cause: .taskExpired)
+        let reverse = await scheduler2.pendingCancelCauseForTesting()
+        #expect(reverse == .userCancelled, "userCancelled should outrank taskExpired after userCancelled→taskExpired sequence")
+    }
 }
 
 // MARK: - Reconciler Regression Tests

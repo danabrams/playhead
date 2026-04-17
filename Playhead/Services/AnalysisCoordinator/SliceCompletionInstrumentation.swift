@@ -415,8 +415,17 @@ enum CauseEmissionRegistry {
         // transfer; on rejection it must emit the corresponding cause.
         // Blocked by dfem (StorageBudget admission hook does not yet
         // surface a typed rejection reason to DownloadManager).
-        declarePlanned(cause: .mediaCap, tag: "DownloadManager.enqueueDownload.storageBudgetRejected.media")
-        declarePlanned(cause: .analysisCap, tag: "DownloadManager.enqueueDownload.storageBudgetRejected.analysis")
+        //
+        // Canonical future site is `DownloadManager.performDownload` —
+        // the interior pipeline that every entry point
+        // (`progressiveDownload`, `streamingDownload`,
+        // `backgroundDownload`) funnels through, and the natural place
+        // to branch on a `StorageBudget.admit(...)` rejection before
+        // URLSession work starts. Tag strings name that method so
+        // planned/live diffs match reality once the hook lands.
+        // Future site; tracked in playhead-dfem.
+        declarePlanned(cause: .mediaCap, tag: "DownloadManager.performDownload.storageBudgetRejected.media")
+        declarePlanned(cause: .analysisCap, tag: "DownloadManager.performDownload.storageBudgetRejected.analysis")
 
         // asr_failed — TranscriptEngineService throws on model failure
         // or returns no segments; AnalysisJobRunner.run(...) surfaces

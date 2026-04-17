@@ -211,23 +211,28 @@ enum CauseAttributionPolicy {
         }
     }
 
-    #if DEBUG
     /// Result of running the precedence ladder without computing the
     /// `SurfaceAttribution` triple. The two fields mirror the like-named
     /// fields on ``CauseResolution`` exactly — the only thing missing is
     /// the attribution mapping.
     ///
-    /// Test-only; do not wire into UI. Compiled out of Release so production
-    /// code cannot accidentally bypass the H1 safety net by surfacing a
-    /// primary cause without going through ``attribute(_:context:)``.
+    /// UI surfaces MUST continue to go through ``resolve(causes:context:)``
+    /// to pick up the H1 safety-net assertion for unmapped causes. This
+    /// type is available to production code so that non-UI paths (the
+    /// scheduler cancel path, the emission-site precedence wrapper) can
+    /// reconcile a set of live causes without paying the DEBUG assertion
+    /// cost for causes that do not yet have a `mappedCauses` triple —
+    /// which is the common case on the cancel / emission paths.
     struct PrimarySelection: Sendable, Hashable {
         let primary: InternalMissCause
         let secondary: [InternalMissCause]
     }
 
-    /// Test-only entrypoint for ladder-coverage tests. Production code MUST
-    /// use ``resolve(causes:context:)`` so the H1 safety net fires for
-    /// unmapped causes. Not compiled in Release.
+    /// Entrypoint for non-UI precedence resolution: the scheduler cancel
+    /// path and the ``primaryCause(among:context:)`` emission wrapper
+    /// funnel through here. UI surfaces MUST use
+    /// ``resolve(causes:context:)`` so the H1 safety net fires for
+    /// unmapped causes.
     ///
     /// Returns the same primary the ladder picks inside `resolve`, plus the
     /// dedup'd remaining causes (computed identically to `resolve`'s
@@ -242,7 +247,6 @@ enum CauseAttributionPolicy {
         let secondary = deduped.filter { $0 != primary }
         return PrimarySelection(primary: primary, secondary: secondary)
     }
-    #endif
 
     // MARK: - Attribution (three hardest mappings as worked examples)
 

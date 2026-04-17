@@ -302,9 +302,44 @@ actor AnalysisWorkScheduler {
     /// entry point.
     func cancelCurrentJob(cause: InternalMissCause = .pipelineError) {
         shouldCancelCurrentJob = true
-        pendingCancelCause = cause
+        // Concurrent cancels with different causes must not stomp each
+        // other with last-writer-wins. Route through
+        // `CauseAttributionPolicy.primaryCause` so precedence (e.g.
+        // `.userCancelled` outranks `.taskExpired`) is honored regardless
+        // of arrival order. Context values are conservative defaults
+        // that keep the tier ranking of the causes the cancel path uses
+        // (`.userCancelled`, `.userPreempted`, `.taskExpired`,
+        // `.pipelineError`) stable — retryBudgetRemaining only matters
+        // for `.taskExpired`, and both tiers (environmentalTransient /
+        // resourceExhausted) still lose to `.userInitiated`.
+        let resolved: InternalMissCause
+        if let existing = pendingCancelCause, existing != cause {
+            let context = CauseAttributionContext(
+                modelAvailableNow: true,
+                retryBudgetRemaining: 0
+            )
+            resolved = CauseAttributionPolicy.primaryCause(
+                among: [existing, cause],
+                context: context
+            ) ?? cause
+        } else {
+            resolved = cause
+        }
+        pendingCancelCause = resolved
         currentRunningTask?.cancel()
     }
+
+    #if DEBUG
+    /// Test-only accessor for the `pendingCancelCause` field so unit
+    /// tests can verify `cancelCurrentJob(cause:)` precedence without
+    /// having to run the full scheduler loop. Do not wire into
+    /// production code — the cause is consumed on the cancellation
+    /// branch of `runOneIteration` and should not be observed
+    /// externally.
+    func pendingCancelCauseForTesting() -> InternalMissCause? {
+        pendingCancelCause
+    }
+    #endif
 
     /// Install the WorkJournal recorder the scheduler uses on the
     /// cancellation branch. Optional — tests that don't need the

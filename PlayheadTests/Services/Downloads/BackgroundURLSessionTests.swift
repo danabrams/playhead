@@ -391,17 +391,43 @@ private actor RecordingWorkJournal: WorkJournalRecording {
     struct Failure: Sendable, Equatable {
         let episodeId: String
         let cause: InternalMissCause
+        let metadataJSON: String?
+    }
+    struct Preempted: Sendable, Equatable {
+        let episodeId: String
+        let cause: InternalMissCause
+        let metadataJSON: String
     }
 
     private(set) var finalized: [String] = []
     private(set) var failures: [Failure] = []
+    private(set) var preempted: [Preempted] = []
 
     func recordFinalized(episodeId: String) async {
         finalized.append(episodeId)
     }
 
     func recordFailed(episodeId: String, cause: InternalMissCause) async {
-        failures.append(Failure(episodeId: episodeId, cause: cause))
+        failures.append(Failure(episodeId: episodeId, cause: cause, metadataJSON: nil))
+    }
+
+    // playhead-1nl6: protocol now requires the metadata-carrying
+    // overload directly — the silent default-forward that dropped the
+    // JSON blob was removed.
+    func recordFailed(
+        episodeId: String,
+        cause: InternalMissCause,
+        metadataJSON: String
+    ) async {
+        failures.append(Failure(episodeId: episodeId, cause: cause, metadataJSON: metadataJSON))
+    }
+
+    func recordPreempted(
+        episodeId: String,
+        cause: InternalMissCause,
+        metadataJSON: String
+    ) async {
+        preempted.append(Preempted(episodeId: episodeId, cause: cause, metadataJSON: metadataJSON))
     }
 }
 

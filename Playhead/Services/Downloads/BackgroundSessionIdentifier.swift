@@ -106,10 +106,19 @@ protocol WorkJournalRecording: Sendable {
     /// Record that the background transfer for `episodeId` failed with
     /// the given internal cause, attaching the `SliceMetadata` JSON
     /// blob the emission site constructed (see
-    /// `SliceCompletionInstrumentation.recordFailed(...)`). Default
-    /// implementation forwards to the metadata-less overload so
-    /// pre-1nl6 recorders do not need to be updated until they want to
-    /// observe the blob.
+    /// `SliceCompletionInstrumentation.recordFailed(...)`).
+    ///
+    /// REQUIRED — no default implementation. A prior revision of this
+    /// protocol shipped a default that forwarded to the metadata-less
+    /// overload, silently dropping the JSON payload. That default was
+    /// removed in playhead-1nl6 review because the blob is load-bearing
+    /// for downstream consumers (WorkJournal diagnostics, device-class
+    /// aggregation); a silent drop on the default path would swallow
+    /// data the spec says every terminal row must carry. Every
+    /// conformer must decide explicitly whether to persist the blob
+    /// (`HyhtRecorder`, `RecordingWorkJournal`) or no-op it
+    /// (`NoopWorkJournalRecorder`) — but that choice must be visible at
+    /// the conformer, not hidden behind a protocol default.
     func recordFailed(
         episodeId: String,
         cause: InternalMissCause,
@@ -124,8 +133,12 @@ protocol WorkJournalRecording: Sendable {
     /// id, bytes written, suspension timestamp) for the WorkJournal row's
     /// metadata column — the recorder does not parse it.
     ///
-    /// Default implementation is a no-op so pre-hyht recorders do not
-    /// need to be updated until they want to observe this event.
+    /// REQUIRED — no default implementation. A prior revision shipped a
+    /// default that silently swallowed the event; that default was
+    /// removed in playhead-1nl6 review for the same reason as
+    /// ``recordFailed(episodeId:cause:metadataJSON:)`` — conformers
+    /// must decide explicitly whether to persist, not inherit a silent
+    /// drop.
     func recordPreempted(
         episodeId: String,
         cause: InternalMissCause,
@@ -133,32 +146,21 @@ protocol WorkJournalRecording: Sendable {
     ) async
 }
 
-extension WorkJournalRecording {
-    /// Default: silently swallow preempted events. Recorders that care
-    /// about force-quit resume state (playhead-hyht) override this.
-    func recordPreempted(
-        episodeId: String,
-        cause: InternalMissCause,
-        metadataJSON: String
-    ) async {}
-
-    /// Default: forward to the metadata-less `recordFailed` so pre-1nl6
-    /// recorders keep working. Recorders that want the metadata blob
-    /// override this method directly.
-    func recordFailed(
-        episodeId: String,
-        cause: InternalMissCause,
-        metadataJSON: String
-    ) async {
-        await recordFailed(episodeId: episodeId, cause: cause)
-    }
-}
-
 /// Default no-op binding used until playhead-uzdq wires a real recorder.
 /// Kept `final` + `Sendable` so it can be stored in an actor.
 final class NoopWorkJournalRecorder: WorkJournalRecording, Sendable {
     func recordFinalized(episodeId: String) async {}
     func recordFailed(episodeId: String, cause: InternalMissCause) async {}
+    /// Explicit no-op: the Noop binding is the "until a real recorder
+    /// is wired" stand-in, so dropping the blob here is deliberate and
+    /// documented at the conformer — not hidden behind a protocol
+    /// default (see ``WorkJournalRecording.recordFailed(...metadataJSON:)``
+    /// docs).
+    func recordFailed(
+        episodeId: String,
+        cause: InternalMissCause,
+        metadataJSON: String
+    ) async {}
     func recordPreempted(
         episodeId: String,
         cause: InternalMissCause,
