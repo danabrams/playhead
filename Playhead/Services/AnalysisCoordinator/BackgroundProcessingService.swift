@@ -59,6 +59,26 @@ protocol BackgroundProcessingTaskProtocol: AnyObject, Sendable {
 
 extension BGProcessingTask: BackgroundProcessingTaskProtocol {}
 
+/// playhead-44h1: additional accessors available on
+/// `BGContinuedProcessingTask` that `handleContinuedProcessingTask`
+/// needs to route the hand-off to `AnalysisCoordinator`.
+///
+/// iOS 26's `BGContinuedProcessingTask` does not expose a `userInfo`
+/// dictionary, so the episode identifier is carried in the task's
+/// `identifier` suffix (per `BGContinuedProcessingTaskRequest`'s
+/// wildcard-identifier convention). This protocol's `episodeId`
+/// parser extracts that suffix and is the only way production code
+/// reads it, so tests can hand a `StubContinuedProcessingTask` with
+/// a synthetic identifier.
+@preconcurrency
+protocol ContinuedProcessingTaskProtocol: BackgroundProcessingTaskProtocol {
+    /// Full wildcard identifier submitted with the request.
+    /// Production: `"com.playhead.app.analysis.continued.<episodeId>"`.
+    var identifier: String { get }
+}
+
+extension BGContinuedProcessingTask: ContinuedProcessingTaskProtocol {}
+
 /// Abstracts BGTaskScheduler for testability.
 protocol BackgroundTaskScheduling: Sendable {
     func submit(_ taskRequest: BGTaskRequest) throws
@@ -77,6 +97,27 @@ protocol AnalysisCoordinating: Sendable {
     /// BGProcessingTask window. Must respect `Task.isCancelled` and return
     /// promptly on expiration.
     func runPendingBackfill() async
+
+    /// playhead-44h1: continue a foreground-assist download + analysis
+    /// inside a `BGContinuedProcessingTask` window.
+    ///
+    /// Called from `BackgroundProcessingService.handleContinuedProcessingTask`
+    /// after the app has backgrounded with an in-flight Now-lane job. The
+    /// coordinator takes ownership of the remaining transfer + post-download
+    /// analysis and must return by `deadline` (propagated from the task's
+    /// expiration callback) or sooner. Throws on failure; the caller maps
+    /// the error to a WorkJournal `failed` entry.
+    func continueForegroundAssist(episodeId: String, deadline: Date) async throws
+
+    /// playhead-44h1: request the running worker for `episodeId` pause
+    /// at its next safe checkpoint.
+    ///
+    /// Called from `BGContinuedProcessingTask.expirationHandler` so the
+    /// worker flushes unit state, releases the lease with
+    /// `event=.preempted`, and exits before iOS forcibly terminates the
+    /// window. This is a best-effort request: if the worker has already
+    /// finished or is not registered, the call is a no-op.
+    func pauseAtNextCheckpoint(episodeId: String, cause: InternalMissCause) async
 }
 
 extension AnalysisCoordinator: AnalysisCoordinating {}
@@ -282,12 +323,27 @@ actor BackgroundProcessingService {
             forTaskWithIdentifier: BackgroundTaskID.continuedProcessing,
             using: nil
         ) { [weak self] task in
-            guard let self, let processingTask = task as? BGProcessingTask else {
+            guard let self else {
                 task.setTaskCompleted(success: false)
                 return
             }
-            let sendableTask = UncheckedSendableBox(processingTask)
-            Task { await self.handleContinuedProcessingTask(sendableTask.value) }
+            // playhead-44h1: continued processing tasks under iOS 26 are
+            // `BGContinuedProcessingTask` (wildcard identifier, long
+            // user-initiated window). Older BGProcessingTask remains
+            // accepted as a fallback for the previous no-op path so
+            // scheduler re-registrations during tests do not crash.
+            if let continuedTask = task as? BGContinuedProcessingTask {
+                let sendableTask = UncheckedSendableBox(continuedTask)
+                Task { await self.handleContinuedProcessingTask(sendableTask.value) }
+                return
+            }
+            if task as? BGProcessingTask != nil {
+                // Legacy identifier path: mark complete without work.
+                // The new flow uses BGContinuedProcessingTask exclusively.
+                task.setTaskCompleted(success: true)
+                return
+            }
+            task.setTaskCompleted(success: false)
         }
 
         BGTaskScheduler.shared.register(
@@ -528,32 +584,122 @@ actor BackgroundProcessingService {
         }
     }
 
-    /// Handle the continued processing BGProcessingTask.
-    ///
-    /// This identifier is reserved for user-initiated long-running work such
-    /// as the initial Foundation Models asset download (see AssetProvider).
-    /// It is intentionally NOT a backfill drain path — `handleBackfillTask`
-    /// already covers deferred backfill via `runPendingBackfill`.
-    ///
-    /// Today there is no user-facing continuation work path that actually
-    /// enqueues this task from the foreground, and no "model download future"
-    /// is exposed by AssetProvider that we could await here. Rather than
-    /// piggyback on `runPendingBackfill` (which duplicates the backfill path
-    /// and misuses the continuation semantics), this handler is a deliberate
-    /// no-op that marks the task complete. The task registration is kept
-    /// alive so a future wiring of the real continuation work can slot in
-    /// without touching registration.
-    ///
-    /// TODO: When AssetProvider exposes an awaitable model-download future,
-    /// call it here and report success/failure from its result.
-    /// See bead for design: BGContinuedProcessingTask rewiring.
-    func handleContinuedProcessingTask(_ task: any BackgroundProcessingTaskProtocol) {
-        logger.info("Continued processing task started (no-op: no continuation work wired)")
+    /// Default deadline budget for `continueForegroundAssist` when the
+    /// caller does not know how long iOS will keep the task alive.
+    /// iOS 26's `BGContinuedProcessingTask` does not surface an explicit
+    /// `expirationDate`; the 15-minute floor matches what Apple documents
+    /// as the minimum granted window for continued-processing requests.
+    /// The `expirationHandler` still bounds the actual budget — this
+    /// value only controls the `deadline` value the coordinator sees.
+    static let continuedProcessingDeadlineBudget: TimeInterval = 15 * 60
 
-        // Honest no-op: there is no continuation work to perform today.
-        // Mark complete so iOS does not treat this as a hang, and return
-        // success=true because "nothing to do" is not a failure.
-        markComplete(task, success: true)
+    /// Prefix for continued-processing task identifiers under the
+    /// `BGContinuedProcessingTaskRequest` wildcard-identifier convention.
+    /// Production identifiers are of the form
+    /// `"<prefix>.<episodeId>"`; the parser below splits on this prefix
+    /// and returns the suffix (empty string → missing id, logged loud
+    /// and the task fails fast so the worker does not spin on a
+    /// nonexistent job).
+    static let continuedProcessingIdentifierPrefix: String =
+        BackgroundTaskID.continuedProcessing + "."
+
+    /// playhead-44h1: hand-off a foreground-assist transfer + analysis
+    /// from the expired foreground-assist work item to the OS-granted
+    /// `BGContinuedProcessingTask` window.
+    ///
+    /// Flow:
+    ///   1. Parse the episode id from the task identifier suffix (see
+    ///      `continuedProcessingIdentifierPrefix`). A missing suffix is
+    ///      a loud failure — the request was malformed, not the OS.
+    ///   2. Invoke `AnalysisCoordinator.continueForegroundAssist(
+    ///      episodeId:deadline:)` with a deadline derived from
+    ///      `continuedProcessingDeadlineBudget`. The coordinator owns
+    ///      the remaining transfer + post-download analysis and must
+    ///      return before the deadline or the expiration handler
+    ///      fires.
+    ///   3. On success, call `setTaskCompleted(success: true)`. On
+    ///      failure (any thrown error), call
+    ///      `setTaskCompleted(success: false)`. The coordinator is
+    ///      responsible for its own WorkJournal bookkeeping; this
+    ///      handler does NOT double-write a `failed` entry here, which
+    ///      would be a duplicate — `continueForegroundAssist` is the
+    ///      canonical emission site for the `failed` / `finalized`
+    ///      journal row.
+    ///   4. The task's `expirationHandler` routes to
+    ///      `pauseAtNextCheckpoint(episodeId:cause:.taskExpired)` so
+    ///      the worker checkpoints and releases its lease with the
+    ///      correct cause before the OS terminates the window.
+    func handleContinuedProcessingTask(_ task: any ContinuedProcessingTaskProtocol) {
+        logger.info("Continued processing task started: identifier=\(task.identifier, privacy: .public)")
+
+        let taskID = ObjectIdentifier(task as AnyObject)
+
+        guard let episodeId = Self.parseEpisodeId(from: task.identifier) else {
+            logger.error("Continued processing task missing episode id suffix: \(task.identifier, privacy: .public)")
+            markComplete(task, success: false)
+            return
+        }
+
+        // Deadline propagated to the coordinator so its internal
+        // polling loops can budget work against the same wall-clock
+        // the OS will enforce via `expirationHandler`. The handler
+        // itself is the hard gate; the deadline is the soft gate.
+        let deadline = Date(timeIntervalSinceNow: Self.continuedProcessingDeadlineBudget)
+        let coordinator = self.coordinator
+
+        let workTask = Task { [weak self] in
+            do {
+                try await coordinator.continueForegroundAssist(
+                    episodeId: episodeId,
+                    deadline: deadline
+                )
+                await self?.markComplete(task, success: true)
+            } catch {
+                self?.logger.error(
+                    "Continued processing failed for episode \(episodeId, privacy: .public): \(String(describing: error), privacy: .public)"
+                )
+                await self?.markComplete(task, success: false)
+            }
+        }
+
+        activeBackgroundTasks[taskID] = workTask
+
+        // Expiration handler: request a safe-point pause with
+        // cause=.taskExpired, then mark the task failed and cancel
+        // the in-flight work. Marking complete BEFORE cancellation
+        // wins the `completedTaskIDs` idempotence race — if the work
+        // task's normal return observes the pause and calls
+        // `markComplete(success: true)` afterwards, the duplicate is
+        // dropped and the OS still sees success=false, which is the
+        // correct reporting for an expiration. The cancellation is
+        // the forcing function that makes the work task return
+        // promptly so resources are reclaimed.
+        task.expirationHandler = { [weak self] in
+            guard let self else { return }
+            Task { [weak self] in
+                guard let self else { return }
+                await self.coordinator.pauseAtNextCheckpoint(
+                    episodeId: episodeId,
+                    cause: .taskExpired
+                )
+                await self.markComplete(task, success: false)
+                workTask.cancel()
+            }
+        }
+    }
+
+    /// Parse the episode id from a wildcard-identifier continued-
+    /// processing task. Returns nil when the identifier does not
+    /// match the expected prefix or when the suffix is empty.
+    ///
+    /// Static so the parsing rule is unit-testable without standing
+    /// up a service instance.
+    static func parseEpisodeId(from identifier: String) -> String? {
+        guard identifier.hasPrefix(continuedProcessingIdentifierPrefix) else {
+            return nil
+        }
+        let suffix = String(identifier.dropFirst(continuedProcessingIdentifierPrefix.count))
+        return suffix.isEmpty ? nil : suffix
     }
 
     // MARK: - Thermal & Battery Management

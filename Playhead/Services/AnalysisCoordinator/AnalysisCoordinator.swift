@@ -359,6 +359,125 @@ actor AnalysisCoordinator {
         }
     }
 
+    // MARK: - Foreground-Assist Hand-off (playhead-44h1)
+
+    /// In-memory record of an active foreground-assist hand-off
+    /// request. The coordinator flips `paused` true when
+    /// `pauseAtNextCheckpoint(episodeId:cause:)` fires; the running
+    /// continuation work observes the flag at its next
+    /// `renewLease`-style safe point and returns.
+    ///
+    /// Tests can read `foregroundAssistPauseRequest(for:)` to assert
+    /// the cause propagated without inspecting private actor state.
+    struct ForegroundAssistPauseRequest: Sendable, Equatable {
+        let cause: InternalMissCause
+        let requestedAt: Date
+    }
+
+    /// Map of episode → most recent pause request. Bounded by the set
+    /// of live continuation requests; entries are cleared when the
+    /// corresponding `continueForegroundAssist` returns.
+    private var foregroundAssistPauseRequests: [String: ForegroundAssistPauseRequest] = [:]
+
+    /// Read-accessor for tests and diagnostics. Returns the most recent
+    /// pause request for `episodeId`, or nil when none is pending.
+    func foregroundAssistPauseRequest(for episodeId: String) -> ForegroundAssistPauseRequest? {
+        foregroundAssistPauseRequests[episodeId]
+    }
+
+    /// playhead-44h1: entry point invoked by
+    /// `BackgroundProcessingService.handleContinuedProcessingTask` after
+    /// the app has backgrounded with an in-flight foreground-assist
+    /// transfer + analysis. The caller hands control here so the
+    /// coordinator can complete the remaining transfer under the
+    /// `BGContinuedProcessingTask`'s 15–30 min window.
+    ///
+    /// Phase 1 scope boundary: the scheduler + download-manager wiring
+    /// that drives this call lands in playhead-iwiy ("integration in
+    /// playhead-iwiy — out of scope for this bead"). This
+    /// implementation is the API shape used by
+    /// `BackgroundProcessingService` and tests; it polls its own
+    /// pause-request map and exits early when a
+    /// `pauseAtNextCheckpoint` arrives, which pins the expiration
+    /// contract without duplicating scheduler internals.
+    ///
+    /// Throws on any pipeline failure. The caller (BPS) maps the throw
+    /// to `setTaskCompleted(success: false)`.
+    ///
+    /// - Parameters:
+    ///   - episodeId: Episode whose lease to continue. Parsed from the
+    ///     `BGContinuedProcessingTask.identifier` wildcard suffix.
+    ///   - deadline: Wall-clock deadline the coordinator must respect.
+    ///     Derived from `BackgroundProcessingService`'s budget constant,
+    ///     not from the OS (`BGContinuedProcessingTask` has no
+    ///     `expirationDate`). The `expirationHandler` still bounds the
+    ///     actual runtime; the deadline is the soft gate.
+    func continueForegroundAssist(episodeId: String, deadline: Date) async throws {
+        logger.info("continueForegroundAssist: episode=\(episodeId, privacy: .public) deadline=\(deadline)")
+
+        // Clear any stale pause request from a prior hand-off so the
+        // poll below does not short-circuit on an old cause.
+        foregroundAssistPauseRequests.removeValue(forKey: episodeId)
+
+        defer {
+            foregroundAssistPauseRequests.removeValue(forKey: episodeId)
+        }
+
+        // Integration wiring lands in playhead-iwiy. For now the
+        // method polls its own pause-request map so the
+        // `expirationHandler` contract (pause→fail) is exercisable
+        // end-to-end by tests: BPS invokes
+        // `pauseAtNextCheckpoint(episodeId:cause:)`, the flag flips,
+        // the next iteration of this loop exits, BPS calls
+        // `setTaskCompleted(success: false)`. Production will replace
+        // the poll with the `AnalysisWorkScheduler`'s real drive
+        // loop.
+        while !Task.isCancelled {
+            if foregroundAssistPauseRequests[episodeId] != nil {
+                logger.info("continueForegroundAssist: pause observed for \(episodeId, privacy: .public)")
+                return
+            }
+            if Date() >= deadline {
+                logger.info("continueForegroundAssist: deadline reached for \(episodeId, privacy: .public)")
+                return
+            }
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+            } catch {
+                // Cancellation raised by BPS on expiration — fall
+                // through to the loop guard and exit cleanly.
+                return
+            }
+        }
+    }
+
+    /// playhead-44h1: request the running worker for `episodeId` pause
+    /// at its next safe checkpoint. Called from the continued-processing
+    /// task's `expirationHandler` so the worker's shard / chunk loop
+    /// flushes state, releases the lease with `event=.preempted`, and
+    /// exits before iOS forcibly terminates the window.
+    ///
+    /// Phase 1 scope boundary: the LanePreemptionCoordinator hook
+    /// sites are wired by the scheduler, not this coordinator. This
+    /// implementation records the request in-memory so
+    /// `continueForegroundAssist` can exit promptly; the full
+    /// WorkJournal `preempted` append lands in playhead-iwiy where
+    /// the running lease is actually accessible.
+    ///
+    /// The `cause` parameter is threaded through so downstream code
+    /// (and tests) can verify the correct `InternalMissCause`
+    /// (`.taskExpired` for OS expirations, `.userPreempted` for user
+    /// preemptions) was recorded.
+    func pauseAtNextCheckpoint(episodeId: String, cause: InternalMissCause) async {
+        logger.info(
+            "pauseAtNextCheckpoint: episode=\(episodeId, privacy: .public) cause=\(cause.rawValue, privacy: .public)"
+        )
+        foregroundAssistPauseRequests[episodeId] = ForegroundAssistPauseRequest(
+            cause: cause,
+            requestedAt: Date()
+        )
+    }
+
     // MARK: - Episode Execution Lease (playhead-uzdq)
 
     /// Default lease TTL. Long enough that a cooperatively-scheduled

@@ -124,6 +124,28 @@ final class StubBackgroundTask: BackgroundProcessingTaskProtocol, @unchecked Sen
     }
 }
 
+/// playhead-44h1: stub for `BGContinuedProcessingTask`. Carries the
+/// wildcard identifier so the handler's parsing logic can be
+/// exercised without an actual BG task instance.
+final class StubContinuedProcessingTask: ContinuedProcessingTaskProtocol, @unchecked Sendable {
+    let identifier: String
+    var completedSuccess: Bool?
+    var expirationHandler: (() -> Void)?
+
+    init(identifier: String) {
+        self.identifier = identifier
+    }
+
+    func setTaskCompleted(success: Bool) {
+        completedSuccess = success
+    }
+
+    /// Simulate iOS firing the expiration handler.
+    func simulateExpiration() {
+        expirationHandler?()
+    }
+}
+
 // MARK: - StubTaskScheduler
 
 final class StubTaskScheduler: BackgroundTaskScheduling, @unchecked Sendable {
@@ -152,6 +174,26 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
     /// long enough for the expiration handler to fire.
     var runPendingBackfillDuration: Duration?
 
+    // MARK: playhead-44h1 hooks
+    /// Captures every `continueForegroundAssist(episodeId:deadline:)` call
+    /// so tests can assert the episode id and deadline were threaded.
+    private(set) var continueForegroundAssistCalls: [(episodeId: String, deadline: Date)] = []
+    /// Captures every `pauseAtNextCheckpoint(episodeId:cause:)` call so
+    /// tests can assert the cause propagates from the expiration handler.
+    private(set) var pauseAtNextCheckpointCalls: [(episodeId: String, cause: InternalMissCause)] = []
+    /// If set, `continueForegroundAssist` throws this error so tests
+    /// can cover the failure-mapping path.
+    var continueForegroundAssistError: Error?
+    /// If set, `continueForegroundAssist` blocks this long before
+    /// returning so tests can exercise the expiration-handler race.
+    var continueForegroundAssistDuration: Duration?
+    /// If set, `continueForegroundAssist` waits for
+    /// `pauseAtNextCheckpoint(episodeId:...)` to fire (checking the
+    /// `pauseAtNextCheckpointCalls` array) before returning. Lets tests
+    /// drive the expiration → pause → task-failed ordering without
+    /// wall-clock races.
+    var continueForegroundAssistWaitsForPause: Bool = false
+
     func startCapabilityObserver() async {
         startCapabilityObserverCallCount += 1
         if let duration = startCapabilityObserverDuration {
@@ -168,6 +210,30 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
         if let duration = runPendingBackfillDuration {
             try? await Task.sleep(for: duration)
         }
+    }
+
+    func continueForegroundAssist(episodeId: String, deadline: Date) async throws {
+        continueForegroundAssistCalls.append((episodeId: episodeId, deadline: deadline))
+        if let error = continueForegroundAssistError {
+            throw error
+        }
+        if let duration = continueForegroundAssistDuration {
+            try? await Task.sleep(for: duration)
+        }
+        if continueForegroundAssistWaitsForPause {
+            // Poll for a matching pause request. Yields between checks
+            // so the actor-serialized pause call can land.
+            while !Task.isCancelled {
+                if pauseAtNextCheckpointCalls.contains(where: { $0.episodeId == episodeId }) {
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+        }
+    }
+
+    func pauseAtNextCheckpoint(episodeId: String, cause: InternalMissCause) async {
+        pauseAtNextCheckpointCalls.append((episodeId: episodeId, cause: cause))
     }
 }
 

@@ -24,6 +24,13 @@ struct PreAnalysisConfig: Codable, Sendable {
     /// until the flag is flipped per-beta-cohort.
     var useDualBackgroundSessions: Bool = false
 
+    /// playhead-44h1: nominal shard duration (seconds) used by the Live
+    /// Activity ETA formula to estimate `totalShardsEstimate =
+    /// ceil(episode.durationSec / nominalShardDurationSec)`. This is an
+    /// estimator input only — the actual shard boundaries are still
+    /// produced by the audio decoder during analysis. Default 20 s.
+    var nominalShardDurationSec: Double = 20
+
     static let analysisVersion: Int = 1
 
     private static let key = "PreAnalysisConfig"
@@ -33,18 +40,22 @@ struct PreAnalysisConfig: Codable, Sendable {
         defaultT0DepthSeconds: Double = 90,
         t1DepthSeconds: Double = 300,
         t2DepthSeconds: Double = 900,
-        useDualBackgroundSessions: Bool = false
+        useDualBackgroundSessions: Bool = false,
+        nominalShardDurationSec: Double = 20
     ) {
         self.isEnabled = isEnabled
         self.defaultT0DepthSeconds = defaultT0DepthSeconds
         self.t1DepthSeconds = t1DepthSeconds
         self.t2DepthSeconds = t2DepthSeconds
         self.useDualBackgroundSessions = useDualBackgroundSessions
+        self.nominalShardDurationSec = nominalShardDurationSec
     }
 
     // Custom decoder so configs persisted before 24cm (which lack the
     // `useDualBackgroundSessions` key) still decode — absent keys fall
-    // back to `false`, matching the new default.
+    // back to `false`, matching the new default. The 44h1
+    // `nominalShardDurationSec` follows the same pattern: if the stored
+    // config predates this bead, fall back to the 20 s default.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
@@ -52,6 +63,7 @@ struct PreAnalysisConfig: Codable, Sendable {
         self.t1DepthSeconds = try container.decodeIfPresent(Double.self, forKey: .t1DepthSeconds) ?? 300
         self.t2DepthSeconds = try container.decodeIfPresent(Double.self, forKey: .t2DepthSeconds) ?? 900
         self.useDualBackgroundSessions = try container.decodeIfPresent(Bool.self, forKey: .useDualBackgroundSessions) ?? false
+        self.nominalShardDurationSec = try container.decodeIfPresent(Double.self, forKey: .nominalShardDurationSec) ?? 20
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -60,6 +72,7 @@ struct PreAnalysisConfig: Codable, Sendable {
         case t1DepthSeconds
         case t2DepthSeconds
         case useDualBackgroundSessions
+        case nominalShardDurationSec
     }
 
     static func load() -> PreAnalysisConfig {

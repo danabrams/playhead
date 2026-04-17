@@ -183,31 +183,145 @@ struct BackfillTaskHandlerTests {
     }
 }
 
-// MARK: - Continued Processing Handler
+// MARK: - Continued Processing Handler (playhead-44h1)
+
+/// Wait for a `StubContinuedProcessingTask`'s `completedSuccess` flag
+/// to flip, with a deadline. Used by playhead-44h1 handler tests that
+/// drive the hand-off through its async work task.
+private func waitForCompletion(
+    of task: StubContinuedProcessingTask,
+    timeout: Duration = .seconds(10)
+) async throws {
+    let deadline = ContinuousClock.now + timeout
+    while task.completedSuccess == nil && ContinuousClock.now < deadline {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
 
 @Suite("Continued Processing Handler")
 struct ContinuedProcessingHandlerTests {
 
-    @Test("Continued processing is a no-op that completes successfully")
-    func continuedProcessingNoOpCompletes() async throws {
-        // handleContinuedProcessingTask is a deliberate no-op today: there is
-        // no user-initiated continuation work wired (e.g. FM asset download
-        // future from AssetProvider). The handler marks the task complete
-        // with success=true because "nothing to do" is not a failure. It must
-        // NOT drain the backfill queue — that is handleBackfillTask's job.
+    private static let identifierPrefix = BackgroundTaskID.continuedProcessing + "."
+
+    @Test("Malformed identifier fails fast without touching coordinator")
+    func malformedIdentifierFailsFast() async throws {
+        // The handler parses the episode id from the wildcard-identifier
+        // suffix. A bare identifier (no suffix) means the request was
+        // malformed upstream — fail loud with success=false and do not
+        // dispatch any work.
         let (bps, coordinator, _, _) = makeBPS()
-        let task = StubBackgroundTask()
+        let task = StubContinuedProcessingTask(identifier: BackgroundTaskID.continuedProcessing)
+
+        await bps.handleContinuedProcessingTask(task)
+        try await waitForCompletion(of: task)
+
+        #expect(task.completedSuccess == false)
+        #expect(coordinator.continueForegroundAssistCalls.isEmpty,
+                "Malformed identifier must not dispatch continueForegroundAssist")
+        #expect(coordinator.pauseAtNextCheckpointCalls.isEmpty)
+    }
+
+    @Test("Happy path dispatches to coordinator and completes success")
+    func happyPathDispatchesToCoordinator() async throws {
+        let (bps, coordinator, _, _) = makeBPS()
+        let episodeId = "episode-44h1-happy"
+        let task = StubContinuedProcessingTask(identifier: Self.identifierPrefix + episodeId)
 
         await bps.handleContinuedProcessingTask(task)
         try await waitForCompletion(of: task)
 
         #expect(task.completedSuccess == true)
-        // Explicit regression: continuation handler must not piggyback on
-        // the backfill drain. See git history around commit 740f727.
-        #expect(coordinator.runPendingBackfillCallCount == 0,
-                "handleContinuedProcessingTask must not call runPendingBackfill — that is handleBackfillTask's job")
-        #expect(coordinator.startCapabilityObserverCallCount == 0,
-                "handleContinuedProcessingTask must not call startCapabilityObserver() either")
+        #expect(coordinator.continueForegroundAssistCalls.count == 1)
+        #expect(coordinator.continueForegroundAssistCalls.first?.episodeId == episodeId)
+        // The deadline must be in the future (derived from the
+        // continuedProcessingDeadlineBudget).
+        if let deadline = coordinator.continueForegroundAssistCalls.first?.deadline {
+            #expect(deadline.timeIntervalSinceNow > 0)
+        }
+    }
+
+    @Test("Coordinator error maps to setTaskCompleted(success: false)")
+    func coordinatorErrorMapsToFailure() async throws {
+        let coordinator = StubAnalysisCoordinator()
+        coordinator.continueForegroundAssistError = NSError(
+            domain: "test", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "synthetic failure"]
+        )
+        let (bps, _, _, _) = makeBPS(coordinator: coordinator)
+        let task = StubContinuedProcessingTask(identifier: Self.identifierPrefix + "ep-fail")
+
+        await bps.handleContinuedProcessingTask(task)
+        try await waitForCompletion(of: task)
+
+        #expect(task.completedSuccess == false)
+    }
+
+    @Test("Expiration handler requests pause with cause=.taskExpired and fails task")
+    func expirationHandlerTriggersPauseAtNextCheckpoint() async throws {
+        // Regression contract: when iOS fires the expirationHandler, the
+        // handler MUST request a safe-point pause with
+        // cause=.taskExpired AND mark the task complete with
+        // success=false. The pause request arrives BEFORE the
+        // markComplete call so the in-flight work has an opportunity to
+        // exit cooperatively via its pause-observed path; the ordering
+        // within the BPS actor's serial queue also guarantees the
+        // "expired → failed" completion wins the idempotence race
+        // against any late success-completion from the work task.
+        let coordinator = StubAnalysisCoordinator()
+        // Keep the work task pending until the pause request lands.
+        // The stub observes its own `pauseAtNextCheckpointCalls` array
+        // so the workflow exits deterministically without wall-clock
+        // races.
+        coordinator.continueForegroundAssistWaitsForPause = true
+        let (bps, _, _, _) = makeBPS(coordinator: coordinator)
+        let episodeId = "episode-expired"
+        let task = StubContinuedProcessingTask(identifier: Self.identifierPrefix + episodeId)
+
+        await bps.handleContinuedProcessingTask(task)
+
+        // Wait for the handler to install the expirationHandler.
+        let setupDeadline = ContinuousClock.now + .seconds(5)
+        while task.expirationHandler == nil && ContinuousClock.now < setupDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        task.simulateExpiration()
+        try await waitForCompletion(of: task)
+
+        #expect(task.completedSuccess == false,
+                "Expiration MUST map to setTaskCompleted(success: false)")
+        #expect(coordinator.pauseAtNextCheckpointCalls.count >= 1)
+        let firstPause = coordinator.pauseAtNextCheckpointCalls.first
+        #expect(firstPause?.episodeId == episodeId)
+        #expect(firstPause?.cause == .taskExpired,
+                "Expiration cause MUST be .taskExpired per bead spec")
+    }
+
+    @Test("Identifier parser handles valid and invalid inputs")
+    func identifierParserHandlesVariants() {
+        // Valid: prefix + episode suffix → suffix returned.
+        let valid = BackgroundProcessingService.parseEpisodeId(
+            from: Self.identifierPrefix + "abc-123"
+        )
+        #expect(valid == "abc-123")
+
+        // Invalid: bare prefix.
+        let bare = BackgroundProcessingService.parseEpisodeId(
+            from: BackgroundTaskID.continuedProcessing
+        )
+        #expect(bare == nil)
+
+        // Invalid: prefix with empty suffix.
+        let emptySuffix = BackgroundProcessingService.parseEpisodeId(
+            from: Self.identifierPrefix
+        )
+        #expect(emptySuffix == nil)
+
+        // Invalid: entirely different identifier.
+        let unrelated = BackgroundProcessingService.parseEpisodeId(
+            from: "com.other.identifier"
+        )
+        #expect(unrelated == nil)
     }
 }
 
