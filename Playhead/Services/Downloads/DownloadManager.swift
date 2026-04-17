@@ -289,8 +289,25 @@ actor DownloadManager {
         // delegate back into the actor's `resumeDataDirectory`. Wired at
         // init (not per-session like onDownloadComplete) because the
         // harvest is independent of which background session fired.
-        self.sessionDelegate.onResumeDataHarvested = { [manager = self] episodeId, data in
+        //
+        // Retain-cycle note: `[weak manager = self]` avoids the cycle
+        // `delegate → closure → manager → sessionDelegate → closure`.
+        // `DownloadManager` is long-lived (typically a singleton), so a
+        // strong capture would leak forever and defeat `deinit` cleanup.
+        //
+        // Async Task hop is safe here (Option A): per the hyht bead's
+        // force-quit state machine, `didCompleteWithError` does NOT
+        // fire at force-quit time. The OS suspends the in-flight task
+        // without delivering completion. The callback only fires while
+        // the app is alive — either during normal runtime or during
+        // background-session rehydration after cold relaunch (see
+        // `scanForSuspendedTransfers`). In both cases the process stays
+        // alive long enough for the FileManager write inside
+        // `persistResumeData` to complete, so the Task hop introduces
+        // no loss-of-write risk.
+        self.sessionDelegate.onResumeDataHarvested = { [weak manager = self] episodeId, data in
             Task {
+                guard let manager else { return }
                 do {
                     try await manager.persistResumeData(episodeId: episodeId, data: data)
                 } catch {
@@ -770,12 +787,16 @@ actor DownloadManager {
         Set(_sessionsByRole.values.compactMap { $0.configuration.identifier })
     }
 
+    #if DEBUG
     /// playhead-g2wq test seam: exposes the URLSession delegate so tests
     /// can drive `didCompleteWithError` directly and verify the
     /// resume-data harvest path writes into `resumeDataDirectory`.
+    /// DEBUG-only to keep production binaries free of the delegate-escape
+    /// surface.
     func sessionDelegateForTesting() -> EpisodeDownloadDelegate {
         sessionDelegate
     }
+    #endif
 
     // MARK: - Progressive Download (Streaming Cache)
 
@@ -1521,6 +1542,15 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
     /// (playhead-g2wq) so the next cold-launch `scanForSuspendedTransfers`
     /// pass can see it. Without this callback the resume-data directory
     /// stays empty in production and the hyht follow-up UX never fires.
+    ///
+    /// Thread-safety invariant: init-once / read-many. The property is
+    /// assigned exactly once by `DownloadManager.init(...)` during actor
+    /// construction (before the delegate is handed to any URLSession),
+    /// and is only READ thereafter from URLSession's delegate queue.
+    /// Mutation after init is forbidden — the `nonisolated(unsafe)`
+    /// qualifier opts out of Swift concurrency checking and relies on
+    /// this invariant for safety. Same contract as `onDownloadComplete`
+    /// and `onUrlSessionDidFinishEvents` above.
     nonisolated(unsafe) var onResumeDataHarvested: ((String, Data) -> Void)?
 
     /// WorkJournal recorder for finalized / failed events. Swapped from
@@ -1646,6 +1676,18 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
         // the next cold launch. If the error carries no blob (server-side
         // failure, name resolution error, etc.) we skip the harvest and
         // fall through to `recordFailed` unchanged.
+        //
+        // Lifecycle note: the callback closure hops onto an async Task
+        // to write to disk. That hop is safe because this delegate
+        // callback only fires while the app is alive — either during
+        // normal runtime or during background-session rehydration after
+        // cold relaunch (the hyht force-quit flow: OS suspends the
+        // in-flight task at force-quit WITHOUT delivering
+        // didCompleteWithError; on the next cold launch URLSession
+        // re-attaches the delegate and drains pending events, at which
+        // point this callback fires with the process alive and running
+        // `scanForSuspendedTransfers`). The FileManager write is
+        // therefore guaranteed to complete before the process exits.
         if let resumeData = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data,
            !resumeData.isEmpty {
             onResumeDataHarvested?(episodeId, resumeData)

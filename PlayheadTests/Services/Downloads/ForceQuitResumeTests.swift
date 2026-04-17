@@ -434,6 +434,42 @@ struct EpisodeDownloadDelegateResumeHarvestTests {
         let ids = await manager.persistedResumeDataEpisodeIdsForTesting()
         #expect(ids.contains("ep-g2wq-harvest"))
     }
+
+    @Test("didCompleteWithError skips harvest when NSURLSessionDownloadTaskResumeData is absent")
+    func skipsHarvestWhenResumeDataAbsent() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let delegate = await manager.sessionDelegateForTesting()
+
+        // Error WITHOUT NSURLSessionDownloadTaskResumeData in userInfo —
+        // e.g. DNS failure, server-side 5xx, unrecoverable transport
+        // error. The harvest path must NOT write anything to the
+        // resume-data directory in this case.
+        let nonResumableError = NSError(
+            domain: NSURLErrorDomain,
+            code: NSURLErrorCannotFindHost,
+            userInfo: [
+                NSLocalizedDescriptionKey: "cannot find host",
+            ]
+        )
+
+        let task = G2wqStubTask(taskDescription: "ep-g2wq-no-blob")
+        delegate.urlSession(URLSession.shared, task: task, didCompleteWithError: nonResumableError)
+
+        // Give any spurious async harvest Task a chance to run (it
+        // shouldn't exist), then assert nothing was persisted.
+        try await Task.sleep(for: .milliseconds(200))
+
+        let ids = await manager.persistedResumeDataEpisodeIdsForTesting()
+        #expect(ids.isEmpty, "Resume-data directory must remain empty when error carries no NSURLSessionDownloadTaskResumeData blob")
+
+        let loaded = try await manager.loadResumeDataForTesting(episodeId: "ep-g2wq-no-blob")
+        #expect(loaded == nil)
+    }
 }
 
 // MARK: - App launch wiring
