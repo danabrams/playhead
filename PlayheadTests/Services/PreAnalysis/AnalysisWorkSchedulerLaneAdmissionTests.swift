@@ -216,4 +216,85 @@ struct AnalysisWorkSchedulerLaneAdmissionTests {
         #expect(!admission.allowsDeferredJob(desiredCoverageSec: 300, t2Threshold: 900))
         #expect(!admission.allowsDeferredJob(desiredCoverageSec: 900, t2Threshold: 900))
     }
+
+    // MARK: - AdmissionGate integration (playhead-bnrs)
+
+    /// Stub transport provider that lets tests drive the scheduler's
+    /// admission gate into `.wifiRequired` without standing up a real
+    /// `NWPathMonitor`. Defaults mirror `WifiTransportStatusProvider`
+    /// (the production fallback) so individual tests can override only
+    /// the axes they care about.
+    private struct StubTransportStatusProvider: TransportStatusProviding {
+        let reachability: TransportSnapshot.Reachability
+        let allowsCellular: Bool
+
+        init(
+            reachability: TransportSnapshot.Reachability = .wifi,
+            allowsCellular: Bool = true
+        ) {
+            self.reachability = reachability
+            self.allowsCellular = allowsCellular
+        }
+
+        func currentReachability() async -> TransportSnapshot.Reachability {
+            reachability
+        }
+        func userAllowsCellular() async -> Bool { allowsCellular }
+    }
+
+    @Test("evaluateAdmissionGate rejects a background (maintenance) job on cellular with .wifiRequired")
+    func testAdmissionGateRejectsMaintenanceOnCellular() async throws {
+        // Nominal thermal + charging so the thermal axis admits; the
+        // rejection must come from the transport gate.
+        let store = try await makeTestStore()
+        let capabilities = StubCapabilitiesProvider(
+            snapshot: makeCapabilitySnapshot(
+                thermalState: .nominal,
+                isLowPowerMode: false,
+                isCharging: true
+            )
+        )
+        let battery = StubBatteryProvider()
+        battery.level = 0.9
+        battery.charging = true
+
+        let transport = StubTransportStatusProvider(
+            reachability: .cellular,
+            // Even with `allowsCellular == true`, maintenance sessions
+            // are Wi-Fi-only by spec — this is the strongest signal that
+            // the gate is actually consulted at the scheduler surface.
+            allowsCellular: true
+        )
+
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: StubAnalysisAudioProvider(),
+            featureService: FeatureExtractionService(store: store),
+            transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
+            adDetection: StubAdDetectionProvider(),
+            cueMaterializer: SkipCueMaterializer(store: store)
+        )
+        let scheduler = AnalysisWorkScheduler(
+            store: store,
+            jobRunner: runner,
+            capabilitiesService: capabilities,
+            downloadManager: StubDownloadProvider(),
+            batteryProvider: battery,
+            transportStatusProvider: transport
+        )
+
+        // priority = 0 => .background lane => scheduler synthesizes
+        // session == .maintenance.
+        let job = makeAnalysisJob(priority: 0)
+        let decision = await scheduler.evaluateAdmissionGate(for: job)
+
+        switch decision {
+        case .reject(let cause):
+            #expect(cause == .wifiRequired,
+                    "Maintenance job on cellular must reject with .wifiRequired, got \(cause)")
+        case .admit(let sliceBytes):
+            Issue.record("Expected .reject(.wifiRequired), got .admit(sliceBytes: \(sliceBytes))")
+        }
+    }
 }

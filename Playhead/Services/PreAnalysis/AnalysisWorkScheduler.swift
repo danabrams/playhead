@@ -24,6 +24,37 @@ protocol LanePreemptionHandler: Sendable {
     func preemptLowerLanes(for incoming: AnalysisWorkScheduler.SchedulerLane) async
 }
 
+/// Point-in-time transport-status query consumed by
+/// `AdmissionGate.transportRejection` at admission time. The scheduler
+/// synthesizes a `TransportSnapshot` per job from the reachability axis
+/// returned here, the job's lane (which maps to interactive vs
+/// maintenance), and the user's cellular preference.
+///
+/// playhead-bnrs ships the default `WifiTransportStatusProvider` — it
+/// always reports `.wifi` / `allowsCellular = true` so production
+/// behavior is unchanged while the admission gate is wired through.
+/// A follow-up bead will introduce a real `NWPathMonitor`-backed
+/// provider and a user-preferences adapter; widening `CapabilitySnapshot`
+/// to carry the network axis was explicitly out of scope for this bead
+/// (see the spec's "scope creep" section).
+protocol TransportStatusProviding: Sendable {
+    /// The current reachability of the active network path.
+    func currentReachability() async -> TransportSnapshot.Reachability
+    /// Whether the user has opted into cellular transfers for
+    /// interactive jobs. Maintenance jobs ignore this value — they are
+    /// Wi-Fi-only regardless.
+    func userAllowsCellular() async -> Bool
+}
+
+/// Conservative default: assume Wi-Fi + user allows cellular. Matches
+/// the pre-bnrs behavior where no transport gate was consulted at all,
+/// so the admission gate wire does not regress production scheduling
+/// until a real reachability provider lands.
+struct WifiTransportStatusProvider: TransportStatusProviding {
+    func currentReachability() async -> TransportSnapshot.Reachability { .wifi }
+    func userAllowsCellular() async -> Bool { true }
+}
+
 actor AnalysisWorkScheduler {
     private static let coverageProgressEpsilon = 0.001
     private let store: AnalysisStore
@@ -31,6 +62,11 @@ actor AnalysisWorkScheduler {
     private let capabilitiesService: any CapabilitiesProviding
     private let downloadManager: any DownloadProviding
     private let batteryProvider: any BatteryStateProviding
+    /// playhead-bnrs: transport-status provider consumed by the
+    /// admission gate. Defaults to `WifiTransportStatusProvider` so
+    /// production behavior is unchanged until a real
+    /// `NWPathMonitor`-backed provider lands in a follow-up bead.
+    private let transportStatusProvider: any TransportStatusProviding
     private let config: PreAnalysisConfig
     private let logger = Logger(subsystem: "com.playhead", category: "WorkScheduler")
 
@@ -184,6 +220,7 @@ actor AnalysisWorkScheduler {
         capabilitiesService: any CapabilitiesProviding,
         downloadManager: any DownloadProviding,
         batteryProvider: any BatteryStateProviding = UIDeviceBatteryProvider(),
+        transportStatusProvider: any TransportStatusProviding = WifiTransportStatusProvider(),
         config: PreAnalysisConfig = .load()
     ) {
         self.store = store
@@ -191,6 +228,7 @@ actor AnalysisWorkScheduler {
         self.capabilitiesService = capabilitiesService
         self.downloadManager = downloadManager
         self.batteryProvider = batteryProvider
+        self.transportStatusProvider = transportStatusProvider
         self.config = config
         var continuation: AsyncStream<Void>.Continuation?
         self.wakeStream = AsyncStream<Void> { continuation = $0 }
@@ -460,6 +498,21 @@ actor AnalysisWorkScheduler {
                 continue
             }
 
+            // Multi-resource admission gate (playhead-bnrs). Consults
+            // thermal / transport / storage / CPU axes; a hard rejection
+            // here skips this pass with a logged cause. On the reject
+            // path we do NOT mutate job state (no `updateJobState` /
+            // WorkJournal write) — the scheduler will re-fetch the job
+            // on the next pass once the failing axis clears (a
+            // capability change wakes the loop). This preserves the
+            // retry semantics that existed before the gate was wired.
+            let gateDecision = await evaluateAdmissionGate(for: job)
+            if case .reject(let cause) = gateDecision {
+                logger.info("AdmissionGate rejected job \(job.jobId) with cause \(cause.rawValue, privacy: .public)")
+                await sleepOrWake(seconds: 30)
+                continue
+            }
+
             // Now-lane admission demotes active Soon / Background jobs at
             // their next safe checkpoint. The protocol is owned by
             // playhead-01t8; this bead only wires the hook. Pass the job's
@@ -516,6 +569,87 @@ actor AnalysisWorkScheduler {
         laneActive[lane] = max(0, current - 1)
     }
 
+    /// Evaluate the full multi-resource admission gate for `job`. Returns
+    /// the `GateAdmissionDecision` the scheduler will act on: `.admit` means
+    /// the caller may proceed to `processJob(_:)`, `.reject(cause)` means
+    /// the scheduler must skip this pass and log the cause.
+    ///
+    /// playhead-bnrs: this is the production consumer of
+    /// `AdmissionGate.admit(...)`. It stitches together the four gate
+    /// inputs:
+    ///
+    /// - `profile`: derived from the capabilities snapshot + live
+    ///   battery, same source as `currentLaneAdmission()`.
+    /// - `deviceClass` / `deviceProfile`: from the snapshot + the
+    ///   playhead-dh9b hard-coded fallback table (the JSON manifest
+    ///   loader is not plumbed here — slice-sizing uses the fallback row
+    ///   until a loader is injected).
+    /// - `transport`: synthesized from `transportStatusProvider`
+    ///   (defaults to `WifiTransportStatusProvider`) and the job's lane.
+    ///   Background-lane jobs map to `.maintenance` (Wi-Fi only); every
+    ///   other lane maps to `.interactive`.
+    /// - `storage`: plentiful-default snapshot — the per-class cap check
+    ///   is still performed by `StorageBudget.admit` at write time; this
+    ///   gate's role in the bnrs wire is to ensure the transport / CPU /
+    ///   thermal axes are consulted at admission. Plumbing a live
+    ///   `StorageBudget` snapshot into the scheduler is a follow-up bead.
+    func evaluateAdmissionGate(for job: AnalysisJob) async -> GateAdmissionDecision {
+        let snapshot = await capabilitiesService.currentSnapshot
+        let batteryState = await batteryProvider.currentBatteryState()
+        let profile = snapshot.qualityProfile(
+            batteryLevel: batteryState.level,
+            isCharging: batteryState.isCharging
+        )
+        let deviceClass = snapshot.deviceClass
+        let deviceProfile = DeviceClassProfile.fallback(for: deviceClass)
+
+        let reachability = await transportStatusProvider.currentReachability()
+        let allowsCellular = await transportStatusProvider.userAllowsCellular()
+        // Background-lane jobs are maintenance transfers (auto-download
+        // / bulk backfill). Everything else is interactive — user-
+        // initiated Play / explicit Download (Now), or a proximate
+        // upcoming-episode preload (Soon). This mirrors the
+        // BackgroundSessionIdentifier split in closed bead playhead-24cm.
+        let session: TransportSnapshot.Session = (job.schedulerLane == .background)
+            ? .maintenance
+            : .interactive
+        let transport = TransportSnapshot(
+            reachability: reachability,
+            session: session,
+            userAllowsCellular: allowsCellular
+        )
+
+        // Storage snapshot: plentiful by construction for this bead.
+        // The per-class admission check is performed by
+        // `StorageBudget.admit(class:sizeBytes:)` at the actual write
+        // site; this gate's contribution is to keep transport/CPU/
+        // thermal consulted at scheduling time. A follow-up bead will
+        // inject a live StorageBudget reference and replace this with a
+        // real snapshot.
+        let storage = StorageSnapshot(
+            canAdmit: [.media: true, .warmResumeBundle: true, .scratch: true],
+            remainingBytes: [
+                .media: Int64.max,
+                .warmResumeBundle: Int64.max,
+                .scratch: Int64.max,
+            ]
+        )
+
+        let admissionJob = AdmissionJob(
+            artifactClasses: [job.artifactClass],
+            estimatedWriteBytes: max(0, job.estimatedWriteBytes)
+        )
+
+        return AdmissionGate.admit(
+            job: admissionJob,
+            profile: profile,
+            deviceClass: deviceClass,
+            deviceProfile: deviceProfile,
+            storage: storage,
+            transport: transport
+        )
+    }
+
     /// Evaluate the current `LaneAdmission` from the capabilities snapshot and
     /// a live battery reading. Exposed internally so tests (and integrators
     /// like BackgroundProcessingService) can ask what the scheduler would do
@@ -524,12 +658,10 @@ actor AnalysisWorkScheduler {
     /// All thermal/battery/low-power reads route through `QualityProfile` —
     /// there are no direct `ProcessInfo.thermalState` or `isLowPowerMode`
     /// reads in this actor. The thermal gate of the broader
-    /// multi-resource admission policy (playhead-bnrs) is already
-    /// honored here via `policy.pauseAllWork`; the transport, storage,
-    /// and CPU gates live in `AdmissionGate.admit(...)` and are
-    /// consulted by callers that have the per-job
-    /// `AdmissionJob` / `StorageSnapshot` / `TransportSnapshot` inputs
-    /// (integration bead playhead-iwiy).
+    /// multi-resource admission policy (playhead-bnrs) is honored here
+    /// via `policy.pauseAllWork`; the transport, storage, and CPU gates
+    /// are consulted by `evaluateAdmissionGate(for:)` which the scheduler
+    /// loop calls after `canAdmit(job:)` succeeds.
     func currentLaneAdmission() async -> LaneAdmission {
         let snapshot = await capabilitiesService.currentSnapshot
         let batteryState = await batteryProvider.currentBatteryState()

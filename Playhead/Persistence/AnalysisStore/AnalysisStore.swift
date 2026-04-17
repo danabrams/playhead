@@ -491,10 +491,25 @@ struct AnalysisJob: Sendable {
     /// holder acquired the row, or `0` when no lease has ever been
     /// acquired.
     let schedulerEpoch: Int
+    /// playhead-bnrs: primary artifact class this job will write to.
+    /// In-memory only (NOT persisted in `analysis_jobs`); consumed by
+    /// `AdmissionGate` at admission time. Defaults to `.media` so every
+    /// existing call-site compiles unchanged — media is the dominant
+    /// write class for pre-analysis jobs.
+    let artifactClass: ArtifactClass
+    /// playhead-bnrs: caller-estimated write bytes for the next slice
+    /// this job will emit. In-memory only (NOT persisted); consumed by
+    /// `AdmissionGate` as a headroom input for per-class storage slice
+    /// sizing. Defaults to `0` so existing call-sites compile unchanged;
+    /// downstream beads that care about precise sizing can set this
+    /// explicitly at enqueue time.
+    let estimatedWriteBytes: Int64
 
     // Existing-style memberwise init that defaults the uzdq fields so
     // every call-site in the codebase compiles unchanged. New callers
-    // pass the two uzdq fields explicitly.
+    // pass the two uzdq fields explicitly. The playhead-bnrs fields
+    // (`artifactClass`, `estimatedWriteBytes`) follow the same defaulted
+    // pattern so the admission-gate integration adds no call-site churn.
     init(
         jobId: String,
         jobType: String,
@@ -518,7 +533,9 @@ struct AnalysisJob: Sendable {
         createdAt: Double,
         updatedAt: Double,
         generationID: String = "",
-        schedulerEpoch: Int = 0
+        schedulerEpoch: Int = 0,
+        artifactClass: ArtifactClass = .media,
+        estimatedWriteBytes: Int64 = 0
     ) {
         self.jobId = jobId
         self.jobType = jobType
@@ -543,6 +560,8 @@ struct AnalysisJob: Sendable {
         self.updatedAt = updatedAt
         self.generationID = generationID
         self.schedulerEpoch = schedulerEpoch
+        self.artifactClass = artifactClass
+        self.estimatedWriteBytes = estimatedWriteBytes
     }
 
     static func computeWorkKey(fingerprint: String, analysisVersion: Int, jobType: String) -> String {
