@@ -62,6 +62,17 @@ struct CapabilitySnapshot: Codable, Sendable, Equatable {
         isCharging && !shouldThrottleAnalysis
     }
 
+    /// The coarse device-class bucket this snapshot was taken on.
+    /// Introduced by playhead-dh9b for per-device grant-window and
+    /// slice-sizing lookups. Derived fresh from `utsname.machine` on
+    /// every access (the mapping is pure and cheap), so this is
+    /// intentionally NOT a stored property: keeping it computed means
+    /// an old snapshot re-inflated from disk on a different device
+    /// still reports the *current* device's class.
+    var deviceClass: DeviceClass {
+        DeviceClass.detect()
+    }
+
     // MARK: - QualityProfile Surface
 
     /// The consolidated `QualityProfile` derived from the snapshot and a live

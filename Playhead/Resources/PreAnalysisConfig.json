@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "deviceClass": "iPhone17Pro",
+      "grantWindowMedianSeconds": 45,
+      "grantWindowP95Seconds": 90,
+      "nominalSliceSizeBytes": 25000000,
+      "cpuWindowSeconds": 40,
+      "bytesPerCpuSecond": 625000,
+      "avgShardDurationMs": 2500
+    },
+    {
+      "deviceClass": "iPhone17",
+      "grantWindowMedianSeconds": 40,
+      "grantWindowP95Seconds": 85,
+      "nominalSliceSizeBytes": 22000000,
+      "cpuWindowSeconds": 35,
+      "bytesPerCpuSecond": 628000,
+      "avgShardDurationMs": 2800
+    },
+    {
+      "deviceClass": "iPhone16Pro",
+      "grantWindowMedianSeconds": 40,
+      "grantWindowP95Seconds": 85,
+      "nominalSliceSizeBytes": 20000000,
+      "cpuWindowSeconds": 35,
+      "bytesPerCpuSecond": 571000,
+      "avgShardDurationMs": 2900
+    },
+    {
+      "deviceClass": "iPhone16",
+      "grantWindowMedianSeconds": 35,
+      "grantWindowP95Seconds": 75,
+      "nominalSliceSizeBytes": 18000000,
+      "cpuWindowSeconds": 30,
+      "bytesPerCpuSecond": 600000,
+      "avgShardDurationMs": 3200
+    },
+    {
+      "deviceClass": "iPhone15Pro",
+      "grantWindowMedianSeconds": 35,
+      "grantWindowP95Seconds": 75,
+      "nominalSliceSizeBytes": 16000000,
+      "cpuWindowSeconds": 30,
+      "bytesPerCpuSecond": 533000,
+      "avgShardDurationMs": 3400
+    },
+    {
+      "deviceClass": "iPhoneSE3",
+      "grantWindowMedianSeconds": 25,
+      "grantWindowP95Seconds": 55,
+      "nominalSliceSizeBytes": 10000000,
+      "cpuWindowSeconds": 20,
+      "bytesPerCpuSecond": 500000,
+      "avgShardDurationMs": 4500
+    },
+    {
+      "deviceClass": "iPhone14andOlder",
+      "grantWindowMedianSeconds": 20,
+      "grantWindowP95Seconds": 45,
+      "nominalSliceSizeBytes": 8000000,
+      "cpuWindowSeconds": 15,
+      "bytesPerCpuSecond": 533000,
+      "avgShardDurationMs": 5500
+    }
+  ]
+}

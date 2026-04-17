@@ -1,8 +1,15 @@
 // PreAnalysisConfig.swift
 // User-configurable settings for the pre-analysis pipeline.
 // Persisted to UserDefaults as JSON.
+//
+// Also hosts the playhead-dh9b device-class profile loader
+// (`loadDeviceProfiles(...)`), which reads the bundled
+// `PreAnalysisConfig.json` and falls back to the hard-coded table in
+// `DeviceClassProfile.fallback(for:)` when the bundle resource is
+// missing or malformed.
 
 import Foundation
+import OSLog
 
 struct PreAnalysisConfig: Codable, Sendable {
     var isEnabled: Bool = true
@@ -74,5 +81,117 @@ struct PreAnalysisConfig: Codable, Sendable {
         if let data = try? JSONEncoder().encode(self) {
             UserDefaults.standard.set(data, forKey: Self.key)
         }
+    }
+
+    // MARK: - playhead-dh9b: Device-Class Profile Loader
+
+    /// The manifest schema version this binary understands. Must match
+    /// the `version` field in `PreAnalysisConfig.json`. A mismatch is
+    /// treated as a malformed bundle (fallback table used, loud log).
+    static let deviceProfilesManifestVersion: Int = 1
+
+    /// Bundle resource name for the device-class manifest (no extension).
+    static let deviceProfilesResourceName: String = "PreAnalysisConfig"
+
+    private static let deviceProfilesLogger = Logger(
+        subsystem: "com.playhead",
+        category: "PreAnalysisConfig"
+    )
+
+    /// Outcome of a `loadDeviceProfiles(...)` call, exposed for
+    /// observability hooks and tests.
+    enum DeviceProfilesLoadResult: Sendable, Equatable {
+        /// Bundle JSON decoded cleanly and covered every DeviceClass
+        /// case. No fallback values were used.
+        case bundleJSON
+        /// Bundle resource was missing. The hard-coded fallback table
+        /// is returned; the caller should log a loud observability
+        /// event (production expects the file to be present).
+        case fallbackMissingResource
+        /// Bundle resource was present but failed to decode, or the
+        /// manifest version did not match `deviceProfilesManifestVersion`.
+        case fallbackMalformedJSON(reason: String)
+    }
+
+    /// Loads the per-device-class profile table.
+    ///
+    /// Resolution order:
+    ///   1. Bundled `PreAnalysisConfig.json` in `bundle` (default `.main`).
+    ///   2. Hard-coded `DeviceClassProfile.fallback(for:)` for every
+    ///      `DeviceClass` case.
+    ///
+    /// The return value always covers every `DeviceClass` case — even
+    /// if the bundled JSON is incomplete, missing entries are patched
+    /// in from the fallback table. This guarantees `result[someClass]`
+    /// never returns nil at runtime.
+    ///
+    /// - Parameter bundle: Bundle to search. Tests pass a stripped
+    ///   bundle (or `.init()`) to exercise the fallback path.
+    /// - Returns: Tuple of (table, outcome). Callers that care about
+    ///   which branch was taken (observability, tests) inspect
+    ///   `outcome`; most callers just use `table`.
+    static func loadDeviceProfiles(
+        bundle: Bundle = .main
+    ) -> (table: [DeviceClass: DeviceClassProfile], outcome: DeviceProfilesLoadResult) {
+        guard let url = bundle.url(
+            forResource: deviceProfilesResourceName,
+            withExtension: "json"
+        ) else {
+            deviceProfilesLogger.error(
+                "PreAnalysisConfig.json missing from bundle; using hard-coded fallback table"
+            )
+            return (DeviceClassProfile.fallbackTable(), .fallbackMissingResource)
+        }
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            let reason = "read failed: \(error.localizedDescription)"
+            deviceProfilesLogger.error(
+                "PreAnalysisConfig.json \(reason, privacy: .public); using fallback"
+            )
+            return (DeviceClassProfile.fallbackTable(), .fallbackMalformedJSON(reason: reason))
+        }
+
+        let manifest: DeviceClassProfilesManifest
+        do {
+            manifest = try JSONDecoder().decode(
+                DeviceClassProfilesManifest.self,
+                from: data
+            )
+        } catch {
+            let reason = "decode failed: \(error.localizedDescription)"
+            deviceProfilesLogger.error(
+                "PreAnalysisConfig.json \(reason, privacy: .public); using fallback"
+            )
+            return (DeviceClassProfile.fallbackTable(), .fallbackMalformedJSON(reason: reason))
+        }
+
+        guard manifest.version == deviceProfilesManifestVersion else {
+            let reason = "version mismatch (got \(manifest.version), expected \(deviceProfilesManifestVersion))"
+            deviceProfilesLogger.error(
+                "PreAnalysisConfig.json \(reason, privacy: .public); using fallback"
+            )
+            return (DeviceClassProfile.fallbackTable(), .fallbackMalformedJSON(reason: reason))
+        }
+
+        // Start from fallback so any DeviceClass not mentioned in the
+        // JSON is still covered. Then overlay the JSON rows.
+        var table = DeviceClassProfile.fallbackTable()
+        for profile in manifest.profiles {
+            guard let bucket = DeviceClass(rawValue: profile.deviceClass) else {
+                // Unknown bucket in JSON (e.g., a row for a future
+                // DeviceClass case this binary doesn't know about).
+                // Ignored — the fallback row stays in place.
+                deviceProfilesLogger.notice(
+                    "PreAnalysisConfig.json contains unknown deviceClass=\(profile.deviceClass, privacy: .public); ignoring row"
+                )
+                continue
+            }
+            table[bucket] = profile
+        }
+
+        return (table, .bundleJSON)
     }
 }
