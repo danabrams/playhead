@@ -359,6 +359,223 @@ actor AnalysisCoordinator {
         }
     }
 
+    // MARK: - Episode Execution Lease (playhead-uzdq)
+
+    /// Default lease TTL. Long enough that a cooperatively-scheduled
+    /// owner can take a full scheduling slice before the next renewal
+    /// cycle, short enough that a crashed owner's lease releases within
+    /// the BG task's lifetime.
+    private static let defaultLeaseTTLSeconds: Double = 30
+
+    /// Acquires a single-writer lease on `episodeId`. See
+    /// ``EpisodeExecutionLease`` for semantics and the bead spec for
+    /// the contract summary.
+    ///
+    /// On success the returned lease carries a freshly-minted
+    /// `generationID` (UUID). The owner passes this lease back on every
+    /// renew / release / finalize call so the store can reject late
+    /// callbacks (generationMismatch) or stale workers (staleEpoch).
+    func acquireLease(
+        episodeId: String,
+        ownerWorkerId: String,
+        schedulerEpoch: Int,
+        ttlSeconds: Double = AnalysisCoordinator.defaultLeaseTTLSeconds,
+        now: Double = Date().timeIntervalSince1970
+    ) async throws -> EpisodeExecutionLease {
+        let generationID = UUID()
+        let descriptor = try await store.acquireEpisodeLease(
+            episodeId: episodeId,
+            ownerWorkerId: ownerWorkerId,
+            generationID: generationID.uuidString,
+            schedulerEpoch: schedulerEpoch,
+            now: now,
+            ttlSeconds: ttlSeconds
+        )
+        return EpisodeExecutionLease(
+            episodeId: descriptor.episodeId,
+            ownerWorkerId: descriptor.ownerWorkerId,
+            generationID: generationID,
+            schedulerEpoch: descriptor.schedulerEpoch,
+            acquiredAt: descriptor.acquiredAt,
+            expiresAt: descriptor.expiresAt,
+            currentCheckpoint: nil,
+            preemptionRequested: false
+        )
+    }
+
+    /// Extends the lease TTL. Caller-visible effect is only to push
+    /// `expiresAt` forward; the persisted row's `leaseExpiresAt` moves
+    /// with it. Rejected with `LeaseError.staleEpoch` when the caller's
+    /// epoch is older than the store's current epoch, and with
+    /// `LeaseError.generationMismatch` when the row's generation has
+    /// rotated underneath the caller (e.g. orphan recovery requeued).
+    func renewLease(
+        _ lease: EpisodeExecutionLease,
+        ttlSeconds: Double = AnalysisCoordinator.defaultLeaseTTLSeconds,
+        now: Double = Date().timeIntervalSince1970
+    ) async throws {
+        try await store.renewEpisodeLease(
+            episodeId: lease.episodeId,
+            generationID: lease.generationID.uuidString,
+            schedulerEpoch: lease.schedulerEpoch,
+            newExpiresAt: now + ttlSeconds,
+            now: now
+        )
+    }
+
+    /// Releases the lease and records a terminal event in the
+    /// WorkJournal. Idempotent for `.finalized` and `.failed`:
+    /// a second call on the same {episodeId, generationID, event}
+    /// tuple is a no-op (no duplicate journal row, no error).
+    func releaseLease(
+        _ lease: EpisodeExecutionLease,
+        event: WorkJournalEntry.EventType,
+        cause: InternalMissCause? = nil,
+        now: Double = Date().timeIntervalSince1970
+    ) async throws {
+        try await store.releaseEpisodeLease(
+            episodeId: lease.episodeId,
+            generationID: lease.generationID.uuidString,
+            schedulerEpoch: lease.schedulerEpoch,
+            eventType: event,
+            cause: cause,
+            now: now
+        )
+    }
+
+    /// Cold-launch orphan recovery. Scans `analysis_jobs` for held
+    /// leases whose `expiresAt` is more than the grace window in the
+    /// past and, for each, inspects the last `work_journal` entry to
+    /// decide how to reconcile:
+    ///
+    /// - terminal (`finalized` / `failed`) → clear lease slot, no
+    ///   requeue.
+    /// - `checkpointed` (or `acquired` with no progress) → requeue
+    ///   with a fresh generationID, bumped epoch, attemptCount=0, and
+    ///   the lane-preserved priority. Now-lane rows stale for >60 s
+    ///   demote to Soon (priority 10).
+    ///
+    /// Returns the list of freshly-rebuilt leases for the caller to
+    /// log / reschedule.
+    ///
+    /// The bead's "work_journal with scheduler_epoch > _meta.scheduler_epoch
+    /// is corruption" rule is a reconciliation invariant: we log the
+    /// condition and drop the offending entry's effect on the decision
+    /// (treat as "no last event found", which routes to the
+    /// no-progress / requeue path).
+    @discardableResult
+    func recoverOrphans(
+        now: Double = Date().timeIntervalSince1970,
+        graceSeconds: Double = 10
+    ) async throws -> [EpisodeExecutionLease] {
+        let stale = try await store.fetchEpisodesWithExpiredLeases(
+            now: now,
+            graceSeconds: graceSeconds
+        )
+        guard !stale.isEmpty else { return [] }
+
+        var rebuilt: [EpisodeExecutionLease] = []
+        let currentEpoch = try await store.fetchSchedulerEpoch() ?? 0
+
+        for job in stale {
+            let lastEvent = try await store.fetchLastWorkJournalEntry(
+                episodeId: job.episodeId,
+                generationID: job.generationID
+            )
+
+            // Spec invariant: journal rows with scheduler_epoch >
+            // _meta.scheduler_epoch are corruption. Log + drop effect.
+            let decisionEvent: WorkJournalEntry.EventType?
+            if let last = lastEvent, last.schedulerEpoch > currentEpoch {
+                logger.error("work_journal.schedulerEpoch=\(last.schedulerEpoch) > _meta=\(currentEpoch) for episode \(job.episodeId); dropping effect")
+                decisionEvent = nil
+            } else {
+                decisionEvent = lastEvent?.eventType
+            }
+
+            switch decisionEvent {
+            case .finalized, .failed:
+                // Already terminal — clear lease slot and move on.
+                try await store.clearOrphanedLeaseNoRequeue(
+                    jobId: job.jobId,
+                    now: now
+                )
+
+            case .checkpointed, .acquired, .preempted, .none:
+                // Resume path: requeue with fresh identity under a
+                // freshly-bumped scheduler epoch.
+                if decisionEvent == .acquired || decisionEvent == nil {
+                    logger.notice("orphan_recovered_no_progress episode=\(job.episodeId)")
+                }
+                let newEpoch = try await store.incrementSchedulerEpoch()
+                let newGenerationID = UUID()
+
+                // Lane preservation: Now-lane (priority >= 10) rows
+                // whose lease expired >60 s ago demote to Soon
+                // (priority = 10 floor). All others keep their band.
+                let staleSeconds = max(0.0, now - (job.leaseExpiresAt ?? now))
+                let newPriority = Self.laneAfterOrphan(
+                    currentPriority: job.priority,
+                    staleSeconds: staleSeconds
+                )
+
+                try await store.requeueOrphanedLease(
+                    jobId: job.jobId,
+                    newGenerationID: newGenerationID.uuidString,
+                    newSchedulerEpoch: newEpoch,
+                    newPriority: newPriority,
+                    now: now
+                )
+                rebuilt.append(
+                    EpisodeExecutionLease(
+                        episodeId: job.episodeId,
+                        ownerWorkerId: "",
+                        generationID: newGenerationID,
+                        schedulerEpoch: newEpoch,
+                        acquiredAt: now,
+                        expiresAt: now,
+                        currentCheckpoint: nil,
+                        preemptionRequested: false
+                    )
+                )
+            }
+        }
+        return rebuilt
+    }
+
+    /// Priority value for a requeued orphan that was demoted out of
+    /// the Now lane. Matches the bead's "priority → 10" spec and lines
+    /// up with the explicit-download priority used by
+    /// ``AnalysisWorkScheduler/enqueue``.
+    static let soonLaneOrphanPriority: Int = 10
+
+    /// Cutoff below which a Now-lane row still belongs in the Now lane
+    /// and above which orphan recovery demotes it to Soon.
+    ///
+    /// The threshold is exclusive ("> 60 s ago") so a lease that
+    /// expired exactly 60 s ago stays in its Now lane; anything older
+    /// demotes.
+    static let nowLaneOrphanDemotionSeconds: Double = 60
+
+    /// Lane-preservation rule from the bead's orphan requeue policy:
+    /// same priority band, EXCEPT Now lane (priority strictly greater
+    /// than Soon=10) leases stale for more than
+    /// ``nowLaneOrphanDemotionSeconds`` demote to Soon.
+    ///
+    /// "Now lane" is defined here as priority > `soonLaneOrphanPriority`
+    /// (= 10). `AnalysisWorkScheduler.enqueue` currently assigns
+    /// explicit downloads priority=10 (Soon) and auto-downloads
+    /// priority=0 (Background). Now-lane priorities (e.g. >= 20) are
+    /// reserved for future playback / hot-path escalations and are the
+    /// only band this rule demotes.
+    static func laneAfterOrphan(currentPriority: Int, staleSeconds: Double) -> Int {
+        if currentPriority > soonLaneOrphanPriority
+           && staleSeconds > nowLaneOrphanDemotionSeconds {
+            return soonLaneOrphanPriority
+        }
+        return currentPriority
+    }
+
     // MARK: - Playback Event Handling
 
     /// Main entry point: receive a playback event and react.
