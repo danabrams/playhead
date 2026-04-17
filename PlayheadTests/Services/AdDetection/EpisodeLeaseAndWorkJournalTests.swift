@@ -580,12 +580,12 @@ struct EpisodeLeaseAndWorkJournalTests {
         let epochBefore = try await store.fetchSchedulerEpoch()
         let gen = UUID()
 
-        // `simulateCrashInSchedulingPass` bumps the scheduler epoch,
-        // appends a journal row, and throws - all inside the outer
-        // runSchedulingPass envelope. The throw must roll back every
-        // step.
+        // `simulateCrashInSchedulingPassForTesting` bumps the scheduler
+        // epoch, appends a journal row, and throws - all inside the
+        // outer runSchedulingPass envelope. The throw must roll back
+        // every step.
         await #expect(throws: AnalysisStore.CrashRollbackTestError.self) {
-            try await store.simulateCrashInSchedulingPass(
+            try await store.simulateCrashInSchedulingPassForTesting(
                 episodeId: episodeId,
                 generationID: gen,
                 timestamp: 0

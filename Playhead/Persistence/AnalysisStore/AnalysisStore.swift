@@ -4259,6 +4259,7 @@ actor AnalysisStore {
         }
     }
 
+    #if DEBUG
     /// Test seam for crash-rollback verification (playhead-uzdq).
     /// Runs a scheduling pass that bumps the scheduler epoch, appends
     /// a `work_journal` row, and then throws — all inside the outer
@@ -4267,7 +4268,7 @@ actor AnalysisStore {
     /// This is exposed as an actor-isolated method (rather than
     /// asking tests to hand-roll a `@Sendable` closure) so the test
     /// file does not have to reason about closure isolation.
-    func simulateCrashInSchedulingPass(
+    func simulateCrashInSchedulingPassForTesting(
         episodeId: String,
         generationID: UUID,
         timestamp: Double
@@ -4290,11 +4291,12 @@ actor AnalysisStore {
         }
     }
 
-    /// Sentinel error thrown by ``simulateCrashInSchedulingPass`` so
+    /// Sentinel error thrown by ``simulateCrashInSchedulingPassForTesting`` so
     /// tests can assert the transactional body rolled back.
     enum CrashRollbackTestError: Error, Equatable {
         case simulated
     }
+    #endif
 
     // MARK: - CRUD: episode execution lease (playhead-uzdq)
 
