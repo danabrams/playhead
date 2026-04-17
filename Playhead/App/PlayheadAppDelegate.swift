@@ -70,6 +70,12 @@ final class PlayheadAppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
+        // playhead-1nl6: populate the CauseEmissionRegistry so the
+        // slice-completion instrumentation knows which production sites
+        // emit which InternalMissCauses. Idempotent — safe if tests also
+        // invoked it.
+        SliceCompletionInstrumentation.bootstrap()
+
         if let manager = DownloadManager.shared {
             let logger = self.logger
             Task {
