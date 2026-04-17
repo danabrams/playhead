@@ -69,7 +69,11 @@ struct BudgetPool: Sendable, Equatable {
     /// Caller must not commit the same reservation twice.
     mutating func commit(_ reservation: BudgetReservation) {
         if reserved < reservation.cost {
-            budgetLog.warning("BudgetPool.commit: cost \(reservation.cost) exceeds reserved \(self.reserved) — possible double-commit")
+            // Swift 6 disallows capturing `self.reserved` in the warning's
+            // escaping autoclosure from a mutating context. Snapshot the
+            // value into a local first so the autoclosure captures a copy.
+            let reservedNow = reserved
+            budgetLog.warning("BudgetPool.commit: cost \(reservation.cost) exceeds reserved \(reservedNow) — possible double-commit")
             assertionFailure("BudgetPool.commit: reservation cost \(reservation.cost) exceeds reserved \(reserved)")
         }
         reserved = max(reserved - reservation.cost, 0)
@@ -80,7 +84,8 @@ struct BudgetPool: Sendable, Equatable {
     /// Caller must not release the same reservation twice.
     mutating func release(_ reservation: BudgetReservation) {
         if reserved < reservation.cost {
-            budgetLog.warning("BudgetPool.release: cost \(reservation.cost) exceeds reserved \(self.reserved) — possible double-release")
+            let reservedNow = reserved
+            budgetLog.warning("BudgetPool.release: cost \(reservation.cost) exceeds reserved \(reservedNow) — possible double-release")
             assertionFailure("BudgetPool.release: reservation cost \(reservation.cost) exceeds reserved \(reserved)")
         }
         reserved = max(reserved - reservation.cost, 0)
