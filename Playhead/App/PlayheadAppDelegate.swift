@@ -1,18 +1,23 @@
 // PlayheadAppDelegate.swift
 // Minimal UIKit-style delegate attached via `@UIApplicationDelegateAdaptor`
-// from the pure-SwiftUI `PlayheadApp`. Its only job is to relay the
+// from the pure-SwiftUI `PlayheadApp`. Its job is to relay the
 // background URLSession wake callback
 // (`application(_:handleEventsForBackgroundURLSession:completionHandler:)`)
 // into the `DownloadManager` so pending transfers can finish reporting
-// their state before the app is suspended again.
+// their state before the app is suspended again, AND to kick off the
+// cold-launch force-quit manual-resume scan within the 2 s SLA
+// required by playhead-hyht.
 //
-// playhead-24cm.
+// playhead-24cm + playhead-hyht.
 
 import Foundation
+import OSLog
 import UIKit
 
 @MainActor
 final class PlayheadAppDelegate: NSObject, UIApplicationDelegate {
+
+    private let logger = Logger(subsystem: "com.playhead", category: "AppDelegate")
 
     // MARK: - State
 
@@ -54,6 +59,38 @@ final class PlayheadAppDelegate: NSObject, UIApplicationDelegate {
     }
 
     // MARK: - UIApplicationDelegate
+
+    /// Kicks off the force-quit manual-resume scan (playhead-hyht) on
+    /// cold launch. The scan must complete within 2 s of this callback
+    /// per the bead spec; we dispatch it on the DownloadManager actor
+    /// and log if the wall-clock elapsed time exceeds the SLA (we do
+    /// NOT block launch on the result — the Activity UI renders the
+    /// `paused` state off of persisted WorkJournal rows).
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+    ) -> Bool {
+        if let manager = DownloadManager.shared {
+            let logger = self.logger
+            Task {
+                let started = ContinuousClock.now
+                do {
+                    let outcome = try await manager.scanForSuspendedTransfers()
+                    let elapsed = ContinuousClock.now - started
+                    if elapsed > .seconds(2) {
+                        logger.error("scanForSuspendedTransfers exceeded 2s SLA: elapsed=\(String(describing: elapsed), privacy: .public), resumable=\(outcome.resumableTransferIds.count), corrupted=\(outcome.corruptedTransferIds.count)")
+                    } else {
+                        logger.info("scanForSuspendedTransfers: resumable=\(outcome.resumableTransferIds.count), corrupted=\(outcome.corruptedTransferIds.count), elapsed=\(String(describing: elapsed), privacy: .public)")
+                    }
+                } catch {
+                    logger.error("scanForSuspendedTransfers failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        } else {
+            logger.info("scanForSuspendedTransfers skipped — no DownloadManager registered")
+        }
+        return true
+    }
 
     /// iOS calls this when it has relaunched the app (or brought it back
     /// from suspension) to deliver pending background URLSession events.
