@@ -4788,17 +4788,28 @@ actor AnalysisStore {
         guard let eventType = WorkJournalEntry.EventType(rawValue: eventRaw) else {
             throw AnalysisStoreError.queryFailed("Unknown work_journal event_type '\(eventRaw)'")
         }
-        // `cause` is nullable at the column level.
+        // `cause` is nullable at the column level. playhead-uzdq.1 Fix #4:
+        // on an unknown rawValue we now promote to the forward-compat
+        // `.unknown(rawCause)` sentinel instead of silently downgrading to
+        // `.pipelineError`, which would have poisoned cause-taxonomy
+        // telemetry whenever the enum evolves.
         let cause: InternalMissCause?
         if let rawCause = optionalText(stmt, 6) {
-            // An unknown cause raw value is downgraded to `.pipelineError`
-            // per the InternalMissCause doc comment's "breaking-change plan".
-            cause = InternalMissCause(rawValue: rawCause) ?? .pipelineError
+            cause = InternalMissCause(rawValue: rawCause) ?? .unknown(rawCause)
         } else {
             cause = nil
         }
+        // playhead-uzdq.1 Fix #3: a non-UUID `generation_id` is corruption
+        // — every writer persists `UUID.uuidString`, and silently
+        // substituting a fresh UUID would hide the corruption AND break
+        // the `{episode_id, generation_id}` identity that orphan recovery
+        // joins on. Throw instead of papering over.
         let generationRaw = try requireText(stmt, 2)
-        let generationUUID = UUID(uuidString: generationRaw) ?? UUID()
+        guard let generationUUID = UUID(uuidString: generationRaw) else {
+            throw AnalysisStoreError.queryFailed(
+                "Non-UUID generation_id in work_journal: '\(generationRaw)'"
+            )
+        }
         let artifactRaw = optionalText(stmt, 8) ?? ArtifactClass.scratch.rawValue
         let artifactClass = ArtifactClass(rawValue: artifactRaw) ?? .scratch
         return WorkJournalEntry(

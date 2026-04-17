@@ -134,6 +134,12 @@ enum CauseAttributionPolicy {
         case .asrFailed,
              .pipelineError:
             return .engineError
+
+        // playhead-uzdq.1: forward-compat sentinel for a schema-evolved
+        // cause. Parked at the lowest tier so it never preempts a
+        // real known cause.
+        case .unknown:
+            return .engineError
         }
     }
 
@@ -386,6 +392,16 @@ enum CauseAttributionPolicy {
              .asrFailed,
              .pipelineError:
             // TODO(playhead-dfem): fill in the remaining 13 rows.
+            return SurfaceAttribution(
+                disposition: .failed,
+                reason: .couldntAnalyze,
+                hint: .retry
+            )
+
+        // playhead-uzdq.1: forward-compat sentinel. We do NOT know what
+        // this cause means, so surface the same generic-failure triple
+        // the unmapped rows emit rather than invent a reason.
+        case .unknown:
             return SurfaceAttribution(
                 disposition: .failed,
                 reason: .couldntAnalyze,
