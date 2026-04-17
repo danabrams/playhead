@@ -12,17 +12,25 @@ final class UserPreferences {
     var playbackSpeed: Double
     var skipIntervals: SkipIntervals
     var backgroundProcessingEnabled: Bool
+    /// Whether background downloads (especially the maintenance lane,
+    /// playhead-24cm) may use cellular data. Mirrored into a
+    /// `UserPreferencesSnapshot` UserDefaults slot so the download
+    /// manager can consult it from contexts where SwiftData isn't
+    /// available (e.g. URLSession configuration at app boot).
+    var allowsCellular: Bool
 
     init(
         skipBehavior: SkipBehavior = .auto,
         playbackSpeed: Double = 1.0,
         skipIntervals: SkipIntervals = .init(),
-        backgroundProcessingEnabled: Bool = true
+        backgroundProcessingEnabled: Bool = true,
+        allowsCellular: Bool = true
     ) {
         self.skipBehavior = skipBehavior
         self.playbackSpeed = playbackSpeed
         self.skipIntervals = skipIntervals
         self.backgroundProcessingEnabled = backgroundProcessingEnabled
+        self.allowsCellular = allowsCellular
     }
 }
 

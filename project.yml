@@ -41,6 +41,7 @@ targets:
         UIBackgroundModes:
           - audio
           - processing
+          - fetch
         BGTaskSchedulerPermittedIdentifiers:
           - com.playhead.app.analysis.backfill
           - com.playhead.app.analysis.continued

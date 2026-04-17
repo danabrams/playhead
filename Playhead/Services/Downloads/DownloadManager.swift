@@ -167,10 +167,27 @@ actor DownloadManager {
     /// Optional scheduler for enqueuing pre-analysis jobs after download.
     private var analysisWorkScheduler: AnalysisWorkScheduler?
 
-    /// Background URL session for pre-caching.
-    private var _backgroundSession: URLSession?
+    /// Background URL sessions keyed by role. Lazy-instantiated on first
+    /// use so tests can construct a `DownloadManager` without spinning
+    /// up NSURLSession state for identifiers they don't exercise.
+    /// See `BackgroundSessionRole` for the three lanes.
+    private var _sessionsByRole: [BackgroundSessionRole: URLSession] = [:]
 
-    /// Delegate for background session.
+    /// Feature flag that gates the 24cm dual-session split. Copied from
+    /// `PreAnalysisConfig.useDualBackgroundSessions` at init time and
+    /// re-exposed via `setUseDualBackgroundSessions(_:)` so tests can
+    /// flip it without reaching into UserDefaults.
+    private var useDualBackgroundSessions: Bool
+
+    /// Recorder injected by playhead-uzdq (or any test double) to emit
+    /// WorkJournal events from the download delegate callbacks. Defaults
+    /// to a no-op so 24cm can ship before uzdq lands.
+    private var workJournalRecorder: WorkJournalRecording
+
+    /// Delegate for background sessions. A single delegate instance
+    /// serves all three identifier lanes — the session identifier is
+    /// pulled from `session.configuration.identifier` on each callback
+    /// if routing needs to differ per-lane.
     private let sessionDelegate: EpisodeDownloadDelegate
 
     // MARK: - Streams
@@ -189,7 +206,9 @@ actor DownloadManager {
 
     init(
         cacheDirectory: URL? = nil,
-        maxCacheBytes: Int64 = DownloadManager.defaultMaxCacheBytes
+        maxCacheBytes: Int64 = DownloadManager.defaultMaxCacheBytes,
+        preAnalysisConfig: PreAnalysisConfig? = nil,
+        workJournalRecorder: WorkJournalRecording = NoopWorkJournalRecorder()
     ) {
         let root = cacheDirectory ?? Self.defaultCacheDirectory()
         self.cacheDirectory = root
@@ -197,10 +216,25 @@ actor DownloadManager {
         self.completeDirectory = root.appendingPathComponent("complete", isDirectory: true)
         self.maxCacheBytes = maxCacheBytes
         self.sessionDelegate = EpisodeDownloadDelegate()
+        let config = preAnalysisConfig ?? PreAnalysisConfig.load()
+        self.useDualBackgroundSessions = config.useDualBackgroundSessions
+        self.workJournalRecorder = workJournalRecorder
 
         let (stream, continuation) = AsyncStream<DownloadProgress>.makeStream()
         self.progressStream = stream
         self.progressContinuation = continuation
+
+        // Wire delegate → manager so finalize / failure events route back
+        // onto the actor. The delegate owns the URLSession-side closure;
+        // we own the state it needs to mutate.
+        self.sessionDelegate.workJournal = workJournalRecorder
+        self.sessionDelegate.onUrlSessionDidFinishEvents = { identifier in
+            Task { @MainActor in
+                if let delegate = DownloadManager.appDelegate {
+                    delegate.invokePendingBackgroundCompletionHandler(forIdentifier: identifier)
+                }
+            }
+        }
     }
 
     /// Returns a fresh AsyncStream that receives all future download progress
@@ -302,19 +336,84 @@ actor DownloadManager {
 
     // MARK: - Background Session
 
-    private func backgroundSession() -> URLSession {
-        if let existing = _backgroundSession { return existing }
-        let config = URLSessionConfiguration.background(
-            withIdentifier: "com.playhead.episode-downloads"
-        )
-        config.isDiscretionary = false
-        config.sessionSendsLaunchEvents = true
-        config.allowsCellularAccess = true
+    /// Roles (configurations) under which a background URLSession may be
+    /// instantiated. playhead-24cm introduces `interactive` and
+    /// `maintenance`; `legacy` remains live for one release cycle so
+    /// resume data from the pre-24cm single-session build can drain.
+    enum BackgroundSessionRole: Hashable {
+        /// User-initiated downloads. `isDiscretionary = false`.
+        case interactive
+        /// Subscription auto-downloads. `isDiscretionary = true`,
+        /// `allowsCellularAccess` follows the user preference.
+        case maintenance
+        /// Legacy single-session identifier. Retained during rollout.
+        case legacy
+
+        var identifier: String {
+            switch self {
+            case .interactive: return BackgroundSessionIdentifier.interactive
+            case .maintenance: return BackgroundSessionIdentifier.maintenance
+            case .legacy:      return BackgroundSessionIdentifier.legacy
+            }
+        }
+
+        static func role(for identifier: String) -> BackgroundSessionRole? {
+            switch identifier {
+            case BackgroundSessionIdentifier.interactive: return .interactive
+            case BackgroundSessionIdentifier.maintenance: return .maintenance
+            case BackgroundSessionIdentifier.legacy:      return .legacy
+            default: return nil
+            }
+        }
+    }
+
+    /// Returns the URLSession for the given role, instantiating it lazily.
+    /// When the 24cm feature flag is OFF, callers that ask for `.interactive`
+    /// or `.maintenance` are transparently routed to `.legacy` so the
+    /// behavior matches the pre-24cm build exactly.
+    private func backgroundSession(for role: BackgroundSessionRole) -> URLSession {
+        let resolvedRole: BackgroundSessionRole = {
+            if !useDualBackgroundSessions, role != .legacy { return .legacy }
+            return role
+        }()
+
+        if let existing = _sessionsByRole[resolvedRole] { return existing }
+
+        let config: URLSessionConfiguration
+        switch resolvedRole {
+        case .interactive:
+            config = URLSessionConfiguration.background(
+                withIdentifier: BackgroundSessionIdentifier.interactive
+            )
+            config.sessionSendsLaunchEvents = true
+            config.isDiscretionary = false
+            config.allowsCellularAccess = true
+        case .maintenance:
+            config = URLSessionConfiguration.background(
+                withIdentifier: BackgroundSessionIdentifier.maintenance
+            )
+            config.sessionSendsLaunchEvents = true
+            config.isDiscretionary = true
+            // UserPreferences.allowsCellular governs the maintenance lane
+            // because auto-downloads are the surface most likely to
+            // surprise users on cellular.
+            config.allowsCellularAccess = UserPreferencesSnapshot.current.allowsCellular
+        case .legacy:
+            config = URLSessionConfiguration.background(
+                withIdentifier: BackgroundSessionIdentifier.legacy
+            )
+            config.sessionSendsLaunchEvents = true
+            config.isDiscretionary = false
+            config.allowsCellularAccess = true
+        }
+
         let session = URLSession(
             configuration: config,
             delegate: sessionDelegate,
             delegateQueue: nil
         )
+
+        // Wire the onDownloadComplete callback once per session.
         sessionDelegate.onDownloadComplete = { [manager = self] episodeId, fileURL in
             Task {
                 await manager.handleBackgroundDownloadComplete(
@@ -323,8 +422,47 @@ actor DownloadManager {
                 )
             }
         }
-        _backgroundSession = session
+
+        _sessionsByRole[resolvedRole] = session
         return session
+    }
+
+    /// Legacy single-session accessor preserved for existing call sites
+    /// (`backgroundDownload(episodeId:from:)` below). Routes to the
+    /// legacy identifier unless the feature flag is on — in which case
+    /// user-initiated downloads use the interactive lane.
+    private func backgroundSession() -> URLSession {
+        backgroundSession(for: useDualBackgroundSessions ? .interactive : .legacy)
+    }
+
+    /// Re-instantiates the URLSession for `identifier` so its delegate
+    /// callbacks fire. Invoked by `PlayheadAppDelegate` when iOS wakes
+    /// the app to relay pending background events.
+    func resumeSession(identifier: String) {
+        guard let role = BackgroundSessionRole.role(for: identifier) else { return }
+        _ = backgroundSession(for: role)
+    }
+
+    /// Overridable for tests: flip the 24cm feature flag in-process.
+    func setUseDualBackgroundSessionsForTesting(_ value: Bool) {
+        self.useDualBackgroundSessions = value
+    }
+
+    /// Overridable for tests / uzdq integration: replace the work-journal
+    /// recorder after construction.
+    func setWorkJournalRecorder(_ recorder: WorkJournalRecording) {
+        self.workJournalRecorder = recorder
+        self.sessionDelegate.workJournal = recorder
+    }
+
+    // MARK: - Test hooks (internal)
+
+    func backgroundSessionForTesting(role: BackgroundSessionRole) -> URLSession {
+        backgroundSession(for: role)
+    }
+
+    func instantiatedSessionIdentifiersForTesting() -> Set<String> {
+        Set(_sessionsByRole.values.compactMap { $0.configuration.identifier })
     }
 
     // MARK: - Progressive Download (Streaming Cache)
@@ -980,14 +1118,93 @@ actor DownloadManager {
 
 extension DownloadManager: DownloadProviding {}
 
+// MARK: - Shared Reference Plumbing (playhead-24cm)
+
+extension DownloadManager {
+    /// Non-owning shared reference used by `PlayheadAppDelegate` to
+    /// reach the live download manager during background wake events.
+    /// Stored weakly so tests and non-app hosts don't keep a manager
+    /// alive. The `PlayheadRuntime` registers its manager at boot.
+    ///
+    /// This is intentionally minimal — we don't expose a service
+    /// locator, just a single slot the app delegate can consult.
+    nonisolated(unsafe) private static var _shared: DownloadManager?
+
+    /// Registers `manager` as the app-wide shared DownloadManager for
+    /// background session wake-up routing.
+    @MainActor
+    static func registerShared(_ manager: DownloadManager) {
+        _shared = manager
+    }
+
+    /// Current shared DownloadManager, if one has been registered.
+    static var shared: DownloadManager? {
+        _shared
+    }
+
+    /// Non-owning reference to the app delegate. Set by
+    /// `PlayheadApp.registerAppDelegate(_:)` at boot so the URLSession
+    /// finish-events callback can reach the pending-handler map.
+    nonisolated(unsafe) private static var _appDelegate: PlayheadAppDelegate?
+
+    @MainActor
+    static func registerAppDelegate(_ delegate: PlayheadAppDelegate) {
+        _appDelegate = delegate
+    }
+
+    static var appDelegate: PlayheadAppDelegate? {
+        _appDelegate
+    }
+}
+
+// MARK: - UserPreferencesSnapshot
+
+/// Snapshot of the subset of `UserPreferences` that download manager
+/// background configuration needs to read at URLSession-construction
+/// time (which may be off-main, synchronous, and before SwiftData is
+/// ready). Persisted in UserDefaults by the settings UI. See
+/// `UserPreferences.allowsCellular` for the source of truth.
+struct UserPreferencesSnapshot: Sendable {
+    var allowsCellular: Bool
+
+    static let defaultsKey = "UserPreferencesSnapshot.allowsCellular"
+
+    static var current: UserPreferencesSnapshot {
+        let allows = UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true
+        return UserPreferencesSnapshot(allowsCellular: allows)
+    }
+
+    static func save(allowsCellular: Bool) {
+        UserDefaults.standard.set(allowsCellular, forKey: defaultsKey)
+    }
+}
+
 // MARK: - EpisodeDownloadDelegate
 
 /// URLSession delegate for handling background episode download events.
+///
+/// Serves both the 24cm-split `interactive`/`maintenance` sessions and the
+/// legacy `com.playhead.episode-downloads` session during the rollout
+/// window. The session identifier is pulled from
+/// `session.configuration.identifier` on each callback so downstream
+/// observers can tell the lanes apart without the delegate tracking
+/// per-lane state.
 final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Sendable {
     private let logger = Logger(subsystem: "com.playhead", category: "EpisodeDownload")
 
     /// Callback for completed downloads: (episodeId, fileURL) -> Void.
     nonisolated(unsafe) var onDownloadComplete: ((String, URL) -> Void)?
+
+    /// Invoked when the URLSession has drained all pending events after
+    /// a background wake. Forwards the session's identifier so the app
+    /// delegate can match it against its pending completion-handler map.
+    nonisolated(unsafe) var onUrlSessionDidFinishEvents: ((String) -> Void)?
+
+    /// WorkJournal recorder for finalized / failed events. Swapped from
+    /// `NoopWorkJournalRecorder` to the real implementation by
+    /// `DownloadManager.setWorkJournalRecorder(_:)` once playhead-uzdq
+    /// is wired up.
+    nonisolated(unsafe) var workJournal: WorkJournalRecording = NoopWorkJournalRecorder()
 
     func urlSession(
         _ session: URLSession,
@@ -1006,7 +1223,10 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
         }()
         let filename = DownloadManager.safeFilename(for: episodeId)
 
-        // Move the file to the complete directory.
+        // Move the file to the complete directory. Note: StorageBudget
+        // (playhead-h7r) placement lands as the media artifact class —
+        // for now we call into the existing complete/ directory which
+        // is the media class on disk.
         let cacheDir = DownloadManager.defaultCacheDirectory()
             .appendingPathComponent("complete", isDirectory: true)
         let destURL = cacheDir.appendingPathComponent("\(filename).\(ext)")
@@ -1024,8 +1244,18 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
             try fm.moveItem(at: location, to: destURL)
             logger.info("Background download complete for \(episodeId)")
             onDownloadComplete?(episodeId, destURL)
+
+            // Emit finalized event for WorkJournal (playhead-uzdq).
+            let recorder = workJournal
+            Task {
+                await recorder.recordFinalized(episodeId: episodeId)
+            }
         } catch {
             logger.error("Failed to move background download for \(episodeId): \(error.localizedDescription)")
+            let recorder = workJournal
+            Task {
+                await recorder.recordFailed(episodeId: episodeId, cause: .pipelineError)
+            }
         }
     }
 
@@ -1041,6 +1271,10 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
             : 0
         let episodeId = downloadTask.taskDescription ?? "unknown"
         logger.debug("Episode \(episodeId) download: \(String(format: "%.1f", progress * 100))%")
+        // playhead-44h1 owns the Live Activity update. For 24cm we log
+        // progress and emit through the existing DownloadManager
+        // broadcast surface downstream via onDownloadProgress hooks that
+        // 44h1 will add.
     }
 
     func urlSession(
@@ -1048,9 +1282,25 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
         task: URLSessionTask,
         didCompleteWithError error: (any Error)?
     ) {
-        if let error {
-            let episodeId = task.taskDescription ?? "unknown"
-            logger.error("Episode \(episodeId) download failed: \(error.localizedDescription)")
+        guard let error else {
+            // Success path is handled by didFinishDownloadingTo. Nothing
+            // to do here — don't double-emit a finalized event.
+            return
         }
+        let episodeId = task.taskDescription ?? "unknown"
+        let cause = InternalMissCause.fromTaskError(error)
+        logger.error("Episode \(episodeId) download failed (\(cause.rawValue)): \(error.localizedDescription)")
+        let recorder = workJournal
+        Task {
+            await recorder.recordFailed(episodeId: episodeId, cause: cause)
+        }
+    }
+
+    /// Called by URLSession after all pending background events have
+    /// been delivered to this delegate. Forwards the identifier so the
+    /// `PlayheadAppDelegate` can invoke its stored completion handler.
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        guard let identifier = session.configuration.identifier else { return }
+        onUrlSessionDidFinishEvents?(identifier)
     }
 }

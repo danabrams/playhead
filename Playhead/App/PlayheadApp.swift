@@ -7,6 +7,10 @@ struct PlayheadApp: App {
     let modelContainer: ModelContainer
     @State private var runtime = PlayheadRuntime()
     @Environment(\.scenePhase) private var scenePhase
+    /// playhead-24cm: attaches `PlayheadAppDelegate` so iOS can deliver
+    /// `application(_:handleEventsForBackgroundURLSession:completionHandler:)`
+    /// when the OS wakes the app to drain background URLSession events.
+    @UIApplicationDelegateAdaptor(PlayheadAppDelegate.self) private var appDelegate
 
     private static let logger = Logger(subsystem: "com.playhead", category: "App")
     private static let playbackPositionSaveInterval: TimeInterval = 15
@@ -49,6 +53,11 @@ struct PlayheadApp: App {
             RootView()
                 .environment(runtime)
                 .task {
+                    // playhead-24cm: register the live DownloadManager
+                    // and AppDelegate for background URLSession wake-up
+                    // routing. Safe to call repeatedly.
+                    DownloadManager.registerAppDelegate(appDelegate)
+                    DownloadManager.registerShared(runtime.downloadManager)
                     runtime.setPlaybackPositionPersistenceHandler { trigger in
                         await Self.persistPlaybackPosition(
                             runtime: runtime,
