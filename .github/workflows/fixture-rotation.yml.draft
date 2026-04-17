@@ -1,0 +1,60 @@
+# DRAFT: weekly rotation for playhead-ym57 device-lab fixtures.
+#
+# Filename intentionally ends in `.draft` so GitHub Actions will NOT
+# auto-schedule this workflow. Rename to `fixture-rotation.yml` to enable
+# once:
+#   1) the rotating candidate pool (scripts/rotation-pool.json) has been
+#      populated with licensed entries; AND
+#   2) the fixtures-v<N> GitHub Release has been cut and download-fixtures.sh
+#      has been switched from its stub mode to a real curl.
+#
+# The workflow runs every Monday at 13:00 UTC and opens a PR with the
+# rotation-picked set merged into fixtures-manifest.json.
+
+name: Fixture Rotation (DRAFT)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 13 * * 1'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  rotate:
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Verify fixtures integrity
+        run: |
+          set -euo pipefail
+          ./scripts/download-fixtures.sh --verify-only
+
+      - name: Rotate fixtures
+        run: |
+          set -euo pipefail
+          swift scripts/rotate-fixtures.swift
+
+      - name: Open PR if manifest changed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- PlayheadTests/Fixtures/Corpus/fixtures-manifest.json; then
+            echo "rotation: no manifest changes this week"
+            exit 0
+          fi
+          BRANCH="fixture-rotation/$(date -u +%Y-%m-%d)"
+          git checkout -b "$BRANCH"
+          git add PlayheadTests/Fixtures/Corpus/fixtures-manifest.json
+          git -c user.email="bot@playhead" -c user.name="fixture-rotation-bot" \
+              commit -m "fixture-rotation: weekly rotating-4 refresh"
+          git push origin "$BRANCH"
+          gh pr create --fill --base main --head "$BRANCH"

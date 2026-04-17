@@ -232,3 +232,85 @@ struct CorpusLoader {
 
 /// Dummy class used to locate the test bundle.
 private final class BundleToken {}
+
+// MARK: - Fixture Manifest (playhead-ym57)
+
+extension CorpusLoader {
+
+    /// Errors surfaced by the fixture-manifest accessors.
+    enum FixtureManifestError: Error, CustomStringConvertible {
+        case manifestNotReadable(URL)
+        case manifestDecodeFailed(URL, Error)
+        case fixtureNotFound(String)
+        case mediaFileMissing(String, URL)
+
+        var description: String {
+            switch self {
+            case .manifestNotReadable(let url):
+                "fixtures-manifest.json not readable at \(url.path)"
+            case .manifestDecodeFailed(let url, let err):
+                "fixtures-manifest.json at \(url.path) failed to decode: \(err.localizedDescription)"
+            case .fixtureNotFound(let id):
+                "No fixture with id \(id) in fixtures-manifest.json"
+            case .mediaFileMissing(let id, let url):
+                "Fixture \(id) media file missing at \(url.path)"
+            }
+        }
+    }
+
+    /// The on-disk Corpus directory for this source tree. Resolved from
+    /// this source file's `#filePath` because the test bundle has no
+    /// Resources build phase and we need canonical disk access for fixture
+    /// integrity verification.
+    static func corpusDirectoryURL(filePath: String = #filePath) -> URL {
+        URL(fileURLWithPath: filePath)
+            .deletingLastPathComponent() // Corpus/
+    }
+
+    /// Load the versioned fixtures manifest.
+    func loadFixtureManifest() throws -> FixtureManifest {
+        let url = Self.corpusDirectoryURL().appendingPathComponent("fixtures-manifest.json")
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw FixtureManifestError.manifestNotReadable(url)
+        }
+        do {
+            return try JSONDecoder().decode(FixtureManifest.self, from: data)
+        } catch {
+            throw FixtureManifestError.manifestDecodeFailed(url, error)
+        }
+    }
+
+    /// Return just the locked-core 8 fixtures, ordered by slot.
+    func loadLockedCoreFixtures() throws -> [FixtureDescriptor] {
+        let manifest = try loadFixtureManifest()
+        return manifest.fixtures.filter(\.locked).sorted { $0.slot < $1.slot }
+    }
+
+    /// Return just the rotating fixtures (locked == false).
+    func loadRotatingFixtures() throws -> [FixtureDescriptor] {
+        let manifest = try loadFixtureManifest()
+        return manifest.fixtures.filter { !$0.locked }
+    }
+
+    /// Look up a single fixture by id.
+    func fixture(withId id: String) throws -> FixtureDescriptor {
+        let manifest = try loadFixtureManifest()
+        guard let match = manifest.fixtures.first(where: { $0.id == id }) else {
+            throw FixtureManifestError.fixtureNotFound(id)
+        }
+        return match
+    }
+
+    /// Resolve the absolute URL of a fixture's media file. Throws if the
+    /// file is missing on disk (useful as a fast precondition in tests).
+    func mediaURL(for fixture: FixtureDescriptor) throws -> URL {
+        let url = Self.corpusDirectoryURL().appendingPathComponent(fixture.file)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw FixtureManifestError.mediaFileMissing(fixture.id, url)
+        }
+        return url
+    }
+}

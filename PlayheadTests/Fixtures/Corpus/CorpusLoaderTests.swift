@@ -239,6 +239,34 @@ struct CorpusValidationEdgeCaseTests {
         #expect(errors.isEmpty, "Empty no-ad annotations should validate cleanly")
     }
 
+    @Test("Loads the ym57 fixture manifest and locked-core 8")
+    func loadFixtureManifest() throws {
+        let manifest = try loader.loadFixtureManifest()
+        #expect(manifest.version == FixtureManifest.currentVersion)
+        #expect(manifest.fixtures.count >= 8)
+
+        let locked = try loader.loadLockedCoreFixtures()
+        #expect(locked.count == 8)
+        #expect(locked.map(\.slot) == Array(1...8), "Locked-core must be slot-ordered 1..8")
+        let allLocked = locked.allSatisfy(\.locked)
+        #expect(allLocked, "Every locked-core fixture should report locked == true")
+
+        // Every locked-core fixture must resolve to a real file on disk.
+        for fx in locked {
+            let url = try loader.mediaURL(for: fx)
+            #expect(FileManager.default.fileExists(atPath: url.path),
+                    "Missing media file for \(fx.id) at \(url.path)")
+        }
+    }
+
+    @Test("Fixture lookup by id returns the right descriptor")
+    func fixtureLookupById() throws {
+        let fx = try loader.fixture(withId: "fixture-01-30min-clean-speech")
+        #expect(fx.slot == 1)
+        #expect(fx.taxonomy.durationBucket == .m30)
+        #expect(fx.taxonomy.language == "en-US")
+    }
+
     @Test("Converts annotation to ReplayConfiguration")
     func annotationToReplayConfig() throws {
         let annotations = try loader.loadAllAnnotations()
