@@ -37,6 +37,14 @@ final class PlayheadRuntime {
     let analysisJobRunner: AnalysisJobRunner
     let analysisWorkScheduler: AnalysisWorkScheduler
     let analysisJobReconciler: AnalysisJobReconciler
+    /// playhead-01t8: runtime-owned coordinator that lets the scheduler
+    /// flip a preemption flag on active lower-lane jobs when admitting
+    /// a Now-lane job. Installed on `analysisWorkScheduler` via
+    /// `setLanePreemptionHandler(_:)` and threaded into
+    /// `analysisJobRunner` so the runner can register each job and
+    /// receive a `PreemptionSignal` for the downstream services to
+    /// poll at their safe points.
+    let lanePreemptionCoordinator: LanePreemptionCoordinator
 
     /// Phase 7.2: Shared user correction store. Wired to `PersistentUserCorrectionStore`
     /// in production; views (TranscriptPeekView, AdBannerView callback) consume this
@@ -381,13 +389,16 @@ final class PlayheadRuntime {
         )
 
         let cueMaterializer = SkipCueMaterializer(store: analysisStore)
+        let lanePreemptionCoordinator = LanePreemptionCoordinator()
+        self.lanePreemptionCoordinator = lanePreemptionCoordinator
         self.analysisJobRunner = AnalysisJobRunner(
             store: analysisStore,
             audioProvider: audioService,
             featureService: featureService,
             transcriptEngine: transcriptEngine,
             adDetection: adDetectionService,
-            cueMaterializer: cueMaterializer
+            cueMaterializer: cueMaterializer,
+            preemptionCoordinator: lanePreemptionCoordinator
         )
         self.analysisWorkScheduler = AnalysisWorkScheduler(
             store: analysisStore,
@@ -451,7 +462,7 @@ final class PlayheadRuntime {
             await adDetectionService.setUserCorrectionStore(correctionStore)
         }
 
-        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService] in
+        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator] in
             // Migrate the analysis store before any component queries its tables.
             do {
                 try await analysisStore.migrate()
@@ -493,6 +504,13 @@ final class PlayheadRuntime {
                 scheduler: analysisWorkScheduler,
                 reconciler: analysisJobReconciler
             )
+            // playhead-01t8: install the preemption coordinator as the
+            // scheduler's `LanePreemptionHandler` before the loop
+            // starts. The runner is already wired with the same
+            // coordinator instance, so a Now-lane admission by the
+            // scheduler flips the flag on the exact signal the running
+            // job is polling.
+            await analysisWorkScheduler.setLanePreemptionHandler(lanePreemptionCoordinator)
             do {
                 _ = try await analysisJobReconciler.reconcile()
             } catch {

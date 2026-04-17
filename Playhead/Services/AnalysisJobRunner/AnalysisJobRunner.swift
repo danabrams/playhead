@@ -25,6 +25,13 @@ actor AnalysisJobRunner {
     private let adDetection: AdDetectionProviding
     private let cueMaterializer: SkipCueMaterializer
     private let thermalStateProvider: @Sendable () -> ProcessInfo.ThermalState
+    /// Optional coordinator (playhead-01t8). When non-nil, every
+    /// `run(_:)` registers with the coordinator at start-of-work,
+    /// threads the returned `PreemptionSignal` down into feature
+    /// extraction + transcription, and unregisters on exit. When nil
+    /// (unit-test paths that never drive the scheduler), the runner
+    /// behaves exactly as it did pre-01t8.
+    private let preemptionCoordinator: LanePreemptionCoordinator?
 
     // MARK: - Init
 
@@ -37,7 +44,8 @@ actor AnalysisJobRunner {
         cueMaterializer: SkipCueMaterializer,
         thermalStateProvider: @escaping @Sendable () -> ProcessInfo.ThermalState = {
             ProcessInfo.processInfo.thermalState
-        }
+        },
+        preemptionCoordinator: LanePreemptionCoordinator? = nil
     ) {
         self.store = store
         self.audioProvider = audioProvider
@@ -46,6 +54,7 @@ actor AnalysisJobRunner {
         self.adDetection = adDetection
         self.cueMaterializer = cueMaterializer
         self.thermalStateProvider = thermalStateProvider
+        self.preemptionCoordinator = preemptionCoordinator
     }
 
     // MARK: - Run
@@ -54,6 +63,39 @@ actor AnalysisJobRunner {
     /// Returns an `AnalysisOutcome` summarizing coverage achieved and stop reason.
     func run(_ request: AnalysisRangeRequest) async -> AnalysisOutcome {
         let assetId = request.analysisAssetId
+
+        // playhead-01t8: register with the preemption coordinator so a
+        // higher-lane admission can flip our signal at its next safe
+        // point. The signal is threaded into `featureService` and
+        // `transcriptEngine`; on observation those services
+        // `acknowledge(jobId:)` themselves and exit cleanly. The
+        // runner only needs to unregister on exit — acknowledge is
+        // idempotent (it no-ops on an already-unregistered id).
+        let preemption: PreemptionContext?
+        if let coordinator = preemptionCoordinator {
+            let lease = makeRegistrationLease(request: request)
+            let signal = await coordinator.register(
+                jobId: request.jobId,
+                lane: request.schedulerLane,
+                lease: lease
+            )
+            preemption = PreemptionContext(
+                jobId: request.jobId,
+                signal: signal,
+                coordinator: coordinator
+            )
+        } else {
+            preemption = nil
+        }
+        defer {
+            // Fire-and-forget unregister. On the preempt path the
+            // service already called `acknowledge`, so this is a no-op
+            // by design (the id is already gone from the registry).
+            if let coordinator = preemptionCoordinator {
+                let jobId = request.jobId
+                Task { await coordinator.unregister(jobId: jobId) }
+            }
+        }
 
         // -- Stage 1: Audio decode --
 
@@ -99,13 +141,28 @@ actor AnalysisJobRunner {
             try await featureService.extractAndPersist(
                 shards: shards,
                 analysisAssetId: assetId,
-                existingCoverage: existingFeatureCoverage
+                existingCoverage: existingFeatureCoverage,
+                preemption: preemption
             )
             PreAnalysisInstrumentation.endStage(featureSignpost)
         } catch {
             PreAnalysisInstrumentation.endStage(featureSignpost)
             logger.error("Feature extraction failed for job \(request.jobId): \(error)")
             return makeOutcome(assetId: assetId, request: request, stopReason: .failed("features: \(error)"))
+        }
+
+        // playhead-01t8: if the preempt signal flipped during feature
+        // extraction, the service acknowledged at its safe point and
+        // returned early. Detect it here before we spin up the heavy
+        // transcription stage and report `.preempted` with whatever
+        // coverage persisted.
+        if let preemption, await preemption.isPreemptionRequested() {
+            return makeOutcome(
+                assetId: assetId,
+                request: request,
+                featureCoverageSec: await currentFeatureCoverage(assetId: assetId),
+                stopReason: .preempted
+            )
         }
 
         let featureCoverage = shards.map { $0.startTime + $0.duration }.max() ?? 0
@@ -130,7 +187,8 @@ actor AnalysisJobRunner {
             shards: shards,
             analysisAssetId: assetId,
             snapshot: snapshot,
-            podcastId: request.podcastId
+            podcastId: request.podcastId,
+            preemption: preemption
         )
 
         // Observe the event stream for completion, with a 5-minute timeout
@@ -193,6 +251,21 @@ actor AnalysisJobRunner {
                 featureCoverageSec: featureCoverage,
                 transcriptCoverageSec: transcriptCoverage,
                 stopReason: earlyStop
+            )
+        }
+
+        // playhead-01t8: honor a preempt that landed during
+        // transcription. The transcript engine acknowledged at its
+        // safe point and exited; we report `.preempted` with the
+        // coverage it managed to persist rather than burning the Now
+        // lane's admission budget on ad detection.
+        if let preemption, await preemption.isPreemptionRequested() {
+            return makeOutcome(
+                assetId: assetId,
+                request: request,
+                featureCoverageSec: featureCoverage,
+                transcriptCoverageSec: transcriptCoverage,
+                stopReason: .preempted
             )
         }
 
@@ -362,6 +435,43 @@ actor AnalysisJobRunner {
         }
 
         return nil
+    }
+
+    // MARK: - Preemption helpers (playhead-01t8)
+
+    /// Build a synthetic `EpisodeExecutionLease` purely for
+    /// `LanePreemptionCoordinator.register(...)` diagnostics. The
+    /// runner is invoked from `AnalysisWorkScheduler`, which uses its
+    /// own `analysis_jobs`-row lease (see
+    /// `AnalysisStore.acquireLease(jobId:owner:expiresAt:)`) that is
+    /// structurally different from `EpisodeExecutionLease` (which is
+    /// owned by `AnalysisCoordinator`). The coordinator only stores
+    /// the lease value on its `LanePreemptionRegistration` for
+    /// diagnostics — it never re-acquires it or reads any of its
+    /// fields to make decisions. A synthetic value is therefore
+    /// fidelity-preserving for the preemption contract.
+    private func makeRegistrationLease(
+        request: AnalysisRangeRequest
+    ) -> EpisodeExecutionLease {
+        let now = Date().timeIntervalSince1970
+        return EpisodeExecutionLease(
+            episodeId: request.episodeId,
+            ownerWorkerId: "preAnalysis:\(request.jobId)",
+            generationID: UUID(),
+            schedulerEpoch: 0,
+            acquiredAt: now,
+            expiresAt: now + 300,
+            currentCheckpoint: nil,
+            preemptionRequested: false
+        )
+    }
+
+    /// Look up the current persisted feature coverage for an asset
+    /// so the `.preempted` outcome can report accurate coverage
+    /// without re-walking the feature batch in memory.
+    private func currentFeatureCoverage(assetId: String) async -> Double {
+        guard let asset = try? await store.fetchAsset(id: assetId) else { return 0 }
+        return asset.featureCoverageEndTime ?? 0
     }
 
     // MARK: - Outcome Builder

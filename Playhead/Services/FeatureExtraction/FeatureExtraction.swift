@@ -480,12 +480,24 @@ actor FeatureExtractionService {
     ///   - shards: Decoded audio shards from AnalysisAudioService.
     ///   - analysisAssetId: The analysis asset these shards belong to.
     ///   - existingCoverage: End time already covered (skip windows before this).
+    ///   - preemption: Optional context from
+    ///     `LanePreemptionCoordinator` (playhead-01t8). When provided,
+    ///     the service polls `signal.isPreemptionRequested()` after
+    ///     each shard's feature batch + checkpoint persists. On a
+    ///     true result it `acknowledge()`s the coordinator and returns
+    ///     early with whatever windows were persisted so far. This is
+    ///     the (a) "post-shard in FeatureExtraction" AND (b)
+    ///     "FeatureExtractionCheckpoint transitions" safe points from
+    ///     the bead spec — they are the same boundary from the
+    ///     caller's perspective because `persistFeatureExtractionBatch`
+    ///     atomically writes windows + checkpoint + coverage.
     /// - Returns: Array of extracted FeatureWindow records.
     @discardableResult
     func extractAndPersist(
         shards: [AnalysisShard],
         analysisAssetId: String,
-        existingCoverage: Double = 0
+        existingCoverage: Double = 0,
+        preemption: PreemptionContext? = nil
     ) async throws -> [FeatureWindow] {
         guard !shards.isEmpty else {
             throw FeatureExtractionError.emptyInput
@@ -567,6 +579,16 @@ actor FeatureExtractionService {
             }
 
             allWindows.append(contentsOf: windows)
+
+            // playhead-01t8 safe points (a) + (b): the shard's windows,
+            // checkpoint, and coverage watermark are durable. If a
+            // higher-lane job has flipped the preemption signal we
+            // acknowledge and exit here — the DB is crash-safe and
+            // the next run will resume from `effectiveCoverage`.
+            if let preemption, await preemption.isPreemptionRequested() {
+                await preemption.acknowledge()
+                return allWindows
+            }
         }
 
         return allWindows

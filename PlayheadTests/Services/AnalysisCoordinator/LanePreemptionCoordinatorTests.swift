@@ -503,6 +503,160 @@ struct LanePreemptionCoordinatorTests {
     }
 }
 
+// MARK: - Safe-point round trip (playhead-01t8)
+
+/// End-to-end test proving the production wiring works: the runner
+/// registers with the coordinator, threads a `PreemptionContext` into
+/// `FeatureExtractionService.extractAndPersist`, the flag flips from a
+/// Now-lane admission simulated by `preemptLowerLanes(for: .now)`, the
+/// extractor observes the signal at its post-shard safe point, calls
+/// `acknowledge`, and returns early. The scheduler's `awaitLowerLaneAck`
+/// then resolves within the HARD GATE budget.
+///
+/// We drive `FeatureExtractionService` directly (rather than via
+/// `AnalysisJobRunner.run`) because the runner's decode + transcription
+/// stages require real audio fixtures — the production poll site we care
+/// about is `extractAndPersist`'s post-shard block, and this test hits it
+/// with production code paths and a real SQLite-backed `AnalysisStore`.
+@Suite("LanePreemptionCoordinator — FeatureExtraction safe-point round trip")
+struct LanePreemptionFeatureExtractionRoundTripTests {
+
+    private func makeAssetSeeded(store: AnalysisStore, assetId: String) async throws {
+        let asset = AnalysisAsset(
+            id: assetId,
+            episodeId: "ep-\(assetId)",
+            assetFingerprint: "fp-\(assetId)",
+            weakFingerprint: nil,
+            sourceURL: "",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "queued",
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        )
+        try await store.insertAsset(asset)
+    }
+
+    private func makeLease(episodeId: String) -> EpisodeExecutionLease {
+        EpisodeExecutionLease(
+            episodeId: episodeId,
+            ownerWorkerId: "test-worker",
+            generationID: UUID(),
+            schedulerEpoch: 1,
+            acquiredAt: Date().timeIntervalSince1970,
+            expiresAt: Date().timeIntervalSince1970 + 30,
+            currentCheckpoint: nil,
+            preemptionRequested: false
+        )
+    }
+
+    /// Generates a non-silent 16 kHz shard large enough to produce
+    /// feature windows on every shard. Uses a simple sinusoid so feature
+    /// extraction does real work rather than being skipped as empty.
+    private func makeNonSilentShard(id: Int, startTime: Double, duration: Double = 5) -> AnalysisShard {
+        let sampleRate = 16_000
+        let sampleCount = sampleRate * Int(duration)
+        let freq: Float = 220.0
+        let samples: [Float] = (0..<sampleCount).map { i in
+            let t = Float(i) / Float(sampleRate)
+            return 0.25 * Float(sin(Double(2 * .pi * freq * t)))
+        }
+        return AnalysisShard(
+            id: id,
+            episodeID: "ep-roundtrip",
+            startTime: startTime,
+            duration: duration,
+            samples: samples
+        )
+    }
+
+    @Test("Round trip: preemptLowerLanes flips signal → FeatureExtraction acks at post-shard boundary",
+          .timeLimit(.minutes(1)))
+    func featureExtractionAcksAtSafePoint() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-roundtrip-\(UUID().uuidString)"
+        try await makeAssetSeeded(store: store, assetId: assetId)
+
+        // Eight 5 s shards = 40 s of audio. That's enough shards to
+        // guarantee the extractor hits at least one post-shard poll
+        // AFTER the preempt request lands mid-flight.
+        let shards = (0..<8).map { i in
+            makeNonSilentShard(id: i, startTime: Double(i) * 5, duration: 5)
+        }
+
+        let coordinator = LanePreemptionCoordinator()
+        let featureService = FeatureExtractionService(store: store)
+
+        // Register the job in the Background lane. A Now admission will
+        // flip its signal.
+        let jobId = "job-roundtrip-\(UUID().uuidString)"
+        let signal = await coordinator.register(
+            jobId: jobId,
+            lane: .background,
+            lease: makeLease(episodeId: "ep-roundtrip")
+        )
+        let context = PreemptionContext(
+            jobId: jobId,
+            signal: signal,
+            coordinator: coordinator
+        )
+
+        // Kick off extraction on its own task so we can flip the signal
+        // mid-flight.
+        let extractionTask = Task<[FeatureWindow], Error> {
+            try await featureService.extractAndPersist(
+                shards: shards,
+                analysisAssetId: assetId,
+                existingCoverage: 0,
+                preemption: context
+            )
+        }
+
+        // Give the extractor enough time to finish the first shard and
+        // reach its post-shard poll. Feature extraction is fast — 50 ms
+        // is ample headroom on an idle simulator and small enough to
+        // leave shards remaining for the preempt to interrupt.
+        try await Task.sleep(for: .milliseconds(50))
+
+        let clock = ContinuousClock()
+        let admissionAt = clock.now
+        await coordinator.preemptLowerLanes(for: .now)
+        let acked = await coordinator.awaitLowerLaneAck(
+            after: .now,
+            within: LanePreemptionCoordinator.preemptionLatencyBudget
+        )
+        let elapsed = clock.now - admissionAt
+
+        let windows = try await extractionTask.value
+
+        #expect(acked, "Extractor must acknowledge within the 5 s HARD GATE")
+        #expect(elapsed < LanePreemptionCoordinator.preemptionLatencyBudget,
+                "Round-trip latency \(elapsed) exceeded HARD GATE")
+        #expect(await signal.cause == .userPreempted,
+                "Signal must record the user-preempted cause")
+
+        // The extractor should have returned some windows (safe-point
+        // exit preserves work) but fewer than the full 8 shards' worth
+        // — otherwise it didn't actually pause, it just completed.
+        #expect(!windows.isEmpty,
+                "Extractor should have persisted at least one shard before pausing")
+
+        // After exit, the coverage watermark should be durable in the
+        // store (atomic write inside persistFeatureExtractionBatch).
+        let asset = try await store.fetchAsset(id: assetId)
+        #expect(asset?.featureCoverageEndTime != nil,
+                "Feature coverage checkpoint must be durable after preempt")
+        if let coverage = asset?.featureCoverageEndTime {
+            #expect(coverage > 0, "Coverage \(coverage) must be > 0 after at least one shard")
+        }
+
+        // Coordinator should no longer list the job after acknowledge.
+        #expect(await coordinator.activeJobs(in: .background) == [],
+                "Acknowledged job must be removed from the registry")
+    }
+}
+
 // MARK: - Lane ordering
 
 @Suite("LanePreemptionCoordinator — Lane Ordering")

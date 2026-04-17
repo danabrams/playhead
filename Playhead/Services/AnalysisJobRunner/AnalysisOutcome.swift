@@ -11,6 +11,12 @@ struct AnalysisOutcome: Sendable {
         case blockedByModel
         case memoryPressure
         case backgroundExpired
+        /// A higher-lane admission (playhead-01t8) flipped the
+        /// preemption signal and the runner paused at its next safe
+        /// point. Coverage fields carry whatever the job managed to
+        /// persist before the pause — by contract this is always on
+        /// a checkpoint boundary so the next run is resumable.
+        case preempted
         case failed(String)
     }
 

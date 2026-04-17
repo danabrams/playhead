@@ -36,6 +36,39 @@
 import Foundation
 import OSLog
 
+// MARK: - PreemptionContext
+
+/// Capability bundle handed to downstream services so they can poll for
+/// preemption at their safe-point boundaries and acknowledge promptly.
+///
+/// The runner registers with the coordinator, receives a
+/// `PreemptionSignal`, and passes this context into
+/// `FeatureExtractionService.extractAndPersist(...)` and
+/// `TranscriptEngineService.startTranscription(...)`. Those services
+/// poll `signal.isPreemptionRequested()` at their enumerated safe
+/// points; when the flag flips they call
+/// `coordinator.acknowledge(jobId:)` and return early.
+///
+/// Passed as a value so it crosses actor boundaries cleanly. The
+/// referenced actors are inherently `Sendable`.
+struct PreemptionContext: Sendable {
+    let jobId: String
+    let signal: PreemptionSignal
+    let coordinator: LanePreemptionCoordinator
+
+    /// Polls the signal. Wrapper for readability at call sites.
+    func isPreemptionRequested() async -> Bool {
+        await signal.isPreemptionRequested()
+    }
+
+    /// Mark the running job as paused at a safe point.
+    /// Downstream services call this *once* immediately before
+    /// returning early from their shard/chunk loop.
+    func acknowledge() async {
+        await coordinator.acknowledge(jobId: jobId)
+    }
+}
+
 // MARK: - PreemptionSignal
 
 /// Thread-safe signal polled by a running analysis job at its safe

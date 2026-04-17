@@ -84,6 +84,12 @@ enum TranscriptEngineEvent: Sendable {
     case completed(analysisAssetId: String)
 }
 
+/// Thrown by `transcribeShard` when the playhead-01t8 preemption
+/// signal flips after a chunk batch has been persisted. The
+/// transcription loop catches this to exit cleanly at the safe point
+/// without logging a shard failure.
+struct TranscriptEnginePreempted: Error {}
+
 // MARK: - TranscriptEngineService
 
 /// Orchestrates transcription of decoded audio shards into TranscriptChunks
@@ -120,6 +126,12 @@ actor TranscriptEngineService {
     /// Used by appendShards to decide whether to start a new loop.
     private var loopRunning: Bool = false
 
+    /// Optional preemption context threaded in by AnalysisJobRunner
+    /// (playhead-01t8). Polled after each TranscriptChunk batch
+    /// persists; on a preempt request the loop acknowledges and
+    /// exits at that safe point.
+    private var preemption: PreemptionContext?
+
     /// Broadcasts persisted chunk batches and completion signals to the
     /// analysis coordinator without forcing it to poll SQLite.
     private var eventContinuations: [UUID: AsyncStream<TranscriptEngineEvent>.Continuation] = [:]
@@ -152,7 +164,8 @@ actor TranscriptEngineService {
         shards: [AnalysisShard],
         analysisAssetId: String,
         snapshot: PlaybackSnapshot,
-        podcastId: String? = nil
+        podcastId: String? = nil,
+        preemption: PreemptionContext? = nil
     ) {
         // Cancel any existing work — we're starting fresh or reprioritizing.
         activeTask?.cancel()
@@ -167,6 +180,7 @@ actor TranscriptEngineService {
         activeAssetId = analysisAssetId
         activePodcastId = podcastId
         latestSnapshot = snapshot
+        self.preemption = preemption
 
         activeTask = Task { [weak self] in
             guard let self else { return }
@@ -261,6 +275,7 @@ actor TranscriptEngineService {
         chunkCounter = 0
         appendedShards = []
         loopRunning = false
+        preemption = nil
     }
 
     /// Clear the active task reference when the loop completes,
@@ -342,6 +357,9 @@ actor TranscriptEngineService {
             } catch is CancellationError {
                 logger.info("Transcription cancelled during shard \(shard.id)")
                 return
+            } catch is TranscriptEnginePreempted {
+                logger.info("Transcription preempted at safe point after shard \(shard.id) [end=\(String(format: "%.1f", shard.startTime + shard.duration))s]")
+                return
             } catch {
                 logger.error("""
                     Transcription failed for shard \(shard.id) \
@@ -374,6 +392,9 @@ actor TranscriptEngineService {
                     try await transcribeShard(shard, analysisAssetId: analysisAssetId)
                 } catch is CancellationError {
                     logger.info("Transcription cancelled during appended shard \(shard.id)")
+                    return
+                } catch is TranscriptEnginePreempted {
+                    logger.info("Transcription preempted at safe point after appended shard \(shard.id)")
                     return
                 } catch {
                     logger.error("""
@@ -522,6 +543,18 @@ actor TranscriptEngineService {
         )
 
         logger.info("Wrote \(emittedChunks.count) chunks for shard \(shard.id) [\(String(format: "%.1f", shard.startTime))-\(String(format: "%.1f", shardEnd))s]")
+
+        // playhead-01t8 safe point (c): post-TranscriptChunk. Every
+        // chunk in `emittedChunks` is durable in SQLite and the
+        // coverage watermark has advanced. If a higher-lane admission
+        // has flipped the preemption signal, acknowledge it here and
+        // let the loop terminate — the next run resumes from this
+        // shard's coverage end time via the standard dedup-by-
+        // fingerprint path.
+        if let preemption, await preemption.isPreemptionRequested() {
+            await preemption.acknowledge()
+            throw TranscriptEnginePreempted()
+        }
     }
 
     // MARK: - Prioritization

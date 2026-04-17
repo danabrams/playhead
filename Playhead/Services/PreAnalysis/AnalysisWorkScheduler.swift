@@ -580,7 +580,8 @@ actor AnalysisWorkScheduler {
             desiredCoverageSec: job.desiredCoverageSec,
             mode: .preRollWarmup,
             outputPolicy: .writeWindowsAndCues,
-            priority: .medium
+            priority: .medium,
+            schedulerLane: job.schedulerLane
         )
 
         let jobSignpost = PreAnalysisInstrumentation.beginJobDuration(jobId: job.jobId)
@@ -781,6 +782,14 @@ actor AnalysisWorkScheduler {
                     logger.error("Failed to update job state: \(error)")
                 }
                 logger.info("Job \(job.jobId) cancelled by playback, requeued")
+
+            case .preempted:
+                do {
+                    try await store.updateJobState(jobId: job.jobId, state: "queued")
+                } catch {
+                    logger.error("Failed to update job state: \(error)")
+                }
+                logger.info("Job \(job.jobId) preempted by higher-lane work, requeued")
             }
         } catch {
             PreAnalysisInstrumentation.endJobDuration(jobSignpost)
