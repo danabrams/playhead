@@ -134,7 +134,20 @@ actor AnalysisWorkScheduler {
     private var currentEpisodeId: String?
     private var activePlaybackEpisodeId: String?
     private var shouldCancelCurrentJob = false
+    /// Cause to thread into WorkJournal when the current running job is
+    /// cancelled. Set by `cancelCurrentJob(cause:)`; consumed on the
+    /// cancellation branch of the run loop. Resets to `nil` after each
+    /// job finishes (whether cancelled or not) so a subsequent job
+    /// doesn't inherit a stale cause tag.
+    private var pendingCancelCause: InternalMissCause?
     private var leaseRenewalTask: Task<Void, any Error>?
+    /// Optional WorkJournal recorder. When non-nil the scheduler emits
+    /// a `recordFailed(..., cause:, metadataJSON:)` row on the
+    /// cancellation path so causes like `.taskExpired` and
+    /// `.userCancelled` land in `work_journal.cause`. Nil (default) is
+    /// fine for unit tests that don't exercise the journal — the
+    /// emission is a best-effort tail call after the lease release.
+    private var workJournalRecorder: WorkJournalRecording = NoopWorkJournalRecorder()
     private static let maxAttemptCount = 5
 
     /// Per-lane running-job counter. Enforces the Now/Soon/Background
@@ -278,9 +291,28 @@ actor AnalysisWorkScheduler {
     }
 
     /// Cancel the currently executing analysis job.
-    func cancelCurrentJob() {
+    ///
+    /// `cause` is the `InternalMissCause` that the scheduler will emit
+    /// on the cancellation branch of the run loop (via the injected
+    /// `WorkJournalRecording` recorder). The default is
+    /// `.pipelineError` so existing callers that don't know a better
+    /// cause still produce a typed cause tag rather than `nil`.
+    /// `.taskExpired` is passed from `BackgroundProcessingService`'s
+    /// expirationHandler; `.userCancelled` is the explicit-cancel
+    /// entry point.
+    func cancelCurrentJob(cause: InternalMissCause = .pipelineError) {
         shouldCancelCurrentJob = true
+        pendingCancelCause = cause
         currentRunningTask?.cancel()
+    }
+
+    /// Install the WorkJournal recorder the scheduler uses on the
+    /// cancellation branch. Optional — tests that don't need the
+    /// journal can leave the default `NoopWorkJournalRecorder` in
+    /// place. Called from `PlayheadRuntime` once the real recorder is
+    /// available.
+    func setWorkJournalRecorder(_ recorder: WorkJournalRecording) {
+        self.workJournalRecorder = recorder
     }
 
     /// Wake the scheduler loop externally. Used by BackgroundProcessingService
@@ -617,9 +649,39 @@ actor AnalysisWorkScheduler {
                     logger.error("Failed to update job state: \(error)")
                 }
                 try? await store.releaseLease(jobId: job.jobId)
+                // playhead-1nl6: emit the cause that accompanied the
+                // cancel into the WorkJournal via the injected recorder.
+                // Default cause is `.pipelineError` so callers that
+                // forgot to pass one still produce a typed tag; the
+                // expirationHandler in BackgroundProcessingService
+                // passes `.taskExpired`, the explicit user cancel path
+                // passes `.userCancelled`.
+                let cause = pendingCancelCause ?? .pipelineError
+                pendingCancelCause = nil
+                let recorder = workJournalRecorder
+                let episodeId = job.episodeId
+                let metadata = await SliceCompletionInstrumentation.recordPaused(
+                    cause: cause,
+                    deviceClass: DeviceClass.detect(),
+                    sliceDurationMs: 0,
+                    bytesProcessed: 0,
+                    shardsCompleted: 0,
+                    extras: [
+                        "stage": "analysisWorkScheduler.cancelCurrentJob",
+                        "job_id": job.jobId,
+                    ]
+                )
+                await recorder.recordPreempted(
+                    episodeId: episodeId,
+                    cause: cause,
+                    metadataJSON: metadata.encodeJSON()
+                )
                 return
             }
             currentRunningTask = nil
+            // Non-cancel path: clear any stale cause so the next job
+            // doesn't inherit it.
+            pendingCancelCause = nil
 
             PreAnalysisInstrumentation.endJobDuration(jobSignpost)
 

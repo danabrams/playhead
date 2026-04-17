@@ -237,15 +237,31 @@ extension DownloadManager {
             if let data = blob, !data.isEmpty {
                 resumable.insert(episodeId)
                 reportedSuspendedTransfers.insert(episodeId)
-                let metadata = Self.preemptedMetadata(
-                    episodeId: episodeId,
-                    bytes: data.count,
-                    suspendedAt: now
+                // Build the SliceMetadata blob via the instrumentation
+                // helper (increments SliceCounters.slicesPaused[.appForceQuitRequiresRelaunch])
+                // and fold the hyht-specific fields (episode_id,
+                // bytes_written, suspended_at, cause) into `extras` so
+                // the flat-sibling JSON shape keeps working for pre-1nl6
+                // consumers. `sliceDurationMs` is 0 because the scan
+                // runs on cold launch and has no prior start instant.
+                let metadata = await SliceCompletionInstrumentation.recordPaused(
+                    cause: .appForceQuitRequiresRelaunch,
+                    deviceClass: DeviceClass.detect(),
+                    sliceDurationMs: 0,
+                    bytesProcessed: data.count,
+                    shardsCompleted: 0,
+                    extras: [
+                        "episode_id": episodeId,
+                        "bytes_written": String(data.count),
+                        "suspended_at": String(now),
+                        "cause": InternalMissCause.appForceQuitRequiresRelaunch.rawValue,
+                        "stage": "forceQuitResumeScan.resumable",
+                    ]
                 )
                 await recorder.recordPreempted(
                     episodeId: episodeId,
                     cause: .appForceQuitRequiresRelaunch,
-                    metadataJSON: metadata
+                    metadataJSON: metadata.encodeJSON()
                 )
                 logger.info("scanForSuspendedTransfers: preempted=\(episodeId, privacy: .public) bytes=\(data.count)")
             } else {
@@ -253,9 +269,24 @@ extension DownloadManager {
                 // so the user sees a clean-restart once, not forever.
                 corrupted.insert(episodeId)
                 try? deleteResumeData(episodeId: episodeId)
+                // Same story as the resumable branch — the scan has no
+                // slice start timestamp; `bytesProcessed` is 0 because
+                // the corrupted blob produced no usable payload.
+                let metadata = await SliceCompletionInstrumentation.recordFailed(
+                    cause: .pipelineError,
+                    deviceClass: DeviceClass.detect(),
+                    sliceDurationMs: 0,
+                    bytesProcessed: 0,
+                    shardsCompleted: 0,
+                    extras: [
+                        "episode_id": episodeId,
+                        "stage": "forceQuitResumeScan.corrupted",
+                    ]
+                )
                 await recorder.recordFailed(
                     episodeId: episodeId,
-                    cause: .pipelineError
+                    cause: .pipelineError,
+                    metadataJSON: metadata.encodeJSON()
                 )
                 logger.error("scanForSuspendedTransfers: corrupted blob for \(episodeId, privacy: .public), pruning")
             }
@@ -299,9 +330,21 @@ extension DownloadManager {
         guard !blob.isEmpty else {
             logger.error("resumeSuspendedTransfer: empty blob for \(episodeId, privacy: .public), purging")
             try? deleteResumeData(episodeId: episodeId)
+            let metadata = await SliceCompletionInstrumentation.recordFailed(
+                cause: .pipelineError,
+                deviceClass: DeviceClass.detect(),
+                sliceDurationMs: 0,
+                bytesProcessed: 0,
+                shardsCompleted: 0,
+                extras: [
+                    "episode_id": episodeId,
+                    "stage": "forceQuitResumeScan.resume.corrupted",
+                ]
+            )
             await workJournalRecorder.recordFailed(
                 episodeId: episodeId,
-                cause: .pipelineError
+                cause: .pipelineError,
+                metadataJSON: metadata.encodeJSON()
             )
             return .corrupted
         }

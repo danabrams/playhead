@@ -1283,8 +1283,31 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
         } catch {
             logger.error("Failed to move background download for \(episodeId): \(error.localizedDescription)")
             let recorder = workJournal
+            let errorDescription = error.localizedDescription
             Task {
-                await recorder.recordFailed(episodeId: episodeId, cause: .pipelineError)
+                // Background URLSession callbacks land outside the app's
+                // foreground lifecycle; we don't have a wall-clock slice
+                // start timestamp here, so sliceDurationMs is 0. The byte
+                // count is what URLSession reported for the transfer
+                // itself (captured from the downloaded file at `location`).
+                let bytesProcessed = (try? FileManager.default
+                    .attributesOfItem(atPath: location.path)[.size] as? Int) ?? 0
+                let metadata = await SliceCompletionInstrumentation.recordFailed(
+                    cause: .pipelineError,
+                    deviceClass: DeviceClass.detect(),
+                    sliceDurationMs: 0,
+                    bytesProcessed: bytesProcessed,
+                    shardsCompleted: 0,
+                    extras: [
+                        "stage": "downloadManager.didFinishDownloadingTo",
+                        "error": errorDescription,
+                    ]
+                )
+                await recorder.recordFailed(
+                    episodeId: episodeId,
+                    cause: .pipelineError,
+                    metadataJSON: metadata.encodeJSON()
+                )
             }
         }
     }
@@ -1321,8 +1344,30 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
         let cause = InternalMissCause.fromTaskError(error)
         logger.error("Episode \(episodeId) download failed (\(cause.rawValue)): \(error.localizedDescription)")
         let recorder = workJournal
+        let bytesReceived = Int(task.countOfBytesReceived)
+        let errorDescription = error.localizedDescription
         Task {
-            await recorder.recordFailed(episodeId: episodeId, cause: cause)
+            // Background URLSession does not expose a wall-clock slice
+            // start to the delegate, so sliceDurationMs is 0 here. This
+            // is NOT skipping the metadata blob — every acquired→terminal
+            // transition emits metadata per the 1nl6 spec; we just record
+            // the fields we have from URLSession's own accounting.
+            let metadata = await SliceCompletionInstrumentation.recordFailed(
+                cause: cause,
+                deviceClass: DeviceClass.detect(),
+                sliceDurationMs: 0,
+                bytesProcessed: bytesReceived,
+                shardsCompleted: 0,
+                extras: [
+                    "stage": "downloadManager.didCompleteWithError",
+                    "error": errorDescription,
+                ]
+            )
+            await recorder.recordFailed(
+                episodeId: episodeId,
+                cause: cause,
+                metadataJSON: metadata.encodeJSON()
+            )
         }
     }
 

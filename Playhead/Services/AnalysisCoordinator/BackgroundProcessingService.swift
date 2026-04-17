@@ -692,7 +692,12 @@ actor BackgroundProcessingService {
         task.expirationHandler = { [weak self] in
             workTask.cancel()
             Task { [weak self] in
-                await self?.analysisWorkScheduler?.cancelCurrentJob()
+                // playhead-1nl6: surface the BGProcessingTask-reclaim
+                // signal through the scheduler's cancel path as the
+                // `.taskExpired` InternalMissCause so any live slice
+                // emits a WorkJournal row with `cause = task_expired`
+                // instead of a bare cancel.
+                await self?.analysisWorkScheduler?.cancelCurrentJob(cause: .taskExpired)
                 await self?.markComplete(task, success: false)
             }
         }

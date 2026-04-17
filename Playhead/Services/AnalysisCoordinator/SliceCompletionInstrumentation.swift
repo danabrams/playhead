@@ -367,55 +367,71 @@ enum CauseEmissionRegistry {
         declareLive(cause: .userPreempted, tag: "LanePreemptionCoordinator.PreemptionSignal.request")
         declareLive(cause: .userPreempted, tag: "AnalysisJobRunner.run.preempted")
 
-        // MARK: Planned — wired up in playhead-dfem.
+        // task_expired — BGProcessingTask expirationHandler fires when
+        // iOS reclaims the window; BackgroundProcessingService invokes
+        // `AnalysisWorkScheduler.cancelCurrentJob(cause: .taskExpired)`
+        // which threads the cause down to the recorder so WorkJournal
+        // gets `cause = task_expired`.
+        declareLive(cause: .taskExpired, tag: "BackgroundProcessingService.handleExpiredProcessingTask")
+        declareLive(cause: .taskExpired, tag: "AnalysisWorkScheduler.cancelCurrentJob.taskExpired")
+
+        // userCancelled — the explicit user-cancel entry. The scheduler
+        // exposes `cancelCurrentJob(cause: .userCancelled)` and forwards
+        // the cause through the injected WorkJournal recorder. The UI
+        // call site is wired in playhead-dfem; the scheduler-side path
+        // is live today and is exercised by unit tests that pass
+        // `.userCancelled` directly.
+        declareLive(cause: .userCancelled, tag: "AnalysisWorkScheduler.cancelCurrentJob.userCancelled")
+
+        // MARK: Planned — blocked by admission-layer refactor (playhead-dfem).
         //
         // Each entry below names a production site where the emission
-        // MUST land once dfem completes the wire-up. The exhaustiveness
-        // test sees these as "declared" (so the test infrastructure is
-        // ready when they go live) but they are excluded from
-        // `liveEmitters` so a regression auditor can see at a glance
-        // which causes still need writers.
-
-        // userCancelled — AnalysisWorkScheduler.cancelCurrentJob is the
-        // explicit user-cancel entry; its teardown path must emit via
-        // the episode lease release.
-        declarePlanned(cause: .userCancelled, tag: "AnalysisWorkScheduler.cancelCurrentJob")
-
-        // task_expired — BGProcessingTask expirationHandler fires when
-        // iOS reclaims the window; BackgroundProcessingService's
-        // handleExpiredProcessingTask must emit the cause for any
-        // still-live slice when it stops the coordinator.
-        declarePlanned(cause: .taskExpired, tag: "BackgroundProcessingService.handleExpiredProcessingTask")
+        // MUST land once dfem completes the admission-layer refactor.
+        // The exhaustiveness test sees these as "declared" (so the test
+        // infrastructure is ready when they go live) but they are
+        // excluded from `liveEmitters` so a regression auditor can see
+        // at a glance which causes still need writers.
 
         // thermal — AnalysisWorkScheduler's per-loop QualityProfile
         // evaluation blocks lanes when thermal demotes the profile; the
         // emission must be recorded on any currently-running slice that
-        // terminates at the pause gate.
+        // terminates at the pause gate. Blocked by dfem (admission-layer
+        // hook that surfaces the thermal gate decision to the running
+        // slice).
         declarePlanned(cause: .thermal, tag: "AnalysisWorkScheduler.admissionDeferred.thermal")
         declarePlanned(cause: .thermal, tag: "AnalysisJobRunner.checkStopConditions.pausedForThermal")
 
         // low_power_mode — emitted independently of thermal (LPM with
-        // thermal .nominal); same admission path as thermal.
+        // thermal .nominal); same admission path as thermal. Blocked by
+        // dfem.
         declarePlanned(cause: .lowPowerMode, tag: "AnalysisWorkScheduler.admissionDeferred.lowPowerMode")
 
         // battery_low_unplugged — battery guard rail at admission time.
+        // Blocked by dfem.
         declarePlanned(cause: .batteryLowUnplugged, tag: "AnalysisWorkScheduler.admissionDeferred.batteryLowUnplugged")
 
         // media_cap / analysis_cap — StorageBudget admission rejections.
         // DownloadManager consults StorageBudget before committing a
         // transfer; on rejection it must emit the corresponding cause.
+        // Blocked by dfem (StorageBudget admission hook does not yet
+        // surface a typed rejection reason to DownloadManager).
         declarePlanned(cause: .mediaCap, tag: "DownloadManager.enqueueDownload.storageBudgetRejected.media")
         declarePlanned(cause: .analysisCap, tag: "DownloadManager.enqueueDownload.storageBudgetRejected.analysis")
 
         // asr_failed — TranscriptEngineService throws on model failure
-        // or returns no segments; AnalysisJobRunner must funnel through
-        // makeOutcome(... stopReason: .failed(...)) mapped to `asrFailed`.
+        // or returns no segments; AnalysisJobRunner.run(...) surfaces
+        // this as `.failed("transcription:zeroCoverage")` at the
+        // `.preempted`/`.failed` outcome boundary. Wiring asr_failed as
+        // a live cause requires threading a WorkJournalRecording into
+        // the runner (today the runner returns an AnalysisOutcome and
+        // the scheduler maps it — neither holds a recorder). Blocked by
+        // dfem (runner recorder injection).
         declarePlanned(cause: .asrFailed, tag: "AnalysisJobRunner.run.transcriptionFailed")
 
         // pipeline_error catch-all in the runner. Already declared live
         // for the DownloadManager site above; the runner hook is
         // planned (AnalysisJobRunner does not yet funnel through the
-        // episode-level lease release with a cause).
+        // episode-level lease release with a cause). Blocked by dfem.
         declarePlanned(cause: .pipelineError, tag: "AnalysisJobRunner.run.catchAll")
     }
 
@@ -432,6 +448,8 @@ enum CauseEmissionRegistry {
         .pipelineError,
         .userPreempted,
         .appForceQuitRequiresRelaunch,
+        .taskExpired,
+        .userCancelled,
     ]
 
     #if DEBUG
@@ -462,8 +480,21 @@ enum CauseEmissionRegistry {
 /// Bootstrap facade for `playhead-1nl6` instrumentation. Call
 /// ``bootstrap()`` at app launch (from `PlayheadAppDelegate`) AND at
 /// test-suite startup; both paths are idempotent.
+///
+/// Also owns the process-wide ``counters`` actor that every live
+/// emission site increments on a preempt / fail. Tests can reach the
+/// counters via ``counters`` directly; production call sites invoke
+/// the convenience helpers (``recordPreempted(...)`` /
+/// ``recordFailed(...)``) which fold metadata JSON construction, the
+/// counter increment, and a `CauseEmissionRegistry` live tag into one
+/// call so new sites can't skip a step.
 enum SliceCompletionInstrumentation {
     private static let bootstrapped = OSAllocatedUnfairLock<Bool>(initialState: false)
+
+    /// Process-wide counters. Shared — every live emission site funnels
+    /// through this actor. Reset only happens on process restart (or via
+    /// ``SliceCounters/reset()`` in tests).
+    static let counters = SliceCounters()
 
     /// Populate `CauseEmissionRegistry` with every known production
     /// emitter. Idempotent.
@@ -487,6 +518,80 @@ enum SliceCompletionInstrumentation {
         }
     }
     #endif
+
+    // MARK: - Emission convenience
+
+    /// Build a `SliceMetadata` blob for a terminal (preempted/failed)
+    /// event. Accepts the four contract fields and (optionally) a
+    /// dictionary of flat extras. Call sites that genuinely cannot
+    /// determine a field (e.g. `bytesProcessed` on a force-quit resume
+    /// scan that never touched the byte counter) pass `0` and name the
+    /// reason in a comment at the call site — the spec says every
+    /// acquired→terminal transition emits metadata, so skipping the
+    /// blob is not an option.
+    static func buildMetadata(
+        sliceDurationMs: Int,
+        bytesProcessed: Int,
+        shardsCompleted: Int,
+        deviceClass: DeviceClass,
+        extras: [String: String] = [:]
+    ) -> SliceMetadata {
+        SliceMetadata(
+            sliceDurationMs: sliceDurationMs,
+            bytesProcessed: bytesProcessed,
+            shardsCompleted: shardsCompleted,
+            deviceClass: deviceClass.rawValue,
+            extras: extras
+        )
+    }
+
+    /// Record a paused (preempted) terminal event: increments the
+    /// `slicesPaused[cause]` counter for `deviceClass` and returns the
+    /// encoded metadata JSON blob the caller should pass to
+    /// `WorkJournalRecording.recordPreempted(...)`.
+    @discardableResult
+    static func recordPaused(
+        cause: InternalMissCause,
+        deviceClass: DeviceClass,
+        sliceDurationMs: Int,
+        bytesProcessed: Int,
+        shardsCompleted: Int,
+        extras: [String: String] = [:]
+    ) async -> SliceMetadata {
+        let metadata = buildMetadata(
+            sliceDurationMs: sliceDurationMs,
+            bytesProcessed: bytesProcessed,
+            shardsCompleted: shardsCompleted,
+            deviceClass: deviceClass,
+            extras: extras
+        )
+        await counters.incrementPaused(deviceClass: deviceClass, cause: cause)
+        return metadata
+    }
+
+    /// Record a failed terminal event: increments the
+    /// `slicesFailed[cause]` counter for `deviceClass` and returns the
+    /// encoded metadata JSON blob the caller should pass to
+    /// `WorkJournalRecording.recordFailed(...)`.
+    @discardableResult
+    static func recordFailed(
+        cause: InternalMissCause,
+        deviceClass: DeviceClass,
+        sliceDurationMs: Int,
+        bytesProcessed: Int,
+        shardsCompleted: Int,
+        extras: [String: String] = [:]
+    ) async -> SliceMetadata {
+        let metadata = buildMetadata(
+            sliceDurationMs: sliceDurationMs,
+            bytesProcessed: bytesProcessed,
+            shardsCompleted: shardsCompleted,
+            deviceClass: deviceClass,
+            extras: extras
+        )
+        await counters.incrementFailed(deviceClass: deviceClass, cause: cause)
+        return metadata
+    }
 }
 
 // MARK: - Resolve-and-record convenience

@@ -297,4 +297,129 @@ struct SliceCompletionInstrumentationTests {
         let third = CauseEmissionRegistry.tags(for: .pipelineError)
         #expect(first == third)
     }
+
+    // MARK: - Live upgrades (1nl6 fix cycle)
+
+    @Test("taskExpired has a live emitter after scheduler wire-up")
+    func taskExpiredIsLive() {
+        SliceCompletionInstrumentation.bootstrap()
+        #expect(CauseEmissionRegistry.isLiveEmitter(cause: .taskExpired))
+    }
+
+    @Test("userCancelled has a live emitter after scheduler wire-up")
+    func userCancelledIsLive() {
+        SliceCompletionInstrumentation.bootstrap()
+        #expect(CauseEmissionRegistry.isLiveEmitter(cause: .userCancelled))
+    }
+
+    @Test("phase1LiveCauses.count is at least 7 after the 1nl6 fix cycle")
+    func phase1LiveCausesAtLeastSeven() {
+        #expect(CauseEmissionRegistry.phase1LiveCauses.count >= 7)
+    }
+
+    // MARK: - SliceCompletionInstrumentation emission helpers
+
+    @Test("recordPaused builds metadata and increments SliceCounters.slicesPaused")
+    func recordPausedBuildsMetadataAndIncrementsCounters() async {
+        // Snapshot the current count so we don't depend on suite ordering.
+        let before = await SliceCompletionInstrumentation.counters.snapshot(
+            deviceClass: .iPhone17Pro
+        )
+        let beforeThermal = before.slicesPaused[.thermal] ?? 0
+
+        let metadata = await SliceCompletionInstrumentation.recordPaused(
+            cause: .thermal,
+            deviceClass: .iPhone17Pro,
+            sliceDurationMs: 2_500,
+            bytesProcessed: 8_192,
+            shardsCompleted: 1,
+            extras: ["stage": "test"]
+        )
+
+        #expect(metadata.sliceDurationMs == 2_500)
+        #expect(metadata.bytesProcessed == 8_192)
+        #expect(metadata.shardsCompleted == 1)
+        #expect(metadata.deviceClass == DeviceClass.iPhone17Pro.rawValue)
+        #expect(metadata.extras["stage"] == "test")
+
+        let after = await SliceCompletionInstrumentation.counters.snapshot(
+            deviceClass: .iPhone17Pro
+        )
+        #expect((after.slicesPaused[.thermal] ?? 0) == beforeThermal + 1)
+    }
+
+    @Test("recordFailed builds metadata and increments SliceCounters.slicesFailed")
+    func recordFailedBuildsMetadataAndIncrementsCounters() async {
+        let before = await SliceCompletionInstrumentation.counters.snapshot(
+            deviceClass: .iPhone16
+        )
+        let beforePipeline = before.slicesFailed[.pipelineError] ?? 0
+
+        let metadata = await SliceCompletionInstrumentation.recordFailed(
+            cause: .pipelineError,
+            deviceClass: .iPhone16,
+            sliceDurationMs: 100,
+            bytesProcessed: 1_024,
+            shardsCompleted: 0,
+            extras: ["stage": "test.failed"]
+        )
+
+        #expect(metadata.deviceClass == DeviceClass.iPhone16.rawValue)
+
+        let after = await SliceCompletionInstrumentation.counters.snapshot(
+            deviceClass: .iPhone16
+        )
+        #expect((after.slicesFailed[.pipelineError] ?? 0) == beforePipeline + 1)
+    }
+
+    // MARK: - Spec F: finalized writes cause = NULL
+
+    /// Bead spec explicitly requires an assertion that `finalized` rows
+    /// write `cause = NULL`. The parallel idempotence test in
+    /// `EpisodeLeaseAndWorkJournalTests` confirms finalized rounds
+    /// through `releaseEpisodeLease(cause: nil)`; this test repeats
+    /// the read-back contract in the Slice-completion suite so a
+    /// drift in the append path (stamping a non-nil cause) fails here
+    /// rather than only in the Ad-detection suite.
+    @Test("releaseEpisodeLease(finalized) writes cause = nil to work_journal")
+    func finalizedRowStoresNullCause() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "ep-1nl6-finalized-cause-null"
+        try await store.insertJob(
+            makeAnalysisJob(
+                jobId: "j-1nl6-fin",
+                episodeId: episodeId,
+                workKey: "wk-1nl6-fin"
+            )
+        )
+        let gen = UUID()
+        let epoch = try await store.fetchSchedulerEpoch() ?? 0
+        _ = try await store.acquireEpisodeLease(
+            episodeId: episodeId,
+            ownerWorkerId: "worker-1nl6",
+            generationID: gen.uuidString,
+            schedulerEpoch: epoch,
+            now: 7_000_000,
+            ttlSeconds: 30
+        )
+
+        try await store.releaseEpisodeLease(
+            episodeId: episodeId,
+            generationID: gen.uuidString,
+            schedulerEpoch: epoch,
+            eventType: .finalized,
+            cause: nil,
+            now: 7_000_100
+        )
+
+        let entries = try await store.fetchWorkJournalEntries(
+            episodeId: episodeId,
+            generationID: gen.uuidString
+        )
+        let finalized = entries.filter { $0.eventType == .finalized }
+        #expect(finalized.count == 1)
+        #expect(finalized.first?.cause == nil,
+                "finalized rows must write cause = NULL; got \(String(describing: finalized.first?.cause))")
+    }
 }
+

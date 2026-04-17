@@ -103,6 +103,19 @@ protocol WorkJournalRecording: Sendable {
     /// the given internal cause.
     func recordFailed(episodeId: String, cause: InternalMissCause) async
 
+    /// Record that the background transfer for `episodeId` failed with
+    /// the given internal cause, attaching the `SliceMetadata` JSON
+    /// blob the emission site constructed (see
+    /// `SliceCompletionInstrumentation.recordFailed(...)`). Default
+    /// implementation forwards to the metadata-less overload so
+    /// pre-1nl6 recorders do not need to be updated until they want to
+    /// observe the blob.
+    func recordFailed(
+        episodeId: String,
+        cause: InternalMissCause,
+        metadataJSON: String
+    ) async
+
     /// Record that the background transfer for `episodeId` was pre-empted
     /// (force-quit relaunch, explicit pause, higher-priority demand) and
     /// may be resumed later. `cause` tags the reason (e.g.
@@ -128,6 +141,17 @@ extension WorkJournalRecording {
         cause: InternalMissCause,
         metadataJSON: String
     ) async {}
+
+    /// Default: forward to the metadata-less `recordFailed` so pre-1nl6
+    /// recorders keep working. Recorders that want the metadata blob
+    /// override this method directly.
+    func recordFailed(
+        episodeId: String,
+        cause: InternalMissCause,
+        metadataJSON: String
+    ) async {
+        await recordFailed(episodeId: episodeId, cause: cause)
+    }
 }
 
 /// Default no-op binding used until playhead-uzdq wires a real recorder.
