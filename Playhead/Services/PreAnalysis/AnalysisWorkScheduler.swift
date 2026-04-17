@@ -6,6 +6,24 @@
 import Foundation
 import OSLog
 
+/// Hook the scheduler calls when admitting a `SchedulerLane.now` job so that a
+/// later bead (playhead-01t8) can implement preemption of active Soon and
+/// Background jobs at the next safe checkpoint boundary. This bead does not
+/// implement the handler; it only defines the protocol surface so downstream
+/// work can plug in without re-opening `AnalysisWorkScheduler`.
+///
+/// Lane vocabulary leaks across module boundaries here because preemption is
+/// inherently a scheduler-internal concern; consumers that implement this
+/// protocol are expected to live inside `Playhead/Services/` alongside the
+/// scheduler itself. The UI-lint test (`SchedulerLaneUILintTests`) enforces
+/// that restriction.
+protocol LanePreemptionHandler: Sendable {
+    /// Called when the scheduler is about to admit a job in the given lane.
+    /// Implementations should demote (pause) active jobs in strictly lower
+    /// lanes at the next safe checkpoint. No-op is a valid default.
+    func preemptLowerLanes(for incoming: AnalysisWorkScheduler.SchedulerLane) async
+}
+
 actor AnalysisWorkScheduler {
     private static let coverageProgressEpsilon = 0.001
     private let store: AnalysisStore
@@ -15,6 +33,96 @@ actor AnalysisWorkScheduler {
     private let batteryProvider: any BatteryStateProviding
     private let config: PreAnalysisConfig
     private let logger = Logger(subsystem: "com.playhead", category: "WorkScheduler")
+
+    // MARK: - SchedulerLane (playhead-r835)
+
+    /// Three-lane partition of the work queue. Derived from
+    /// `AnalysisJob.priority` via the `schedulerLane` computed property on
+    /// the job model. The partition is orthogonal to the existing T0/T1/T2
+    /// coverage tiers — a T0 playback job can live in the Now lane, while a
+    /// deep T2 backfill lives in Background.
+    ///
+    /// The variant names are deliberately scheduler-internal: they MUST NOT
+    /// surface in UI copy, diagnostics text, or activity strings. The UI-lint
+    /// test `SchedulerLaneUILintTests` enforces that prohibition by scanning
+    /// every non-Services Swift source in the app target.
+    ///
+    /// Priority ranges (see also `AnalysisJob.schedulerLane`):
+    /// - `.now` — priority >= 20 (user-initiated Play / Download promotions,
+    ///   including playback T0)
+    /// - `.soon` — priority 1..<20 (auto-download w/ proximity hints /
+    ///   upcoming episodes)
+    /// - `.background` — priority <= 0 (deferred auto-download, bulk backfill)
+    enum SchedulerLane: Sendable, Equatable, CaseIterable {
+        case now
+        case soon
+        case background
+    }
+
+    /// Per-lane concurrency cap. Bead spec:
+    /// - Now:        <= 2 concurrent non-playback jobs
+    /// - Soon:       <= 1 concurrent
+    /// - Background: <= 1 concurrent
+    /// - T0 playback jobs (`jobType == "playback"`) are EXEMPT from the Now
+    ///   cap — they are always admitted when not globally paused.
+    ///
+    /// Implemented as a reference type (rather than actor state directly) so
+    /// tests can exercise the counter in isolation and so that future
+    /// refactors can swap in alternative accounting without touching every
+    /// admission call site. Because the counter is only mutated from inside
+    /// the scheduler actor, `@unchecked Sendable` is safe here — there is no
+    /// cross-actor contention.
+    final class LaneConcurrencyCounter: @unchecked Sendable {
+        private static let nowCap = 2
+        private static let soonCap = 1
+        private static let backgroundCap = 1
+
+        private var active: [SchedulerLane: Int] = [
+            .now: 0,
+            .soon: 0,
+            .background: 0,
+        ]
+
+        init() {}
+
+        /// Current running-job count in `lane`. Exposed for instrumentation
+        /// and tests; the scheduler uses `canAdmit` / `didStart` / `didFinish`
+        /// directly in the loop.
+        func count(lane: SchedulerLane) -> Int {
+            active[lane] ?? 0
+        }
+
+        /// Whether `job` may be admitted under the current per-lane count.
+        /// T0 playback jobs (`jobType == "playback"`) bypass the Now cap
+        /// unconditionally — the hot-path must always be able to drain.
+        func canAdmit(job: AnalysisJob) -> Bool {
+            let lane = job.schedulerLane
+            if lane == .now && job.jobType == "playback" {
+                return true
+            }
+            let cap: Int
+            switch lane {
+            case .now:        cap = Self.nowCap
+            case .soon:       cap = Self.soonCap
+            case .background: cap = Self.backgroundCap
+            }
+            return count(lane: lane) < cap
+        }
+
+        /// Record that `job` has started running in its lane.
+        func didStart(job: AnalysisJob) {
+            let lane = job.schedulerLane
+            active[lane, default: 0] += 1
+        }
+
+        /// Record that `job` has finished running in its lane. Clamped at
+        /// zero so a stray double-finish does not produce negative counts.
+        func didFinish(job: AnalysisJob) {
+            let lane = job.schedulerLane
+            let current = active[lane, default: 0]
+            active[lane] = max(0, current - 1)
+        }
+    }
 
     /// Admission decision the scheduler derives from the current QualityProfile
     /// and applies to every loop iteration. Consolidates thermal/battery/
@@ -43,6 +151,29 @@ actor AnalysisWorkScheduler {
                 return policy.allowSoonLane
             }
         }
+
+        /// Whether a job in the given `SchedulerLane` is admitted under the
+        /// current QualityProfile. This is the priority-derived dual of
+        /// `allowsDeferredJob(desiredCoverageSec:t2Threshold:)` — the latter
+        /// gates by coverage depth, this one gates by lane.
+        ///
+        /// Semantics:
+        /// - Any lane is blocked when `pauseAllWork` is true (critical).
+        /// - `.now` is admitted unless `pauseAllWork`; it ignores the Soon
+        ///   and Background gates because Now-lane jobs are user-initiated
+        ///   (Play / explicit Download) and must drain promptly even in
+        ///   serious thermal states.
+        /// - `.soon` is admitted only when `policy.allowSoonLane` is true.
+        /// - `.background` is admitted only when `policy.allowBackgroundLane`
+        ///   is true.
+        func allows(lane: SchedulerLane) -> Bool {
+            if pauseAllWork { return false }
+            switch lane {
+            case .now:        return true
+            case .soon:       return policy.allowSoonLane
+            case .background: return policy.allowBackgroundLane
+            }
+        }
     }
 
     private var schedulerTask: Task<Void, Never>?
@@ -53,6 +184,21 @@ actor AnalysisWorkScheduler {
     private var shouldCancelCurrentJob = false
     private var leaseRenewalTask: Task<Void, any Error>?
     private static let maxAttemptCount = 5
+
+    /// Per-lane running-job counter. Enforces the Now/Soon/Background
+    /// concurrency caps spelled out in playhead-r835. Today the scheduler
+    /// runs at most one job at a time via `currentRunningTask`, so the
+    /// counter's per-lane caps are not yet the binding constraint on real
+    /// execution — they are the contract the admission path uses so that
+    /// later beads can fan the scheduler out to honest multi-lane
+    /// concurrency without re-opening admission policy.
+    private let laneCounter = LaneConcurrencyCounter()
+
+    /// Hook installed by downstream beads (playhead-01t8) to implement
+    /// preemption of active Soon / Background jobs when a Now-lane job is
+    /// admitted. Nil means "no preemption" — which is the only behavior this
+    /// bead ships.
+    private var preemptionHandler: (any LanePreemptionHandler)?
 
     private var wakeContinuation: AsyncStream<Void>.Continuation?
     private var wakeStream: AsyncStream<Void>
@@ -189,6 +335,15 @@ actor AnalysisWorkScheduler {
         wakeSchedulerLoop()
     }
 
+    /// Install a lane-preemption handler. This bead (playhead-r835) only
+    /// defines the protocol surface — it installs no default handler. A
+    /// later bead (playhead-01t8) will wire an implementation that pauses
+    /// active Soon / Background jobs at their next safe checkpoint when the
+    /// scheduler admits a Now-lane job.
+    func setLanePreemptionHandler(_ handler: (any LanePreemptionHandler)?) {
+        self.preemptionHandler = handler
+    }
+
     /// Start the scheduler loop. Call after reconciliation is complete.
     func startSchedulerLoop() {
         schedulerTask?.cancel()
@@ -269,7 +424,26 @@ actor AnalysisWorkScheduler {
                 continue
             }
 
+            // Per-lane concurrency cap (playhead-r835). T0 playback jobs are
+            // exempt from the Now cap; the counter encodes that rule. If the
+            // cap is saturated, fall back to the standard sleep so we do not
+            // re-fetch the same job in a tight loop.
+            guard laneCounter.canAdmit(job: job) else {
+                logger.info("Skipping job \(job.jobId) — lane \(String(describing: job.schedulerLane), privacy: .public) at capacity")
+                await sleepOrWake(seconds: 5)
+                continue
+            }
+
+            // Now-lane admission demotes active Soon / Background jobs at
+            // their next safe checkpoint. The protocol is owned by
+            // playhead-01t8; this bead only wires the hook.
+            if job.schedulerLane == .now, let preempt = preemptionHandler {
+                await preempt.preemptLowerLanes(for: .now)
+            }
+
+            laneCounter.didStart(job: job)
             await processJob(job)
+            laneCounter.didFinish(job: job)
         }
     }
 
@@ -699,5 +873,27 @@ actor AnalysisWorkScheduler {
         let cuesCreated = outcome.newCueCount > 0
 
         return featureAdvanced || transcriptAdvanced || cueAdvanced || cuesCreated
+    }
+}
+
+// MARK: - AnalysisJob → SchedulerLane derivation (playhead-r835)
+
+extension AnalysisJob {
+    /// Maps the job's `priority` into the scheduler's three-lane partition.
+    ///
+    /// The boundaries are:
+    /// - `priority >= 20`       → `.now`
+    /// - `priority 1..<20`      → `.soon`
+    /// - `priority <= 0`        → `.background`
+    ///
+    /// These ranges are the ones spelled out in the playhead-r835 bead
+    /// spec. Keep the ranges contiguous and non-overlapping — every integer
+    /// priority must map to exactly one lane.
+    var schedulerLane: AnalysisWorkScheduler.SchedulerLane {
+        switch priority {
+        case 20...:    return .now
+        case 1..<20:   return .soon
+        default:       return .background
+        }
     }
 }
