@@ -144,6 +144,25 @@ actor DownloadManager {
     /// Subdirectory for fully downloaded and verified audio.
     nonisolated let completeDirectory: URL
 
+    /// Subdirectory for URLSession resume-data blobs persisted by
+    /// `scanForSuspendedTransfers()` (playhead-hyht). One file per
+    /// episode keyed by `safeFilename(for: episodeId)`. Each file's
+    /// body is the opaque OS resume-data blob returned from
+    /// `URLSessionDownloadTask.cancel(byProducingResumeData:)`.
+    nonisolated let resumeDataDirectory: URL
+
+    /// In-memory set of episode IDs the most recent scan reported as
+    /// having a persisted resume-data blob. Populated by
+    /// `scanForSuspendedTransfers()` and used by the idempotence guard
+    /// so a second scan pass does not re-emit preempted events for the
+    /// same suspended transfers. Cleared when the transfer is resumed
+    /// (blob consumed) or the blob is pruned as corrupted.
+    ///
+    /// Visibility is `internal` (not `private`) so the scan/resume
+    /// extension in `ForceQuitResumeScan.swift` can mutate it — the
+    /// actor isolation keeps reads/writes ordered.
+    internal var reportedSuspendedTransfers: Set<String> = []
+
     // MARK: - State
 
     /// Active download tasks keyed by episode ID.
@@ -182,7 +201,11 @@ actor DownloadManager {
     /// Recorder injected by playhead-uzdq (or any test double) to emit
     /// WorkJournal events from the download delegate callbacks. Defaults
     /// to a no-op so 24cm can ship before uzdq lands.
-    private var workJournalRecorder: WorkJournalRecording
+    ///
+    /// Visibility is `internal` (not `private`) so the playhead-hyht
+    /// force-quit scan extension in `ForceQuitResumeScan.swift` can emit
+    /// preempted/failed rows without re-entering DownloadManager.swift.
+    internal var workJournalRecorder: WorkJournalRecording
 
     /// Delegate for background sessions. A single delegate instance
     /// serves all three identifier lanes — the session identifier is
@@ -214,6 +237,7 @@ actor DownloadManager {
         self.cacheDirectory = root
         self.partialsDirectory = root.appendingPathComponent("partials", isDirectory: true)
         self.completeDirectory = root.appendingPathComponent("complete", isDirectory: true)
+        self.resumeDataDirectory = root.appendingPathComponent("resumeData", isDirectory: true)
         self.maxCacheBytes = maxCacheBytes
         self.sessionDelegate = EpisodeDownloadDelegate()
         let config = preAnalysisConfig ?? PreAnalysisConfig.load()
@@ -311,7 +335,7 @@ actor DownloadManager {
     /// Create required directories on first use.
     func bootstrap() throws {
         let fm = FileManager.default
-        for dir in [cacheDirectory, partialsDirectory, completeDirectory] {
+        for dir in [cacheDirectory, partialsDirectory, completeDirectory, resumeDataDirectory] {
             if !fm.fileExists(atPath: dir.path) {
                 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
             }
@@ -371,7 +395,11 @@ actor DownloadManager {
     /// When the 24cm feature flag is OFF, callers that ask for `.interactive`
     /// or `.maintenance` are transparently routed to `.legacy` so the
     /// behavior matches the pre-24cm build exactly.
-    private func backgroundSession(for role: BackgroundSessionRole) -> URLSession {
+    ///
+    /// Visibility is `internal` (not `private`) so the playhead-hyht
+    /// force-quit scan extension in `ForceQuitResumeScan.swift` can hand
+    /// a resume-data blob back to the interactive session.
+    internal func backgroundSession(for role: BackgroundSessionRole) -> URLSession {
         let resolvedRole: BackgroundSessionRole = {
             if !useDualBackgroundSessions, role != .legacy { return .legacy }
             return role
@@ -1131,9 +1159,11 @@ extension DownloadManager {
     nonisolated(unsafe) private static var _shared: DownloadManager?
 
     /// Registers `manager` as the app-wide shared DownloadManager for
-    /// background session wake-up routing.
+    /// background session wake-up routing. Pass `nil` to clear the slot
+    /// — useful for test teardown so a later test starting in a fresh
+    /// state does not accidentally observe a previous test's manager.
     @MainActor
-    static func registerShared(_ manager: DownloadManager) {
+    static func registerShared(_ manager: DownloadManager?) {
         _shared = manager
     }
 
