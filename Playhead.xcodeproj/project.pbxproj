@@ -350,6 +350,7 @@
 		CF545E050DE76F5A1C319778 /* FoundationModelClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BD567C1E84D66A8AE2151B2 /* FoundationModelClassifier.swift */; };
 		D00B7813262B080065323E2F /* RegionShadowObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BA686FB08419B7F12AB3A44 /* RegionShadowObserver.swift */; };
 		D016DD263A2EC780B6E45BC0 /* CorpusLoaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 104A431669814AE2F9BD67A2 /* CorpusLoaderTests.swift */; };
+		D2D6CDCD15FBED32251AF8AD /* TransportStatusProviding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 279F35CB900F4DE8B0DBB382 /* TransportStatusProviding.swift */; };
 		D3F07043610FC77194FFD600 /* TimeFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31953F019D7492F34C2C81A8 /* TimeFormatter.swift */; };
 		D48BCAAACA4D3CC565B75D07 /* FoundationModelShadowBenchmarkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00691A86B0D90C69FA415A75 /* FoundationModelShadowBenchmarkTests.swift */; };
 		D57B416C099AB980BFE358AE /* TranscriptPeekView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54729A182A274D9487290D7F /* TranscriptPeekView.swift */; };
@@ -485,6 +486,7 @@
 		260D6F028C47AC6C2C8A73C6 /* SLICohortMeaningfulnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SLICohortMeaningfulnessTests.swift; sourceTree = "<group>"; };
 		265165A8793A457E3B06F777 /* BudgetAllocationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BudgetAllocationPolicy.swift; sourceTree = "<group>"; };
 		269746ABF14260F5ACB1B145 /* BoundaryExpander.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundaryExpander.swift; sourceTree = "<group>"; };
+		279F35CB900F4DE8B0DBB382 /* TransportStatusProviding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransportStatusProviding.swift; sourceTree = "<group>"; };
 		282B34EDDB8D7F38EF876C13 /* EpisodeDurationBucketClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EpisodeDurationBucketClassifier.swift; sourceTree = "<group>"; };
 		28AAB3AC7A6660237A0C12E4 /* CausalSourceDemotionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CausalSourceDemotionStoreTests.swift; sourceTree = "<group>"; };
 		2A0095F306E2C02D345F9B18 /* ChapterEvidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChapterEvidence.swift; sourceTree = "<group>"; };
@@ -1117,6 +1119,7 @@
 				43294AFD6D618AFE53B354EA /* DeviceClassProfile.swift */,
 				E8AF12185530DBBB28A96177 /* PreAnalysisConfig.swift */,
 				8D0B876D178EC599BB89B294 /* PreAnalysisInstrumentation.swift */,
+				279F35CB900F4DE8B0DBB382 /* TransportStatusProviding.swift */,
 			);
 			path = PreAnalysis;
 			sourceTree = "<group>";
@@ -2064,6 +2067,7 @@
 				59F98B0020A3E016CD9DA2AC /* TranscriptPeekViewModel.swift in Sources */,
 				09528F9D09719704FF57CA8E /* TranscriptQualityEstimator.swift in Sources */,
 				0FC18D0CB9DCB68EAB89E3DF /* TranscriptSegmenter.swift in Sources */,
+				D2D6CDCD15FBED32251AF8AD /* TransportStatusProviding.swift in Sources */,
 				951B514BA816C00DEEBC1E16 /* TrustScoringService.swift in Sources */,
 				B9B63518E65DDE127FBEC75F /* Typography.swift in Sources */,
 				8EF6DEABE12727DEE137E015 /* UserCorrectionStore.swift in Sources */,

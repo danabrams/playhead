@@ -103,6 +103,21 @@ struct StorageSnapshot: Sendable, Equatable {
     }
 }
 
+extension StorageSnapshot {
+    /// Stub — will be replaced by live StorageBudget snapshot (playhead-1iq1).
+    /// Admits every class with `.max` remaining bytes; consumed by
+    /// `AnalysisWorkScheduler.evaluateAdmissionGate(for:)` until the
+    /// live snapshot is plumbed in.
+    static let plentiful = StorageSnapshot(
+        canAdmit: [.media: true, .warmResumeBundle: true, .scratch: true],
+        remainingBytes: [
+            .media: Int64.max,
+            .warmResumeBundle: Int64.max,
+            .scratch: Int64.max,
+        ]
+    )
+}
+
 // MARK: - AdmissionJob
 
 /// The minimum job descriptor the admission gate needs. Separated from
@@ -118,6 +133,7 @@ struct AdmissionJob: Sendable, Equatable {
     /// split this across classes — it is a headroom input, not a
     /// per-class allocation. `StorageBudget.canAdmit` per-class is the
     /// binding constraint.
+    // TODO(playhead-1iq1): consume in storageRejection once live StorageBudget snapshot lands
     let estimatedWriteBytes: Int64
 
     init(artifactClasses: Set<ArtifactClass>, estimatedWriteBytes: Int64) {
