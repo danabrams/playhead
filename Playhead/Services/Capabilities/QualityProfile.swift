@@ -3,10 +3,12 @@
 //
 // Prior to this file, thermal state, low-power mode, battery level, and
 // charging state were read piecewise by each consumer (AnalysisWorkScheduler,
-// BackgroundProcessingService, DeviceAdmissionPolicy). That produced drift
-// across callers when thresholds changed. QualityProfile consolidates the
-// read into a single named surface with explicit per-variant policy that the
-// scheduler and other consumers can route through.
+// BackgroundProcessingService, the former `DeviceAdmissionPolicy`). That
+// produced drift across callers when thresholds changed. QualityProfile
+// consolidates the read into a single named surface with explicit per-variant
+// policy that the scheduler and other consumers route through. As of C1,
+// `DeviceAdmissionPolicy` has been removed and `AdmissionController` derives
+// its admission decision directly from this profile.
 //
 // The four variants intentionally mirror ProcessInfo.ThermalState so callers
 // can reason about profile changes using familiar thermal vocabulary. The
@@ -35,9 +37,10 @@ enum QualityProfile: String, Codable, Sendable, Equatable, CaseIterable, CustomS
 
     // MARK: - Derivation
 
-    /// Threshold below which battery is considered "critically low." Mirrors
-    /// `DeviceAdmissionPolicy.lowBatteryThreshold` so the two gates stay in
-    /// lockstep. A value of exactly 0.20 is NOT treated as low.
+    /// Threshold below which battery is considered "critically low." A value
+    /// of exactly 0.20 is NOT treated as low. This is the canonical low-
+    /// battery cutoff for the analysis pipeline; `AdmissionController` and
+    /// `BackgroundProcessingService` route through this constant.
     static let lowBatteryThreshold: Float = 0.20
 
     /// Pure derivation of a quality profile from the underlying OS reads.
@@ -129,7 +132,22 @@ enum QualityProfile: String, Codable, Sendable, Equatable, CaseIterable, CustomS
         let pauseAllWork: Bool
     }
 
-    /// Per-variant scheduler policy. Matches the playhead-5ih bead spec:
+    /// Per-variant scheduler policy. Matches the playhead-5ih bead spec.
+    /// Under C1 this drives four production callers; anyone editing these
+    /// tuples must revisit ALL FOUR:
+    ///   - `AdmissionController.admitNextEligibleJob` — gates on `pauseAllWork`.
+    ///   - `BackgroundProcessingService.handleCapabilityUpdate` and
+    ///     `handleBackfillTask` — both use `pauseAllWork` for the foreground
+    ///     hot-path gate and `pauseAllWork || !allowSoonLane` for the backfill
+    ///     gate.
+    ///   - `AnalysisWorkScheduler.currentLaneAdmission` — wraps
+    ///     `schedulerPolicy` into a `LaneAdmission` for the per-lane T0/Soon/
+    ///     Background admission decisions.
+    ///
+    /// Known carve-out: `BackgroundProcessingService.hotPathLookaheadMultiplier()`
+    /// predates C1 and still reads thermal/LPM directly rather than
+    /// routing through `sliceFraction`. Editing `sliceFraction` here will
+    /// NOT propagate to that method — change both sites.
     /// - `nominal`: full slice, all lanes.
     /// - `fair`: full slice, pause Background lane.
     /// - `serious`: half slice, pause Soon + Background lanes.

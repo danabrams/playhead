@@ -67,7 +67,7 @@ struct ExecutionConditionInput: Sendable, Equatable {
     /// is, it satisfies neither the favorable nor constrained battery
     /// predicates on its own.
     /// (Float, not Double, to match `UIDevice.batteryLevel` and
-    /// `SLI.swift:25-30`'s convention of mirroring `DeviceAdmissionPolicy`'s
+    /// `SLI.swift:25-30`'s convention of mirroring `QualityProfile`'s
     /// `lowBatteryThreshold` which is itself a Float in [0, 1].)
     let batteryLevel: Float
 
@@ -87,7 +87,7 @@ struct ExecutionConditionInput: Sendable, Equatable {
 }
 
 /// Favorable battery-level floor (inclusive). Expressed as a ratio in
-/// [0.0, 1.0] so the type matches `CapabilitySnapshot`/`DeviceAdmissionPolicy`
+/// [0.0, 1.0] so the type matches `CapabilitySnapshot`/`QualityProfile`
 /// conventions.
 enum ExecutionConditionBatteryThresholds {
     /// 0.50 — at or above this, battery contributes to `favorable`

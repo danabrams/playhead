@@ -9,14 +9,30 @@
 //   - BGContinuedProcessingTask: ONLY for user-initiated long-running work
 //     (e.g., initial model download via AssetProvider).
 //
-// Thermal management:
-//   .nominal/.fair  -> full analysis
-//   .serious        -> reduce hot-path window, pause backfill
-//   .critical       -> pause all analysis
+// Thermal + battery + power management (routed through QualityProfile, C1):
+//   profile=.nominal/.fair -> full analysis (Background lane may pause at
+//                             .fair via the lane-level scheduler)
+//   profile=.serious       -> pause backfill (Soon + Background lanes);
+//                             foreground hot-path remains open
+//   profile=.critical      -> pause all analysis including hot-path
 //
-// Battery management:
-//   Below 20% and not charging -> pause all non-critical analysis
-//   Low Power Mode             -> reduce hot-path lookahead, defer backfill
+// QualityProfile demotes by ONE step from the raw thermal baseline when
+// either Low Power Mode is on, OR battery is below 20% while unplugged.
+// So plain LPM with nominal thermal lands on .fair (no BPS pause); LPM
+// stacked on fair thermal lands on .serious (backfill pauses). The two-
+// tier BPS gate is `pauseAllWork` for the hot-path and
+// `pauseAllWork || !allowSoonLane` for backfill.
+//
+// Caveat: `hotPathLookaheadMultiplier()` below predates C1 and still reads
+// `currentThermalState`/`isLowPowerMode` directly rather than routing
+// through `QualityProfile.schedulerPolicy.sliceFraction`. Its outputs
+// agree with QualityProfile on the raw thermal axis but diverge on:
+//   (a) `.critical` thermal — multiplier 1.0 vs sliceFraction 0.0
+//   (b) any nominal-thermal + LPM input — multiplier 0.5 vs sliceFraction
+//       1.0 (profile demotes nominal→fair which still has sliceFraction 1.0)
+//   (c) `.fair` thermal + unplugged-low-battery — multiplier 1.0 vs
+//       sliceFraction 0.5 (profile demotes fair→serious which has 0.5)
+// Tracked as tech debt — not blocking C1.
 
 import BackgroundTasks
 import Foundation
@@ -136,7 +152,11 @@ actor BackgroundProcessingService {
     /// Whether backfill is currently paused due to thermal/battery constraints.
     private var backfillPaused = false
 
-    /// Whether all analysis is paused (critical thermal or low battery).
+    /// Whether all analysis is paused. Under C1, this gate is set only when
+    /// `QualityProfile.schedulerPolicy.pauseAllWork` is true — today that is
+    /// reached only at `.critical` (thermal-driven). Plain low-battery and
+    /// plain LPM no longer set this flag; they demote the profile but leave
+    /// the foreground hot-path running.
     private var allAnalysisPaused = false
 
     /// Task observing capability changes for thermal/battery management.
@@ -363,6 +383,14 @@ actor BackgroundProcessingService {
         hotPathActive && !allAnalysisPaused
     }
 
+    /// Whether backfill is currently paused. Exposed for tests so they can
+    /// pin C1's two-tier gate (`pauseAllWork` for the foreground hot-path,
+    /// `pauseAllWork || !allowSoonLane` for backfill) without reaching into
+    /// private state.
+    func isBackfillPaused() -> Bool {
+        backfillPaused
+    }
+
     // MARK: - Background Task Scheduling
 
     /// Schedule a BGProcessingTask for deferred backfill.
@@ -428,16 +456,22 @@ actor BackgroundProcessingService {
             // Check constraints before starting.
             await self.updateBatteryState()
             let snapshot = await self.capabilitiesService.currentSnapshot
-            let decision = self.deviceAdmissionDecision(for: snapshot)
-            guard decision == .admit else {
-                let reason: String
-                switch decision {
-                case .admit:
-                    reason = "admit"
-                case .deferred(let deferReason):
-                    reason = deferReason.rawValue
-                }
-                self.logger.info("Backfill skipped: \(reason, privacy: .public)")
+            let profile = self.currentQualityProfile(for: snapshot)
+            // C1 alignment: backfill-class work pauses when QualityProfile
+            // closes the Soon lane — i.e. profile is `.serious` or `.critical`.
+            // This is INTENTIONALLY broader than the BPS foreground gate
+            // (which only fires on `.critical`) but narrower than the
+            // historical DAP behavior: DAP also paused backfill on plain LPM
+            // and plain unplugged-low-battery, which under QP only demote to
+            // `.fair` — Soon lane stays open. The lane-level scheduler in
+            // `AnalysisWorkScheduler` is the canonical place that throttles
+            // `.fair` (it pauses Background lane), so leaving the BPS gate
+            // open at `.fair` is the correct division of labor.
+            let policy = profile.schedulerPolicy
+            if policy.pauseAllWork || !policy.allowSoonLane {
+                self.logger.info(
+                    "Backfill skipped under QualityProfile \(profile.rawValue, privacy: .public)"
+                )
                 await self.markComplete(task, success: true)
                 return
             }
@@ -532,20 +566,32 @@ actor BackgroundProcessingService {
 
         await updateBatteryState()
 
-        // `shouldPauseBackfill` mirrors the shared DeviceAdmissionPolicy gate
-        // (thermal throttle, low battery while not charging, or Low Power
-        // Mode), so this service and AdmissionController stay in sync.
-        // `shouldPauseAll` is BPS-specific service logic layered on top: it
-        // pauses every analysis path (including the foreground hot-path) when
-        // the device is in distress.
-        let shouldPauseAll = snapshot.thermalState == .critical || isBatteryTooLow()
-        let shouldPauseBackfill = deviceAdmissionDecision(for: snapshot) != .admit
+        // C1 alignment: route every gate through `QualityProfile`. The
+        // derived profile is the single source of truth shared with
+        // `AdmissionController` and `AnalysisWorkScheduler` so this service
+        // cannot drift on thresholds.
+        //
+        // - `shouldPauseAll` is BPS-specific service logic: pause every
+        //   analysis path (including the foreground hot-path) when the device
+        //   is in distress (`pauseAllWork` is set in `.critical`).
+        // - `shouldPauseBackfill` mirrors the AdmissionController backfill
+        //   gate: pause when the profile closes the Soon lane (`.serious` or
+        //   `.critical`). This is INTENTIONALLY broader than the foreground
+        //   gate but narrower than the historical DAP behavior — DAP also
+        //   paused backfill on plain LPM and plain unplugged-low-battery,
+        //   which under QP only demote to `.fair` (Soon lane stays open). The
+        //   lane-level scheduler handles `.fair` directly by pausing the
+        //   Background lane. See review-cycle 1 H-1.
+        let profile = currentQualityProfile(for: snapshot)
+        let policy = profile.schedulerPolicy
+        let shouldPauseAll = policy.pauseAllWork
+        let shouldPauseBackfill = policy.pauseAllWork || !policy.allowSoonLane
 
         // Pause all analysis.
         if shouldPauseAll && !allAnalysisPaused {
             allAnalysisPaused = true
             backfillPaused = true
-            logger.warning("All analysis paused (thermal=\(snapshot.thermalState.rawValue), battery=\(self.currentBatteryLevel))")
+            logger.warning("All analysis paused (profile=\(profile.rawValue, privacy: .public), thermal=\(snapshot.thermalState.rawValue), battery=\(self.currentBatteryLevel))")
 
             Task {
                 await coordinator.stop()
@@ -555,7 +601,7 @@ actor BackgroundProcessingService {
         // Resume from full pause.
         if !shouldPauseAll && allAnalysisPaused {
             allAnalysisPaused = false
-            logger.info("Analysis pause lifted (thermal=\(snapshot.thermalState.rawValue))")
+            logger.info("Analysis pause lifted (profile=\(profile.rawValue, privacy: .public), thermal=\(snapshot.thermalState.rawValue))")
             // The coordinator's capability observer survives stop() calls,
             // so no need to re-start it here. Hot-path work will resume
             // naturally on the next playback event or capability change
@@ -565,12 +611,12 @@ actor BackgroundProcessingService {
         // Pause/resume backfill independently.
         if shouldPauseBackfill && !backfillPaused {
             backfillPaused = true
-            logger.info("Backfill paused (thermal=\(snapshot.thermalState.rawValue), lowPower=\(snapshot.isLowPowerMode))")
+            logger.info("Backfill paused (profile=\(profile.rawValue, privacy: .public), thermal=\(snapshot.thermalState.rawValue), lowPower=\(snapshot.isLowPowerMode))")
         }
 
         if !shouldPauseBackfill && backfillPaused {
             backfillPaused = false
-            logger.info("Backfill resumed")
+            logger.info("Backfill resumed (profile=\(profile.rawValue, privacy: .public))")
         }
 
         if previousThermalState != snapshot.thermalState {
@@ -585,37 +631,30 @@ actor BackgroundProcessingService {
         isCharging = state.isCharging
     }
 
-    /// Whether battery is below threshold and device is not charging.
-    /// The threshold is sourced from `DeviceAdmissionPolicy` so this service
-    /// and `AdmissionController` cannot drift on the cutoff.
-    private func isBatteryTooLow() -> Bool {
-        currentBatteryLevel >= 0
-            && currentBatteryLevel < DeviceAdmissionPolicy.lowBatteryThreshold
-            && !isCharging
-    }
-
-    /// Evaluate the shared `DeviceAdmissionPolicy` against the latest
-    /// capability snapshot, using the BPS-cached battery and charging state
-    /// (which is refreshed from the battery provider on every capability
-    /// update). The returned decision answers "may backfill-class work run
-    /// right now?" — service-specific gates (e.g. `shouldPauseAll`) are
-    /// layered on top by callers.
-    private func deviceAdmissionDecision(for snapshot: CapabilitySnapshot) -> DeviceAdmissionPolicy.Decision {
-        let effectiveSnapshot = CapabilitySnapshot(
-            foundationModelsAvailable: snapshot.foundationModelsAvailable,
-            foundationModelsUsable: snapshot.foundationModelsUsable,
-            appleIntelligenceEnabled: snapshot.appleIntelligenceEnabled,
-            foundationModelsLocaleSupported: snapshot.foundationModelsLocaleSupported,
-            thermalState: snapshot.thermalState,
-            isLowPowerMode: isLowPowerMode,
-            isCharging: isCharging,
-            backgroundProcessingSupported: snapshot.backgroundProcessingSupported,
-            availableDiskSpaceBytes: snapshot.availableDiskSpaceBytes,
-            capturedAt: snapshot.capturedAt
-        )
-        return DeviceAdmissionPolicy.evaluate(
-            snapshot: effectiveSnapshot,
-            batteryLevel: currentBatteryLevel
+    /// Derive the current `QualityProfile` from the latest capability
+    /// snapshot, overriding the snapshot's battery and charging fields with
+    /// the BPS-cached values (refreshed from the battery provider on every
+    /// capability update).
+    ///
+    /// All thermal/battery/low-power decisions in BPS route through this
+    /// helper so the service and `AdmissionController` cannot drift — they
+    /// share `QualityProfile.derive(...)` as the single source of truth.
+    ///
+    /// Field-by-field: `thermalState` and `isLowPowerMode` come from the
+    /// `snapshot` argument (via `CapabilitySnapshot.qualityProfile(...)`).
+    /// `batteryLevel` and `isCharging` are taken from BPS-cached values,
+    /// which are refreshed from the battery provider on every capability
+    /// update and so are at least as fresh as the snapshot's battery fields.
+    /// In practice the snapshot is produced by the same capabilities service
+    /// that drives BPS, so all four values agree under steady state. Outside
+    /// steady state, the BPS-cached `isCharging` can lead the snapshot's by
+    /// one capability tick (the snapshot only refreshes `isCharging` when a
+    /// `batteryStateDidChange` notification fires); the override is the
+    /// freshness fix for that brief window.
+    private func currentQualityProfile(for snapshot: CapabilitySnapshot) -> QualityProfile {
+        snapshot.qualityProfile(
+            batteryLevel: currentBatteryLevel,
+            isCharging: isCharging
         )
     }
 

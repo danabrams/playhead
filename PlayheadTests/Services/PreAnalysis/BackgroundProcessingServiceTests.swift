@@ -62,10 +62,11 @@ struct BackfillTaskHandlerTests {
     func backfillSkippedOnThermalThrottle() async throws {
         // NOTE: This test exercises the throttle-check code path in handleBackfillTask.
         // On a simulator with nominal thermal state, the backfill will proceed normally.
-        // The shouldThrottleAnalysis gate reads from the real CapabilitiesService snapshot
-        // which cannot be injected. To fully test the skip path, the device must report
-        // .serious or .critical thermal state. This test still validates the happy path
-        // does NOT skip when thermal is nominal.
+        // The QualityProfile-derived backfill gate (`pauseAllWork || !allowSoonLane`)
+        // reads from the real CapabilitiesService snapshot which cannot be injected.
+        // To fully test the skip path, the device must report .serious or .critical
+        // thermal state. This test still validates the happy path does NOT skip
+        // when thermal is nominal.
         let (bps, coordinator, _, _) = makeBPS()
         let task = StubBackgroundTask()
 
@@ -367,7 +368,7 @@ struct ThermalManagementTests {
         #expect(coordinator.stopCallCount >= 1)
     }
 
-    @Test("Serious thermal does not pause all analysis")
+    @Test("Serious thermal does not pause all analysis but does pause backfill")
     func seriousThermalDoesNotPauseAllAnalysis() async throws {
         let (bps, coordinator, _, _) = makeBPS()
 
@@ -375,7 +376,8 @@ struct ThermalManagementTests {
         await bps.playbackDidStart()
         try await Task.sleep(for: .milliseconds(50))
 
-        // Apply serious thermal -- should NOT pause all (only critical does).
+        // Apply serious thermal -- should NOT pause all (only critical does)
+        // but SHOULD pause backfill since .serious clears `allowSoonLane`.
         let seriousSnapshot = makeCapabilitySnapshot(thermalState: .serious)
         await bps.handleCapabilityUpdate(seriousSnapshot)
         try await Task.sleep(for: .milliseconds(50))
@@ -384,6 +386,11 @@ struct ThermalManagementTests {
         #expect(await bps.isHotPathActive() == true)
         // Coordinator.stop() should NOT have been called for serious.
         #expect(coordinator.stopCallCount == 0)
+        // L-C2-3: positive assertion that .serious is exactly where backfill
+        // pauses but the hot-path doesn't (the narrower-than-DAP, broader-
+        // than-foreground point in the gate matrix).
+        #expect(await bps.isBackfillPaused() == true,
+                ".serious profile clears allowSoonLane → backfill paused")
     }
 
     @Test("Recovery from critical thermal lifts pause flag")
@@ -420,18 +427,100 @@ struct ThermalManagementTests {
 @Suite("Battery Management")
 struct BatteryManagementTests {
 
-    @Test("Low battery pauses all analysis")
-    func lowBatteryPausesAll() async throws {
+    // C1 alignment behavior matrix at the BPS layer:
+    //
+    //   inputs                                   profile     pauseAll  pauseBackfill
+    //   nominal + plain low-battery              .fair       no        no
+    //   nominal + plain LPM                      .fair       no        no
+    //   fair    + low-battery (unplugged)        .serious    no        YES
+    //   fair    + LPM                            .serious    no        YES
+    //   any     + critical thermal               .critical   YES       YES
+    //
+    // Plain low-battery and plain LPM (with nominal thermal) do NOT pause
+    // ANY BPS gate — they only demote the profile to `.fair`, which the
+    // lane-level `AnalysisWorkScheduler` handles by pausing the Background
+    // lane. This is the C1 narrowing of DAP: DAP used to defer all backfill
+    // at these inputs; QP keeps the BPS-layer backfill gate open and lets
+    // the lane scheduler throttle Background per-lane downstream. The BPS
+    // backfill gate is broader than the BPS foreground gate (fires at
+    // `.serious`, vs `.critical` for the hot-path) but narrower than DAP.
+    @Test("Plain low battery + nominal thermal pauses neither hot-path nor backfill")
+    func lowBatteryDoesNotPauseAllAnalysis() async throws {
         let battery = StubBatteryProvider()
         battery.level = 0.15
         battery.charging = false
         let (bps, coordinator, _, _) = makeBPS(battery: battery)
 
+        // Activate hot-path so we can verify it stays active.
+        await bps.playbackDidStart()
+        try await Task.sleep(for: .milliseconds(50))
+
         let nominalSnapshot = makeCapabilitySnapshot(thermalState: .nominal)
         await bps.handleCapabilityUpdate(nominalSnapshot)
         try await Task.sleep(for: .milliseconds(50))
 
-        #expect(coordinator.stopCallCount >= 1)
+        // The full-pause path runs `coordinator.stop()` only when
+        // `pauseAllWork` is true; plain low battery demotes to .fair so
+        // the foreground gate stays open.
+        #expect(coordinator.stopCallCount == 0,
+                "Plain low battery must not trigger pauseAllWork (only .critical does)")
+        #expect(await bps.isHotPathActive() == true,
+                "Hot-path must remain active under plain low battery alone")
+        // The backfill gate is `pauseAllWork || !allowSoonLane`. `.fair` keeps
+        // Soon lane open so backfill is NOT paused at this layer either —
+        // the scheduler pauses Background lane separately.
+        #expect(await bps.isBackfillPaused() == false,
+                "Plain low battery (.fair profile) must not pause backfill at the BPS layer")
+    }
+
+    @Test("Fair thermal + LPM (charged) pauses backfill but not hot-path")
+    func fairThermalPlusLPMPausesBackfillOnly() async throws {
+        let battery = StubBatteryProvider()
+        battery.level = 0.95
+        battery.charging = true
+        let (bps, coordinator, _, _) = makeBPS(battery: battery)
+
+        await bps.playbackDidStart()
+        try await Task.sleep(for: .milliseconds(50))
+
+        // Fair thermal + LPM → profile demotes to .serious which clears
+        // `allowSoonLane`. Backfill pauses; foreground hot-path stays open.
+        let fairLpmSnapshot = makeCapabilitySnapshot(
+            thermalState: .fair,
+            isLowPowerMode: true
+        )
+        await bps.handleCapabilityUpdate(fairLpmSnapshot)
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(coordinator.stopCallCount == 0,
+                "fair + LPM → .serious profile, pauseAllWork=false, hot-path stays open")
+        #expect(await bps.isHotPathActive() == true)
+        #expect(await bps.isBackfillPaused() == true,
+                ".serious profile clears allowSoonLane → backfill paused at BPS layer")
+    }
+
+    @Test("Fair thermal + low battery (unplugged) pauses backfill but not hot-path")
+    func fairThermalPlusLowBatteryPausesBackfillOnly() async throws {
+        let battery = StubBatteryProvider()
+        battery.level = 0.15
+        battery.charging = false
+        let (bps, coordinator, _, _) = makeBPS(battery: battery)
+
+        await bps.playbackDidStart()
+        try await Task.sleep(for: .milliseconds(50))
+
+        // Fair thermal + unplugged low battery → profile demotes to .serious
+        // which clears `allowSoonLane`. The BPS backfill gate fires; the
+        // foreground gate (`pauseAllWork`) does not.
+        let fairSnapshot = makeCapabilitySnapshot(thermalState: .fair)
+        await bps.handleCapabilityUpdate(fairSnapshot)
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(coordinator.stopCallCount == 0,
+                ".serious profile does not trigger pauseAllWork — hot-path stays open")
+        #expect(await bps.isHotPathActive() == true)
+        #expect(await bps.isBackfillPaused() == true,
+                ".serious profile clears allowSoonLane → backfill paused at BPS layer")
     }
 
     @Test("Low battery while charging does NOT pause")
@@ -445,31 +534,36 @@ struct BatteryManagementTests {
         await bps.handleCapabilityUpdate(nominalSnapshot)
         try await Task.sleep(for: .milliseconds(50))
 
-        // All analysis should NOT be paused when charging.
+        // All analysis should NOT be paused when charging — charging keeps
+        // the profile at .nominal regardless of battery level.
         #expect(coordinator.stopCallCount == 0)
+        #expect(await bps.isBackfillPaused() == false,
+                "Charging keeps profile .nominal so neither lane is paused")
     }
 
-    @Test("Battery recovery resumes analysis")
-    func batteryRecoveryResumes() async throws {
-        let battery = StubBatteryProvider()
-        battery.level = 0.15
-        battery.charging = false
-        let (bps, coordinator, _, _) = makeBPS(battery: battery)
+    // C1 alignment: critical thermal is now the only canonical "pause
+    // everything" trigger. Pre-C1, BPS pause-all also fired on
+    // `isBatteryTooLow()` (which already required `!isCharging`); under C1
+    // that is folded into QualityProfile and only `.critical` raises
+    // `pauseAllWork`. This test pins the recovery path: when critical lifts,
+    // hot-path resumes.
+    @Test("Critical thermal recovery resumes analysis")
+    func criticalThermalRecoveryResumes() async throws {
+        let (bps, coordinator, _, _) = makeBPS()
 
         // Activate hot-path first.
         await bps.playbackDidStart()
         try await Task.sleep(for: .milliseconds(50))
 
-        // Trigger low battery pause.
-        let snapshot1 = makeCapabilitySnapshot(thermalState: .nominal)
-        await bps.handleCapabilityUpdate(snapshot1)
+        // Trigger critical-thermal pause-all.
+        let critical = makeCapabilitySnapshot(thermalState: .critical)
+        await bps.handleCapabilityUpdate(critical)
         try await Task.sleep(for: .milliseconds(50))
         #expect(coordinator.stopCallCount >= 1)
 
-        // Recover battery.
-        battery.level = 0.50
-        let snapshot2 = makeCapabilitySnapshot(thermalState: .nominal)
-        await bps.handleCapabilityUpdate(snapshot2)
+        // Recover to nominal.
+        let nominal = makeCapabilitySnapshot(thermalState: .nominal)
+        await bps.handleCapabilityUpdate(nominal)
         try await Task.sleep(for: .milliseconds(50))
 
         // Hot-path should resume since playback was active.

@@ -26,7 +26,7 @@ import Foundation
 //
 // Thresholds are expressed in SI units: durations in TimeInterval
 // (seconds, Double) and rates as Double fractions in [0, 1]. This matches
-// the existing project convention (see DeviceAdmissionPolicy's
+// the existing project convention (see QualityProfile's
 // `lowBatteryThreshold` as a Float in [0, 1]).
 
 /// The canonical set of SLIs for download→ready pipeline health.

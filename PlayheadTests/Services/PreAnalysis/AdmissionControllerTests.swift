@@ -41,41 +41,93 @@ struct AdmissionControllerTests {
 
         #expect(first.job?.jobId == "high-priority")
         #expect(first.deferReason == nil)
+        #expect(first.qualityProfile == .nominal,
+                "admit decisions carry the derived QualityProfile")
         #expect(blockedWhileBusy.job == nil)
         #expect(blockedWhileBusy.deferReason == .serialBusy)
+        #expect(blockedWhileBusy.qualityProfile == nil,
+                "serialBusy short-circuits before device-state evaluation")
         #expect(second.job?.jobId == "low-priority")
     }
 
-    @Test("defers only critical thermal, allows serious thermal, and charging overrides low battery")
+    // C1 alignment: the admission gate is now `QualityProfile.schedulerPolicy.pauseAllWork`,
+    // which is true today only at `.critical` thermal. Plain low-battery and
+    // serious thermal demote the profile to `.serious` (which still admits at
+    // the controller level — the scheduler is the layer that gates per-lane).
+    @Test("defers only when QualityProfile pauses all work; admits otherwise")
     func testThermalAndBatteryGating() async {
         let controller = AdmissionController()
-        await controller.enqueue(makeBackfillJob(jobId: "gated-job", priority: 5))
-        await controller.enqueue(makeBackfillJob(jobId: "serious-job", priority: 4))
+        await controller.enqueue(makeBackfillJob(jobId: "critical-thermal-job", priority: 9))
+        await controller.enqueue(makeBackfillJob(jobId: "serious-thermal-job", priority: 8))
+        await controller.enqueue(makeBackfillJob(jobId: "low-battery-job", priority: 7))
+        await controller.enqueue(makeBackfillJob(jobId: "charging-low-battery-job", priority: 6))
 
+        // Critical thermal: profile=.critical, pauseAllWork=true -> defer.
         let thermalBlocked = await controller.admitNextEligibleJob(
             snapshot: makeCapabilitySnapshot(thermalState: .critical, isCharging: true),
             batteryLevel: 0.95
         )
+        #expect(thermalBlocked.job == nil)
+        #expect(thermalBlocked.deferReason == .thermalThrottled)
+        #expect(thermalBlocked.qualityProfile == .critical,
+                "critical thermal derives .critical and attaches it to the decision")
+
+        // Serious thermal (unplugged): profile=.serious, pauseAllWork=false -> admit.
+        // (The scheduler still pauses Soon+Background lanes at .serious; that's
+        // a per-lane decision, not an admission decision.)
         let seriousAdmitted = await controller.admitNextEligibleJob(
             snapshot: makeCapabilitySnapshot(thermalState: .serious, isCharging: false),
             batteryLevel: 0.95
         )
-        await controller.finish(jobId: "gated-job")
-        let lowBatteryBlocked = await controller.admitNextEligibleJob(
+        #expect(seriousAdmitted.job?.jobId == "critical-thermal-job",
+                "serious thermal admits at the controller level")
+        #expect(seriousAdmitted.qualityProfile == .serious)
+        await controller.finish(jobId: "critical-thermal-job")
+
+        // Plain low battery (nominal thermal, unplugged): profile demotes
+        // nominal->fair, pauseAllWork=false -> admit. This is the C1
+        // narrowing: DAP used to defer here, QP admits because per-lane
+        // throttling already handles it downstream.
+        let lowBatteryAdmitted = await controller.admitNextEligibleJob(
             snapshot: makeCapabilitySnapshot(thermalState: .nominal, isCharging: false),
             batteryLevel: 0.19
         )
+        #expect(lowBatteryAdmitted.job?.jobId == "serious-thermal-job",
+                "plain low battery does not block admission under QualityProfile")
+        #expect(lowBatteryAdmitted.qualityProfile == .fair)
+        await controller.finish(jobId: "serious-thermal-job")
+
+        // Charging at low battery: profile stays .nominal -> admit.
         let chargingAdmitted = await controller.admitNextEligibleJob(
             snapshot: makeCapabilitySnapshot(thermalState: .nominal, isCharging: true),
             batteryLevel: 0.05
         )
+        #expect(chargingAdmitted.job?.jobId == "low-battery-job")
+        #expect(chargingAdmitted.qualityProfile == .nominal)
+    }
 
-        #expect(thermalBlocked.job == nil)
-        #expect(thermalBlocked.deferReason == .thermalThrottled)
-        #expect(seriousAdmitted.job?.jobId == "gated-job")
-        #expect(lowBatteryBlocked.job == nil)
-        #expect(lowBatteryBlocked.deferReason == .batteryTooLow)
-        #expect(chargingAdmitted.job?.jobId == "serious-job")
+    // C1 alignment + thermal precedence: when multiple constraints fire at
+    // once (.critical thermal + LPM + unplugged + low battery), the
+    // deferReason helper returns `.thermalThrottled` because thermal is
+    // checked first, and the attached qualityProfile is `.critical`.
+    @Test("critical thermal carries thermalThrottled defer reason and .critical profile")
+    func testCriticalThermalDeferAttribution() async {
+        let controller = AdmissionController()
+        await controller.enqueue(makeBackfillJob(jobId: "critical", priority: 5))
+
+        let blocked = await controller.admitNextEligibleJob(
+            snapshot: makeCapabilitySnapshot(
+                thermalState: .critical,
+                isLowPowerMode: true,
+                isCharging: false
+            ),
+            batteryLevel: 0.05
+        )
+
+        #expect(blocked.job == nil)
+        #expect(blocked.deferReason == .thermalThrottled,
+                "thermal precedence wins when multiple constraints would also fire")
+        #expect(blocked.qualityProfile == .critical)
     }
 
     // M14: runningJob exposes the whole job, not just the id.
@@ -107,6 +159,11 @@ struct AdmissionControllerTests {
         )
         #expect(throttled.job == nil)
         #expect(throttled.deferReason == nil)
+        // The empty-queue branch short-circuits before device-state evaluation,
+        // so qualityProfile is nil — callers must not assume a non-nil profile
+        // on a decision where job and deferReason are both nil.
+        #expect(throttled.qualityProfile == nil,
+                "empty-queue .idle short-circuits before QualityProfile derivation")
     }
 
     // #13: createdAt tiebreaker — earlier wins at equal priority.
@@ -254,12 +311,16 @@ struct AdmissionControllerTests {
         #expect(running == nil)
     }
 
-    @Test("defers Low Power Mode via the shared DeviceAdmissionPolicy")
-    func testLowPowerModeDeferral() async {
+    // C1 alignment: Low Power Mode alone no longer blocks admission. LPM
+    // demotes nominal->fair (or fair->serious), but neither profile sets
+    // `pauseAllWork`. Per-lane throttling in `AnalysisWorkScheduler` is the
+    // appropriate place to act on the demotion (e.g. pause Background lane).
+    @Test("Low Power Mode alone does not block admission; profile demotes one step")
+    func testLowPowerModeDoesNotBlockAdmission() async {
         let controller = AdmissionController()
         await controller.enqueue(makeBackfillJob(jobId: "lpm-job", priority: 5))
 
-        let blocked = await controller.admitNextEligibleJob(
+        let admitted = await controller.admitNextEligibleJob(
             snapshot: makeCapabilitySnapshot(
                 thermalState: .nominal,
                 isLowPowerMode: true,
@@ -268,7 +329,75 @@ struct AdmissionControllerTests {
             batteryLevel: 0.95
         )
 
-        #expect(blocked.job == nil)
-        #expect(blocked.deferReason == .lowPowerMode)
+        #expect(admitted.job?.jobId == "lpm-job",
+                "LPM no longer blocks admission — it demotes the profile only")
+        #expect(admitted.deferReason == nil)
+        #expect(admitted.qualityProfile == .fair,
+                "nominal thermal + LPM demotes one step to .fair")
+    }
+
+    // C1 contradiction case 2 from the alignment plan: thermal fair + LPM on.
+    // DAP used to defer entirely; QP demotes to .serious which still admits
+    // (per-lane gates handle the throttle).
+    @Test("fair thermal + Low Power Mode admits with .serious profile")
+    func testFairThermalPlusLPMAdmitsWithSeriousProfile() async {
+        let controller = AdmissionController()
+        await controller.enqueue(makeBackfillJob(jobId: "fair-lpm-job", priority: 5))
+
+        let admitted = await controller.admitNextEligibleJob(
+            snapshot: makeCapabilitySnapshot(
+                thermalState: .fair,
+                isLowPowerMode: true,
+                isCharging: true
+            ),
+            batteryLevel: 0.95
+        )
+
+        #expect(admitted.job?.jobId == "fair-lpm-job")
+        #expect(admitted.deferReason == nil,
+                "admitted decisions must not carry a defer reason")
+        #expect(admitted.qualityProfile == .serious,
+                "fair thermal demoted by LPM lands on .serious")
+    }
+
+    // M-7 from review-cycle 1 / L-C2-1 from cycle 2: pin the contract that
+    // `qualityProfile` reflects the snapshot passed on THIS call, not a prior
+    // admit result. Today the controller stores no per-call device state, so
+    // this test is a forward canary against a future refactor that caches a
+    // profile across admit/defer transitions.
+    @Test("admission flips correctly when profile alternates admit / defer")
+    func testAdmissionFlipsAcrossProfileChanges() async {
+        let controller = AdmissionController()
+        await controller.enqueue(makeBackfillJob(jobId: "first", priority: 9, createdAt: 10))
+        await controller.enqueue(makeBackfillJob(jobId: "second", priority: 8, createdAt: 20))
+
+        // Call 1: nominal thermal, should admit "first" with .nominal profile.
+        let admit1 = await controller.admitNextEligibleJob(
+            snapshot: makeCapabilitySnapshot(thermalState: .nominal, isCharging: true),
+            batteryLevel: 0.95
+        )
+        #expect(admit1.job?.jobId == "first")
+        #expect(admit1.qualityProfile == .nominal)
+        await controller.finish(jobId: "first")
+
+        // Call 2: critical thermal, must defer with .critical profile.
+        let defer1 = await controller.admitNextEligibleJob(
+            snapshot: makeCapabilitySnapshot(thermalState: .critical, isCharging: true),
+            batteryLevel: 0.95
+        )
+        #expect(defer1.job == nil)
+        #expect(defer1.deferReason == .thermalThrottled)
+        #expect(defer1.qualityProfile == .critical,
+                "deferred decision must carry the .critical profile, not the prior .nominal")
+
+        // Call 3: back to nominal, must admit "second" with fresh .nominal.
+        let admit2 = await controller.admitNextEligibleJob(
+            snapshot: makeCapabilitySnapshot(thermalState: .nominal, isCharging: true),
+            batteryLevel: 0.95
+        )
+        #expect(admit2.job?.jobId == "second",
+                "queue head must advance after the previous job finished")
+        #expect(admit2.qualityProfile == .nominal,
+                "post-defer admit must derive a fresh profile, not reuse .critical")
     }
 }
