@@ -10,6 +10,7 @@
   "testTargets" : [
     {
       "skippedTests" : [
+        "BackgroundingCycleTests",
         "CorpusPhase1TranscriptPipelineTests",
         "CorpusLexicalScannerCoverageTests",
         "CorpusEvidenceCatalogTests",
@@ -17,11 +18,20 @@
         "CorpusAcousticBreakTests",
         "FoundationModelClassifierTests",
         "FoundationModelShadowBenchmarkTests",
+        "ForceQuitCycleTests",
+        "InterruptionHarnessInjectTests",
+        "InterruptionHarnessTests",
+        "LowPowerTransitionCycleTests",
+        "NetworkLossCycleTests",
         "Phase3ShadowReplayHarnessTests",
         "Phase4ShadowBenchmarkTests",
         "Phase5IntegrationTests",
         "KnownAdsIntegrationTests",
+        "RelaunchCycleTests",
         "ScrubPastAdIntegrationTests",
+        "StoragePressureCycleTests",
+        "ThermalDowngradeCycleTests",
+        "UserPreemptionCycleTests",
         "HighSpeedPlaybackIntegrationTests",
         "CheckpointResumeIntegrationTests",
         "FoundationModelsUnavailableTests",

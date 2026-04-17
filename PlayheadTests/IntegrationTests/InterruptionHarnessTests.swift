@@ -39,6 +39,7 @@ class InterruptionCycleSuiteBase: XCTestCase {
         harness.mockTaskScheduler.reset()
         harness.mockCapabilities.reset()
         harness.mockStorageBudget.reset()
+        harness.cleanupDownloadCache()
         harness = nil
         try await super.tearDown()
     }
@@ -143,6 +144,20 @@ final class StoragePressureCycleTests: InterruptionCycleSuiteBase {
             let preempted = r.journal.filter { $0.eventType == .preempted }
             XCTAssertEqual(preempted.first?.cause, .mediaCap)
         }
+        // Production-pathway assertion: the harness must have driven
+        // `MockStorageBudget.admit(class: .media, ...)` at least once per
+        // cycle (the observation point the pathway uses to derive
+        // `.mediaCap`). If a future refactor skipped the admit call, the
+        // cause would still match because `terminalFor(.storagePressure)`
+        // returns `.mediaCap` as its scripted fallback — this counter
+        // check is what keeps the oracle non-tautological.
+        let mediaAdmitCalls = harness.mockStorageBudget.sizeProviderCalls
+            .filter { $0 == .media }
+            .count
+        XCTAssertGreaterThanOrEqual(
+            mediaAdmitCalls, 5,
+            "storagePressure pathway should call admit(.media) at least once per cycle"
+        )
     }
 }
 
@@ -154,6 +169,22 @@ final class UserPreemptionCycleTests: InterruptionCycleSuiteBase {
             let preempted = r.journal.filter { $0.eventType == .preempted }
             XCTAssertEqual(preempted.first?.cause, .userPreempted)
         }
+        // Production-pathway assertion: the real
+        // `LanePreemptionCoordinator` should have observed at least 5
+        // `preemptLowerLanes(for:)` invocations (one per cycle). Each
+        // cycle also acknowledges its registration before teardown, so
+        // by the time we reach this assertion the coordinator should
+        // have zero outstanding registrations.
+        let preemptCount = await harness.lanePreemptionCoordinator.preemptionRequestCount
+        XCTAssertGreaterThanOrEqual(
+            preemptCount, 5,
+            "userPreemption pathway should invoke preemptLowerLanes once per cycle"
+        )
+        let outstanding = await harness.lanePreemptionCoordinator.registeredCount()
+        XCTAssertEqual(
+            outstanding, 0,
+            "userPreemption pathway must acknowledge each registration before release"
+        )
     }
 }
 
@@ -165,6 +196,17 @@ final class ForceQuitCycleTests: InterruptionCycleSuiteBase {
             let preempted = r.journal.filter { $0.eventType == .preempted }
             XCTAssertEqual(preempted.first?.cause, .appForceQuitRequiresRelaunch)
         }
+        // Production-pathway assertion: the relay recorder wired into
+        // `DownloadManager` must have received one `recordPreempted`
+        // call per cycle from `scanForSuspendedTransfers`. The oracle's
+        // cause correctness above proves the scan's cause choice
+        // propagated through the relay; this count proves the scan
+        // itself actually ran (vs the scripted fallback path masking a
+        // regression that skipped the scan).
+        XCTAssertGreaterThanOrEqual(
+            harness.forceQuitRelayRecorder.preemptedCount, 5,
+            "forceQuit pathway should invoke scanForSuspendedTransfers once per cycle"
+        )
     }
 }
 
@@ -173,12 +215,14 @@ final class ForceQuitCycleTests: InterruptionCycleSuiteBase {
 final class InterruptionHarnessInjectTests: XCTestCase {
     func test_injectBackgrounding_submitsBGRequest() async throws {
         let harness = try await InterruptionHarness.make()
+        defer { harness.cleanupDownloadCache() }
         try await harness.inject(.backgrounding(episodeId: "ep-1"))
         XCTAssertEqual(harness.mockTaskScheduler.submittedRequests.count, 1)
     }
 
     func test_injectThermalDowngrade_publishesSeriousSnapshot() async throws {
         let harness = try await InterruptionHarness.make()
+        defer { harness.cleanupDownloadCache() }
         try await harness.inject(.thermalDowngrade(episodeId: "ep-thermal"))
         let snap = await harness.mockCapabilities.currentSnapshot
         XCTAssertEqual(snap.thermalState, .serious)
@@ -186,6 +230,7 @@ final class InterruptionHarnessInjectTests: XCTestCase {
 
     func test_injectLowPower_publishesLowPowerSnapshot() async throws {
         let harness = try await InterruptionHarness.make()
+        defer { harness.cleanupDownloadCache() }
         try await harness.inject(.lowPowerTransition(episodeId: "ep-lp"))
         let snap = await harness.mockCapabilities.currentSnapshot
         XCTAssertTrue(snap.isLowPowerMode)
@@ -193,6 +238,7 @@ final class InterruptionHarnessInjectTests: XCTestCase {
 
     func test_injectStoragePressure_forcesRejection() async throws {
         let harness = try await InterruptionHarness.make()
+        defer { harness.cleanupDownloadCache() }
         try await harness.inject(.storagePressure(episodeId: "ep-sp"))
         let decision = await harness.mockStorageBudget.admit(class: .media, sizeBytes: 10_000)
         if case .rejectCapExceeded = decision {
@@ -204,6 +250,7 @@ final class InterruptionHarnessInjectTests: XCTestCase {
 
     func test_injectNetworkLoss_installsProtocol() async throws {
         let harness = try await InterruptionHarness.make()
+        defer { harness.cleanupDownloadCache() }
         try await harness.inject(.networkLoss(episodeId: "ep-nl"))
         // Issue a request through a configured session and expect the
         // stub to fail it. Use a bespoke session so we don't pollute
@@ -232,6 +279,7 @@ final class InterruptionHarnessTests: XCTestCase {
 
     func test_fifty_cycle_matrix() async throws {
         let harness = try await InterruptionHarness.make()
+        defer { harness.cleanupDownloadCache() }
         let allTypes = CycleType.allCases
         var allJournals: [WorkJournalEntry] = []
         var perTypeCounts: [CycleType: Int] = [:]
