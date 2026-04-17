@@ -16,6 +16,41 @@ private let SQLITE_TRANSIENT_PTR = unsafeBitCast(-1, to: sqlite3_destructor_type
 
 // MARK: - Row types
 
+/// playhead-h7r: the three artifact classes recognized by the storage
+/// budget enforcer. Each `analysis_assets` row carries exactly one class;
+/// per-class caps and eviction policies are encoded in ``StorageBudget``.
+///
+/// Raw-value strings are the ground-truth persisted in SQLite. Do not
+/// rename them without a migration.
+enum ArtifactClass: String, Sendable, Hashable, CaseIterable {
+    /// Downloaded podcast media (audio file). Largest per-asset footprint;
+    /// the only class that is directly evictable under dual-cap pressure.
+    case media
+
+    /// A warm-resume bundle (bucketed features / indices / compact
+    /// derivatives) whose role is to accelerate resumption of analysis
+    /// after a cold start. Never directly evicted; its footprint is
+    /// constrained by a ratio check against evicted media (see
+    /// ``StorageBudget``).
+    case warmResumeBundle
+
+    /// Short-lived intermediate state (temp staging, working buffers).
+    /// Evicted AFTER media under dual-cap pressure. Safe to delete at
+    /// any time — any lost scratch bytes are reconstructible.
+    case scratch
+
+    /// Decodes a raw SQLite value, defaulting to ``media`` for any
+    /// unrecognized or empty string. `'media'` is the safe default
+    /// because it is the only evictable class, matching the migration
+    /// sentinel behavior (`DEFAULT 'media'`).
+    static func fromPersistedRaw(_ raw: String?) -> ArtifactClass {
+        guard let raw, let cls = ArtifactClass(rawValue: raw) else {
+            return .media
+        }
+        return cls
+    }
+}
+
 struct AnalysisAsset: Sendable {
     let id: String
     let episodeId: String
@@ -28,6 +63,40 @@ struct AnalysisAsset: Sendable {
     let analysisState: String
     let analysisVersion: Int
     let capabilitySnapshot: String?
+    /// playhead-h7r: classification for storage-budget accounting.
+    /// Defaults to ``ArtifactClass/media`` so every existing call-site
+    /// (two in `AnalysisCoordinator`, one in `AnalysisWorkScheduler`)
+    /// compiles unchanged — `media` is the correct class for the
+    /// downloaded podcast audio they represent.
+    let artifactClass: ArtifactClass
+
+    init(
+        id: String,
+        episodeId: String,
+        assetFingerprint: String,
+        weakFingerprint: String?,
+        sourceURL: String,
+        featureCoverageEndTime: Double?,
+        fastTranscriptCoverageEndTime: Double?,
+        confirmedAdCoverageEndTime: Double?,
+        analysisState: String,
+        analysisVersion: Int,
+        capabilitySnapshot: String?,
+        artifactClass: ArtifactClass = .media
+    ) {
+        self.id = id
+        self.episodeId = episodeId
+        self.assetFingerprint = assetFingerprint
+        self.weakFingerprint = weakFingerprint
+        self.sourceURL = sourceURL
+        self.featureCoverageEndTime = featureCoverageEndTime
+        self.fastTranscriptCoverageEndTime = fastTranscriptCoverageEndTime
+        self.confirmedAdCoverageEndTime = confirmedAdCoverageEndTime
+        self.analysisState = analysisState
+        self.analysisVersion = analysisVersion
+        self.capabilitySnapshot = capabilitySnapshot
+        self.artifactClass = artifactClass
+    }
 }
 
 struct AnalysisSession: Sendable {
@@ -740,6 +809,10 @@ actor AnalysisStore {
             // index on these columns; revisit only if profiling under
             // revalidation load (playhead-zx6i) proves need.
             try addModelPolicyFeatureSchemaVersionColumnsIfNeeded()
+            // playhead-h7r: tag every analysis_assets row with an
+            // `artifact_class`. See `addArtifactClassColumnIfNeeded()` for
+            // documentation of sentinel and eviction semantics.
+            try addArtifactClassColumnIfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -912,6 +985,12 @@ actor AnalysisStore {
         // `migrateOnlyForTesting()` intentionally skips `createTables()`
         // and some seeded fixtures may not include every in-scope table.
         try addModelPolicyFeatureSchemaVersionColumnsIfNeededForExistingTables()
+        // playhead-h7r: mirror the `addArtifactClassColumnIfNeeded` call
+        // from `migrate()`. Guarded by `tableExists` because some seeded
+        // fixtures may not include `analysis_assets`.
+        if try tableExists("analysis_assets") {
+            try addArtifactClassColumnIfNeeded()
+        }
     }
     #endif
 
@@ -1113,6 +1192,39 @@ actor AnalysisStore {
                 definition: "INTEGER NOT NULL DEFAULT 0"
             )
         }
+    }
+
+    /// playhead-h7r: add `artifact_class` to `analysis_assets`. Idempotent.
+    ///
+    /// New artifacts are classified at insert time into one of three
+    /// classes (see ``ArtifactClass``) so the storage-budget enforcer
+    /// (``StorageBudget``) can apply per-class LRU eviction and the
+    /// warm-resume-bundle ratio invariant.
+    ///
+    /// Sentinel: legacy rows without an explicit class are migrated to
+    /// `'media'` via SQLite's `ALTER TABLE ADD COLUMN ... DEFAULT`
+    /// semantics. `'media'` is the safe default because it is the only
+    /// evictable class under dual-cap pressure — misclassifying a legacy
+    /// row as media does not leak bytes, it just makes that row a
+    /// candidate for eviction ahead of correctly-tagged warm-resume
+    /// bundles.
+    ///
+    /// Placement: the column is appended to the END of `analysis_assets`
+    /// (SQLite's only supported `ADD COLUMN` position). Existing
+    /// `SELECT *` readers in this file (`readAsset`, at the positional
+    /// indices 0..10) remain correct because the new column sits at
+    /// index 11; a dedicated fetch path reads it out when needed.
+    ///
+    /// Rollback: `ADD COLUMN` is additive-only. Existing INSERT call-sites
+    /// use explicit column lists that now include `artifact_class`, so a
+    /// schema downgrade that drops the column would break inserts —
+    /// there is no destructive rollback path.
+    private func addArtifactClassColumnIfNeeded() throws {
+        try addColumnIfNeeded(
+            table: "analysis_assets",
+            column: "artifact_class",
+            definition: "TEXT NOT NULL DEFAULT '\(ArtifactClass.media.rawValue)'"
+        )
     }
 
     /// Seeds `_meta.schema_version = '1'` on a brand-new database so the
@@ -2162,12 +2274,15 @@ actor AnalysisStore {
     // MARK: - CRUD: analysis_assets
 
     func insertAsset(_ asset: AnalysisAsset) throws {
+        // playhead-h7r: new artifacts get an explicit `artifact_class` at
+        // insert time. Legacy rows predating the column use the
+        // `DEFAULT 'media'` sentinel from the migration.
         let sql = """
             INSERT INTO analysis_assets
             (id, episodeId, assetFingerprint, weakFingerprint, sourceURL,
              featureCoverageEndTime, fastTranscriptCoverageEndTime, confirmedAdCoverageEndTime,
-             analysisState, analysisVersion, capabilitySnapshot)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             analysisState, analysisVersion, capabilitySnapshot, artifact_class)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -2182,7 +2297,26 @@ actor AnalysisStore {
         bind(stmt, 9, asset.analysisState)
         bind(stmt, 10, asset.analysisVersion)
         bind(stmt, 11, asset.capabilitySnapshot)
+        bind(stmt, 12, asset.artifactClass.rawValue)
         try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-h7r: count `analysis_assets` rows grouped by
+    /// `artifact_class`. Used by ``StorageBudget`` as a lightweight way
+    /// to observe per-class cardinality; byte accounting is the job of
+    /// the injected size accessor, not this store.
+    func countAssetsByArtifactClass() throws -> [ArtifactClass: Int] {
+        let sql = "SELECT artifact_class, COUNT(*) FROM analysis_assets GROUP BY artifact_class"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        var out: [ArtifactClass: Int] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let raw = optionalText(stmt, 0)
+            let cls = ArtifactClass.fromPersistedRaw(raw)
+            let count = Int(sqlite3_column_int(stmt, 1))
+            out[cls, default: 0] += count
+        }
+        return out
     }
 
     func fetchAsset(id: String) throws -> AnalysisAsset? {
@@ -2251,6 +2385,12 @@ actor AnalysisStore {
     }
 
     private func readAsset(_ stmt: OpaquePointer?) -> AnalysisAsset {
+        // playhead-h7r: `SELECT * FROM analysis_assets` returns columns
+        // in CREATE TABLE order (0..10), followed by `createdAt` at 11
+        // (from the CREATE TABLE clause), followed by `artifact_class`
+        // at 12 (appended by `addArtifactClassColumnIfNeeded`). Legacy
+        // fixtures or pre-migration rows fall back to `.media` via
+        // ``ArtifactClass/fromPersistedRaw(_:)``.
         AnalysisAsset(
             id: text(stmt, 0),
             episodeId: text(stmt, 1),
@@ -2262,7 +2402,8 @@ actor AnalysisStore {
             confirmedAdCoverageEndTime: optionalDouble(stmt, 7),
             analysisState: text(stmt, 8),
             analysisVersion: Int(sqlite3_column_int(stmt, 9)),
-            capabilitySnapshot: optionalText(stmt, 10)
+            capabilitySnapshot: optionalText(stmt, 10),
+            artifactClass: ArtifactClass.fromPersistedRaw(optionalText(stmt, 12))
         )
     }
 
