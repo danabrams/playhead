@@ -572,6 +572,15 @@ final class PlayheadRuntime {
                 // Non-fatal: downloads will fail but playback still works.
             }
 
+            // playhead-44h1 (fix): wire the willResignActive observer so
+            // the foreground-assist hand-off decision runs in a shipped
+            // build. Without this call, `handleWillResignActive` only
+            // fires from tests and the entire bead deliverable is dead
+            // code in production. `registerForegroundAssistLifecycleObserver`
+            // is idempotent, so re-invocation (e.g. a preview runtime
+            // mis-wire) is a safe no-op.
+            await downloadManager.registerForegroundAssistLifecycleObserver()
+
             do {
                 try await modelInventory.scan()
             } catch {

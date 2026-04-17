@@ -194,12 +194,6 @@ actor DownloadManager {
     /// testing surface stays consistent.
     private var backgroundTaskScheduler: any BackgroundTaskScheduling = BGTaskScheduler.shared
 
-    /// playhead-44h1 (fix): guards against submitting two
-    /// `BGContinuedProcessingTaskRequest`s for the same episode in the
-    /// same `willResignActive` cycle. iOS coalesces duplicates but
-    /// logging a second submit for the same id muddies the log.
-    private var inflightContinuedProcessingSubmissions: Set<String> = []
-
     /// Metadata cache: episode ID -> HTTP metadata from last response.
     private var metadataCache: [String: HTTPAssetMetadata] = [:]
 
@@ -437,8 +431,26 @@ actor DownloadManager {
     /// Token returned by `NotificationCenter.addObserver(forName:...)`
     /// so ``deregisterForegroundAssistLifecycleObserver`` can reverse
     /// the registration. An opaque `NSObjectProtocol` per the API
-    /// contract.
-    private var foregroundAssistObserverToken: (any NSObjectProtocol)?
+    /// contract. Marked `nonisolated(unsafe)` so the actor's nonisolated
+    /// `deinit` can read the token and remove the observer from
+    /// `NotificationCenter.default` (itself thread-safe) without
+    /// hopping onto the actor. All non-deinit mutations still happen
+    /// on the actor so reads/writes remain serialized in practice.
+    nonisolated(unsafe) private var foregroundAssistObserverToken: (any NSObjectProtocol)?
+
+    /// playhead-44h1 (fix): remove the `willResignActive` observer on
+    /// deinit so a released `DownloadManager` does not leave a stray
+    /// `NotificationCenter` registration pointing at freed memory.
+    /// Actor `deinit` is nonisolated; `NotificationCenter.removeObserver`
+    /// is documented thread-safe and the token is `nonisolated(unsafe)`,
+    /// so reading it here is sound. All live mutation of the token
+    /// happens through actor-isolated methods, which cannot race with
+    /// `deinit` (the last reference has already dropped).
+    deinit {
+        if let token = foregroundAssistObserverToken {
+            NotificationCenter.default.removeObserver(token)
+        }
+    }
 
     /// Tear down the `willResignActive` observer. Primarily for
     /// tests so a second registration does not accumulate observers
@@ -458,9 +470,12 @@ actor DownloadManager {
     /// ``ForegroundAssistTransferSnapshot``, call
     /// ``ForegroundAssistHandoff/decide(for:)``, and act on the
     /// verdict. A single `willResignActive` cycle may emit multiple
-    /// submissions — one per still-active episode — but each
-    /// submission is deduped within the cycle via
-    /// ``inflightContinuedProcessingSubmissions``.
+    /// submissions — one per still-active episode. The outer loop
+    /// iterates distinct keys of ``foregroundAssistProgress`` so the
+    /// same episode cannot be submitted twice within one cycle. Across
+    /// cycles, iOS coalesces duplicate `BGContinuedProcessingTaskRequest`
+    /// identifiers server-side, so we do not maintain any app-side
+    /// dedupe set here.
     @discardableResult
     func handleWillResignActive(
         now: Date = Date()
@@ -519,19 +534,11 @@ actor DownloadManager {
     /// `"<BackgroundTaskID.continuedProcessing>.<episodeId>"` that
     /// `BackgroundProcessingService.parseEpisodeId(from:)` expects.
     ///
-    /// Idempotent within a single `willResignActive` cycle — a second
-    /// call for the same `episodeId` is swallowed. The cycle gate is
-    /// cleared after the submission completes (success OR failure) so
-    /// the next transition is free to submit again for a still-active
-    /// transfer.
+    /// No app-side dedupe: iOS `BGTaskScheduler` coalesces duplicate
+    /// identifiers, and `handleWillResignActive`'s caller loop already
+    /// iterates distinct `episodeId`s, so a single cycle cannot submit
+    /// twice for the same episode.
     private func submitContinuedProcessingRequest(for episodeId: String) {
-        guard !inflightContinuedProcessingSubmissions.contains(episodeId) else {
-            logger.debug("BGContinuedProcessingTaskRequest already submitted for \(episodeId, privacy: .public)")
-            return
-        }
-        inflightContinuedProcessingSubmissions.insert(episodeId)
-        defer { inflightContinuedProcessingSubmissions.remove(episodeId) }
-
         let identifier = "\(BackgroundTaskID.continuedProcessing).\(episodeId)"
         let request = BGContinuedProcessingTaskRequest(
             identifier: identifier,

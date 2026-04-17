@@ -486,31 +486,45 @@ actor AnalysisCoordinator {
     /// Resolution:
     ///   - Look up the episode's most-recently-updated `analysis_jobs`
     ///     row to capture the live `{generationID, schedulerEpoch}`.
-    ///   - When no row is found (unusual — a continued-processing
-    ///     task fired for an episode with no job) we still append a
-    ///     row with generationID="" and schedulerEpoch=0 so the
-    ///     journal retains an audit trail of the expire/complete.
+    ///   - When no row is found, log a warning and SKIP the append.
+    ///     Rationale (review fix): writing a row with a freshly-minted
+    ///     UUID that never joined to a real job row produces an orphan
+    ///     WorkJournal entry that nothing downstream can reconcile —
+    ///     worse than no row at all for support triage. The miss path
+    ///     is already anomalous (a continued-processing task fired
+    ///     for an episode with no job) and deserves a warning, not a
+    ///     ghost row. If a future spec revision needs a durable miss
+    ///     record, extend `SliceMetadata` with a `wasOrphan` flag
+    ///     rather than re-enabling the UUID regeneration here.
     ///
     /// Errors from the store are logged and swallowed: the caller is
     /// the BG task expiration / completion path, which has no
-    /// recourse. An unresolved journal row is strictly less bad than
-    /// a raised error here, which would otherwise have to propagate
-    /// into `setTaskCompleted(success:)`.
+    /// recourse. A logged warning is strictly less bad than a raised
+    /// error here, which would otherwise have to propagate into
+    /// `setTaskCompleted(success:)`.
     func recordForegroundAssistOutcome(
         episodeId: String,
         eventType: WorkJournalEntry.EventType,
         cause: InternalMissCause?
     ) async {
         do {
-            let job = try await store.fetchLatestJobForEpisode(episodeId)
-            let rawGenerationID = job?.generationID ?? ""
-            let schedulerEpoch = job?.schedulerEpoch ?? 0
-            let generationUUID = UUID(uuidString: rawGenerationID) ?? UUID()
+            guard let job = try await store.fetchLatestJobForEpisode(episodeId) else {
+                logger.warning(
+                    "recordForegroundAssistOutcome: no analysis_jobs row for episode=\(episodeId, privacy: .public) event=\(eventType.rawValue, privacy: .public); skipping journal append to avoid orphan UUID"
+                )
+                return
+            }
+            guard let generationUUID = UUID(uuidString: job.generationID) else {
+                logger.warning(
+                    "recordForegroundAssistOutcome: non-UUID generationID=\(job.generationID, privacy: .public) for episode=\(episodeId, privacy: .public); skipping journal append to avoid orphan UUID"
+                )
+                return
+            }
             let entry = WorkJournalEntry(
                 id: UUID().uuidString,
                 episodeId: episodeId,
                 generationID: generationUUID,
-                schedulerEpoch: schedulerEpoch,
+                schedulerEpoch: job.schedulerEpoch,
                 timestamp: Date().timeIntervalSince1970,
                 eventType: eventType,
                 cause: cause,

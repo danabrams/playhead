@@ -690,7 +690,7 @@ actor BackgroundProcessingService {
                 // the `markComplete` race so the OS-visible outcome
                 // agrees with the terminal journal event it wrote.
                 if let self {
-                    await self.coordinator.recordForegroundAssistOutcome(
+                    await self.appendTerminal(
                         episodeId: episodeId,
                         eventType: .finalized,
                         cause: nil
@@ -702,7 +702,7 @@ actor BackgroundProcessingService {
                     "Continued processing failed for episode \(episodeId, privacy: .public): \(String(describing: error), privacy: .public)"
                 )
                 if let self {
-                    await self.coordinator.recordForegroundAssistOutcome(
+                    await self.appendTerminal(
                         episodeId: episodeId,
                         eventType: .failed,
                         cause: .pipelineError
@@ -736,7 +736,7 @@ actor BackgroundProcessingService {
                     episodeId: episodeId,
                     cause: .taskExpired
                 )
-                await self.coordinator.recordForegroundAssistOutcome(
+                await self.appendTerminal(
                     episodeId: episodeId,
                     eventType: .failed,
                     cause: .taskExpired
@@ -745,6 +745,25 @@ actor BackgroundProcessingService {
                 workTask.cancel()
             }
         }
+    }
+
+    /// playhead-44h1 (fix): shared terminal-append helper for the
+    /// three WorkJournal emission sites in `handleContinuedProcessingTask`
+    /// (finalized / pipelineError / taskExpired). Keeps the call-sites
+    /// DRY so a future change to the terminal-row contract (extra
+    /// metadata, different routing, telemetry hooks) only edits one
+    /// place. Behavior is byte-identical to the inline call it replaces:
+    /// forwards to the coordinator's `recordForegroundAssistOutcome`.
+    private func appendTerminal(
+        episodeId: String,
+        eventType: WorkJournalEntry.EventType,
+        cause: InternalMissCause?
+    ) async {
+        await coordinator.recordForegroundAssistOutcome(
+            episodeId: episodeId,
+            eventType: eventType,
+            cause: cause
+        )
     }
 
     /// Parse the episode id from a wildcard-identifier continued-

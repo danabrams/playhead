@@ -7,6 +7,7 @@ import Dispatch
 import CryptoKit
 import Network
 import Testing
+import UIKit
 @testable import Playhead
 
 // MARK: - Bootstrap & Directory Structure
@@ -562,5 +563,52 @@ struct DownloadManagerForegroundAssistHandoffTests {
         let decisions = await manager.handleWillResignActive()
         #expect(decisions.isEmpty)
         #expect(scheduler.submitted.isEmpty)
+    }
+
+    @Test("Posted willResignActive notification drives a real BG task submission end-to-end")
+    @MainActor
+    func postedWillResignActiveDrivesSubmission() async throws {
+        // Review-fix Blocker 1: registerForegroundAssistLifecycleObserver
+        // must install a notification observer that routes a posted
+        // willResignActive into handleWillResignActive without any test
+        // hook calling that method directly. Seed progress far enough
+        // from done that the decision is submitBG, post the notification,
+        // and wait for the scheduler to observe the submission.
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = DownloadManager(cacheDirectory: dir)
+        let scheduler = CapturingTaskScheduler()
+        await manager.setBackgroundTaskSchedulerForTesting(scheduler)
+
+        let episodeId = "ep-44h1-notif"
+        await manager.seedForegroundAssistProgressForTesting(
+            episodeId: episodeId,
+            bytesWritten: 1_000_000,
+            totalBytes: 10_000_000,
+            firstObservedAt: Date(timeIntervalSinceNow: -20),
+            firstObservedBytes: 0
+        )
+        await manager.registerForegroundAssistLifecycleObserver()
+        defer {
+            Task { await manager.deregisterForegroundAssistLifecycleObserver() }
+        }
+
+        NotificationCenter.default.post(
+            name: UIApplication.willResignActiveNotification,
+            object: nil
+        )
+
+        // The observer hops into a Task; poll briefly for the submission
+        // to land rather than relying on a wall-clock sleep.
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while scheduler.submitted.isEmpty && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 20_000_000) // 20 ms
+        }
+
+        #expect(!scheduler.submitted.isEmpty,
+                "Posted willResignActive must route through the registered observer to the scheduler")
+        let identifier = scheduler.submitted.first?.identifier ?? ""
+        #expect(identifier.hasSuffix("." + episodeId),
+                "Observer-driven submission must use the episode-id-suffixed identifier")
     }
 }
