@@ -523,7 +523,13 @@ actor AnalysisWorkScheduler {
     ///
     /// All thermal/battery/low-power reads route through `QualityProfile` —
     /// there are no direct `ProcessInfo.thermalState` or `isLowPowerMode`
-    /// reads in this actor.
+    /// reads in this actor. The thermal gate of the broader
+    /// multi-resource admission policy (playhead-bnrs) is already
+    /// honored here via `policy.pauseAllWork`; the transport, storage,
+    /// and CPU gates live in `AdmissionGate.admit(...)` and are
+    /// consulted by callers that have the per-job
+    /// `AdmissionJob` / `StorageSnapshot` / `TransportSnapshot` inputs
+    /// (integration bead playhead-iwiy).
     func currentLaneAdmission() async -> LaneAdmission {
         let snapshot = await capabilitiesService.currentSnapshot
         let batteryState = await batteryProvider.currentBatteryState()
