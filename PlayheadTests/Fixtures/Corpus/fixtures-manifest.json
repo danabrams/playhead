@@ -1,0 +1,165 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "id": "fixture-01-30min-clean-speech",
+      "file": "Media/fixture-01-30min-clean-speech.wav",
+      "sha256": "ca20141bf77026f897a3c282c807b6edf02417a86c8ab56b17f7aa501e6b5af9",
+      "durationSec": 1800,
+      "taxonomy": {
+        "durationBucket": "30m",
+        "chapterRichness": "sparse",
+        "adDensity": "medium",
+        "adPlacement": "mid-roll",
+        "language": "en-US",
+        "audioStructure": "clean-speech",
+        "dynamicInsertion": false
+      },
+      "locked": true,
+      "slot": 1,
+      "licensingRef": "LICENSING.md#fixture-01",
+      "syntheticDurationSec": 0.5,
+      "synthetic": true
+    },
+    {
+      "id": "fixture-02-60min-music-bed",
+      "file": "Media/fixture-02-60min-music-bed.wav",
+      "sha256": "88c60d37b801157e5b7730b1a361dccfcfcfc20a7b7aa94657f0d11783f75167",
+      "durationSec": 3600,
+      "taxonomy": {
+        "durationBucket": "60m",
+        "chapterRichness": "sparse",
+        "adDensity": "medium",
+        "adPlacement": "mid-roll",
+        "language": "en-US",
+        "audioStructure": "music-bed",
+        "dynamicInsertion": false
+      },
+      "locked": true,
+      "slot": 2,
+      "licensingRef": "LICENSING.md#fixture-02",
+      "syntheticDurationSec": 0.5,
+      "synthetic": true
+    },
+    {
+      "id": "fixture-03-15min-language-unsupported-zh",
+      "file": "Media/fixture-03-15min-language-unsupported-zh.wav",
+      "sha256": "815779a29924b870361d02959e7bac53bc46435a091dbf63371ec41effaeca16",
+      "durationSec": 900,
+      "taxonomy": {
+        "durationBucket": "15m",
+        "chapterRichness": "none",
+        "adDensity": "none",
+        "adPlacement": "none",
+        "language": "zh-Hans",
+        "audioStructure": "clean-speech",
+        "dynamicInsertion": false
+      },
+      "locked": true,
+      "slot": 3,
+      "licensingRef": "LICENSING.md#fixture-03",
+      "syntheticDurationSec": 0.5,
+      "synthetic": true
+    },
+    {
+      "id": "fixture-04-90min-dynamic-insertion",
+      "file": "Media/fixture-04-90min-dynamic-insertion.wav",
+      "sha256": "aeb5766cf76ddc9288fa401d63b1912aa0cb3f83e101713cdb40283e0769a750",
+      "durationSec": 5400,
+      "taxonomy": {
+        "durationBucket": "90m",
+        "chapterRichness": "rich",
+        "adDensity": "high",
+        "adPlacement": "mixed",
+        "language": "en-US",
+        "audioStructure": "clean-speech",
+        "dynamicInsertion": true
+      },
+      "locked": true,
+      "slot": 4,
+      "licensingRef": "LICENSING.md#fixture-04",
+      "syntheticDurationSec": 0.5,
+      "synthetic": true
+    },
+    {
+      "id": "fixture-05-45min-poor-audio",
+      "file": "Media/fixture-05-45min-poor-audio.wav",
+      "sha256": "a08818ce54799dd426fb3c28d495b1b7d75367a00224db4f6eae7525ba68b96a",
+      "durationSec": 2700,
+      "taxonomy": {
+        "durationBucket": "45m",
+        "chapterRichness": "sparse",
+        "adDensity": "low",
+        "adPlacement": "mid-roll",
+        "language": "en-US",
+        "audioStructure": "poor-remote",
+        "dynamicInsertion": false
+      },
+      "locked": true,
+      "slot": 5,
+      "licensingRef": "LICENSING.md#fixture-05",
+      "syntheticDurationSec": 0.5,
+      "synthetic": true
+    },
+    {
+      "id": "fixture-06-30min-chapter-rich",
+      "file": "Media/fixture-06-30min-chapter-rich.wav",
+      "sha256": "5cc940999208009bbfab3a2b73be1b511a6e08afeeb82af48d496a50d6e9541a",
+      "durationSec": 1800,
+      "taxonomy": {
+        "durationBucket": "30m",
+        "chapterRichness": "rich",
+        "adDensity": "medium",
+        "adPlacement": "mid-roll",
+        "language": "en-US",
+        "audioStructure": "clean-speech",
+        "dynamicInsertion": false
+      },
+      "locked": true,
+      "slot": 6,
+      "licensingRef": "LICENSING.md#fixture-06",
+      "syntheticDurationSec": 0.5,
+      "synthetic": true
+    },
+    {
+      "id": "fixture-07-60min-multi-break",
+      "file": "Media/fixture-07-60min-multi-break.wav",
+      "sha256": "d5523610849d9d526ad60896ea2107c6719d95505a8ecf2628126cd178135a7c",
+      "durationSec": 3600,
+      "taxonomy": {
+        "durationBucket": "60m",
+        "chapterRichness": "sparse",
+        "adDensity": "high",
+        "adPlacement": "mixed",
+        "language": "en-US",
+        "audioStructure": "clean-speech",
+        "dynamicInsertion": false
+      },
+      "locked": true,
+      "slot": 7,
+      "licensingRef": "LICENSING.md#fixture-07",
+      "syntheticDurationSec": 0.5,
+      "synthetic": true
+    },
+    {
+      "id": "fixture-08-90min-repeat-download-warm-resume",
+      "file": "Media/fixture-08-90min-repeat-download-warm-resume.wav",
+      "sha256": "b6bafca2511e1e16d7f9249b37ece5ad892e3a862ebf29645142e6b351ac294d",
+      "durationSec": 5400,
+      "taxonomy": {
+        "durationBucket": "90m",
+        "chapterRichness": "sparse",
+        "adDensity": "medium",
+        "adPlacement": "mid-roll",
+        "language": "en-US",
+        "audioStructure": "clean-speech",
+        "dynamicInsertion": false
+      },
+      "locked": true,
+      "slot": 8,
+      "licensingRef": "LICENSING.md#fixture-08",
+      "syntheticDurationSec": 0.5,
+      "synthetic": true
+    }
+  ]
+}
