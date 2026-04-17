@@ -373,6 +373,69 @@ struct WorkJournalRecordingPreemptedDefaultTests {
     }
 }
 
+// MARK: - Delegate resume-data harvest (playhead-g2wq)
+
+@Suite("EpisodeDownloadDelegate – resume-data harvest (playhead-g2wq)")
+struct EpisodeDownloadDelegateResumeHarvestTests {
+
+    /// Minimal URLSessionTask double exposing `taskDescription`. Cannot
+    /// instantiate a real URLSessionTask without a session; subclass is
+    /// adequate because the delegate only reads `taskDescription` and
+    /// `countOfBytesReceived` in the didCompleteWithError path.
+    private final class G2wqStubTask: URLSessionTask, @unchecked Sendable {
+        private let _taskDescription: String?
+        init(taskDescription: String?) {
+            self._taskDescription = taskDescription
+            super.init()
+        }
+        override var taskDescription: String? {
+            get { _taskDescription }
+            set { /* immutable stub */ }
+        }
+    }
+
+    @Test("didCompleteWithError harvests NSURLSessionDownloadTaskResumeData and writes it to resumeDataDirectory")
+    func harvestsResumeDataIntoResumeDirectory() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Real manager so the delegate's onResumeDataHarvested callback
+        // is wired to the real `persistResumeData` actor path. This is
+        // the whole point of the bead — we must hit the directory write
+        // so we catch any future directory-path regression.
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let delegate = await manager.sessionDelegateForTesting()
+
+        let resumeBlob = Data([0x01, 0x02, 0x03, 0xAB, 0xCD, 0xEF])
+        let cancelError = NSError(
+            domain: NSURLErrorDomain,
+            code: NSURLErrorCancelled,
+            userInfo: [
+                NSURLSessionDownloadTaskResumeData: resumeBlob,
+                NSLocalizedDescriptionKey: "cancelled",
+            ]
+        )
+
+        let task = G2wqStubTask(taskDescription: "ep-g2wq-harvest")
+        delegate.urlSession(URLSession.shared, task: task, didCompleteWithError: cancelError)
+
+        // The harvest routes through an actor hop; poll until the blob
+        // lands on disk or we give up.
+        let sawBlob = await pollUntil(timeout: .seconds(2)) {
+            let loaded = try? await manager.loadResumeDataForTesting(episodeId: "ep-g2wq-harvest")
+            return loaded == resumeBlob
+        }
+        #expect(sawBlob)
+
+        // Belt-and-suspenders: the scan enumerator should now list the
+        // harvested episode, proving the index file was written too.
+        let ids = await manager.persistedResumeDataEpisodeIdsForTesting()
+        #expect(ids.contains("ep-g2wq-harvest"))
+    }
+}
+
 // MARK: - App launch wiring
 
 @MainActor

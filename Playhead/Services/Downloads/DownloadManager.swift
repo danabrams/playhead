@@ -285,6 +285,25 @@ actor DownloadManager {
                 }
             }
         }
+        // playhead-g2wq: route harvested resume-data blobs from the
+        // delegate back into the actor's `resumeDataDirectory`. Wired at
+        // init (not per-session like onDownloadComplete) because the
+        // harvest is independent of which background session fired.
+        self.sessionDelegate.onResumeDataHarvested = { [manager = self] episodeId, data in
+            Task {
+                do {
+                    try await manager.persistResumeData(episodeId: episodeId, data: data)
+                } catch {
+                    // A write failure here is best-effort; the next
+                    // cold-launch scan simply won't see this blob. Log
+                    // via the shared resume-data category so support
+                    // triage can correlate.
+                    Logger(
+                        subsystem: "com.playhead", category: "ForceQuitResume"
+                    ).error("persistResumeData (harvest) failed for \(episodeId, privacy: .public): \(String(describing: error), privacy: .public)")
+                }
+            }
+        }
     }
 
     /// Returns a fresh AsyncStream that receives all future download progress
@@ -749,6 +768,13 @@ actor DownloadManager {
 
     func instantiatedSessionIdentifiersForTesting() -> Set<String> {
         Set(_sessionsByRole.values.compactMap { $0.configuration.identifier })
+    }
+
+    /// playhead-g2wq test seam: exposes the URLSession delegate so tests
+    /// can drive `didCompleteWithError` directly and verify the
+    /// resume-data harvest path writes into `resumeDataDirectory`.
+    func sessionDelegateForTesting() -> EpisodeDownloadDelegate {
+        sessionDelegate
     }
 
     // MARK: - Progressive Download (Streaming Cache)
@@ -1488,6 +1514,15 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
     /// delegate can match it against its pending completion-handler map.
     nonisolated(unsafe) var onUrlSessionDidFinishEvents: ((String) -> Void)?
 
+    /// Invoked when a terminated transfer's didCompleteWithError callback
+    /// carries an `NSURLSessionDownloadTaskResumeData` blob in its
+    /// userInfo. Routes the blob back into DownloadManager's
+    /// `resumeDataDirectory` via `persistResumeData(episodeId:data:)`
+    /// (playhead-g2wq) so the next cold-launch `scanForSuspendedTransfers`
+    /// pass can see it. Without this callback the resume-data directory
+    /// stays empty in production and the hyht follow-up UX never fires.
+    nonisolated(unsafe) var onResumeDataHarvested: ((String, Data) -> Void)?
+
     /// WorkJournal recorder for finalized / failed events. Swapped from
     /// `NoopWorkJournalRecorder` to the real implementation by
     /// `DownloadManager.setWorkJournalRecorder(_:)` once playhead-uzdq
@@ -1601,6 +1636,21 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
         let episodeId = task.taskDescription ?? "unknown"
         let cause = InternalMissCause.fromTaskError(error)
         logger.error("Episode \(episodeId) download failed (\(cause.rawValue)): \(error.localizedDescription)")
+
+        // playhead-g2wq: harvest OS-produced resume-data BEFORE emitting
+        // `recordFailed`. URLSession stashes the resume blob in
+        // `NSError.userInfo[NSURLSessionDownloadTaskResumeData]` whenever
+        // the terminated transfer is eligible for `downloadTask(withResumeData:)`
+        // replay. Persisting it here is what populates `resumeDataDirectory`
+        // so `scanForSuspendedTransfers` can find suspended transfers on
+        // the next cold launch. If the error carries no blob (server-side
+        // failure, name resolution error, etc.) we skip the harvest and
+        // fall through to `recordFailed` unchanged.
+        if let resumeData = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data,
+           !resumeData.isEmpty {
+            onResumeDataHarvested?(episodeId, resumeData)
+        }
+
         let recorder = workJournal
         let bytesReceived = Int(task.countOfBytesReceived)
         let errorDescription = error.localizedDescription
