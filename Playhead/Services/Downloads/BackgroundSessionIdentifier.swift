@@ -102,6 +102,32 @@ protocol WorkJournalRecording: Sendable {
     /// Record that the background transfer for `episodeId` failed with
     /// the given internal cause.
     func recordFailed(episodeId: String, cause: InternalMissCause) async
+
+    /// Record that the background transfer for `episodeId` was pre-empted
+    /// (force-quit relaunch, explicit pause, higher-priority demand) and
+    /// may be resumed later. `cause` tags the reason (e.g.
+    /// `.appForceQuitRequiresRelaunch` for playhead-hyht's cold-launch
+    /// scan). `metadataJSON` carries caller-specific context (transfer
+    /// id, bytes written, suspension timestamp) for the WorkJournal row's
+    /// metadata column — the recorder does not parse it.
+    ///
+    /// Default implementation is a no-op so pre-hyht recorders do not
+    /// need to be updated until they want to observe this event.
+    func recordPreempted(
+        episodeId: String,
+        cause: InternalMissCause,
+        metadataJSON: String
+    ) async
+}
+
+extension WorkJournalRecording {
+    /// Default: silently swallow preempted events. Recorders that care
+    /// about force-quit resume state (playhead-hyht) override this.
+    func recordPreempted(
+        episodeId: String,
+        cause: InternalMissCause,
+        metadataJSON: String
+    ) async {}
 }
 
 /// Default no-op binding used until playhead-uzdq wires a real recorder.
@@ -109,4 +135,9 @@ protocol WorkJournalRecording: Sendable {
 final class NoopWorkJournalRecorder: WorkJournalRecording, Sendable {
     func recordFinalized(episodeId: String) async {}
     func recordFailed(episodeId: String, cause: InternalMissCause) async {}
+    func recordPreempted(
+        episodeId: String,
+        cause: InternalMissCause,
+        metadataJSON: String
+    ) async {}
 }
