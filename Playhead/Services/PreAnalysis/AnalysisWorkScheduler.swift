@@ -59,70 +59,22 @@ actor AnalysisWorkScheduler {
         case background
     }
 
-    /// Per-lane concurrency cap. Bead spec:
+    /// Per-lane concurrency caps. Bead spec:
     /// - Now:        <= 2 concurrent non-playback jobs
     /// - Soon:       <= 1 concurrent
     /// - Background: <= 1 concurrent
     /// - T0 playback jobs (`jobType == "playback"`) are EXEMPT from the Now
     ///   cap — they are always admitted when not globally paused.
     ///
-    /// Implemented as a reference type (rather than actor state directly) so
-    /// tests can exercise the counter in isolation and so that future
-    /// refactors can swap in alternative accounting without touching every
-    /// admission call site. Because the counter is only mutated from inside
-    /// the scheduler actor, `@unchecked Sendable` is safe here — there is no
-    /// cross-actor contention.
-    final class LaneConcurrencyCounter: @unchecked Sendable {
-        private static let nowCap = 2
-        private static let soonCap = 1
-        private static let backgroundCap = 1
-
-        private var active: [SchedulerLane: Int] = [
-            .now: 0,
-            .soon: 0,
-            .background: 0,
-        ]
-
-        init() {}
-
-        /// Current running-job count in `lane`. Exposed for instrumentation
-        /// and tests; the scheduler uses `canAdmit` / `didStart` / `didFinish`
-        /// directly in the loop.
-        func count(lane: SchedulerLane) -> Int {
-            active[lane] ?? 0
-        }
-
-        /// Whether `job` may be admitted under the current per-lane count.
-        /// T0 playback jobs (`jobType == "playback"`) bypass the Now cap
-        /// unconditionally — the hot-path must always be able to drain.
-        func canAdmit(job: AnalysisJob) -> Bool {
-            let lane = job.schedulerLane
-            if lane == .now && job.jobType == "playback" {
-                return true
-            }
-            let cap: Int
-            switch lane {
-            case .now:        cap = Self.nowCap
-            case .soon:       cap = Self.soonCap
-            case .background: cap = Self.backgroundCap
-            }
-            return count(lane: lane) < cap
-        }
-
-        /// Record that `job` has started running in its lane.
-        func didStart(job: AnalysisJob) {
-            let lane = job.schedulerLane
-            active[lane, default: 0] += 1
-        }
-
-        /// Record that `job` has finished running in its lane. Clamped at
-        /// zero so a stray double-finish does not produce negative counts.
-        func didFinish(job: AnalysisJob) {
-            let lane = job.schedulerLane
-            let current = active[lane, default: 0]
-            active[lane] = max(0, current - 1)
-        }
-    }
+    /// Concurrency accounting lives directly on the actor (`laneActive`,
+    /// `canAdmit`, `didStart`, `didFinish`) rather than in a separate
+    /// reference type. Actor isolation guarantees data-race safety for the
+    /// mutable counter, so no `@unchecked Sendable` escape hatch is needed.
+    /// The caps are compile-time constants; swap them here if the bead spec
+    /// changes.
+    static let nowCap = 2
+    static let soonCap = 1
+    static let backgroundCap = 1
 
     /// Admission decision the scheduler derives from the current QualityProfile
     /// and applies to every loop iteration. Consolidates thermal/battery/
@@ -192,7 +144,14 @@ actor AnalysisWorkScheduler {
     /// execution — they are the contract the admission path uses so that
     /// later beads can fan the scheduler out to honest multi-lane
     /// concurrency without re-opening admission policy.
-    private let laneCounter = LaneConcurrencyCounter()
+    ///
+    /// Stored inline on the actor for data-race safety by isolation — see
+    /// the `nowCap` / `soonCap` / `backgroundCap` constants above.
+    private var laneActive: [SchedulerLane: Int] = [
+        .now: 0,
+        .soon: 0,
+        .background: 0,
+    ]
 
     /// Hook installed by downstream beads (playhead-01t8) to implement
     /// preemption of active Soon / Background jobs when a Now-lane job is
@@ -425,10 +384,10 @@ actor AnalysisWorkScheduler {
             }
 
             // Per-lane concurrency cap (playhead-r835). T0 playback jobs are
-            // exempt from the Now cap; the counter encodes that rule. If the
+            // exempt from the Now cap; `canAdmit` encodes that rule. If the
             // cap is saturated, fall back to the standard sleep so we do not
             // re-fetch the same job in a tight loop.
-            guard laneCounter.canAdmit(job: job) else {
+            guard canAdmit(job: job) else {
                 logger.info("Skipping job \(job.jobId) — lane \(String(describing: job.schedulerLane), privacy: .public) at capacity")
                 await sleepOrWake(seconds: 5)
                 continue
@@ -436,15 +395,58 @@ actor AnalysisWorkScheduler {
 
             // Now-lane admission demotes active Soon / Background jobs at
             // their next safe checkpoint. The protocol is owned by
-            // playhead-01t8; this bead only wires the hook.
+            // playhead-01t8; this bead only wires the hook. Pass the job's
+            // lane rather than a hardcoded `.now` so that if the guard above
+            // ever widens (e.g. Soon-on-Background preemption), the call
+            // site does not silently misreport the incoming lane.
             if job.schedulerLane == .now, let preempt = preemptionHandler {
-                await preempt.preemptLowerLanes(for: .now)
+                await preempt.preemptLowerLanes(for: job.schedulerLane)
             }
 
-            laneCounter.didStart(job: job)
+            didStart(job: job)
             await processJob(job)
-            laneCounter.didFinish(job: job)
+            didFinish(job: job)
         }
+    }
+
+    // MARK: - Lane concurrency accounting (playhead-r835)
+
+    /// Current running-job count in `lane`. Exposed for instrumentation and
+    /// tests; the scheduler loop uses `canAdmit` / `didStart` / `didFinish`
+    /// directly.
+    func laneActiveCount(_ lane: SchedulerLane) -> Int {
+        laneActive[lane] ?? 0
+    }
+
+    /// Whether `job` may be admitted under the current per-lane count. T0
+    /// playback jobs (`jobType == "playback"`) bypass the Now cap
+    /// unconditionally — the hot-path must always be able to drain.
+    func canAdmit(job: AnalysisJob) -> Bool {
+        let lane = job.schedulerLane
+        if lane == .now && job.jobType == "playback" {
+            return true
+        }
+        let cap: Int
+        switch lane {
+        case .now:        cap = Self.nowCap
+        case .soon:       cap = Self.soonCap
+        case .background: cap = Self.backgroundCap
+        }
+        return laneActiveCount(lane) < cap
+    }
+
+    /// Record that `job` has started running in its lane.
+    func didStart(job: AnalysisJob) {
+        let lane = job.schedulerLane
+        laneActive[lane, default: 0] += 1
+    }
+
+    /// Record that `job` has finished running in its lane. Clamped at zero
+    /// so a stray double-finish does not produce negative counts.
+    func didFinish(job: AnalysisJob) {
+        let lane = job.schedulerLane
+        let current = laneActive[lane, default: 0]
+        laneActive[lane] = max(0, current - 1)
     }
 
     /// Evaluate the current `LaneAdmission` from the capabilities snapshot and
