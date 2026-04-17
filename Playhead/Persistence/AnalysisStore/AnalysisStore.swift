@@ -444,6 +444,21 @@ struct PreviewBudget: Sendable {
     let lastUpdated: Double
 }
 
+/// playhead-uzdq: minimal return value from
+/// ``AnalysisStore/acquireEpisodeLease``. The store side doesn't carry
+/// preemption signals or in-memory checkpoint caches — those live on
+/// the coordinator's richer ``EpisodeExecutionLease`` struct. This
+/// descriptor just plumbs the persisted state back to the caller.
+struct EpisodeExecutionLeaseDescriptor: Sendable, Equatable {
+    let jobId: String
+    let episodeId: String
+    let ownerWorkerId: String
+    let generationID: String
+    let schedulerEpoch: Int
+    let acquiredAt: Double
+    let expiresAt: Double
+}
+
 struct AnalysisJob: Sendable {
     let jobId: String
     let jobType: String         // "preAnalysis" | "playback" | "backfill"
@@ -466,6 +481,69 @@ struct AnalysisJob: Sendable {
     let lastErrorCode: String?
     let createdAt: Double
     let updatedAt: Double
+    /// playhead-uzdq: generation ID owned by the current lease holder,
+    /// or `""` when no lease has ever been acquired. Stored as
+    /// `generationID TEXT NOT NULL DEFAULT ''` and read back as the
+    /// empty string for pre-uzdq rows. Callers that need a typed
+    /// identity use ``EpisodeExecutionLease/generationID`` (UUID).
+    let generationID: String
+    /// playhead-uzdq: scheduler epoch captured when the current lease
+    /// holder acquired the row, or `0` when no lease has ever been
+    /// acquired.
+    let schedulerEpoch: Int
+
+    // Existing-style memberwise init that defaults the uzdq fields so
+    // every call-site in the codebase compiles unchanged. New callers
+    // pass the two uzdq fields explicitly.
+    init(
+        jobId: String,
+        jobType: String,
+        episodeId: String,
+        podcastId: String?,
+        analysisAssetId: String?,
+        workKey: String,
+        sourceFingerprint: String,
+        downloadId: String,
+        priority: Int,
+        desiredCoverageSec: Double,
+        featureCoverageSec: Double,
+        transcriptCoverageSec: Double,
+        cueCoverageSec: Double,
+        state: String,
+        attemptCount: Int,
+        nextEligibleAt: Double?,
+        leaseOwner: String?,
+        leaseExpiresAt: Double?,
+        lastErrorCode: String?,
+        createdAt: Double,
+        updatedAt: Double,
+        generationID: String = "",
+        schedulerEpoch: Int = 0
+    ) {
+        self.jobId = jobId
+        self.jobType = jobType
+        self.episodeId = episodeId
+        self.podcastId = podcastId
+        self.analysisAssetId = analysisAssetId
+        self.workKey = workKey
+        self.sourceFingerprint = sourceFingerprint
+        self.downloadId = downloadId
+        self.priority = priority
+        self.desiredCoverageSec = desiredCoverageSec
+        self.featureCoverageSec = featureCoverageSec
+        self.transcriptCoverageSec = transcriptCoverageSec
+        self.cueCoverageSec = cueCoverageSec
+        self.state = state
+        self.attemptCount = attemptCount
+        self.nextEligibleAt = nextEligibleAt
+        self.leaseOwner = leaseOwner
+        self.leaseExpiresAt = leaseExpiresAt
+        self.lastErrorCode = lastErrorCode
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.generationID = generationID
+        self.schedulerEpoch = schedulerEpoch
+    }
 
     static func computeWorkKey(fingerprint: String, analysisVersion: Int, jobType: String) -> String {
         "\(fingerprint):\(analysisVersion):\(jobType)"
@@ -813,6 +891,13 @@ actor AnalysisStore {
             // `artifact_class`. See `addArtifactClassColumnIfNeeded()` for
             // documentation of sentinel and eviction semantics.
             try addArtifactClassColumnIfNeeded()
+            // playhead-uzdq: per-episode execution lease on analysis_jobs
+            // (two new columns — no separate lease table) plus the
+            // append-only work_journal table and scheduler_epoch
+            // singleton in _meta.
+            try addEpisodeExecutionLeaseColumnsIfNeeded()
+            try createWorkJournalTableIfNeeded()
+            try seedSchedulerEpochIfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -990,6 +1075,17 @@ actor AnalysisStore {
         // fixtures may not include `analysis_assets`.
         if try tableExists("analysis_assets") {
             try addArtifactClassColumnIfNeeded()
+        }
+        // playhead-uzdq: mirror the lease + work_journal additions.
+        // Guarded on `analysis_jobs` / `_meta` so fixtures without
+        // those tables don't error out; production callers already
+        // have them via `createTables()`.
+        if try tableExists("analysis_jobs") {
+            try addEpisodeExecutionLeaseColumnsIfNeeded()
+        }
+        if try tableExists("_meta") {
+            try createWorkJournalTableIfNeeded()
+            try seedSchedulerEpochIfNeeded()
         }
     }
     #endif
@@ -1244,6 +1340,80 @@ actor AnalysisStore {
             column: "artifact_class",
             definition: "TEXT NOT NULL DEFAULT '\(ArtifactClass.media.rawValue)'"
         )
+    }
+
+    /// playhead-uzdq: per-episode execution lease state on
+    /// `analysis_jobs`. Adds two columns — `generationID TEXT NOT NULL
+    /// DEFAULT ''` and `schedulerEpoch INTEGER NOT NULL DEFAULT 0` —
+    /// using `addColumnIfNeeded` so the migration is idempotent and
+    /// pre-existing rows backfill to the NULL-lease sentinel.
+    ///
+    /// Sentinels:
+    /// - `generationID = ''` → no lease has ever been acquired on this
+    ///   row. Distinguished from a live lease by `leaseOwner IS NOT NULL`.
+    /// - `schedulerEpoch = 0` → conservative floor. Fresh epochs start
+    ///   at 1 (`seedSchedulerEpochIfNeeded`) so any real lease has
+    ///   epoch >= 1.
+    ///
+    /// Placement: appended at the END of `analysis_jobs` (SQLite's only
+    /// supported ADD COLUMN position). `readJob` reads both columns at
+    /// the new trailing indices 21 and 22.
+    ///
+    /// No index is added — leases are looked up by `episodeId` (already
+    /// indexed by `idx_jobs_episode`), and `generationID` comparisons
+    /// are always scoped to a single episode so a scan is fine.
+    private func addEpisodeExecutionLeaseColumnsIfNeeded() throws {
+        try addColumnIfNeeded(
+            table: "analysis_jobs",
+            column: "generationID",
+            definition: "TEXT NOT NULL DEFAULT ''"
+        )
+        try addColumnIfNeeded(
+            table: "analysis_jobs",
+            column: "schedulerEpoch",
+            definition: "INTEGER NOT NULL DEFAULT 0"
+        )
+    }
+
+    /// playhead-uzdq: append-only audit trail of lease lifecycle events.
+    /// Indexes:
+    /// - `idx_wj_episode_gen` drives orphan-recovery's "last event per
+    ///   generation" lookup.
+    /// - `idx_wj_epoch` supports cold-start reconciliation's epoch sweep
+    ///   (drop journal effects with `scheduler_epoch > _meta.scheduler_epoch`).
+    ///
+    /// Every row is tagged `artifact_class = 'scratch'` (see
+    /// ``ArtifactClass``) — journal state is reconstructible audit
+    /// metadata, never user-facing media.
+    private func createWorkJournalTableIfNeeded() throws {
+        try exec("""
+            CREATE TABLE IF NOT EXISTS work_journal (
+                id TEXT PRIMARY KEY,
+                episode_id TEXT NOT NULL,
+                generation_id TEXT NOT NULL,
+                scheduler_epoch INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                event_type TEXT NOT NULL,
+                cause TEXT,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                artifact_class TEXT NOT NULL DEFAULT '\(ArtifactClass.scratch.rawValue)'
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_wj_episode_gen ON work_journal(episode_id, generation_id)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_wj_epoch ON work_journal(scheduler_epoch)")
+    }
+
+    /// playhead-uzdq: seed `_meta(key='scheduler_epoch', value='1')` on
+    /// a brand-new DB so every lease captures a non-zero epoch. Legacy
+    /// rows (pre-uzdq) that carry `schedulerEpoch=0` are the sentinel
+    /// for "no lease has ever been acquired" and are distinguishable
+    /// from live leases by `leaseOwner IS NOT NULL`.
+    ///
+    /// `INSERT OR IGNORE` makes this idempotent across re-migration.
+    private func seedSchedulerEpochIfNeeded() throws {
+        let stmt = try prepare("INSERT OR IGNORE INTO _meta (key, value) VALUES ('scheduler_epoch', '1')")
+        defer { sqlite3_finalize(stmt) }
+        try step(stmt, expecting: SQLITE_DONE)
     }
 
     /// Seeds `_meta.schema_version = '1'` on a brand-new database so the
@@ -3691,14 +3861,18 @@ actor AnalysisStore {
 
     @discardableResult
     func insertJob(_ job: AnalysisJob) throws -> Bool {
+        // playhead-uzdq: generationID + schedulerEpoch are appended.
+        // Defaults on the AnalysisJob init mean legacy callers that
+        // don't pass them insert the "no-lease" sentinels ('' and 0),
+        // matching the column DEFAULTs for pre-existing rows.
         let sql = """
             INSERT OR IGNORE INTO analysis_jobs
             (jobId, jobType, episodeId, podcastId, analysisAssetId, workKey,
              sourceFingerprint, downloadId, priority, desiredCoverageSec,
              featureCoverageSec, transcriptCoverageSec, cueCoverageSec,
              state, attemptCount, nextEligibleAt, leaseOwner, leaseExpiresAt,
-             lastErrorCode, createdAt, updatedAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             lastErrorCode, createdAt, updatedAt, generationID, schedulerEpoch)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -3723,6 +3897,8 @@ actor AnalysisStore {
         bind(stmt, 19, job.lastErrorCode)
         bind(stmt, 20, job.createdAt)
         bind(stmt, 21, job.updatedAt)
+        bind(stmt, 22, job.generationID)
+        bind(stmt, 23, job.schedulerEpoch)
         try step(stmt, expecting: SQLITE_DONE)
         return sqlite3_changes(db) > 0
     }
@@ -4004,6 +4180,616 @@ actor AnalysisStore {
             try? exec("ROLLBACK")
             throw error
         }
+    }
+
+    // MARK: - CRUD: scheduler_epoch (playhead-uzdq)
+
+    /// Reads the current global scheduler epoch. Returns `nil` when the
+    /// row does not exist — all production paths call
+    /// `seedSchedulerEpochIfNeeded` during migration, so a `nil` return
+    /// indicates a test fixture that skipped seeding.
+    func fetchSchedulerEpoch() throws -> Int? {
+        let stmt = try prepare("SELECT value FROM _meta WHERE key = 'scheduler_epoch'")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        guard let raw = optionalText(stmt, 0), let epoch = Int(raw) else {
+            return nil
+        }
+        return epoch
+    }
+
+    /// Atomically increments `_meta.scheduler_epoch` and returns the
+    /// new value. The read-modify-write runs inside a BEGIN IMMEDIATE
+    /// transaction so a concurrent incrementer cannot produce a
+    /// duplicate epoch.
+    ///
+    /// Caller owns the *scheduling pass* envelope: this method and any
+    /// `analysis_jobs` / `work_journal` mutations that belong to the
+    /// same scheduling trigger should share a single outer transaction
+    /// (see `runSchedulingPass`). When called outside a transaction
+    /// this method opens and commits one of its own.
+    @discardableResult
+    func incrementSchedulerEpoch() throws -> Int {
+        let inTxn = sqlite3_get_autocommit(db) == 0
+        if !inTxn {
+            try exec("BEGIN IMMEDIATE")
+        }
+        do {
+            let current = try fetchSchedulerEpoch() ?? 0
+            let next = current + 1
+            let upsert = try prepare("""
+                INSERT INTO _meta (key, value) VALUES ('scheduler_epoch', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """)
+            defer { sqlite3_finalize(upsert) }
+            bind(upsert, 1, String(next))
+            try step(upsert, expecting: SQLITE_DONE)
+            if !inTxn {
+                try exec("COMMIT")
+            }
+            return next
+        } catch {
+            if !inTxn {
+                try? exec("ROLLBACK")
+            }
+            throw error
+        }
+    }
+
+    /// Executes `body` inside a BEGIN IMMEDIATE transaction so every
+    /// `analysis_jobs` update, `work_journal` append, and optional
+    /// `_meta.scheduler_epoch` bump that belongs to a single scheduling
+    /// trigger lands atomically. Matches the bead's "atomic
+    /// SchedulingPass" contract.
+    ///
+    /// The closure runs on the store's actor executor (it is not
+    /// `@Sendable`, so it inherits this actor's isolation). Callers
+    /// may invoke other `AnalysisStore` methods inside `body`;
+    /// nested calls detect the already-open transaction via
+    /// `sqlite3_get_autocommit` and reuse the outer envelope.
+    func runSchedulingPass<T>(_ body: () throws -> T) throws -> T {
+        try exec("BEGIN IMMEDIATE")
+        do {
+            let result = try body()
+            try exec("COMMIT")
+            return result
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Test seam for crash-rollback verification (playhead-uzdq).
+    /// Runs a scheduling pass that bumps the scheduler epoch, appends
+    /// a `work_journal` row, and then throws — all inside the outer
+    /// `runSchedulingPass` transaction so both writes roll back.
+    ///
+    /// This is exposed as an actor-isolated method (rather than
+    /// asking tests to hand-roll a `@Sendable` closure) so the test
+    /// file does not have to reason about closure isolation.
+    func simulateCrashInSchedulingPass(
+        episodeId: String,
+        generationID: UUID,
+        timestamp: Double
+    ) throws {
+        try runSchedulingPass {
+            _ = try incrementSchedulerEpoch()
+            let entry = WorkJournalEntry(
+                id: UUID().uuidString,
+                episodeId: episodeId,
+                generationID: generationID,
+                schedulerEpoch: 99_999,
+                timestamp: timestamp,
+                eventType: .acquired,
+                cause: nil,
+                metadata: "{}",
+                artifactClass: .scratch
+            )
+            try appendWorkJournalEntry(entry)
+            throw CrashRollbackTestError.simulated
+        }
+    }
+
+    /// Sentinel error thrown by ``simulateCrashInSchedulingPass`` so
+    /// tests can assert the transactional body rolled back.
+    enum CrashRollbackTestError: Error, Equatable {
+        case simulated
+    }
+
+    // MARK: - CRUD: episode execution lease (playhead-uzdq)
+
+    /// Acquires an episode-level lease by taking the first eligible
+    /// `analysis_jobs` row for `episodeId` (ORDER BY priority DESC,
+    /// createdAt ASC) whose lease slot is free (`leaseOwner IS NULL` or
+    /// `leaseExpiresAt < now`) and CAS-setting the lease columns to the
+    /// caller's identity.
+    ///
+    /// Transactional: the eligibility probe, epoch validation, CAS
+    /// update, and `acquired` journal append all run inside a single
+    /// BEGIN IMMEDIATE..COMMIT envelope.
+    ///
+    /// Errors:
+    /// - `LeaseError.staleEpoch` if `schedulerEpoch` < the store's
+    ///   current epoch.
+    /// - `LeaseError.noJobForEpisode` if no `analysis_jobs` row exists
+    ///   for `episodeId`.
+    /// - `LeaseError.leaseHeld` if a live lease already covers every
+    ///   row for the episode.
+    func acquireEpisodeLease(
+        episodeId: String,
+        ownerWorkerId: String,
+        generationID: String,
+        schedulerEpoch: Int,
+        now: Double,
+        ttlSeconds: Double,
+        metadataJSON: String = "{}"
+    ) throws -> EpisodeExecutionLeaseDescriptor {
+        try exec("BEGIN IMMEDIATE")
+        do {
+            // Epoch validation first: a stale epoch short-circuits
+            // before we touch any state. Fresh databases that somehow
+            // escaped migration have no epoch row; treat that as
+            // epoch=0 and allow the acquisition.
+            let currentEpoch = try fetchSchedulerEpoch() ?? 0
+            if schedulerEpoch < currentEpoch {
+                try exec("ROLLBACK")
+                throw LeaseError.staleEpoch(expected: schedulerEpoch, actual: currentEpoch)
+            }
+
+            // Find the best candidate row for this episode whose lease
+            // slot is free. ORDER matches the spec: higher priority
+            // first, then oldest (FIFO within priority).
+            let findSQL = """
+                SELECT jobId FROM analysis_jobs
+                WHERE episodeId = ?
+                  AND (leaseOwner IS NULL OR leaseExpiresAt < ?)
+                ORDER BY priority DESC, createdAt ASC, jobId ASC
+                LIMIT 1
+                """
+            let findStmt = try prepare(findSQL)
+            bind(findStmt, 1, episodeId)
+            bind(findStmt, 2, now)
+            let stepRc = sqlite3_step(findStmt)
+            defer { sqlite3_finalize(findStmt) }
+            if stepRc != SQLITE_ROW {
+                // Distinguish "no row at all" from "all rows held".
+                let existsStmt = try prepare("SELECT 1 FROM analysis_jobs WHERE episodeId = ? LIMIT 1")
+                defer { sqlite3_finalize(existsStmt) }
+                bind(existsStmt, 1, episodeId)
+                let hasRow = sqlite3_step(existsStmt) == SQLITE_ROW
+                try exec("ROLLBACK")
+                if hasRow {
+                    throw LeaseError.leaseHeld(episodeId: episodeId)
+                } else {
+                    throw LeaseError.noJobForEpisode(episodeId: episodeId)
+                }
+            }
+            let jobId = text(findStmt, 0)
+
+            // CAS: the eligibility probe above can race under WAL if a
+            // competitor opened its own BEGIN IMMEDIATE and committed
+            // between our probe and our update. Guard the update with
+            // the same `leaseOwner IS NULL OR leaseExpiresAt < ?`
+            // predicate; zero rows changed means we lost the race.
+            let expiresAt = now + ttlSeconds
+            let updateSQL = """
+                UPDATE analysis_jobs
+                SET leaseOwner = ?, leaseExpiresAt = ?,
+                    generationID = ?, schedulerEpoch = ?,
+                    state = CASE WHEN state IN ('complete','superseded') THEN state ELSE 'running' END,
+                    updatedAt = ?
+                WHERE jobId = ? AND (leaseOwner IS NULL OR leaseExpiresAt < ?)
+                """
+            let updateStmt = try prepare(updateSQL)
+            defer { sqlite3_finalize(updateStmt) }
+            bind(updateStmt, 1, ownerWorkerId)
+            bind(updateStmt, 2, expiresAt)
+            bind(updateStmt, 3, generationID)
+            bind(updateStmt, 4, schedulerEpoch)
+            bind(updateStmt, 5, now)
+            bind(updateStmt, 6, jobId)
+            bind(updateStmt, 7, now)
+            try step(updateStmt, expecting: SQLITE_DONE)
+            if sqlite3_changes(db) == 0 {
+                try exec("ROLLBACK")
+                throw LeaseError.leaseHeld(episodeId: episodeId)
+            }
+
+            // Append the `acquired` journal row in the same txn.
+            try appendWorkJournalEntryLocked(
+                episodeId: episodeId,
+                generationID: generationID,
+                schedulerEpoch: schedulerEpoch,
+                timestamp: now,
+                eventType: .acquired,
+                cause: nil,
+                metadataJSON: metadataJSON
+            )
+
+            try exec("COMMIT")
+            return EpisodeExecutionLeaseDescriptor(
+                jobId: jobId,
+                episodeId: episodeId,
+                ownerWorkerId: ownerWorkerId,
+                generationID: generationID,
+                schedulerEpoch: schedulerEpoch,
+                acquiredAt: now,
+                expiresAt: expiresAt
+            )
+        } catch {
+            // Ignore rollback failures — the primary error is already
+            // the thing the caller cares about.
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Extends the lease TTL iff the caller's {generationID,
+    /// schedulerEpoch} still match the row. Stale callers get
+    /// `LeaseError.staleEpoch` or `.generationMismatch` and their write
+    /// is rejected.
+    func renewEpisodeLease(
+        episodeId: String,
+        generationID: String,
+        schedulerEpoch: Int,
+        newExpiresAt: Double,
+        now: Double
+    ) throws {
+        try exec("BEGIN IMMEDIATE")
+        do {
+            let currentEpoch = try fetchSchedulerEpoch() ?? 0
+            if schedulerEpoch < currentEpoch {
+                try exec("ROLLBACK")
+                throw LeaseError.staleEpoch(expected: schedulerEpoch, actual: currentEpoch)
+            }
+            let sql = """
+                UPDATE analysis_jobs
+                SET leaseExpiresAt = ?, updatedAt = ?
+                WHERE episodeId = ? AND generationID = ? AND schedulerEpoch = ?
+                """
+            let stmt = try prepare(sql)
+            defer { sqlite3_finalize(stmt) }
+            bind(stmt, 1, newExpiresAt)
+            bind(stmt, 2, now)
+            bind(stmt, 3, episodeId)
+            bind(stmt, 4, generationID)
+            bind(stmt, 5, schedulerEpoch)
+            try step(stmt, expecting: SQLITE_DONE)
+            if sqlite3_changes(db) == 0 {
+                try exec("ROLLBACK")
+                throw LeaseError.generationMismatch(episodeId: episodeId)
+            }
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Releases an episode lease and records the terminal event in the
+    /// WorkJournal. Idempotent for terminal events (`finalized`,
+    /// `failed`): if a matching terminal row already exists for
+    /// {episodeId, generationID}, the second call is a no-op and does
+    /// NOT append a duplicate journal row.
+    ///
+    /// When the caller's {generationID} does not match the row (e.g.
+    /// late callback after a requeue), `LeaseError.generationMismatch`
+    /// is thrown.
+    func releaseEpisodeLease(
+        episodeId: String,
+        generationID: String,
+        schedulerEpoch: Int,
+        eventType: WorkJournalEntry.EventType,
+        cause: InternalMissCause?,
+        now: Double,
+        metadataJSON: String = "{}"
+    ) throws {
+        try exec("BEGIN IMMEDIATE")
+        do {
+            // Idempotence guard for terminal events: if a matching
+            // terminal journal row already exists, treat this call as
+            // a duplicate and return early. We check BEFORE the lease
+            // clear so a second `finalized` against an already-released
+            // row doesn't log a second row OR raise generationMismatch.
+            if eventType == .finalized || eventType == .failed {
+                if try terminalJournalRowExists(
+                    episodeId: episodeId,
+                    generationID: generationID,
+                    eventType: eventType
+                ) {
+                    try exec("COMMIT")
+                    return
+                }
+            }
+
+            // Clear lease fields on the matching row (if any). We do
+            // NOT gate on schedulerEpoch here — a release after an
+            // epoch bump is still the legitimate owner tearing down.
+            let updateSQL = """
+                UPDATE analysis_jobs
+                SET leaseOwner = NULL, leaseExpiresAt = NULL, updatedAt = ?
+                WHERE episodeId = ? AND generationID = ?
+                """
+            let updateStmt = try prepare(updateSQL)
+            defer { sqlite3_finalize(updateStmt) }
+            bind(updateStmt, 1, now)
+            bind(updateStmt, 2, episodeId)
+            bind(updateStmt, 3, generationID)
+            try step(updateStmt, expecting: SQLITE_DONE)
+            if sqlite3_changes(db) == 0 {
+                try exec("ROLLBACK")
+                throw LeaseError.generationMismatch(episodeId: episodeId)
+            }
+
+            try appendWorkJournalEntryLocked(
+                episodeId: episodeId,
+                generationID: generationID,
+                schedulerEpoch: schedulerEpoch,
+                timestamp: now,
+                eventType: eventType,
+                cause: cause,
+                metadataJSON: metadataJSON
+            )
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Returns every `analysis_jobs` row whose lease slot is held but
+    /// has expired more than `graceSeconds` before `now`. Used on cold
+    /// launch by `AnalysisCoordinator.recoverOrphans`.
+    ///
+    /// The grace window matches the bead's "now - 10s" filter so we
+    /// don't race a currently-executing lease whose next renewal is
+    /// about to land.
+    func fetchEpisodesWithExpiredLeases(
+        now: Double,
+        graceSeconds: Double = 10
+    ) throws -> [AnalysisJob] {
+        let sql = """
+            SELECT * FROM analysis_jobs
+            WHERE leaseOwner IS NOT NULL AND leaseExpiresAt < ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, now - graceSeconds)
+        var out: [AnalysisJob] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append(readJob(stmt))
+        }
+        return out
+    }
+
+    /// Fetches the most-recent WorkJournal entry for the given
+    /// {episodeId, generationID}. Returns `nil` when no entry exists.
+    func fetchLastWorkJournalEntry(
+        episodeId: String,
+        generationID: String
+    ) throws -> WorkJournalEntry? {
+        let sql = """
+            SELECT id, episode_id, generation_id, scheduler_epoch,
+                   timestamp, event_type, cause, metadata, artifact_class
+            FROM work_journal
+            WHERE episode_id = ? AND generation_id = ?
+            ORDER BY timestamp DESC, rowid DESC
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, episodeId)
+        bind(stmt, 2, generationID)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return try readWorkJournalEntry(stmt)
+    }
+
+    /// Fetches every WorkJournal row for a {episodeId, generationID}
+    /// pair, ordered oldest-first. Primarily for testing / audit; the
+    /// happy-path `fetchLastWorkJournalEntry` is what orphan recovery
+    /// uses in production.
+    func fetchWorkJournalEntries(
+        episodeId: String,
+        generationID: String
+    ) throws -> [WorkJournalEntry] {
+        let sql = """
+            SELECT id, episode_id, generation_id, scheduler_epoch,
+                   timestamp, event_type, cause, metadata, artifact_class
+            FROM work_journal
+            WHERE episode_id = ? AND generation_id = ?
+            ORDER BY timestamp ASC, rowid ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, episodeId)
+        bind(stmt, 2, generationID)
+        var out: [WorkJournalEntry] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append(try readWorkJournalEntry(stmt))
+        }
+        return out
+    }
+
+    /// Requeue an orphaned analysis_jobs row: clear the stale lease,
+    /// assign a fresh generationID + new scheduler epoch, reset
+    /// attemptCount to 0 and apply the (possibly demoted) priority.
+    /// All mutations run inside a single transaction so recovery is
+    /// crash-consistent.
+    ///
+    /// Lane preservation: caller computes the new priority per bead
+    /// policy (same band except Now > 60s stale → demote to Soon).
+    /// This method does NOT recompute lanes — it takes the new priority
+    /// verbatim.
+    func requeueOrphanedLease(
+        jobId: String,
+        newGenerationID: String,
+        newSchedulerEpoch: Int,
+        newPriority: Int,
+        now: Double
+    ) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET leaseOwner = NULL, leaseExpiresAt = NULL,
+                generationID = ?, schedulerEpoch = ?,
+                priority = ?, attemptCount = 0,
+                state = CASE WHEN state = 'running' THEN 'queued' ELSE state END,
+                updatedAt = ?
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, newGenerationID)
+        bind(stmt, 2, newSchedulerEpoch)
+        bind(stmt, 3, newPriority)
+        bind(stmt, 4, now)
+        bind(stmt, 5, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Clears the lease slot on a row that has reached a terminal event
+    /// (finalized / failed) but was stranded on cold launch. Does NOT
+    /// requeue.
+    func clearOrphanedLeaseNoRequeue(jobId: String, now: Double) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET leaseOwner = NULL, leaseExpiresAt = NULL, updatedAt = ?
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, now)
+        bind(stmt, 2, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Appends a free-standing WorkJournal entry. Most call-sites rely
+    /// on the implicit appends from `acquireEpisodeLease` /
+    /// `releaseEpisodeLease`; this method is exposed for
+    /// `checkpointed` events (which do not transition the lease slot)
+    /// and for test harnesses that seed specific journal shapes.
+    func appendWorkJournalEntry(_ entry: WorkJournalEntry) throws {
+        let inTxn = sqlite3_get_autocommit(db) == 0
+        if !inTxn {
+            try exec("BEGIN IMMEDIATE")
+        }
+        do {
+            try insertWorkJournalRow(entry)
+            if !inTxn {
+                try exec("COMMIT")
+            }
+        } catch {
+            if !inTxn {
+                try? exec("ROLLBACK")
+            }
+            throw error
+        }
+    }
+
+    /// Internal append that assumes an outer transaction is already
+    /// open. Used by `acquireEpisodeLease` and `releaseEpisodeLease`.
+    private func appendWorkJournalEntryLocked(
+        episodeId: String,
+        generationID: String,
+        schedulerEpoch: Int,
+        timestamp: Double,
+        eventType: WorkJournalEntry.EventType,
+        cause: InternalMissCause?,
+        metadataJSON: String
+    ) throws {
+        let entry = WorkJournalEntry(
+            id: UUID().uuidString,
+            episodeId: episodeId,
+            generationID: UUID(uuidString: generationID) ?? UUID(),
+            schedulerEpoch: schedulerEpoch,
+            timestamp: timestamp,
+            eventType: eventType,
+            cause: cause,
+            metadata: metadataJSON,
+            artifactClass: .scratch
+        )
+        // The entry we just built has a fresh id; we insert using the
+        // passed-in generationID raw string, NOT the UUID we parsed,
+        // so the CAS/orphan-recovery joins still match rows whose
+        // generation was stored as a non-canonical string.
+        try insertWorkJournalRow(entry, rawGenerationID: generationID)
+    }
+
+    /// Private row INSERT. `rawGenerationID` lets callers persist the
+    /// exact string they were handed (the coordinator always passes a
+    /// canonical UUID, but tests may seed arbitrary strings).
+    private func insertWorkJournalRow(
+        _ entry: WorkJournalEntry,
+        rawGenerationID: String? = nil
+    ) throws {
+        let sql = """
+            INSERT INTO work_journal
+            (id, episode_id, generation_id, scheduler_epoch, timestamp,
+             event_type, cause, metadata, artifact_class)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, entry.id)
+        bind(stmt, 2, entry.episodeId)
+        bind(stmt, 3, rawGenerationID ?? entry.generationID.uuidString)
+        bind(stmt, 4, entry.schedulerEpoch)
+        bind(stmt, 5, entry.timestamp)
+        bind(stmt, 6, entry.eventType.rawValue)
+        bind(stmt, 7, entry.cause?.rawValue)
+        bind(stmt, 8, entry.metadata)
+        bind(stmt, 9, entry.artifactClass.rawValue)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Idempotence probe used by `releaseEpisodeLease` for terminal
+    /// events. Returns `true` iff a matching row already exists.
+    private func terminalJournalRowExists(
+        episodeId: String,
+        generationID: String,
+        eventType: WorkJournalEntry.EventType
+    ) throws -> Bool {
+        let sql = """
+            SELECT 1 FROM work_journal
+            WHERE episode_id = ? AND generation_id = ? AND event_type = ?
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, episodeId)
+        bind(stmt, 2, generationID)
+        bind(stmt, 3, eventType.rawValue)
+        return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
+    private func readWorkJournalEntry(_ stmt: OpaquePointer?) throws -> WorkJournalEntry {
+        let eventRaw = try requireText(stmt, 5)
+        guard let eventType = WorkJournalEntry.EventType(rawValue: eventRaw) else {
+            throw AnalysisStoreError.queryFailed("Unknown work_journal event_type '\(eventRaw)'")
+        }
+        // `cause` is nullable at the column level.
+        let cause: InternalMissCause?
+        if let rawCause = optionalText(stmt, 6) {
+            // An unknown cause raw value is downgraded to `.pipelineError`
+            // per the InternalMissCause doc comment's "breaking-change plan".
+            cause = InternalMissCause(rawValue: rawCause) ?? .pipelineError
+        } else {
+            cause = nil
+        }
+        let generationRaw = try requireText(stmt, 2)
+        let generationUUID = UUID(uuidString: generationRaw) ?? UUID()
+        let artifactRaw = optionalText(stmt, 8) ?? ArtifactClass.scratch.rawValue
+        let artifactClass = ArtifactClass(rawValue: artifactRaw) ?? .scratch
+        return WorkJournalEntry(
+            id: try requireText(stmt, 0),
+            episodeId: try requireText(stmt, 1),
+            generationID: generationUUID,
+            schedulerEpoch: Int(sqlite3_column_int(stmt, 3)),
+            timestamp: sqlite3_column_double(stmt, 4),
+            eventType: eventType,
+            cause: cause,
+            metadata: optionalText(stmt, 7) ?? "{}",
+            artifactClass: artifactClass
+        )
     }
 
     // MARK: - CRUD: backfill_jobs
@@ -4926,6 +5712,13 @@ actor AnalysisStore {
     }
 
     private func readJob(_ stmt: OpaquePointer?) -> AnalysisJob {
+        // playhead-uzdq: `generationID` and `schedulerEpoch` live at
+        // trailing indices 21 and 22. They are `addColumnIfNeeded`
+        // additions that SQLite appends to the end of the column list,
+        // leaving the legacy positions 0..20 untouched. A pre-uzdq
+        // schema that somehow lacked the columns would produce NULLs,
+        // which we coerce to the "no-lease" sentinels via
+        // `optionalText` / `optionalInt` + the nil-coalescing.
         AnalysisJob(
             jobId: text(stmt, 0),
             jobType: text(stmt, 1),
@@ -4947,7 +5740,9 @@ actor AnalysisStore {
             leaseExpiresAt: optionalDouble(stmt, 17),
             lastErrorCode: optionalText(stmt, 18),
             createdAt: sqlite3_column_double(stmt, 19),
-            updatedAt: sqlite3_column_double(stmt, 20)
+            updatedAt: sqlite3_column_double(stmt, 20),
+            generationID: optionalText(stmt, 21) ?? "",
+            schedulerEpoch: optionalInt(stmt, 22) ?? 0
         )
     }
 
