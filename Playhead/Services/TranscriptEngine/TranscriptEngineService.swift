@@ -308,7 +308,13 @@ actor TranscriptEngineService {
         analysisAssetId: String
     ) async {
         loopRunning = true
-        defer { loopRunning = false }
+        defer {
+            loopRunning = false
+            // playhead-01t8: clear the per-job preemption context so a
+            // stale signal reference does not linger across jobs. The
+            // next `startTranscription` call assigns its own context.
+            preemption = nil
+        }
         logger.info("Starting transcription loop: \(shards.count) shards for asset \(analysisAssetId)")
         let loopStart = ContinuousClock.now
 

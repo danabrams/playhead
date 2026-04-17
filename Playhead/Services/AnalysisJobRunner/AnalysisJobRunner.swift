@@ -91,6 +91,8 @@ actor AnalysisJobRunner {
             // Fire-and-forget unregister. On the preempt path the
             // service already called `acknowledge`, so this is a no-op
             // by design (the id is already gone from the registry).
+            // Callers cannot synchronously observe post-run
+            // deregistration; the unregister is eventually consistent.
             if let coordinator = preemptionCoordinator {
                 let jobId = request.jobId
                 Task { await coordinator.unregister(jobId: jobId) }
@@ -234,6 +236,21 @@ actor AnalysisJobRunner {
         // TranscriptEngineService does not yet expose a stopTranscription() method.
 
         if transcriptCoverage == 0 {
+            // playhead-01t8: if a preempt flipped during transcription,
+            // the engine threw `TranscriptEnginePreempted` and exited
+            // cleanly with whatever coverage it persisted (which may be
+            // zero on the very first shard). Report `.preempted` rather
+            // than `.failed` so scheduler bookkeeping treats this as a
+            // deliberate hand-off, not a pipeline failure.
+            if let preemption, await preemption.isPreemptionRequested() {
+                return makeOutcome(
+                    assetId: assetId,
+                    request: request,
+                    featureCoverageSec: featureCoverage,
+                    transcriptCoverageSec: 0,
+                    stopReason: .preempted
+                )
+            }
             logger.warning("Transcription for asset \(assetId) finished with zero coverage — stream may have ended prematurely or timed out")
             return makeOutcome(
                 assetId: assetId,
