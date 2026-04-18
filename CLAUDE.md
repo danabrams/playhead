@@ -25,16 +25,18 @@ Two test plans exist. **Use the correct one for your context:**
 xcodebuild test -scheme Playhead -testPlan PlayheadFastTests \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
 ```
-Skips all integration/benchmark/replay suites. Runs in ~3 minutes.
+Skips XCTest interruption-cycle integration suites. Runs in ~3 minutes on simulator.
 
 **Phase-close verification only (final gate before closing an epic):**
 ```bash
 xcodebuild test -scheme Playhead -testPlan PlayheadIntegrationTests \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
 ```
-Runs corpus verification, FM classifier, replay harness, pipeline benchmarks. Takes ~30 minutes. **Do not run this during per-bead work.**
+True superset of FastTests — adds the 20 XCTest interruption-cycle suites. Runs in ~1 minute on simulator (FoundationModels gracefully unavailable). Real-device runs are slower because FM tests actually execute.
 
-The `PlayheadFastTests` plan is the default in Xcode (Cmd+U). Never run the full `-only-testing:PlayheadTests` suite without a test plan — it will include both and take 30+ minutes.
+**Why both plans use `skippedTests` only (no `selectedTests`):** Xcode's xctestplan filter honors XCTest class names but **silently ignores Swift Testing identifiers** in both `selectedTests` and `skippedTests`. Selecting Swift Testing tests via `selectedTests` ends up enabling 0 of them. We work around this by using `skippedTests` (which leaves Swift Testing always enabled) and only filtering XCTest classes. Per-class filtering of Swift Testing requires `-only-testing:'PlayheadTests/StructName/method()'` on the command line, not the test plan.
+
+The `PlayheadFastTests` plan is the default in Xcode (Cmd+U).
 
 ## Parallelism Ceiling
 
