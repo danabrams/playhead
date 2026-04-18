@@ -775,18 +775,18 @@ actor AnalysisWorkScheduler {
                 logger.warning("Skipping asset-resolution failure writes for job \(job.jobId): lease reclaimed by orphan recovery")
                 return
             }
-            do {
-                let backoff = min(pow(2.0, Double(job.attemptCount + 1)) * 60, 3600)
+            let backoff = min(pow(2.0, Double(job.attemptCount + 1)) * 60, 3600)
+            await writeIfStillOwned("assetResolution.markFailed") {
                 try await store.updateJobState(
                     jobId: job.jobId,
                     state: "failed",
                     nextEligibleAt: Date().timeIntervalSince1970 + backoff,
                     lastErrorCode: "assetResolution: \(error)"
                 )
-            } catch {
-                logger.error("Failed to update job state after asset resolution error: \(error)")
             }
-            try? await store.releaseLease(jobId: job.jobId)
+            await writeIfStillOwned("assetResolution.releaseLease") {
+                try await store.releaseLease(jobId: job.jobId)
+            }
             return
         }
         let request = AnalysisRangeRequest(
@@ -812,12 +812,12 @@ actor AnalysisWorkScheduler {
                 // `fetchNextEligibleJob` (queued|paused|failed only) and
                 // to `recoverExpiredLease` (leaseOwner IS NOT NULL
                 // only). Revert to 'queued' before releasing the lease.
-                do {
+                await writeIfStillOwned("cancelRace.revertQueued") {
                     try await store.updateJobState(jobId: job.jobId, state: "queued")
-                } catch {
-                    logger.error("Failed to revert job state on cancel-race: \(error)")
                 }
-                try? await store.releaseLease(jobId: job.jobId)
+                await writeIfStillOwned("cancelRace.releaseLease") {
+                    try await store.releaseLease(jobId: job.jobId)
+                }
                 // Clear cancel state so it doesn't leak into the next
                 // job picked up by the loop. `pendingCancelCause` was
                 // set by the racing canceller for the now-skipped job;
@@ -857,12 +857,12 @@ actor AnalysisWorkScheduler {
                     pendingCancelCause = nil
                     return
                 }
-                do {
+                await writeIfStillOwned("cancelCatch.revertQueued") {
                     try await store.updateJobState(jobId: job.jobId, state: "queued")
-                } catch {
-                    logger.error("Failed to update job state: \(error)")
                 }
-                try? await store.releaseLease(jobId: job.jobId)
+                await writeIfStillOwned("cancelCatch.releaseLease") {
+                    try await store.releaseLease(jobId: job.jobId)
+                }
                 // playhead-1nl6: emit the cause that accompanied the
                 // cancel into the WorkJournal via the injected recorder.
                 // Default cause is `.pipelineError` so callers that
@@ -906,26 +906,24 @@ actor AnalysisWorkScheduler {
                 coverageSec: outcome.cueCoverageSec
             )
 
-            // Renewal task may have flipped `lostOwnership` while the
-            // pipeline was finishing; the new owner now holds state /
-            // attemptCount / progress, so writing here would corrupt
-            // its accounting and the final `releaseLease` would also
-            // clear a lease we no longer hold.
+            // First check before the outcome write chain. Each
+            // individual `store.X(...)` below is also wrapped in
+            // `writeIfStillOwned` so the renewer flipping the flag at
+            // any subsequent `await` suspension point does not slip a
+            // late write through.
             if lostOwnership {
                 logger.warning("Skipping outcome writes for job \(job.jobId): lease reclaimed by orphan recovery")
                 return
             }
 
             // Update progress in the store.
-            do {
+            await writeIfStillOwned("updateJobProgress") {
                 try await store.updateJobProgress(
                     jobId: job.jobId,
                     featureCoverageSec: outcome.featureCoverageSec,
                     transcriptCoverageSec: outcome.transcriptCoverageSec,
                     cueCoverageSec: outcome.cueCoverageSec
                 )
-            } catch {
-                logger.error("Failed to update job progress: \(error)")
             }
 
             // Handle outcome.
@@ -961,12 +959,18 @@ actor AnalysisWorkScheduler {
                         createdAt: now,
                         updatedAt: now
                     )
-                    try await store.insertJob(nextJob)
-                    try await store.updateJobState(jobId: job.jobId, state: "complete")
+                    await writeIfStillOwned("tierAdvance.insertNext") {
+                        try await store.insertJob(nextJob)
+                    }
+                    await writeIfStillOwned("tierAdvance.markComplete") {
+                        try await store.updateJobState(jobId: job.jobId, state: "complete")
+                    }
                     PreAnalysisInstrumentation.logTierCompletion(tier: "\(Int(job.desiredCoverageSec))s", completed: true)
                     logger.info("Tier advancement: \(job.desiredCoverageSec)s -> \(nextCoverage)s for episode \(job.episodeId)")
                 } else {
-                    try await store.updateJobState(jobId: job.jobId, state: "complete")
+                    await writeIfStillOwned("allTiersDone.markComplete") {
+                        try await store.updateJobState(jobId: job.jobId, state: "complete")
+                    }
                     PreAnalysisInstrumentation.logTierCompletion(tier: "\(Int(job.desiredCoverageSec))s", completed: true)
                     logger.info("Job \(job.jobId) complete (all tiers done)")
                 }
@@ -974,34 +978,40 @@ actor AnalysisWorkScheduler {
             case .reachedTarget:
                 // Re-queue, but with a guard against infinite loops for short episodes
                 // or episodes that can never reach the desired coverage.
-                do {
-                    if !Self.shouldRetryCoverageInsufficient(job: job, outcome: outcome) {
+                if !Self.shouldRetryCoverageInsufficient(job: job, outcome: outcome) {
+                    await writeIfStillOwned("coverageInsufficient.noProgress") {
                         try await store.updateJobState(
                             jobId: job.jobId,
                             state: "complete",
                             lastErrorCode: "coverageInsufficient:noProgress"
                         )
-                        logger.info("Job \(job.jobId) marked complete after no-progress pass (coverage insufficient)")
-                    } else {
+                    }
+                    logger.info("Job \(job.jobId) marked complete after no-progress pass (coverage insufficient)")
+                } else {
+                    await writeIfStillOwned("coverageInsufficient.increment") {
                         try await store.incrementAttemptCount(jobId: job.jobId)
-                        let updatedJob = try await store.fetchJob(byId: job.jobId)
-                        if (updatedJob?.attemptCount ?? 0) >= Self.maxAttemptCount {
+                    }
+                    let updatedJob = lostOwnership ? nil : (try? await store.fetchJob(byId: job.jobId))
+                    if (updatedJob?.attemptCount ?? 0) >= Self.maxAttemptCount {
+                        await writeIfStillOwned("coverageInsufficient.maxAttempts") {
                             try await store.updateJobState(
                                 jobId: job.jobId,
                                 state: "complete",
                                 lastErrorCode: "maxAttemptsReached:coverageInsufficient"
                             )
-                            logger.info("Job \(job.jobId) marked complete after max attempts (coverage insufficient)")
-                        } else {
-                            // Backoff before next attempt: without a
-                            // gap, the scheduler loop wakes
-                            // immediately, picks the same job, and
-                            // burns the full decode pipeline N more
-                            // times in a tight loop. Match the
-                            // `.failed` exponential backoff so
-                            // attempt-N waits min(2^N * 60, 3600) s.
-                            let attemptIndex = Double((updatedJob?.attemptCount ?? 1))
-                            let backoff = min(pow(2.0, attemptIndex) * 60, 3600)
+                        }
+                        logger.info("Job \(job.jobId) marked complete after max attempts (coverage insufficient)")
+                    } else {
+                        // Backoff before next attempt: without a
+                        // gap, the scheduler loop wakes
+                        // immediately, picks the same job, and
+                        // burns the full decode pipeline N more
+                        // times in a tight loop. Match the
+                        // `.failed` exponential backoff so
+                        // attempt-N waits min(2^N * 60, 3600) s.
+                        let attemptIndex = Double((updatedJob?.attemptCount ?? 1))
+                        let backoff = min(pow(2.0, attemptIndex) * 60, 3600)
+                        await writeIfStillOwned("coverageInsufficient.requeue") {
                             try await store.updateJobState(
                                 jobId: job.jobId,
                                 state: "queued",
@@ -1009,84 +1019,74 @@ actor AnalysisWorkScheduler {
                             )
                         }
                     }
-                } catch {
-                    logger.error("Failed to update job state: \(error)")
                 }
 
             case .blockedByModel:
                 let nextEligible = Date().timeIntervalSince1970 + 300
-                do {
+                await writeIfStillOwned("blockedByModel") {
                     try await store.updateJobState(
                         jobId: job.jobId,
                         state: "blocked:modelUnavailable",
                         nextEligibleAt: nextEligible
                     )
-                } catch {
-                    logger.error("Failed to update job state: \(error)")
                 }
                 logger.info("Job \(job.jobId) blocked: model unavailable, retry in 300s")
 
             case .pausedForThermal, .memoryPressure:
                 let nextEligible = Date().timeIntervalSince1970 + 30
-                do {
+                await writeIfStillOwned("pausedThermalOrMemory") {
                     try await store.updateJobState(
                         jobId: job.jobId,
                         state: "paused",
                         nextEligibleAt: nextEligible
                     )
-                } catch {
-                    logger.error("Failed to update job state: \(error)")
                 }
                 logger.info("Job \(job.jobId) paused for thermal/memory, retry in 30s")
 
             case .failed(let reason):
-                do {
+                await writeIfStillOwned("failed.increment") {
                     try await store.incrementAttemptCount(jobId: job.jobId)
-                    let updated = try await store.fetchJob(byId: job.jobId)
-                    let attempts = updated?.attemptCount ?? job.attemptCount + 1
-                    if attempts >= Self.maxAttemptCount {
+                }
+                let updated = lostOwnership ? nil : (try? await store.fetchJob(byId: job.jobId))
+                let attempts = updated?.attemptCount ?? job.attemptCount + 1
+                if attempts >= Self.maxAttemptCount {
+                    await writeIfStillOwned("failed.supersede") {
                         try await store.updateJobState(
                             jobId: job.jobId,
                             state: "superseded",
                             lastErrorCode: "maxAttemptsReached:\(reason)"
                         )
-                        logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: \(reason)")
-                    } else {
-                        let backoff = min(pow(2.0, Double(attempts)) * 60, 3600)
-                        let nextEligible = Date().timeIntervalSince1970 + backoff
+                    }
+                    logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: \(reason)")
+                } else {
+                    let backoff = min(pow(2.0, Double(attempts)) * 60, 3600)
+                    let nextEligible = Date().timeIntervalSince1970 + backoff
+                    await writeIfStillOwned("failed.requeue") {
                         try await store.updateJobState(
                             jobId: job.jobId,
                             state: "failed",
                             nextEligibleAt: nextEligible,
                             lastErrorCode: reason
                         )
-                        logger.warning("Job \(job.jobId) failed: \(reason), attempt \(attempts), backoff \(backoff)s")
                     }
-                } catch {
-                    logger.error("Failed to update job state: \(error)")
+                    logger.warning("Job \(job.jobId) failed: \(reason), attempt \(attempts), backoff \(backoff)s")
                 }
 
             case .backgroundExpired:
-                do {
+                await writeIfStillOwned("backgroundExpired.requeue") {
                     try await store.updateJobState(jobId: job.jobId, state: "queued")
-                } catch {
-                    logger.error("Failed to update job state: \(error)")
                 }
                 logger.info("Job \(job.jobId) background expired, requeued")
 
             case .cancelledByPlayback:
-                do {
+                await writeIfStillOwned("cancelledByPlayback.requeue") {
                     try await store.updateJobState(jobId: job.jobId, state: "queued")
-                } catch {
-                    logger.error("Failed to update job state: \(error)")
                 }
                 logger.info("Job \(job.jobId) cancelled by playback, requeued")
 
             case .preempted:
-                do {
+                await writeIfStillOwned("preempted.requeue") {
                     try await store.updateJobState(jobId: job.jobId, state: "queued")
-                } catch {
-                    logger.error("Failed to update job state: \(error)")
                 }
                 logger.info("Job \(job.jobId) preempted by higher-lane work, requeued")
             }
@@ -1096,19 +1096,23 @@ actor AnalysisWorkScheduler {
                 logger.warning("Skipping failure cleanup writes for job \(job.jobId): lease reclaimed by orphan recovery (error: \(error))")
                 return
             }
-            do {
+            await writeIfStillOwned("outerCatch.increment") {
                 try await store.incrementAttemptCount(jobId: job.jobId)
-                let updated = try await store.fetchJob(byId: job.jobId)
-                let attempts = updated?.attemptCount ?? job.attemptCount + 1
-                if attempts >= Self.maxAttemptCount {
+            }
+            let updated = lostOwnership ? nil : (try? await store.fetchJob(byId: job.jobId))
+            let attempts = updated?.attemptCount ?? job.attemptCount + 1
+            if attempts >= Self.maxAttemptCount {
+                await writeIfStillOwned("outerCatch.supersede") {
                     try await store.updateJobState(
                         jobId: job.jobId,
                         state: "superseded",
                         lastErrorCode: "maxAttemptsReached:\(error.localizedDescription)"
                     )
-                } else {
-                    let backoff = min(pow(2.0, Double(attempts)) * 60, 3600)
-                    let nextEligible = Date().timeIntervalSince1970 + backoff
+                }
+            } else {
+                let backoff = min(pow(2.0, Double(attempts)) * 60, 3600)
+                let nextEligible = Date().timeIntervalSince1970 + backoff
+                await writeIfStillOwned("outerCatch.requeue") {
                     try await store.updateJobState(
                         jobId: job.jobId,
                         state: "failed",
@@ -1116,21 +1120,43 @@ actor AnalysisWorkScheduler {
                         lastErrorCode: error.localizedDescription
                     )
                 }
-            } catch {
-                logger.error("Failed to update job state after failure: \(error)")
             }
             logger.error("Job \(job.jobId) threw: \(error)")
         }
 
-        // If the renewal task flipped `lostOwnership` while we were
-        // writing the outcome, the new owner already holds the lease;
-        // releaseLease here would clear theirs. The other early-return
-        // branches above also guard this same fall-through path.
-        if lostOwnership {
-            logger.warning("Skipping releaseLease tail for job \(job.jobId): lease reclaimed by orphan recovery")
-            return
+        // Final releaseLease is the load-bearing tail for the
+        // happy-path arms (e.g. `.reachedTarget` with all tiers done)
+        // that don't early-return. Gated like every other store write
+        // because AnalysisStore.releaseLease is a blind UPDATE-by-jobId
+        // (not owner-scoped); calling it after losing ownership
+        // clears the new owner's lease.
+        await writeIfStillOwned("releaseLease.tail") {
+            try await store.releaseLease(jobId: job.jobId)
         }
-        try? await store.releaseLease(jobId: job.jobId)
+    }
+
+    // MARK: - Lease-aware write helper
+
+    /// Performs `body` only if this scheduler still owns the job's
+    /// lease. `lostOwnership` may be flipped to `true` by the renewal
+    /// task at any actor suspension point — so a single early-return
+    /// guard before a chain of `await store.X(...)` calls is not
+    /// sufficient. Wrap every cleanup-path store call so the check is
+    /// re-evaluated immediately before the write.
+    ///
+    /// `body` errors are caught and logged here (matches the prior
+    /// `do { try } catch { logger.error(...) }` pattern) so callers
+    /// don't need to wrap each call themselves.
+    private func writeIfStillOwned(
+        _ what: String,
+        _ body: () async throws -> Void
+    ) async {
+        guard !lostOwnership else { return }
+        do {
+            try await body()
+        } catch {
+            logger.error("Failed cleanup write [\(what)]: \(error)")
+        }
     }
 
     // MARK: - Tier Definitions
