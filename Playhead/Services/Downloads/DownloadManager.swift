@@ -321,6 +321,21 @@ actor DownloadManager {
                 }
             }
         }
+        // Wire onDownloadComplete once at init (not per-session). Body
+        // is identical across sessions — only the actor hop varies, and
+        // that's keyed off `episodeId`/`fileURL` not the session. The
+        // prior per-session reassignment in `backgroundSession(for:)`
+        // produced needless closure churn under repeated session
+        // instantiation (e.g. cold-launch rehydration of multiple
+        // identifiers).
+        self.sessionDelegate.onDownloadComplete = { [manager = self] episodeId, fileURL in
+            Task {
+                await manager.handleBackgroundDownloadComplete(
+                    episodeId: episodeId,
+                    fileURL: fileURL
+                )
+            }
+        }
     }
 
     /// Returns a fresh AsyncStream that receives all future download progress
@@ -735,15 +750,8 @@ actor DownloadManager {
             delegateQueue: nil
         )
 
-        // Wire the onDownloadComplete callback once per session.
-        sessionDelegate.onDownloadComplete = { [manager = self] episodeId, fileURL in
-            Task {
-                await manager.handleBackgroundDownloadComplete(
-                    episodeId: episodeId,
-                    fileURL: fileURL
-                )
-            }
-        }
+        // onDownloadComplete is wired once at init — see DownloadManager
+        // initializer. No per-session reassignment needed.
 
         _sessionsByRole[resolvedRole] = session
         return session
@@ -1424,7 +1432,12 @@ actor DownloadManager {
     /// Computes a strong fingerprint and enqueues analysis.
     func handleBackgroundDownloadComplete(episodeId: String, fileURL: URL) async {
         if let strongHash = try? FileHasher.sha256(fileURL: fileURL) {
-            fingerprintCache[episodeId] = AudioFingerprint(weak: "", strong: strongHash)
+            // Preserve any weak fingerprint a prior progressive/streaming
+            // download (or metadata cache) populated for this episode —
+            // overwriting with `weak: ""` would erase data analysis
+            // consumers later expect to find via `fingerprint(for:)`.
+            let existingWeak = fingerprintCache[episodeId]?.weak ?? ""
+            fingerprintCache[episodeId] = AudioFingerprint(weak: existingWeak, strong: strongHash)
             await enqueueAnalysisIfNeeded(
                 episodeId: episodeId,
                 sourceFingerprint: strongHash,

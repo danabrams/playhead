@@ -23,6 +23,21 @@ import Foundation
 import XCTest
 @testable import Playhead
 
+// MARK: - Stable hash for seed derivation
+
+/// Swift's `String.hashValue` uses a process-randomized seed, so the
+/// "deterministic per-cycle seed" claim is only honored within a single
+/// test process. Use FNV-1a 64-bit so seeds are stable across runs and
+/// CI invocations — important for reproducing a flaking cycle.
+fileprivate func stableSeed(from s: String) -> UInt64 {
+    var hash: UInt64 = 0xcbf29ce484222325
+    for byte in s.utf8 {
+        hash ^= UInt64(byte)
+        hash &*= 0x100000001b3
+    }
+    return hash
+}
+
 // MARK: - Shared cycle-suite base
 
 /// Base helper: per-type test suites all follow the same pattern.
@@ -56,7 +71,7 @@ class InterruptionCycleSuiteBase: XCTestCase {
             // bitPattern-cast to avoid the negative-Int trap that
             // `UInt64(_: Int)` raises for hash values with the sign
             // bit set.
-            let seed = UInt64(bitPattern: Int64(type.rawValue.hashValue ^ i))
+            let seed = stableSeed(from: type.rawValue) &+ UInt64(i)
             let result = try await harness.cycle(
                 type: type,
                 durationMs: durationMs,
@@ -287,7 +302,7 @@ final class InterruptionHarnessTests: XCTestCase {
         // D6 floor: 5 cycles per type.
         for type in allTypes {
             for i in 0..<5 {
-                let seed = Self.umbrellaSeed &+ UInt64(bitPattern: Int64(type.rawValue.hashValue)) &+ UInt64(i)
+                let seed = Self.umbrellaSeed &+ stableSeed(from: type.rawValue) &+ UInt64(i)
                 let result = try await harness.cycle(
                     type: type,
                     durationMs: 50,
@@ -331,8 +346,13 @@ final class InterruptionHarnessTests: XCTestCase {
         add(attachment)
 
         // Counts + aggregate oracles.
+        // The 5-per-type floor + 10 overage = exactly 50, so the totals
+        // are tautological by construction. The meaningful checks are:
+        //   1. overage actually ran (10 cycles → totals exactly 50, not 40)
+        //   2. random distribution didn't trivially collapse onto one type
+        //      (would mean SeededRandomNumberGenerator regressed)
         let totalCycles = perTypeCounts.values.reduce(0, +)
-        XCTAssertGreaterThanOrEqual(totalCycles, 50, "total cycles \(totalCycles) below floor 50")
+        XCTAssertEqual(totalCycles, 50, "expected exactly 5×8 + 10 overage = 50 cycles")
         for type in allTypes {
             XCTAssertGreaterThanOrEqual(
                 perTypeCounts[type, default: 0],
@@ -340,6 +360,15 @@ final class InterruptionHarnessTests: XCTestCase {
                 "\(type.rawValue) cycles \(perTypeCounts[type, default: 0]) below per-type floor 5"
             )
         }
+        // Overage distribution check: 10 random draws over 8 buckets
+        // should hit at least 4 distinct types under a stable RNG.
+        // Strictly less means the RNG collapsed.
+        let overageCounts: [CycleType: Int] = perTypeCounts.mapValues { $0 - 5 }
+        let typesHitByOverage = overageCounts.values.filter { $0 > 0 }.count
+        XCTAssertGreaterThanOrEqual(
+            typesHitByOverage, 4,
+            "overage of 10 cycles hit only \(typesHitByOverage) distinct type(s); RNG distribution suspect"
+        )
 
         // Final aggregate oracles run once across the union journal.
         assertMissCausesValid(allJournals)

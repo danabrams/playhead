@@ -640,9 +640,11 @@ final class InterruptionHarness: @unchecked Sendable {
         )
         guard let derivedCause = admissionDecisionToMissCause(decision) else {
             // admit returned `.accept` — the forced-decision inject must
-            // have mis-fired. Fall through to the scripted path so the
-            // oracle still runs, but the caller's
-            // `XCTAssertGreaterThan(admitCalls, 0)` will pass regardless.
+            // have mis-fired. The scripted fallback would silently
+            // re-record the expected cause and mask a real regression in
+            // `admissionDecisionToMissCause`. Fail loudly so a CI run
+            // surfaces the bug.
+            XCTFail("storage pathway: forced .rejectCapExceeded resolved to .accept; admissionDecisionToMissCause returned nil")
             return false
         }
         try await store.releaseEpisodeLease(
@@ -696,9 +698,11 @@ final class InterruptionHarness: @unchecked Sendable {
         // synchronously inside the actor.
         let requested = await signal.isPreemptionRequested()
         guard requested else {
-            // Shouldn't happen — `preemptLowerLanes` flipped the signal
-            // on a job we just registered in a strictly-lower lane. Let
-            // the scripted fallback run so the oracle still runs.
+            // `preemptLowerLanes` should have flipped the signal on a
+            // job we just registered in a strictly-lower lane. The
+            // scripted fallback would silently mask a regression in
+            // LanePreemptionCoordinator. Fail loudly.
+            XCTFail("userPreemption pathway: preemptLowerLanes did not flip signal for background-lane job")
             await lanePreemptionCoordinator.acknowledge(jobId: "job-\(episodeId)")
             return false
         }
@@ -746,8 +750,10 @@ final class InterruptionHarness: @unchecked Sendable {
         let outcome = try await downloadManager.scanForSuspendedTransfers()
         forceQuitRelayRecorder.clearContext()
         guard outcome.resumableTransferIds.contains(episodeId) else {
-            // Scan treated this blob as corrupted/missing — fall through
-            // to the scripted path so the cycle still finalizes.
+            // The blob we just persisted should be enumerated as
+            // resumable. The scripted fallback would mask a regression
+            // in `scanForSuspendedTransfers` — fail loudly instead.
+            XCTFail("forceQuit pathway: persisted blob for \(episodeId) not in scan.resumableTransferIds")
             return false
         }
         return true
