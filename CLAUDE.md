@@ -36,6 +36,10 @@ Runs corpus verification, FM classifier, replay harness, pipeline benchmarks. Ta
 
 The `PlayheadFastTests` plan is the default in Xcode (Cmd+U). Never run the full `-only-testing:PlayheadTests` suite without a test plan — it will include both and take 30+ minutes.
 
+## Parallelism Ceiling
+
+**Maximum 2 concurrent subagents running `xcodebuild` at any time on this machine (16 GB RAM).** Each parallel build can spike 1–3 GB during Swift compilation; combined with Xcode GUI, simulator, sourcekit indexers, and Claude itself, going past 2 has historically OOM'd Xcode (2026-04-17 incident). When orchestrating waves of beads, queue rather than fan out beyond 2. Sequential is always safe.
+
 ## Disk Hygiene
 
 Each bead worktree runs `xcodebuild -derivedDataPath .derivedData`, producing ~2 GB of cache. Cleanup must be deliberate — a missed step leaves orphan gigabytes. Real paths are `.worktrees/<slug>/.derivedData` (depth 3, camelCase).

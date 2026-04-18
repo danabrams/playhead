@@ -50,6 +50,10 @@ targets:
       testTargets:
         - name: PlayheadTests
           parallelizable: true
+      testPlans:
+        - path: TestPlans/PlayheadFastTests.xctestplan
+          defaultPlan: true
+        - path: TestPlans/PlayheadIntegrationTests.xctestplan
       storeKitConfiguration: Playhead/Resources/Playhead.storekit
   PlayheadTests:
     type: bundle.unit-test
