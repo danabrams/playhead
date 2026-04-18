@@ -203,6 +203,14 @@ actor DownloadManager {
     /// Episodes with active/incomplete analysis (protected from eviction).
     private var analysisProtectedEpisodes: Set<String> = []
 
+    /// Episode IDs whose background URLSession download is currently
+    /// in flight. Background tasks aren't tracked in `activeDownloads`
+    /// (foreground only), so this set gives `evictIfNeeded` a way to
+    /// protect just-deposited bg files in the small window between
+    /// `didFinishDownloadingTo` moving the file into completeDirectory
+    /// and `handleBackgroundDownloadComplete` running `touchAccess`.
+    private var bgInFlightEpisodes: Set<String> = []
+
     /// Fingerprint cache: episode ID -> computed fingerprint.
     private var fingerprintCache: [String: AudioFingerprint] = [:]
 
@@ -1184,6 +1192,7 @@ actor DownloadManager {
             : backgroundSession(for: .legacy)
         let task = session.downloadTask(with: url)
         task.taskDescription = episodeId
+        bgInFlightEpisodes.insert(episodeId)
         task.resume()
         logger.info("Queued background download for \(episodeId)")
     }
@@ -1356,7 +1365,7 @@ actor DownloadManager {
             includingPropertiesForKeys: [.fileSizeKey]
         ) else { return }
 
-        var candidates: [(episodeId: String, url: URL, size: Int64, lastAccess: Date)] = []
+        var candidates: [(episodeId: String?, displayName: String, url: URL, size: Int64, lastAccess: Date)] = []
         // Build a reverse map from hashed filename → episode ID. Union
         // accessLog with protected and active sets so a file deposited
         // outside the manager (or before its accessLog entry was
@@ -1364,6 +1373,7 @@ actor DownloadManager {
         let knownEpisodeIds = Set(accessLog.keys)
             .union(analysisProtectedEpisodes)
             .union(activeDownloads.keys)
+            .union(bgInFlightEpisodes)
         let hashToEpisodeId: [String: String] = Dictionary(
             uniqueKeysWithValues: knownEpisodeIds.map { (Self.safeFilename(for: $0), $0) }
         )
@@ -1372,6 +1382,7 @@ actor DownloadManager {
             let episodeId = hashToEpisodeId[name]
             guard !(episodeId.map { analysisProtectedEpisodes.contains($0) } ?? false) else { continue }
             guard !(episodeId.map { activeDownloads.keys.contains($0) } ?? false) else { continue }
+            guard !(episodeId.map { bgInFlightEpisodes.contains($0) } ?? false) else { continue }
 
             let values = try? fileURL.resourceValues(
                 forKeys: [.fileSizeKey, .contentModificationDateKey]
@@ -1383,7 +1394,7 @@ actor DownloadManager {
             let lastAccess = episodeId.flatMap { accessLog[$0] }
                 ?? values?.contentModificationDate
                 ?? .distantPast
-            candidates.append((episodeId ?? name, fileURL, size, lastAccess))
+            candidates.append((episodeId, episodeId ?? name, fileURL, size, lastAccess))
         }
 
         // Sort: least recently accessed first.
@@ -1394,17 +1405,26 @@ actor DownloadManager {
 
             try fm.removeItem(at: candidate.url)
             currentSize -= candidate.size
-            accessLog[candidate.episodeId] = nil
-            fingerprintCache[candidate.episodeId] = nil
-            metadataCache[candidate.episodeId] = nil
-            logger.info("Evicted \(candidate.episodeId): freed \(candidate.size) bytes")
+            // Only scrub the per-episode caches when we resolved a real
+            // episode id. Writing nil at the hashed-filename key would
+            // be a no-op AND, worse, leave any cache entries keyed by
+            // the real id (held under a different filename hash) leaked.
+            if let id = candidate.episodeId {
+                accessLog[id] = nil
+                fingerprintCache[id] = nil
+                metadataCache[id] = nil
+            }
+            logger.info("Evicted \(candidate.displayName): freed \(candidate.size) bytes")
         }
     }
 
     /// Manually clear all cached episode audio.
     func clearCache() throws {
         let fm = FileManager.default
-        for dir in [completeDirectory, partialsDirectory] {
+        // Include resumeDataDirectory so a clearCache + relaunch sequence
+        // doesn't resurrect phantom suspended-transfer events for episodes
+        // whose audio is gone.
+        for dir in [completeDirectory, partialsDirectory, resumeDataDirectory] {
             guard let contents = try? fm.contentsOfDirectory(
                 at: dir, includingPropertiesForKeys: nil
             ) else { continue }
@@ -1429,6 +1449,9 @@ actor DownloadManager {
         if fm.fileExists(atPath: partial.path) {
             try fm.removeItem(at: partial)
         }
+        // Symmetric blob cleanup so a future scan doesn't resurrect a
+        // suspended-transfer event for an episode the user just deleted.
+        try? deleteResumeData(episodeId: episodeId)
         accessLog[episodeId] = nil
         fingerprintCache[episodeId] = nil
         metadataCache[episodeId] = nil
@@ -1457,6 +1480,13 @@ actor DownloadManager {
             )
         }
         touchAccess(episodeId: episodeId)
+        bgInFlightEpisodes.remove(episodeId)
+        // A successful completion can resurrect a stale resume-data blob
+        // from a prior failed attempt: without this delete, the next
+        // cold-launch `scanForSuspendedTransfers` would emit a phantom
+        // `appForceQuitRequiresRelaunch` event for an episode that's
+        // already fully downloaded.
+        try? deleteResumeData(episodeId: episodeId)
         // Background pre-cache deposits weren't subject to LRU eviction;
         // without this, the cache could grow past `maxCacheBytes` until
         // the next foreground download. Best-effort: a failure here just

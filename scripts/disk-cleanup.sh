@@ -37,6 +37,13 @@ is_registered() {
 
 remove() {
   local path="$1" reason="$2"
+  # Symlink defense: rm -rf follows symlink targets. A developer-created
+  # symlink (e.g. .worktrees/foo/.derivedData → /Users/dabrams/critical)
+  # would otherwise clobber the link target. Refuse and log instead.
+  if [[ -L "$path" ]]; then
+    log "SKIP (symlink): $path"
+    return
+  fi
   local size
   size="$(du -sh "$path" 2>/dev/null | awk '{print $1}')"
   log "REMOVE ($reason, $size): $path"

@@ -629,12 +629,16 @@ struct EpisodeLeaseAndWorkJournalTests {
                 episodeId: job.episodeId,
                 generationID: job.generationID
             )
-            let decisionEvent: WorkJournalEntry.EventType?
+            // Production policy (AnalysisCoordinator.recoverOrphans):
+            // a journal row at a future epoch indicates corruption — the
+            // lease is held but the journal disagrees with our scheduler
+            // generation. Skipping recovery preserves whatever terminal
+            // state exists rather than redoing work or requeueing
+            // something that may already be done.
             if let last = lastEvent, last.schedulerEpoch > currentEpoch {
-                decisionEvent = nil
-            } else {
-                decisionEvent = lastEvent?.eventType
+                continue
             }
+            let decisionEvent = lastEvent?.eventType
 
             switch decisionEvent {
             case .finalized, .failed:

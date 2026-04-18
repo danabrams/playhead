@@ -51,10 +51,15 @@ class InterruptionCycleSuiteBase: XCTestCase {
     }
 
     override func tearDown() async throws {
-        harness.mockTaskScheduler.reset()
-        harness.mockCapabilities.reset()
-        harness.mockStorageBudget.reset()
-        harness.cleanupDownloadCache()
+        // Guard against tearDown running after a setUp that threw before
+        // assigning `harness` — XCTest runs tearDown in that case and
+        // force-unwrap would crash, hiding the real setUp failure.
+        if let harness {
+            harness.mockTaskScheduler.reset()
+            harness.mockCapabilities.reset()
+            harness.mockStorageBudget.reset()
+            harness.cleanupDownloadCache()
+        }
         harness = nil
         try await super.tearDown()
     }
