@@ -5,7 +5,6 @@ import BackgroundTasks
 import Foundation
 import Dispatch
 import CryptoKit
-import Network
 import Testing
 import UIKit
 @testable import Playhead
@@ -280,92 +279,110 @@ struct DownloadManagerIntegrityTests {
 
 // MARK: - Resume Contracts
 
-private enum IgnoringRangeServerError: Error {
-    case failedToStart
-    case missingPort
-}
-
-/// Test-only helper shared across Network callbacks on a private serial queue.
+/// Test stub that intercepts URLSession requests via URLProtocol so the resume
+/// contract test does not depend on real loopback networking. The previous
+/// NWListener-based implementation flaked under heavy parallel test load
+/// (NSURLErrorNotConnectedToInternet -1009 on 127.0.0.1). See bead playhead-fpsl.
 private final class IgnoringRangeHTTPServer: @unchecked Sendable {
     private let body: Data
-    private let listener: NWListener
-    private let queue = DispatchQueue(label: "PlayheadTests.IgnoringRangeHTTPServer")
-    private let started = DispatchSemaphore(value: 0)
-    private var boundPort: NWEndpoint.Port?
+    private let token: String
+    private let host = "playhead-test"
+    private let lock = NSLock()
+    private var requests: [String] = []
 
-    private(set) var rawRequests: [String] = []
+    var rawRequests: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return requests
+    }
 
     init(body: Data) throws {
         self.body = body
-        self.listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: 0)!)
+        self.token = UUID().uuidString
     }
 
     func start() throws -> URL {
-        listener.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
-            if case .ready = state {
-                self.boundPort = self.listener.port
-                self.started.signal()
-            }
-        }
-
-        listener.newConnectionHandler = { [weak self] connection in
-            self?.handle(connection: connection)
-        }
-
-        listener.start(queue: queue)
-
-        guard started.wait(timeout: .now() + 5) == .success else {
-            throw IgnoringRangeServerError.failedToStart
-        }
-
-        guard let port = boundPort else {
-            throw IgnoringRangeServerError.missingPort
-        }
-
-        return URL(string: "http://127.0.0.1:\(port.rawValue)/audio")!
+        IgnoringRangeURLProtocol.register(server: self, token: token)
+        return URL(string: "http://\(host)/\(token)/audio")!
     }
 
     func stop() {
-        listener.cancel()
+        IgnoringRangeURLProtocol.unregister(token: token)
     }
 
-    private func handle(connection: NWConnection) {
-        connection.start(queue: queue)
-        receiveRequest(connection: connection, accumulated: Data())
-    }
-
-    private func receiveRequest(connection: NWConnection, accumulated: Data) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, isComplete, error in
-            guard let self else { return }
-
-            var buffer = accumulated
-            if let data {
-                buffer.append(data)
-            }
-
-            let requestText = String(decoding: buffer, as: UTF8.self)
-            if requestText.contains("\r\n\r\n") || isComplete || error != nil {
-                self.rawRequests.append(requestText)
-                self.sendResponse(connection: connection)
-                return
-            }
-
-            self.receiveRequest(connection: connection, accumulated: buffer)
+    fileprivate func record(request: URLRequest) {
+        var raw = "\(request.httpMethod ?? "GET") \(request.url?.path ?? "") HTTP/1.1\r\n"
+        for (key, value) in request.allHTTPHeaderFields ?? [:] {
+            raw += "\(key): \(value)\r\n"
         }
+        raw += "\r\n"
+        lock.lock()
+        requests.append(raw)
+        lock.unlock()
     }
 
-    private func sendResponse(connection: NWConnection) {
-        var response = Data("HTTP/1.1 200 OK\r\n".utf8)
-        response.append(Data("Content-Length: \(body.count)\r\n".utf8))
-        response.append(Data("Content-Type: application/octet-stream\r\n".utf8))
-        response.append(Data("Connection: close\r\n\r\n".utf8))
-        response.append(body)
+    fileprivate func responseBody() -> Data { body }
+}
 
-        connection.send(content: response, completion: .contentProcessed { _ in
-            connection.cancel()
-        })
+private final class IgnoringRangeURLProtocol: URLProtocol {
+    nonisolated(unsafe) private static let registryLock = NSLock()
+    nonisolated(unsafe) private static var registry: [String: IgnoringRangeHTTPServer] = [:]
+    nonisolated(unsafe) private static var registered = false
+
+    static func register(server: IgnoringRangeHTTPServer, token: String) {
+        registryLock.lock()
+        registry[token] = server
+        if !registered {
+            URLProtocol.registerClass(IgnoringRangeURLProtocol.self)
+            registered = true
+        }
+        registryLock.unlock()
     }
+
+    static func unregister(token: String) {
+        registryLock.lock()
+        registry.removeValue(forKey: token)
+        if registry.isEmpty {
+            URLProtocol.unregisterClass(IgnoringRangeURLProtocol.self)
+            registered = false
+        }
+        registryLock.unlock()
+    }
+
+    private static func server(for url: URL?) -> IgnoringRangeHTTPServer? {
+        guard let url, url.host == "playhead-test" else { return nil }
+        let token = url.pathComponents.dropFirst().first ?? ""
+        registryLock.lock(); defer { registryLock.unlock() }
+        return registry[token]
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        server(for: request.url) != nil
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url, let server = Self.server(for: url) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        server.record(request: request)
+        let body = server.responseBody()
+        let response = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: [
+                "Content-Length": "\(body.count)",
+                "Content-Type": "application/octet-stream"
+            ]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 @Suite("DownloadManager – Resume")
