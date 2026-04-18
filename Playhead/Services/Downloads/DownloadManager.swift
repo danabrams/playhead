@@ -803,6 +803,15 @@ actor DownloadManager {
         Set(_sessionsByRole.values.compactMap { $0.configuration.identifier })
     }
 
+    /// Snapshot of currently-instantiated background URLSessions across
+    /// all roles. Used by `ForceQuitResumeScan.liveBackgroundDownloadEpisodeIds`
+    /// to dedup the cold-launch scan against transfers the OS still
+    /// owns, without triggering lazy instantiation of cold sessions
+    /// (which would blow the 2 s scan SLA).
+    func backgroundSessionsAlreadyInstantiated() -> [URLSession] {
+        Array(_sessionsByRole.values)
+    }
+
     #if DEBUG
     /// playhead-g2wq test seam: exposes the URLSession delegate so tests
     /// can drive `didCompleteWithError` directly and verify the

@@ -152,6 +152,15 @@ actor AnalysisWorkScheduler {
     private var currentEpisodeId: String?
     private var activePlaybackEpisodeId: String?
     private var shouldCancelCurrentJob = false
+    /// Set to `true` by the lease-renewal task when its CAS finds no
+    /// matching row — i.e. orphan recovery (or another scheduler
+    /// instance) has reclaimed the lease and may already have re-queued
+    /// or completed the job under a new owner. When set, the run loop
+    /// must skip every store write in its cleanup paths (state revert,
+    /// progress update, retry/backoff, releaseLease) because those
+    /// writes would clobber the new owner's bookkeeping. Reset at the
+    /// start of every job so the flag never bleeds across iterations.
+    private var lostOwnership = false
     /// Cause to thread into WorkJournal when the current running job is
     /// cancelled. Set by `cancelCurrentJob(cause:)`; consumed on the
     /// cancellation branch of the run loop. Resets to `nil` after each
@@ -718,16 +727,20 @@ actor AnalysisWorkScheduler {
         currentJobId = job.jobId
         currentEpisodeId = job.episodeId
         shouldCancelCurrentJob = false
+        lostOwnership = false
 
         // End queue-wait signpost interval.
         if let queueState = queueWaitStates.removeValue(forKey: job.jobId) {
             PreAnalysisInstrumentation.endQueueWait(queueState)
         }
 
-        // Lease renewal task: renew every 120s. Stops itself if the
-        // CAS finds no matching row — that means orphan recovery
-        // reclaimed the lease, and continuing would silently re-seat a
-        // released slot.
+        // Lease renewal task: renew every 120s. If the CAS finds no
+        // matching row, orphan recovery (or another scheduler instance)
+        // has reclaimed the lease — set `lostOwnership` so the cleanup
+        // paths skip every store write (state revert, progress update,
+        // backoff, releaseLease) that would otherwise clobber the new
+        // owner's bookkeeping, then cancel the running task so the run
+        // loop unwinds promptly.
         leaseRenewalTask = Task {
             while !Task.isCancelled {
                 try await Task.sleep(for: .seconds(120))
@@ -737,7 +750,11 @@ actor AnalysisWorkScheduler {
                     owner: "preAnalysis",
                     newExpiresAt: newExpiry
                 )) ?? false
-                if !stillOwned { break }
+                if !stillOwned {
+                    self.lostOwnership = true
+                    self.currentRunningTask?.cancel()
+                    break
+                }
             }
         }
 
@@ -754,6 +771,10 @@ actor AnalysisWorkScheduler {
             assetId = try await resolveAnalysisAssetId(for: job, localAudioURL: localAudioURL)
         } catch {
             logger.error("Failed to resolve analysis asset for job \(job.jobId): \(error)")
+            guard !lostOwnership else {
+                logger.warning("Skipping asset-resolution failure writes for job \(job.jobId): lease reclaimed by orphan recovery")
+                return
+            }
             do {
                 let backoff = min(pow(2.0, Double(job.attemptCount + 1)) * 60, 3600)
                 try await store.updateJobState(
@@ -826,6 +847,16 @@ actor AnalysisWorkScheduler {
                 outcome = try await runTask.value
             } catch is CancellationError {
                 PreAnalysisInstrumentation.endJobDuration(jobSignpost)
+                if lostOwnership {
+                    // Lease was reclaimed by orphan recovery. The new
+                    // owner is the source of truth for state, retry
+                    // count, and cause; any write here would clobber
+                    // its bookkeeping. Drop the cancel cause to avoid
+                    // bleeding it into the next job.
+                    logger.warning("Skipping cancel cleanup writes for job \(job.jobId): lease reclaimed by orphan recovery")
+                    pendingCancelCause = nil
+                    return
+                }
                 do {
                     try await store.updateJobState(jobId: job.jobId, state: "queued")
                 } catch {
@@ -874,6 +905,16 @@ actor AnalysisWorkScheduler {
                 stopReason: String(describing: outcome.stopReason),
                 coverageSec: outcome.cueCoverageSec
             )
+
+            // Renewal task may have flipped `lostOwnership` while the
+            // pipeline was finishing; the new owner now holds state /
+            // attemptCount / progress, so writing here would corrupt
+            // its accounting and the final `releaseLease` would also
+            // clear a lease we no longer hold.
+            if lostOwnership {
+                logger.warning("Skipping outcome writes for job \(job.jobId): lease reclaimed by orphan recovery")
+                return
+            }
 
             // Update progress in the store.
             do {
@@ -1051,6 +1092,10 @@ actor AnalysisWorkScheduler {
             }
         } catch {
             PreAnalysisInstrumentation.endJobDuration(jobSignpost)
+            if lostOwnership {
+                logger.warning("Skipping failure cleanup writes for job \(job.jobId): lease reclaimed by orphan recovery (error: \(error))")
+                return
+            }
             do {
                 try await store.incrementAttemptCount(jobId: job.jobId)
                 let updated = try await store.fetchJob(byId: job.jobId)
@@ -1077,6 +1122,14 @@ actor AnalysisWorkScheduler {
             logger.error("Job \(job.jobId) threw: \(error)")
         }
 
+        // If the renewal task flipped `lostOwnership` while we were
+        // writing the outcome, the new owner already holds the lease;
+        // releaseLease here would clear theirs. The other early-return
+        // branches above also guard this same fall-through path.
+        if lostOwnership {
+            logger.warning("Skipping releaseLease tail for job \(job.jobId): lease reclaimed by orphan recovery")
+            return
+        }
         try? await store.releaseLease(jobId: job.jobId)
     }
 

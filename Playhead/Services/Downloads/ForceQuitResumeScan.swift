@@ -219,10 +219,27 @@ extension DownloadManager {
         let now = Date().timeIntervalSince1970
         let recorder = workJournalRecorder
 
+        // Cross-session dedup: if a persisted blob's episode is also
+        // present as a live URLSession task (interactive, maintenance,
+        // or legacy session), the OS still owns the transfer and will
+        // deliver completion through the existing delegate path. Emit
+        // `appForceQuitRequiresRelaunch` here would create a phantom
+        // resume-prompt for a transfer that's actually still running.
+        let liveEpisodeIds = await liveBackgroundDownloadEpisodeIds()
+
         for episodeId in ids {
             // Idempotence guard: if the same blob was already reported
             // during this process's lifetime, skip the re-emission.
             guard !reportedSuspendedTransfers.contains(episodeId) else {
+                continue
+            }
+
+            // Skip blobs whose transfer is still live in some session.
+            // The blob is left on disk; if the transfer ultimately
+            // completes the delegate's resume-data harvest path will
+            // overwrite it, and a subsequent scan will reconcile.
+            if liveEpisodeIds.contains(episodeId) {
+                logger.info("scanForSuspendedTransfers: skip \(episodeId, privacy: .public) — still live in URLSession")
                 continue
             }
 
@@ -296,6 +313,46 @@ extension DownloadManager {
             resumableTransferIds: resumable,
             corruptedTransferIds: corrupted
         )
+    }
+
+    /// Union of `taskDescription` values across already-instantiated
+    /// background sessions that represent non-completed download tasks.
+    /// Used by `scanForSuspendedTransfers` to avoid emitting a
+    /// force-quit prompt for an episode whose transfer is still live —
+    /// an OS-held task that survived the app's force-quit and
+    /// reattached on relaunch should not also be represented as a
+    /// stale resume-data blob.
+    ///
+    /// Only queries sessions the actor has already brought up; the
+    /// scan runs inside the AppDelegate's 2 s SLA and instantiating a
+    /// background URLSession from cold can take hundreds of ms. The
+    /// cost of missing a session not yet instantiated is at most one
+    /// dismissable phantom prompt when the OS later wakes us via
+    /// `application(_:handleEventsForBackgroundURLSession:)` and the
+    /// next scan reconciles. Calls run concurrently via `async let`.
+    /// Tasks with empty or nil `taskDescription` are skipped —
+    /// production code stamps every download task with `episodeId`
+    /// (DownloadManager.swift:1194, ForceQuitResumeScan.swift:356).
+    private func liveBackgroundDownloadEpisodeIds() async -> Set<String> {
+        let sessions = backgroundSessionsAlreadyInstantiated()
+        guard !sessions.isEmpty else { return [] }
+        let allTaskLists = await withTaskGroup(of: [URLSessionTask].self) { group in
+            for session in sessions {
+                group.addTask { await session.allTasks }
+            }
+            var collected: [[URLSessionTask]] = []
+            for await tasks in group { collected.append(tasks) }
+            return collected
+        }
+        var result: Set<String> = []
+        for tasks in allTaskLists {
+            for task in tasks where task.state != .completed {
+                if let id = task.taskDescription, !id.isEmpty {
+                    result.insert(id)
+                }
+            }
+        }
+        return result
     }
 
     /// Resumes a previously-suspended transfer by handing its
