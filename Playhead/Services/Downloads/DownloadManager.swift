@@ -1357,10 +1357,15 @@ actor DownloadManager {
         ) else { return }
 
         var candidates: [(episodeId: String, url: URL, size: Int64, lastAccess: Date)] = []
-        // Build a reverse map from hashed filename → episode ID using the access log,
-        // so we can check analysis protection correctly.
+        // Build a reverse map from hashed filename → episode ID. Union
+        // accessLog with protected and active sets so a file deposited
+        // outside the manager (or before its accessLog entry was
+        // written) can still be identified for protection checks.
+        let knownEpisodeIds = Set(accessLog.keys)
+            .union(analysisProtectedEpisodes)
+            .union(activeDownloads.keys)
         let hashToEpisodeId: [String: String] = Dictionary(
-            uniqueKeysWithValues: accessLog.keys.map { (Self.safeFilename(for: $0), $0) }
+            uniqueKeysWithValues: knownEpisodeIds.map { (Self.safeFilename(for: $0), $0) }
         )
         for fileURL in contents {
             let name = fileURL.deletingPathExtension().lastPathComponent
@@ -1368,9 +1373,16 @@ actor DownloadManager {
             guard !(episodeId.map { analysisProtectedEpisodes.contains($0) } ?? false) else { continue }
             guard !(episodeId.map { activeDownloads.keys.contains($0) } ?? false) else { continue }
 
-            let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey])
+            let values = try? fileURL.resourceValues(
+                forKeys: [.fileSizeKey, .contentModificationDateKey]
+            )
             let size = Int64(values?.fileSize ?? 0)
-            let lastAccess = episodeId.flatMap { accessLog[$0] } ?? .distantPast
+            // Fall back to file mtime — not `.distantPast` — so a
+            // freshly-deposited background download whose accessLog
+            // entry hasn't been written yet isn't the first victim.
+            let lastAccess = episodeId.flatMap { accessLog[$0] }
+                ?? values?.contentModificationDate
+                ?? .distantPast
             candidates.append((episodeId ?? name, fileURL, size, lastAccess))
         }
 
@@ -1445,6 +1457,11 @@ actor DownloadManager {
             )
         }
         touchAccess(episodeId: episodeId)
+        // Background pre-cache deposits weren't subject to LRU eviction;
+        // without this, the cache could grow past `maxCacheBytes` until
+        // the next foreground download. Best-effort: a failure here just
+        // defers cleanup to the next eviction trigger.
+        try? await evictIfNeeded()
     }
 
     /// Rebuilds the LRU access log from file modification dates.

@@ -138,9 +138,11 @@ struct AdmissionJob: Sendable, Equatable {
 
     init(artifactClasses: Set<ArtifactClass>, estimatedWriteBytes: Int64) {
         precondition(!artifactClasses.isEmpty, "AdmissionJob must declare at least one ArtifactClass")
-        precondition(estimatedWriteBytes >= 0, "AdmissionJob.estimatedWriteBytes must be non-negative")
+        // Clamp + assert instead of precondition so upstream Int64
+        // underflow doesn't crash release; storage gate still runs.
+        assert(estimatedWriteBytes >= 0, "AdmissionJob.estimatedWriteBytes must be non-negative; clamping to 0")
         self.artifactClasses = artifactClasses
-        self.estimatedWriteBytes = estimatedWriteBytes
+        self.estimatedWriteBytes = max(0, estimatedWriteBytes)
     }
 }
 
