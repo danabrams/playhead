@@ -4073,18 +4073,27 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
-    func renewLease(jobId: String, newExpiresAt: Double) throws {
+    /// Owner-scoped lease renewal. Returns `true` when the row was
+    /// updated (caller still owns the lease) and `false` when no row
+    /// matched (lease was reclaimed by orphan recovery, released, or
+    /// transferred). Callers MUST check the return value and cancel
+    /// their renewal task on `false` — otherwise a renewal task that
+    /// outlives its owner could re-seat a NULL-owner row's expiry and
+    /// deceive `recoverExpiredLease`.
+    func renewLease(jobId: String, owner: String, newExpiresAt: Double) throws -> Bool {
         let sql = """
             UPDATE analysis_jobs
             SET leaseExpiresAt = ?, updatedAt = ?
-            WHERE jobId = ?
+            WHERE jobId = ? AND leaseOwner = ?
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, newExpiresAt)
         bind(stmt, 2, Date().timeIntervalSince1970)
         bind(stmt, 3, jobId)
+        bind(stmt, 4, owner)
         try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
     }
 
     func fetchJobsByState(_ state: String) throws -> [AnalysisJob] {

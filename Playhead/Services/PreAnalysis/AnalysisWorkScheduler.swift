@@ -724,12 +724,20 @@ actor AnalysisWorkScheduler {
             PreAnalysisInstrumentation.endQueueWait(queueState)
         }
 
-        // Lease renewal task: renew every 120s.
+        // Lease renewal task: renew every 120s. Stops itself if the
+        // CAS finds no matching row — that means orphan recovery
+        // reclaimed the lease, and continuing would silently re-seat a
+        // released slot.
         leaseRenewalTask = Task {
             while !Task.isCancelled {
                 try await Task.sleep(for: .seconds(120))
                 let newExpiry = Date().timeIntervalSince1970 + 300
-                try? await self.store.renewLease(jobId: job.jobId, newExpiresAt: newExpiry)
+                let stillOwned = (try? await self.store.renewLease(
+                    jobId: job.jobId,
+                    owner: "preAnalysis",
+                    newExpiresAt: newExpiry
+                )) ?? false
+                if !stillOwned { break }
             }
         }
 
@@ -777,7 +785,25 @@ actor AnalysisWorkScheduler {
         do {
             guard !shouldCancelCurrentJob else {
                 PreAnalysisInstrumentation.endJobDuration(jobSignpost)
+                // `acquireLease` set state='running' atomically; if we
+                // skip without reverting, the job is stranded at
+                // 'running' with leaseOwner=NULL — invisible to
+                // `fetchNextEligibleJob` (queued|paused|failed only) and
+                // to `recoverExpiredLease` (leaseOwner IS NOT NULL
+                // only). Revert to 'queued' before releasing the lease.
+                do {
+                    try await store.updateJobState(jobId: job.jobId, state: "queued")
+                } catch {
+                    logger.error("Failed to revert job state on cancel-race: \(error)")
+                }
                 try? await store.releaseLease(jobId: job.jobId)
+                // Clear cancel state so it doesn't leak into the next
+                // job picked up by the loop. `pendingCancelCause` was
+                // set by the racing canceller for the now-skipped job;
+                // a stale value would mis-attribute the next job's
+                // cancellation if one arrives.
+                shouldCancelCurrentJob = false
+                pendingCancelCause = nil
                 return
             }
 
@@ -926,7 +952,20 @@ actor AnalysisWorkScheduler {
                             )
                             logger.info("Job \(job.jobId) marked complete after max attempts (coverage insufficient)")
                         } else {
-                            try await store.updateJobState(jobId: job.jobId, state: "queued")
+                            // Backoff before next attempt: without a
+                            // gap, the scheduler loop wakes
+                            // immediately, picks the same job, and
+                            // burns the full decode pipeline N more
+                            // times in a tight loop. Match the
+                            // `.failed` exponential backoff so
+                            // attempt-N waits min(2^N * 60, 3600) s.
+                            let attemptIndex = Double((updatedJob?.attemptCount ?? 1))
+                            let backoff = min(pow(2.0, attemptIndex) * 60, 3600)
+                            try await store.updateJobState(
+                                jobId: job.jobId,
+                                state: "queued",
+                                nextEligibleAt: Date().timeIntervalSince1970 + backoff
+                            )
                         }
                     }
                 } catch {

@@ -1167,7 +1167,13 @@ actor DownloadManager {
             return
         }
 
-        let session = backgroundSession()
+        // Pre-cache work: route through the maintenance lane when the
+        // dual-session flag is on so it cannot starve user-initiated
+        // (.interactive) downloads. When the flag is off, fall through
+        // to the legacy single session.
+        let session = useDualBackgroundSessions
+            ? backgroundSession(for: .maintenance)
+            : backgroundSession(for: .legacy)
         let task = session.downloadTask(with: url)
         task.taskDescription = episodeId
         task.resume()

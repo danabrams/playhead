@@ -247,6 +247,13 @@ enum AdmissionGate {
         }
 
         // All hard gates pass — compute soft slice size.
+        // Phase 1 contract: the CPU axis is soft-only (zero-throughput
+        // device profiles narrow slice size to zero on admit but do
+        // not reject; AdmissionGateTests.testAndGateTruthTable encodes
+        // this). The thermal-collapse case (sliceFraction == 0 outside
+        // critical) is prevented upstream by the QualityProfile
+        // invariant: any tier that sets sliceFraction = 0.0 also sets
+        // pauseAllWork = true, which short-circuits before this point.
         let slice = sliceBytes(
             profile: profile,
             deviceProfile: deviceProfile,
@@ -286,12 +293,13 @@ enum AdmissionGate {
     // MARK: - Storage gate
 
     /// Returns the storage rejection cause, or `nil` when every class
-    /// the job writes to admits. When multiple classes fail, the first
-    /// in the job's class set (iteration order) wins — this is a stable
-    /// deterministic choice; callers that require a specific precedence
-    /// across storage-only rejections should split the job.
+    /// the job writes to admits. When multiple classes fail, the lowest
+    /// `ArtifactClass.allCases` index wins — Set iteration order is not
+    /// stable across process launches (Swift's randomized hash seeding),
+    /// so we must iterate the canonical enum order to keep the chosen
+    /// cause deterministic for triage.
     static func storageRejection(job: AdmissionJob, storage: StorageSnapshot) -> InternalMissCause? {
-        for cls in job.artifactClasses {
+        for cls in ArtifactClass.allCases where job.artifactClasses.contains(cls) {
             if !storage.canAdmit(cls) {
                 return storageCause(for: cls)
             }

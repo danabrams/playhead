@@ -68,7 +68,13 @@ func pollUntil(
     let deadline = clock.now.advanced(by: timeout)
     while clock.now < deadline {
         if try await condition() { return true }
+        // `rethrows` constraint forces `try?` here (Task.sleep throws
+        // CancellationError, not from the closure), so check
+        // `Task.isCancelled` after the sleep to exit cleanly on
+        // cancellation rather than spinning until the outer
+        // `.timeLimit`.
         try? await Task.sleep(for: interval)
+        if Task.isCancelled { return false }
     }
     return try await condition()
 }

@@ -426,6 +426,11 @@ final class InterruptionHarness: @unchecked Sendable {
     /// across the 50-cycle matrix.
     func cleanupDownloadCache() {
         try? FileManager.default.removeItem(at: downloadCacheDirectory)
+        // Unregister the URLProtocol so a later test in the same xctest
+        // process is not poisoned with `-1009` for every HTTP request.
+        // `register()` is idempotent so re-registration on the next
+        // `.networkLoss` injection is cheap.
+        NetworkLossProtocol.unregister()
     }
 
     // MARK: D1 — inject

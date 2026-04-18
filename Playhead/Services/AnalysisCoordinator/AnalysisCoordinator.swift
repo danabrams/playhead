@@ -661,66 +661,86 @@ actor AnalysisCoordinator {
         let currentEpoch = try await store.fetchSchedulerEpoch() ?? 0
 
         for job in stale {
-            let lastEvent = try await store.fetchLastWorkJournalEntry(
-                episodeId: job.episodeId,
-                generationID: job.generationID
-            )
-
-            // Spec invariant: journal rows with scheduler_epoch >
-            // _meta.scheduler_epoch are corruption. Log + drop effect.
-            let decisionEvent: WorkJournalEntry.EventType?
-            if let last = lastEvent, last.schedulerEpoch > currentEpoch {
-                logger.error("work_journal.schedulerEpoch=\(last.schedulerEpoch) > _meta=\(currentEpoch) for episode \(job.episodeId); dropping effect")
-                decisionEvent = nil
-            } else {
-                decisionEvent = lastEvent?.eventType
+            let lastEvent: WorkJournalEntry?
+            do {
+                lastEvent = try await store.fetchLastWorkJournalEntry(
+                    episodeId: job.episodeId,
+                    generationID: job.generationID
+                )
+            } catch {
+                // A single corrupt journal row must not abort the
+                // entire orphan sweep; log and skip this episode so
+                // the rest still recover.
+                logger.error("orphan_recover.fetchJournal_failed episode=\(job.episodeId) error=\(String(describing: error))")
+                continue
             }
 
-            switch decisionEvent {
-            case .finalized, .failed:
-                // Already terminal — clear lease slot and move on.
-                try await store.clearOrphanedLeaseNoRequeue(
-                    jobId: job.jobId,
-                    now: now
-                )
+            // Spec invariant: journal rows with scheduler_epoch >
+            // _meta.scheduler_epoch are corruption. The previous
+            // implementation dropped the effect and fell into the
+            // resume branch — which would *redo* finalized work if the
+            // corrupted row was `.finalized`. Conservative recovery:
+            // skip the episode entirely so a human can investigate.
+            // The lease slot stays orphaned; the next sweep will retry.
+            if let last = lastEvent, last.schedulerEpoch > currentEpoch {
+                logger.error("work_journal.schedulerEpoch=\(last.schedulerEpoch) > _meta=\(currentEpoch) for episode \(job.episodeId); skipping recovery to avoid redoing terminal work")
+                continue
+            }
+            let decisionEvent = lastEvent?.eventType
 
-            case .checkpointed, .acquired, .preempted, .none:
-                // Resume path: requeue with fresh identity under a
-                // freshly-bumped scheduler epoch.
-                if decisionEvent == .acquired || decisionEvent == nil {
-                    logger.notice("orphan_recovered_no_progress episode=\(job.episodeId)")
-                }
-                let newEpoch = try await store.incrementSchedulerEpoch()
-                let newGenerationID = UUID()
-
-                // Lane preservation: Now-lane (priority >= 10) rows
-                // whose lease expired >60 s ago demote to Soon
-                // (priority = 10 floor). All others keep their band.
-                let staleSeconds = max(0.0, now - (job.leaseExpiresAt ?? now))
-                let newPriority = Self.laneAfterOrphan(
-                    currentPriority: job.priority,
-                    staleSeconds: staleSeconds
-                )
-
-                try await store.requeueOrphanedLease(
-                    jobId: job.jobId,
-                    newGenerationID: newGenerationID.uuidString,
-                    newSchedulerEpoch: newEpoch,
-                    newPriority: newPriority,
-                    now: now
-                )
-                rebuilt.append(
-                    EpisodeExecutionLease(
-                        episodeId: job.episodeId,
-                        ownerWorkerId: "",
-                        generationID: newGenerationID,
-                        schedulerEpoch: newEpoch,
-                        acquiredAt: now,
-                        expiresAt: now,
-                        currentCheckpoint: nil,
-                        preemptionRequested: false
+            do {
+                switch decisionEvent {
+                case .finalized, .failed:
+                    // Already terminal — clear lease slot and move on.
+                    try await store.clearOrphanedLeaseNoRequeue(
+                        jobId: job.jobId,
+                        now: now
                     )
-                )
+
+                case .checkpointed, .acquired, .preempted, .none:
+                    // Resume path: requeue with fresh identity under a
+                    // freshly-bumped scheduler epoch.
+                    if decisionEvent == .acquired || decisionEvent == nil {
+                        logger.notice("orphan_recovered_no_progress episode=\(job.episodeId)")
+                    }
+                    let newEpoch = try await store.incrementSchedulerEpoch()
+                    let newGenerationID = UUID()
+
+                    // Lane preservation: Now-lane (priority >= 10) rows
+                    // whose lease expired >60 s ago demote to Soon
+                    // (priority = 10 floor). All others keep their band.
+                    let staleSeconds = max(0.0, now - (job.leaseExpiresAt ?? now))
+                    let newPriority = Self.laneAfterOrphan(
+                        currentPriority: job.priority,
+                        staleSeconds: staleSeconds
+                    )
+
+                    try await store.requeueOrphanedLease(
+                        jobId: job.jobId,
+                        newGenerationID: newGenerationID.uuidString,
+                        newSchedulerEpoch: newEpoch,
+                        newPriority: newPriority,
+                        now: now
+                    )
+                    rebuilt.append(
+                        EpisodeExecutionLease(
+                            episodeId: job.episodeId,
+                            ownerWorkerId: "",
+                            generationID: newGenerationID,
+                            schedulerEpoch: newEpoch,
+                            acquiredAt: now,
+                            expiresAt: now,
+                            currentCheckpoint: nil,
+                            preemptionRequested: false
+                        )
+                    )
+                }
+            } catch {
+                // One job's DB error must not abort the sweep — the
+                // orphan stays orphaned (next sweep will retry) but
+                // other recoverable orphans still recover.
+                logger.error("orphan_recover.perJob_failed episode=\(job.episodeId) error=\(String(describing: error))")
+                continue
             }
         }
         return rebuilt
