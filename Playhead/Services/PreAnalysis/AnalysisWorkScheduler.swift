@@ -1154,6 +1154,8 @@ actor AnalysisWorkScheduler {
         guard !lostOwnership else { return }
         do {
             try await body()
+        } catch is CancellationError {
+            logger.warning("Cleanup write [\(what)] cancelled (likely lease reclaim mid-write)")
         } catch {
             logger.error("Failed cleanup write [\(what)]: \(error)")
         }
@@ -1180,7 +1182,14 @@ actor AnalysisWorkScheduler {
             return analysisAssetId
         }
 
+        // Lease-aware writes: this method runs after `leaseRenewalTask` is
+        // armed, so any `await` here is a suspension point where the renewer
+        // can flip `lostOwnership`. Throw CancellationError on a flip so the
+        // existing asset-resolution catch in processJob hits its
+        // `guard !lostOwnership` and skips its own cleanup writes too.
+        // Orphan recovery (or the new owner) will redo this work cleanly.
         if let existing = try await store.fetchAssetByEpisodeId(job.episodeId) {
+            guard !lostOwnership else { throw CancellationError() }
             try await store.updateJobAnalysisAssetId(jobId: job.jobId, analysisAssetId: existing.id)
             return existing.id
         }
@@ -1208,7 +1217,9 @@ actor AnalysisWorkScheduler {
             analysisVersion: PreAnalysisConfig.analysisVersion,
             capabilitySnapshot: capabilityJSON
         )
+        guard !lostOwnership else { throw CancellationError() }
         try await store.insertAsset(asset)
+        guard !lostOwnership else { throw CancellationError() }
         try await store.updateJobAnalysisAssetId(jobId: job.jobId, analysisAssetId: assetId)
         return assetId
     }
