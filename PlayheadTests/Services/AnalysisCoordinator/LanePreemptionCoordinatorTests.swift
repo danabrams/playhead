@@ -578,11 +578,17 @@ struct LanePreemptionFeatureExtractionRoundTripTests {
         let assetId = "asset-roundtrip-\(UUID().uuidString)"
         try await makeAssetSeeded(store: store, assetId: assetId)
 
-        // Eight 5 s shards = 40 s of audio. That's enough shards to
-        // guarantee the extractor hits at least one post-shard poll
-        // AFTER the preempt request lands mid-flight.
-        let shards = (0..<8).map { i in
-            makeNonSilentShard(id: i, startTime: Double(i) * 5, duration: 5)
+        // Sixteen 30 s shards = 8 minutes of synthetic audio. Production
+        // shards are 30 s (`AnalysisAudioService.defaultShardDuration`),
+        // and 16 of them gives the extractor enough wall-clock work
+        // that even a `Task.sleep`-style handoff under heavy parallel
+        // test load (where `sleep(.ms(50))` measured ~1.9 s in
+        // playhead-01t8 reopen) cannot finish all of it before the
+        // preempt request lands. Without this floor of work, the
+        // extractor can race to natural completion under load and the
+        // post-shard poll path is never exercised.
+        let shards = (0..<16).map { i in
+            makeNonSilentShard(id: i, startTime: Double(i) * 30, duration: 30)
         }
 
         let coordinator = LanePreemptionCoordinator()
@@ -613,11 +619,24 @@ struct LanePreemptionFeatureExtractionRoundTripTests {
             )
         }
 
-        // Give the extractor enough time to finish the first shard and
-        // reach its post-shard poll. Feature extraction is fast — 50 ms
-        // is ample headroom on an idle simulator and small enough to
-        // leave shards remaining for the preempt to interrupt.
-        try await Task.sleep(for: .milliseconds(50))
+        // Wait deterministically until the extractor has PROVEN it is
+        // both (a) mid-flight (still registered in the coordinator's
+        // background lane) and (b) past at least one post-shard
+        // boundary (`featureCoverageEndTime > 0`, which is only set
+        // inside `persistFeatureExtractionBatch`). This replaces a
+        // brittle `Task.sleep(.milliseconds(50))` that — under heavy
+        // parallel test load on the simulator — was observed to
+        // wake ~1.9 s late, by which time the extractor had finished
+        // all shards and the test's preempt landed against a no-op.
+        // (See `pollUntil` docstring re: playhead-qtc.) The extractor
+        // is guaranteed to still be mid-flight after the first shard
+        // because there are 15 shards of work left.
+        let inFlight = try await pollUntil(timeout: .seconds(30)) {
+            let coverage = try await store.fetchAsset(id: assetId)?.featureCoverageEndTime ?? 0
+            let stillRegistered = await coordinator.activeJobs(in: .background).contains(jobId)
+            return coverage > 0 && stillRegistered
+        }
+        try #require(inFlight, "Extractor must reach an in-flight state before the test can preempt it")
 
         let clock = ContinuousClock()
         let admissionAt = clock.now
@@ -637,10 +656,12 @@ struct LanePreemptionFeatureExtractionRoundTripTests {
                 "Signal must record the user-preempted cause")
 
         // The extractor should have returned some windows (safe-point
-        // exit preserves work) but fewer than the full 8 shards' worth
+        // exit preserves work) but fewer than the full 16 shards' worth
         // — otherwise it didn't actually pause, it just completed.
         #expect(!windows.isEmpty,
                 "Extractor should have persisted at least one shard before pausing")
+        #expect(windows.count < 16 * 15,
+                "Extractor must have paused early — saw windows=\(windows.count) for 16-shard run, expected fewer than the full \(16 * 15) windows")
 
         // After exit, the coverage watermark should be durable in the
         // store (atomic write inside persistFeatureExtractionBatch).
@@ -655,6 +676,7 @@ struct LanePreemptionFeatureExtractionRoundTripTests {
         #expect(await coordinator.activeJobs(in: .background) == [],
                 "Acknowledged job must be removed from the registry")
     }
+
 }
 
 // MARK: - Lane ordering
