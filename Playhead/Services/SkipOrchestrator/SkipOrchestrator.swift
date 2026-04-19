@@ -902,6 +902,23 @@ actor SkipOrchestrator {
         let decision = SkipDecisionState.applied
         logDecision(managed: managed, decision: decision, reason: "Skip policy accepted (auto mode)")
 
+        // playhead-o45p: emit an auto_skip_fired event to the ol05 state-
+        // transition log. Paired with readyEntered events on the same
+        // episode_id_hash, this is the numerator/denominator source for
+        // the Wave 4 false_ready_rate dogfood metric. Hashing happens
+        // through the shared logger salt so the two event sites produce
+        // byte-identical episode hashes.
+        if let assetId = activeAssetId {
+            let hashed = SurfaceStatusInvariantLogger.hashEpisodeId(assetId)
+            let startMs = Int((managed.snappedStart * 1000.0).rounded())
+            let endMs = Int((managed.snappedEnd * 1000.0).rounded())
+            SurfaceStatusInvariantLogger.recordAutoSkipFired(
+                episodeIdHash: hashed,
+                windowStartMs: startMs,
+                windowEndMs: endMs
+            )
+        }
+
         // Persist to SQLite (fire-and-forget from the actor).
         let windowId = managed.adWindow.id
         Task { [store, logger] in

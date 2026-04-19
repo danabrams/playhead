@@ -205,6 +205,17 @@ enum SurfaceStatusInvariantLogger {
         )
     }
 
+    /// Hash an episode ID using the per-install salt the logger is
+    /// currently configured with. Exposed so non-ol05 callers (e.g. the
+    /// SkipOrchestrator's auto-skip emission path) can produce the same
+    /// opaque token the logger would if they routed the raw episode ID
+    /// through `record(_:)` — cross-event correlation (readyEntered ⇔
+    /// autoSkipFired on the same episode) depends on byte-identical
+    /// hashes across emission sites.
+    static func hashEpisodeId(_ episodeId: String) -> String {
+        return state.hashEpisodeId(episodeId)
+    }
+
     // MARK: - Test-only introspection
 
     #if DEBUG
@@ -524,9 +535,15 @@ private final class LoggerState: @unchecked Sendable {
     /// `playhead-ghon` contract — when ghon's hasher lands the two
     /// implementations should produce byte-identical output for the
     /// same (installID, episodeId) pair.
+    ///
+    /// Reads `installId` on the serial write queue so concurrent callers
+    /// (e.g. SkipOrchestrator, which is an actor) can produce a
+    /// byte-identical hash without racing the `resetForTesting` path
+    /// that rewrites installId.
     func hashEpisodeId(_ episodeId: String) -> String {
+        let salt = writeQueue.sync { installId }
         return SurfaceStatusEpisodeIdHasher.hash(
-            installId: installId,
+            installId: salt,
             episodeId: episodeId
         )
     }
