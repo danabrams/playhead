@@ -1,25 +1,8 @@
 // DiagnosticsExportService.swift
-// Mail-composer entry point for the support-safe diagnostics bundle.
-// Owns the file-write + composer presentation; the actual UI placement
-// (Settings → Diagnostics screen) is delivered by Phase 2 playhead-l274.
+// Support-safe diagnostics bundle mail-composer + iPad activity fallback,
+// plus coordinator seam protocols for the orchestrator layer.
 //
-// Scope: playhead-ghon (Phase 1.5 — support-safe diagnostics bundle classes).
-//
-// Why split out from the bundle builder: the builder is pure and runs
-// on any thread; this service touches MessageUI / UIKit and must run on
-// the main actor. Keeping the service thin means most of the bead's
-// behavior is unit-testable without a UI host.
-//
-// iPad fallback: per spec, iPad falls back to `UIActivityViewController`
-// with `.mail` excluded from other sharing surfaces (support requires
-// the email artifact specifically). The fallback is selected at
-// presentation time via `UIDevice.current.userInterfaceIdiom`.
-//
-// Reset hook: the composer's completion handler routes the
-// `MFMailComposeResult` through ``DiagnosticsOptInResetPolicy`` and
-// applies the new value to every `Episode.diagnosticsOptIn` that was
-// set when the bundle was built. This bead delivers the data plumbing;
-// the toggle UI itself ships in Phase 2 playhead-l274.
+// Scope: playhead-ghon. UI placement ships in Phase 2 playhead-l274.
 
 import Foundation
 
@@ -33,44 +16,25 @@ import MessageUI
 
 // MARK: - Service
 
-/// Coordinates diagnostics-bundle generation and presents the iOS mail
-/// composer. The service is intentionally `@MainActor` because every
-/// surface it touches (UIKit presentation, MessageUI delegate callbacks,
-/// SwiftData ModelContext mutations) is main-actor isolated.
 @MainActor
 final class DiagnosticsExportService {
 
-    /// MIME type the mail composer attaches the bundle as. Surfaced as a
-    /// constant so tests can grep-anchor it.
     static let attachmentMIMEType = "application/json"
-
-    /// Filename prefix used when constructing
-    /// `playhead-diagnostics-<ISO8601>.json`. Surfaced as a constant for
-    /// the same reason.
     static let filenamePrefix = "playhead-diagnostics"
 
-    /// Convenience builder for the composer subject line. Public so the
-    /// Phase 2 UI can preview it.
     static func defaultSubject(buildType: BuildType) -> String {
         "Playhead diagnostics (\(buildType.rawValue))"
     }
 
-    /// Constructs the canonical filename for a bundle generated at
-    /// `date`. Splitting this out keeps the ISO8601 substitution
-    /// auditable.
+    /// `playhead-diagnostics-<ISO8601>.json`. ":" replaced with "-" for
+    /// portability; documented-only relaxation from strict ISO-8601.
     static func filename(for date: Date) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
-        // ":" is illegal on FAT32 / acceptable on APFS — strip to keep
-        // the filename portable across whatever the user's mail client
-        // does with the attachment.
         let stamp = formatter.string(from: date).replacingOccurrences(of: ":", with: "-")
         return "\(filenamePrefix)-\(stamp).json"
     }
 
-    /// Encodes the bundle file into JSON bytes ready for attachment.
-    /// Centralized so the encoder configuration (date strategy, key
-    /// formatting) is uniform across every emission site.
     static func encode(_ bundle: DiagnosticsBundleFile) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
@@ -79,10 +43,8 @@ final class DiagnosticsExportService {
     }
 
     #if canImport(MessageUI) && os(iOS)
-    /// Maps a real `MFMailComposeResult` into the test-friendly
-    /// `DiagnosticsMailComposeResult`. The mapping is deliberately
-    /// total — `@unknown default` returns `.failed` so a future Apple
-    /// case never silently clears `diagnosticsOptIn`.
+    /// `@unknown default → .failed` so a future Apple case never
+    /// silently clears `diagnosticsOptIn`.
     static func map(_ result: MFMailComposeResult) -> DiagnosticsMailComposeResult {
         switch result {
         case .cancelled: return .cancelled
@@ -93,4 +55,155 @@ final class DiagnosticsExportService {
         }
     }
     #endif
+
+    // MARK: - Composer construction
+
+    #if canImport(MessageUI) && os(iOS)
+    /// Returns `nil` if `canSendMail()` is false; caller should fall
+    /// back to `makeActivityFallback(fileURL:)`. Caller retains the
+    /// delegate.
+    static func makeMailComposer(
+        data: Data,
+        filename: String,
+        subject: String,
+        delegate: MFMailComposeViewControllerDelegate
+    ) -> MFMailComposeViewController? {
+        guard MFMailComposeViewController.canSendMail() else { return nil }
+        let composer = MFMailComposeViewController()
+        composer.mailComposeDelegate = delegate
+        composer.setSubject(subject)
+        composer.addAttachmentData(data, mimeType: attachmentMIMEType, fileName: filename)
+        return composer
+    }
+    #endif
+
+    // MARK: - iPad / no-mail fallback
+
+    #if canImport(UIKit) && os(iOS)
+    /// Excluded from the iPad / no-mail fallback. Per spec the fallback
+    /// is mail-only — every other activity filtered out so the user
+    /// cannot route diagnostics to AirDrop/Notes/Messages (support
+    /// needs the email artifact). Surfaced so tests can assert.
+    static let mailOnlyFallbackExcludedActivities: [UIActivity.ActivityType] = [
+        .addToReadingList,
+        .airDrop,
+        .assignToContact,
+        .copyToPasteboard,
+        .markupAsPDF,
+        .message,
+        .openInIBooks,
+        .postToFacebook,
+        .postToFlickr,
+        .postToTencentWeibo,
+        .postToTwitter,
+        .postToVimeo,
+        .postToWeibo,
+        .print,
+        .saveToCameraRoll,
+        .sharePlay
+    ]
+
+    /// Mail-only `UIActivityViewController`; callers own presentation.
+    static func makeActivityFallback(fileURL: URL) -> UIActivityViewController {
+        let controller = UIActivityViewController(
+            activityItems: [fileURL],
+            applicationActivities: nil
+        )
+        controller.excludedActivityTypes = mailOnlyFallbackExcludedActivities
+        return controller
+    }
+
+    /// Writes bundle to tmp for the activity-controller fallback.
+    /// Caller is responsible for cleanup.
+    static func writeBundle(
+        data: Data,
+        filename: String,
+        directory: URL = FileManager.default.temporaryDirectory
+    ) throws -> URL {
+        let url = directory.appendingPathComponent(filename, isDirectory: false)
+        try data.write(to: url, options: [.atomic])
+        return url
+    }
+    #endif
+}
+
+// MARK: - Coordinator seams
+
+/// Abstract presenter for the diagnostics export UI. Production uses
+/// `UIKitDiagnosticsPresenter`; tests inject a fake that completes
+/// synchronously with a canned `DiagnosticsMailComposeResult`.
+///
+/// The presenter owns:
+///   * Mail-vs-activity selection (iPhone mail composer vs iPad activity
+///     fallback, or activity fallback when `canSendMail()` is false).
+///   * Presentation on the host view controller.
+///   * Delivering the final `DiagnosticsMailComposeResult` back to the
+///     coordinator via the completion handler.
+@MainActor
+protocol DiagnosticsExportPresenter {
+    func present(
+        data: Data,
+        filename: String,
+        subject: String,
+        completion: @escaping @MainActor (Result<DiagnosticsMailComposeResult, Error>) -> Void
+    )
+}
+
+/// Async fetch closure that returns the most-recent WorkJournalEntry
+/// rows (newest-first, bounded by `DiagnosticsBundleBuilder.schedulerEventsCap`).
+/// Kept as a closure so the coordinator does not depend on
+/// `AnalysisStore` directly — tests supply a canned list.
+typealias DiagnosticsJournalFetch = @Sendable () async throws -> [WorkJournalEntry]
+
+/// Seam for flipping `Episode.diagnosticsOptIn = false` on the rows
+/// that actually shipped in the bundle. Abstracted so the coordinator
+/// remains pure-logic and the SwiftData/ModelContext dependency lives in
+/// the production adapter (`SwiftDataDiagnosticsOptInSink`).
+@MainActor
+protocol DiagnosticsOptInSink {
+    func applyResetToEpisodes(matchingEpisodeIds: [String], newValue: Bool)
+}
+
+struct DiagnosticsExportEnvironment: Sendable {
+    let appVersion: String
+    let osVersion: String
+    let deviceClass: DeviceClass
+    let buildType: BuildType
+    let eligibility: AnalysisEligibility
+    let installID: UUID
+    let now: Date
+    let fetchLimit: Int
+
+    init(
+        appVersion: String,
+        osVersion: String,
+        deviceClass: DeviceClass,
+        buildType: BuildType,
+        eligibility: AnalysisEligibility,
+        installID: UUID,
+        now: Date = .now,
+        fetchLimit: Int = DiagnosticsBundleBuilder.schedulerEventsCap
+    ) {
+        self.appVersion = appVersion
+        self.osVersion = osVersion
+        self.deviceClass = deviceClass
+        self.buildType = buildType
+        self.eligibility = eligibility
+        self.installID = installID
+        self.now = now
+        self.fetchLimit = fetchLimit
+    }
+}
+
+// MARK: - Errors
+
+/// Errors surfaced by the `DiagnosticsExportCoordinator`. Kept deliberately
+/// narrow — builder/service errors propagate untransformed so callers can
+/// distinguish "we never got to presentation" (this enum) from "the
+/// composer failed" (a `DiagnosticsMailComposeResult.failed`).
+enum DiagnosticsExportError: Error, Equatable {
+    /// Coordinator was asked to present without a host view controller
+    /// (e.g. the UIKit root was torn down mid-flow). Non-recoverable at
+    /// the coordinator layer; UI should surface a retry prompt.
+    case missingHostViewController
 }
