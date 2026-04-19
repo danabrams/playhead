@@ -57,6 +57,17 @@ final class Episode {
     var isPlayed: Bool
     var feedMetadata: FeedDescriptionMetadata?
 
+    /// Per-episode opt-in for the OptIn diagnostics bundle (playhead-ghon).
+    /// Defaults to `false` so the additive SwiftData migration is
+    /// non-destructive: existing rows decode with the property set to
+    /// `false` and the OptIn bundle path remains a no-op until the user
+    /// flips this flag through the Phase 2 Diagnostics screen
+    /// (playhead-l274). Reset policy lives in
+    /// ``DiagnosticsOptInResetPolicy`` — flag clears when the mail
+    /// composer reports `.sent` or `.saved`, persists on `.cancelled`
+    /// or `.failed`.
+    var diagnosticsOptIn: Bool = false
+
     init(
         feedItemGUID: String,
         feedURL: URL,
@@ -71,7 +82,8 @@ final class Episode {
         publishedAt: Date? = nil,
         playbackPosition: TimeInterval = 0,
         isPlayed: Bool = false,
-        feedMetadata: FeedDescriptionMetadata? = nil
+        feedMetadata: FeedDescriptionMetadata? = nil,
+        diagnosticsOptIn: Bool = false
     ) {
         self.feedItemGUID = feedItemGUID
         self.canonicalEpisodeKey = Self.makeCanonicalKey(
@@ -89,6 +101,7 @@ final class Episode {
         self.playbackPosition = playbackPosition
         self.isPlayed = isPlayed
         self.feedMetadata = feedMetadata
+        self.diagnosticsOptIn = diagnosticsOptIn
     }
 
     /// Derives the canonical key from feedItemGUID + feedURL for preview budget tracking.

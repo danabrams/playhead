@@ -4660,6 +4660,37 @@ actor AnalysisStore {
         return out
     }
 
+    /// Fetches the most-recent `limit` WorkJournal entries across ALL
+    /// episodes and generations, ordered by `(timestamp DESC, rowid DESC)`
+    /// so the absolute-newest row is `out[0]`. Used by the support-safe
+    /// diagnostics bundle (playhead-ghon) to populate both
+    /// `scheduler_events` (last 200) and `work_journal_tail` (last 50).
+    ///
+    /// The two diagnostics consumers use different orderings — scheduler
+    /// events are emitted newest-first, the journal tail is emitted in
+    /// insertion order — so this method returns the rawest possible
+    /// "newest N rows" set and the builder re-orders client-side. That
+    /// keeps SQL simple and the projection rules pure.
+    func fetchRecentWorkJournalEntries(limit: Int) throws -> [WorkJournalEntry] {
+        precondition(limit >= 0, "fetchRecentWorkJournalEntries: limit must be non-negative")
+        if limit == 0 { return [] }
+        let sql = """
+            SELECT id, episode_id, generation_id, scheduler_epoch,
+                   timestamp, event_type, cause, metadata, artifact_class
+            FROM work_journal
+            ORDER BY timestamp DESC, rowid DESC
+            LIMIT ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, limit)
+        var out: [WorkJournalEntry] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append(try readWorkJournalEntry(stmt))
+        }
+        return out
+    }
+
     /// Requeue an orphaned analysis_jobs row: clear the stale lease,
     /// assign a fresh generationID + new scheduler epoch, reset
     /// attemptCount to 0 and apply the (possibly demoted) priority.
