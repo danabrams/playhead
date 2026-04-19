@@ -68,7 +68,11 @@ final class UIKitDiagnosticsPresenter: DiagnosticsExportPresenter {
         // signed-in Mail account), fall through to the activity fallback
         // so support still gets an email artifact from the user's other
         // mail client.
-        if MFMailComposeViewController.canSendMail() {
+        let decision = Self.decideBranch(
+            canSendMail: MFMailComposeViewController.canSendMail()
+        )
+        switch decision {
+        case .mail:
             presentMailComposer(
                 data: data,
                 filename: filename,
@@ -76,15 +80,33 @@ final class UIKitDiagnosticsPresenter: DiagnosticsExportPresenter {
                 host: host,
                 completion: completion
             )
-            return
+        case .activityFallback:
+            presentActivityFallback(
+                data: data,
+                filename: filename,
+                host: host,
+                completion: completion
+            )
         }
+    }
 
-        presentActivityFallback(
-            data: data,
-            filename: filename,
-            host: host,
-            completion: completion
-        )
+    // MARK: - Branch decision (pure, testable)
+
+    /// The two possible presentation branches. Kept as an enum so the
+    /// decision function is pure and testable without presenting UIKit.
+    enum Branch: Equatable {
+        case mail
+        case activityFallback
+    }
+
+    /// Pure decision: given `canSendMail()` pick the presentation branch.
+    /// Callers that discover mail is unavailable DOWNSTREAM (e.g. the
+    /// composer factory returns `nil` even though `canSendMail()` said
+    /// true moments earlier) should fall through to the activity
+    /// fallback — that's the job of `presentMailComposer` itself, which
+    /// re-invokes `presentActivityFallback` on a nil-composer result.
+    static func decideBranch(canSendMail: Bool) -> Branch {
+        canSendMail ? .mail : .activityFallback
     }
 
     // MARK: - Mail composer path
@@ -121,10 +143,17 @@ final class UIKitDiagnosticsPresenter: DiagnosticsExportPresenter {
             delegate: proxy
         ) else {
             // `canSendMail()` said yes a moment ago but composer
-            // construction declined — treat as failed so the coordinator
-            // preserves the opt-in flag for retry.
+            // construction declined. Rather than dead-ending with
+            // `.failed`, fall through to the activity fallback so the
+            // user always has a path to export — identical to the
+            // `canSendMail() == false` branch.
             self.activeDelegate = nil
-            completion(.success(.failed))
+            presentActivityFallback(
+                data: data,
+                filename: filename,
+                host: host,
+                completion: completion
+            )
             return
         }
         host.present(composer, animated: true)

@@ -15,6 +15,7 @@ import Testing
 
 #if canImport(UIKit) && canImport(MessageUI) && os(iOS)
 import UIKit
+import MessageUI
 
 @testable import Playhead
 
@@ -122,6 +123,57 @@ struct UIKitDiagnosticsPresenterTests {
         UIKitDiagnosticsPresenter.removeSubdirectory(bogus)
         #expect(!FileManager.default.fileExists(atPath: bogus.path))
     }
+
+    // MARK: - Branch decision
+
+    @Test("decideBranch: canSendMail == true → .mail")
+    func decideBranchCanSendMailTrue() {
+        #expect(UIKitDiagnosticsPresenter.decideBranch(canSendMail: true) == .mail)
+    }
+
+    @Test("decideBranch: canSendMail == false → .activityFallback")
+    func decideBranchCanSendMailFalse() {
+        #expect(UIKitDiagnosticsPresenter.decideBranch(canSendMail: false) == .activityFallback)
+    }
+
+    // MARK: - Nil-composer fall-through
+    //
+    // The mail-composer construction can decline (rare — e.g. the MessageUI
+    // framework declines to vend a composer despite `canSendMail()` having
+    // just returned true). When that happens, the presenter must NOT
+    // dead-end with `.failed` — it must fall through to the activity
+    // fallback so the user always has a path to export. We can't drive
+    // `MFMailComposeViewController` in unit tests, so we cover the
+    // underlying service seam that would trigger the fall-through.
+
+    @Test("makeMailComposer returns nil when canSendMail() is false (fall-through trigger)")
+    func makeMailComposerReturnsNilWhenCanSendMailIsFalse() {
+        // On the simulator `canSendMail()` is reliably false, so this is
+        // the same nil-composer state the presenter would react to by
+        // falling through to the activity fallback. End-to-end simulation
+        // of the "canSendMail == true, composer == nil" race is
+        // simulator-hostile; we rely on decideBranch + this nil contract
+        // plus the presenter branching logic.
+        let composer = DiagnosticsExportService.makeMailComposer(
+            data: Data("{}".utf8),
+            filename: "playhead-diagnostics-x.json",
+            subject: "s",
+            delegate: NullMailComposeDelegate()
+        )
+        #expect(composer == nil)
+    }
+}
+
+// Minimal MFMailComposeViewControllerDelegate stub for the nil-composer
+// contract test. Never actually receives a callback because
+// `makeMailComposer` returns nil before a composer is built.
+@MainActor
+private final class NullMailComposeDelegate: NSObject, MFMailComposeViewControllerDelegate {
+    nonisolated func mailComposeController(
+        _ controller: MFMailComposeViewController,
+        didFinishWith result: MFMailComposeResult,
+        error: Error?
+    ) {}
 }
 
 #endif // canImport(UIKit) && canImport(MessageUI) && os(iOS)
