@@ -11,6 +11,7 @@ enum SwiftDataStore {
             Podcast.self,
             Episode.self,
             UserPreferences.self,
+            InstallIdentity.self,
         ])
     }
 
@@ -45,7 +46,7 @@ enum PlayheadSchemaV1: VersionedSchema {
     static var versionIdentifier: Schema.Version { Schema.Version(1, 0, 0) }
 
     static var models: [any PersistentModel.Type] {
-        [Podcast.self, Episode.self, UserPreferences.self]
+        [Podcast.self, Episode.self, UserPreferences.self, InstallIdentity.self]
     }
 }
 
