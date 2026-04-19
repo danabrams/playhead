@@ -330,65 +330,267 @@ struct CauseAttributionPolicyTests {
         )
     }
 
-    // MARK: - Placeholder behavior (H1)
+    // MARK: - Complete 16-row mapping table (playhead-dfem)
 
-    /// Causes the worked-example mapping does NOT cover yet. Filled in by
-    /// playhead-dfem. Maintained as the literal complement of
-    /// `CauseAttributionPolicy.mappedCauses` so the test below catches drift
-    /// in either direction.
-    private static let unmappedCauses: [InternalMissCause] = [
-        .noRuntimeGrant,
-        .thermal,
-        .lowPowerMode,
-        .batteryLowUnplugged,
-        .noNetwork,
-        .wifiRequired,
-        .mediaCap,
-        .analysisCap,
-        .userPreempted,
-        .userCancelled,
-        .unsupportedEpisodeLanguage,
-        .asrFailed,
-        .pipelineError,
+    /// Expected `SurfaceAttribution` for each context-free
+    /// `InternalMissCause`. Context-dependent rows
+    /// (`.modelTemporarilyUnavailable`, `.taskExpired`) are tested
+    /// separately above because they branch on `CauseAttributionContext`;
+    /// both branches are already covered by the worked-example tests.
+    ///
+    /// Order matches `InternalMissCause.allCases` to make a missing-row
+    /// diff obvious against the enum declaration.
+    struct MappingExpectation: Sendable, CustomStringConvertible {
+        let cause: InternalMissCause
+        let expected: SurfaceAttribution
+
+        var description: String {
+            "\(cause) -> \(expected.disposition.rawValue)/\(expected.reason.rawValue)/\(expected.hint.rawValue)"
+        }
+    }
+
+    /// Context-free rows: output does not depend on
+    /// `CauseAttributionContext`, so a single canonical context value
+    /// drives every assertion. Note the two context-dependent causes
+    /// (`.modelTemporarilyUnavailable`, `.taskExpired`) are absent from
+    /// this list and covered by their own tests.
+    private static let contextFreeExpectations: [MappingExpectation] = [
+        .init(cause: .noRuntimeGrant,
+              expected: SurfaceAttribution(disposition: .queued,
+                                           reason: .waitingForTime,
+                                           hint: .wait)),
+        .init(cause: .thermal,
+              expected: SurfaceAttribution(disposition: .paused,
+                                           reason: .phoneIsHot,
+                                           hint: .wait)),
+        .init(cause: .lowPowerMode,
+              expected: SurfaceAttribution(disposition: .paused,
+                                           reason: .powerLimited,
+                                           hint: .chargeDevice)),
+        .init(cause: .batteryLowUnplugged,
+              expected: SurfaceAttribution(disposition: .paused,
+                                           reason: .powerLimited,
+                                           hint: .chargeDevice)),
+        .init(cause: .noNetwork,
+              expected: SurfaceAttribution(disposition: .paused,
+                                           reason: .waitingForNetwork,
+                                           hint: .none)),
+        .init(cause: .wifiRequired,
+              expected: SurfaceAttribution(disposition: .paused,
+                                           reason: .waitingForNetwork,
+                                           hint: .connectToWiFi)),
+        .init(cause: .mediaCap,
+              expected: SurfaceAttribution(disposition: .failed,
+                                           reason: .storageFull,
+                                           hint: .freeUpStorage)),
+        .init(cause: .analysisCap,
+              expected: SurfaceAttribution(disposition: .failed,
+                                           reason: .couldntAnalyze,
+                                           hint: .retry)),
+        .init(cause: .userPreempted,
+              expected: SurfaceAttribution(disposition: .paused,
+                                           reason: .cancelled,
+                                           hint: .none)),
+        .init(cause: .userCancelled,
+              expected: SurfaceAttribution(disposition: .paused,
+                                           reason: .cancelled,
+                                           hint: .none)),
+        .init(cause: .unsupportedEpisodeLanguage,
+              expected: SurfaceAttribution(disposition: .unavailable,
+                                           reason: .analysisUnavailable,
+                                           hint: .none)),
+        .init(cause: .asrFailed,
+              expected: SurfaceAttribution(disposition: .failed,
+                                           reason: .couldntAnalyze,
+                                           hint: .retry)),
+        .init(cause: .pipelineError,
+              expected: SurfaceAttribution(disposition: .failed,
+                                           reason: .couldntAnalyze,
+                                           hint: .retry)),
+        .init(cause: .appForceQuitRequiresRelaunch,
+              expected: SurfaceAttribution(disposition: .paused,
+                                           reason: .resumeInApp,
+                                           hint: .openAppToResume)),
     ]
 
-    @Test("mappedCauses contains exactly the three worked examples")
-    func mappedCausesContainsThreeWorkedExamples() {
-        #expect(CauseAttributionPolicy.mappedCauses == [
-            .modelTemporarilyUnavailable,
-            .taskExpired,
-            .appForceQuitRequiresRelaunch,
-        ])
+    /// Context matrix exercised by ``contextFreeRowsMapToCanonicalTriple``.
+    /// Each context-free row must produce the SAME triple across all four
+    /// contexts; if any row diverges across contexts, the row is not
+    /// actually context-free and the test fails. This is the adversarial
+    /// safety net for the "context-free" claim — it catches a future
+    /// implementation that silently branches on context for a supposedly
+    /// context-free cause.
+    private static let contextFreeMatrix: [CauseAttributionContext] = [
+        CauseAttributionContext(modelAvailableNow: true,
+                                retryBudgetRemaining: 3),
+        CauseAttributionContext(modelAvailableNow: true,
+                                retryBudgetRemaining: 0),
+        CauseAttributionContext(modelAvailableNow: false,
+                                retryBudgetRemaining: 3),
+        CauseAttributionContext(modelAvailableNow: false,
+                                retryBudgetRemaining: 0),
+    ]
+
+    @Test("context-free InternalMissCause rows map to their canonical triple",
+          arguments: CauseAttributionPolicyTests.contextFreeExpectations)
+    func contextFreeRowsMapToCanonicalTriple(
+        expectation: MappingExpectation
+    ) {
+        // Assert the same expected triple across every context in the
+        // matrix — this machine-checks the "context-free" claim. A
+        // divergence here means the row is context-dependent and the
+        // expectation table (or the mapping) needs revisiting.
+        for context in Self.contextFreeMatrix {
+            let result = CauseAttributionPolicy.resolve(
+                causes: [expectation.cause],
+                context: context
+            )
+            #expect(
+                result?.attribution == expectation.expected,
+                "\(expectation.cause) under \(context) expected \(expectation.expected) but got \(String(describing: result?.attribution))"
+            )
+        }
     }
 
-    @Test("mapped + unmapped covers the full InternalMissCause domain (no gaps, no overlap)")
-    func mappedAndUnmappedPartitionTheDomain() {
+    @Test("mappedCauses covers exactly the 16 canonical InternalMissCause cases")
+    func mappedCausesCoversAllCanonicalCases() {
         let mapped = CauseAttributionPolicy.mappedCauses
-        let unmapped = Set(Self.unmappedCauses)
         let all = Set(InternalMissCause.allCases)
-
-        #expect(mapped.intersection(unmapped).isEmpty,
-                "mapped and unmapped sets must be disjoint")
-        #expect(mapped.union(unmapped) == all,
-                "mapped ∪ unmapped must equal InternalMissCause.allCases")
-        // Belt-and-suspenders: assert size too so a future cause added to
-        // the enum without updating either side trips this immediately.
-        #expect(mapped.count + unmapped.count == InternalMissCause.allCases.count)
+        // After playhead-dfem every canonical case is mapped; no gaps,
+        // no overlaps with the `.unknown(_)` sentinel.
+        #expect(mapped == all)
+        #expect(mapped.count == 16)
     }
 
-    #if DEBUG
-    @Test("every unmapped cause returns the placeholder triple AND is absent from mappedCauses",
-          arguments: CauseAttributionPolicyTests.unmappedCauses)
-    func unmappedCausesReturnPlaceholderAndAreAbsentFromMappedSet(
+    @Test("every canonical InternalMissCause case produces a valid surface triple",
+          arguments: InternalMissCause.allCases)
+    func everyCanonicalCaseProducesValidTriple(
         cause: InternalMissCause
     ) {
-        // Use the assertion-tolerant entrypoint: this test deliberately
-        // exercises the placeholder branch, so the DEBUG-only assertion in
-        // `attribute(_:context:)` would otherwise crash the runner.
-        // The helper itself is DEBUG-only (so production cannot bypass the
-        // safety net), which is why the test is wrapped in #if DEBUG too.
+        // The benign context maps context-dependent causes to their
+        // "system will recover on its own" branch. The assertion here is
+        // only that a triple exists and routes through `resolve` without
+        // tripping the H1 DEBUG assertion — the exact triple shape is
+        // pinned by the table-driven test above (context-free rows) or
+        // the worked-example tests (context-dependent rows).
+        let result = CauseAttributionPolicy.resolve(
+            causes: [cause],
+            context: Self.benignContext
+        )
+        #expect(result != nil, "resolve returned nil for \(cause)")
+        #expect(result?.primary == cause)
+        #expect(CauseAttributionPolicy.mappedCauses.contains(cause))
+    }
+
+    // MARK: - Bucket coverage (Up Next / Paused / Recently Finished /
+    //         Analysis Unavailable)
+
+    /// The four surface buckets Plan §6 Phase 1.5 deliverable 2 requires
+    /// every `InternalMissCause` to land in. Each bucket is the set of
+    /// `(SurfaceDisposition, SurfaceReason)` pairs valid for that
+    /// bucket. `ResolutionHint` does not participate in bucketing.
+    private struct SurfacePair: Sendable, Hashable {
+        let disposition: SurfaceDisposition
+        let reason: SurfaceReason
+    }
+
+    private static let upNextBucket: Set<SurfacePair> = [
+        // "Up Next" is the queued-work surface.
+        SurfacePair(disposition: .queued, reason: .waitingForTime),
+    ]
+
+    private static let pausedBucket: Set<SurfacePair> = [
+        SurfacePair(disposition: .paused, reason: .phoneIsHot),
+        SurfacePair(disposition: .paused, reason: .powerLimited),
+        SurfacePair(disposition: .paused, reason: .waitingForNetwork),
+        SurfacePair(disposition: .paused, reason: .cancelled),
+        SurfacePair(disposition: .paused, reason: .resumeInApp),
+    ]
+
+    private static let recentlyFinishedBucket: Set<SurfacePair> = [
+        // "Recently Finished" is where terminal failures land so the
+        // user can see them and retry.
+        SurfacePair(disposition: .failed, reason: .couldntAnalyze),
+        SurfacePair(disposition: .failed, reason: .storageFull),
+    ]
+
+    private static let analysisUnavailableBucket: Set<SurfacePair> = [
+        SurfacePair(disposition: .unavailable,
+                    reason: .analysisUnavailable),
+    ]
+
+    /// The four buckets must partition the set of every
+    /// `(disposition, reason)` pair produced by the 16 canonical causes
+    /// across both possible context values.
+    @Test("every InternalMissCause lands in exactly one of the four surface buckets")
+    func everyCauseLandsInOneBucket() {
+        let contexts: [CauseAttributionContext] = [
+            CauseAttributionContext(modelAvailableNow: true,
+                                    retryBudgetRemaining: 3),
+            CauseAttributionContext(modelAvailableNow: true,
+                                    retryBudgetRemaining: 0),
+            CauseAttributionContext(modelAvailableNow: false,
+                                    retryBudgetRemaining: 3),
+            CauseAttributionContext(modelAvailableNow: false,
+                                    retryBudgetRemaining: 0),
+        ]
+        let allBuckets: [Set<SurfacePair>] = [
+            Self.upNextBucket,
+            Self.pausedBucket,
+            Self.recentlyFinishedBucket,
+            Self.analysisUnavailableBucket,
+        ]
+
+        for cause in InternalMissCause.allCases {
+            for ctx in contexts {
+                let triple = CauseAttributionPolicy.attribute(
+                    cause, context: ctx
+                )
+                let pair = SurfacePair(
+                    disposition: triple.disposition,
+                    reason: triple.reason
+                )
+                let matches = allBuckets.filter { $0.contains(pair) }
+                #expect(
+                    matches.count == 1,
+                    "\(cause) under \(ctx) produced \(pair) which matched \(matches.count) buckets (expected exactly 1)"
+                )
+            }
+        }
+    }
+
+    @Test("bucket sets are pairwise disjoint")
+    func bucketsArePairwiseDisjoint() {
+        let buckets: [(name: String, set: Set<SurfacePair>)] = [
+            ("upNext", Self.upNextBucket),
+            ("paused", Self.pausedBucket),
+            ("recentlyFinished", Self.recentlyFinishedBucket),
+            ("analysisUnavailable", Self.analysisUnavailableBucket),
+        ]
+        for i in 0..<buckets.count {
+            for j in (i + 1)..<buckets.count {
+                let intersection = buckets[i].set.intersection(buckets[j].set)
+                #expect(
+                    intersection.isEmpty,
+                    "buckets \(buckets[i].name) and \(buckets[j].name) overlap on \(intersection)"
+                )
+            }
+        }
+    }
+
+    // MARK: - Unknown-sentinel behavior (forward-compat)
+
+    #if DEBUG
+    @Test(".unknown(_) returns the generic-failure triple via the ignoring helper")
+    func unknownSentinelReturnsGenericFailureTriple() {
+        // `.unknown(_)` is the only input that now trips the H1 DEBUG
+        // assertion in `attribute(_:context:)` — the switch in
+        // `attributeCore` maps every canonical case, so the only
+        // unmapped input is this forward-compat sentinel. The helper
+        // exercises the same body without firing the assertion so the
+        // test runner stays alive.
         let triple = CauseAttributionPolicy.attributeIgnoringPlaceholderAssertion(
-            cause,
+            .unknown("futureCauseXYZ"),
             context: Self.benignContext
         )
         #expect(triple == SurfaceAttribution(
@@ -396,38 +598,32 @@ struct CauseAttributionPolicyTests {
             reason: .couldntAnalyze,
             hint: .retry
         ))
-        #expect(!CauseAttributionPolicy.mappedCauses.contains(cause))
+        #expect(!CauseAttributionPolicy.mappedCauses.contains(.unknown("futureCauseXYZ")))
     }
     #endif
 
-    @Test("every mapped cause IS in mappedCauses",
-          arguments: [
-            InternalMissCause.modelTemporarilyUnavailable,
-            .taskExpired,
-            .appForceQuitRequiresRelaunch,
-          ])
-    func mappedCausesAreInMappedSet(cause: InternalMissCause) {
-        #expect(CauseAttributionPolicy.mappedCauses.contains(cause))
-    }
-
     #if DEBUG
-    @Test("attributeIgnoringPlaceholderAssertion returns the same value as attribute for mapped causes")
-    func ignoringHelperMatchesAttributeForMappedCauses() {
+    @Test("attributeIgnoringPlaceholderAssertion returns the same value as attribute for every canonical cause")
+    func ignoringHelperMatchesAttributeForAllCanonicalCauses() {
         // Smoke check that the test-only helper doesn't drift from the
-        // production switch for the mapped rows. We can call `attribute`
-        // directly here because all three causes are mapped, so the
-        // assertion does not fire. Wrapped in #if DEBUG because the
-        // helper itself is DEBUG-only.
-        for cause in CauseAttributionPolicy.mappedCauses {
-            let production = CauseAttributionPolicy.attribute(
-                cause,
-                context: Self.benignContext
-            )
-            let helper = CauseAttributionPolicy.attributeIgnoringPlaceholderAssertion(
-                cause,
-                context: Self.benignContext
-            )
-            #expect(production == helper, "drift on \(cause)")
+        // production switch now that every canonical case is mapped.
+        // Wrapped in #if DEBUG because the helper itself is DEBUG-only.
+        let contexts: [CauseAttributionContext] = [
+            CauseAttributionContext(modelAvailableNow: true,
+                                    retryBudgetRemaining: 3),
+            CauseAttributionContext(modelAvailableNow: false,
+                                    retryBudgetRemaining: 0),
+        ]
+        for cause in InternalMissCause.allCases {
+            for ctx in contexts {
+                let production = CauseAttributionPolicy.attribute(
+                    cause, context: ctx
+                )
+                let helper = CauseAttributionPolicy.attributeIgnoringPlaceholderAssertion(
+                    cause, context: ctx
+                )
+                #expect(production == helper, "drift on \(cause) / \(ctx)")
+            }
         }
     }
     #endif
