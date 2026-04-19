@@ -413,19 +413,43 @@ struct CauseAttributionPolicyTests {
                                            hint: .openAppToResume)),
     ]
 
+    /// Context matrix exercised by ``contextFreeRowsMapToCanonicalTriple``.
+    /// Each context-free row must produce the SAME triple across all four
+    /// contexts; if any row diverges across contexts, the row is not
+    /// actually context-free and the test fails. This is the adversarial
+    /// safety net for the "context-free" claim — it catches a future
+    /// implementation that silently branches on context for a supposedly
+    /// context-free cause.
+    private static let contextFreeMatrix: [CauseAttributionContext] = [
+        CauseAttributionContext(modelAvailableNow: true,
+                                retryBudgetRemaining: 3),
+        CauseAttributionContext(modelAvailableNow: true,
+                                retryBudgetRemaining: 0),
+        CauseAttributionContext(modelAvailableNow: false,
+                                retryBudgetRemaining: 3),
+        CauseAttributionContext(modelAvailableNow: false,
+                                retryBudgetRemaining: 0),
+    ]
+
     @Test("context-free InternalMissCause rows map to their canonical triple",
           arguments: CauseAttributionPolicyTests.contextFreeExpectations)
     func contextFreeRowsMapToCanonicalTriple(
         expectation: MappingExpectation
     ) {
-        let result = CauseAttributionPolicy.resolve(
-            causes: [expectation.cause],
-            context: Self.benignContext
-        )
-        #expect(
-            result?.attribution == expectation.expected,
-            "\(expectation.cause) expected \(expectation.expected) but got \(String(describing: result?.attribution))"
-        )
+        // Assert the same expected triple across every context in the
+        // matrix — this machine-checks the "context-free" claim. A
+        // divergence here means the row is context-dependent and the
+        // expectation table (or the mapping) needs revisiting.
+        for context in Self.contextFreeMatrix {
+            let result = CauseAttributionPolicy.resolve(
+                causes: [expectation.cause],
+                context: context
+            )
+            #expect(
+                result?.attribution == expectation.expected,
+                "\(expectation.cause) under \(context) expected \(expectation.expected) but got \(String(describing: result?.attribution))"
+            )
+        }
     }
 
     @Test("mappedCauses covers exactly the 16 canonical InternalMissCause cases")

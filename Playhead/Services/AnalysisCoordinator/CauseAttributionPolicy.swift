@@ -71,9 +71,10 @@ enum CauseAttributionPolicy {
     /// Precedence tiers. Higher `rawValue` wins.
     ///
     /// `engineError` is not one of the four nominal tiers documented in the
-    /// plan; it is the catch-all for `asr_failed` and `pipeline_error`, which
-    /// should only surface when nothing else is live. Encoding it as the
-    /// lowest tier makes the ladder total over every `InternalMissCause`.
+    /// plan; it is the catch-all for `asrFailed`, `pipelineError`, and the
+    /// `.unknown(_)` forward-compat sentinel, which should only surface when
+    /// nothing else is live. Encoding it as the lowest tier makes the ladder
+    /// total over every `InternalMissCause`.
     enum Tier: Int, Sendable, Comparable {
         case engineError = 0
         case eligibilityPermanent = 1
@@ -372,10 +373,11 @@ enum CauseAttributionPolicy {
                 hint: .openAppToResume
             )
 
-        // MARK: Remaining 13 rows (playhead-dfem, Phase 1.5 deliverable 2)
+        // MARK: Canonical context-free mappings
         //
-        // These rows are enumerated explicitly (not folded into a default
-        // clause) so the switch is compiler-enforced exhaustive over
+        // Landed in playhead-dfem (Phase 1.5 deliverable 2). These rows are
+        // enumerated explicitly (not folded into a default clause) so the
+        // switch is compiler-enforced exhaustive over
         // InternalMissCause.allCases — adding a future canonical case
         // forces a review here before the build compiles.
 
