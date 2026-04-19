@@ -507,16 +507,24 @@ actor BackgroundProcessingService {
     /// Both the work path and expiration handler call this; only the first wins.
     /// Tracked per-task so overlapping handlers cannot silently drop each
     /// other's completions.
-    func markComplete(_ task: any BackgroundProcessingTaskProtocol, success: Bool) {
+    ///
+    /// Returns `true` when this call won the completion race (and therefore
+    /// `setTaskCompleted` was invoked), `false` when a prior call already
+    /// completed the task. Callers that emit a paired `WorkJournal`
+    /// terminal-row should gate the emission on the return value to avoid
+    /// double-writing audit rows when expiration races a normal return.
+    @discardableResult
+    func markComplete(_ task: any BackgroundProcessingTaskProtocol, success: Bool) -> Bool {
         let id = ObjectIdentifier(task as AnyObject)
         guard !completedTaskIDs.contains(id) else {
             logger.debug("BGTask completion already called, ignoring duplicate")
-            return
+            return false
         }
         completedTaskIDs.insert(id)
         // Clean up the active-task entry for this BGProcessingTask, if any.
         activeBackgroundTasks.removeValue(forKey: id)
         task.setTaskCompleted(success: success)
+        return true
     }
 
     // MARK: - Background Task Handlers
@@ -677,37 +685,50 @@ actor BackgroundProcessingService {
                     deadline: deadline
                 )
                 // Spec state-machine step 5: on successful completion
-                // append a `finalized` WorkJournal entry. This is the
-                // canonical emission site for the success path — the
-                // coordinator's internal polling loop returns normally
-                // when either (a) the deadline was reached cleanly or
-                // (b) a pause-observed exit already wrote `failed`
-                // earlier in the expirationHandler path. In case (b)
-                // the `finalized` append is still safe: the store's
-                // `appendWorkJournalEntry` is a non-idempotent
-                // free-standing append and the journal is an
-                // append-only audit trail. The expiration path wins
-                // the `markComplete` race so the OS-visible outcome
-                // agrees with the terminal journal event it wrote.
+                // append a `finalized` WorkJournal entry — but ONLY when
+                // we win the markComplete race. The coordinator's polling
+                // loop also returns normally when (a) the deadline was
+                // reached cleanly OR (b) a pause-observed exit unwound
+                // after the expiration handler already wrote `failed`.
+                // In case (b), the expiration path's markComplete won
+                // first; emitting `finalized` here would double-write a
+                // contradictory terminal row for the same {episode,
+                // generation} pair. Gating on the markComplete return
+                // value keeps the audit trail single-row-per-outcome.
+                //
+                // Order matters: markComplete first, appendTerminal only
+                // if we won. The opposite order in the expiration path is
+                // intentional (durability of the failed row across a
+                // mid-handler crash); here, losing the finalized row on a
+                // crash between the two calls is preferable to writing
+                // it ahead of an unknown race outcome.
                 if let self {
-                    await self.appendTerminal(
-                        episodeId: episodeId,
-                        eventType: .finalized,
-                        cause: nil
-                    )
-                    await self.markComplete(task, success: true)
+                    let won = await self.markComplete(task, success: true)
+                    if won {
+                        await self.appendTerminal(
+                            episodeId: episodeId,
+                            eventType: .finalized,
+                            cause: nil
+                        )
+                    }
                 }
             } catch {
                 self?.logger.error(
                     "Continued processing failed for episode \(episodeId, privacy: .public): \(String(describing: error), privacy: .public)"
                 )
+                // Same race-gating as the success branch: if expiration
+                // already wrote `failed/taskExpired` and won markComplete,
+                // a paired `failed/pipelineError` here would duplicate the
+                // terminal row with a misattributed cause.
                 if let self {
-                    await self.appendTerminal(
-                        episodeId: episodeId,
-                        eventType: .failed,
-                        cause: .pipelineError
-                    )
-                    await self.markComplete(task, success: false)
+                    let won = await self.markComplete(task, success: false)
+                    if won {
+                        await self.appendTerminal(
+                            episodeId: episodeId,
+                            eventType: .failed,
+                            cause: .pipelineError
+                        )
+                    }
                 }
             }
         }
