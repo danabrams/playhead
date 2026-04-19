@@ -422,6 +422,15 @@
 		FE094685E4D4030EAC60F3DE /* DownloadManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4EF478F6703172C462A0057 /* DownloadManagerTests.swift */; };
 		FE20F50A0907C05EEBB88314 /* EpisodeDurationBucketClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEF208412B71E825AD8E430F /* EpisodeDurationBucketClassifierTests.swift */; };
 		FEFCC10CFF7EF39FD043123F /* SensitiveWindowRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 117F1E41DE084B613166D952 /* SensitiveWindowRouter.swift */; };
+		5317EED3A1C9C17F9DFBED76 /* SurfaceStatusInvariants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AC0F8A0BBE44BCE2F5DB7DC /* SurfaceStatusInvariants.swift */; };
+		5016467D6F0EDA1081838144 /* SurfaceStateTransitionEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7355E5EC57DE9F149B356E67 /* SurfaceStateTransitionEntry.swift */; };
+		401196F23135C8179AAE2B6B /* SurfaceStatusEpisodeIdHasher.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABB9408ECA510A91CCF3D52F /* SurfaceStatusEpisodeIdHasher.swift */; };
+		0BE3F9F68DF05A84617EFCFE /* SurfaceReasonCopyTemplates.swift in Sources */ = {isa = PBXBuildFile; fileRef = 962798C092CAC70B48EF6E33 /* SurfaceReasonCopyTemplates.swift */; };
+		2FB28D40E6C94A44AB70E52F /* SurfaceStatusInvariantsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 797EE2CA73B847E7A8F57875 /* SurfaceStatusInvariantsTests.swift */; };
+		A285EB53E06A47D8853444D5 /* SurfaceStatusFuzzTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAED44B3001449DF85A7C944 /* SurfaceStatusFuzzTests.swift */; };
+		ED1F3EBFDF9C45BCBDB2038C /* SurfaceStatusInvariantLoggerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21BDED4492E34217AEF48F4C /* SurfaceStatusInvariantLoggerTests.swift */; };
+		699A3CB3D8ED4663BD928B85 /* SurfaceStatusEpisodeIdHasherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CE93ECFB1E84CD4A855423C /* SurfaceStatusEpisodeIdHasherTests.swift */; };
+		BF42A90EBFBC464AB41E8007 /* SurfaceReasonCopyTemplateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D52D6DD6BDF747C9B118E126 /* SurfaceReasonCopyTemplateTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -853,6 +862,15 @@
 		FE5DD1A344E740FC5E1E183E /* BackfillProgressCursorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackfillProgressCursorTests.swift; sourceTree = "<group>"; };
 		FE60055EE7FD54970B500C31 /* BrowseView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowseView.swift; sourceTree = "<group>"; };
 		FF38243D35CA07BE595A877C /* FoundationModelExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoundationModelExtractor.swift; sourceTree = "<group>"; };
+		3AC0F8A0BBE44BCE2F5DB7DC /* SurfaceStatusInvariants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceStatusInvariants.swift; sourceTree = "<group>"; };
+		7355E5EC57DE9F149B356E67 /* SurfaceStateTransitionEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceStateTransitionEntry.swift; sourceTree = "<group>"; };
+		ABB9408ECA510A91CCF3D52F /* SurfaceStatusEpisodeIdHasher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceStatusEpisodeIdHasher.swift; sourceTree = "<group>"; };
+		962798C092CAC70B48EF6E33 /* SurfaceReasonCopyTemplates.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceReasonCopyTemplates.swift; sourceTree = "<group>"; };
+		797EE2CA73B847E7A8F57875 /* SurfaceStatusInvariantsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceStatusInvariantsTests.swift; sourceTree = "<group>"; };
+		CAED44B3001449DF85A7C944 /* SurfaceStatusFuzzTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceStatusFuzzTests.swift; sourceTree = "<group>"; };
+		21BDED4492E34217AEF48F4C /* SurfaceStatusInvariantLoggerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceStatusInvariantLoggerTests.swift; sourceTree = "<group>"; };
+		0CE93ECFB1E84CD4A855423C /* SurfaceStatusEpisodeIdHasherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceStatusEpisodeIdHasherTests.swift; sourceTree = "<group>"; };
+		D52D6DD6BDF747C9B118E126 /* SurfaceReasonCopyTemplateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceReasonCopyTemplateTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -1409,7 +1427,12 @@
 				EA2176DAFCCD28BE839CF62B /* EpisodeSurfaceStatusSnapshotTests.swift */,
 				3365A2AEE04F52D6621F9D26 /* SurfaceStatusUILintTests.swift */,
 				773A65DF9A1B6226667208AC /* GoldenFixtures */,
-			);
+							797EE2CA73B847E7A8F57875 /* SurfaceStatusInvariantsTests.swift */,
+				CAED44B3001449DF85A7C944 /* SurfaceStatusFuzzTests.swift */,
+				21BDED4492E34217AEF48F4C /* SurfaceStatusInvariantLoggerTests.swift */,
+				0CE93ECFB1E84CD4A855423C /* SurfaceStatusEpisodeIdHasherTests.swift */,
+				D52D6DD6BDF747C9B118E126 /* SurfaceReasonCopyTemplateTests.swift */,
+);
 			path = SurfaceStatus;
 			sourceTree = "<group>";
 		};
@@ -1422,6 +1445,10 @@
 				CE283EC22A7779B8A12ACC49 /* EpisodeSurfaceStatusReducer.swift */,
 				7CB61D86A571490AF180881E /* SurfaceStatus.swift */,
 				0893B1796AB14ACE6C3D955B /* SurfaceStatusInvariantLogger.swift */,
+				3AC0F8A0BBE44BCE2F5DB7DC /* SurfaceStatusInvariants.swift */,
+				7355E5EC57DE9F149B356E67 /* SurfaceStateTransitionEntry.swift */,
+				ABB9408ECA510A91CCF3D52F /* SurfaceStatusEpisodeIdHasher.swift */,
+				962798C092CAC70B48EF6E33 /* SurfaceReasonCopyTemplates.swift */,
 			);
 			path = SurfaceStatus;
 			sourceTree = "<group>";
@@ -2133,6 +2160,10 @@
 				23B87D6D80646D8C9C799FCD /* StreamingAudioDecoder.swift in Sources */,
 				570B93F4E4B48F287DC527AC /* SurfaceStatus.swift in Sources */,
 				E54E2596ED3A2AEE73800093 /* SurfaceStatusInvariantLogger.swift in Sources */,
+				5317EED3A1C9C17F9DFBED76 /* SurfaceStatusInvariants.swift in Sources */,
+				5016467D6F0EDA1081838144 /* SurfaceStateTransitionEntry.swift in Sources */,
+				401196F23135C8179AAE2B6B /* SurfaceStatusEpisodeIdHasher.swift in Sources */,
+				0BE3F9F68DF05A84617EFCFE /* SurfaceReasonCopyTemplates.swift in Sources */,
 				6C40EAF7B6620EEAB4589BDF /* SwiftDataStore.swift in Sources */,
 				EE636F4F7880221DAF6E4860 /* TargetedWindowNarrower.swift in Sources */,
 				2A2DBC03BB0DAEC911D16F40 /* Theme.swift in Sources */,
@@ -2369,7 +2400,12 @@
 				5C3F9263DAECCFCCEE8B91A7 /* UserMarkedAdInjectionTests.swift in Sources */,
 				2934CB0BDEFD261C285BD3AC /* WithTestRuntime.swift in Sources */,
 				E517D642282F2FF5DD23A010 /* WorkJournalReadCorruptionTests.swift in Sources */,
-			);
+							2FB28D40E6C94A44AB70E52F /* SurfaceStatusInvariantsTests.swift in Sources */,
+				A285EB53E06A47D8853444D5 /* SurfaceStatusFuzzTests.swift in Sources */,
+				ED1F3EBFDF9C45BCBDB2038C /* SurfaceStatusInvariantLoggerTests.swift in Sources */,
+				699A3CB3D8ED4663BD928B85 /* SurfaceStatusEpisodeIdHasherTests.swift in Sources */,
+				BF42A90EBFBC464AB41E8007 /* SurfaceReasonCopyTemplateTests.swift in Sources */,
+);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */

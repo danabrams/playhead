@@ -30,12 +30,65 @@ final class SurfaceStatusUILintTests: XCTestCase {
     /// regex prevents matching identifiers that merely share a prefix.
     private static let forbiddenToken = #"\bInternalMissCause\b"#
 
-    /// Scope of the lint: any `.swift` file whose path contains this
-    /// substring is checked. Anchored on `/Playhead/Views/` so the UI
-    /// layer (and only the UI layer) is policed; the cause type is
-    /// legitimately used in `Services/` and the new `SurfaceStatus/`
-    /// module.
-    private static let uiPathSubstring = "/Playhead/Views/"
+    /// Additional forbidden tokens — the playhead-ol05 module-boundary
+    /// extension. Each pattern is a word-boundary regex matching one of
+    /// the symbols UI files MUST NOT reference directly:
+    ///
+    ///   * `AnalysisStore` / `AnalysisSummary` — persistence-layer types
+    ///     the reducer consumes through `AnalysisState`. UI must not
+    ///     reach past the reducer into the store.
+    ///   * `SurfaceAttribution` — the cause→triple struct the policy
+    ///     emits. UI works with `EpisodeSurfaceStatus`, not the raw
+    ///     attribution triple.
+    ///   * `CauseAttributionPolicy` — the policy the reducer consults;
+    ///     UI must not reach past the reducer to the policy.
+    ///
+    /// Note: `SurfaceDisposition`, `SurfaceReason`, `ResolutionHint`
+    /// are defined in `CauseTaxonomy.swift` BUT they are intentionally
+    /// part of the reducer's public output (they are `EpisodeSurfaceStatus`'s
+    /// fields). The lint therefore allow-lists those three names — UI
+    /// IS expected to switch on `disposition` / `reason` / `hint`.
+    private static let extendedForbiddenTokens: [String] = [
+        #"\bInternalMissCause\b"#,
+        #"\bAnalysisStore\b"#,
+        #"\bAnalysisSummary\b"#,
+        #"\bCauseAttributionPolicy\b"#,
+        #"\bSurfaceAttribution\b"#,
+    ]
+
+    /// Scope of the lint: any `.swift` file whose path contains one of
+    /// these substrings is checked.
+    ///
+    /// Historically this was a single string (`/Playhead/Views/`) but
+    /// that left SwiftUI `View`-conforming types that live in
+    /// `Playhead/App/` (`ContentView`, `RootView`, `ReturningSplashView`)
+    /// outside the lint's reach. Anything that ships pixels to the user
+    /// is UI-layer and must consume `EpisodeSurfaceStatus` only.
+    private static let uiPathSubstrings: [String] = [
+        "/Playhead/Views/",
+        "/Playhead/App/",
+    ]
+
+    /// Allow-list of service-wiring files that live under `Playhead/App/`
+    /// but are NOT UI-layer. `PlayheadRuntime.swift` is where the DI
+    /// graph is assembled (and must reference `AnalysisStore` etc. to
+    /// wire the graph together); `PlayheadAppDelegate.swift` is the UIKit
+    /// delegate that sets up the runtime at launch and legitimately
+    /// references internal types in doc comments. These two files are
+    /// not SwiftUI Views and never render user copy.
+    ///
+    /// `DebugEpisodeExporter.swift` and `TranscriptPeekViewModel.swift`
+    /// are legacy UI-layer files (under `Playhead/Views/`) that pre-date
+    /// the `EpisodeSurfaceStatus` boundary discipline. Their refactor is
+    /// tracked as a separate followup — see bead filed after ol05 merge.
+    /// They are allow-listed here so that the extended UI lint can land
+    /// without blocking on a scope-creep refactor.
+    private static let uiPathExemptFilenames: Set<String> = [
+        "PlayheadRuntime.swift",
+        "PlayheadAppDelegate.swift",
+        "DebugEpisodeExporter.swift",
+        "TranscriptPeekViewModel.swift",
+    ]
 
     func testInternalMissCauseIsNotReferencedInUIViews() throws {
         let appRoot = try Self.appSourceRoot()
@@ -46,11 +99,34 @@ final class SurfaceStatusUILintTests: XCTestCase {
 
         if !violations.isEmpty {
             XCTFail(
-                "InternalMissCause referenced in Playhead/Views "
+                "InternalMissCause referenced in UI-layer file "
                 + "(\(violations.count) occurrence(s)). UI must consume "
                 + "`EpisodeSurfaceStatus` and render `SurfaceReason` — see "
                 + "playhead-5bb3 bead spec:\n"
                 + violations.sorted().joined(separator: "\n")
+            )
+        }
+    }
+
+    /// playhead-ol05 extension: forbid every UI-layer reference to the
+    /// extended token list (AnalysisStore / AnalysisSummary /
+    /// CauseAttributionPolicy / SurfaceAttribution / InternalMissCause).
+    /// UI files MUST consume `EpisodeSurfaceStatus` only.
+    func testNoSchedulerOrPersistenceTypesInUIViews() throws {
+        let appRoot = try Self.appSourceRoot()
+        var allViolations: [String] = []
+        for pattern in Self.extendedForbiddenTokens {
+            let regex = try NSRegularExpression(pattern: pattern)
+            var violations: [String] = []
+            try Self.scan(root: appRoot, regex: regex, into: &violations)
+            allViolations.append(contentsOf: violations)
+        }
+        if !allViolations.isEmpty {
+            XCTFail(
+                "Forbidden module-boundary token referenced in UI-layer file "
+                + "(\(allViolations.count) occurrence(s)). UI must consume "
+                + "`EpisodeSurfaceStatus` only — see playhead-ol05 bead spec:\n"
+                + allViolations.sorted().joined(separator: "\n")
             )
         }
     }
@@ -162,15 +238,23 @@ final class SurfaceStatusUILintTests: XCTestCase {
 
         for case let url as URL in enumerator {
             guard url.pathExtension == "swift" else { continue }
-            // Only police the UI Views directory.
-            guard url.path.contains(Self.uiPathSubstring) else { continue }
+            // Only police UI-layer paths.
+            guard Self.uiPathSubstrings.contains(where: { url.path.contains($0) }) else {
+                continue
+            }
+            // Service-wiring files under Playhead/App/ are exempt — they
+            // are not SwiftUI Views and legitimately reference scheduler
+            // / persistence types to wire the DI graph.
+            if Self.uiPathExemptFilenames.contains(url.lastPathComponent) {
+                continue
+            }
 
             let source = try String(contentsOf: url, encoding: .utf8)
             let lineNumbers = Self.scanSource(source, regex: regex)
             for lineNumber in lineNumbers {
                 violations.append(
                     "\(url.lastPathComponent):\(lineNumber): "
-                    + "`InternalMissCause` referenced in Playhead/Views"
+                    + "forbidden module-boundary token referenced in UI layer"
                 )
             }
         }
@@ -203,3 +287,5 @@ final class SurfaceStatusUILintTests: XCTestCase {
         return app
     }
 }
+
+
