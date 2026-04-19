@@ -153,16 +153,15 @@ struct AnalysisUnavailableReasonTests {
 
     @Test("Codable — round-trip preserves every case")
     func codable_roundTripPreservesEveryCase() throws {
+        // Iterate `allCases` so adding a new enum case is automatically
+        // exercised by this round-trip — a hand-listed array would
+        // silently become non-exhaustive. The sibling
+        // `codable_encodesExpectedRawValues` test legitimately uses a
+        // hand-listed (case, expectedRaw) pair array because its
+        // purpose is to pin the exact string form per case.
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
-        let all: [AnalysisUnavailableReason] = [
-            .hardwareUnsupported,
-            .regionUnsupported,
-            .languageUnsupported,
-            .appleIntelligenceDisabled,
-            .modelTemporarilyUnavailable,
-        ]
-        for value in all {
+        for value in AnalysisUnavailableReason.allCases {
             let data = try encoder.encode(value)
             let decoded = try decoder.decode(AnalysisUnavailableReason.self, from: data)
             #expect(decoded == value)

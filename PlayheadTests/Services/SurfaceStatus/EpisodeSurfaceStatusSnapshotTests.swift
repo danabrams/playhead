@@ -32,7 +32,7 @@ import Testing
 
 @testable import Playhead
 
-@Suite("EpisodeSurfaceStatusReducer — golden snapshot matrix (playhead-5bb3)")
+@Suite("EpisodeSurfaceStatusReducer — golden snapshot matrix (playhead-5bb3)", .serialized)
 struct EpisodeSurfaceStatusSnapshotTests {
 
     /// Path to the golden JSON on disk, anchored at `#filePath` so the
@@ -127,15 +127,17 @@ struct EpisodeSurfaceStatusSnapshotTests {
     /// baseline the reviewer intends to diff against; this test is a
     /// no-op in that case.
     ///
-    /// Ordering note: this test runs unordered relative to
-    /// `goldenMatches` (Swift Testing does not guarantee test ordering
-    /// within a suite). That is fine — either `goldenMatches` runs
-    /// first on the placeholder (it fails with a "mismatch" diff then
-    /// this test overwrites, and the next `swift test` invocation
-    /// passes), or this test runs first (the placeholder is rewritten
-    /// in-place and `goldenMatches` then reads the fresh data). Both
-    /// orders converge to the same committed-fixture state after a
-    /// second invocation.
+    /// Ordering note: the enclosing `@Suite` is marked `.serialized`, so
+    /// this test and `goldenMatches` cannot run concurrently. That
+    /// eliminates the write-vs-read race during regen — a mid-flight
+    /// rewrite can no longer produce a torn-read false-negative diff in
+    /// `goldenMatches`. Swift Testing still does not guarantee a
+    /// particular order between the two tests, but either order
+    /// converges: if `goldenMatches` runs first on the placeholder it
+    /// records a "mismatch" diff and this test overwrites; the next
+    /// `swift test` invocation then passes. If this test runs first the
+    /// placeholder is rewritten in-place and `goldenMatches` reads the
+    /// fresh data in the same run.
     @Test("Rewrite placeholder golden fixture ({} → full matrix)")
     func rewritePlaceholderGoldenFixture() throws {
         let url = Self.goldenURL()
@@ -143,6 +145,22 @@ struct EpisodeSurfaceStatusSnapshotTests {
         let existing = try Data(contentsOf: url)
         let placeholder = Data("{}\n".utf8)
         guard existing == placeholder else {
+            // Non-placeholder, non-missing file: the common "normal test
+            // run" case where the committed baseline is intact, so we
+            // no-op. Emit a warning-severity note (does NOT fail the
+            // test) so a developer who intended to regenerate — but
+            // left a mangled partial fixture on disk — can see why
+            // regen didn't fire.
+            let headPreview = String(decoding: existing.prefix(16), as: UTF8.self)
+            Issue.record(
+                Comment(rawValue: """
+                skipping placeholder rewrite — on-disk fixture does not match the \
+                3-byte placeholder (\(existing.count) bytes, starts with \"\(headPreview)\"…). \
+                To regenerate: overwrite \(url.path) with `{}\\n` (e.g. \
+                `printf '{}\\n' > \(url.path)`) and re-run the suite.
+                """),
+                severity: .warning
+            )
             return
         }
         let rendered = try Self.renderMatrixJSON()
