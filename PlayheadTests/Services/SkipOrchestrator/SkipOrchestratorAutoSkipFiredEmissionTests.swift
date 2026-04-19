@@ -44,8 +44,14 @@ struct SkipOrchestratorAutoSkipFiredEmissionTests {
             observations: 10
         )
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        // Use distinct asset and episode IDs so the assertion at the
+        // bottom actually proves we hash the episode ID (not the asset
+        // ID). `false_ready_rate` pairs `auto_skip_fired` with
+        // `ready_entered` by the episode-ID hash; if the orchestrator
+        // hashed the asset ID, every pairing would silently fail.
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-o45p-1",
+            episodeId: "episode-o45p-1",
             podcastId: "podcast-1"
         )
 
@@ -80,10 +86,14 @@ struct SkipOrchestratorAutoSkipFiredEmissionTests {
         #expect(autoSkipEntries.first?.windowEndMs == 60_000)
 
         // The episode hash must match the value the shared logger salt
-        // produces for the same assetId — cross-event correlation with
-        // `ready_entered` depends on this.
-        let expectedHash = SurfaceStatusInvariantLogger.hashEpisodeId("asset-o45p-1")
+        // produces for the EPISODE ID (NOT the analysis asset ID) —
+        // cross-event correlation with `ready_entered` depends on this.
+        let expectedHash = SurfaceStatusInvariantLogger.hashEpisodeId("episode-o45p-1")
         #expect(autoSkipEntries.first?.episodeIdHash == expectedHash)
+        // And the asset-ID hash must NOT match — guards against a
+        // regression where the orchestrator reverts to hashing the asset.
+        let assetHash = SurfaceStatusInvariantLogger.hashEpisodeId("asset-o45p-1")
+        #expect(autoSkipEntries.first?.episodeIdHash != assetHash)
     }
 
     @Test("auto_skip_fired is NOT emitted when mode is shadow (no auto-skip)")
@@ -102,6 +112,7 @@ struct SkipOrchestratorAutoSkipFiredEmissionTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-o45p-2",
+            episodeId: "episode-o45p-2",
             podcastId: "podcast-1"
         )
 

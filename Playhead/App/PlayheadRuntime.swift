@@ -834,6 +834,7 @@ final class PlayheadRuntime {
                     if let assetId = resolvedAssetId {
                         await self.skipOrchestrator.beginEpisode(
                             analysisAssetId: assetId,
+                            episodeId: episodeId,
                             podcastId: podcastId
                         )
                     }
@@ -878,6 +879,7 @@ final class PlayheadRuntime {
         if let assetId = resolvedAssetId {
             await skipOrchestrator.beginEpisode(
                 analysisAssetId: assetId,
+                episodeId: episodeId,
                 podcastId: podcastId
             )
         }

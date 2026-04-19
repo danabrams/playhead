@@ -56,7 +56,7 @@ struct UserMarkedAdInjectionTests {
         await orchestrator.setSkipCueHandler { cues in
             Task { await accumulator.append(cues) }
         }
-        await orchestrator.beginEpisode(analysisAssetId: "asset-1", podcastId: "podcast-1")
+        await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1", podcastId: "podcast-1")
 
         await orchestrator.injectUserMarkedAd(
             start: 60.0,
@@ -93,7 +93,7 @@ struct UserMarkedAdInjectionTests {
         )
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.setSkipCueHandler { _ in }
-        await orchestrator.beginEpisode(analysisAssetId: "asset-1", podcastId: "podcast-1")
+        await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1", podcastId: "podcast-1")
 
         // Subscribe to banner stream before injection.
         let bannerStream = await orchestrator.bannerItemStream()
@@ -133,7 +133,7 @@ struct UserMarkedAdInjectionTests {
         )
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.setSkipCueHandler { _ in }
-        await orchestrator.beginEpisode(analysisAssetId: "asset-1", podcastId: "podcast-1")
+        await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1", podcastId: "podcast-1")
 
         // Subscribe to segment stream.
         let segmentStream = await orchestrator.appliedSegmentsStream()
@@ -257,7 +257,7 @@ struct UserMarkedAdIntegrationTests {
         await orchestrator.setSkipCueHandler { cues in
             Task { await accumulator.append(cues) }
         }
-        await orchestrator.beginEpisode(analysisAssetId: "asset-1", podcastId: "podcast-1")
+        await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1", podcastId: "podcast-1")
 
         let detectionService = AdDetectionService(
             store: store,

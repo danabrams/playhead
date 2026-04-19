@@ -30,6 +30,7 @@ struct SkipOrchestratorRevertTests {
         }
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -81,6 +82,7 @@ struct SkipOrchestratorRevertTests {
         }
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -125,6 +127,7 @@ struct SkipOrchestratorRevertTests {
         }
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -170,6 +173,7 @@ struct SkipOrchestratorRevertTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -215,6 +219,7 @@ struct SkipOrchestratorRevertTests {
         }
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -247,7 +252,7 @@ struct SkipOrchestratorRevertTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let orchestrator = SkipOrchestrator(store: store)
-        await orchestrator.beginEpisode(analysisAssetId: "asset-1")
+        await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1")
 
         // Should not crash or log a decision for a nonexistent window.
         await orchestrator.revertWindow(windowId: "nonexistent", podcastId: "podcast-1")
@@ -269,6 +274,7 @@ struct SkipOrchestratorRevertTests {
         await orchestrator.setSkipCueHandler { _ in }
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -316,6 +322,7 @@ struct SkipOrchestratorRevertTests {
         await orchestrator.setSkipCueHandler { _ in }
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 

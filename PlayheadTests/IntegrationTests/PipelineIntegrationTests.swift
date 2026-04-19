@@ -1259,7 +1259,9 @@ struct KnownAdsIntegrationTests {
         let trustService = TrustScoringService(store: trustStore)
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
-            analysisAssetId: assetId, podcastId: podcastId
+            analysisAssetId: assetId,
+            episodeId: assetId,
+            podcastId: podcastId
         )
 
         // 6. Feed detected windows and verify skip decisions.
@@ -1340,7 +1342,9 @@ struct ScrubPastAdIntegrationTests {
         let trustService = TrustScoringService(store: trustStore)
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
-            analysisAssetId: assetId, podcastId: podcastId
+            analysisAssetId: assetId,
+            episodeId: assetId,
+            podcastId: podcastId
         )
 
         // User scrubs past the ad to time 300 (ad ends at 160).
@@ -1978,7 +1982,9 @@ struct CombinedTuningReplayTests {
             // --- Layer 4: Skip orchestrator (uses auto-mode candidate promotion) ---
             let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
             await orchestrator.beginEpisode(
-                analysisAssetId: assetId, podcastId: podcastId
+                analysisAssetId: assetId,
+                episodeId: assetId,
+                podcastId: podcastId
             )
 
             // Convert classifier results into AdWindows.
@@ -2227,7 +2233,9 @@ struct CombinedTuningReplayTests {
         let trustService = TrustScoringService(store: trustStore)
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
-            analysisAssetId: assetId, podcastId: podcastId
+            analysisAssetId: assetId,
+            episodeId: assetId,
+            podcastId: podcastId
         )
 
         // Feed a candidate (not confirmed) with confidence above enter threshold.
@@ -2283,7 +2291,9 @@ struct CombinedTuningReplayTests {
         let manualTrust = TrustScoringService(store: manualTrustStore)
         let manualOrch = SkipOrchestrator(store: manualStore, trustService: manualTrust)
         await manualOrch.beginEpisode(
-            analysisAssetId: manualAssetId, podcastId: manualPodcastId
+            analysisAssetId: manualAssetId,
+            episodeId: manualAssetId,
+            podcastId: manualPodcastId
         )
 
         let manualCandidate = AdWindow(

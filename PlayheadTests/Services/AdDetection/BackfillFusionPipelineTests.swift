@@ -399,6 +399,7 @@ struct BackfillFusionSkipOrchestratorTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-skip-1",
+            episodeId: "asset-skip-1",
             podcastId: "podcast-1"
         )
 
@@ -428,6 +429,7 @@ struct BackfillFusionSkipOrchestratorTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-skip-1",
+            episodeId: "asset-skip-1",
             podcastId: "podcast-1"
         )
 
@@ -457,6 +459,7 @@ struct BackfillFusionSkipOrchestratorTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-skip-1",
+            episodeId: "asset-skip-1",
             podcastId: "podcast-1"
         )
 
@@ -557,7 +560,7 @@ struct BackfillOrchestratorWiringTests {
         let (service, orchestrator) = await makeServiceWithOrchestrator(store: store)
 
         // Activate the episode so receiveAdDecisionResults can process results.
-        await orchestrator.beginEpisode(analysisAssetId: assetId, podcastId: nil)
+        await orchestrator.beginEpisode(analysisAssetId: assetId, episodeId: assetId, podcastId: nil)
 
         let chunks = makeFusionAdChunks(assetId: assetId)
         try await service.runBackfill(

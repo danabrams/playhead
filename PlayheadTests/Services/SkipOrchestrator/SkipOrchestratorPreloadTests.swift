@@ -72,7 +72,7 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
         }
 
         // beginEpisode should load the cues and push them through the pipeline.
-        await orchestrator.beginEpisode(analysisAssetId: "asset-1")
+        await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1")
 
         // The orchestrator should have processed the pre-loaded cues.
         // In default shadow mode, windows are confirmed (not applied), so the
@@ -87,7 +87,7 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
 
     func testBeginEpisodeWithNoCues() async throws {
         // No cues in store -- beginEpisode should succeed without error.
-        await orchestrator.beginEpisode(analysisAssetId: "asset-1")
+        await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1")
 
         let log = await orchestrator.getDecisionLog()
         XCTAssertTrue(log.isEmpty, "No decisions should be logged when store has no cues")
@@ -112,7 +112,7 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
         )
         try await store.insertSkipCues([cue])
 
-        await orchestrator.beginEpisode(analysisAssetId: "asset-1")
+        await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1")
 
         // Now send a live AdWindow covering the same region.
         let liveWindow = AdWindow(

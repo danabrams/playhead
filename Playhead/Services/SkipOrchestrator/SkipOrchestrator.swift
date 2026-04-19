@@ -154,6 +154,12 @@ actor SkipOrchestrator {
     /// Current analysis asset ID.
     private var activeAssetId: String?
 
+    /// Current episode ID (canonical episode key). Used for the
+    /// `episode_id_hash` stamped on `auto_skip_fired` events so the hash
+    /// byte-matches the one `EpisodeSurfaceStatusObserver` stamps on
+    /// `ready_entered`. Windows/decisions remain keyed by `activeAssetId`.
+    private var activeEpisodeId: String?
+
     /// Whether we are currently "in ad state" (hysteresis tracking).
     private var inAdState: Bool = false
 
@@ -296,11 +302,22 @@ actor SkipOrchestrator {
 
     /// Begin orchestration for a new episode. Clears all prior state.
     /// - Parameters:
-    ///   - analysisAssetId: The analysis asset being played.
+    ///   - analysisAssetId: The analysis asset being played. Continues to
+    ///     key windows, decisions, and pre-materialized cue lookups.
+    ///   - episodeId: The canonical episode key (the identity unit that
+    ///     `EpisodeSurfaceStatusObserver` hashes onto `ready_entered`).
+    ///     Required so `auto_skip_fired.episode_id_hash` byte-matches
+    ///     `ready_entered.episode_id_hash` for the same episode —
+    ///     `false_ready_rate` pairs the two by that hash.
     ///   - podcastId: The podcast's ID, used to load the per-show trust mode.
-    func beginEpisode(analysisAssetId: String, podcastId: String? = nil) async {
+    func beginEpisode(
+        analysisAssetId: String,
+        episodeId: String,
+        podcastId: String? = nil
+    ) async {
         windows.removeAll()
         activeAssetId = analysisAssetId
+        activeEpisodeId = episodeId
         activePodcastId = podcastId
         inAdState = false
         lastSeekTime = nil
@@ -354,6 +371,7 @@ actor SkipOrchestrator {
 
         windows.removeAll()
         activeAssetId = nil
+        activeEpisodeId = nil
         activePodcastId = nil
         inAdState = false
         banneredWindowIds.removeAll()
@@ -906,10 +924,14 @@ actor SkipOrchestrator {
         // transition log. Paired with readyEntered events on the same
         // episode_id_hash, this is the numerator/denominator source for
         // the Wave 4 false_ready_rate dogfood metric. Hashing happens
-        // through the shared logger salt so the two event sites produce
-        // byte-identical episode hashes.
-        if let assetId = activeAssetId {
-            let hashed = SurfaceStatusInvariantLogger.hashEpisodeId(assetId)
+        // through the shared logger salt on the CANONICAL EPISODE KEY
+        // (not the analysis asset ID) so the two event sites produce
+        // byte-identical episode hashes —
+        // `EpisodeSurfaceStatusObserver.runReducerFor` hashes the same
+        // episode key onto `ready_entered`, and `false_ready_rate.swift`
+        // pairs events by that hash.
+        if let episodeId = activeEpisodeId {
+            let hashed = SurfaceStatusInvariantLogger.hashEpisodeId(episodeId)
             let startMs = Int((managed.snappedStart * 1000.0).rounded())
             let endMs = Int((managed.snappedEnd * 1000.0).rounded())
             SurfaceStatusInvariantLogger.recordAutoSkipFired(
