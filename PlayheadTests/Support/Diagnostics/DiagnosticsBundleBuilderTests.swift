@@ -195,23 +195,25 @@ struct DiagnosticsBundleBuilderTests {
         #expect(bundle.schedulerEvents.last?.timestamp == Self.t0 + 100)
     }
 
-    @Test("builder is order-independent: shuffled input produces spec output (regression)")
-    func builderOrderIndependentShuffled() {
-        // Shuffle with a deterministic seed-equivalent — reverse-halves
-        // interleave — so the input is neither ASC nor DESC.
+    @Test("builder is order-independent: interleaved input produces spec output (regression)")
+    func builderOrderIndependentInterleaved() {
+        // Deterministically interleave reverse-halves so the input is
+        // neither ASC nor DESC. Called "interleaved" rather than
+        // "shuffled" because the construction is fully deterministic —
+        // each call produces the same input order.
         let base = (0..<120).map {
             Self.entry(episodeId: "ep-\($0)", timestamp: Self.t0 + Double($0))
         }
-        var shuffled: [WorkJournalEntry] = []
+        var interleaved: [WorkJournalEntry] = []
         for i in 0..<60 {
-            shuffled.append(base[119 - i]) // newest end
-            shuffled.append(base[i])        // oldest end
+            interleaved.append(base[119 - i]) // newest end
+            interleaved.append(base[i])        // oldest end
         }
 
         let bundle = DiagnosticsBundleBuilder.buildDefault(
             appVersion: "1.0", osVersion: "iOS 26", deviceClass: .iPhone17Pro,
             buildType: .debug, eligibility: Self.eligible,
-            workJournalEntries: shuffled, installID: Self.installID
+            workJournalEntries: interleaved, installID: Self.installID
         )
 
         // work_journal_tail: most-recent 50 (t0+70..t0+119), ascending.
