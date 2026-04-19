@@ -34,11 +34,27 @@ actor AnalysisWorkScheduler {
     /// the top of the queue on this pass — either the Soon-vs-Background
     /// deferred filter skipped it, the config is disabled, or the
     /// multi-resource admission gate (playhead-bnrs) rejected it. Longer
-    /// than the default 5s sleep because in each of those cases the same
-    /// job would come straight back to the top of the queue; a short
-    /// sleep would produce a hot log/poll loop. A capability change or
-    /// an explicit `wake()` preempts the sleep.
+    /// than `idlePollSeconds` because in each of those cases the same job
+    /// would come straight back to the top of the queue; a short sleep
+    /// would produce a hot log/poll loop. A capability change or an
+    /// explicit `wake()` preempts the sleep.
     private static let rejectionBackoffSeconds: UInt64 = 30
+    /// Default sleep between idle scheduler passes when there's nothing to
+    /// admit but no explicit reason to back off harder. Wake() preempts.
+    private static let idlePollSeconds: UInt64 = 5
+    /// Lease lifetime applied at acquire and at each renewal CAS. Renewal
+    /// happens every `leaseRenewalIntervalSeconds`, well inside this window.
+    private static let leaseExpirySeconds: TimeInterval = 300
+    /// Renewal cadence for in-flight job leases. Must be < leaseExpirySeconds
+    /// with margin so a missed wakeup doesn't lose the lease.
+    private static let leaseRenewalIntervalSeconds: UInt64 = 120
+
+    /// Centralized exponential-backoff for failed/retrying jobs. Doubles per
+    /// attempt, capped at 1 hour. `attempt` is 1-indexed (first retry is 2 min).
+    private static func exponentialBackoffSeconds(attempt: Int) -> Double {
+        min(pow(2.0, Double(attempt)) * 60, 3600)
+    }
+
     private let store: AnalysisStore
     private let jobRunner: AnalysisJobRunner
     private let capabilitiesService: any CapabilitiesProviding
@@ -430,7 +446,7 @@ actor AnalysisWorkScheduler {
             // Foreground playback owns the shared transcript/backfill pipeline.
             // Do not start deferred pre-analysis work until playback stops.
             if activePlaybackEpisodeId != nil {
-                await sleepOrWake(seconds: 5)
+                await sleepOrWake(seconds: Self.idlePollSeconds)
                 continue
             }
 
@@ -439,7 +455,7 @@ actor AnalysisWorkScheduler {
             // Critical thermal (or equivalent) pauses every lane, including
             // T0 playback drains. Wait for the next wake/capability change.
             if admission.pauseAllWork {
-                await sleepOrWake(seconds: 5)
+                await sleepOrWake(seconds: Self.idlePollSeconds)
                 continue
             }
 
@@ -457,7 +473,7 @@ actor AnalysisWorkScheduler {
                 t0ThresholdSec: config.defaultT0DepthSeconds,
                 now: now
             ) else {
-                await sleepOrWake(seconds: 5)
+                await sleepOrWake(seconds: Self.idlePollSeconds)
                 continue
             }
 
@@ -485,7 +501,7 @@ actor AnalysisWorkScheduler {
             // re-fetch the same job in a tight loop.
             guard canAdmit(job: job) else {
                 logger.info("Skipping job \(job.jobId) — lane \(String(describing: job.schedulerLane), privacy: .public) at capacity")
-                await sleepOrWake(seconds: 5)
+                await sleepOrWake(seconds: Self.idlePollSeconds)
                 continue
             }
 
@@ -712,7 +728,7 @@ actor AnalysisWorkScheduler {
         }
 
         // Acquire lease.
-        let leaseExpiry = Date().timeIntervalSince1970 + 300
+        let leaseExpiry = Date().timeIntervalSince1970 + Self.leaseExpirySeconds
         let leaseAcquired = (try? await store.acquireLease(
             jobId: job.jobId,
             owner: "preAnalysis",
@@ -734,17 +750,16 @@ actor AnalysisWorkScheduler {
             PreAnalysisInstrumentation.endQueueWait(queueState)
         }
 
-        // Lease renewal task: renew every 120s. If the CAS finds no
-        // matching row, orphan recovery (or another scheduler instance)
-        // has reclaimed the lease — set `lostOwnership` so the cleanup
-        // paths skip every store write (state revert, progress update,
-        // backoff, releaseLease) that would otherwise clobber the new
-        // owner's bookkeeping, then cancel the running task so the run
-        // loop unwinds promptly.
+        // Lease renewal task. If the CAS finds no matching row, orphan
+        // recovery (or another scheduler instance) has reclaimed the lease
+        // — set `lostOwnership` so the cleanup paths skip every store
+        // write (state revert, progress update, backoff, releaseLease)
+        // that would otherwise clobber the new owner's bookkeeping, then
+        // cancel the running task so the run loop unwinds promptly.
         leaseRenewalTask = Task {
             while !Task.isCancelled {
-                try await Task.sleep(for: .seconds(120))
-                let newExpiry = Date().timeIntervalSince1970 + 300
+                try await Task.sleep(for: .seconds(Self.leaseRenewalIntervalSeconds))
+                let newExpiry = Date().timeIntervalSince1970 + Self.leaseExpirySeconds
                 let stillOwned = (try? await self.store.renewLease(
                     jobId: job.jobId,
                     owner: "preAnalysis",
@@ -775,7 +790,7 @@ actor AnalysisWorkScheduler {
                 logger.warning("Skipping asset-resolution failure writes for job \(job.jobId): lease reclaimed by orphan recovery")
                 return
             }
-            let backoff = min(pow(2.0, Double(job.attemptCount + 1)) * 60, 3600)
+            let backoff = Self.exponentialBackoffSeconds(attempt: job.attemptCount + 1)
             await writeIfStillOwned("assetResolution.markFailed") {
                 try await store.updateJobState(
                     jobId: job.jobId,
@@ -1059,7 +1074,7 @@ actor AnalysisWorkScheduler {
                     }
                     logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: \(reason)")
                 } else {
-                    let backoff = min(pow(2.0, Double(attempts)) * 60, 3600)
+                    let backoff = Self.exponentialBackoffSeconds(attempt: attempts)
                     let nextEligible = Date().timeIntervalSince1970 + backoff
                     await writeIfStillOwned("failed.requeue") {
                         try await store.updateJobState(
@@ -1110,7 +1125,7 @@ actor AnalysisWorkScheduler {
                     )
                 }
             } else {
-                let backoff = min(pow(2.0, Double(attempts)) * 60, 3600)
+                let backoff = Self.exponentialBackoffSeconds(attempt: attempts)
                 let nextEligible = Date().timeIntervalSince1970 + backoff
                 await writeIfStillOwned("outerCatch.requeue") {
                     try await store.updateJobState(

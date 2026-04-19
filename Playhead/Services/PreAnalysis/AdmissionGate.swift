@@ -138,8 +138,9 @@ struct AdmissionJob: Sendable, Equatable {
 
     init(artifactClasses: Set<ArtifactClass>, estimatedWriteBytes: Int64) {
         precondition(!artifactClasses.isEmpty, "AdmissionJob must declare at least one ArtifactClass")
-        // Clamp + assert instead of precondition so upstream Int64
-        // underflow doesn't crash release; storage gate still runs.
+        // assert(debug-trap) + max(release-clamp): catches caller bugs in
+        // debug, while upstream Int64 underflow can't crash release; the
+        // storage gate still runs against the clamped value.
         assert(estimatedWriteBytes >= 0, "AdmissionJob.estimatedWriteBytes must be non-negative; clamping to 0")
         self.artifactClasses = artifactClasses
         self.estimatedWriteBytes = max(0, estimatedWriteBytes)
@@ -177,7 +178,7 @@ enum AdmissionGate {
 
     /// Cellular slice cap. Interactive transfers on cellular clamp
     /// `sliceBytes` to this ceiling so each slice completes within a
-    /// conservative radio-on window. Default 10 MiB per bead spec.
+    /// conservative radio-on window. Default 10 MiB per playhead-bnrs spec.
     static let cellularSliceCapBytes: Int64 = 10 * 1024 * 1024
 
     // MARK: - Public entrypoint

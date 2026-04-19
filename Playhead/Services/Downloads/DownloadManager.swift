@@ -1720,8 +1720,8 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
         let progress = totalBytesExpectedToWrite > 0
             ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
             : 0
-        let episodeId = downloadTask.taskDescription ?? "unknown"
-        logger.debug("Episode \(episodeId) download: \(String(format: "%.1f", progress * 100))%")
+        let episodeId = downloadTask.taskDescription ?? "<missing-task-description>"
+        logger.debug("Episode \(episodeId, privacy: .public) download: \(String(format: "%.1f", progress * 100))%")
         // playhead-44h1 owns the Live Activity update. For 24cm we log
         // progress and emit through the existing DownloadManager
         // broadcast surface downstream via onDownloadProgress hooks that
@@ -1738,9 +1738,9 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
             // to do here — don't double-emit a finalized event.
             return
         }
-        let episodeId = task.taskDescription ?? "unknown"
+        let episodeId = task.taskDescription ?? "<missing-task-description>"
         let cause = InternalMissCause.fromTaskError(error)
-        logger.error("Episode \(episodeId) download failed (\(cause.rawValue)): \(error.localizedDescription)")
+        logger.error("Episode \(episodeId, privacy: .public) download failed (\(cause.rawValue)): \(error.localizedDescription)")
 
         // playhead-g2wq: harvest OS-produced resume-data BEFORE emitting
         // `recordFailed`. URLSession stashes the resume blob in

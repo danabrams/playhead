@@ -2,6 +2,7 @@
 // Shared test utilities used across PlayheadTests suites.
 
 import Foundation
+import SQLite3
 @testable import Playhead
 
 /// Creates a uniquely-named temporary directory for test isolation.
@@ -80,8 +81,6 @@ func pollUntil(
 }
 
 // MARK: - Migration test helpers
-
-import SQLite3
 
 /// H11 (cycle 2): writes `_meta.schema_version = '<version>'` directly into a
 /// sqlite file so a subsequent `AnalysisStore(directory:).migrate()` runs the

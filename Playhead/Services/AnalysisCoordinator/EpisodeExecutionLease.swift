@@ -65,11 +65,11 @@ struct EpisodeExecutionLease: Sendable, Equatable {
     /// ``AnalysisCoordinator/renewLease(_:)`` when they want the store
     /// to persist resumable progress.
     ///
-    /// NOTE: Phase-0 of playhead-uzdq only threads this field through
-    /// the lease struct; persistence of the checkpoint itself reuses
+    /// NOTE: persistence of the checkpoint itself reuses
     /// ``AnalysisStore/persistFeatureExtractionCheckpoint(_:)`` on the
-    /// feature_extraction_state table. A later phase (playhead-01t8)
-    /// extends the checkpoint payload.
+    /// feature_extraction_state table — this field only carries the
+    /// most-recent checkpoint through the lease struct so callers don't
+    /// have to round-trip the store on each renewal.
     let currentCheckpoint: FeatureExtractionCheckpoint?
 
     /// Signal from the coordinator to the owner that a higher-priority

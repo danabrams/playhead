@@ -285,7 +285,11 @@ extension DownloadManager {
                 // Corrupted / zero-length blob: emit diagnostic + prune
                 // so the user sees a clean-restart once, not forever.
                 corrupted.insert(episodeId)
-                try? deleteResumeData(episodeId: episodeId)
+                do {
+                    try deleteResumeData(episodeId: episodeId)
+                } catch {
+                    logger.error("scanForSuspendedTransfers: failed to prune corrupted blob for \(episodeId, privacy: .public): \(error)")
+                }
                 // Same story as the resumable branch — the scan has no
                 // slice start timestamp; `bytesProcessed` is 0 because
                 // the corrupted blob produced no usable payload.
@@ -331,8 +335,9 @@ extension DownloadManager {
     /// `application(_:handleEventsForBackgroundURLSession:)` and the
     /// next scan reconciles. Calls run concurrently via `async let`.
     /// Tasks with empty or nil `taskDescription` are skipped —
-    /// production code stamps every download task with `episodeId`
-    /// (DownloadManager.swift:1194, ForceQuitResumeScan.swift:356).
+    /// production code stamps every download task with `episodeId` (see
+    /// `setTaskDescription` callsites in `DownloadManager` and the
+    /// resume path in this file).
     private func liveBackgroundDownloadEpisodeIds() async -> Set<String> {
         let sessions = backgroundSessionsAlreadyInstantiated()
         guard !sessions.isEmpty else { return [] }
@@ -427,24 +432,4 @@ extension DownloadManager {
         return .resumed
     }
 
-    // MARK: - Metadata shaping
-
-    /// Produces the `metadata` JSON payload for a `preempted` row.
-    /// Kept small so `AnalysisStore.appendWorkJournalEntry` doesn't
-    /// bloat the `work_journal` table — the column accepts arbitrary
-    /// JSON but we keep it to the fields playhead-5bb3 / playhead-dfem
-    /// actually consume.
-    static func preemptedMetadata(
-        episodeId: String,
-        bytes: Int,
-        suspendedAt: Double
-    ) -> String {
-        // Manual JSON assembly — no allocation of JSONEncoder, no risk
-        // of locale-dependent number formatting that might surprise
-        // downstream consumers.
-        let episodeEscaped = episodeId
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        return #"{"episode_id":"\#(episodeEscaped)","bytes_written":\#(bytes),"suspended_at":\#(suspendedAt),"cause":"app_force_quit_requires_relaunch"}"#
-    }
 }
