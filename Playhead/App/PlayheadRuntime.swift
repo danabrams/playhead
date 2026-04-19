@@ -46,6 +46,15 @@ final class PlayheadRuntime {
     /// poll at their safe points.
     let lanePreemptionCoordinator: LanePreemptionCoordinator
 
+    /// playhead-o45p: production consumer of `EpisodeSurfaceStatusReducer`.
+    /// Wired so `ready_entered` events fire on real episode lifecycle
+    /// edges (cold-start play of an already-complete episode, and
+    /// analysis-completion transitions from the coordinator). The
+    /// observer is the SINGLE production call-site of the reducer +
+    /// transition emitter — without it the Wave 4 false_ready_rate
+    /// metric's denominator collapses to zero.
+    let surfaceStatusObserver: EpisodeSurfaceStatusObserver
+
     /// Phase 7.2: Shared user correction store. Wired to `PersistentUserCorrectionStore`
     /// in production; views (TranscriptPeekView, AdBannerView callback) consume this
     /// to persist vetoes and listen-reverts without knowing the concrete type.
@@ -373,6 +382,21 @@ final class PlayheadRuntime {
             skipOrchestrator: skipOrchestrator
         )
         self.downloadManager = DownloadManager()
+
+        // playhead-o45p: construct the surface-status observer before
+        // the coordinator so it can be injected via the coordinator's
+        // optional DI slot. The observer reads capability snapshots
+        // through a closure that dispatches onto `capabilitiesService`
+        // at call time, so the snapshot is always current with runtime
+        // state (thermal/power/AI-toggle changes).
+        let capabilitiesServiceForObserver = capabilitiesService
+        self.surfaceStatusObserver = EpisodeSurfaceStatusObserver(
+            store: analysisStore,
+            capabilitySnapshotProvider: { [capabilitiesServiceForObserver] in
+                await capabilitiesServiceForObserver.currentSnapshot
+            }
+        )
+
         self.analysisCoordinator = AnalysisCoordinator(
             store: analysisStore,
             audioService: audioService,
@@ -381,7 +405,8 @@ final class PlayheadRuntime {
             capabilitiesService: capabilitiesService,
             adDetectionService: adDetectionService,
             skipOrchestrator: skipOrchestrator,
-            downloadManager: downloadManager
+            downloadManager: downloadManager,
+            surfaceStatusObserver: surfaceStatusObserver
         )
         self.backgroundProcessingService = BackgroundProcessingService(
             coordinator: analysisCoordinator,
@@ -711,6 +736,15 @@ final class PlayheadRuntime {
         currentAnalysisAssetId = nil
 
         await backgroundProcessingService.playbackDidStart()
+
+        // playhead-o45p: run the surface-status reducer in the
+        // play-started context so a cold-start ready_entered fires for
+        // episodes that are already `.complete` in the persistence
+        // store. No-ops when the episode has no persisted
+        // `analysis_assets` row yet — the analysis-completion edge in
+        // `AnalysisCoordinator.transition` will handle that case once
+        // the pipeline runs.
+        await surfaceStatusObserver.observeEpisodePlayStarted(episodeId: episodeId)
 
         // Load artwork for lock screen / CarPlay Now Playing.
         var artwork: UIImage?

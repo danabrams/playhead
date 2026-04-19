@@ -26,7 +26,14 @@ import Foundation
 /// exactly once on each transition INTO a ready-for-playback disposition
 /// (queued + no blocking cause). Pure stateful machinery — does NOT own
 /// the logger writes it delegates to.
-final class SurfaceStatusReadyTransitionEmitter {
+///
+/// Marked `@unchecked Sendable` so it can be handed to an owning actor
+/// (e.g. `EpisodeSurfaceStatusObserver`) at init time. The internal
+/// `lastReadyByEpisode` dictionary is NOT thread-safe on its own — per
+/// the class contract, the owning actor must serialize all calls to
+/// `reduceAndEmit(...)`. This conformance is a compile-time assertion
+/// that single-actor ownership is the only supported usage pattern.
+final class SurfaceStatusReadyTransitionEmitter: @unchecked Sendable {
 
     /// The reducer this emitter wraps. Pluggable so tests can inject a
     /// deterministic override, and so the production wiring can swap in
