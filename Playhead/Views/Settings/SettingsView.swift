@@ -36,6 +36,9 @@ struct SettingsView: View {
     /// bd-fmfb: cached list of `LanguageModelSession.logFeedbackAttachment`
     /// payload URLs captured by the feedback store. Refreshed via `.task`.
     @State private var fmFeedbackAttachmentURLs: [URL] = []
+    /// playhead-ct2q: transient UI state for the "Send diagnostics" hatch.
+    @State private var sendDiagnosticsInProgress = false
+    @State private var sendDiagnosticsLastResult: String?
     #endif
 
     /// Injected dependencies — set via environment or passed directly.
@@ -55,6 +58,7 @@ struct SettingsView: View {
                     purchasesSection
                     #if DEBUG
                     debugSection
+                    sendDiagnosticsSection
                     fmFeedbackSection
                     #endif
                 }
@@ -654,6 +658,83 @@ private extension SettingsView {
         debugExport = await DebugEpisodeExporter.buildLibraryExport(
             store: runtime.analysisStore
         )
+    }
+
+    // MARK: - playhead-ct2q: Send diagnostics (dogfood #if DEBUG hatch)
+
+    /// Minimal call site for `DiagnosticsExportCoordinator`. Phase 1.5
+    /// Wave 4 dogfooders need a way to push a support-safe diagnostics
+    /// bundle back to the team BEFORE playhead-l274 ships the full
+    /// Phase 2 Settings screen; this section is that hatch.
+    ///
+    /// Scope (from bead spec):
+    ///   * No per-episode opt-in UI — `optInEpisodes: []` in the hatch.
+    ///   * Default (non-opt-in) bundle only.
+    ///   * DEBUG builds only. Release builds exclude the entire
+    ///     `#if DEBUG` block in `SettingsView.body`, which removes the
+    ///     section from the Settings screen and prevents the
+    ///     `runDebugDiagnosticsExport(...)` symbol from being
+    ///     referenced — that symbol itself is `#if DEBUG`-gated in
+    ///     `DebugDiagnosticsHatch.swift`.
+    var sendDiagnosticsSection: some View {
+        Section {
+            Button {
+                Task { await sendDiagnostics() }
+            } label: {
+                HStack {
+                    Label("Send diagnostics", systemImage: "envelope.badge")
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.accent)
+
+                    Spacer()
+
+                    if sendDiagnosticsInProgress {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(sendDiagnosticsInProgress)
+            .listRowBackground(AppColors.surface)
+
+            if let outcome = sendDiagnosticsLastResult {
+                Text(outcome)
+                    .font(AppTypography.caption)
+                    .foregroundStyle(AppColors.textTertiary)
+                    .listRowBackground(AppColors.surface)
+            }
+        } header: {
+            sectionHeader("Send Diagnostics")
+        } footer: {
+            Text("Emails a support-safe diagnostics bundle to the team. Default bundle only: no raw transcripts, no episode IDs. DEBUG builds only.")
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.textTertiary)
+        }
+    }
+
+    @MainActor
+    func sendDiagnostics() async {
+        sendDiagnosticsInProgress = true
+        defer { sendDiagnosticsInProgress = false }
+
+        do {
+            let result = try await runDebugDiagnosticsExport(
+                runtime: runtime,
+                modelContext: modelContext
+            )
+            sendDiagnosticsLastResult = "Last: \(describe(result))"
+        } catch {
+            sendDiagnosticsLastResult = "Last: error — \(error.localizedDescription)"
+        }
+    }
+
+    private func describe(_ result: DiagnosticsMailComposeResult) -> String {
+        switch result {
+        case .sent:      return "sent"
+        case .saved:     return "saved"
+        case .cancelled: return "cancelled"
+        case .failed:    return "failed"
+        }
     }
 
     // MARK: - bd-fmfb: FoundationModels feedback attachments
