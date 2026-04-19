@@ -1003,7 +1003,7 @@ struct Phase6AdDecisionHysteresisTests {
         let trustService = try await makeTrustService(mode: "auto")
 
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
-        await orchestrator.beginEpisode(analysisAssetId: assetId, podcastId: "podcast-hysteresis")
+        await orchestrator.beginEpisode(analysisAssetId: assetId, episodeId: assetId, podcastId: "podcast-hysteresis")
 
         // Enter span: above enterThreshold (0.65)
         let enterSpan = makeDecisionResult(
@@ -1051,7 +1051,7 @@ struct Phase6AdDecisionHysteresisTests {
         let trustService = try await makeTrustService(mode: "auto")
 
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
-        await orchestrator.beginEpisode(analysisAssetId: assetId, podcastId: "podcast-hysteresis")
+        await orchestrator.beginEpisode(analysisAssetId: assetId, episodeId: assetId, podcastId: "podcast-hysteresis")
 
         // Enter span: above enterThreshold
         let enterSpan = makeDecisionResult(
@@ -1094,7 +1094,7 @@ struct Phase6AdDecisionHysteresisTests {
         let trustService = try await makeTrustService(mode: "auto")
 
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
-        await orchestrator.beginEpisode(analysisAssetId: assetId, podcastId: "podcast-hysteresis")
+        await orchestrator.beginEpisode(analysisAssetId: assetId, episodeId: assetId, podcastId: "podcast-hysteresis")
 
         // Three sequential spans with decreasing confidence
         let enterSpan = makeDecisionResult(
@@ -1151,7 +1151,7 @@ struct Phase6AdDecisionHysteresisTests {
         let trustService = try await makeTrustService(mode: "auto")
 
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
-        await orchestrator.beginEpisode(analysisAssetId: assetId, podcastId: "podcast-hysteresis")
+        await orchestrator.beginEpisode(analysisAssetId: assetId, episodeId: assetId, podcastId: "podcast-hysteresis")
 
         let belowEnterSpan = makeDecisionResult(
             id: "below-enter",

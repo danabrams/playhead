@@ -116,6 +116,13 @@ actor AnalysisCoordinator {
     private let skipOrchestrator: SkipOrchestrator
     private let downloadManager: DownloadManager?
 
+    /// playhead-o45p: optional observer that routes session-state
+    /// transitions through `EpisodeSurfaceStatusReducer` so
+    /// `ready_entered` events fire on the analysis-completion edge. Held
+    /// nullably so existing tests that construct the coordinator
+    /// directly (without the observer) keep working unchanged.
+    private let surfaceStatusObserver: EpisodeSurfaceStatusObserver?
+
     // MARK: - Active Session State
 
     /// The currently active session, if any.
@@ -175,7 +182,8 @@ actor AnalysisCoordinator {
         capabilitiesService: CapabilitiesService,
         adDetectionService: AdDetectionService,
         skipOrchestrator: SkipOrchestrator,
-        downloadManager: DownloadManager? = nil
+        downloadManager: DownloadManager? = nil,
+        surfaceStatusObserver: EpisodeSurfaceStatusObserver? = nil
     ) {
         self.store = store
         self.audioService = audioService
@@ -185,6 +193,7 @@ actor AnalysisCoordinator {
         self.adDetectionService = adDetectionService
         self.skipOrchestrator = skipOrchestrator
         self.downloadManager = downloadManager
+        self.surfaceStatusObserver = surfaceStatusObserver
     }
 
     // MARK: - Lifecycle
@@ -1169,6 +1178,19 @@ actor AnalysisCoordinator {
         }
 
         logger.info("Session \(sessionId): \(currentState.rawValue) -> \(newState.rawValue)")
+
+        // playhead-o45p: on the analysis-completion edge, route the
+        // episode through the surface-status observer so `ready_entered`
+        // fires once (analysisCompleted trigger) for the false_ready_rate
+        // dogfood metric's numerator/denominator. Best-effort —
+        // failures inside the observer are logged there and swallowed;
+        // the analysis pipeline's correctness never depends on this.
+        if newState == .complete,
+           let observer = surfaceStatusObserver,
+           let episodeId = activeEpisodeId
+        {
+            await observer.observeAnalysisSessionComplete(episodeId: episodeId)
+        }
     }
 
     /// Resolve or create an analysis asset ID for an episode without starting

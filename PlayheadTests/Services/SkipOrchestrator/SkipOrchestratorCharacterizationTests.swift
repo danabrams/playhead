@@ -85,6 +85,7 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -112,6 +113,7 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -141,6 +143,7 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -178,6 +181,7 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -208,6 +212,7 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -237,7 +242,7 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
         try await store.insertAsset(makeSkipTestAnalysisAsset())
 
         let orchestrator = SkipOrchestrator(store: store)
-        await orchestrator.beginEpisode(analysisAssetId: "asset-1")
+        await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1")
 
         let ad = makeSkipTestAdWindow(
             id: "ad-shadow",
@@ -267,6 +272,7 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -299,6 +305,7 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -333,6 +340,7 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -366,6 +374,7 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
         }
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -412,6 +421,7 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
         }
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -466,6 +476,7 @@ struct SkipOrchestratorCorrectionStoreTests {
         )
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -519,6 +530,7 @@ struct SkipOrchestratorCharacterizationFinalizedBoundaryTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -557,6 +569,7 @@ struct SkipOrchestratorAdDecisionContractTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -590,6 +603,7 @@ struct SkipOrchestratorAdDecisionContractTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -630,6 +644,7 @@ struct SkipOrchestratorAdDecisionContractTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -675,7 +690,7 @@ struct SkipOrchestratorAdDecisionContractTests {
 
         // Shadow orchestrator (no trust service → defaults to .shadow mode).
         let shadowOrchestrator = SkipOrchestrator(store: store)
-        await shadowOrchestrator.beginEpisode(analysisAssetId: "asset-1")
+        await shadowOrchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1")
 
         let manualTrust = try await makeSkipTestTrustService(
             mode: "manual",
@@ -685,6 +700,7 @@ struct SkipOrchestratorAdDecisionContractTests {
         let manualOrchestrator = SkipOrchestrator(store: store, trustService: manualTrust)
         await manualOrchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -723,6 +739,7 @@ struct SkipOrchestratorBannerItemStreamTests {
         let orchestrator = SkipOrchestrator(store: store)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -769,6 +786,7 @@ struct SkipOrchestratorBannerItemStreamTests {
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-2"
         )
 
@@ -807,6 +825,7 @@ struct SkipOrchestratorBannerItemStreamTests {
         let orchestrator = SkipOrchestrator(store: store)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -845,6 +864,7 @@ struct SkipOrchestratorBannerItemStreamTests {
         let orchestrator = SkipOrchestrator(store: store)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 

@@ -414,6 +414,7 @@ struct SkipOrchestratorCorrectionScopeTests {
         )
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 
@@ -493,6 +494,7 @@ struct ListenRevertSponsorScopeTests {
         )
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
+            episodeId: "asset-1",
             podcastId: "podcast-1"
         )
 

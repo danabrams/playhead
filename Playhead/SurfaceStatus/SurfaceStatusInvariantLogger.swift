@@ -152,6 +152,70 @@ enum SurfaceStatusInvariantLogger {
         state.enqueueSyntheticViolation(message: message)
     }
 
+    // MARK: - playhead-o45p event emitters
+
+    /// Append a `ready_entered` event to the session log. The reducer's
+    /// consumer calls this when `EpisodeSurfaceStatus` transitions INTO
+    /// a ready-for-playback disposition (queued + no blocking cause).
+    /// Fire-and-forget.
+    ///
+    /// - Parameters:
+    ///   - episodeIdHash: SHA-256 hash of the per-install episode ID.
+    ///     Passed in pre-hashed so the logger never holds the raw ID.
+    ///   - trigger: The consumer's best guess at what caused the ready
+    ///     transition (cold start, analysis completion, unblock, other).
+    ///     `nil` when the consumer has no finer signal.
+    ///   - timestamp: Defaults to now; tests may pin it.
+    static func recordReadyEntered(
+        episodeIdHash: String?,
+        trigger: SurfaceStateTransitionEntryTrigger?,
+        timestamp: Date = Date()
+    ) {
+        state.enqueueReadyEntered(
+            episodeIdHash: episodeIdHash,
+            trigger: trigger,
+            timestamp: timestamp
+        )
+    }
+
+    /// Append an `auto_skip_fired` event to the session log. The
+    /// `SkipOrchestrator` calls this when its policy decides to apply
+    /// an auto-skip at playhead-time (the "Skip policy accepted (auto
+    /// mode)" code path). Fire-and-forget.
+    ///
+    /// - Parameters:
+    ///   - episodeIdHash: SHA-256 hash of the per-install episode ID.
+    ///   - windowStartMs: Integer milliseconds from episode start of the
+    ///     skipped ad window's start time. Callers pass seconds-in-double
+    ///     converted via `Int((t * 1000).rounded())`.
+    ///   - windowEndMs: Integer milliseconds from episode start of the
+    ///     skipped ad window's end time.
+    ///   - timestamp: Defaults to now.
+    static func recordAutoSkipFired(
+        episodeIdHash: String?,
+        windowStartMs: Int,
+        windowEndMs: Int,
+        timestamp: Date = Date()
+    ) {
+        state.enqueueAutoSkipFired(
+            episodeIdHash: episodeIdHash,
+            windowStartMs: windowStartMs,
+            windowEndMs: windowEndMs,
+            timestamp: timestamp
+        )
+    }
+
+    /// Hash an episode ID using the per-install salt the logger is
+    /// currently configured with. Exposed so non-ol05 callers (e.g. the
+    /// SkipOrchestrator's auto-skip emission path) can produce the same
+    /// opaque token the logger would if they routed the raw episode ID
+    /// through `record(_:)` — cross-event correlation (readyEntered ⇔
+    /// autoSkipFired on the same episode) depends on byte-identical
+    /// hashes across emission sites.
+    static func hashEpisodeId(_ episodeId: String) -> String {
+        return state.hashEpisodeId(episodeId)
+    }
+
     // MARK: - Test-only introspection
 
     #if DEBUG
@@ -248,6 +312,13 @@ private final class LoggerState: @unchecked Sendable {
     /// logger's current session ID. The sessionId substitution happens
     /// ON the serial write queue so reads of `self.sessionId` never
     /// race against `resetForTesting`'s write.
+    ///
+    /// The rebuilt entry preserves every field the caller supplied,
+    /// including the playhead-o45p additions (`eventType`, `entryTrigger`,
+    /// `windowStartMs`, `windowEndMs`). Dropping any of them here would
+    /// silently convert `readyEntered` / `autoSkipFired` events into
+    /// default `.invariantViolation` entries on disk, collapsing the
+    /// false_ready_rate metric's ability to distinguish event types.
     func enqueueWriteWithCurrentSession(entry: SurfaceStateTransitionEntry) {
         writeQueue.async { [weak self] in
             guard let self else { return }
@@ -261,7 +332,11 @@ private final class LoggerState: @unchecked Sendable {
                 newReason: entry.newReason,
                 cause: entry.cause,
                 eligibilitySnapshot: entry.eligibilitySnapshot,
-                invariantViolation: entry.invariantViolation
+                invariantViolation: entry.invariantViolation,
+                eventType: entry.eventType,
+                entryTrigger: entry.entryTrigger,
+                windowStartMs: entry.windowStartMs,
+                windowEndMs: entry.windowEndMs
             )
             self.writeLocked(stamped)
         }
@@ -287,6 +362,71 @@ private final class LoggerState: @unchecked Sendable {
                 cause: context.cause,
                 eligibilitySnapshot: context.eligibilitySnapshot,
                 invariantViolation: violation
+            )
+            self.writeLocked(entry)
+        }
+    }
+
+    /// Append a `ready_entered` event. SessionId is read on the serial
+    /// write queue. Fire-and-forget. Uses placeholder disposition/reason
+    /// values (`.queued` / `.waitingForTime`) since ready-entered events
+    /// are always associated with the "queued + no blocking cause"
+    /// state — the `eventType` discriminator is what matters for audit
+    /// aggregation.
+    func enqueueReadyEntered(
+        episodeIdHash: String?,
+        trigger: SurfaceStateTransitionEntryTrigger?,
+        timestamp: Date
+    ) {
+        writeQueue.async { [weak self] in
+            guard let self else { return }
+            let entry = SurfaceStateTransitionEntry(
+                timestamp: timestamp,
+                sessionId: self.sessionId,
+                episodeIdHash: episodeIdHash,
+                priorDisposition: nil,
+                newDisposition: .queued,
+                priorReason: nil,
+                newReason: .waitingForTime,
+                cause: nil,
+                eligibilitySnapshot: nil,
+                invariantViolation: nil,
+                eventType: .readyEntered,
+                entryTrigger: trigger,
+                windowStartMs: nil,
+                windowEndMs: nil
+            )
+            self.writeLocked(entry)
+        }
+    }
+
+    /// Append an `auto_skip_fired` event. SessionId is read on the serial
+    /// write queue. Fire-and-forget. Uses placeholder disposition/reason
+    /// values (`.queued` / `.waitingForTime`) since the event carries its
+    /// own payload in `window_start_ms`/`window_end_ms`.
+    func enqueueAutoSkipFired(
+        episodeIdHash: String?,
+        windowStartMs: Int,
+        windowEndMs: Int,
+        timestamp: Date
+    ) {
+        writeQueue.async { [weak self] in
+            guard let self else { return }
+            let entry = SurfaceStateTransitionEntry(
+                timestamp: timestamp,
+                sessionId: self.sessionId,
+                episodeIdHash: episodeIdHash,
+                priorDisposition: nil,
+                newDisposition: .queued,
+                priorReason: nil,
+                newReason: .waitingForTime,
+                cause: nil,
+                eligibilitySnapshot: nil,
+                invariantViolation: nil,
+                eventType: .autoSkipFired,
+                entryTrigger: nil,
+                windowStartMs: windowStartMs,
+                windowEndMs: windowEndMs
             )
             self.writeLocked(entry)
         }
@@ -406,9 +546,15 @@ private final class LoggerState: @unchecked Sendable {
     /// `playhead-ghon` contract — when ghon's hasher lands the two
     /// implementations should produce byte-identical output for the
     /// same (installID, episodeId) pair.
+    ///
+    /// Reads `installId` on the serial write queue so concurrent callers
+    /// (e.g. SkipOrchestrator, which is an actor) can produce a
+    /// byte-identical hash without racing the `resetForTesting` path
+    /// that rewrites installId.
     func hashEpisodeId(_ episodeId: String) -> String {
+        let salt = writeQueue.sync { installId }
         return SurfaceStatusEpisodeIdHasher.hash(
-            installId: installId,
+            installId: salt,
             episodeId: episodeId
         )
     }
