@@ -84,23 +84,25 @@ final class DiagnosticsExportService {
     /// is mail-only — every other activity filtered out so the user
     /// cannot route diagnostics to AirDrop/Notes/Messages (support
     /// needs the email artifact). Surfaced so tests can assert.
+    ///
+    /// The list is intentionally limited to activities iOS still vends
+    /// on current SDKs. Legacy social-share types (Facebook, Twitter,
+    /// Weibo, TencentWeibo, Vimeo, Flickr, iBooks, MarkupAsPDF,
+    /// SharePlay) were previously listed here but are no longer user-
+    /// reachable system activities — Apple retired the underlying
+    /// services or moved them behind feature flags. Excluding a
+    /// non-present activity type is a harmless no-op, but carrying the
+    /// dead names forward muddles the contract, so they're dropped.
+    /// If any of them resurface as a distinct routing target in a
+    /// future iOS, add them back here.
     static let mailOnlyFallbackExcludedActivities: [UIActivity.ActivityType] = [
         .addToReadingList,
         .airDrop,
         .assignToContact,
         .copyToPasteboard,
-        .markupAsPDF,
         .message,
-        .openInIBooks,
-        .postToFacebook,
-        .postToFlickr,
-        .postToTencentWeibo,
-        .postToTwitter,
-        .postToVimeo,
-        .postToWeibo,
         .print,
-        .saveToCameraRoll,
-        .sharePlay
+        .saveToCameraRoll
     ]
 
     /// Mail-only `UIActivityViewController`; callers own presentation.
