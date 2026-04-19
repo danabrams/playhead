@@ -172,7 +172,6 @@ struct DiagnosticsExportEnvironment: Sendable {
     let eligibility: AnalysisEligibility
     let installID: UUID
     let now: Date
-    let fetchLimit: Int
 
     init(
         appVersion: String,
@@ -181,8 +180,7 @@ struct DiagnosticsExportEnvironment: Sendable {
         buildType: BuildType,
         eligibility: AnalysisEligibility,
         installID: UUID,
-        now: Date = .now,
-        fetchLimit: Int = DiagnosticsBundleBuilder.schedulerEventsCap
+        now: Date = .now
     ) {
         self.appVersion = appVersion
         self.osVersion = osVersion
@@ -191,7 +189,6 @@ struct DiagnosticsExportEnvironment: Sendable {
         self.eligibility = eligibility
         self.installID = installID
         self.now = now
-        self.fetchLimit = fetchLimit
     }
 }
 

@@ -86,8 +86,7 @@ private func makeEnvironment(now: Date = Date(timeIntervalSince1970: 1_700_000_0
             capturedAt: now
         ),
         installID: UUID(uuidString: "11111111-1111-4111-8111-111111111111")!,
-        now: now,
-        fetchLimit: DiagnosticsBundleBuilder.schedulerEventsCap
+        now: now
     )
 }
 

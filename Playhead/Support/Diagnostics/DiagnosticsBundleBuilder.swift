@@ -9,6 +9,17 @@
 // Keeping the surface as static functions makes every code path
 // reachable from a unit test without spinning up an actor.
 //
+// Input ordering contract: the builder does NOT assume any particular
+// ordering of the `workJournalEntries` input. Both the `scheduler_events`
+// and `work_journal_tail` projections sort by `timestamp` ascending
+// internally before taking the most-recent tail. This keeps the builder
+// correct whether the caller supplies rows oldest-first (insertion
+// order, as the spec's `work_journal_tail[]` language implies) or
+// newest-first (which is what the production `AnalysisStore`
+// `ORDER BY timestamp DESC, rowid DESC` fetch returns). Without the
+// internal sort a `.suffix(N)` on a DESC-ordered input would silently
+// return the OLDEST N rows of the fetched window.
+//
 // Legal checklist enforcement points (per spec):
 //   (a) Default bundle never carries a raw episodeId — all references
 //       go through `EpisodeIdHasher.hash(installID:episodeId:)`.
@@ -76,9 +87,16 @@ enum DiagnosticsBundleBuilder {
     // MARK: - Default bundle
 
     /// Pure transform from raw inputs into the always-safe
-    /// `DefaultBundle`. The caller passes the FULL set of journal
-    /// entries (oldest-first, by insertion order); the builder applies
-    /// the cap + projection rules per the spec.
+    /// `DefaultBundle`.
+    ///
+    /// Input order is not significant: the builder sorts
+    /// `workJournalEntries` by `timestamp` ascending before taking
+    /// the tail for both `scheduler_events` and `work_journal_tail`,
+    /// so it produces the same spec-compliant output regardless of
+    /// whether the caller supplies oldest-first (insertion order) or
+    /// newest-first (`ORDER BY timestamp DESC`) rows. This guards
+    /// against the `.suffix(N)` inversion bug where a DESC-ordered
+    /// caller would otherwise leak the OLDEST N rows into the tail.
     static func buildDefault(
         appVersion: String,
         osVersion: String,
@@ -89,12 +107,16 @@ enum DiagnosticsBundleBuilder {
         installID: UUID
     ) -> DefaultBundle {
 
-        // scheduler_events: most-recent N by timestamp, sorted desc.
-        // We sort once and slice; the input order is not assumed to be
-        // pre-sorted because the source SQLite query may return rows in
-        // insertion order, not strict timestamp order.
-        let sortedDesc = workJournalEntries.sorted { $0.timestamp > $1.timestamp }
-        let schedulerEvents = sortedDesc.prefix(schedulerEventsCap).map { entry -> DefaultBundle.SchedulerEvent in
+        // Canonicalise: timestamp ASCENDING (oldest first). Taking the
+        // suffix of this ordering is equivalent to "most recent N",
+        // independent of how the caller sorted the input. Reversing
+        // gives us newest-first for the `scheduler_events` projection.
+        let sortedAsc = workJournalEntries.sorted { $0.timestamp < $1.timestamp }
+
+        // scheduler_events: most-recent N by timestamp, emitted newest
+        // first. Take the trailing N of the ascending list and reverse.
+        let schedulerTailAsc = sortedAsc.suffix(schedulerEventsCap)
+        let schedulerEvents = schedulerTailAsc.reversed().map { entry -> DefaultBundle.SchedulerEvent in
             DefaultBundle.SchedulerEvent(
                 timestamp: entry.timestamp,
                 eventType: entry.eventType.rawValue,
@@ -105,10 +127,10 @@ enum DiagnosticsBundleBuilder {
             )
         }
 
-        // work_journal_tail: most-recent N by INSERTION order. We treat
-        // the caller's input as already-insertion-ordered (oldest first)
-        // and keep the suffix.
-        let tailSlice = workJournalEntries.suffix(workJournalTailCap)
+        // work_journal_tail: most-recent N by timestamp, emitted in
+        // ascending (insertion-equivalent) order — the spec phrases
+        // this as "last 50 … by insertion order".
+        let tailSlice = sortedAsc.suffix(workJournalTailCap)
         let workJournalTail = tailSlice.map { entry -> DefaultBundle.WorkJournalRecord in
             DefaultBundle.WorkJournalRecord(
                 id: entry.id,

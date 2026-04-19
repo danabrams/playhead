@@ -133,6 +133,96 @@ struct DiagnosticsBundleBuilderTests {
         #expect(bundle.workJournalTail.last?.timestamp == Self.t0 + 99)
     }
 
+    // MARK: - Regression: order-independent tail selection
+    //
+    // The production `AnalysisStore.fetchRecentWorkJournalEntries` returns
+    // rows `ORDER BY timestamp DESC, rowid DESC` (newest first). A naïve
+    // `.suffix(N)` on that input would silently return the OLDEST N rows
+    // — i.e. positions 150-199 of a 200-row newest-first fetch — instead
+    // of the MOST RECENT 50. These tests feed a DESCENDING-timestamp
+    // fixture and assert the tail contains the highest timestamps,
+    // proving the builder is order-independent.
+
+    @Test("work_journal_tail is most-recent 50 even when input is newest-first (regression)")
+    func workJournalTailHandlesNewestFirstInput() {
+        // Feed 100 rows in DESCENDING timestamp order, as the production
+        // `AnalysisStore` fetch returns. Before the fix, `.suffix(50)`
+        // would return timestamps t0..t0+49 (the oldest 50 of the fetch).
+        // After the fix we must see t0+50..t0+99 (the newest 50) in
+        // ascending order.
+        let entries = (0..<100).map {
+            Self.entry(episodeId: "ep-\($0)", timestamp: Self.t0 + Double($0))
+        }.reversed() // newest first
+
+        let bundle = DiagnosticsBundleBuilder.buildDefault(
+            appVersion: "1.0", osVersion: "iOS 26", deviceClass: .iPhone17Pro,
+            buildType: .debug, eligibility: Self.eligible,
+            workJournalEntries: Array(entries), installID: Self.installID
+        )
+
+        #expect(bundle.workJournalTail.count == 50)
+        // Must be the MOST-RECENT 50 rows (timestamps t0+50 through t0+99),
+        // emitted in ASCENDING order per the spec's insertion-order phrasing.
+        let stamps = bundle.workJournalTail.map(\.timestamp)
+        let expected = (50..<100).map { Self.t0 + Double($0) }
+        #expect(stamps == expected)
+        #expect(bundle.workJournalTail.first?.timestamp == Self.t0 + 50)
+        #expect(bundle.workJournalTail.last?.timestamp == Self.t0 + 99)
+    }
+
+    @Test("scheduler_events is most-recent 200 desc even when input is newest-first (regression)")
+    func schedulerEventsHandlesNewestFirstInput() {
+        // 300 rows in DESCENDING order; the builder must still emit
+        // the 200 highest-timestamp rows, sorted newest-first.
+        let entries = (0..<300).map {
+            Self.entry(episodeId: "ep-\($0)", timestamp: Self.t0 + Double($0))
+        }.reversed() // newest first
+
+        let bundle = DiagnosticsBundleBuilder.buildDefault(
+            appVersion: "1.0", osVersion: "iOS 26", deviceClass: .iPhone17Pro,
+            buildType: .debug, eligibility: Self.eligible,
+            workJournalEntries: Array(entries), installID: Self.installID
+        )
+
+        #expect(bundle.schedulerEvents.count == 200)
+        // Newest first per the existing contract.
+        #expect(bundle.schedulerEvents.first?.timestamp == Self.t0 + 299)
+        // The 200th (last) emitted event must correspond to t0+100 —
+        // i.e. the oldest row inside the kept window. If the builder
+        // had naïvely `.prefix(200)`'d the DESC-ordered input it would
+        // have kept t0+100..t0+299 too — so to make the regression
+        // sharper we also include a shuffled-input case below.
+        #expect(bundle.schedulerEvents.last?.timestamp == Self.t0 + 100)
+    }
+
+    @Test("builder is order-independent: shuffled input produces spec output (regression)")
+    func builderOrderIndependentShuffled() {
+        // Shuffle with a deterministic seed-equivalent — reverse-halves
+        // interleave — so the input is neither ASC nor DESC.
+        let base = (0..<120).map {
+            Self.entry(episodeId: "ep-\($0)", timestamp: Self.t0 + Double($0))
+        }
+        var shuffled: [WorkJournalEntry] = []
+        for i in 0..<60 {
+            shuffled.append(base[119 - i]) // newest end
+            shuffled.append(base[i])        // oldest end
+        }
+
+        let bundle = DiagnosticsBundleBuilder.buildDefault(
+            appVersion: "1.0", osVersion: "iOS 26", deviceClass: .iPhone17Pro,
+            buildType: .debug, eligibility: Self.eligible,
+            workJournalEntries: shuffled, installID: Self.installID
+        )
+
+        // work_journal_tail: most-recent 50 (t0+70..t0+119), ascending.
+        let tailStamps = bundle.workJournalTail.map(\.timestamp)
+        #expect(tailStamps == (70..<120).map { Self.t0 + Double($0) })
+        // scheduler_events: 120 <= cap, so all rows appear, descending.
+        #expect(bundle.schedulerEvents.count == 120)
+        let schedStamps = bundle.schedulerEvents.map(\.timestamp)
+        #expect(schedStamps == (0..<120).reversed().map { Self.t0 + Double($0) })
+    }
+
     @Test("work_journal_tail omits raw episodeId (only hash is emitted)")
     func workJournalTailHashedNotRaw() {
         let entries = [Self.entry(episodeId: "raw-secret-id", timestamp: Self.t0)]
