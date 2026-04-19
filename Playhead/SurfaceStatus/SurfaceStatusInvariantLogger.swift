@@ -1,18 +1,26 @@
 // SurfaceStatusInvariantLogger.swift
 // Tier-B (production-safe, all-builds) logging channel for impossible-
-// state violations and state-transition audit entries from the surface-
-// status reducer.
+// state violations from the surface-status reducer.
 //
 // Scope: playhead-ol05 (Phase 1.5 — "State-transition audit + impossible-
 // state assertions + cross-target contract test").
 //
 // ----- Overview -----
 //
+// Anomaly-only: records entries ONLY when the reducer produces an
+// invariant violation. Successful transitions are NOT logged — the
+// JSON Lines file only ever contains violation entries. Consumed by
+// `playhead-e2a3`'s anomaly-rate audit (pass criterion 1: "no
+// impossible-state entries observed in production telemetry"), which
+// measures the RATE of anomalies, not the full transition stream. The
+// 82004e5 commit message phrased this as "state-transition audit" for
+// short; this file is the authoritative contract.
+//
 // The logger writes JSON Lines to a per-session file under
-// `Caches/Diagnostics/`. Each line is exactly one
-// `SurfaceStateTransitionEntry` (with optional `invariantViolation`
-// payload). Files rotate per session — a new launch picks a fresh
-// timestamped filename — and the logger evicts older sessions on
+// `Caches/Diagnostics/`. Each (anomaly) line is exactly one
+// `SurfaceStateTransitionEntry` whose `invariantViolation` payload is
+// always populated. Files rotate per session — a new launch picks a
+// fresh timestamped filename — and the logger evicts older sessions on
 // startup so disk usage cannot grow without bound across long-lived
 // dogfood sessions.
 //
@@ -107,61 +115,41 @@ enum SurfaceStatusInvariantLogger {
     /// Append a single state-transition entry to the current session
     /// file. Fire-and-forget — the call returns as soon as the entry is
     /// enqueued on the serial write queue.
+    ///
+    /// Note: `entry.sessionId` will be OVERWRITTEN with the logger's
+    /// current session ID (read on the serial write queue to avoid the
+    /// cross-thread race with `resetForTesting`). Callers that want to
+    /// supply a specific sessionId can use the test hooks directly.
     static func record(_ entry: SurfaceStateTransitionEntry) {
-        state.enqueueWrite(entry)
+        state.enqueueWriteWithCurrentSession(entry: entry)
     }
 
     /// Convenience: emit one entry per violation in the supplied list,
     /// reusing the supplied `context` for the non-violation fields.
     /// When `violations` is empty this is a no-op.
+    ///
+    /// `context` does NOT carry a sessionId — the logger stamps each
+    /// entry with its own current session ID on the serial write queue
+    /// so all `sessionId` reads and writes happen on the same queue.
     static func recordViolations(
         _ violations: [InvariantViolation],
         context: SurfaceStateTransitionContext
     ) {
         for violation in violations {
-            let entry = SurfaceStateTransitionEntry(
-                timestamp: context.timestamp,
-                sessionId: state.sessionId,
-                episodeIdHash: context.episodeIdHash,
-                priorDisposition: context.priorDisposition,
-                newDisposition: context.newDisposition,
-                priorReason: context.priorReason,
-                newReason: context.newReason,
-                cause: context.cause,
-                eligibilitySnapshot: context.eligibilitySnapshot,
-                invariantViolation: violation
-            )
-            record(entry)
+            state.enqueueViolation(context: context, violation: violation)
         }
     }
 
     /// Legacy string-only entry-point retained so the reducer's existing
     /// call-sites do not need to change. Wraps the message in a
-    /// synthetic `unavailableWithRetryHint`-coded violation purely so
-    /// the JSON shape stays consistent — callers that want the right
-    /// code should migrate to `record(_:)` or
-    /// `recordViolations(_:context:)`.
+    /// synthetic `reducerInternalBug`-coded violation so the JSON shape
+    /// stays consistent.
     ///
     /// TODO(playhead-ol05.followup): migrate the reducer's three
     /// `invariantViolated(_:)` call-sites to `recordViolations` with a
     /// real context, so the synthetic-code workaround can be retired.
     static func invariantViolated(_ message: String) {
-        let entry = SurfaceStateTransitionEntry(
-            timestamp: Date(),
-            sessionId: state.sessionId,
-            episodeIdHash: nil,
-            priorDisposition: nil,
-            newDisposition: .failed,
-            priorReason: nil,
-            newReason: .couldntAnalyze,
-            cause: nil,
-            eligibilitySnapshot: nil,
-            invariantViolation: InvariantViolation(
-                code: .unavailableWithRetryHint,
-                description: message
-            )
-        )
-        record(entry)
+        state.enqueueSyntheticViolation(message: message)
     }
 
     // MARK: - Test-only introspection
@@ -188,9 +176,11 @@ enum SurfaceStatusInvariantLogger {
         return state.currentSessionFileURL
     }
 
-    /// Test hook: read the session ID the logger is using.
+    /// Test hook: read the session ID the logger is using. Reads on
+    /// the serial write queue so the value is a consistent snapshot
+    /// relative to any in-flight `resetForTesting` or writes.
     internal static func _currentSessionId() -> UUID {
-        return state.sessionId
+        return state.currentSessionIdForTesting()
     }
     #endif
 }
@@ -201,10 +191,16 @@ enum SurfaceStatusInvariantLogger {
 /// serial write queue, current session file, and install-ID salt used
 /// by the hasher.
 ///
-/// Marked `@unchecked Sendable` because mutation is gated by the serial
-/// `writeQueue` — every property accessed on more than one thread is
-/// either immutable (`sessionId`, `installId`) or only mutated inside
-/// `writeQueue`'s closure body.
+/// Marked `@unchecked Sendable` because every mutable property is
+/// accessed ONLY on the serial `writeQueue`:
+///   * `sessionId`, `installId`, `diagnosticsDirectory`,
+///     `currentSessionFileURL`, `currentFileHandle` are all read and
+///     written exclusively from closures executing on `writeQueue`
+///     (async writes from the hot path; sync for test helpers).
+///   * The production hot path never reads these directly from the
+///     caller's thread — see `enqueueViolation`, `enqueueSyntheticViolation`,
+///     `enqueueWriteWithCurrentSession`, all of which hop onto the
+///     queue before touching any mutable state.
 private final class LoggerState: @unchecked Sendable {
 
     /// Serial queue: every write hops onto this before touching the file
@@ -248,10 +244,87 @@ private final class LoggerState: @unchecked Sendable {
 
     // MARK: - Write path
 
-    func enqueueWrite(_ entry: SurfaceStateTransitionEntry) {
+    /// Enqueue a pre-built entry, overwriting its `sessionId` with the
+    /// logger's current session ID. The sessionId substitution happens
+    /// ON the serial write queue so reads of `self.sessionId` never
+    /// race against `resetForTesting`'s write.
+    func enqueueWriteWithCurrentSession(entry: SurfaceStateTransitionEntry) {
         writeQueue.async { [weak self] in
-            self?.writeLocked(entry)
+            guard let self else { return }
+            let stamped = SurfaceStateTransitionEntry(
+                timestamp: entry.timestamp,
+                sessionId: self.sessionId,
+                episodeIdHash: entry.episodeIdHash,
+                priorDisposition: entry.priorDisposition,
+                newDisposition: entry.newDisposition,
+                priorReason: entry.priorReason,
+                newReason: entry.newReason,
+                cause: entry.cause,
+                eligibilitySnapshot: entry.eligibilitySnapshot,
+                invariantViolation: entry.invariantViolation
+            )
+            self.writeLocked(stamped)
         }
+    }
+
+    /// Build + write a violation entry. The context supplies every
+    /// non-violation field; the sessionId is read ON the serial write
+    /// queue so all sessionId reads and writes share the same queue.
+    func enqueueViolation(
+        context: SurfaceStateTransitionContext,
+        violation: InvariantViolation
+    ) {
+        writeQueue.async { [weak self] in
+            guard let self else { return }
+            let entry = SurfaceStateTransitionEntry(
+                timestamp: context.timestamp,
+                sessionId: self.sessionId,
+                episodeIdHash: context.episodeIdHash,
+                priorDisposition: context.priorDisposition,
+                newDisposition: context.newDisposition,
+                priorReason: context.priorReason,
+                newReason: context.newReason,
+                cause: context.cause,
+                eligibilitySnapshot: context.eligibilitySnapshot,
+                invariantViolation: violation
+            )
+            self.writeLocked(entry)
+        }
+    }
+
+    /// Legacy synthetic-violation entry point. Used by
+    /// `SurfaceStatusInvariantLogger.invariantViolated(_:)` to wrap a
+    /// free-form message in a real JSON-shaped entry. SessionId is read
+    /// on the serial write queue.
+    func enqueueSyntheticViolation(message: String) {
+        let timestamp = Date()
+        writeQueue.async { [weak self] in
+            guard let self else { return }
+            let entry = SurfaceStateTransitionEntry(
+                timestamp: timestamp,
+                sessionId: self.sessionId,
+                episodeIdHash: nil,
+                priorDisposition: nil,
+                newDisposition: .failed,
+                priorReason: nil,
+                newReason: .couldntAnalyze,
+                cause: nil,
+                eligibilitySnapshot: nil,
+                invariantViolation: InvariantViolation(
+                    code: .reducerInternalBug,
+                    description: message
+                )
+            )
+            self.writeLocked(entry)
+        }
+    }
+
+    /// Read the current sessionId on the serial write queue so the
+    /// returned value is a consistent snapshot relative to any in-flight
+    /// reset or write. Test-only: the production hot path never needs
+    /// to read sessionId from outside the queue.
+    func currentSessionIdForTesting() -> UUID {
+        return writeQueue.sync { self.sessionId }
     }
 
     /// Must run on `writeQueue`.

@@ -56,12 +56,30 @@ final class SurfaceStatusUILintTests: XCTestCase {
         #"\bSurfaceAttribution\b"#,
     ]
 
-    /// Scope of the lint: any `.swift` file whose path contains this
-    /// substring is checked. Anchored on `/Playhead/Views/` so the UI
-    /// layer (and only the UI layer) is policed; the cause type is
-    /// legitimately used in `Services/` and the new `SurfaceStatus/`
-    /// module.
-    private static let uiPathSubstring = "/Playhead/Views/"
+    /// Scope of the lint: any `.swift` file whose path contains one of
+    /// these substrings is checked.
+    ///
+    /// Historically this was a single string (`/Playhead/Views/`) but
+    /// that left SwiftUI `View`-conforming types that live in
+    /// `Playhead/App/` (`ContentView`, `RootView`, `ReturningSplashView`)
+    /// outside the lint's reach. Anything that ships pixels to the user
+    /// is UI-layer and must consume `EpisodeSurfaceStatus` only.
+    private static let uiPathSubstrings: [String] = [
+        "/Playhead/Views/",
+        "/Playhead/App/",
+    ]
+
+    /// Allow-list of service-wiring files that live under `Playhead/App/`
+    /// but are NOT UI-layer. `PlayheadRuntime.swift` is where the DI
+    /// graph is assembled (and must reference `AnalysisStore` etc. to
+    /// wire the graph together); `PlayheadAppDelegate.swift` is the UIKit
+    /// delegate that sets up the runtime at launch and legitimately
+    /// references internal types in doc comments. These two files are
+    /// not SwiftUI Views and never render user copy.
+    private static let uiPathExemptFilenames: Set<String> = [
+        "PlayheadRuntime.swift",
+        "PlayheadAppDelegate.swift",
+    ]
 
     func testInternalMissCauseIsNotReferencedInUIViews() throws {
         let appRoot = try Self.appSourceRoot()
@@ -72,7 +90,7 @@ final class SurfaceStatusUILintTests: XCTestCase {
 
         if !violations.isEmpty {
             XCTFail(
-                "InternalMissCause referenced in Playhead/Views "
+                "InternalMissCause referenced in UI-layer file "
                 + "(\(violations.count) occurrence(s)). UI must consume "
                 + "`EpisodeSurfaceStatus` and render `SurfaceReason` — see "
                 + "playhead-5bb3 bead spec:\n"
@@ -96,7 +114,7 @@ final class SurfaceStatusUILintTests: XCTestCase {
         }
         if !allViolations.isEmpty {
             XCTFail(
-                "Forbidden module-boundary token referenced in Playhead/Views "
+                "Forbidden module-boundary token referenced in UI-layer file "
                 + "(\(allViolations.count) occurrence(s)). UI must consume "
                 + "`EpisodeSurfaceStatus` only — see playhead-ol05 bead spec:\n"
                 + allViolations.sorted().joined(separator: "\n")
@@ -211,15 +229,23 @@ final class SurfaceStatusUILintTests: XCTestCase {
 
         for case let url as URL in enumerator {
             guard url.pathExtension == "swift" else { continue }
-            // Only police the UI Views directory.
-            guard url.path.contains(Self.uiPathSubstring) else { continue }
+            // Only police UI-layer paths.
+            guard Self.uiPathSubstrings.contains(where: { url.path.contains($0) }) else {
+                continue
+            }
+            // Service-wiring files under Playhead/App/ are exempt — they
+            // are not SwiftUI Views and legitimately reference scheduler
+            // / persistence types to wire the DI graph.
+            if Self.uiPathExemptFilenames.contains(url.lastPathComponent) {
+                continue
+            }
 
             let source = try String(contentsOf: url, encoding: .utf8)
             let lineNumbers = Self.scanSource(source, regex: regex)
             for lineNumber in lineNumbers {
                 violations.append(
                     "\(url.lastPathComponent):\(lineNumber): "
-                    + "`InternalMissCause` referenced in Playhead/Views"
+                    + "forbidden module-boundary token referenced in UI layer"
                 )
             }
         }
@@ -252,3 +278,5 @@ final class SurfaceStatusUILintTests: XCTestCase {
         return app
     }
 }
+
+

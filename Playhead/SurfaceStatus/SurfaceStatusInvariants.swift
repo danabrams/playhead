@@ -258,6 +258,19 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         /// Invariant 5: an empty batch with a non-`.queued` disposition.
         case emptyBatchWithNonQueuedDisposition =
             "empty_batch_with_non_queued_disposition"
+
+        /// Synthetic catch-all used by
+        /// `SurfaceStatusInvariantLogger.invariantViolated(_:)` when the
+        /// reducer hits a precedence-ladder default branch that should be
+        /// unreachable (see `EpisodeSurfaceStatusReducer`'s three internal
+        /// `invariantViolated(_:)` call-sites). Not one of the five
+        /// numbered Phase-1.5 invariants — this code exists so the JSON
+        /// Lines log can distinguish "taxonomy-rule violation" from
+        /// "reducer-internal impossibility" when e2a3 aggregates by code.
+        /// Addresses reviewer's `playhead-glch` concern in place of
+        /// filing a follow-up bead: a dedicated code is a ~1-line change
+        /// that makes the audit stream unambiguous today.
+        case reducerInternalBug = "reducer_internal_bug"
     }
 
     let code: Code
