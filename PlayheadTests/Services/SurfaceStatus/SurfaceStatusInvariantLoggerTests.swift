@@ -147,8 +147,11 @@ struct SurfaceStatusInvariantLoggerTests {
         for key in requiredKeys {
             #expect(line.contains(key), "Missing required key \(key) in JSON line: \(line)")
         }
-        // Invariant_violation MUST NOT appear when nil (encodeIfPresent).
-        #expect(!line.contains("\"invariant_violation\""))
+        // The `invariant_violation` payload key MUST NOT appear when nil
+        // (encodeIfPresent). Match on the KEY specifically — a colon follows
+        // a JSON key, but the same string appears as a VALUE of event_type
+        // after playhead-o45p so we disambiguate via the trailing ":".
+        #expect(!line.contains("\"invariant_violation\":"))
     }
 
     @Test("invariant_violation appears only when the entry carries one")
@@ -202,6 +205,128 @@ struct SurfaceStatusInvariantLoggerTests {
     }
 
     // MARK: - Convenience: recordViolations
+
+    // MARK: - Schema round-trip (playhead-o45p)
+
+    @Test("Pre-o45p JSON lines (no event_type) decode as invariant_violation entries")
+    func legacyJsonLinesDecodeAsInvariantViolation() throws {
+        // Simulate a JSON Lines line produced by the pre-o45p logger. The
+        // line has no `event_type` key — after o45p we default to
+        // `.invariantViolation` so e2a3's audit tooling keeps working
+        // against historical session files.
+        let legacyJson = """
+        {
+          "timestamp": "2023-11-14T22:13:20Z",
+          "session_id": "3573D414-061A-43A1-8984-6CE1B4B85794",
+          "episode_id_hash": "abc123",
+          "prior_disposition": "queued",
+          "new_disposition": "paused",
+          "prior_reason": "waiting_for_time",
+          "new_reason": "phone_is_hot",
+          "cause": "thermal"
+        }
+        """
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let entry = try decoder.decode(
+            SurfaceStateTransitionEntry.self,
+            from: Data(legacyJson.utf8)
+        )
+        #expect(entry.eventType == .invariantViolation)
+        #expect(entry.entryTrigger == nil)
+        #expect(entry.windowStartMs == nil)
+        #expect(entry.windowEndMs == nil)
+    }
+
+    @Test("Unknown event_type values decode as invariant_violation (forward-compat)")
+    func unknownEventTypeDecodesAsInvariantViolation() throws {
+        // A future logger might emit an event_type this build does not
+        // recognize. The decoder must fall back to .invariantViolation so
+        // pre-existing aggregation tools do not throw.
+        let futureJson = """
+        {
+          "timestamp": "2023-11-14T22:13:20Z",
+          "session_id": "3573D414-061A-43A1-8984-6CE1B4B85794",
+          "new_disposition": "queued",
+          "new_reason": "waiting_for_time",
+          "event_type": "some_future_event_that_did_not_exist_yet"
+        }
+        """
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let entry = try decoder.decode(
+            SurfaceStateTransitionEntry.self,
+            from: Data(futureJson.utf8)
+        )
+        #expect(entry.eventType == .invariantViolation)
+    }
+
+    @Test("A readyEntered entry round-trips with its entry_trigger preserved")
+    func readyEnteredRoundTrips() throws {
+        let entry = SurfaceStateTransitionEntry(
+            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+            sessionId: UUID(uuidString: "3573D414-061A-43A1-8984-6CE1B4B85794")!,
+            episodeIdHash: "episode-abc",
+            priorDisposition: nil,
+            newDisposition: .queued,
+            priorReason: nil,
+            newReason: .waitingForTime,
+            cause: nil,
+            eligibilitySnapshot: nil,
+            invariantViolation: nil,
+            eventType: .readyEntered,
+            entryTrigger: .analysisCompleted,
+            windowStartMs: nil,
+            windowEndMs: nil
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(entry)
+        let line = String(decoding: data, as: UTF8.self)
+        #expect(line.contains("\"event_type\":\"ready_entered\""))
+        #expect(line.contains("\"entry_trigger\":\"analysis_completed\""))
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let roundTripped = try decoder.decode(SurfaceStateTransitionEntry.self, from: data)
+        #expect(roundTripped == entry)
+    }
+
+    @Test("An autoSkipFired entry round-trips with its window bounds preserved")
+    func autoSkipFiredRoundTrips() throws {
+        let entry = SurfaceStateTransitionEntry(
+            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+            sessionId: UUID(uuidString: "3573D414-061A-43A1-8984-6CE1B4B85794")!,
+            episodeIdHash: "episode-xyz",
+            priorDisposition: nil,
+            newDisposition: .queued,
+            priorReason: nil,
+            newReason: .waitingForTime,
+            cause: nil,
+            eligibilitySnapshot: nil,
+            invariantViolation: nil,
+            eventType: .autoSkipFired,
+            entryTrigger: nil,
+            windowStartMs: 42_000,
+            windowEndMs: 47_500
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(entry)
+        let line = String(decoding: data, as: UTF8.self)
+        #expect(line.contains("\"event_type\":\"auto_skip_fired\""))
+        #expect(line.contains("\"window_start_ms\":42000"))
+        #expect(line.contains("\"window_end_ms\":47500"))
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let roundTripped = try decoder.decode(SurfaceStateTransitionEntry.self, from: data)
+        #expect(roundTripped == entry)
+    }
 
     @Test("recordViolations(_:context:) emits one entry per violation")
     func recordViolationsEmitsOnePerViolation() throws {
