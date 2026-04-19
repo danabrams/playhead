@@ -34,6 +34,18 @@ struct EpisodeSurfaceStatusMatrixRow {
 ///
 /// 2 × 10 × 2 × 2 × 2 = 160 rows. Small enough to render a stable JSON
 /// fixture in-memory at test time.
+///
+/// Why only 9 representative causes (not every `InternalMissCause`
+/// variant)? The 9 entries cover all 9 distinct `(disposition, reason)`
+/// pairs the reducer emits. Additional cause variants that route to
+/// the same pair (e.g. `.asrFailed` / `.pipelineError` / `.noRuntimeGrant`
+/// / `.unsupportedEpisodeLanguage` all share the default-branch
+/// `(failed, couldntAnalyze)`, and `.batteryLowUnplugged` / `.noNetwork`
+/// / `.modelTemporarilyUnavailable` join the transient-wait tier) are
+/// intentionally NOT duplicated here — they are pinned by targeted
+/// unit tests in `EpisodeSurfaceStatusReducerTests`. Keeping the matrix
+/// representative (rather than exhaustive) keeps the golden fixture
+/// readable without sacrificing reducer coverage.
 enum EpisodeSurfaceStatusMatrix {
 
     // MARK: - Base values

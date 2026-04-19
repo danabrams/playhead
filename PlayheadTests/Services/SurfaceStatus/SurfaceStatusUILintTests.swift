@@ -115,6 +115,10 @@ final class SurfaceStatusUILintTests: XCTestCase {
     // MARK: - Scanner (copied from SchedulerLaneUILintTests for
     // symmetry; see that file's header for rationale.)
 
+    // String literals are deliberately NOT stripped — user-facing copy
+    // that mentions forbidden symbols (e.g. "InternalMissCause" in a UI
+    // string) is a leak of internal taxonomy and should be flagged.
+    // Matches SchedulerLaneUILintTests convention.
     private static func effectiveCode(onLine line: String) -> String? {
         let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
         if trimmed.first == "*" {

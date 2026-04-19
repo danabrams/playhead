@@ -85,8 +85,9 @@ struct EpisodeSurfaceStatusSnapshotTests {
             let goldenHead = String(goldenStr.prefix(2000))
             let renderedHead = String(renderedStr.prefix(2000))
             let msg = """
-            Golden fixture mismatch. \
-            Re-run with PLAYHEAD_REGEN_SURFACE_STATUS_GOLDEN=1 after reviewing the diff.
+            Golden fixture mismatch. To regenerate: delete the fixture at \
+            \(url.path) and re-run — the seed-on-absence path will write a fresh \
+            file and fail; review and commit the result.
             ---EXPECTED (golden)---
             \(goldenHead)
             ---ACTUAL (rendered)---

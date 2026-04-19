@@ -98,7 +98,7 @@ func episodeSurfaceStatus(
     // regardless of any resource / transient state. Emphasis is on the
     // USER source: the user took an action, so we must acknowledge
     // that action in the UI rather than dress it up as a resource wait.
-    if Self_isUserPaused(cause) {
+    if isUserPaused(cause) {
         switch cause {
         case .userPreempted, .userCancelled:
             return EpisodeSurfaceStatus(
@@ -119,14 +119,14 @@ func episodeSurfaceStatus(
                 readinessAnchor: readinessAnchor
             )
         default:
-            // Impossible by the guard above — `Self_isUserPaused` only
+            // Impossible by the guard above — `isUserPaused` only
             // returns true for the three cases handled above. We call
             // the invariant logger so ol05 can observe this path if the
             // ladder ever falls out of sync.
             SurfaceStatusInvariantLogger.invariantViolated(
                 "user-paused rule matched an unknown cause: \(cause)"
             )
-            return Self_fallback(
+            return fallback(
                 readiness: readiness,
                 readinessAnchor: readinessAnchor
             )
@@ -142,7 +142,7 @@ func episodeSurfaceStatus(
     // retry-budget context in its signature, so we conservatively treat
     // `taskExpired` as a transient wait unless the persisted status
     // says the job has already moved to `.failed`.
-    if Self_isResourceBlock(cause: cause, state: state) {
+    if isResourceBlock(cause: cause, state: state) {
         switch cause {
         case .mediaCap:
             return EpisodeSurfaceStatus(
@@ -164,7 +164,7 @@ func episodeSurfaceStatus(
             )
         case .taskExpired:
             // Only reached when the persisted status is `.failed`,
-            // meaning retries are exhausted — see `Self_isResourceBlock`.
+            // meaning retries are exhausted — see `isResourceBlock`.
             return EpisodeSurfaceStatus(
                 disposition: .failed,
                 reason: .couldntAnalyze,
@@ -177,7 +177,7 @@ func episodeSurfaceStatus(
             SurfaceStatusInvariantLogger.invariantViolated(
                 "resource-block rule matched an unknown cause: \(cause)"
             )
-            return Self_fallback(
+            return fallback(
                 readiness: readiness,
                 readinessAnchor: readinessAnchor
             )
@@ -190,7 +190,7 @@ func episodeSurfaceStatus(
     // the paused/waiting reason. These are conditions that will resolve
     // themselves over time or with a small user action (plug in,
     // connect to Wi-Fi) without requiring a retry.
-    if Self_isTransientWait(cause: cause) {
+    if isTransientWait(cause: cause) {
         switch cause {
         case .thermal:
             return EpisodeSurfaceStatus(
@@ -252,7 +252,7 @@ func episodeSurfaceStatus(
             SurfaceStatusInvariantLogger.invariantViolated(
                 "transient-wait rule matched an unknown cause: \(cause)"
             )
-            return Self_fallback(
+            return fallback(
                 readiness: readiness,
                 readinessAnchor: readinessAnchor
             )
@@ -285,7 +285,7 @@ func episodeSurfaceStatus(
 // means no UI file needs to classify a cause — the reducer does it all.
 
 /// `true` when the cause is a user-initiated pause / cancel.
-private func Self_isUserPaused(_ cause: InternalMissCause) -> Bool {
+private func isUserPaused(_ cause: InternalMissCause) -> Bool {
     switch cause {
     case .userPreempted,
          .userCancelled,
@@ -303,7 +303,7 @@ private func Self_isUserPaused(_ cause: InternalMissCause) -> Bool {
 /// remaining (the common case) it is a transient wait and belongs in
 /// Rule 4. Only when the persisted status has already moved to
 /// `.failed` do we treat it as a resource block.
-private func Self_isResourceBlock(cause: InternalMissCause, state: AnalysisState) -> Bool {
+private func isResourceBlock(cause: InternalMissCause, state: AnalysisState) -> Bool {
     switch cause {
     case .mediaCap, .analysisCap:
         return true
@@ -317,7 +317,7 @@ private func Self_isResourceBlock(cause: InternalMissCause, state: AnalysisState
 /// `true` when the cause is an environmental-transient that the system
 /// will recover from on its own (possibly after a small user action
 /// like plugging in).
-private func Self_isTransientWait(cause: InternalMissCause) -> Bool {
+private func isTransientWait(cause: InternalMissCause) -> Bool {
     switch cause {
     case .thermal,
          .lowPowerMode,
@@ -326,10 +326,10 @@ private func Self_isTransientWait(cause: InternalMissCause) -> Bool {
          .wifiRequired:
         return true
     case .taskExpired:
-        // Covered by `Self_isResourceBlock` only when `.failed`. Here
+        // Covered by `isResourceBlock` only when `.failed`. Here
         // we return true so the transient-wait rule handles the retries-
         // remaining path. (The reducer evaluates Rule 3 before Rule 4;
-        // if `Self_isResourceBlock` returned true, we never reach here.)
+        // if `isResourceBlock` returned true, we never reach here.)
         return true
     case .modelTemporarilyUnavailable:
         // Matches CauseAttributionPolicy's tier: when the model is
@@ -345,7 +345,7 @@ private func Self_isTransientWait(cause: InternalMissCause) -> Bool {
 /// The reducer's contract is total — every case of every enum is
 /// handled — so this should never execute in production. It exists so
 /// the compiler can see that every branch returns a value.
-private func Self_fallback(
+private func fallback(
     readiness: PlaybackReadiness,
     readinessAnchor: TimeInterval?
 ) -> EpisodeSurfaceStatus {
