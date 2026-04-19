@@ -3,17 +3,21 @@
 // a fixed precedence ladder, retaining the remaining causes as secondaries.
 //
 // Scope note:
-// The full 16-row mapping from `InternalMissCause` to
-// `(SurfaceDisposition, SurfaceReason, ResolutionHint)` lives in a later bead
-// (playhead-dfem, Phase 1.5). This file implements:
+// This file implements the full four-layer attribution for
+// `InternalMissCause`:
 //   * the precedence ladder (tiers + tie-break rule),
 //   * `resolve(...)` for selecting the primary cause, and
-//   * the three hardest context-dependent mappings as worked examples:
-//     `model_temporarily_unavailable`, `task_expired`, and
-//     `app_force_quit_requires_relaunch`.
-// The 13 remaining rows are deliberately left as TODO hooks in
-// `attribute(_:context:)` so dfem can fill them in without changing the
-// public surface.
+//   * the complete 16-row mapping from `InternalMissCause` to
+//     `(SurfaceDisposition, SurfaceReason, ResolutionHint)`.
+// The three worked examples landed in playhead-v11
+// (`model_temporarily_unavailable`, `task_expired`,
+// `app_force_quit_requires_relaunch`); the remaining 13 rows landed in
+// playhead-dfem (Phase 1.5 deliverable 2). The switch in
+// `attributeCore(_:context:)` is compiler-enforced exhaustive over every
+// `InternalMissCause` case; the only non-canonical branch is the
+// `.unknown(_)` forward-compat sentinel, which returns the generic
+// failure triple so an unrecognized persisted cause string cannot reach
+// the UI unmapped.
 
 import Foundation
 
@@ -254,47 +258,42 @@ enum CauseAttributionPolicy {
         return PrimarySelection(primary: primary, secondary: secondary)
     }
 
-    // MARK: - Attribution (three hardest mappings as worked examples)
+    // MARK: - Attribution (complete 16-row mapping)
 
     /// The set of `InternalMissCause`s for which `attribute(_:context:)` returns
-    /// a real, reviewed mapping (vs the catch-all placeholder triple). Callers
-    /// that wire `resolve(...)` into a UI surface MUST branch on this set and
-    /// fall back to a generic "couldn't analyze" copy path for unmapped causes
-    /// rather than rendering the placeholder verbatim — the placeholder is a
-    /// sentinel for unfinished work, not a copy choice.
+    /// a real, reviewed mapping. After playhead-dfem this is the full set of
+    /// 16 canonical cases defined in `InternalMissCause.allCases`.
     ///
-    /// Filled in incrementally: this bead lands the three worked examples;
-    /// playhead-dfem will expand the set as it adds the remaining rows.
-    static let mappedCauses: Set<InternalMissCause> = [
-        .modelTemporarilyUnavailable,
-        .taskExpired,
-        .appForceQuitRequiresRelaunch,
-    ]
+    /// `.unknown(_)` is deliberately absent: it is a read-path forward-compat
+    /// sentinel, not a production emission site, and it routes to the generic
+    /// failure triple in `attributeCore` so an unrecognized persisted cause
+    /// cannot reach the UI without firing the H1 DEBUG assertion below.
+    static let mappedCauses: Set<InternalMissCause> = Set(InternalMissCause.allCases)
 
     /// Map an `InternalMissCause` to its `SurfaceAttribution` triple, applying
     /// context where the triple is context-dependent.
     ///
-    /// Only the three hardest rows are implemented as worked examples in this
-    /// bead; the remaining 13 rows are filled in by playhead-dfem. For rows
-    /// not yet implemented we return a conservative placeholder
-    /// (`failed` + `couldntAnalyze` + `retry`) so the surface layer always has
-    /// a valid triple to display. This placeholder is intentionally audible
-    /// (it looks like a failure) so that missing-mapping bugs show up in
-    /// review before ship.
+    /// After playhead-dfem every canonical `InternalMissCause` case has a
+    /// reviewed mapping; the switch inside `attributeCore` is compiler-
+    /// enforced exhaustive, so the only remaining unmapped input is the
+    /// `.unknown(_)` forward-compat sentinel. For `.unknown(_)` we return
+    /// a conservative generic-failure triple (`failed` + `couldntAnalyze`
+    /// + `retry`) so the surface layer always has a valid triple even if a
+    /// schema-evolved cause string reaches attribution.
     ///
-    /// In DEBUG builds, hitting the placeholder path additionally fires an
-    /// `assertionFailure` so any code that wires this result into UI without
-    /// first branching on `mappedCauses` will crash loudly in dev. Tests that
-    /// intentionally exercise the placeholder branch should call
-    /// `attributeIgnoringPlaceholderAssertion(_:context:)` instead, which
-    /// shares the same logic without the assertion.
+    /// In DEBUG builds, hitting the `.unknown(_)` path additionally fires
+    /// an `assertionFailure` so emitters that accidentally produce an
+    /// `.unknown(_)` instead of one of the 16 canonical cases crash loudly
+    /// in dev. Tests that intentionally exercise the sentinel branch
+    /// should call `attributeIgnoringPlaceholderAssertion(_:context:)`
+    /// instead, which shares the same logic without the assertion.
     static func attribute(
         _ cause: InternalMissCause,
         context: CauseAttributionContext
     ) -> SurfaceAttribution {
         if !mappedCauses.contains(cause) {
             assertionFailure(
-                "CauseAttributionPolicy.attribute placeholder hit for \(cause); fill in playhead-dfem"
+                "CauseAttributionPolicy.attribute placeholder hit for \(cause); every canonical InternalMissCause must map through attributeCore"
             )
         }
         return attributeCore(cause, context: context)
@@ -373,25 +372,109 @@ enum CauseAttributionPolicy {
                 hint: .openAppToResume
             )
 
-        // MARK: Remaining 13 rows — deferred to playhead-dfem (Phase 1.5).
+        // MARK: Remaining 13 rows (playhead-dfem, Phase 1.5 deliverable 2)
         //
-        // Leaving these as a single default keeps the policy total without
-        // prematurely freezing mappings that will be reviewed holistically
-        // in dfem. See the bead plan §6 Phase 0 / Phase 1.5 split.
-        case .noRuntimeGrant,
-             .thermal,
-             .lowPowerMode,
-             .batteryLowUnplugged,
-             .noNetwork,
-             .wifiRequired,
-             .mediaCap,
-             .analysisCap,
-             .userPreempted,
-             .userCancelled,
-             .unsupportedEpisodeLanguage,
-             .asrFailed,
+        // These rows are enumerated explicitly (not folded into a default
+        // clause) so the switch is compiler-enforced exhaustive over
+        // InternalMissCause.allCases — adding a future canonical case
+        // forces a review here before the build compiles.
+
+        // Environmental: system will retry on its own; no user action
+        // required beyond waiting. Maps to the queued/waiting bucket.
+        case .noRuntimeGrant:
+            return SurfaceAttribution(
+                disposition: .queued,
+                reason: .waitingForTime,
+                hint: .wait
+            )
+
+        // Environmental transient: device is thermally saturated.
+        // Presents as paused until the state clears; no user CTA because
+        // the only action is "wait".
+        case .thermal:
+            return SurfaceAttribution(
+                disposition: .paused,
+                reason: .phoneIsHot,
+                hint: .wait
+            )
+
+        // Power-state pauses: the system defers work while the device is
+        // constrained. Both map to the same triple because the user
+        // remedy is the same (charge / plug in). We distinguish the two
+        // InternalMissCauses upstream for telemetry, but the surface
+        // copy is identical.
+        case .lowPowerMode,
+             .batteryLowUnplugged:
+            return SurfaceAttribution(
+                disposition: .paused,
+                reason: .powerLimited,
+                hint: .chargeDevice
+            )
+
+        // Network pauses share a reason bucket but differ in whether the
+        // user has a CTA: `.noNetwork` has no action (wait for
+        // connectivity to return), while `.wifiRequired` is fixable by
+        // the user connecting to Wi-Fi or changing the download-on-
+        // cellular preference.
+        case .noNetwork:
+            return SurfaceAttribution(
+                disposition: .paused,
+                reason: .waitingForNetwork,
+                hint: .none
+            )
+        case .wifiRequired:
+            return SurfaceAttribution(
+                disposition: .paused,
+                reason: .waitingForNetwork,
+                hint: .connectToWiFi
+            )
+
+        // Resource-exhausted (capacity): media cap is a storage
+        // condition the user can clear; analysis cap is internal budget
+        // exhaustion that the user retries to reset.
+        case .mediaCap:
+            return SurfaceAttribution(
+                disposition: .failed,
+                reason: .storageFull,
+                hint: .freeUpStorage
+            )
+        case .analysisCap:
+            return SurfaceAttribution(
+                disposition: .failed,
+                reason: .couldntAnalyze,
+                hint: .retry
+            )
+
+        // User-initiated pause: both `.userCancelled` (explicit user
+        // action) and `.userPreempted` (system-initiated deference that
+        // surfaces as "cancelled" to the user) map to the same paused/
+        // cancelled triple with no hint. The telemetry distinction
+        // between the two lives upstream; the UI does not differentiate.
+        case .userCancelled,
+             .userPreempted:
+            return SurfaceAttribution(
+                disposition: .paused,
+                reason: .cancelled,
+                hint: .none
+            )
+
+        // Eligibility-permanent: episode language is outside the set
+        // Foundation Models supports, so analysis is not going to happen
+        // for this episode. No CTA — the user cannot change an
+        // episode's language.
+        case .unsupportedEpisodeLanguage:
+            return SurfaceAttribution(
+                disposition: .unavailable,
+                reason: .analysisUnavailable,
+                hint: .none
+            )
+
+        // Engine errors: ASR and pipeline failures both surface as
+        // "couldn't analyze — retry". Distinguishing them at the UI
+        // would leak implementation detail; telemetry keeps the
+        // distinction upstream.
+        case .asrFailed,
              .pipelineError:
-            // TODO(playhead-dfem): fill in the remaining 13 rows.
             return SurfaceAttribution(
                 disposition: .failed,
                 reason: .couldntAnalyze,
@@ -400,7 +483,8 @@ enum CauseAttributionPolicy {
 
         // playhead-uzdq.1: forward-compat sentinel. We do NOT know what
         // this cause means, so surface the same generic-failure triple
-        // the unmapped rows emit rather than invent a reason.
+        // the canonical engine-error rows emit rather than invent a
+        // reason.
         case .unknown:
             return SurfaceAttribution(
                 disposition: .failed,
