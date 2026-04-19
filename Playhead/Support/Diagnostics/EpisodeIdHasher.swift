@@ -31,26 +31,14 @@ enum EpisodeIdHasher {
         var bytes: [UInt8] = []
         bytes.append(contentsOf: installID.uuidString.utf8)
         bytes.append(contentsOf: episodeId.utf8)
-        return _sha256Hex(bytes)
+        return sha256Hex(bytes)
     }
 
     /// Internal helper exposed for direct verification in tests.
-    /// Lowercase hex per UInt8.
-    static func _sha256Hex(_ bytes: [UInt8]) -> String {
+    /// Lowercase hex per UInt8. Output is exactly
+    /// `SHA256.Digest.byteCount * 2` (= 64) lowercase hex chars.
+    static func sha256Hex(_ bytes: [UInt8]) -> String {
         let digest = SHA256.hash(data: bytes)
-        var out = ""
-        out.reserveCapacity(SHA256.Digest.byteCount * 2)
-        for byte in digest {
-            out.append(Self.hexNibble(byte >> 4))
-            out.append(Self.hexNibble(byte & 0x0F))
-        }
-        return out
-    }
-
-    private static func hexNibble(_ value: UInt8) -> Character {
-        switch value & 0x0F {
-        case 0...9: return Character(UnicodeScalar(UInt8(0x30) + value))
-        default:    return Character(UnicodeScalar(UInt8(0x57) + value)) // 'a' = 0x61, value=10
-        }
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 }

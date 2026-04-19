@@ -74,7 +74,7 @@ struct EpisodeIdHasherTests {
         let episodeId = "ep-1"
         let expectedInputBytes =
             Array(installID.uuidString.utf8) + Array(episodeId.utf8)
-        let expected = EpisodeIdHasher._sha256Hex(expectedInputBytes)
+        let expected = EpisodeIdHasher.sha256Hex(expectedInputBytes)
         let actual = EpisodeIdHasher.hash(installID: installID, episodeId: episodeId)
         #expect(actual == expected)
     }
