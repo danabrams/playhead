@@ -4,14 +4,28 @@
 // reducer's output for an existing row (or any change to the row set
 // itself) will trip the diff, forcing a deliberate fixture update.
 //
-// To regenerate the golden fixture after an intentional reducer change,
-// delete the fixture file from disk (`PlayheadTests/Services/SurfaceStatus/
-// GoldenFixtures/episode-surface-status.json`) and re-run the test —
-// the first run with no fixture on disk seeds a fresh one (and fails
-// the test so the reviewer sees a diff in `git status`). The file-
-// absence seed path is chosen over an env-var flag because xcodebuild
-// does not forward environment variables to test processes by default,
-// which made the env-var approach silently no-op in CI.
+// Regeneration flow
+// -----------------
+// The golden fixture is ALSO listed as a bundled test resource in the
+// PlayheadTests target (see `project.pbxproj` — the file ships into
+// the test bundle so other suites that prefer bundle-loading over a
+// `#filePath` lookup can also consume it). Consequently, the naive
+// "delete the fixture and re-run" flow does NOT work: the build phase
+// requires the resource file to exist on disk, so deletion fails the
+// build before the seed-on-absence code path ever executes.
+//
+// To regenerate, overwrite the committed fixture with the 3-byte
+// placeholder `{}\n` and re-run the test suite. The
+// `rewritePlaceholderGoldenFixture` test (below) detects the
+// placeholder and writes a fresh render over it; the subsequent
+// `goldenMatches` run (in the same suite invocation) then compares
+// against the freshly-written file and passes. Inspect `git diff` and
+// commit the result. The 3-byte placeholder check is strict so the
+// regen test cannot silently trample a real committed baseline.
+//
+// The legacy seed-on-absence path in `goldenMatches` is kept as a
+// belt-and-braces safeguard for a fresh clone or a test-resource
+// unlisting in the future, but it is not the primary path.
 
 import Foundation
 import Testing
@@ -85,9 +99,11 @@ struct EpisodeSurfaceStatusSnapshotTests {
             let goldenHead = String(goldenStr.prefix(2000))
             let renderedHead = String(renderedStr.prefix(2000))
             let msg = """
-            Golden fixture mismatch. To regenerate: delete the fixture at \
-            \(url.path) and re-run — the seed-on-absence path will write a fresh \
-            file and fail; review and commit the result.
+            Golden fixture mismatch. To regenerate: overwrite \(url.path) \
+            with the 3-byte placeholder `{}\\n` (e.g. `printf '{}\\n' > \(url.path)`) \
+            and re-run the snapshot suite. The rewritePlaceholderGoldenFixture \
+            test will rewrite the placeholder with the current render; then \
+            review `git diff` and commit the result.
             ---EXPECTED (golden)---
             \(goldenHead)
             ---ACTUAL (rendered)---
@@ -95,6 +111,43 @@ struct EpisodeSurfaceStatusSnapshotTests {
             """
             Issue.record(Comment(rawValue: msg))
         }
+    }
+
+    /// Regeneration entry point — rewrites the golden fixture with a
+    /// fresh render whenever the committed file is a 3-byte placeholder
+    /// (`{}\n`). This is the canonical "unfreeze the baseline" flow: the
+    /// fixture is bundled as a test resource, so deleting it outright
+    /// fails the build (see file header). Overwriting with the
+    /// placeholder keeps the resource file present for the build phase
+    /// while signalling to this test that the committed baseline has
+    /// been intentionally invalidated.
+    ///
+    /// The placeholder detection is strict — the file must be exactly
+    /// `{}\n` (3 bytes). Any other content is presumed to be a real
+    /// baseline the reviewer intends to diff against; this test is a
+    /// no-op in that case.
+    ///
+    /// Ordering note: this test runs unordered relative to
+    /// `goldenMatches` (Swift Testing does not guarantee test ordering
+    /// within a suite). That is fine — either `goldenMatches` runs
+    /// first on the placeholder (it fails with a "mismatch" diff then
+    /// this test overwrites, and the next `swift test` invocation
+    /// passes), or this test runs first (the placeholder is rewritten
+    /// in-place and `goldenMatches` then reads the fresh data). Both
+    /// orders converge to the same committed-fixture state after a
+    /// second invocation.
+    @Test("Rewrite placeholder golden fixture ({} → full matrix)")
+    func rewritePlaceholderGoldenFixture() throws {
+        let url = Self.goldenURL()
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let existing = try Data(contentsOf: url)
+        let placeholder = Data("{}\n".utf8)
+        guard existing == placeholder else {
+            return
+        }
+        let rendered = try Self.renderMatrixJSON()
+        try rendered.write(to: url)
+        Issue.record(Comment(rawValue: "Rewrote placeholder fixture at \(url.path); inspect the diff and commit if correct."))
     }
 
     // MARK: - Matrix invariants
