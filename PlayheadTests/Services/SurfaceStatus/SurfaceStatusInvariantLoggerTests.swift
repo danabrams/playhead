@@ -362,4 +362,70 @@ struct SurfaceStatusInvariantLoggerTests {
         }
         #expect(lines.count == violations.count)
     }
+
+    // MARK: - playhead-o45p: sessionId re-stamp preserves new fields
+
+    /// Regression guard for finding #24. Prior to the fix,
+    /// `enqueueWriteWithCurrentSession` rebuilt the entry to overwrite
+    /// `sessionId` but silently dropped the four fields introduced by
+    /// playhead-o45p (`eventType`, `entryTrigger`, `windowStartMs`,
+    /// `windowEndMs`), so every `readyEntered` or `autoSkipFired` event
+    /// fed through `record(_:)` ended up on disk as a default
+    /// `.invariantViolation` with empty trigger/window fields. This test
+    /// pins the contract by writing a `readyEntered` entry with every
+    /// new field populated and asserting the round-tripped line carries
+    /// the same values.
+    @Test("record(_:) preserves o45p fields (eventType/entryTrigger/windowStartMs/windowEndMs)")
+    func recordPreservesO45pFieldsThroughSessionIdReStamp() throws {
+        let dir = Self.makeTempDirectory()
+        SurfaceStatusInvariantLogger._resetForTesting(directory: dir)
+        defer { SurfaceStatusInvariantLogger._resetForTesting() }
+
+        // Build a readyEntered entry with every new field populated.
+        // The sessionId we supply here is IRRELEVANT — the logger
+        // overwrites it on the write queue. The critical assertion is
+        // that the OTHER new fields survive that rebuild.
+        let entry = SurfaceStateTransitionEntry(
+            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+            sessionId: UUID(), // will be overwritten
+            episodeIdHash: "hash-o45p-24",
+            priorDisposition: nil,
+            newDisposition: .queued,
+            priorReason: nil,
+            newReason: .waitingForTime,
+            cause: nil,
+            eligibilitySnapshot: nil,
+            invariantViolation: nil,
+            eventType: .readyEntered,
+            entryTrigger: .analysisCompleted,
+            windowStartMs: 12_345,
+            windowEndMs: 67_890
+        )
+
+        SurfaceStatusInvariantLogger.record(entry)
+        SurfaceStatusInvariantLogger._flushForTesting()
+
+        let url = try #require(SurfaceStatusInvariantLogger._currentSessionFileURL())
+        let data = try Data(contentsOf: url)
+        let lines = String(decoding: data, as: UTF8.self)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+        #expect(lines.count == 1)
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(
+            SurfaceStateTransitionEntry.self,
+            from: Data(lines[0].utf8)
+        )
+
+        // SessionId is expected to be overwritten by the logger; every
+        // other field (especially the four o45p additions) must survive.
+        #expect(decoded.eventType == .readyEntered)
+        #expect(decoded.entryTrigger == .analysisCompleted)
+        #expect(decoded.windowStartMs == 12_345)
+        #expect(decoded.windowEndMs == 67_890)
+        #expect(decoded.episodeIdHash == "hash-o45p-24")
+        #expect(decoded.newDisposition == .queued)
+        #expect(decoded.newReason == .waitingForTime)
+    }
 }

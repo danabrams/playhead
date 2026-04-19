@@ -312,6 +312,13 @@ private final class LoggerState: @unchecked Sendable {
     /// logger's current session ID. The sessionId substitution happens
     /// ON the serial write queue so reads of `self.sessionId` never
     /// race against `resetForTesting`'s write.
+    ///
+    /// The rebuilt entry preserves every field the caller supplied,
+    /// including the playhead-o45p additions (`eventType`, `entryTrigger`,
+    /// `windowStartMs`, `windowEndMs`). Dropping any of them here would
+    /// silently convert `readyEntered` / `autoSkipFired` events into
+    /// default `.invariantViolation` entries on disk, collapsing the
+    /// false_ready_rate metric's ability to distinguish event types.
     func enqueueWriteWithCurrentSession(entry: SurfaceStateTransitionEntry) {
         writeQueue.async { [weak self] in
             guard let self else { return }
@@ -325,7 +332,11 @@ private final class LoggerState: @unchecked Sendable {
                 newReason: entry.newReason,
                 cause: entry.cause,
                 eligibilitySnapshot: entry.eligibilitySnapshot,
-                invariantViolation: entry.invariantViolation
+                invariantViolation: entry.invariantViolation,
+                eventType: entry.eventType,
+                entryTrigger: entry.entryTrigger,
+                windowStartMs: entry.windowStartMs,
+                windowEndMs: entry.windowEndMs
             )
             self.writeLocked(stamped)
         }
