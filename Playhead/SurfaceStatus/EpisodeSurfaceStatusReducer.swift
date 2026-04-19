@@ -50,6 +50,61 @@ func episodeSurfaceStatus(
     coverage: CoverageSummary?,
     readinessAnchor: TimeInterval?
 ) -> EpisodeSurfaceStatus {
+    return _validatedEpisodeSurfaceStatus(
+        _episodeSurfaceStatusCore(
+            state: state,
+            cause: cause,
+            eligibility: eligibility,
+            coverage: coverage,
+            readinessAnchor: readinessAnchor
+        ),
+        cause: cause,
+        eligibility: eligibility
+    )
+}
+
+/// Tier-A + Tier-B invariant gate at the reducer's exit. Centralized so
+/// every return path inside `_episodeSurfaceStatusCore` flows through one
+/// validator — adding a new return path inside core does NOT require a
+/// matching change here.
+///
+/// * Tier-A (DEBUG): fails fast on any invariant violation via
+///   `precondition`, so dev builds and the dogfood Debug-build flavor
+///   cannot ship a violating output.
+/// * Tier-B (all builds): records each violation to the JSON Lines
+///   audit log via `SurfaceStatusInvariantLogger`. Release builds rely
+///   on this signal exclusively (no precondition crash).
+private func _validatedEpisodeSurfaceStatus(
+    _ status: EpisodeSurfaceStatus,
+    cause: InternalMissCause?,
+    eligibility: AnalysisEligibility
+) -> EpisodeSurfaceStatus {
+    let violations = SurfaceStatusInvariants.violations(of: status)
+    if !violations.isEmpty {
+        let context = SurfaceStateTransitionContext(
+            episodeIdHash: nil,
+            priorDisposition: nil,
+            newDisposition: status.disposition,
+            priorReason: nil,
+            newReason: status.reason,
+            cause: cause,
+            eligibilitySnapshot: eligibility
+        )
+        SurfaceStatusInvariantLogger.recordViolations(violations, context: context)
+        SurfaceStatusInvariants.enforce(violations)
+    }
+    return status
+}
+
+/// Pure core: the original reducer body, untouched except for the
+/// rename. Every return below is gated through `_validatedEpisodeSurfaceStatus`.
+private func _episodeSurfaceStatusCore(
+    state: AnalysisState,
+    cause: InternalMissCause?,
+    eligibility: AnalysisEligibility,
+    coverage: CoverageSummary?,
+    readinessAnchor: TimeInterval?
+) -> EpisodeSurfaceStatus {
 
     // Derived once up front so every branch below can consult the same
     // snapshot without re-evaluating CoverageSummary.

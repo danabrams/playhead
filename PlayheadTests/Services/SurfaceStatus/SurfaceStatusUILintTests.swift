@@ -30,6 +30,32 @@ final class SurfaceStatusUILintTests: XCTestCase {
     /// regex prevents matching identifiers that merely share a prefix.
     private static let forbiddenToken = #"\bInternalMissCause\b"#
 
+    /// Additional forbidden tokens — the playhead-ol05 module-boundary
+    /// extension. Each pattern is a word-boundary regex matching one of
+    /// the symbols UI files MUST NOT reference directly:
+    ///
+    ///   * `AnalysisStore` / `AnalysisSummary` — persistence-layer types
+    ///     the reducer consumes through `AnalysisState`. UI must not
+    ///     reach past the reducer into the store.
+    ///   * `SurfaceAttribution` — the cause→triple struct the policy
+    ///     emits. UI works with `EpisodeSurfaceStatus`, not the raw
+    ///     attribution triple.
+    ///   * `CauseAttributionPolicy` — the policy the reducer consults;
+    ///     UI must not reach past the reducer to the policy.
+    ///
+    /// Note: `SurfaceDisposition`, `SurfaceReason`, `ResolutionHint`
+    /// are defined in `CauseTaxonomy.swift` BUT they are intentionally
+    /// part of the reducer's public output (they are `EpisodeSurfaceStatus`'s
+    /// fields). The lint therefore allow-lists those three names — UI
+    /// IS expected to switch on `disposition` / `reason` / `hint`.
+    private static let extendedForbiddenTokens: [String] = [
+        #"\bInternalMissCause\b"#,
+        #"\bAnalysisStore\b"#,
+        #"\bAnalysisSummary\b"#,
+        #"\bCauseAttributionPolicy\b"#,
+        #"\bSurfaceAttribution\b"#,
+    ]
+
     /// Scope of the lint: any `.swift` file whose path contains this
     /// substring is checked. Anchored on `/Playhead/Views/` so the UI
     /// layer (and only the UI layer) is policed; the cause type is
@@ -51,6 +77,29 @@ final class SurfaceStatusUILintTests: XCTestCase {
                 + "`EpisodeSurfaceStatus` and render `SurfaceReason` — see "
                 + "playhead-5bb3 bead spec:\n"
                 + violations.sorted().joined(separator: "\n")
+            )
+        }
+    }
+
+    /// playhead-ol05 extension: forbid every UI-layer reference to the
+    /// extended token list (AnalysisStore / AnalysisSummary /
+    /// CauseAttributionPolicy / SurfaceAttribution / InternalMissCause).
+    /// UI files MUST consume `EpisodeSurfaceStatus` only.
+    func testNoSchedulerOrPersistenceTypesInUIViews() throws {
+        let appRoot = try Self.appSourceRoot()
+        var allViolations: [String] = []
+        for pattern in Self.extendedForbiddenTokens {
+            let regex = try NSRegularExpression(pattern: pattern)
+            var violations: [String] = []
+            try Self.scan(root: appRoot, regex: regex, into: &violations)
+            allViolations.append(contentsOf: violations)
+        }
+        if !allViolations.isEmpty {
+            XCTFail(
+                "Forbidden module-boundary token referenced in Playhead/Views "
+                + "(\(allViolations.count) occurrence(s)). UI must consume "
+                + "`EpisodeSurfaceStatus` only — see playhead-ol05 bead spec:\n"
+                + allViolations.sorted().joined(separator: "\n")
             )
         }
     }
