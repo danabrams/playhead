@@ -26,6 +26,18 @@
 // is mechanically computable from the JSONL schema the o45p bead
 // introduced. The 10-day audit can port this logic into whatever shell
 // the engineer running the audit prefers.
+//
+// Smoke-test fixture:
+//   swift scripts/false_ready_rate.swift scripts/fixtures/false_ready_rate_sample.jsonl
+//
+// The fixture covers the four behaviourally-distinct scenarios:
+//   1. ready_entered without any matching auto_skip_fired → "false ready"
+//   2. ready_entered followed by auto_skip_fired within the window → "true ready"
+//   3. auto_skip_fired with no preceding ready_entered (neither denom nor numer)
+//   4. ready_entered for one episode, auto_skip_fired for a DIFFERENT episode
+//      within the window → "false ready" (skips do not cross episode hashes)
+//
+// Expected output: denominator=3, numerator=2, rate=66.67%.
 
 import Foundation
 
