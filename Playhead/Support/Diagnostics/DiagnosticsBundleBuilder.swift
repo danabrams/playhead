@@ -82,6 +82,12 @@ enum DiagnosticsBundleBuilder {
     /// Hard cap on the character length of a single transcript excerpt.
     /// Excerpts longer than this are truncated to the cap. Legal
     /// checklist item (b).
+    ///
+    /// Units: grapheme-cluster count via `String.prefix` (i.e.
+    /// `String.count`). Byte-length of the resulting UTF-8 may exceed
+    /// this for multi-byte characters (emoji, CJK text, combining
+    /// marks). This is intentional — the cap is about limiting the
+    /// amount of *text* shipped for legal review, not bytes on disk.
     static let transcriptExcerptCharCap = 1_000
 
     // MARK: - Default bundle
