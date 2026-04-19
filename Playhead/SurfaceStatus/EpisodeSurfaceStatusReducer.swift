@@ -321,6 +321,20 @@ private func _episodeSurfaceStatusCore(
     // analyze" failure. These are the rows CauseAttributionPolicy
     // marks as `engineError` or `eligibilityPermanent`, for which a
     // retry CTA is the correct Phase 1.5 affordance.
+    //
+    // playhead-o45p Gap D: when a `.unknown(_)` forward-compat sentinel
+    // reaches this branch, emit an impossible-state log entry via the
+    // ol05 invariant logger. The reducer's contract is total over the 16
+    // canonical cases — reaching this default with `.unknown(raw)` means
+    // a schema-evolved cause string escaped upstream validation. The
+    // surface output is still a safe conservative triple; the log line
+    // lets e2a3 aggregate unmapped-cause rates independently of the
+    // surface behavior.
+    if case .unknown(let raw) = cause {
+        SurfaceStatusInvariantLogger.invariantViolated(
+            "reducer received unmapped InternalMissCause.unknown(\(raw)); surfaced conservative .failed/.couldntAnalyze/.retry triple"
+        )
+    }
     return EpisodeSurfaceStatus(
         disposition: .failed,
         reason: .couldntAnalyze,
