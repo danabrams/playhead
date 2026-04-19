@@ -89,6 +89,10 @@ final class UIKitDiagnosticsPresenter: DiagnosticsExportPresenter {
 
     // MARK: - Mail composer path
 
+    // The mail composer path writes no disk artifact: the attachment is
+    // handed to `MFMailComposeViewController.addAttachmentData(_:mimeType:fileName:)`
+    // in-memory (see `DiagnosticsExportService.makeMailComposer`). No
+    // temp file is created so no cleanup is required on this branch.
     private func presentMailComposer(
         data: Data,
         filename: String,
@@ -134,27 +138,45 @@ final class UIKitDiagnosticsPresenter: DiagnosticsExportPresenter {
         host: UIViewController,
         completion: @escaping @MainActor (Result<DiagnosticsMailComposeResult, Error>) -> Void
     ) {
-        // Activity fallback needs a file URL — write to tmp first. On any
-        // write error surface as a `.failed` result so the opt-in flag
-        // persists; the user can retry.
-        let url: URL
+        // Activity fallback needs a file URL — the presenter writes the
+        // bundle into a per-export UUID subdirectory of the system tmp
+        // directory. The subdirectory is removed in the activity
+        // completion handler regardless of success/cancel/error. A
+        // dedicated subdir (rather than a bare file under tmp) makes the
+        // cleanup atomic and PII-safe: the diagnostics JSON contains
+        // opted-in episode titles + transcript excerpts, and iOS does not
+        // reliably reap tmp files — they can persist for days. Owning the
+        // write + cleanup in one place keeps the pair symmetric.
+        //
+        // On any write error surface as a `.failed` result so the opt-in
+        // flag persists; the user can retry.
+        let subdir: URL
+        let fileURL: URL
         do {
-            url = try DiagnosticsExportService.writeBundle(
-                data: data, filename: filename
+            (subdir, fileURL) = try Self.writeBundleToFreshSubdirectory(
+                data: data,
+                filename: filename
             )
         } catch {
             completion(.success(.failed))
             return
         }
 
-        let activity = DiagnosticsExportService.makeActivityFallback(fileURL: url)
+        let activity = DiagnosticsExportService.makeActivityFallback(fileURL: fileURL)
         activity.completionWithItemsHandler = { _, completed, _, _ in
             // `completed == true` when the user successfully routes the
             // artifact; we treat that as `.sent` so the opt-in flag
             // clears. A dismissed sheet (`completed == false`) is
             // `.cancelled`.
+            //
+            // Clean up the per-export subdirectory before firing the
+            // outer completion. `try?` swallows any unlikely removal
+            // failure — the worst case is leftover tmp bytes, which is
+            // exactly the state we were trying to avoid; we do not want
+            // a cleanup failure to mask a successful export.
             let mapped: DiagnosticsMailComposeResult = completed ? .sent : .cancelled
             Task { @MainActor in
+                Self.removeSubdirectory(subdir)
                 completion(.success(mapped))
             }
         }
@@ -172,6 +194,43 @@ final class UIKitDiagnosticsPresenter: DiagnosticsExportPresenter {
             popover.permittedArrowDirections = []
         }
         host.present(activity, animated: true)
+    }
+
+    // MARK: - Temp-file lifecycle (internal for tests)
+
+    /// Creates a fresh UUID-named subdirectory under the system tmp
+    /// directory, writes the bundle inside it, and returns both the
+    /// subdir URL (for cleanup) and the file URL (for the activity
+    /// controller). Exposed `internal static` so tests can drive the
+    /// write + cleanup pair without presenting a real
+    /// `UIActivityViewController` (simulator-hostile).
+    static func writeBundleToFreshSubdirectory(
+        data: Data,
+        filename: String,
+        parentDirectory: URL = FileManager.default.temporaryDirectory,
+        subdirectoryName: String = UUID().uuidString
+    ) throws -> (subdirectory: URL, fileURL: URL) {
+        let subdir = parentDirectory.appendingPathComponent(
+            subdirectoryName,
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: subdir,
+            withIntermediateDirectories: true
+        )
+        let fileURL = try DiagnosticsExportService.writeBundle(
+            data: data,
+            filename: filename,
+            directory: subdir
+        )
+        return (subdir, fileURL)
+    }
+
+    /// Best-effort removal of the per-export subdirectory. Swallows
+    /// errors by design — see `presentActivityFallback` for rationale.
+    /// Exposed `internal static` so tests can call directly.
+    static func removeSubdirectory(_ url: URL) {
+        try? FileManager.default.removeItem(at: url)
     }
 }
 
