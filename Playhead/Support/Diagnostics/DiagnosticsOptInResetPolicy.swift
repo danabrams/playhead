@@ -51,4 +51,19 @@ enum DiagnosticsOptInResetPolicy {
             return current
         }
     }
+
+    /// Returns `true` when the composer result should trigger a reset of
+    /// `Episode.diagnosticsOptIn` to `false`. Equivalent to the question
+    /// "is this a delivery-confirming result?" and consistent with
+    /// `newValue(current: true, result:) == false` for every case.
+    ///
+    /// Callers (e.g. `DiagnosticsExportCoordinator`) prefer this over
+    /// the `!newValue(current: true, ...)` double-negation because the
+    /// intent reads directly off the name.
+    static func shouldReset(result: DiagnosticsMailComposeResult) -> Bool {
+        switch result {
+        case .sent, .saved:     return true
+        case .cancelled, .failed: return false
+        }
+    }
 }

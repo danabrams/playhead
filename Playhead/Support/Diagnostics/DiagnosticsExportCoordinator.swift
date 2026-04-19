@@ -128,13 +128,11 @@ final class DiagnosticsExportCoordinator {
     /// `.cancelled` / `.failed` we short-circuit and do not touch the sink
     /// (preserving the flag for the next retry).
     private func applyOptInResetIfNeeded(for result: DiagnosticsMailComposeResult) {
-        // The policy is total over (current, result); applying it with
-        // `current = true` tells us whether a true→false transition is
-        // warranted. Equivalent to: "are we in a clear-the-flag state?"
-        let shouldReset = !DiagnosticsOptInResetPolicy.newValue(
-            current: true, result: result
-        )
-        guard shouldReset else { return }
+        // Ask the policy directly: "is this a delivery-confirming
+        // result?" `shouldReset(result:)` is kept consistent with
+        // `newValue(current: true, result:) == false` by a dedicated
+        // unit test.
+        guard DiagnosticsOptInResetPolicy.shouldReset(result: result) else { return }
 
         let includedIds = optInEpisodes
             .filter(\.diagnosticsOptIn)

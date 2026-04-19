@@ -77,4 +77,38 @@ struct DiagnosticsOptInResetPolicyTests {
     func enumExhaustivenessCanary() {
         #expect(DiagnosticsMailComposeResult.allCases.count == 4)
     }
+
+    // MARK: - shouldReset(result:) — delivery-confirming predicate
+    //
+    // `shouldReset(result:)` MUST match `!newValue(current: true, result:)`
+    // for every case. The coordinator relies on the two being equivalent.
+
+    @Test("shouldReset(.sent) == true")
+    func shouldResetSent() {
+        #expect(DiagnosticsOptInResetPolicy.shouldReset(result: .sent) == true)
+    }
+
+    @Test("shouldReset(.saved) == true")
+    func shouldResetSaved() {
+        #expect(DiagnosticsOptInResetPolicy.shouldReset(result: .saved) == true)
+    }
+
+    @Test("shouldReset(.cancelled) == false")
+    func shouldResetCancelled() {
+        #expect(DiagnosticsOptInResetPolicy.shouldReset(result: .cancelled) == false)
+    }
+
+    @Test("shouldReset(.failed) == false")
+    func shouldResetFailed() {
+        #expect(DiagnosticsOptInResetPolicy.shouldReset(result: .failed) == false)
+    }
+
+    @Test("shouldReset(result:) is consistent with !newValue(current: true, result:) for all cases")
+    func shouldResetConsistentWithNewValue() {
+        for result in DiagnosticsMailComposeResult.allCases {
+            let expected = !DiagnosticsOptInResetPolicy.newValue(current: true, result: result)
+            let actual = DiagnosticsOptInResetPolicy.shouldReset(result: result)
+            #expect(actual == expected, "Inconsistent for \(result): shouldReset=\(actual), !newValue(current:true)=\(expected)")
+        }
+    }
 }
