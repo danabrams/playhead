@@ -50,9 +50,21 @@ final class InstallIdentity {
 /// the SwiftData store so the value survives app launches; lost on
 /// uninstall/reinstall by design (uninstall is a new install).
 ///
-/// Thread-safety: SwiftData's ``ModelContext`` is not `Sendable`. Call
-/// this provider from the same isolation as the context — typically the
-/// `@MainActor` context vended by ``SwiftDataStore.makeContainer()``.
+/// Thread-safety: this provider is pinned to ``@MainActor``. SwiftData's
+/// ``ModelContext`` is not ``Sendable``, and the fetch-then-insert-then-save
+/// step that provisions the row is itself not thread-safe: two callers
+/// racing on a non-isolated provider could each pass the fetch, each
+/// insert, and each save, producing two rows and breaking the
+/// singleton-row invariant. Actor isolation keeps the provisioning
+/// critical section single-threaded, matching the pattern used by
+/// ``SwiftDataDiagnosticsOptInSink`` which owns the same kind of
+/// ``ModelContext``-bound mutation.
+///
+/// Callers must invoke ``installID()`` from a ``@MainActor`` context
+/// (typically Phase 2 playhead-l274's diagnostics bundle assembly path,
+/// which already runs on the main actor via the SwiftData container
+/// vended by ``SwiftDataStore.makeContainer()``).
+@MainActor
 struct InstallIDProvider {
 
     private let context: ModelContext
