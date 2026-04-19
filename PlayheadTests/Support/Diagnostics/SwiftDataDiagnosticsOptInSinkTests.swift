@@ -13,13 +13,6 @@ import Testing
 @MainActor
 struct SwiftDataDiagnosticsOptInSinkTests {
 
-    private func makeContext() throws -> ModelContext {
-        let schema = Schema([Podcast.self, Episode.self, UserPreferences.self])
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
-        let container = try ModelContainer(for: schema, configurations: [config])
-        return ModelContext(container)
-    }
-
     private func makeEpisode(
         guid: String,
         feedURL: URL = URL(string: "https://example.com/rss")!,
@@ -36,7 +29,7 @@ struct SwiftDataDiagnosticsOptInSinkTests {
 
     @Test("reset clears diagnosticsOptIn for matching canonical keys, leaves others untouched")
     func resetsOnlyMatchingEpisodes() throws {
-        let ctx = try makeContext()
+        let ctx = try makeDiagnosticsInMemoryContext()
         let feed = URL(string: "https://example.com/rss")!
         let a = makeEpisode(guid: "A", feedURL: feed, diagnosticsOptIn: true)
         let b = makeEpisode(guid: "B", feedURL: feed, diagnosticsOptIn: true)
@@ -61,7 +54,7 @@ struct SwiftDataDiagnosticsOptInSinkTests {
 
     @Test("empty input list is a no-op — store is untouched")
     func emptyInputIsNoop() throws {
-        let ctx = try makeContext()
+        let ctx = try makeDiagnosticsInMemoryContext()
         let a = makeEpisode(guid: "A", diagnosticsOptIn: true)
         ctx.insert(a)
         try ctx.save()
@@ -75,7 +68,7 @@ struct SwiftDataDiagnosticsOptInSinkTests {
 
     @Test("unknown episode IDs are silently skipped (idempotent against concurrent delete)")
     func unknownIdsSkipped() throws {
-        let ctx = try makeContext()
+        let ctx = try makeDiagnosticsInMemoryContext()
         let a = makeEpisode(guid: "A", diagnosticsOptIn: true)
         ctx.insert(a)
         try ctx.save()

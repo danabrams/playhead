@@ -37,10 +37,7 @@ struct EpisodeDiagnosticsOptInTests {
 
     @Test("setting diagnosticsOptIn = true persists across in-memory store reads")
     func mutableAndPersisted() throws {
-        let schema = Schema([Podcast.self, Episode.self, UserPreferences.self])
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
-        let container = try ModelContainer(for: schema, configurations: [config])
-        let ctx = ModelContext(container)
+        let ctx = try makeDiagnosticsInMemoryContext()
 
         let ep = Episode(
             feedItemGUID: "guid-1",
