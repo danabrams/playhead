@@ -1,67 +1,102 @@
 // AnalysisUnavailableReason.swift
-// Forward-declaration stub for `AnalysisUnavailableReason`. The enum's
-// cases and derivation logic are owned by playhead-sueq (Phase 1.5 —
-// "Analysis-unavailable reason + derivation from AnalysisEligibility"),
-// which has not landed yet. This stub gives the `EpisodeSurfaceStatus`
-// reducer a stable type to point at so consumers can compile against
-// the reducer's public surface without depending on sueq's landing.
+// Per-device reason why on-device analysis is unavailable, derived
+// purely from an `AnalysisEligibility` snapshot. Owned by the surface-
+// status module; consumed by `EpisodeSurfaceStatus`.
 //
-// TODO(playhead-sueq): Flesh out this enum with the full per-field
-// derivation ladder (hardware unsupported > region unsupported > AI
-// disabled > language unsupported > model-not-resident) and return a
-// non-nil `AnalysisUnavailableReason` whenever `AnalysisEligibility`
-// indicates at least one failing gate. Until then, `derive(from:)` is
-// a no-op that returns nil — the reducer branches on the absence of a
-// value to decide whether to emit `disposition = .unavailable`.
+// Scope: playhead-sueq (Phase 1.5 — "analysisUnavailableReason wiring").
 //
-// Scope contract with playhead-5bb3 (this bead):
-//   * The reducer is allowed to call `AnalysisUnavailableReason.derive`.
-//   * The reducer MUST NOT pattern-match on any specific case — the
-//     enum is empty today and adding cases here would make sueq's
-//     landing a merge conflict.
-//   * When sueq lands, the reducer's branch for
-//     `.disposition == .unavailable` will be updated to plumb the
-//     returned reason into the output struct. For now the output carries
-//     `analysisUnavailableReason: AnalysisUnavailableReason?` which is
-//     always nil.
+// Shape rationale — why a flat raw-value enum (not an associated-value
+// enum or a struct):
+//   * Every case is a pure tag; there is no per-case payload to carry.
+//   * The UI keys copy and CTAs off `rawValue`, so a `String` raw-value
+//     form is the simplest Codable representation.
+//   * A flat enum is exhaustively switchable, which the UI layer relies
+//     on to guarantee every reason has a copy string.
+//
+// Derivation contract — see `derive(from:)`:
+//   hardware > region > language > appleIntelligence > model
+//
+// Intuition: "most-permanent / least-fixable wins." A user whose device
+// is simultaneously hardware-unsupported AND has AI toggled off should
+// be told "hardware unsupported" — sending them to Settings first would
+// only burn a round-trip before they hit the immovable wall. Conversely,
+// a transient model-unavailable window is the lowest-priority signal:
+// nothing is actually broken, the system will recover on its own.
+//
+// Scope contract with CauseAttributionPolicy (playhead-dfem):
+//   * `AnalysisUnavailableReason` derives ONLY from `AnalysisEligibility`.
+//     It does NOT consume `InternalMissCause` or any other runtime
+//     signal. The cause→triple mapping lives in `CauseAttributionPolicy`;
+//     this enum lives one layer lower and answers the different question
+//     "why is this device ineligible at all".
+//   * Downstream consumers that need a cause-aware picture must read
+//     BOTH this reason and the cause — do not conflate them.
+//
+// Scope contract with playhead-ol05 (invariant enforcement):
+//   * `ol05` will add the runtime invariant "analysisUnavailableReason
+//     non-nil ⇔ disposition == .unavailable". This file does NOT assert
+//     that invariant — it only exposes the derivation. Invariant wiring
+//     belongs in `SurfaceStatusInvariantLogger` / the reducer.
 
 import Foundation
 
 /// Per-field derived reason why analysis is unavailable on this device.
-/// Cases are intentionally empty in this bead — see the file-level TODO
-/// and playhead-sueq for the canonical enum definition.
 ///
-/// The empty enum form is a deliberate compile-time tripwire: any code
-/// that tries to `switch` exhaustively on it is asserting that every
-/// case is handled, and an empty enum forces the caller to route
-/// through `derive(from:)` rather than pattern-match on the stub.
-///
-/// `Sendable` and `Hashable` are trivially satisfied by an empty enum
-/// (no instances, no stored properties). We do NOT conform to
-/// `Codable` on the stub: Swift's Codable synthesis for a case-less
-/// enum would produce encode/decode bodies that either always throw or
-/// are unreachable, and we would have to maintain them through sueq's
-/// landing anyway. The downstream consumer (`EpisodeSurfaceStatus`)
-/// handles the optional field by writing the raw-value string only when
-/// a value is present; since `derive(from:)` always returns nil in
-/// Phase 1.5, the Codable seam is exercised only on the nil side.
-enum AnalysisUnavailableReason: Sendable, Hashable {
+/// Cases are ordered in the enum declaration to mirror the precedence
+/// ladder (most-permanent / least-fixable first). The enum is a flat
+/// `String` raw-value form so that Codable produces stable snake-case
+/// tokens matching the field names on `AnalysisEligibility`.
+enum AnalysisUnavailableReason: String, Sendable, Hashable, Codable, CaseIterable {
 
-    // MARK: - Derivation (stub)
+    /// Device hardware cannot run on-device analysis. Permanent for
+    /// this device/OS pair; not user-fixable without new hardware.
+    case hardwareUnsupported = "hardware_unsupported"
+
+    /// Device region is outside the supported list. Permanent within the
+    /// region; user-fixable only by changing their region setting, which
+    /// has broad side effects we don't want to prescribe.
+    case regionUnsupported = "region_unsupported"
+
+    /// Device primary locale is not a supported language. Note this is
+    /// the DEVICE locale, not a per-episode language — per-episode
+    /// language gating is explicitly out of scope for this enum and is
+    /// handled via `InternalMissCause.unsupportedEpisodeLanguage`
+    /// further up the stack.
+    case languageUnsupported = "language_unsupported"
+
+    /// User has Apple Intelligence toggled off in Settings. User-fixable
+    /// with a single toggle, which is why it ranks below the more-
+    /// permanent gates above: the UI should nudge the user toward the
+    /// fix rather than surfacing a more-alarming hardware story.
+    case appleIntelligenceDisabled = "apple_intelligence_disabled"
+
+    /// ML model assets are not currently resident. Transient by design;
+    /// the system is expected to recover without user action as the
+    /// model re-downloads / re-loads. Ranked last because it is the
+    /// softest signal of the five — nothing is structurally wrong.
+    case modelTemporarilyUnavailable = "model_temporarily_unavailable"
+
+    // MARK: - Derivation
 
     /// Derive an `AnalysisUnavailableReason` from an `AnalysisEligibility`
-    /// snapshot. Returns `nil` when the device is fully eligible. The
-    /// stub implementation ALWAYS returns nil — playhead-sueq will
-    /// replace this with the real per-field derivation ladder.
+    /// snapshot using the precedence ladder documented at the top of
+    /// this file: hardware > region > language > appleIntelligence >
+    /// model. Returns `nil` iff `eligibility.isFullyEligible` is true.
     ///
-    /// The call-site contract (reducer in `EpisodeSurfaceStatusReducer.swift`)
-    /// branches on `isFullyEligible` directly for the ineligible decision;
-    /// the return value of `derive(from:)` is plumbed into the output
-    /// struct purely as the "which reason won the ladder" signal, which
-    /// Phase 1.5 does not need yet.
+    /// This function is a pure static — same inputs always yield the
+    /// same output, no side effects, no logging. The reducer
+    /// (`episodeSurfaceStatus`) calls this once per reduction and
+    /// plumbs the result into the output struct.
     static func derive(from eligibility: AnalysisEligibility) -> AnalysisUnavailableReason? {
-        // TODO(playhead-sueq): fill in the per-field derivation ladder.
-        _ = eligibility
+        // Order of tests matches the declared precedence ladder. Short-
+        // circuit at the first false field; every subsequent `if` is
+        // implicitly guarded by the prior fields being true.
+        if !eligibility.hardwareSupported { return .hardwareUnsupported }
+        if !eligibility.regionSupported { return .regionUnsupported }
+        if !eligibility.languageSupported { return .languageUnsupported }
+        if !eligibility.appleIntelligenceEnabled { return .appleIntelligenceDisabled }
+        if !eligibility.modelAvailableNow { return .modelTemporarilyUnavailable }
+        // All gates pass — no reason to surface.
         return nil
     }
 }

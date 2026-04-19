@@ -39,9 +39,10 @@ import Foundation
 /// unavailability reason (`analysisUnavailableReason`).
 ///
 /// `Codable` is implemented so the snapshot test suite can render golden
-/// JSON fixtures without a bespoke encoder. The `AnalysisUnavailableReason`
-/// stub is currently always `nil`; when playhead-sueq lands we will
-/// extend the Codable surface to carry the enum's raw-value form.
+/// JSON fixtures without a bespoke encoder. `analysisUnavailableReason`
+/// is encoded under the snake-cased key `analysis_unavailable_reason`
+/// and is present only when the reducer produced a non-nil reason (i.e.
+/// the eligibility-blocks rule fired).
 struct EpisodeSurfaceStatus: Sendable, Hashable, Codable {
 
     /// Which UI state bucket this episode falls into. Drives row/tile
@@ -60,11 +61,13 @@ struct EpisodeSurfaceStatus: Sendable, Hashable, Codable {
     /// Per-device unavailability reason, populated only when
     /// `disposition == .unavailable`. `nil` in every other case.
     ///
-    /// Phase 1.5: always `nil` even in the unavailable disposition —
-    /// playhead-sueq is the bead that will populate this from the
-    /// `AnalysisEligibility` snapshot. The reducer still emits
-    /// `disposition = .unavailable` correctly; only the detail is
-    /// deferred.
+    /// Populated by the reducer via
+    /// `AnalysisUnavailableReason.derive(from:)` (see playhead-sueq).
+    /// The eligibility-blocks rule (Rule 1) short-circuits to the
+    /// `.unavailable` disposition and carries the derived reason; every
+    /// other rule emits `nil`. The runtime invariant
+    /// "analysisUnavailableReason non-nil ⇔ disposition == .unavailable"
+    /// is wired separately in playhead-ol05.
     let analysisUnavailableReason: AnalysisUnavailableReason?
 
     /// Playback-readiness signal for the current readiness anchor.
@@ -97,15 +100,17 @@ struct EpisodeSurfaceStatus: Sendable, Hashable, Codable {
 
     // MARK: - Codable
     //
-    // Hand-rolled to skip the `analysisUnavailableReason` field entirely
-    // in Phase 1.5 (the stub enum is not Codable — see file-level notes
-    // in `AnalysisUnavailableReason.swift`). When playhead-sueq lands,
-    // extend the keys below and plumb the value through.
+    // Hand-rolled so `analysisUnavailableReason` is emitted under the
+    // snake-cased key `analysis_unavailable_reason` and only when the
+    // reducer produced a non-nil value. `readinessAnchor` uses
+    // `encodeIfPresent` on the same grounds — the nil state is the
+    // common case and the key is elided to keep fixtures minimal.
 
     enum CodingKeys: String, CodingKey {
         case disposition
         case reason
         case hint
+        case analysisUnavailableReason = "analysis_unavailable_reason"
         case playbackReadiness
         case readinessAnchor
     }
@@ -115,9 +120,12 @@ struct EpisodeSurfaceStatus: Sendable, Hashable, Codable {
         self.disposition = try container.decode(SurfaceDisposition.self, forKey: .disposition)
         self.reason = try container.decode(SurfaceReason.self, forKey: .reason)
         self.hint = try container.decode(ResolutionHint.self, forKey: .hint)
+        self.analysisUnavailableReason = try container.decodeIfPresent(
+            AnalysisUnavailableReason.self,
+            forKey: .analysisUnavailableReason
+        )
         self.playbackReadiness = try container.decode(PlaybackReadiness.self, forKey: .playbackReadiness)
         self.readinessAnchor = try container.decodeIfPresent(TimeInterval.self, forKey: .readinessAnchor)
-        self.analysisUnavailableReason = nil
     }
 
     func encode(to encoder: Encoder) throws {
@@ -125,6 +133,7 @@ struct EpisodeSurfaceStatus: Sendable, Hashable, Codable {
         try container.encode(disposition, forKey: .disposition)
         try container.encode(reason, forKey: .reason)
         try container.encode(hint, forKey: .hint)
+        try container.encodeIfPresent(analysisUnavailableReason, forKey: .analysisUnavailableReason)
         try container.encode(playbackReadiness, forKey: .playbackReadiness)
         try container.encodeIfPresent(readinessAnchor, forKey: .readinessAnchor)
     }
