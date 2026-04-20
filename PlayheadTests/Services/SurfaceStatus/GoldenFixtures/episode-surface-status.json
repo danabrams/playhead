@@ -18,7 +18,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -26,7 +26,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/analysisCap\/queued\/coverageNil\/anchor42_5" : {
@@ -48,7 +48,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -56,7 +56,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/appForceQuit\/failed\/coverageNil\/anchor42_5" : {
@@ -78,7 +78,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -86,7 +86,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/appForceQuit\/queued\/coverageNil\/anchor42_5" : {
@@ -108,7 +108,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -116,7 +116,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/lowPowerMode\/failed\/coverageNil\/anchor42_5" : {
@@ -138,7 +138,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -146,7 +146,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/lowPowerMode\/queued\/coverageNil\/anchor42_5" : {
@@ -168,7 +168,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -176,7 +176,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/mediaCap\/failed\/coverageNil\/anchor42_5" : {
@@ -198,7 +198,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -206,7 +206,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/mediaCap\/queued\/coverageNil\/anchor42_5" : {
@@ -228,7 +228,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -236,7 +236,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/none\/failed\/coverageNil\/anchor42_5" : {
@@ -258,7 +258,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -266,7 +266,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/none\/queued\/coverageNil\/anchor42_5" : {
@@ -288,7 +288,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -296,7 +296,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/taskExpired\/failed\/coverageNil\/anchor42_5" : {
@@ -318,7 +318,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -326,7 +326,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/taskExpired\/queued\/coverageNil\/anchor42_5" : {
@@ -348,7 +348,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -356,7 +356,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/thermal\/failed\/coverageNil\/anchor42_5" : {
@@ -378,7 +378,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -386,7 +386,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/thermal\/queued\/coverageNil\/anchor42_5" : {
@@ -408,7 +408,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -416,7 +416,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/userCancelled\/failed\/coverageNil\/anchor42_5" : {
@@ -438,7 +438,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -446,7 +446,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/userCancelled\/queued\/coverageNil\/anchor42_5" : {
@@ -468,7 +468,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -476,7 +476,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/userPreempted\/failed\/coverageNil\/anchor42_5" : {
@@ -498,7 +498,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -506,7 +506,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/userPreempted\/queued\/coverageNil\/anchor42_5" : {
@@ -528,7 +528,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -536,7 +536,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/wifiRequired\/failed\/coverageNil\/anchor42_5" : {
@@ -558,7 +558,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -566,7 +566,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "aiDisabled\/wifiRequired\/queued\/coverageNil\/anchor42_5" : {
@@ -588,7 +588,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "analysis_unavailable"
   },
@@ -596,7 +596,7 @@
     "analysis_unavailable_reason" : "apple_intelligence_disabled",
     "disposition" : "unavailable",
     "hint" : "enable_apple_intelligence",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "analysis_unavailable"
   },
   "eligible\/analysisCap\/failed\/coverageNil\/anchor42_5" : {
@@ -615,14 +615,14 @@
   "eligible\/analysisCap\/failed\/coveragePresent\/anchor42_5" : {
     "disposition" : "failed",
     "hint" : "free_up_storage",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "storage_full"
   },
   "eligible\/analysisCap\/failed\/coveragePresent\/anchorNil" : {
     "disposition" : "failed",
     "hint" : "free_up_storage",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "storage_full"
   },
   "eligible\/analysisCap\/queued\/coverageNil\/anchor42_5" : {
@@ -641,14 +641,14 @@
   "eligible\/analysisCap\/queued\/coveragePresent\/anchor42_5" : {
     "disposition" : "failed",
     "hint" : "free_up_storage",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "storage_full"
   },
   "eligible\/analysisCap\/queued\/coveragePresent\/anchorNil" : {
     "disposition" : "failed",
     "hint" : "free_up_storage",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "storage_full"
   },
   "eligible\/appForceQuit\/failed\/coverageNil\/anchor42_5" : {
@@ -667,14 +667,14 @@
   "eligible\/appForceQuit\/failed\/coveragePresent\/anchor42_5" : {
     "disposition" : "paused",
     "hint" : "open_app_to_resume",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "resume_in_app"
   },
   "eligible\/appForceQuit\/failed\/coveragePresent\/anchorNil" : {
     "disposition" : "paused",
     "hint" : "open_app_to_resume",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "resume_in_app"
   },
   "eligible\/appForceQuit\/queued\/coverageNil\/anchor42_5" : {
@@ -693,14 +693,14 @@
   "eligible\/appForceQuit\/queued\/coveragePresent\/anchor42_5" : {
     "disposition" : "paused",
     "hint" : "open_app_to_resume",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "resume_in_app"
   },
   "eligible\/appForceQuit\/queued\/coveragePresent\/anchorNil" : {
     "disposition" : "paused",
     "hint" : "open_app_to_resume",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "resume_in_app"
   },
   "eligible\/lowPowerMode\/failed\/coverageNil\/anchor42_5" : {
@@ -719,14 +719,14 @@
   "eligible\/lowPowerMode\/failed\/coveragePresent\/anchor42_5" : {
     "disposition" : "paused",
     "hint" : "charge_device",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "power_limited"
   },
   "eligible\/lowPowerMode\/failed\/coveragePresent\/anchorNil" : {
     "disposition" : "paused",
     "hint" : "charge_device",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "power_limited"
   },
   "eligible\/lowPowerMode\/queued\/coverageNil\/anchor42_5" : {
@@ -745,14 +745,14 @@
   "eligible\/lowPowerMode\/queued\/coveragePresent\/anchor42_5" : {
     "disposition" : "paused",
     "hint" : "charge_device",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "power_limited"
   },
   "eligible\/lowPowerMode\/queued\/coveragePresent\/anchorNil" : {
     "disposition" : "paused",
     "hint" : "charge_device",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "power_limited"
   },
   "eligible\/mediaCap\/failed\/coverageNil\/anchor42_5" : {
@@ -771,14 +771,14 @@
   "eligible\/mediaCap\/failed\/coveragePresent\/anchor42_5" : {
     "disposition" : "failed",
     "hint" : "free_up_storage",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "storage_full"
   },
   "eligible\/mediaCap\/failed\/coveragePresent\/anchorNil" : {
     "disposition" : "failed",
     "hint" : "free_up_storage",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "storage_full"
   },
   "eligible\/mediaCap\/queued\/coverageNil\/anchor42_5" : {
@@ -797,14 +797,14 @@
   "eligible\/mediaCap\/queued\/coveragePresent\/anchor42_5" : {
     "disposition" : "failed",
     "hint" : "free_up_storage",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "storage_full"
   },
   "eligible\/mediaCap\/queued\/coveragePresent\/anchorNil" : {
     "disposition" : "failed",
     "hint" : "free_up_storage",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "storage_full"
   },
   "eligible\/none\/failed\/coverageNil\/anchor42_5" : {
@@ -823,14 +823,14 @@
   "eligible\/none\/failed\/coveragePresent\/anchor42_5" : {
     "disposition" : "queued",
     "hint" : "wait",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "waiting_for_time"
   },
   "eligible\/none\/failed\/coveragePresent\/anchorNil" : {
     "disposition" : "queued",
     "hint" : "wait",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "waiting_for_time"
   },
   "eligible\/none\/queued\/coverageNil\/anchor42_5" : {
@@ -849,14 +849,14 @@
   "eligible\/none\/queued\/coveragePresent\/anchor42_5" : {
     "disposition" : "queued",
     "hint" : "wait",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "waiting_for_time"
   },
   "eligible\/none\/queued\/coveragePresent\/anchorNil" : {
     "disposition" : "queued",
     "hint" : "wait",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "waiting_for_time"
   },
   "eligible\/taskExpired\/failed\/coverageNil\/anchor42_5" : {
@@ -875,14 +875,14 @@
   "eligible\/taskExpired\/failed\/coveragePresent\/anchor42_5" : {
     "disposition" : "failed",
     "hint" : "retry",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "couldnt_analyze"
   },
   "eligible\/taskExpired\/failed\/coveragePresent\/anchorNil" : {
     "disposition" : "failed",
     "hint" : "retry",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "couldnt_analyze"
   },
   "eligible\/taskExpired\/queued\/coverageNil\/anchor42_5" : {
@@ -901,14 +901,14 @@
   "eligible\/taskExpired\/queued\/coveragePresent\/anchor42_5" : {
     "disposition" : "queued",
     "hint" : "wait",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "waiting_for_time"
   },
   "eligible\/taskExpired\/queued\/coveragePresent\/anchorNil" : {
     "disposition" : "queued",
     "hint" : "wait",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "waiting_for_time"
   },
   "eligible\/thermal\/failed\/coverageNil\/anchor42_5" : {
@@ -927,14 +927,14 @@
   "eligible\/thermal\/failed\/coveragePresent\/anchor42_5" : {
     "disposition" : "paused",
     "hint" : "wait",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "phone_is_hot"
   },
   "eligible\/thermal\/failed\/coveragePresent\/anchorNil" : {
     "disposition" : "paused",
     "hint" : "wait",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "phone_is_hot"
   },
   "eligible\/thermal\/queued\/coverageNil\/anchor42_5" : {
@@ -953,14 +953,14 @@
   "eligible\/thermal\/queued\/coveragePresent\/anchor42_5" : {
     "disposition" : "paused",
     "hint" : "wait",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "phone_is_hot"
   },
   "eligible\/thermal\/queued\/coveragePresent\/anchorNil" : {
     "disposition" : "paused",
     "hint" : "wait",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "phone_is_hot"
   },
   "eligible\/userCancelled\/failed\/coverageNil\/anchor42_5" : {
@@ -979,14 +979,14 @@
   "eligible\/userCancelled\/failed\/coveragePresent\/anchor42_5" : {
     "disposition" : "cancelled",
     "hint" : "retry",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "cancelled"
   },
   "eligible\/userCancelled\/failed\/coveragePresent\/anchorNil" : {
     "disposition" : "cancelled",
     "hint" : "retry",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "cancelled"
   },
   "eligible\/userCancelled\/queued\/coverageNil\/anchor42_5" : {
@@ -1005,14 +1005,14 @@
   "eligible\/userCancelled\/queued\/coveragePresent\/anchor42_5" : {
     "disposition" : "cancelled",
     "hint" : "retry",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "cancelled"
   },
   "eligible\/userCancelled\/queued\/coveragePresent\/anchorNil" : {
     "disposition" : "cancelled",
     "hint" : "retry",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "cancelled"
   },
   "eligible\/userPreempted\/failed\/coverageNil\/anchor42_5" : {
@@ -1031,14 +1031,14 @@
   "eligible\/userPreempted\/failed\/coveragePresent\/anchor42_5" : {
     "disposition" : "cancelled",
     "hint" : "retry",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "cancelled"
   },
   "eligible\/userPreempted\/failed\/coveragePresent\/anchorNil" : {
     "disposition" : "cancelled",
     "hint" : "retry",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "cancelled"
   },
   "eligible\/userPreempted\/queued\/coverageNil\/anchor42_5" : {
@@ -1057,14 +1057,14 @@
   "eligible\/userPreempted\/queued\/coveragePresent\/anchor42_5" : {
     "disposition" : "cancelled",
     "hint" : "retry",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "cancelled"
   },
   "eligible\/userPreempted\/queued\/coveragePresent\/anchorNil" : {
     "disposition" : "cancelled",
     "hint" : "retry",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "cancelled"
   },
   "eligible\/wifiRequired\/failed\/coverageNil\/anchor42_5" : {
@@ -1083,14 +1083,14 @@
   "eligible\/wifiRequired\/failed\/coveragePresent\/anchor42_5" : {
     "disposition" : "paused",
     "hint" : "connect_to_wifi",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "waiting_for_network"
   },
   "eligible\/wifiRequired\/failed\/coveragePresent\/anchorNil" : {
     "disposition" : "paused",
     "hint" : "connect_to_wifi",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "waiting_for_network"
   },
   "eligible\/wifiRequired\/queued\/coverageNil\/anchor42_5" : {
@@ -1109,14 +1109,14 @@
   "eligible\/wifiRequired\/queued\/coveragePresent\/anchor42_5" : {
     "disposition" : "paused",
     "hint" : "connect_to_wifi",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "waiting_for_network"
   },
   "eligible\/wifiRequired\/queued\/coveragePresent\/anchorNil" : {
     "disposition" : "paused",
     "hint" : "connect_to_wifi",
-    "playbackReadiness" : "none",
+    "playbackReadiness" : "deferredOnly",
     "reason" : "waiting_for_network"
   }
 }

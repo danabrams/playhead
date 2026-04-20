@@ -208,9 +208,44 @@ struct SurfaceStatusFuzzTests {
         let cause = randomCause(using: &rng)
         let eligibility = randomEligibility(using: &rng)
         let state = randomState(using: &rng)
-        let coverage: CoverageSummary? = Bool.random(using: &rng)
-            ? CoverageSummary(hasAnyCoverage: Bool.random(using: &rng))
-            : nil
+        // playhead-cthe: CoverageSummary has real internal structure
+        // now. Randomize over four shapes so the fuzz covers every
+        // PlaybackReadiness case the derivation can return.
+        let coverage: CoverageSummary?
+        switch Int.random(in: 0..<4, using: &rng) {
+        case 0:
+            coverage = nil
+        case 1:
+            // Empty record → .none
+            coverage = CoverageSummary.empty(
+                modelVersion: "m1",
+                policyVersion: 1,
+                featureSchemaVersion: 1,
+                updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+            )
+        case 2:
+            // isComplete → .complete at any anchor. Single range
+            // covering an entire plausible episode length.
+            coverage = CoverageSummary(
+                coverageRanges: [0.0...3600.0],
+                isComplete: true,
+                modelVersion: "m1",
+                policyVersion: 1,
+                featureSchemaVersion: 1,
+                updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+            )
+        default:
+            // Partial, incomplete — yields .proximal at anchors inside
+            // the range, .deferredOnly otherwise.
+            coverage = CoverageSummary(
+                coverageRanges: [0.0...1800.0],
+                isComplete: false,
+                modelVersion: "m1",
+                policyVersion: 1,
+                featureSchemaVersion: 1,
+                updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+            )
+        }
         let anchor: TimeInterval? = Bool.random(using: &rng)
             ? TimeInterval.random(in: 0...3600, using: &rng)
             : nil

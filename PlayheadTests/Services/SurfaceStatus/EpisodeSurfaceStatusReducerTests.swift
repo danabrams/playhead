@@ -260,9 +260,14 @@ struct EpisodeSurfaceStatusReducerTests {
         #expect(out.playbackReadiness == .none)
     }
 
-    @Test("non-nil coverage currently still returns .none (Phase 1.5 stub)")
-    func nonNilCoverageStillNoneInStub() {
-        let coverage = CoverageSummary(hasAnyCoverage: true)
+    @Test("empty coverage with a non-nil record still returns .none")
+    func emptyCoverageRecordReturnsNone() {
+        let coverage = CoverageSummary.empty(
+            modelVersion: "m1",
+            policyVersion: 1,
+            featureSchemaVersion: 1,
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
         let out = episodeSurfaceStatus(
             state: Self.queuedState,
             cause: nil,
@@ -270,9 +275,8 @@ struct EpisodeSurfaceStatusReducerTests {
             coverage: coverage,
             readinessAnchor: nil
         )
-        // Phase 2 (playhead-cthe) will flip this assertion when the
-        // real CoverageSummary lands. Until then the stub always
-        // returns .none.
+        // playhead-cthe: an empty coverage record (no ranges,
+        // isComplete=false) derives to `.none` regardless of anchor.
         #expect(out.playbackReadiness == .none)
     }
 

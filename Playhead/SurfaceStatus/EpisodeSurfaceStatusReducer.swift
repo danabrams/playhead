@@ -118,7 +118,37 @@ private func _episodeSurfaceStatusCore(
 
     // Derived once up front so every branch below can consult the same
     // snapshot without re-evaluating CoverageSummary.
-    let readiness = coverage?.readiness(anchor: readinessAnchor) ?? .none
+    let readiness = derivePlaybackReadiness(
+        coverage: coverage,
+        anchor: readinessAnchor
+    )
+    // playhead-cthe: validate the derived (coverage, readiness) pair
+    // against the spec's two impossible-state assertions ("complete
+    // implies proximal" / "proximal requires firstCoveredOffset").
+    // Violations flow through the ol05 invariant channel (Tier-A
+    // precondition in DEBUG + Tier-B JSON Lines in every build) so the
+    // same audit stream that records taxonomy violations records
+    // coverage inconsistencies.
+    let coverageViolations = SurfaceStatusInvariants.violations(
+        coverage: coverage,
+        readiness: readiness
+    )
+    if !coverageViolations.isEmpty {
+        let coverageContext = SurfaceStateTransitionContext(
+            episodeIdHash: nil,
+            priorDisposition: nil,
+            newDisposition: .queued,
+            priorReason: nil,
+            newReason: .waitingForTime,
+            cause: cause,
+            eligibilitySnapshot: eligibility
+        )
+        invariantLogger?.recordViolations(
+            coverageViolations,
+            context: coverageContext
+        )
+        SurfaceStatusInvariants.enforce(coverageViolations)
+    }
     let unavailableReason = AnalysisUnavailableReason.derive(from: eligibility)
 
     // MARK: Rule 1 — eligibility-blocks

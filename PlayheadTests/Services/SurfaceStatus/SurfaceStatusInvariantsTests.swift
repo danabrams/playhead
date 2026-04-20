@@ -247,6 +247,134 @@ struct SurfaceStatusInvariantsTests {
         #expect(violations.count >= 1)
     }
 
+    // MARK: - Coverage / readiness invariants (playhead-cthe)
+
+    /// Build a canonical CoverageSummary for the invariant tests.
+    private static func makeCoverage(
+        ranges: [ClosedRange<TimeInterval>],
+        isComplete: Bool
+    ) -> CoverageSummary {
+        CoverageSummary(
+            coverageRanges: ranges,
+            isComplete: isComplete,
+            modelVersion: "m1",
+            policyVersion: 1,
+            featureSchemaVersion: 1,
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+    }
+
+    @Test("cthe Invariant A — .complete with nil coverage IS flagged")
+    func ctheCompleteWithNilCoverageFlagged() {
+        let violations = SurfaceStatusInvariants.violations(
+            coverage: nil,
+            readiness: .complete
+        )
+        let codes = violations.map(\.code)
+        #expect(codes.contains(.completeReadinessMissingCoverage))
+    }
+
+    @Test("cthe Invariant A — .complete with isComplete=false IS flagged")
+    func ctheCompleteWithIncompleteCoverageFlagged() {
+        let coverage = Self.makeCoverage(
+            ranges: [0.0...1000.0],
+            isComplete: false
+        )
+        let violations = SurfaceStatusInvariants.violations(
+            coverage: coverage,
+            readiness: .complete
+        )
+        let codes = violations.map(\.code)
+        #expect(codes.contains(.completeReadinessMissingCoverage))
+    }
+
+    @Test("cthe Invariant A — .complete with isComplete=true AND non-nil first offset does NOT flag")
+    func ctheCompleteWithValidCoverageValid() {
+        let coverage = Self.makeCoverage(
+            ranges: [0.0...3600.0],
+            isComplete: true
+        )
+        let violations = SurfaceStatusInvariants.violations(
+            coverage: coverage,
+            readiness: .complete
+        )
+        #expect(violations.isEmpty)
+    }
+
+    @Test("cthe Invariant B — .proximal with nil coverage IS flagged")
+    func ctheProximalWithNilCoverageFlagged() {
+        let violations = SurfaceStatusInvariants.violations(
+            coverage: nil,
+            readiness: .proximal
+        )
+        let codes = violations.map(\.code)
+        #expect(codes.contains(.proximalReadinessMissingFirstOffset))
+    }
+
+    @Test("cthe Invariant B — .proximal with empty coverage (nil first offset) IS flagged")
+    func ctheProximalWithEmptyCoverageFlagged() {
+        let coverage = CoverageSummary.empty(
+            modelVersion: "m1",
+            policyVersion: 1,
+            featureSchemaVersion: 1
+        )
+        #expect(coverage.firstCoveredOffset == nil)
+        let violations = SurfaceStatusInvariants.violations(
+            coverage: coverage,
+            readiness: .proximal
+        )
+        let codes = violations.map(\.code)
+        #expect(codes.contains(.proximalReadinessMissingFirstOffset))
+    }
+
+    @Test("cthe Invariant B — .proximal with non-empty coverage does NOT flag")
+    func ctheProximalWithValidCoverageValid() {
+        let coverage = Self.makeCoverage(
+            ranges: [0.0...1000.0],
+            isComplete: false
+        )
+        let violations = SurfaceStatusInvariants.violations(
+            coverage: coverage,
+            readiness: .proximal
+        )
+        #expect(violations.isEmpty)
+    }
+
+    @Test("cthe — .none readiness never produces coverage violations")
+    func ctheNoneReadinessNeverFlags() {
+        // Full cartesian: nil + empty + non-empty coverage all produce
+        // zero violations when readiness is `.none`.
+        let empty = CoverageSummary.empty(
+            modelVersion: "m1",
+            policyVersion: 1,
+            featureSchemaVersion: 1
+        )
+        let nonEmpty = Self.makeCoverage(
+            ranges: [0.0...1000.0],
+            isComplete: false
+        )
+        for coverage: CoverageSummary? in [nil, empty, nonEmpty] {
+            let violations = SurfaceStatusInvariants.violations(
+                coverage: coverage,
+                readiness: .none
+            )
+            #expect(violations.isEmpty)
+        }
+    }
+
+    @Test("cthe — .deferredOnly readiness never produces coverage violations")
+    func ctheDeferredOnlyReadinessNeverFlags() {
+        let nonEmpty = Self.makeCoverage(
+            ranges: [0.0...1000.0],
+            isComplete: false
+        )
+        let violations = SurfaceStatusInvariants.violations(
+            coverage: nonEmpty,
+            readiness: .deferredOnly
+        )
+        #expect(violations.isEmpty)
+    }
+
     // MARK: - InvariantViolation shape
 
     @Test("InvariantViolation.Code roundtrips through Codable")
