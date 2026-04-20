@@ -327,12 +327,21 @@ extension EnvironmentValues {
 ///     Sourced from the app's bundle short version, matching what
 ///     `DebugDiagnosticsHatch.appVersionString()` uses for the
 ///     default-bundle `app_version` field.
-///   - `transcriptModelVersion` — `TranscriptEngineService.Config`
-///     default (`"apple-speech-v1"` today).
-///   - `adDetectionModelVersion` — `AdDetectionService` default id.
-///   - `policyVersion`         — `SkipOrchestrator.Config` default
-///     (`"skip-policy-v1"` today).
-///   - `featureSchemaVersion`  — `FeatureWindow` schema version.
+///   - `transcriptModelVersion` — read live from
+///     `TranscriptEngineServiceConfig.default.modelVersion` so Diagnostics
+///     cannot drift from what transcript chunks are tagged with.
+///   - `adDetectionModelVersion` — read live from
+///     `AdDetectionService.hotPathReplayModelVersion`, the same symbol
+///     used to tag synthetic replay transcript chunks.
+///   - `policyVersion`         — read live from
+///     `SkipPolicyConfig.default.policyVersion` so Diagnostics mirrors
+///     the idempotency-key version the SkipOrchestrator actually emits.
+///   - `featureSchemaVersion`  — `SharedVersionConstants.featureSchemaVersion`
+///     (no single-service config home — see that file for rationale).
+///
+/// I1 policy (playhead-l274 code review): every string here must be
+/// sourced from the live service/shared constant. Never duplicate the
+/// literal — `SettingsL274Tests` asserts cross-source agreement.
 struct DiagnosticsVersions: Sendable, Equatable {
     let pipelineVersion: String
     let transcriptModelVersion: String
@@ -340,17 +349,17 @@ struct DiagnosticsVersions: Sendable, Equatable {
     let policyVersion: String
     let featureSchemaVersion: String
 
-    /// Default resolver wired from `Bundle.main` and the configured
-    /// service defaults. Call sites that want a deterministic snapshot
-    /// (tests, snapshot-style exports) construct the struct directly.
+    /// Default resolver wired from `Bundle.main` and the live service
+    /// defaults. Call sites that want a deterministic snapshot (tests,
+    /// snapshot-style exports) construct the struct directly.
     static func current(bundle: Bundle = .main) -> DiagnosticsVersions {
         let short = (bundle.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "unknown"
         return DiagnosticsVersions(
             pipelineVersion: short,
-            transcriptModelVersion: "apple-speech-v1",
-            adDetectionModelVersion: "hot-path-replay",
-            policyVersion: "skip-policy-v1",
-            featureSchemaVersion: "1"
+            transcriptModelVersion: TranscriptEngineServiceConfig.default.modelVersion,
+            adDetectionModelVersion: AdDetectionService.hotPathReplayModelVersion,
+            policyVersion: SkipPolicyConfig.default.policyVersion,
+            featureSchemaVersion: SharedVersionConstants.featureSchemaVersionString
         )
     }
 }

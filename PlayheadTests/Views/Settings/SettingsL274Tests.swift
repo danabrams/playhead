@@ -652,17 +652,41 @@ struct DiagnosticsVersionsTests {
         #expect(!v.featureSchemaVersion.isEmpty)
     }
 
+    // MARK: - I1 cross-source agreement (playhead-l274 code review)
+    //
+    // Each Diagnostics version column must read from the live
+    // service-owned symbol, not a duplicated literal. The asserts below
+    // fail LOUDLY when a service bumps its version but Diagnostics
+    // silently keeps the old copy — the exact drift I1 locked in.
+
     @Test func transcriptModelMatchesTranscriptEngineServiceDefault() {
-        // Belt-and-braces: the version surfaced in Diagnostics must
-        // match the default configured in TranscriptEngineService
-        // (`apple-speech-v1`). Drift would mean the user sees a version
-        // string that no chunk was ever tagged with.
+        // The version surfaced in Diagnostics must equal the default
+        // configured in TranscriptEngineServiceConfig (the same symbol
+        // that tags every produced chunk).
         let v = DiagnosticsVersions.current()
-        #expect(v.transcriptModelVersion == "apple-speech-v1")
+        #expect(v.transcriptModelVersion == TranscriptEngineServiceConfig.default.modelVersion)
     }
 
     @Test func policyVersionMatchesSkipOrchestratorDefault() {
+        // Diagnostics must read from `SkipPolicyConfig.default` so the
+        // idempotency-key version the UI shows matches what
+        // `SkipOrchestrator` stamps on skip decisions.
         let v = DiagnosticsVersions.current()
-        #expect(v.policyVersion == "skip-policy-v1")
+        #expect(v.policyVersion == SkipPolicyConfig.default.policyVersion)
+    }
+
+    @Test func adDetectionModelMatchesAdDetectionServiceSymbol() {
+        // Diagnostics must surface the same constant AdDetectionService
+        // uses when tagging synthetic replay chunks.
+        let v = DiagnosticsVersions.current()
+        #expect(v.adDetectionModelVersion == AdDetectionService.hotPathReplayModelVersion)
+    }
+
+    @Test func featureSchemaVersionMatchesSharedConstant() {
+        // No service owns a `featureSchemaVersion` default — the canonical
+        // value lives in `SharedVersionConstants`, which CoverageSummary
+        // call sites are migrated to read from.
+        let v = DiagnosticsVersions.current()
+        #expect(v.featureSchemaVersion == SharedVersionConstants.featureSchemaVersionString)
     }
 }
