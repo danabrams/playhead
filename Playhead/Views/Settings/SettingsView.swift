@@ -148,6 +148,18 @@ struct SettingsView: View {
     /// relocation to SwiftData is a single read-path change.
     private var keepAnalysisKey: String { "SettingsL274.storage.keepAnalysisWhenRemoving" }
 
+    /// Single shared `HH:mm:ss` formatter for the Diagnostics scheduler
+    /// rows. Hoisted to a `static let` (per code-review I2) so the
+    /// `ForEach` body does not allocate a fresh formatter on every row
+    /// render — a read-only DateFormatter is safe to share across
+    /// threads per Apple's documented thread-safety guarantees for
+    /// NSDateFormatter.
+    static let schedulerEventTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
     /// playhead-l274: hydrate the scheduler-events tail. Failures are
     /// swallowed — the Diagnostics row renders empty rather than erroring
     /// in a support-surface panel.
@@ -1173,16 +1185,11 @@ private extension SettingsView {
     @ViewBuilder
     func schedulerEventRow(_ entry: WorkJournalEntry) -> some View {
         let time = Date(timeIntervalSince1970: entry.timestamp)
-        let formatter: DateFormatter = {
-            let f = DateFormatter()
-            f.dateFormat = "HH:mm:ss"
-            return f
-        }()
         let hashedEpisode = String(entry.episodeId.prefix(8))
         let missCause = entry.cause?.rawValue ?? "-"
         VStack(alignment: .leading, spacing: 2) {
             HStack {
-                Text(formatter.string(from: time))
+                Text(Self.schedulerEventTimeFormatter.string(from: time))
                     .font(AppTypography.timestamp)
                     .foregroundStyle(AppColors.textTertiary)
                 Text(entry.eventType.rawValue)
