@@ -85,12 +85,26 @@ struct SettingsView: View {
                         playbackSection(prefs)
                         // playhead-l274: new Phase 2 groups inserted after
                         // Playback per the UI design doc §F.
+                        //
+                        // I4 (code-review): SwiftUI's `proxy.scrollTo(id, anchor:)`
+                        // on a `Section` directly inside a `List` is known to
+                        // be unreliable because the SwiftUI runtime associates
+                        // the ID with the Section's first row rather than its
+                        // header — anchoring with `.top` lands inside the
+                        // section header. The deterministic pattern is to
+                        // attach the route ID to a zero-height invisible
+                        // anchor row that lives at the top of each section.
+                        // `proxy.scrollTo(anchorId, anchor: .top)` then lands
+                        // exactly at the section's first content row, which
+                        // is what the deep-link UX expects (see
+                        // `SettingsRouterDeepLinkTests.freeUpSpaceLandsOnStorage`).
+                        // Real-device smoke-test is still the definitive
+                        // check; the anchor row is the most-portable
+                        // fallback if a future iOS revision changes List
+                        // section anchoring semantics.
                         downloadsSection
-                            .id(SettingsRoute.downloads.anchorId)
                         storageSettingsSection
-                            .id(SettingsRoute.storage.anchorId)
                         diagnosticsSection
-                            .id(SettingsRoute.diagnostics.anchorId)
                         backgroundSection(prefs)
                         storageSection
                         purchasesSection
@@ -901,6 +915,7 @@ private extension SettingsView {
 
     var downloadsSection: some View {
         Section {
+            scrollAnchor(SettingsRoute.downloads.anchorId)
             // Auto-download on subscribe
             HStack {
                 Text(SettingsL274Copy.autoDownloadOnSubscribeLabel)
@@ -984,6 +999,7 @@ private extension SettingsView {
 
     var storageSettingsSection: some View {
         Section {
+            scrollAnchor(SettingsRoute.storage.anchorId)
             // Episode storage cap picker
             HStack {
                 Text(SettingsL274Copy.episodeStorageCapLabel)
@@ -1096,6 +1112,7 @@ private extension SettingsView {
 
     var diagnosticsSection: some View {
         Section {
+            scrollAnchor(SettingsRoute.diagnostics.anchorId)
             let versions = DiagnosticsVersions.current()
             // Pipeline / model / policy / feature-schema versions
             diagnosticsKV(SettingsL274Copy.pipelineVersionLabel, versions.pipelineVersion)
@@ -1242,6 +1259,26 @@ private extension SettingsView {
             .font(AppTypography.sans(size: 13, weight: .semibold))
             .foregroundStyle(AppColors.textSecondary)
             .textCase(nil)
+    }
+
+    /// playhead-l274 I4 (code-review): zero-height invisible List row
+    /// used as a deterministic deep-link target for `proxy.scrollTo(id,
+    /// anchor: .top)`. SwiftUI's List loses the section-level `.id()`
+    /// modifier when the section's first row's anchor is requested,
+    /// because the runtime associates the ID with the first row's
+    /// position rather than the header. Attaching the ID to a
+    /// dedicated, hidden row at the top of the section keeps the scroll
+    /// target stable across List layout passes and matches the pattern
+    /// used elsewhere in SwiftUI deep-link surfaces.
+    @ViewBuilder
+    func scrollAnchor(_ id: String) -> some View {
+        Color.clear
+            .frame(height: 0)
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets())
+            .listRowSeparator(.hidden)
+            .accessibilityHidden(true)
+            .id(id)
     }
 }
 
