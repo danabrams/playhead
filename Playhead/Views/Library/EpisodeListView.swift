@@ -23,6 +23,17 @@ struct EpisodeListView: View {
     @State private var navigateToNowPlaying = false
     @State private var selectedEpisode: Episode?
 
+    /// Tracks whether the user has already dismissed the first-✓
+    /// tooltip. Persisted via UserDefaults; see
+    /// `OnboardingFlags.firstCheckmarkTooltipSeenKey`.
+    @AppStorage(OnboardingFlags.firstCheckmarkTooltipSeenKey)
+    private var hasSeenFirstCheckmarkTooltip: Bool = false
+
+    /// Drives the tooltip overlay visibility. Separate from the
+    /// persisted flag so a fade-out animation can run before the
+    /// tooltip is removed from the view hierarchy.
+    @State private var showsFirstCheckmarkTooltip: Bool = false
+
     init(podcast: Podcast, hapticPlayer: any HapticPlaying = SystemHapticPlayer()) {
         self.podcast = podcast
         self.hapticPlayer = hapticPlayer
@@ -51,12 +62,59 @@ struct EpisodeListView: View {
             } else {
                 episodeList
             }
+
+            if showsFirstCheckmarkTooltip {
+                FirstCheckmarkTooltipView(onDismiss: dismissFirstCheckmarkTooltip)
+                    .zIndex(1)
+            }
         }
+        .animation(Motion.standard, value: showsFirstCheckmarkTooltip)
         .navigationTitle(podcast.title)
         .navigationBarTitleDisplayMode(.large)
         .fullScreenCover(isPresented: $navigateToNowPlaying) {
             NowPlayingView(runtime: runtime)
         }
+        .onAppear {
+            evaluateFirstCheckmarkTooltip()
+        }
+        .onChange(of: anyEpisodeHasAnalysis) { _, _ in
+            evaluateFirstCheckmarkTooltip()
+        }
+    }
+
+    // MARK: - First ✓ Tooltip
+
+    /// True iff at least one episode in the current list has a ready
+    /// checkmark badge (`analysisSummary.hasAnalysis == true`). Drives
+    /// the first-✓ tooltip trigger.
+    private var anyEpisodeHasAnalysis: Bool {
+        episodes.contains { $0.analysisSummary?.hasAnalysis == true }
+    }
+
+    /// Shows the tooltip on list appear (and on state changes) if the
+    /// user has never dismissed it and a ✓ badge is visible. The
+    /// boolean gate lives in `OnboardingGating` (pure) for testability;
+    /// the `showsFirstCheckmarkTooltip` bookkeeping stays here because
+    /// it is SwiftUI view state.
+    private func evaluateFirstCheckmarkTooltip() {
+        if hasSeenFirstCheckmarkTooltip {
+            if showsFirstCheckmarkTooltip { showsFirstCheckmarkTooltip = false }
+            return
+        }
+        let shouldShow = OnboardingGating.shouldPresentFirstCheckmarkTooltip(
+            hasSeenFirstCheckmarkTooltip: hasSeenFirstCheckmarkTooltip,
+            anyEpisodeHasAnalysis: anyEpisodeHasAnalysis
+        )
+        if shouldShow, !showsFirstCheckmarkTooltip {
+            showsFirstCheckmarkTooltip = true
+        }
+    }
+
+    /// Persists the dismissal and hides the overlay. Called from the
+    /// tooltip's `onDismiss` callback.
+    private func dismissFirstCheckmarkTooltip() {
+        hasSeenFirstCheckmarkTooltip = true
+        showsFirstCheckmarkTooltip = false
     }
 }
 

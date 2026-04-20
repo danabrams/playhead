@@ -182,8 +182,12 @@ struct PlayheadApp: App {
 private struct RootView: View {
 
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
+    @AppStorage(OnboardingFlags.firstSubscriptionOnboardingSeenKey)
+    private var hasSeenFirstSubscriptionOnboarding = false
     @Environment(PlayheadRuntime.self) private var runtime
+    @Query private var podcasts: [Podcast]
     @State private var showSplash = true
+    @State private var presentFirstSubscriptionOnboarding = false
 
     var body: some View {
         Group {
@@ -203,10 +207,33 @@ private struct RootView: View {
                     withAnimation(.easeOut(duration: 0.4).delay(0.3)) {
                         showSplash = false
                     }
+                    evaluateFirstSubscriptionOnboarding()
+                }
+                .onChange(of: podcasts.count) { _, _ in
+                    evaluateFirstSubscriptionOnboarding()
+                }
+                .fullScreenCover(isPresented: $presentFirstSubscriptionOnboarding) {
+                    FirstSubscriptionOnboardingView(onDismiss: {
+                        presentFirstSubscriptionOnboarding = false
+                    })
                 }
             } else {
                 OnboardingView()
             }
+        }
+    }
+
+    /// Show the one-screen first-subscription onboarding if (a) the user
+    /// has completed first-launch onboarding, (b) at least one podcast
+    /// is subscribed, and (c) the user has not yet tapped "Got it".
+    /// Gate logic lives in `OnboardingGating` (pure) for testability.
+    private func evaluateFirstSubscriptionOnboarding() {
+        if OnboardingGating.shouldPresentFirstSubscriptionOnboarding(
+            hasCompletedOnboarding: hasCompletedOnboarding,
+            hasSeenFirstSubscriptionOnboarding: hasSeenFirstSubscriptionOnboarding,
+            podcastCount: podcasts.count
+        ) {
+            presentFirstSubscriptionOnboarding = true
         }
     }
 
