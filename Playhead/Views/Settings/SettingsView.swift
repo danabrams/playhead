@@ -46,45 +46,115 @@ struct SettingsView: View {
     var assetProvider: AssetProvider?
     var entitlementManager: EntitlementManager?
 
+    /// playhead-l274: optional deep-link router. When non-nil, the view
+    /// scrolls to the matching group anchor on appearance or whenever
+    /// `pending` changes (e.g. hkg8 "Free up space" tap). Kept optional
+    /// so existing call sites (preview, tests) continue to compile.
+    var router: SettingsRouter?
+
+    /// playhead-l274: Downloads group state, loaded from UserDefaults.
+    @State private var downloadsSettings: DownloadsSettings = .init()
+
+    /// playhead-l274: Storage cap picker selection, derived from the
+    /// persisted `StorageBudgetSettings.mediaCapBytes` (playhead-h7r).
+    @State private var episodeStorageCap: EpisodeStorageCap = .defaultValue
+
+    /// playhead-l274: "Keep analysis when removing downloads" toggle.
+    /// Persisted via UserDefaults under a dedicated key.
+    @State private var keepAnalysisWhenRemoving: Bool = false
+
+    /// playhead-l274: placeholder feature-flag toggles. Defaults OFF per
+    /// spec; backing storage lands when the flag-implementation beads
+    /// (xr3t, zx6i, 2hpn, 43ed) close.
+    @State private var featureFlagValues: [String: Bool] = FeatureFlagPlaceholders.defaultValues
+
+    /// playhead-l274: scheduler-event tail (up to 50 entries) for the
+    /// Diagnostics group. Loaded lazily on section appearance.
+    @State private var schedulerEvents: [WorkJournalEntry] = []
+
     var body: some View {
         NavigationStack {
-            List {
-                if let prefs = preferences {
-                    modelSection
-                    adSkipSection(prefs)
-                    playbackSection(prefs)
-                    backgroundSection(prefs)
-                    storageSection
-                    purchasesSection
-                    #if DEBUG
-                    debugSection
-                    sendDiagnosticsSection
-                    fmFeedbackSection
-                    #endif
-                }
-            }
-            .listStyle(.insetGrouped)
-            .scrollContentBackground(.hidden)
-            .background(AppColors.background)
-            .navigationTitle("Settings")
-            .navigationBarTitleDisplayMode(.large)
-            .onAppear {
-                if preferences == nil {
-                    if let existing = allPreferences.first {
-                        preferences = existing
-                    } else {
-                        let fresh = UserPreferences()
-                        modelContext.insert(fresh)
-                        preferences = fresh
+            ScrollViewReader { proxy in
+                List {
+                    if let prefs = preferences {
+                        modelSection
+                        adSkipSection(prefs)
+                        playbackSection(prefs)
+                        // playhead-l274: new Phase 2 groups inserted after
+                        // Playback per the UI design doc §F.
+                        downloadsSection
+                            .id(SettingsRoute.downloads.anchorId)
+                        storageSettingsSection
+                            .id(SettingsRoute.storage.anchorId)
+                        diagnosticsSection
+                            .id(SettingsRoute.diagnostics.anchorId)
+                        backgroundSection(prefs)
+                        storageSection
+                        purchasesSection
+                        #if DEBUG
+                        debugSection
+                        sendDiagnosticsSection
+                        fmFeedbackSection
+                        #endif
                     }
                 }
-            }
-            .task {
-                await viewModel.computeStorageSizes()
-                if let inventory {
-                    await viewModel.refreshModelStatuses(inventory: inventory)
+                .listStyle(.insetGrouped)
+                .scrollContentBackground(.hidden)
+                .background(AppColors.background)
+                .navigationTitle("Settings")
+                .navigationBarTitleDisplayMode(.large)
+                .onAppear {
+                    if preferences == nil {
+                        if let existing = allPreferences.first {
+                            preferences = existing
+                        } else {
+                            let fresh = UserPreferences()
+                            modelContext.insert(fresh)
+                            preferences = fresh
+                        }
+                    }
+                    // playhead-l274: load persisted l274 state.
+                    downloadsSettings = DownloadsSettings.load()
+                    episodeStorageCap = EpisodeStorageCap.from(
+                        bytes: StorageBudgetSettings.load().mediaCapBytes
+                    )
+                    keepAnalysisWhenRemoving = UserDefaults.standard.bool(
+                        forKey: keepAnalysisKey
+                    )
+                }
+                .task {
+                    await viewModel.computeStorageSizes()
+                    if let inventory {
+                        await viewModel.refreshModelStatuses(inventory: inventory)
+                    }
+                    await refreshSchedulerEvents()
+                }
+                .onChange(of: router?.pending) { _, newRoute in
+                    guard let newRoute else { return }
+                    withAnimation {
+                        proxy.scrollTo(newRoute.anchorId, anchor: .top)
+                    }
+                    router?.consume()
                 }
             }
+        }
+    }
+
+    /// playhead-l274: persistence key for the "Keep analysis when
+    /// removing downloads" toggle. Stored as a plain Bool so a future
+    /// relocation to SwiftData is a single read-path change.
+    private var keepAnalysisKey: String { "SettingsL274.storage.keepAnalysisWhenRemoving" }
+
+    /// playhead-l274: hydrate the scheduler-events tail. Failures are
+    /// swallowed — the Diagnostics row renders empty rather than erroring
+    /// in a support-surface panel.
+    @MainActor
+    private func refreshSchedulerEvents() async {
+        do {
+            schedulerEvents = try await runtime.analysisStore
+                .fetchRecentWorkJournalEntries(limit: 50)
+        } catch {
+            schedulerEvents = []
         }
     }
 
@@ -809,6 +879,344 @@ private extension SettingsView {
     }
 }
 #endif
+
+// MARK: - playhead-l274: Downloads Section
+
+private extension SettingsView {
+
+    var downloadsSection: some View {
+        Section {
+            // Auto-download on subscribe
+            HStack {
+                Text(SettingsL274Copy.autoDownloadOnSubscribeLabel)
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textPrimary)
+                Spacer()
+                Picker("", selection: Binding(
+                    get: { downloadsSettings.autoDownloadOnSubscribe },
+                    set: { newValue in
+                        downloadsSettings.autoDownloadOnSubscribe = newValue
+                        downloadsSettings.save()
+                    }
+                )) {
+                    ForEach(AutoDownloadOnSubscribe.allCases, id: \.self) { option in
+                        Text(option.displayLabel).tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+                .tint(AppColors.accent)
+            }
+            .listRowBackground(AppColors.surface)
+            .accessibilityLabel(SettingsL274Copy.autoDownloadOnSubscribeLabel)
+            .accessibilityValue(downloadsSettings.autoDownloadOnSubscribe.displayLabel)
+
+            // Download over cellular
+            HStack {
+                Text(SettingsL274Copy.downloadOverCellularLabel)
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textPrimary)
+                Spacer()
+                Picker("", selection: Binding(
+                    get: { downloadsSettings.cellularPolicy },
+                    set: { newValue in
+                        downloadsSettings.cellularPolicy = newValue
+                        downloadsSettings.save()
+                    }
+                )) {
+                    ForEach(CellularPolicy.allCases, id: \.self) { option in
+                        Text(option.displayLabel).tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+                .tint(AppColors.accent)
+            }
+            .listRowBackground(AppColors.surface)
+            .accessibilityLabel(SettingsL274Copy.downloadOverCellularLabel)
+            .accessibilityValue(downloadsSettings.cellularPolicy.displayLabel)
+
+            // "Download Next N" default count
+            HStack {
+                Text(SettingsL274Copy.downloadNextDefaultCountLabel)
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textPrimary)
+                Spacer()
+                Picker("", selection: Binding(
+                    get: { downloadsSettings.downloadNextDefaultCount },
+                    set: { newValue in
+                        downloadsSettings.downloadNextDefaultCount = newValue
+                        downloadsSettings.save()
+                    }
+                )) {
+                    ForEach(DownloadNextDefaultCount.allCases, id: \.self) { option in
+                        Text(option.displayLabel).tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+                .tint(AppColors.accent)
+            }
+            .listRowBackground(AppColors.surface)
+            .accessibilityLabel(SettingsL274Copy.downloadNextDefaultCountLabel)
+            .accessibilityValue(downloadsSettings.downloadNextDefaultCount.displayLabel)
+        } header: {
+            sectionHeader(SettingsL274Copy.downloadsHeader)
+        }
+    }
+}
+
+// MARK: - playhead-l274: Storage Section
+
+private extension SettingsView {
+
+    var storageSettingsSection: some View {
+        Section {
+            // Episode storage cap picker
+            HStack {
+                Text(SettingsL274Copy.episodeStorageCapLabel)
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textPrimary)
+                Spacer()
+                Picker("", selection: Binding(
+                    get: { episodeStorageCap },
+                    set: { newValue in
+                        episodeStorageCap = newValue
+                        // Persist to StorageBudgetSettings so the next
+                        // admission-control read observes the new cap
+                        // (playhead-h7r). No relaunch required — the
+                        // admission path reads `.load()` on every check.
+                        var budget = StorageBudgetSettings.load()
+                        budget.mediaCapBytes = newValue.bytes
+                        budget.save()
+                    }
+                )) {
+                    ForEach(EpisodeStorageCap.allCases, id: \.self) { option in
+                        Text(option.displayLabel).tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+                .tint(AppColors.accent)
+            }
+            .listRowBackground(AppColors.surface)
+            .accessibilityLabel(SettingsL274Copy.episodeStorageCapLabel)
+            .accessibilityValue(episodeStorageCap.displayLabel)
+
+            // Current usage bar (media usage vs. cap)
+            storageUsageRow
+
+            // Keep-analysis toggle with sub-line
+            VStack(alignment: .leading, spacing: Spacing.xxs) {
+                Toggle(isOn: Binding(
+                    get: { keepAnalysisWhenRemoving },
+                    set: { newValue in
+                        keepAnalysisWhenRemoving = newValue
+                        UserDefaults.standard.set(newValue, forKey: keepAnalysisKey)
+                    }
+                )) {
+                    Text(SettingsL274Copy.keepAnalysisToggleLabel)
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.textPrimary)
+                }
+                .tint(AppColors.accent)
+
+                Text(SettingsL274Copy.keepAnalysisSubLine)
+                    .font(AppTypography.caption)
+                    .foregroundStyle(AppColors.textTertiary)
+            }
+            .listRowBackground(AppColors.surface)
+
+            // Analysis cap display (read-only)
+            HStack {
+                Text(SettingsL274Copy.analysisCapLabel)
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textPrimary)
+                Spacer()
+                Text(SettingsViewModel.formattedSize(analysisCapBytes))
+                    .font(AppTypography.timestamp)
+                    .foregroundStyle(AppColors.textTertiary)
+            }
+            .listRowBackground(AppColors.surface)
+            .accessibilityElement(children: .combine)
+
+            // Auto-evict policy line (read-only)
+            Text(SettingsL274Copy.autoEvictPolicyLine)
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.textTertiary)
+                .listRowBackground(AppColors.surface)
+        } header: {
+            sectionHeader(SettingsL274Copy.storageHeader)
+        }
+    }
+
+    @ViewBuilder
+    var storageUsageRow: some View {
+        let cap = episodeStorageCap.bytes
+        let used = viewModel.cachedAudioSize
+        let fraction: Double = {
+            guard cap > 0, cap != Int64.max else { return 0 }
+            return max(0, min(1, Double(used) / Double(cap)))
+        }()
+
+        VStack(alignment: .leading, spacing: Spacing.xxs) {
+            HStack {
+                Text(SettingsL274Copy.currentUsageLabel)
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textPrimary)
+                Spacer()
+                Text("\(SettingsViewModel.formattedSize(used)) / \(episodeStorageCap.displayLabel)")
+                    .font(AppTypography.timestamp)
+                    .foregroundStyle(AppColors.textTertiary)
+            }
+            if episodeStorageCap != .unlimited {
+                ProgressView(value: fraction)
+                    .tint(AppColors.accent)
+            }
+        }
+        .listRowBackground(AppColors.surface)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: - playhead-l274: Diagnostics Section
+
+private extension SettingsView {
+
+    var diagnosticsSection: some View {
+        Section {
+            let versions = DiagnosticsVersions.current()
+            // Pipeline / model / policy / feature-schema versions
+            diagnosticsKV(SettingsL274Copy.pipelineVersionLabel, versions.pipelineVersion)
+            diagnosticsKV(SettingsL274Copy.modelVersionsLabel, "transcript=\(versions.transcriptModelVersion), ad=\(versions.adDetectionModelVersion)")
+            diagnosticsKV(SettingsL274Copy.policyVersionLabel, versions.policyVersion)
+            diagnosticsKV(SettingsL274Copy.featureSchemaVersionLabel, versions.featureSchemaVersion)
+
+            // Last 50 scheduler events
+            DisclosureGroup(SettingsL274Copy.schedulerEventsLabel) {
+                if schedulerEvents.isEmpty {
+                    Text("No recent scheduler events.")
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppColors.textTertiary)
+                } else {
+                    ForEach(Array(schedulerEvents.enumerated()), id: \.offset) { _, entry in
+                        schedulerEventRow(entry)
+                    }
+                }
+            }
+            .listRowBackground(AppColors.surface)
+
+            // Per-show capability profile (h6a6 is OPEN — hide when no data)
+            // No producer API exists yet; the row stays hidden. When h6a6
+            // lands, add the provider call here and render when non-empty.
+            // (Explicit no-op keeps the scope discipline visible.)
+
+            // Feature-flag placeholder toggles (all default OFF)
+            DisclosureGroup(SettingsL274Copy.featureFlagsLabel) {
+                ForEach(FeatureFlagPlaceholders.orderedSlugs, id: \.self) { slug in
+                    Toggle(isOn: Binding(
+                        get: { featureFlagValues[slug] ?? false },
+                        set: { newValue in
+                            featureFlagValues[slug] = newValue
+                            // TODO(bd playhead-l274): wire actual flag storage
+                        }
+                    )) {
+                        Text("playhead-\(slug)")
+                            .font(AppTypography.body)
+                            .foregroundStyle(AppColors.textPrimary)
+                    }
+                    .tint(AppColors.accent)
+                }
+            }
+            .listRowBackground(AppColors.surface)
+
+            // Send diagnostics button (mail composer only, never network)
+            Button {
+                Task { await sendDiagnosticsViaSettings() }
+            } label: {
+                HStack {
+                    Label(SettingsL274Copy.sendDiagnosticsButtonLabel, systemImage: "envelope.badge")
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.accent)
+                    Spacer()
+                }
+            }
+            .buttonStyle(.plain)
+            .listRowBackground(AppColors.surface)
+        } header: {
+            sectionHeader(SettingsL274Copy.diagnosticsHeader)
+        } footer: {
+            Text(SettingsL274Copy.sendDiagnosticsFooter)
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.textTertiary)
+        }
+    }
+
+    @ViewBuilder
+    func diagnosticsKV(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .font(AppTypography.body)
+                .foregroundStyle(AppColors.textPrimary)
+            Spacer()
+            Text(value)
+                .font(AppTypography.timestamp)
+                .foregroundStyle(AppColors.textTertiary)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(2)
+                .truncationMode(.middle)
+        }
+        .listRowBackground(AppColors.surface)
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    func schedulerEventRow(_ entry: WorkJournalEntry) -> some View {
+        let time = Date(timeIntervalSince1970: entry.timestamp)
+        let formatter: DateFormatter = {
+            let f = DateFormatter()
+            f.dateFormat = "HH:mm:ss"
+            return f
+        }()
+        let hashedEpisode = String(entry.episodeId.prefix(8))
+        let missCause = entry.cause?.rawValue ?? "-"
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(formatter.string(from: time))
+                    .font(AppTypography.timestamp)
+                    .foregroundStyle(AppColors.textTertiary)
+                Text(entry.eventType.rawValue)
+                    .font(AppTypography.caption)
+                    .foregroundStyle(AppColors.textSecondary)
+                Spacer()
+                Text(hashedEpisode)
+                    .font(AppTypography.timestamp)
+                    .foregroundStyle(AppColors.textTertiary)
+            }
+            if entry.cause != nil {
+                Text("cause: \(missCause)")
+                    .font(AppTypography.timestamp)
+                    .foregroundStyle(AppColors.textTertiary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    @MainActor
+    func sendDiagnosticsViaSettings() async {
+        // Release-safe entry: route through the same Phase 1.5 coordinator
+        // path the DEBUG hatch uses, but wrapped so Release builds still
+        // compile. The coordinator NEVER initiates a network upload — the
+        // mail composer is the sole delivery surface.
+        #if DEBUG
+        _ = try? await runDebugDiagnosticsExport(
+            runtime: runtime,
+            modelContext: modelContext
+        )
+        #else
+        // Release builds currently lack a non-DEBUG entry point; a
+        // follow-up will wire a release-safe diagnostics-export call
+        // site. Until then, the button is a no-op in Release.
+        // TODO(bd playhead-l274-release-wiring): release-safe diagnostics entry point.
+        #endif
+    }
+}
 
 // MARK: - Helpers
 

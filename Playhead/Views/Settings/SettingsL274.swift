@@ -295,6 +295,27 @@ final class SettingsRouter {
     }
 }
 
+// MARK: - SettingsRouter SwiftUI environment
+
+import SwiftUI
+
+/// SwiftUI environment key for the shared `SettingsRouter`. Tab-root
+/// views (Library, Browse, Settings) install the same instance via
+/// `.environment(\.settingsRouter, router)`; deep-link entry points
+/// (e.g. `DownloadNextView.onFreeUpSpace`) read it to push a route.
+private struct SettingsRouterKey: @preconcurrency EnvironmentKey {
+    @MainActor static let defaultValue: SettingsRouter? = nil
+}
+
+extension EnvironmentValues {
+    /// Shared deep-link router. Nil in previews/tests that don't install
+    /// one; call sites guard with `if let router = ...`.
+    var settingsRouter: SettingsRouter? {
+        get { self[SettingsRouterKey.self] }
+        set { self[SettingsRouterKey.self] = newValue }
+    }
+}
+
 // MARK: - DiagnosticsVersions
 
 /// Resolver for the four version strings surfaced in the Diagnostics
