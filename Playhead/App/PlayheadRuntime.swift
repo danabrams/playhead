@@ -757,14 +757,12 @@ final class PlayheadRuntime {
     /// prior anchor. Sub-threshold commits are silently no-op'd inside
     /// the cascade.
     ///
-    /// `chapterEvidence` is intentionally left empty here: chapter
-    /// evidence is not yet sourced anywhere on the production commit
-    /// path (no live caller invokes `seedCandidateWindows` either), so
-    /// passing `[]` matches the empty seed and preserves the proximal
-    /// re-latch behavior. Sponsor-chapter preservation across re-latch
-    /// will land alongside the runner-side cascade consumption work
-    /// (`playhead-swws`) when chapter evidence becomes available on the
-    /// commit path.
+    /// playhead-swws: chapter evidence is sourced from the cascade's
+    /// own per-episode cache (populated at `seedCandidateWindows` time).
+    /// The commit-point caller does not carry chapter evidence in
+    /// scope, so omitting it here preserves any sponsor-chapter
+    /// windows the cascade selected at seed time — earlier we passed
+    /// `[]` as a placeholder, which erased sponsors on every re-latch.
     func noteCommittedPlayhead(
         episodeId: String,
         position: TimeInterval,
@@ -773,8 +771,7 @@ final class PlayheadRuntime {
         await analysisWorkScheduler.noteCommittedPlayhead(
             episodeId: episodeId,
             newPosition: position,
-            episodeDuration: episodeDuration,
-            chapterEvidence: []
+            episodeDuration: episodeDuration
         )
     }
 
