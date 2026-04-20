@@ -690,3 +690,105 @@ struct DiagnosticsVersionsTests {
         #expect(v.featureSchemaVersion == SharedVersionConstants.featureSchemaVersionString)
     }
 }
+
+// MARK: - Release diagnostics hatch source canary
+
+/// Mirror of `DebugDiagnosticsHatchSourceCanaryTests` for the Release
+/// hatch (playhead-l274 code-review I3). Asserts that
+/// `ReleaseDiagnosticsHatch.swift` is gated by
+/// `#if !DEBUG && canImport(UIKit) && os(iOS)` at the file level so the
+/// Release-only coordinator assembly never compile-references in DEBUG.
+///
+/// If this test fails, the gating wrapper has been removed or altered
+/// and the Release hatch may be compiled into DEBUG builds.
+@Suite("ReleaseDiagnosticsHatch source canaries (playhead-l274 I3)")
+struct ReleaseDiagnosticsHatchSourceCanaryTests {
+
+    private static let repoRoot: URL = {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // .../Settings/
+            .deletingLastPathComponent() // .../Views/
+            .deletingLastPathComponent() // .../PlayheadTests/
+            .deletingLastPathComponent() // .../<repo root>/
+    }()
+
+    private func read(_ relative: String) throws -> String {
+        let url = Self.repoRoot.appendingPathComponent(relative)
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    @Test func releaseHatchFileGuardedByNotDebug() throws {
+        let source = try read("Playhead/Support/Diagnostics/ReleaseDiagnosticsHatch.swift")
+
+        // The file MUST contain both #if !DEBUG and the matching #endif.
+        #expect(source.contains("#if !DEBUG"))
+        #expect(source.contains("#endif"))
+        // The first non-comment, non-blank line must be the
+        // `#if !DEBUG && canImport(UIKit) && os(iOS)` opener — this is
+        // the inverse of the DEBUG hatch's `#if DEBUG` opener and the
+        // mirror invariant we lock in here.
+        let firstCode = source
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .first { line in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                return !trimmed.isEmpty && !trimmed.hasPrefix("//")
+            }
+        let trimmed = firstCode?.trimmingCharacters(in: .whitespaces) ?? ""
+        #expect(trimmed.hasPrefix("#if !DEBUG"))
+        #expect(trimmed.contains("canImport(UIKit)"))
+        #expect(trimmed.contains("os(iOS)"))
+    }
+
+    @Test func runReleaseDiagnosticsExportEntryInsideNotDebugRegion() throws {
+        let source = try read("Playhead/Support/Diagnostics/ReleaseDiagnosticsHatch.swift")
+        // The entry point must exist and live AFTER the file-level
+        // `#if !DEBUG` opener.
+        #expect(source.contains("func runReleaseDiagnosticsExport("))
+        guard
+            let releaseOpen = source.range(of: "#if !DEBUG"),
+            let entry = source.range(of: "func runReleaseDiagnosticsExport(")
+        else {
+            Issue.record("Expected both #if !DEBUG and runReleaseDiagnosticsExport in hatch source")
+            return
+        }
+        #expect(releaseOpen.lowerBound < entry.lowerBound)
+    }
+
+    @Test func settingsViewCallSiteGatedByNotDebug() throws {
+        // The `runReleaseDiagnosticsExport` invocation in `SettingsView`
+        // must live inside an `#elseif canImport(UIKit) && os(iOS)`
+        // branch following an `#if DEBUG`, so it only fires in Release.
+        let source = try read("Playhead/Views/Settings/SettingsView.swift")
+        #expect(source.contains("runReleaseDiagnosticsExport"))
+        // Walk the source counting #if depth; each
+        // `runReleaseDiagnosticsExport` invocation must appear inside an
+        // `#elseif` branch of an `#if DEBUG` (not in DEBUG itself).
+        let lines = source.split(separator: "\n", omittingEmptySubsequences: false)
+        var inDebugBranch = false
+        var inElseBranch = false
+        var depth = 0
+        var sawGuardedReference = false
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("#if DEBUG") {
+                depth += 1
+                inDebugBranch = true
+                inElseBranch = false
+            } else if trimmed.hasPrefix("#elseif") && depth > 0 {
+                inDebugBranch = false
+                inElseBranch = true
+            } else if trimmed.hasPrefix("#endif") && depth > 0 {
+                depth -= 1
+                inDebugBranch = false
+                inElseBranch = false
+            }
+            if line.contains("runReleaseDiagnosticsExport(") && inElseBranch {
+                sawGuardedReference = true
+            }
+        }
+        #expect(
+            sawGuardedReference,
+            "runReleaseDiagnosticsExport call must live inside an #elseif branch of #if DEBUG so it only fires in Release"
+        )
+    }
+}

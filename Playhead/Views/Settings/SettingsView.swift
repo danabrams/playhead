@@ -1212,106 +1212,25 @@ private extension SettingsView {
     @MainActor
     func sendDiagnosticsViaSettings() async {
         // Release-safe entry: route through the Phase 1.5 coordinator. In
-        // DEBUG we still prefer the existing hatch so the DEBUG-only
-        // `sendDiagnosticsSection` and this Diagnostics-group button share
-        // a single code path (retains the canary-guarded
-        // `runDebugDiagnosticsExport` invocation). In Release we assemble
-        // the same coordinator graph inline here from Release-compatible
-        // types — the coordinator + presenter + sink are all already
-        // Release-safe, only the DEBUG `runDebugDiagnosticsExport` helper
-        // file is DEBUG-gated. Under no path do we initiate a network
-        // upload; the mail composer (or iPad activity fallback) is the
-        // sole delivery surface.
+        // DEBUG we call the DEBUG hatch so both dogfood surfaces share a
+        // single code path (retains the canary-guarded
+        // `runDebugDiagnosticsExport` invocation). In Release we call
+        // the Release hatch, which assembles an identical coordinator
+        // graph — see `ReleaseDiagnosticsHatch.swift`. Under no path do
+        // we initiate a network upload; the mail composer (or iPad
+        // activity fallback) is the sole delivery surface.
         #if DEBUG
         _ = try? await runDebugDiagnosticsExport(
             runtime: runtime,
             modelContext: modelContext
         )
         #elseif canImport(UIKit) && os(iOS)
-        _ = try? await runReleaseDiagnosticsExport()
+        _ = try? await runReleaseDiagnosticsExport(
+            runtime: runtime,
+            modelContext: modelContext
+        )
         #endif
     }
-
-    #if !DEBUG && canImport(UIKit) && os(iOS)
-    /// Release-build sibling of `runDebugDiagnosticsExport`. Inlined here
-    /// (instead of as a sibling to the DEBUG hatch file) because
-    /// `DebugDiagnosticsHatch.swift` is guarded at the file level by
-    /// `#if DEBUG` and a source-canary test asserts that guard.
-    ///
-    /// The coordinator graph mirrors the DEBUG hatch one-for-one:
-    ///   1. `InstallIDProvider(context: modelContext).installID()`
-    ///   2. `DiagnosticsExportEnvironment` from `Bundle.main`,
-    ///      `ProcessInfo`, `DeviceClass.detect()`, `BuildType.detect()`,
-    ///      the live `CapabilitySnapshot`, and the install UUID.
-    ///   3. `journalFetch` adapter over `runtime.analysisStore`.
-    ///   4. `SwiftDataDiagnosticsOptInSink(context: modelContext)`.
-    ///   5. `UIKitDiagnosticsPresenter` with a key-window host provider.
-    @MainActor
-    private func runReleaseDiagnosticsExport() async throws -> DiagnosticsMailComposeResult {
-        let installID = try InstallIDProvider(context: modelContext).installID()
-        let snapshot = await runtime.capabilitiesService.currentSnapshot
-        let now = Date()
-        let eligibility = AnalysisEligibility(
-            hardwareSupported: snapshot.foundationModelsAvailable,
-            appleIntelligenceEnabled: snapshot.appleIntelligenceEnabled,
-            regionSupported: true,
-            languageSupported: snapshot.foundationModelsLocaleSupported,
-            modelAvailableNow: snapshot.foundationModelsUsable,
-            capturedAt: now
-        )
-        let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "unknown"
-        let osv = ProcessInfo.processInfo.operatingSystemVersion
-        let osVersion = "\(osv.majorVersion).\(osv.minorVersion).\(osv.patchVersion)"
-
-        let environment = DiagnosticsExportEnvironment(
-            appVersion: appVersion,
-            osVersion: osVersion,
-            deviceClass: DeviceClass.detect(),
-            buildType: BuildType.detect(),
-            eligibility: eligibility,
-            installID: installID,
-            now: now
-        )
-
-        let store = runtime.analysisStore
-        let journalFetch: DiagnosticsJournalFetch = { [store] in
-            try await store.fetchRecentWorkJournalEntries(limit: 200)
-        }
-
-        let presenter = UIKitDiagnosticsPresenter(hostProvider: Self.releaseHostProvider)
-        let coordinator = DiagnosticsExportCoordinator(
-            environment: environment,
-            presenter: presenter,
-            journalFetch: journalFetch,
-            optInSink: SwiftDataDiagnosticsOptInSink(context: modelContext),
-            optInEpisodes: []
-        )
-        return try await coordinator.exportAndPresent()
-    }
-
-    /// Release-build default host provider. Walks to the foreground-active
-    /// window's rootViewController, then follows the presented-chain so
-    /// the composer lands on top of any modally presented sheet
-    /// (Settings is itself typically presented modally). Mirrors the
-    /// DEBUG hatch's `defaultHostProvider`.
-    @MainActor
-    private static let releaseHostProvider: @MainActor () -> UIViewController? = {
-        let scene = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first { $0.activationState == .foregroundActive }
-            ?? UIApplication.shared.connectedScenes
-                .compactMap { $0 as? UIWindowScene }
-                .first
-        guard let root = scene?.windows.first(where: \.isKeyWindow)?.rootViewController
-            ?? scene?.windows.first?.rootViewController
-        else { return nil }
-        var current = root
-        while let presented = current.presentedViewController {
-            current = presented
-        }
-        return current
-    }
-    #endif
 }
 
 // MARK: - Helpers
