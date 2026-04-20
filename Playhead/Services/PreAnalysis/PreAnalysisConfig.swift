@@ -31,6 +31,30 @@ struct PreAnalysisConfig: Codable, Sendable {
     /// produced by the audio decoder during analysis. Default 20 s.
     var nominalShardDurationSec: Double = 20
 
+    /// playhead-c3pi: length (seconds) of the candidate ASR window for
+    /// an unplayed episode — first 20 minutes from `episodeStart`. Bead
+    /// spec §"Candidate-window selection" (Plan §3 detection cascade +
+    /// §6 Phase 2 deliverable 1). Hoisted into the config so a future
+    /// per-cohort experiment can move the boundary without touching
+    /// `CandidateWindowSelector`.
+    var unplayedCandidateWindowSeconds: TimeInterval = 20 * 60
+
+    /// playhead-c3pi: length (seconds) of the candidate ASR window for
+    /// a resumed episode — next 15 minutes from the readiness anchor
+    /// (`Episode.playbackAnchor`). Matches
+    /// `playbackReadinessProximalLookaheadSeconds` from playhead-cthe so
+    /// the readiness derivation and the cascade scheduler agree on the
+    /// proximal lookahead.
+    var resumedCandidateWindowSeconds: TimeInterval = 15 * 60
+
+    /// playhead-c3pi: minimum playhead delta (seconds) between two
+    /// committed positions for the cascade to treat the move as a
+    /// "seek" and re-latch the candidate-window selection on the new
+    /// position. Routine ±15-s / ±30-s skip taps stay below this
+    /// threshold (strict greater-than comparison) so they do not churn
+    /// the scheduler queue.
+    var seekRelatchThresholdSeconds: TimeInterval = 30
+
     static let analysisVersion: Int = 1
 
     private static let key = "PreAnalysisConfig"
@@ -41,7 +65,10 @@ struct PreAnalysisConfig: Codable, Sendable {
         t1DepthSeconds: Double = 300,
         t2DepthSeconds: Double = 900,
         useDualBackgroundSessions: Bool = false,
-        nominalShardDurationSec: Double = 20
+        nominalShardDurationSec: Double = 20,
+        unplayedCandidateWindowSeconds: TimeInterval = 20 * 60,
+        resumedCandidateWindowSeconds: TimeInterval = 15 * 60,
+        seekRelatchThresholdSeconds: TimeInterval = 30
     ) {
         self.isEnabled = isEnabled
         self.defaultT0DepthSeconds = defaultT0DepthSeconds
@@ -49,6 +76,9 @@ struct PreAnalysisConfig: Codable, Sendable {
         self.t2DepthSeconds = t2DepthSeconds
         self.useDualBackgroundSessions = useDualBackgroundSessions
         self.nominalShardDurationSec = nominalShardDurationSec
+        self.unplayedCandidateWindowSeconds = unplayedCandidateWindowSeconds
+        self.resumedCandidateWindowSeconds = resumedCandidateWindowSeconds
+        self.seekRelatchThresholdSeconds = seekRelatchThresholdSeconds
     }
 
     // Custom decoder so configs persisted before 24cm (which lack the
@@ -64,6 +94,11 @@ struct PreAnalysisConfig: Codable, Sendable {
         self.t2DepthSeconds = try container.decodeIfPresent(Double.self, forKey: .t2DepthSeconds) ?? 900
         self.useDualBackgroundSessions = try container.decodeIfPresent(Bool.self, forKey: .useDualBackgroundSessions) ?? false
         self.nominalShardDurationSec = try container.decodeIfPresent(Double.self, forKey: .nominalShardDurationSec) ?? 20
+        // playhead-c3pi: configs persisted before this bead omit these
+        // keys; default to the bead-spec values so old blobs decode.
+        self.unplayedCandidateWindowSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .unplayedCandidateWindowSeconds) ?? (20 * 60)
+        self.resumedCandidateWindowSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .resumedCandidateWindowSeconds) ?? (15 * 60)
+        self.seekRelatchThresholdSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .seekRelatchThresholdSeconds) ?? 30
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -73,6 +108,9 @@ struct PreAnalysisConfig: Codable, Sendable {
         case t2DepthSeconds
         case useDualBackgroundSessions
         case nominalShardDurationSec
+        case unplayedCandidateWindowSeconds
+        case resumedCandidateWindowSeconds
+        case seekRelatchThresholdSeconds
     }
 
     static func load() -> PreAnalysisConfig {
