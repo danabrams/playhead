@@ -336,6 +336,14 @@ actor AnalysisWorkScheduler {
     /// when the user seeks more than `seekRelatchThresholdSeconds` away
     /// from the prior anchor.
     ///
+    /// playhead-swws: `chapterEvidence` is optional. The cascade caches
+    /// the evidence captured at the most recent `seedCandidateWindows`
+    /// call; commit-point callers (which don't carry chapter evidence
+    /// in scope) should pass `nil` so cached sponsor-chapter windows
+    /// survive the re-latch instead of being erased on every seek.
+    /// Pass an explicit array only when fresh evidence is available
+    /// (e.g. after a metadata reparse).
+    ///
     /// - Returns: The new candidate-window order on a re-latch, or
     ///   `nil` when the delta did not exceed the threshold (no
     ///   re-latch). When no cascade was injected, always returns nil.
@@ -344,7 +352,7 @@ actor AnalysisWorkScheduler {
         episodeId: String,
         newPosition: TimeInterval,
         episodeDuration: TimeInterval?,
-        chapterEvidence: [ChapterEvidence]
+        chapterEvidence: [ChapterEvidence]? = nil
     ) async -> [CandidateWindow]? {
         guard let cascade = candidateWindowCascade else { return nil }
         return await cascade.noteSeek(
@@ -363,6 +371,61 @@ actor AnalysisWorkScheduler {
     func currentCandidateWindows(for episodeId: String) async -> [CandidateWindow] {
         guard let cascade = candidateWindowCascade else { return [] }
         return await cascade.currentWindows(for: episodeId) ?? []
+    }
+
+    /// playhead-swws: peek the next slice the scheduler would dispatch
+    /// on the next loop iteration WITHOUT mutating any state (no lease
+    /// acquisition, no state transitions, no signposts). Returns the
+    /// next eligible job paired with the cascade's first candidate
+    /// window for that job's episode.
+    ///
+    /// Used by the swws ordering test to prove that the cascade's
+    /// proximal-first order is the order the scheduler ACTUALLY
+    /// dispatches in, not just what the cascade reports it would
+    /// prefer. When the cascade has been seeded with a sponsor window
+    /// at e.g. [10min, 11min] and the proximal window at [0, 20min],
+    /// the cascade's first window is the sponsor — and the dispatched
+    /// slice's `cascadeWindow` matches it. With no cascade seed for
+    /// the episode, `cascadeWindow` is `nil` and the dispatched job is
+    /// exactly what `fetchNextEligibleJob` would return on its own —
+    /// preserving FIFO behavior for the long tail of episodes that
+    /// have not been seeded.
+    ///
+    /// Returns `nil` when no eligible job exists OR when the
+    /// admission policy currently bars all work (`pauseAllWork`); the
+    /// loop's per-pass back-off behavior still applies, this accessor
+    /// just reports the absence of a dispatchable slice without
+    /// taking the standard sleep.
+    func peekNextDispatchableSlice() async -> DispatchableSlice? {
+        guard config.isEnabled else { return nil }
+        let admission = await currentLaneAdmission()
+        guard !admission.pauseAllWork else { return nil }
+
+        let deferredWorkAllowed = admission.policy.allowSoonLane
+            || admission.policy.allowBackgroundLane
+        let now = Date().timeIntervalSince1970
+
+        guard let job = try? await store.fetchNextEligibleJob(
+            deferredWorkAllowed: deferredWorkAllowed,
+            t0ThresholdSec: config.defaultT0DepthSeconds,
+            now: now
+        ) else {
+            return nil
+        }
+
+        let cascadeWindow: CandidateWindow?
+        if let cascade = candidateWindowCascade,
+           let windows = await cascade.currentWindows(for: job.episodeId) {
+            cascadeWindow = windows.first
+        } else {
+            cascadeWindow = nil
+        }
+
+        return DispatchableSlice(
+            jobId: job.jobId,
+            episodeId: job.episodeId,
+            cascadeWindow: cascadeWindow
+        )
     }
 
     /// Notify the scheduler that playback has started for an episode.
@@ -877,6 +940,21 @@ actor AnalysisWorkScheduler {
             }
             return
         }
+        // playhead-swws: consult the candidate-window cascade for
+        // this episode and surface its first window on the request.
+        // The runner (and downstream slice-execution work in
+        // playhead-1iq1) will use this to prioritize the
+        // proximal/sponsor window over the legacy "process [0,
+        // desiredCoverageSec]" depth-first behavior. `nil` when the
+        // cascade is unwired or the episode has not been seeded —
+        // existing FIFO behavior is preserved in that case.
+        let cascadeWindow: CandidateWindow?
+        if let cascade = candidateWindowCascade,
+           let windows = await cascade.currentWindows(for: job.episodeId) {
+            cascadeWindow = windows.first
+        } else {
+            cascadeWindow = nil
+        }
         let request = AnalysisRangeRequest(
             jobId: job.jobId,
             episodeId: job.episodeId,
@@ -887,7 +965,8 @@ actor AnalysisWorkScheduler {
             mode: .preRollWarmup,
             outputPolicy: .writeWindowsAndCues,
             priority: .medium,
-            schedulerLane: job.schedulerLane
+            schedulerLane: job.schedulerLane,
+            windowRange: cascadeWindow?.range
         )
 
         let jobSignpost = PreAnalysisInstrumentation.beginJobDuration(jobId: job.jobId)

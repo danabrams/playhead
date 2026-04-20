@@ -28,6 +28,17 @@ struct AnalysisRangeRequest: Sendable {
     /// preemptible lane.
     let schedulerLane: AnalysisWorkScheduler.SchedulerLane
 
+    /// playhead-swws: the cascade-selected window (sponsor-chapter or
+    /// playhead-proximal) that the scheduler chose to dispatch this
+    /// pass. `nil` when no candidate-window cascade is wired or the
+    /// episode has not been seeded — in that case the runner falls
+    /// back to its existing FIFO/depth-driven processing of `[0,
+    /// desiredCoverageSec]`. When non-nil, this is the range the
+    /// runner SHOULD prioritize within the broader job; this bead
+    /// surfaces the field for observability/testing only — slice-level
+    /// execution is wired by playhead-1iq1.
+    let windowRange: ClosedRange<TimeInterval>?
+
     init(
         jobId: String,
         episodeId: String,
@@ -38,7 +49,8 @@ struct AnalysisRangeRequest: Sendable {
         mode: Mode,
         outputPolicy: OutputPolicy,
         priority: TaskPriority,
-        schedulerLane: AnalysisWorkScheduler.SchedulerLane = .background
+        schedulerLane: AnalysisWorkScheduler.SchedulerLane = .background,
+        windowRange: ClosedRange<TimeInterval>? = nil
     ) {
         self.jobId = jobId
         self.episodeId = episodeId
@@ -50,7 +62,34 @@ struct AnalysisRangeRequest: Sendable {
         self.outputPolicy = outputPolicy
         self.priority = priority
         self.schedulerLane = schedulerLane
+        self.windowRange = windowRange
     }
+}
+
+// MARK: - DispatchableSlice (playhead-swws)
+
+/// A peek of the next job the scheduler would dispatch on the next
+/// loop iteration, paired with the cascade's first candidate window
+/// for the job's episode if the cascade has been seeded for it.
+///
+/// Surfaced as a public, side-effect-free accessor on
+/// `AnalysisWorkScheduler` (`peekNextDispatchableSlice()`) so the
+/// playhead-swws ordering test can prove that proximal-first cascade
+/// order overrides the store's `priority DESC, createdAt ASC` (FIFO
+/// at equal priority) ordering for episodes the cascade has been
+/// seeded for. When the cascade returns no windows for the job's
+/// episode (no seed, or all windows consumed), `cascadeWindow` is
+/// `nil` and the dispatched job is exactly what `fetchNextEligibleJob`
+/// would return — preserving FIFO behavior for callers that have not
+/// opted into cascade-aware dispatch.
+struct DispatchableSlice: Sendable, Equatable {
+    let jobId: String
+    let episodeId: String
+    /// First window from `CandidateWindowCascade.currentWindows(for:)`
+    /// for this job's episode — sponsor-chapter windows come first,
+    /// then the proximal window. `nil` when the cascade is unwired
+    /// for the episode.
+    let cascadeWindow: CandidateWindow?
 }
 
 // MARK: - OutputPolicy
