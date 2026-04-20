@@ -173,6 +173,34 @@ final class ActivityViewModel {
         snapshot = Self.aggregate(inputs: inputs, now: now)
     }
 
+    /// Apply a user drag-to-reorder gesture to the Up Next section. The
+    /// View's `List { … }.onMove { src, dst in vm.moveUpNext(...) }`
+    /// handler funnels through here so the snapshot's `upNext` ordering
+    /// is the single source of truth the view re-renders against.
+    ///
+    /// v1 scope (playhead-quh7 fix): the reorder lives only on the
+    /// in-memory snapshot — the next `refresh(from:)` will overwrite the
+    /// user's manual order with whatever the production
+    /// `ActivitySnapshotProvider` hands back. Persisting the order
+    /// across refreshes requires a new column on the `Episode` SwiftData
+    /// model (e.g. `queuePosition: Int?`) and is intentionally deferred
+    /// to a follow-up bead per the spec-fix scope guidance ("if nothing
+    /// supports persisted user ordering today, STOP and ask before going
+    /// wider"). The ergonomic gap is real but bounded: refreshes today
+    /// arrive only on scheduler-state changes, not on a polling loop, so
+    /// the manual order persists for the duration of the user's
+    /// interaction with the screen.
+    func moveUpNext(from source: IndexSet, to destination: Int) {
+        var reordered = snapshot.upNext
+        reordered.move(fromOffsets: source, toOffset: destination)
+        snapshot = ActivitySnapshot(
+            now: snapshot.now,
+            upNext: reordered,
+            paused: snapshot.paused,
+            recentlyFinished: snapshot.recentlyFinished
+        )
+    }
+
     // MARK: - Pure aggregation
 
     /// Maximum number of Recently Finished rows the snapshot retains.
@@ -189,8 +217,9 @@ final class ActivityViewModel {
     ///
     /// Ordering rules:
     /// - Now / Up Next / Paused: input order preserved (the production
-    ///   provider hands rows in scheduler-priority order; the View can
-    ///   later add drag-to-reorder for Up Next).
+    ///   provider hands rows in scheduler-priority order). Drag-to-
+    ///   reorder for Up Next ships via `moveUpNext(from:to:)` which
+    ///   mutates the in-memory snapshot after aggregation.
     /// - Recently Finished: newest-first by `finishedAt`, capped at
     ///   `recentlyFinishedCap`, filtered to the trailing 24h window
     ///   ending at `now`.

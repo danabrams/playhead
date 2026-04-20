@@ -333,6 +333,57 @@ struct ActivityViewModelTests {
         #expect(snapshot.recentlyFinished.isEmpty)
     }
 
+    // MARK: - Up Next drag-to-reorder
+
+    @Test("moveUpNext rewrites snapshot.upNext order in place")
+    @MainActor
+    func moveUpNextReordersSnapshot() {
+        // Build a starting snapshot of four queued (Up Next) episodes
+        // by feeding the aggregator a deterministic input list. We
+        // route through `refresh(from:)` rather than constructing the
+        // snapshot inline so the test exercises the same entry point
+        // production uses.
+        let inputs: [ActivityEpisodeInput] = (0..<4).map { i in
+            Self.makeInput(
+                id: "ep-\(i)",
+                title: "Episode \(i)",
+                status: Self.makeStatus(
+                    disposition: .queued,
+                    reason: .waitingForTime
+                ),
+                isRunning: false
+            )
+        }
+        let vm = ActivityViewModel()
+        vm.refresh(from: inputs)
+        #expect(vm.snapshot.upNext.map(\.episodeId) == [
+            "ep-0", "ep-1", "ep-2", "ep-3"
+        ])
+
+        // Move ep-3 (index 3) to the front (destination 0). This is
+        // the same `(IndexSet, Int)` shape SwiftUI's
+        // `List.onMove { src, dst in ... }` hands the closure.
+        vm.moveUpNext(from: IndexSet(integer: 3), to: 0)
+        #expect(vm.snapshot.upNext.map(\.episodeId) == [
+            "ep-3", "ep-0", "ep-1", "ep-2"
+        ])
+
+        // A second drag to verify subsequent reorders compose against
+        // the already-mutated snapshot (i.e. moveUpNext is not
+        // recomputing from a stale baseline).
+        vm.moveUpNext(from: IndexSet(integer: 0), to: 3)
+        #expect(vm.snapshot.upNext.map(\.episodeId) == [
+            "ep-0", "ep-1", "ep-3", "ep-2"
+        ])
+
+        // Reorder must not bleed into the other sections. The four
+        // queued / not-running inputs all land in upNext; now / paused
+        // / recentlyFinished must remain empty across the moves.
+        #expect(vm.snapshot.now.isEmpty)
+        #expect(vm.snapshot.paused.isEmpty)
+        #expect(vm.snapshot.recentlyFinished.isEmpty)
+    }
+
     // MARK: - Cancelled disposition routing
 
     @Test("cancelled disposition with finishedAt → Recently Finished as couldntAnalyze")

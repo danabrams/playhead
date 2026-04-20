@@ -59,17 +59,21 @@ struct ActivityView: View {
                 AppColors.background
                     .ignoresSafeArea()
 
-                ScrollView {
-                    VStack(alignment: .leading, spacing: Spacing.xl) {
-                        nowSection
-                        upNextSection
-                        pausedSection
-                        recentlyFinishedSection
-                    }
-                    .padding(.horizontal, Spacing.md)
-                    .padding(.top, Spacing.sm)
-                    .padding(.bottom, Spacing.xxl)
+                // List (not ScrollView+VStack) is required so the Up
+                // Next section can opt into `.onMove` drag-to-reorder.
+                // `.plain` style + hidden separators + cleared
+                // backgrounds preserve the prior visual treatment so
+                // sections still read as bold-titled groups inside the
+                // app's dark surface.
+                List {
+                    nowSection
+                    upNextSection
+                    pausedSection
+                    recentlyFinishedSection
                 }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .background(AppColors.background)
                 .refreshable {
                     await refresh()
                 }
@@ -101,42 +105,68 @@ struct ActivityView: View {
 private extension ActivityView {
 
     var nowSection: some View {
-        ActivitySection(title: "Now") {
+        Section {
             if viewModel.snapshot.now.isEmpty {
                 Text("Nothing running — pull down to refresh")
                     .font(AppTypography.body)
                     .foregroundStyle(AppColors.textSecondary)
                     .accessibilityIdentifier("ActivityView.now.empty")
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
             } else {
                 ForEach(viewModel.snapshot.now) { row in
                     NowRowView(row: row)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
                 }
             }
+        } header: {
+            sectionHeader("Now")
         }
     }
 
     var upNextSection: some View {
-        ActivitySection(title: "Up Next") {
+        Section {
             if viewModel.snapshot.upNext.isEmpty {
                 Text("Nothing queued")
                     .font(AppTypography.body)
                     .foregroundStyle(AppColors.textSecondary)
                     .accessibilityIdentifier("ActivityView.upNext.empty")
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
             } else {
                 ForEach(viewModel.snapshot.upNext) { row in
                     UpNextRowView(row: row)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
+                // Drag-to-reorder per bead spec ("Up Next: queued
+                // eligible work, reorder by drag"). Funnels into the
+                // VM so the snapshot's `upNext` ordering is the
+                // single source of truth the view re-renders against.
+                // No EditButton — modern iOS supports the long-press
+                // drag affordance in plain List rows without an
+                // explicit edit-mode toggle.
+                .onMove { source, destination in
+                    viewModel.moveUpNext(from: source, to: destination)
                 }
             }
+        } header: {
+            sectionHeader("Up Next")
         }
     }
 
     @ViewBuilder
     var pausedSection: some View {
         if !viewModel.snapshot.paused.isEmpty {
-            ActivitySection(title: "Paused") {
+            Section {
                 ForEach(viewModel.snapshot.paused) { row in
                     PausedRowView(row: row)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
                 }
+            } header: {
+                sectionHeader("Paused")
             }
         }
     }
@@ -144,29 +174,34 @@ private extension ActivityView {
     @ViewBuilder
     var recentlyFinishedSection: some View {
         if !viewModel.snapshot.recentlyFinished.isEmpty {
-            ActivitySection(title: "Recently Finished") {
+            Section {
                 ForEach(viewModel.snapshot.recentlyFinished) { row in
                     RecentlyFinishedRowView(row: row)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
                 }
+            } header: {
+                sectionHeader("Recently Finished")
             }
         }
     }
-}
 
-/// Single section helper: renders a bold title followed by a vertical
-/// stack of section content. Replaces a `+` operator workaround so the
-/// view body composes via SwiftUI's standard `@ViewBuilder` semantics.
-private struct ActivitySection<Content: View>: View {
-    let title: String
-    @ViewBuilder let content: () -> Content
-    var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.sm) {
-            Text(title)
-                .font(AppTypography.sans(size: 18, weight: .semibold))
-                .foregroundStyle(AppColors.textPrimary)
-                .padding(.bottom, Spacing.xs)
-            content()
-        }
+    /// Section header styled to match the prior `ActivitySection`
+    /// bold-title look so the visual cadence of the screen survives the
+    /// migration from `ScrollView + VStack` to `List + Section`.
+    func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(AppTypography.sans(size: 18, weight: .semibold))
+            .foregroundStyle(AppColors.textPrimary)
+            .textCase(nil)
+            .padding(.top, Spacing.sm)
+            .padding(.bottom, Spacing.xs)
+            .listRowInsets(EdgeInsets(
+                top: 0,
+                leading: 0,
+                bottom: 0,
+                trailing: 0
+            ))
     }
 }
 
@@ -293,9 +328,24 @@ private struct RecentlyFinishedRowView: View {
     private var accessibilitySummary: String {
         let prefix: String
         switch row.outcome {
-        case .success: prefix = "Done"
-        case .couldntAnalyze: prefix = "Couldn't analyze"
-        case .analysisUnavailable: prefix = "Analysis unavailable"
+        case .success:
+            // "Done" has no canonical source in
+            // SurfaceReasonCopyTemplates / EpisodeStatusLineCopy — it's
+            // the success-glyph caption for accessibility only. Inline
+            // is acceptable because there is nothing to dedupe against.
+            prefix = "Done"
+        case .couldntAnalyze:
+            // Canonical "Couldn't analyze" copy — same source the
+            // visible subcopy on this row pulls from. Avoids the inline
+            // string drift the spec-reviewer flagged (issue L2).
+            prefix = SurfaceReasonCopyTemplates.template(for: .couldntAnalyze)
+        case .analysisUnavailable:
+            // No canonical short-form for this outcome — the longer
+            // template ("Analysis unavailable on this device") is too
+            // verbose for the accessibility prefix and the
+            // unavailable-reason subcopy already carries the
+            // device-specific detail.
+            prefix = "Analysis unavailable"
         }
         if let sub = subcopy {
             return "\(prefix), \(row.title), \(sub)"
