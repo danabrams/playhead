@@ -20,6 +20,11 @@ struct EpisodeListView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(PlayheadRuntime.self) private var runtime
 
+    /// playhead-l274: shared deep-link router for Settings. When the
+    /// amber "Free up space →" CTA is tapped we push `.storage`; the
+    /// Settings tab observes and scrolls on next appearance.
+    @Environment(\.settingsRouter) private var settingsRouter
+
     @State private var navigateToNowPlaying = false
     @State private var selectedEpisode: Episode?
 
@@ -165,12 +170,13 @@ private extension EpisodeListView {
                         }
                     },
                     onFreeUpSpace: {
-                        // TODO(bd playhead-l274): route into the dedicated
-                        // Settings → Storage screen once it exists. Today
-                        // Settings → Storage is a section inside
-                        // SettingsView — no scoped destination yet. This
-                        // closure is a stub placeholder on the show page;
-                        // the full screen is l274's responsibility.
+                        // playhead-l274: push `.storage` into the shared
+                        // `SettingsRouter`. The Settings tab's
+                        // `SettingsView` observes `pending` and scrolls
+                        // the list to the Storage group anchor; the
+                        // router is cleared via `consume()` once the
+                        // scroll is honored.
+                        settingsRouter?.request(.storage)
                     }
                 )
                 .listRowBackground(Color.clear)
