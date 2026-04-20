@@ -175,6 +175,18 @@ enum LeaseError: Error, CustomStringConvertible, Equatable {
     /// lease has already been released or transferred. Treated as a
     /// no-op at the API boundary — the WorkJournal still records the
     /// attempt for audit.
+    ///
+    /// **Overloaded semantics (tech debt).** This case is ALSO thrown
+    /// from renewal-time expiry checks — i.e. when the caller's
+    /// generation is correct but the lease has already passed its
+    /// deadline and been reclaimed. The underlying SQL predicate
+    /// conflates "no row with matching generation" and "no row with
+    /// matching generation AND unexpired deadline", so the callsite
+    /// throws the same error for both conditions. From the caller's
+    /// perspective both mean "your lease is no longer valid; stop", but
+    /// a future refactor should split this into `.generationMismatch`
+    /// vs. `.leaseExpired` so log diagnostics can distinguish late
+    /// callbacks from deadline-miss reclaim cycles.
     case generationMismatch(episodeId: String)
 
     /// No analysis_jobs row exists for this episode, so there is

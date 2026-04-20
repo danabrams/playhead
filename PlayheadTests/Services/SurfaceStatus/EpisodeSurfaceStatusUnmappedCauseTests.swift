@@ -16,7 +16,7 @@ import Testing
 
 @testable import Playhead
 
-@Suite("Reducer — unmapped cause triggers impossible-state log (playhead-o45p Gap D)", .serialized)
+@Suite("Reducer — unmapped cause triggers impossible-state log (playhead-o45p Gap D)")
 struct EpisodeSurfaceStatusUnmappedCauseTests {
 
     private static let eligible = AnalysisEligibility(
@@ -44,10 +44,9 @@ struct EpisodeSurfaceStatusUnmappedCauseTests {
     }
 
     @Test(".unknown(_) cause triggers an impossible-state log entry")
-    func unknownCauseEmitsInvariantViolation() throws {
+    func unknownCauseEmitsInvariantViolation() async throws {
         let dir = Self.makeTempDirectory()
-        SurfaceStatusInvariantLogger._resetForTesting(directory: dir)
-        defer { SurfaceStatusInvariantLogger._resetForTesting() }
+        let logger = SurfaceStatusInvariantLogger(directory: dir)
 
         // Feed the reducer a `.unknown(raw)` cause — the forward-compat
         // sentinel the Codable path lands in for a schema-evolved cause
@@ -58,7 +57,8 @@ struct EpisodeSurfaceStatusUnmappedCauseTests {
             cause: .unknown("future_cause_xyz"),
             eligibility: Self.eligible,
             coverage: nil,
-            readinessAnchor: nil
+            readinessAnchor: nil,
+            invariantLogger: logger
         )
 
         // Conservative surface triple per the reducer's default branch.
@@ -69,9 +69,9 @@ struct EpisodeSurfaceStatusUnmappedCauseTests {
         // Drain the logger and verify the session file contains a
         // reducer_internal_bug invariant entry mentioning the raw cause
         // string.
-        SurfaceStatusInvariantLogger._flushForTesting()
+        logger.flushForTesting()
 
-        let sessionURL = try #require(SurfaceStatusInvariantLogger._currentSessionFileURL())
+        let sessionURL = try #require(logger.currentSessionFileURL)
         var entries: [SurfaceStateTransitionEntry] = []
         for _ in 0..<10 {
             let data = try Data(contentsOf: sessionURL)
@@ -81,7 +81,7 @@ struct EpisodeSurfaceStatusUnmappedCauseTests {
                 .split(separator: "\n", omittingEmptySubsequences: true)
                 .map { try decoder.decode(SurfaceStateTransitionEntry.self, from: Data($0.utf8)) }
             if !entries.isEmpty { break }
-            SurfaceStatusInvariantLogger._flushForTesting()
+            logger.flushForTesting()
         }
 
         let violations = entries.filter {

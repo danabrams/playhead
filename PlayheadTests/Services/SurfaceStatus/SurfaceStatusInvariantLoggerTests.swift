@@ -7,17 +7,20 @@
 //   * Single-entry write-and-read round trip; one JSON Lines record per
 //     `record(_:)` call.
 //   * Schema compliance: every required field present, snake_case keys.
-//   * Session rotation: a fresh launch (simulated by `_resetForTesting`)
-//     opens a new session file.
+//   * Session rotation: a fresh logger instance opens a new session file.
 //   * Eviction: when more than `maxSessionFiles` sessions exist, the
 //     oldest are deleted on the next write.
+//
+// Concurrency: every test constructs its own `SurfaceStatusInvariantLogger`
+// instance pointing at a unique temp directory. No shared global state,
+// so tests run in parallel without a cross-suite mutex.
 
 import Foundation
 import Testing
 
 @testable import Playhead
 
-@Suite("SurfaceStatusInvariantLogger — write/read/rotate (playhead-ol05)", .serialized)
+@Suite("SurfaceStatusInvariantLogger — write/read/rotate (playhead-ol05)")
 struct SurfaceStatusInvariantLoggerTests {
 
     // MARK: - Setup helpers
@@ -59,18 +62,15 @@ struct SurfaceStatusInvariantLoggerTests {
     // MARK: - Round-trip
 
     @Test("Writing one entry produces one JSON-Lines record on disk")
-    func singleEntryRoundTrip() throws {
+    func singleEntryRoundTrip() async throws {
         let dir = Self.makeTempDirectory()
-        SurfaceStatusInvariantLogger._resetForTesting(directory: dir)
-        defer { SurfaceStatusInvariantLogger._resetForTesting() }
+        let logger = SurfaceStatusInvariantLogger(directory: dir)
 
-        let entry = Self.sampleEntry(
-            sessionId: SurfaceStatusInvariantLogger._currentSessionId()
-        )
-        SurfaceStatusInvariantLogger.record(entry)
-        SurfaceStatusInvariantLogger._flushForTesting()
+        let entry = Self.sampleEntry(sessionId: logger.currentSessionId)
+        logger.record(entry)
+        logger.flushForTesting()
 
-        let url = try #require(SurfaceStatusInvariantLogger._currentSessionFileURL())
+        let url = try #require(logger.currentSessionFileURL)
         let data = try Data(contentsOf: url)
         let lines = String(decoding: data, as: UTF8.self)
             .split(separator: "\n", omittingEmptySubsequences: true)
@@ -87,19 +87,18 @@ struct SurfaceStatusInvariantLoggerTests {
     }
 
     @Test("Writing many entries produces a JSON-Lines file with one record per line")
-    func manyEntriesProduceOneLineEach() throws {
+    func manyEntriesProduceOneLineEach() async throws {
         let dir = Self.makeTempDirectory()
-        SurfaceStatusInvariantLogger._resetForTesting(directory: dir)
-        defer { SurfaceStatusInvariantLogger._resetForTesting() }
+        let logger = SurfaceStatusInvariantLogger(directory: dir)
 
-        let sessionId = SurfaceStatusInvariantLogger._currentSessionId()
+        let sessionId = logger.currentSessionId
         let count = 25
         for _ in 0..<count {
-            SurfaceStatusInvariantLogger.record(Self.sampleEntry(sessionId: sessionId))
+            logger.record(Self.sampleEntry(sessionId: sessionId))
         }
-        SurfaceStatusInvariantLogger._flushForTesting()
-        // Drain pending writes by enqueueing a no-op probe and waiting.
-        let url = try #require(SurfaceStatusInvariantLogger._currentSessionFileURL())
+        logger.flushForTesting()
+
+        let url = try #require(logger.currentSessionFileURL)
 
         // Read up to a few times in case the write queue is still draining.
         var lines: [Substring] = []
@@ -108,8 +107,7 @@ struct SurfaceStatusInvariantLoggerTests {
             lines = String(decoding: data, as: UTF8.self)
                 .split(separator: "\n", omittingEmptySubsequences: true)
             if lines.count == count { break }
-            // Yield to the write queue.
-            SurfaceStatusInvariantLogger._flushForTesting()
+            logger.flushForTesting()
         }
         #expect(lines.count == count)
     }
@@ -117,18 +115,15 @@ struct SurfaceStatusInvariantLoggerTests {
     // MARK: - Schema compliance
 
     @Test("JSON record carries every required snake_case field")
-    func schemaSnakeCaseFields() throws {
+    func schemaSnakeCaseFields() async throws {
         let dir = Self.makeTempDirectory()
-        SurfaceStatusInvariantLogger._resetForTesting(directory: dir)
-        defer { SurfaceStatusInvariantLogger._resetForTesting() }
+        let logger = SurfaceStatusInvariantLogger(directory: dir)
 
-        let entry = Self.sampleEntry(
-            sessionId: SurfaceStatusInvariantLogger._currentSessionId()
-        )
-        SurfaceStatusInvariantLogger.record(entry)
-        SurfaceStatusInvariantLogger._flushForTesting()
+        let entry = Self.sampleEntry(sessionId: logger.currentSessionId)
+        logger.record(entry)
+        logger.flushForTesting()
 
-        let url = try #require(SurfaceStatusInvariantLogger._currentSessionFileURL())
+        let url = try #require(logger.currentSessionFileURL)
         let data = try Data(contentsOf: url)
         let line = String(decoding: data, as: UTF8.self)
 
@@ -155,22 +150,21 @@ struct SurfaceStatusInvariantLoggerTests {
     }
 
     @Test("invariant_violation appears only when the entry carries one")
-    func invariantViolationIsPresentWhenSet() throws {
+    func invariantViolationIsPresentWhenSet() async throws {
         let dir = Self.makeTempDirectory()
-        SurfaceStatusInvariantLogger._resetForTesting(directory: dir)
-        defer { SurfaceStatusInvariantLogger._resetForTesting() }
+        let logger = SurfaceStatusInvariantLogger(directory: dir)
 
         let entry = Self.sampleEntry(
-            sessionId: SurfaceStatusInvariantLogger._currentSessionId(),
+            sessionId: logger.currentSessionId,
             violation: InvariantViolation(
                 code: .unavailableWithRetryHint,
                 description: "test"
             )
         )
-        SurfaceStatusInvariantLogger.record(entry)
-        SurfaceStatusInvariantLogger._flushForTesting()
+        logger.record(entry)
+        logger.flushForTesting()
 
-        let url = try #require(SurfaceStatusInvariantLogger._currentSessionFileURL())
+        let url = try #require(logger.currentSessionFileURL)
         let data = try Data(contentsOf: url)
         let line = String(decoding: data, as: UTF8.self)
         #expect(line.contains("\"invariant_violation\""))
@@ -180,26 +174,20 @@ struct SurfaceStatusInvariantLoggerTests {
     // MARK: - Session rotation
 
     @Test("Rotating sessions opens a fresh file path")
-    func rotationOpensFreshFile() throws {
+    func rotationOpensFreshFile() async throws {
         let dir = Self.makeTempDirectory()
-        SurfaceStatusInvariantLogger._resetForTesting(directory: dir)
-        defer { SurfaceStatusInvariantLogger._resetForTesting() }
 
-        SurfaceStatusInvariantLogger.record(
-            Self.sampleEntry(sessionId: SurfaceStatusInvariantLogger._currentSessionId())
-        )
-        SurfaceStatusInvariantLogger._flushForTesting()
-        let firstURL = try #require(SurfaceStatusInvariantLogger._currentSessionFileURL())
+        // Simulate two consecutive process launches sharing the same
+        // diagnostics directory by constructing two logger instances.
+        let first = SurfaceStatusInvariantLogger(directory: dir)
+        first.record(Self.sampleEntry(sessionId: first.currentSessionId))
+        first.flushForTesting()
+        let firstURL = try #require(first.currentSessionFileURL)
 
-        // Rotate: simulate a fresh process launch but keep the same dir.
-        // The reset MUST keep using the same diagnostics directory so we
-        // can inspect both sessions side-by-side.
-        SurfaceStatusInvariantLogger._resetForTesting(directory: dir)
-        SurfaceStatusInvariantLogger.record(
-            Self.sampleEntry(sessionId: SurfaceStatusInvariantLogger._currentSessionId())
-        )
-        SurfaceStatusInvariantLogger._flushForTesting()
-        let secondURL = try #require(SurfaceStatusInvariantLogger._currentSessionFileURL())
+        let second = SurfaceStatusInvariantLogger(directory: dir)
+        second.record(Self.sampleEntry(sessionId: second.currentSessionId))
+        second.flushForTesting()
+        let secondURL = try #require(second.currentSessionFileURL)
 
         #expect(firstURL != secondURL)
     }
@@ -329,10 +317,9 @@ struct SurfaceStatusInvariantLoggerTests {
     }
 
     @Test("recordViolations(_:context:) emits one entry per violation")
-    func recordViolationsEmitsOnePerViolation() throws {
+    func recordViolationsEmitsOnePerViolation() async throws {
         let dir = Self.makeTempDirectory()
-        SurfaceStatusInvariantLogger._resetForTesting(directory: dir)
-        defer { SurfaceStatusInvariantLogger._resetForTesting() }
+        let logger = SurfaceStatusInvariantLogger(directory: dir)
 
         let context = SurfaceStateTransitionContext(
             episodeIdHash: nil,
@@ -347,10 +334,10 @@ struct SurfaceStatusInvariantLoggerTests {
             InvariantViolation(code: .unavailableWithRetryHint, description: "1"),
             InvariantViolation(code: .emptyBatchWithNonQueuedDisposition, description: "2"),
         ]
-        SurfaceStatusInvariantLogger.recordViolations(violations, context: context)
-        SurfaceStatusInvariantLogger._flushForTesting()
+        logger.recordViolations(violations, context: context)
+        logger.flushForTesting()
 
-        let url = try #require(SurfaceStatusInvariantLogger._currentSessionFileURL())
+        let url = try #require(logger.currentSessionFileURL)
         // Read with retry to drain the queue.
         var lines: [Substring] = []
         for _ in 0..<10 {
@@ -358,7 +345,7 @@ struct SurfaceStatusInvariantLoggerTests {
             lines = String(decoding: data, as: UTF8.self)
                 .split(separator: "\n", omittingEmptySubsequences: true)
             if lines.count == violations.count { break }
-            SurfaceStatusInvariantLogger._flushForTesting()
+            logger.flushForTesting()
         }
         #expect(lines.count == violations.count)
     }
@@ -376,10 +363,9 @@ struct SurfaceStatusInvariantLoggerTests {
     /// new field populated and asserting the round-tripped line carries
     /// the same values.
     @Test("record(_:) preserves o45p fields (eventType/entryTrigger/windowStartMs/windowEndMs)")
-    func recordPreservesO45pFieldsThroughSessionIdReStamp() throws {
+    func recordPreservesO45pFieldsThroughSessionIdReStamp() async throws {
         let dir = Self.makeTempDirectory()
-        SurfaceStatusInvariantLogger._resetForTesting(directory: dir)
-        defer { SurfaceStatusInvariantLogger._resetForTesting() }
+        let logger = SurfaceStatusInvariantLogger(directory: dir)
 
         // Build a readyEntered entry with every new field populated.
         // The sessionId we supply here is IRRELEVANT — the logger
@@ -402,10 +388,10 @@ struct SurfaceStatusInvariantLoggerTests {
             windowEndMs: 67_890
         )
 
-        SurfaceStatusInvariantLogger.record(entry)
-        SurfaceStatusInvariantLogger._flushForTesting()
+        logger.record(entry)
+        logger.flushForTesting()
 
-        let url = try #require(SurfaceStatusInvariantLogger._currentSessionFileURL())
+        let url = try #require(logger.currentSessionFileURL)
         let data = try Data(contentsOf: url)
         let lines = String(decoding: data, as: UTF8.self)
             .split(separator: "\n", omittingEmptySubsequences: true)

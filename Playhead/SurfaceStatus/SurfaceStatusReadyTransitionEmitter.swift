@@ -38,7 +38,13 @@ final class SurfaceStatusReadyTransitionEmitter: @unchecked Sendable {
     /// The reducer this emitter wraps. Pluggable so tests can inject a
     /// deterministic override, and so the production wiring can swap in
     /// a batched / coalesced variant later.
-    typealias Reducer = (
+    ///
+    /// The typealias is 5 arguments — the optional `invariantLogger`
+    /// parameter on `episodeSurfaceStatus(...)` is bound at composition
+    /// time (see `EpisodeSurfaceStatusObserver.init`) rather than passed
+    /// on every call, so the emitter itself does not need to know about
+    /// the logger.
+    typealias Reducer = @Sendable (
         _ state: AnalysisState,
         _ cause: InternalMissCause?,
         _ eligibility: AnalysisEligibility,
@@ -46,8 +52,10 @@ final class SurfaceStatusReadyTransitionEmitter: @unchecked Sendable {
         _ readinessAnchor: TimeInterval?
     ) -> EpisodeSurfaceStatus
 
-    /// The logger sink. Pluggable for tests — production passes the
-    /// real `SurfaceStatusInvariantLogger.recordReadyEntered` static.
+    /// The logger sink. Pluggable for tests — the composition root
+    /// (`PlayheadRuntime` → `EpisodeSurfaceStatusObserver`) passes a
+    /// closure bound to the injected `SurfaceStatusInvariantLogger`
+    /// instance.
     typealias LoggerSink = (
         _ episodeIdHash: String?,
         _ trigger: SurfaceStateTransitionEntryTrigger?
@@ -63,14 +71,24 @@ final class SurfaceStatusReadyTransitionEmitter: @unchecked Sendable {
     /// ready reduction is classified as `coldStart`.
     private var lastReadyByEpisode: [String: Bool] = [:]
 
+    /// Default reducer that forwards to `episodeSurfaceStatus(...)`
+    /// without the optional invariant logger. Callers that want the
+    /// reducer's impossible-state paths to log to a specific logger
+    /// instance should construct a bound reducer closure themselves
+    /// (see `EpisodeSurfaceStatusObserver`).
+    static let defaultReducer: Reducer = { state, cause, eligibility, coverage, anchor in
+        episodeSurfaceStatus(
+            state: state,
+            cause: cause,
+            eligibility: eligibility,
+            coverage: coverage,
+            readinessAnchor: anchor
+        )
+    }
+
     init(
-        reducer: @escaping Reducer = episodeSurfaceStatus,
-        loggerSink: @escaping LoggerSink = { hash, trigger in
-            SurfaceStatusInvariantLogger.recordReadyEntered(
-                episodeIdHash: hash,
-                trigger: trigger
-            )
-        }
+        reducer: @escaping Reducer = SurfaceStatusReadyTransitionEmitter.defaultReducer,
+        loggerSink: @escaping LoggerSink
     ) {
         self.reducer = reducer
         self.loggerSink = loggerSink

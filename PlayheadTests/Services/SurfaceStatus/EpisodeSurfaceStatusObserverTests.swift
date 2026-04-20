@@ -76,7 +76,16 @@ struct EpisodeSurfaceStatusObserverTests {
         snapshot: CapabilitySnapshot? = makeSnapshot(),
         sink: @escaping SurfaceStatusReadyTransitionEmitter.LoggerSink
     ) -> EpisodeSurfaceStatusObserver {
-        let reducer: SurfaceStatusReadyTransitionEmitter.Reducer = episodeSurfaceStatus
+        let reducer: SurfaceStatusReadyTransitionEmitter.Reducer = {
+            state, cause, eligibility, coverage, anchor in
+            episodeSurfaceStatus(
+                state: state,
+                cause: cause,
+                eligibility: eligibility,
+                coverage: coverage,
+                readinessAnchor: anchor
+            )
+        }
         let emitter = SurfaceStatusReadyTransitionEmitter(
             reducer: reducer,
             loggerSink: sink

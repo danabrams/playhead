@@ -12,9 +12,7 @@
 // JSON Lines file only ever contains violation entries. Consumed by
 // `playhead-e2a3`'s anomaly-rate audit (pass criterion 1: "no
 // impossible-state entries observed in production telemetry"), which
-// measures the RATE of anomalies, not the full transition stream. The
-// 82004e5 commit message phrased this as "state-transition audit" for
-// short; this file is the authoritative contract.
+// measures the RATE of anomalies, not the full transition stream.
 //
 // The logger writes JSON Lines to a per-session file under
 // `Caches/Diagnostics/`. Each (anomaly) line is exactly one
@@ -26,14 +24,22 @@
 //
 // Retention matches `playhead-ghon`'s scheduler_events 200-row tail:
 // the most recent session files are kept, older ones are deleted on
-// launch. (The exact numeric ceiling lives in `maxSessionFiles` below
-// and may diverge from ghon's row-count if a per-row vs per-session
-// distinction matters; today they share the same magic number for
-// convenience.)
+// launch. (The exact numeric ceiling lives in `maxSessionFiles` below.)
 //
 // Thread-safety: every write goes through a serial `DispatchQueue` and
 // is fire-and-forget from the caller's perspective. The reducer / batch
 // validator does not block on the logger — log emission is best-effort.
+//
+// ----- Instance-based design (post-refactor) -----
+//
+// This logger is a REFERENCE TYPE constructed and owned by the
+// composition root (`PlayheadRuntime`) and injected into every
+// producer that emits to the JSONL stream (`SkipOrchestrator`,
+// `EpisodeSurfaceStatusObserver`, the reducer's invariant paths).
+// Each test that wants to read back from the stream constructs its
+// OWN instance pointing at a temp directory — there is no shared
+// mutable state across tests, so the cross-suite races that
+// previously required a process-wide mutex are gone at the source.
 //
 // ----- Schema (owned by this bead) -----
 //
@@ -50,27 +56,10 @@
 //     "invariant_violation": <InvariantViolation | null>
 //   }
 //
-// `episodeId_hash` is SHA-256 of `installID || episodeId`, hex-encoded.
-// The installID salt is per-install; an attacker without the salt
-// cannot reverse the hash to recover the episode ID. The hasher is
-// implemented locally in this module because `playhead-ghon` (which
-// owns the canonical hasher) is being landed concurrently — the two
-// implementations share the same contract and either can be wired up
-// once both land.
-//
-// ----- API surface -----
-//
-//   * `SurfaceStatusInvariantLogger.record(_:)` — append one entry.
-//   * `SurfaceStatusInvariantLogger.recordViolations(_:context:)` —
-//     emit one entry per violation; convenience for invariant-only
-//     emission paths.
-//   * `SurfaceStatusInvariantLogger.invariantViolated(_:)` — legacy
-//     string-only entry-point, retained so the reducer's existing call-
-//     sites do not have to change in this bead. Wraps the message in a
-//     synthetic violation entry.
-//
-// All entry-points are namespaced static methods on the enum (no
-// instance, no reference counting on the hot path).
+// `episode_id_hash` is SHA-256 of `installID || episodeId`, hex-encoded.
+// The installID salt is per-install (in production) / per-instance (in
+// tests); an attacker without the salt cannot reverse the hash to
+// recover the episode ID.
 
 import Foundation
 
@@ -79,15 +68,17 @@ import Foundation
 /// Tier-B production logging channel. Writes JSON Lines to a per-session
 /// file under `Caches/Diagnostics/`. See the file-level overview for the
 /// schema and retention policy.
-enum SurfaceStatusInvariantLogger {
+///
+/// Constructed by `PlayheadRuntime` (one instance per app) and injected
+/// into every producer that writes to the surface-status JSONL stream.
+/// Every instance owns its own write queue, session file, and install-ID
+/// salt — there is no process-global logger state.
+final class SurfaceStatusInvariantLogger: @unchecked Sendable {
 
-    // MARK: - Configuration
+    // MARK: - Configuration (shared by every instance)
 
     /// Maximum number of session files to retain. Older files are
-    /// evicted on startup. Matches `playhead-ghon`'s scheduler_events
-    /// 200-row tail cadence — the two retention policies share a magic
-    /// number for ease of reasoning even though one is per-row and the
-    /// other is per-session.
+    /// evicted on startup.
     static let maxSessionFiles: Int = 200
 
     /// Directory name under `Caches/` that holds the JSON Lines files.
@@ -105,10 +96,17 @@ enum SurfaceStatusInvariantLogger {
 
     // MARK: - State
 
-    /// Backing storage for the per-process logger state. Lazily
-    /// initialized on first use so unit tests that never touch the
-    /// logger pay no I/O cost.
-    private static let state: LoggerState = LoggerState()
+    private let state: LoggerState
+
+    // MARK: - Init
+
+    /// Construct a logger writing to `directory`. When nil, writes to
+    /// `Caches/Diagnostics/`. Tests typically pass a unique temp dir so
+    /// each test owns its own session file, install-ID salt, and write
+    /// queue with no overlap across tests.
+    init(directory: URL? = nil) {
+        self.state = LoggerState(directory: directory)
+    }
 
     // MARK: - Public API
 
@@ -117,21 +115,15 @@ enum SurfaceStatusInvariantLogger {
     /// enqueued on the serial write queue.
     ///
     /// Note: `entry.sessionId` will be OVERWRITTEN with the logger's
-    /// current session ID (read on the serial write queue to avoid the
-    /// cross-thread race with `resetForTesting`). Callers that want to
-    /// supply a specific sessionId can use the test hooks directly.
-    static func record(_ entry: SurfaceStateTransitionEntry) {
+    /// current session ID.
+    func record(_ entry: SurfaceStateTransitionEntry) {
         state.enqueueWriteWithCurrentSession(entry: entry)
     }
 
     /// Convenience: emit one entry per violation in the supplied list,
     /// reusing the supplied `context` for the non-violation fields.
     /// When `violations` is empty this is a no-op.
-    ///
-    /// `context` does NOT carry a sessionId — the logger stamps each
-    /// entry with its own current session ID on the serial write queue
-    /// so all `sessionId` reads and writes happen on the same queue.
-    static func recordViolations(
+    func recordViolations(
         _ violations: [InvariantViolation],
         context: SurfaceStateTransitionContext
     ) {
@@ -144,11 +136,7 @@ enum SurfaceStatusInvariantLogger {
     /// call-sites do not need to change. Wraps the message in a
     /// synthetic `reducerInternalBug`-coded violation so the JSON shape
     /// stays consistent.
-    ///
-    /// TODO(playhead-ol05.followup): migrate the reducer's three
-    /// `invariantViolated(_:)` call-sites to `recordViolations` with a
-    /// real context, so the synthetic-code workaround can be retired.
-    static func invariantViolated(_ message: String) {
+    func invariantViolated(_ message: String) {
         state.enqueueSyntheticViolation(message: message)
     }
 
@@ -158,15 +146,7 @@ enum SurfaceStatusInvariantLogger {
     /// consumer calls this when `EpisodeSurfaceStatus` transitions INTO
     /// a ready-for-playback disposition (queued + no blocking cause).
     /// Fire-and-forget.
-    ///
-    /// - Parameters:
-    ///   - episodeIdHash: SHA-256 hash of the per-install episode ID.
-    ///     Passed in pre-hashed so the logger never holds the raw ID.
-    ///   - trigger: The consumer's best guess at what caused the ready
-    ///     transition (cold start, analysis completion, unblock, other).
-    ///     `nil` when the consumer has no finer signal.
-    ///   - timestamp: Defaults to now; tests may pin it.
-    static func recordReadyEntered(
+    func recordReadyEntered(
         episodeIdHash: String?,
         trigger: SurfaceStateTransitionEntryTrigger?,
         timestamp: Date = Date()
@@ -178,20 +158,10 @@ enum SurfaceStatusInvariantLogger {
         )
     }
 
-    /// Append an `auto_skip_fired` event to the session log. The
-    /// `SkipOrchestrator` calls this when its policy decides to apply
-    /// an auto-skip at playhead-time (the "Skip policy accepted (auto
-    /// mode)" code path). Fire-and-forget.
-    ///
-    /// - Parameters:
-    ///   - episodeIdHash: SHA-256 hash of the per-install episode ID.
-    ///   - windowStartMs: Integer milliseconds from episode start of the
-    ///     skipped ad window's start time. Callers pass seconds-in-double
-    ///     converted via `Int((t * 1000).rounded())`.
-    ///   - windowEndMs: Integer milliseconds from episode start of the
-    ///     skipped ad window's end time.
-    ///   - timestamp: Defaults to now.
-    static func recordAutoSkipFired(
+    /// Append an `auto_skip_fired` event to the session log.
+    /// `SkipOrchestrator` calls this when its policy decides to apply an
+    /// auto-skip at playhead-time. Fire-and-forget.
+    func recordAutoSkipFired(
         episodeIdHash: String?,
         windowStartMs: Int,
         windowEndMs: Int,
@@ -205,46 +175,35 @@ enum SurfaceStatusInvariantLogger {
         )
     }
 
-    /// Hash an episode ID using the per-install salt the logger is
-    /// currently configured with. Exposed so non-ol05 callers (e.g. the
-    /// SkipOrchestrator's auto-skip emission path) can produce the same
-    /// opaque token the logger would if they routed the raw episode ID
-    /// through `record(_:)` — cross-event correlation (readyEntered ⇔
-    /// autoSkipFired on the same episode) depends on byte-identical
-    /// hashes across emission sites.
-    static func hashEpisodeId(_ episodeId: String) -> String {
+    /// Hash an episode ID using this logger's install-ID salt. Every
+    /// producer that stamps `episode_id_hash` onto an entry must route
+    /// through the SAME logger instance so `false_ready_rate`'s
+    /// numerator/denominator pairing by hash is byte-identical across
+    /// producers.
+    func hashEpisodeId(_ episodeId: String) -> String {
         return state.hashEpisodeId(episodeId)
     }
 
     // MARK: - Test-only introspection
 
     #if DEBUG
-    /// Test hook: force the logger to point at a temporary directory
-    /// so unit tests can write/read entries without polluting the real
-    /// `Caches/`. Returns the directory the logger is now writing to.
-    /// Compiled out of Release.
-    @discardableResult
-    internal static func _resetForTesting(directory: URL? = nil) -> URL {
-        return state.resetForTesting(directory: directory)
-    }
-
     /// Test hook: synchronously drain pending writes. Use after
     /// `record(_:)` to ensure the file reflects every emitted entry
     /// before reading it back.
-    internal static func _flushForTesting() {
+    func flushForTesting() {
         state.flushForTesting()
     }
 
     /// Test hook: read the path of the current session file.
-    internal static func _currentSessionFileURL() -> URL? {
-        return state.currentSessionFileURL
+    var currentSessionFileURL: URL? {
+        state.currentSessionFileURL
     }
 
     /// Test hook: read the session ID the logger is using. Reads on
     /// the serial write queue so the value is a consistent snapshot
-    /// relative to any in-flight `resetForTesting` or writes.
-    internal static func _currentSessionId() -> UUID {
-        return state.currentSessionIdForTesting()
+    /// relative to any in-flight writes.
+    var currentSessionId: UUID {
+        state.currentSessionIdForTesting()
     }
     #endif
 }
@@ -256,15 +215,8 @@ enum SurfaceStatusInvariantLogger {
 /// by the hasher.
 ///
 /// Marked `@unchecked Sendable` because every mutable property is
-/// accessed ONLY on the serial `writeQueue`:
-///   * `sessionId`, `installId`, `diagnosticsDirectory`,
-///     `currentSessionFileURL`, `currentFileHandle` are all read and
-///     written exclusively from closures executing on `writeQueue`
-///     (async writes from the hot path; sync for test helpers).
-///   * The production hot path never reads these directly from the
-///     caller's thread — see `enqueueViolation`, `enqueueSyntheticViolation`,
-///     `enqueueWriteWithCurrentSession`, all of which hop onto the
-///     queue before touching any mutable state.
+/// accessed ONLY on the serial `writeQueue`. The install-ID salt is
+/// immutable for the instance's lifetime.
 private final class LoggerState: @unchecked Sendable {
 
     /// Serial queue: every write hops onto this before touching the file
@@ -273,14 +225,13 @@ private final class LoggerState: @unchecked Sendable {
 
     /// Per-session UUID stamped onto every entry and incorporated into
     /// the session filename so two simultaneously-launched processes
-    /// (test runner + app) cannot collide. Mutable ONLY via
-    /// `resetForTesting` — the real logger never rotates mid-process.
-    private(set) var sessionId: UUID
+    /// cannot collide. Immutable for the instance's lifetime.
+    private let sessionId: UUID
 
-    /// Per-install salt for the episode-ID hasher. Generated once and
-    /// persisted in the diagnostics directory; subsequent launches read
-    /// the same value so cross-session correlation works.
-    private(set) var installId: String
+    /// Per-install salt for the episode-ID hasher. Loaded from (or
+    /// created in) the diagnostics directory at init time. Immutable
+    /// for the instance's lifetime.
+    private let installId: String
 
     /// The session file URL. Lazily realized on first write so that a
     /// process that never logs anything does not create empty files.
@@ -289,18 +240,16 @@ private final class LoggerState: @unchecked Sendable {
     /// File handle for the current session. Lazily opened.
     private var currentFileHandle: FileHandle?
 
-    /// Diagnostics directory the logger writes into. Defaults to
-    /// `Caches/Diagnostics/`; tests can override via
-    /// `resetForTesting(directory:)`.
-    private var diagnosticsDirectory: URL
+    /// Diagnostics directory the logger writes into.
+    private let diagnosticsDirectory: URL
 
-    init() {
+    init(directory: URL?) {
         self.writeQueue = DispatchQueue(
             label: "playhead.surface-status-invariant-logger",
             qos: .utility
         )
         self.sessionId = UUID()
-        self.diagnosticsDirectory = LoggerState.defaultDiagnosticsDirectory()
+        self.diagnosticsDirectory = directory ?? LoggerState.defaultDiagnosticsDirectory()
         self.installId = LoggerState.loadOrCreateInstallId(
             in: self.diagnosticsDirectory
         )
@@ -309,9 +258,7 @@ private final class LoggerState: @unchecked Sendable {
     // MARK: - Write path
 
     /// Enqueue a pre-built entry, overwriting its `sessionId` with the
-    /// logger's current session ID. The sessionId substitution happens
-    /// ON the serial write queue so reads of `self.sessionId` never
-    /// race against `resetForTesting`'s write.
+    /// logger's current session ID.
     ///
     /// The rebuilt entry preserves every field the caller supplied,
     /// including the playhead-o45p additions (`eventType`, `entryTrigger`,
@@ -342,9 +289,7 @@ private final class LoggerState: @unchecked Sendable {
         }
     }
 
-    /// Build + write a violation entry. The context supplies every
-    /// non-violation field; the sessionId is read ON the serial write
-    /// queue so all sessionId reads and writes share the same queue.
+    /// Build + write a violation entry.
     func enqueueViolation(
         context: SurfaceStateTransitionContext,
         violation: InvariantViolation
@@ -367,8 +312,7 @@ private final class LoggerState: @unchecked Sendable {
         }
     }
 
-    /// Append a `ready_entered` event. SessionId is read on the serial
-    /// write queue. Fire-and-forget. Uses placeholder disposition/reason
+    /// Append a `ready_entered` event. Uses placeholder disposition/reason
     /// values (`.queued` / `.waitingForTime`) since ready-entered events
     /// are always associated with the "queued + no blocking cause"
     /// state — the `eventType` discriminator is what matters for audit
@@ -400,8 +344,7 @@ private final class LoggerState: @unchecked Sendable {
         }
     }
 
-    /// Append an `auto_skip_fired` event. SessionId is read on the serial
-    /// write queue. Fire-and-forget. Uses placeholder disposition/reason
+    /// Append an `auto_skip_fired` event. Uses placeholder disposition/reason
     /// values (`.queued` / `.waitingForTime`) since the event carries its
     /// own payload in `window_start_ms`/`window_end_ms`.
     func enqueueAutoSkipFired(
@@ -434,8 +377,7 @@ private final class LoggerState: @unchecked Sendable {
 
     /// Legacy synthetic-violation entry point. Used by
     /// `SurfaceStatusInvariantLogger.invariantViolated(_:)` to wrap a
-    /// free-form message in a real JSON-shaped entry. SessionId is read
-    /// on the serial write queue.
+    /// free-form message in a real JSON-shaped entry.
     func enqueueSyntheticViolation(message: String) {
         let timestamp = Date()
         writeQueue.async { [weak self] in
@@ -459,10 +401,10 @@ private final class LoggerState: @unchecked Sendable {
         }
     }
 
-    /// Read the current sessionId on the serial write queue so the
-    /// returned value is a consistent snapshot relative to any in-flight
-    /// reset or write. Test-only: the production hot path never needs
-    /// to read sessionId from outside the queue.
+    /// Read the current sessionId. Immutable for the instance's
+    /// lifetime, so no synchronization is needed — the sync hop is
+    /// preserved only so callers see any in-flight writes' side effects
+    /// before returning.
     func currentSessionIdForTesting() -> UUID {
         return writeQueue.sync { self.sessionId }
     }
@@ -543,44 +485,16 @@ private final class LoggerState: @unchecked Sendable {
     /// `episode_id_hash` field of every JSON Lines entry.
     ///
     /// SHA-256(installID || episodeId), hex-encoded. Matches the
-    /// `playhead-ghon` contract — when ghon's hasher lands the two
-    /// implementations should produce byte-identical output for the
-    /// same (installID, episodeId) pair.
-    ///
-    /// Reads `installId` on the serial write queue so concurrent callers
-    /// (e.g. SkipOrchestrator, which is an actor) can produce a
-    /// byte-identical hash without racing the `resetForTesting` path
-    /// that rewrites installId.
+    /// `playhead-ghon` contract — both implementations produce
+    /// byte-identical output for the same (installID, episodeId) pair.
     func hashEpisodeId(_ episodeId: String) -> String {
-        let salt = writeQueue.sync { installId }
         return SurfaceStatusEpisodeIdHasher.hash(
-            installId: salt,
+            installId: installId,
             episodeId: episodeId
         )
     }
 
     // MARK: - Test-only helpers
-
-    func resetForTesting(directory: URL? = nil) -> URL {
-        return writeQueue.sync {
-            self.currentFileHandle?.closeFile()
-            self.currentFileHandle = nil
-            self.currentSessionFileURL = nil
-            // Simulate a fresh process launch: new session UUID (so
-            // rotation tests see a distinct filename even when the
-            // timestamp clock hasn't ticked a full second).
-            self.sessionId = UUID()
-            if let directory {
-                self.diagnosticsDirectory = directory
-            } else {
-                self.diagnosticsDirectory = LoggerState.defaultDiagnosticsDirectory()
-            }
-            self.installId = LoggerState.loadOrCreateInstallId(
-                in: self.diagnosticsDirectory
-            )
-            return self.diagnosticsDirectory
-        }
-    }
 
     func flushForTesting() {
         writeQueue.sync {

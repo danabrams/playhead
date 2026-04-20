@@ -26,10 +26,11 @@
 // accessed from a single serial context. Callable `await`-ed from any
 // other actor (MainActor, AnalysisCoordinator, etc.).
 //
-// Hashing: uses `SurfaceStatusInvariantLogger.hashEpisodeId(_:)` so the
-// episode_id_hash on `ready_entered` events is byte-identical to the
-// hash SkipOrchestrator stamps on `auto_skip_fired`. Cross-event
-// correlation in `scripts/false_ready_rate.swift` depends on this.
+// Hashing: receives a hasher closure bound to the same
+// `SurfaceStatusInvariantLogger` instance that SkipOrchestrator uses, so
+// the episode_id_hash on `ready_entered` events is byte-identical to
+// the hash stamped on `auto_skip_fired`. Cross-event correlation in
+// `scripts/false_ready_rate.swift` depends on this.
 
 import Foundation
 import os
@@ -55,10 +56,10 @@ actor EpisodeSurfaceStatusObserver {
     private let capabilitySnapshotProvider: @Sendable () async -> CapabilitySnapshot?
 
     /// Pluggable hasher so tests can assert on a known hash value
-    /// without depending on the global logger salt. Production passes
-    /// `SurfaceStatusInvariantLogger.hashEpisodeId` so production events
-    /// are byte-identical to the `auto_skip_fired` hashes emitted by
-    /// SkipOrchestrator.
+    /// without depending on the production installId. Production passes
+    /// a closure bound to the same `SurfaceStatusInvariantLogger`
+    /// instance used by SkipOrchestrator so `ready_entered` and
+    /// `auto_skip_fired` hashes are byte-identical.
     private let episodeIdHasher: @Sendable (String) -> String
 
     /// The stateful emitter. Owns per-episode memory of the last
@@ -73,16 +74,47 @@ actor EpisodeSurfaceStatusObserver {
 
     // MARK: - Init
 
+    /// Production wiring passes `invariantLogger` and (usually) a hasher
+    /// bound to it; the observer builds the emitter internally with a
+    /// reducer closure that threads the logger through (so impossible-
+    /// state warnings land on the injected logger) and with a sink
+    /// closure that calls `invariantLogger.recordReadyEntered(...)`.
+    ///
+    /// Tests that only want to exercise the mapping+emission flow can
+    /// pass just `store` + `capabilitySnapshotProvider` and accept the
+    /// default logger (a fresh isolated instance) and derived hasher.
+    /// Tests that want to assert on the emitted trigger/hash can inject
+    /// a custom `emitter` directly, bypassing the logger entirely.
     init(
         store: AnalysisStore,
         capabilitySnapshotProvider: @escaping @Sendable () async -> CapabilitySnapshot?,
-        episodeIdHasher: @escaping @Sendable (String) -> String = SurfaceStatusInvariantLogger.hashEpisodeId,
-        emitter: SurfaceStatusReadyTransitionEmitter = SurfaceStatusReadyTransitionEmitter()
+        invariantLogger: SurfaceStatusInvariantLogger = SurfaceStatusInvariantLogger(),
+        episodeIdHasher: (@Sendable (String) -> String)? = nil,
+        emitter: SurfaceStatusReadyTransitionEmitter? = nil
     ) {
         self.store = store
         self.capabilitySnapshotProvider = capabilitySnapshotProvider
-        self.episodeIdHasher = episodeIdHasher
-        self.emitter = emitter
+        self.episodeIdHasher = episodeIdHasher ?? { [invariantLogger] episodeId in
+            invariantLogger.hashEpisodeId(episodeId)
+        }
+        self.emitter = emitter ?? SurfaceStatusReadyTransitionEmitter(
+            reducer: { state, cause, eligibility, coverage, anchor in
+                episodeSurfaceStatus(
+                    state: state,
+                    cause: cause,
+                    eligibility: eligibility,
+                    coverage: coverage,
+                    readinessAnchor: anchor,
+                    invariantLogger: invariantLogger
+                )
+            },
+            loggerSink: { [invariantLogger] episodeIdHash, trigger in
+                invariantLogger.recordReadyEntered(
+                    episodeIdHash: episodeIdHash,
+                    trigger: trigger
+                )
+            }
+        )
     }
 
     // MARK: - Production entry points

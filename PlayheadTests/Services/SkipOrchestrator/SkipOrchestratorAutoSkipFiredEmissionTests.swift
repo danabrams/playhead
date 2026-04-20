@@ -5,13 +5,17 @@
 //
 // Scope: playhead-o45p (false_ready_rate instrumentation — Wave 4 pass
 // criterion 3).
+//
+// Concurrency: each test constructs its own `SurfaceStatusInvariantLogger`
+// instance pointed at a unique temp directory. No shared global state,
+// so tests run in parallel without a cross-suite mutex.
 
 import Foundation
 import Testing
 
 @testable import Playhead
 
-@Suite("SkipOrchestrator — auto_skip_fired emission (playhead-o45p)", .serialized)
+@Suite("SkipOrchestrator — auto_skip_fired emission (playhead-o45p)")
 struct SkipOrchestratorAutoSkipFiredEmissionTests {
 
     private static func makeTempDirectory() -> URL {
@@ -33,25 +37,36 @@ struct SkipOrchestratorAutoSkipFiredEmissionTests {
     @Test("auto_skip_fired is emitted when auto mode applies a high-confidence window")
     func autoSkipFiredEmitted() async throws {
         let dir = Self.makeTempDirectory()
-        SurfaceStatusInvariantLogger._resetForTesting(directory: dir)
-        defer { SurfaceStatusInvariantLogger._resetForTesting() }
+        let logger = SurfaceStatusInvariantLogger(directory: dir)
+        let hasher: @Sendable (String) -> String = { [logger] in
+            logger.hashEpisodeId($0)
+        }
+
+        let runTag = UUID().uuidString
+        let assetId = "asset-o45p-\(runTag)"
+        let episodeId = "episode-o45p-\(runTag)"
 
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-o45p-1"))
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: assetId, episodeId: episodeId))
         let trustService = try await makeSkipTestTrustService(
             mode: "auto",
             trustScore: 0.9,
             observations: 10
         )
-        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            invariantLogger: logger,
+            episodeIdHasher: hasher
+        )
         // Use distinct asset and episode IDs so the assertion at the
         // bottom actually proves we hash the episode ID (not the asset
         // ID). `false_ready_rate` pairs `auto_skip_fired` with
         // `ready_entered` by the episode-ID hash; if the orchestrator
         // hashed the asset ID, every pairing would silently fail.
         await orchestrator.beginEpisode(
-            analysisAssetId: "asset-o45p-1",
-            episodeId: "episode-o45p-1",
+            analysisAssetId: assetId,
+            episodeId: episodeId,
             podcastId: "podcast-1"
         )
 
@@ -60,8 +75,8 @@ struct SkipOrchestratorAutoSkipFiredEmissionTests {
         // >= 15s (the default minimum) AND confidence above the 0.65
         // enter threshold to reach the apply path cleanly.
         let window = makeSkipTestAdWindow(
-            id: "ad-o45p-1",
-            assetId: "asset-o45p-1",
+            id: "ad-o45p-\(runTag)",
+            assetId: assetId,
             startTime: 30.0,
             endTime: 60.0,
             confidence: 0.8,
@@ -69,56 +84,65 @@ struct SkipOrchestratorAutoSkipFiredEmissionTests {
         )
         await orchestrator.receiveAdWindows([window])
 
-        SurfaceStatusInvariantLogger._flushForTesting()
+        logger.flushForTesting()
 
-        let sessionURL = try #require(SurfaceStatusInvariantLogger._currentSessionFileURL())
+        let sessionURL = try #require(logger.currentSessionFileURL)
         // Retry briefly while the serial write queue drains.
         var autoSkipEntries: [SurfaceStateTransitionEntry] = []
         for _ in 0..<10 {
             let all = try Self.readAllEntries(sessionURL)
             autoSkipEntries = all.filter { $0.eventType == .autoSkipFired }
             if !autoSkipEntries.isEmpty { break }
-            SurfaceStatusInvariantLogger._flushForTesting()
+            logger.flushForTesting()
         }
 
         #expect(autoSkipEntries.count == 1)
         #expect(autoSkipEntries.first?.windowStartMs == 30_000)
         #expect(autoSkipEntries.first?.windowEndMs == 60_000)
 
-        // The episode hash must match the value the shared logger salt
-        // produces for the EPISODE ID (NOT the analysis asset ID) —
-        // cross-event correlation with `ready_entered` depends on this.
-        let expectedHash = SurfaceStatusInvariantLogger.hashEpisodeId("episode-o45p-1")
-        #expect(autoSkipEntries.first?.episodeIdHash == expectedHash)
+        // The episode hash must match what the hasher produces for the
+        // EPISODE ID (NOT the analysis asset ID) — cross-event
+        // correlation with `ready_entered` depends on this.
+        #expect(autoSkipEntries.first?.episodeIdHash == hasher(episodeId))
         // And the asset-ID hash must NOT match — guards against a
         // regression where the orchestrator reverts to hashing the asset.
-        let assetHash = SurfaceStatusInvariantLogger.hashEpisodeId("asset-o45p-1")
-        #expect(autoSkipEntries.first?.episodeIdHash != assetHash)
+        #expect(autoSkipEntries.first?.episodeIdHash != hasher(assetId))
     }
 
     @Test("auto_skip_fired is NOT emitted when mode is shadow (no auto-skip)")
     func autoSkipFiredNotEmittedInShadowMode() async throws {
         let dir = Self.makeTempDirectory()
-        SurfaceStatusInvariantLogger._resetForTesting(directory: dir)
-        defer { SurfaceStatusInvariantLogger._resetForTesting() }
+        let logger = SurfaceStatusInvariantLogger(directory: dir)
+        let hasher: @Sendable (String) -> String = { [logger] in
+            logger.hashEpisodeId($0)
+        }
+
+        let runTag = UUID().uuidString
+        let assetId = "asset-o45p-shadow-\(runTag)"
+        let episodeId = "episode-o45p-shadow-\(runTag)"
 
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-o45p-2"))
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: assetId, episodeId: episodeId))
         let trustService = try await makeSkipTestTrustService(
             mode: "shadow",
             trustScore: 0.5,
             observations: 0
         )
-        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            invariantLogger: logger,
+            episodeIdHasher: hasher
+        )
         await orchestrator.beginEpisode(
-            analysisAssetId: "asset-o45p-2",
-            episodeId: "episode-o45p-2",
+            analysisAssetId: assetId,
+            episodeId: episodeId,
             podcastId: "podcast-1"
         )
 
         let window = makeSkipTestAdWindow(
-            id: "ad-o45p-2",
-            assetId: "asset-o45p-2",
+            id: "ad-o45p-shadow-\(runTag)",
+            assetId: assetId,
             startTime: 30.0,
             endTime: 60.0,
             confidence: 0.85,
@@ -126,12 +150,11 @@ struct SkipOrchestratorAutoSkipFiredEmissionTests {
         )
         await orchestrator.receiveAdWindows([window])
 
-        SurfaceStatusInvariantLogger._flushForTesting()
+        logger.flushForTesting()
 
         // If no session file was ever opened, there are no entries. If
-        // one was opened, the file must not contain any autoSkipFired
-        // entries.
-        if let sessionURL = SurfaceStatusInvariantLogger._currentSessionFileURL(),
+        // one was opened, it must not contain any autoSkipFired entries.
+        if let sessionURL = logger.currentSessionFileURL,
            FileManager.default.fileExists(atPath: sessionURL.path) {
             let entries = try Self.readAllEntries(sessionURL)
             let autoSkipEntries = entries.filter { $0.eventType == .autoSkipFired }

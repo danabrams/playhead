@@ -198,18 +198,50 @@ actor SkipOrchestrator {
     /// The podcast ID for the current episode. Needed to populate banner items.
     private var activePodcastId: String?
 
+    /// Hasher used to stamp `auto_skip_fired` events with a per-install
+    /// episode ID hash. Production passes a closure bound to the shared
+    /// `SurfaceStatusInvariantLogger` instance so the hash is byte-
+    /// identical to the one `EpisodeSurfaceStatusObserver` stamps on
+    /// `ready_entered`. Tests can pin the hash to a known value
+    /// independent of the logger's installId.
+    private let episodeIdHasher: @Sendable (String) -> String
+
+    /// The audit logger instance that `auto_skip_fired` events are
+    /// written to. Shared with `EpisodeSurfaceStatusObserver` so both
+    /// producers of the false_ready_rate pair land on the same file
+    /// with the same installId.
+    private let invariantLogger: SurfaceStatusInvariantLogger
+
     // MARK: - Init
 
+    /// - Parameters:
+    ///   - invariantLogger: The audit logger instance this orchestrator
+    ///     writes `auto_skip_fired` events to. Defaults to a fresh
+    ///     instance — test suites that don't inspect the log get an
+    ///     isolated logger per orchestrator (no cross-test file races).
+    ///     Production passes the runtime-shared instance so the companion
+    ///     `ready_entered` producer (EpisodeSurfaceStatusObserver) lands
+    ///     on the same file with the same installId.
+    ///   - episodeIdHasher: Hasher for the `episode_id_hash` field.
+    ///     When `nil`, derived from `invariantLogger.hashEpisodeId` so
+    ///     production events naturally pair with the observer's. Tests
+    ///     that want a pinned hash pass a deterministic closure.
     init(
         store: AnalysisStore,
         config: SkipPolicyConfig = .default,
         trustService: TrustScoringService? = nil,
-        correctionStore: (any UserCorrectionStore)? = nil
+        correctionStore: (any UserCorrectionStore)? = nil,
+        invariantLogger: SurfaceStatusInvariantLogger = SurfaceStatusInvariantLogger(),
+        episodeIdHasher: (@Sendable (String) -> String)? = nil
     ) {
         self.store = store
         self.config = config
         self.trustService = trustService
         self.correctionStore = correctionStore
+        self.invariantLogger = invariantLogger
+        self.episodeIdHasher = episodeIdHasher ?? { [invariantLogger] episodeId in
+            invariantLogger.hashEpisodeId(episodeId)
+        }
     }
 
     // MARK: - Configuration
@@ -931,10 +963,10 @@ actor SkipOrchestrator {
         // episode key onto `ready_entered`, and `false_ready_rate.swift`
         // pairs events by that hash.
         if let episodeId = activeEpisodeId {
-            let hashed = SurfaceStatusInvariantLogger.hashEpisodeId(episodeId)
+            let hashed = episodeIdHasher(episodeId)
             let startMs = Int((managed.snappedStart * 1000.0).rounded())
             let endMs = Int((managed.snappedEnd * 1000.0).rounded())
-            SurfaceStatusInvariantLogger.recordAutoSkipFired(
+            invariantLogger.recordAutoSkipFired(
                 episodeIdHash: hashed,
                 windowStartMs: startMs,
                 windowEndMs: endMs

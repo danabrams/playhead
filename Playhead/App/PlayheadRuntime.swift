@@ -55,6 +55,16 @@ final class PlayheadRuntime {
     /// metric's denominator collapses to zero.
     let surfaceStatusObserver: EpisodeSurfaceStatusObserver
 
+    /// playhead-o45p: Shared `SurfaceStatusInvariantLogger` instance that
+    /// underwrites every tier-B audit event in the surface-status JSONL
+    /// stream. Produced events come from two sides of the
+    /// false_ready_rate pair: `auto_skip_fired` (from SkipOrchestrator)
+    /// and `ready_entered` (from EpisodeSurfaceStatusObserver). Sharing
+    /// the instance keeps both sides on the same session file with the
+    /// same installId — a precondition for byte-identical
+    /// `episode_id_hash` values across the pair.
+    let surfaceStatusLogger: SurfaceStatusInvariantLogger
+
     /// Phase 7.2: Shared user correction store. Wired to `PersistentUserCorrectionStore`
     /// in production; views (TranscriptPeekView, AdBannerView callback) consume this
     /// to persist vetoes and listen-reverts without knowing the concrete type.
@@ -348,13 +358,28 @@ final class PlayheadRuntime {
         let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
         self.correctionStore = correctionStore
 
+        // playhead-o45p: construct ONE shared SurfaceStatusInvariantLogger
+        // instance and thread it through both the SkipOrchestrator (which
+        // emits `auto_skip_fired`) and the EpisodeSurfaceStatusObserver
+        // (which emits `ready_entered`). Sharing the instance ensures both
+        // sides of the false_ready_rate pair land on the same session
+        // file with the same installId, so their episode_id_hash values
+        // are byte-identical.
+        let surfaceStatusLogger = SurfaceStatusInvariantLogger()
+        self.surfaceStatusLogger = surfaceStatusLogger
+        let surfaceStatusHasher: @Sendable (String) -> String = { [surfaceStatusLogger] episodeId in
+            surfaceStatusLogger.hashEpisodeId(episodeId)
+        }
+
         // Phase 6.5 (playhead-4my.16): skipOrchestrator is constructed before
         // adDetectionService so it can be injected for step-17 forwarding.
         // The orchestrator is otherwise wired identically to before this change.
         self.skipOrchestrator = SkipOrchestrator(
             store: analysisStore,
             trustService: trustService,
-            correctionStore: correctionStore
+            correctionStore: correctionStore,
+            invariantLogger: surfaceStatusLogger,
+            episodeIdHasher: surfaceStatusHasher
         )
         self.adDetectionService = AdDetectionService(
             store: analysisStore,
@@ -394,7 +419,9 @@ final class PlayheadRuntime {
             store: analysisStore,
             capabilitySnapshotProvider: { [capabilitiesServiceForObserver] in
                 await capabilitiesServiceForObserver.currentSnapshot
-            }
+            },
+            invariantLogger: surfaceStatusLogger,
+            episodeIdHasher: surfaceStatusHasher
         )
 
         self.analysisCoordinator = AnalysisCoordinator(

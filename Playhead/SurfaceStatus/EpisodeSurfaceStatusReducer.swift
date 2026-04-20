@@ -41,6 +41,11 @@ import Foundation
 ///     `playbackReadiness` to `.none`.
 ///   - readinessAnchor: Time anchor the UI uses when rendering the
 ///     "analyzed up to here" scrubber marker. Pass-through.
+///   - invariantLogger: Sink for impossible-state violations detected
+///     during reduction. `nil` silently drops violations — appropriate
+///     for pure unit tests of the reducer's precedence ladder. Production
+///     threads the composition root's logger through so Tier-B audit
+///     entries land on disk.
 /// - Returns: A fully populated `EpisodeSurfaceStatus`. Never nil — the
 ///   reducer is total over every possible input combination.
 func episodeSurfaceStatus(
@@ -48,7 +53,8 @@ func episodeSurfaceStatus(
     cause: InternalMissCause?,
     eligibility: AnalysisEligibility,
     coverage: CoverageSummary?,
-    readinessAnchor: TimeInterval?
+    readinessAnchor: TimeInterval?,
+    invariantLogger: SurfaceStatusInvariantLogger? = nil
 ) -> EpisodeSurfaceStatus {
     return _validatedEpisodeSurfaceStatus(
         _episodeSurfaceStatusCore(
@@ -56,10 +62,12 @@ func episodeSurfaceStatus(
             cause: cause,
             eligibility: eligibility,
             coverage: coverage,
-            readinessAnchor: readinessAnchor
+            readinessAnchor: readinessAnchor,
+            invariantLogger: invariantLogger
         ),
         cause: cause,
-        eligibility: eligibility
+        eligibility: eligibility,
+        invariantLogger: invariantLogger
     )
 }
 
@@ -77,7 +85,8 @@ func episodeSurfaceStatus(
 private func _validatedEpisodeSurfaceStatus(
     _ status: EpisodeSurfaceStatus,
     cause: InternalMissCause?,
-    eligibility: AnalysisEligibility
+    eligibility: AnalysisEligibility,
+    invariantLogger: SurfaceStatusInvariantLogger?
 ) -> EpisodeSurfaceStatus {
     let violations = SurfaceStatusInvariants.violations(of: status)
     if !violations.isEmpty {
@@ -90,7 +99,7 @@ private func _validatedEpisodeSurfaceStatus(
             cause: cause,
             eligibilitySnapshot: eligibility
         )
-        SurfaceStatusInvariantLogger.recordViolations(violations, context: context)
+        invariantLogger?.recordViolations(violations, context: context)
         SurfaceStatusInvariants.enforce(violations)
     }
     return status
@@ -103,7 +112,8 @@ private func _episodeSurfaceStatusCore(
     cause: InternalMissCause?,
     eligibility: AnalysisEligibility,
     coverage: CoverageSummary?,
-    readinessAnchor: TimeInterval?
+    readinessAnchor: TimeInterval?,
+    invariantLogger: SurfaceStatusInvariantLogger?
 ) -> EpisodeSurfaceStatus {
 
     // Derived once up front so every branch below can consult the same
@@ -178,7 +188,7 @@ private func _episodeSurfaceStatusCore(
             // returns true for the three cases handled above. We call
             // the invariant logger so ol05 can observe this path if the
             // ladder ever falls out of sync.
-            SurfaceStatusInvariantLogger.invariantViolated(
+            invariantLogger?.invariantViolated(
                 "user-paused rule matched an unknown cause: \(cause)"
             )
             return fallback(
@@ -229,7 +239,7 @@ private func _episodeSurfaceStatusCore(
                 readinessAnchor: readinessAnchor
             )
         default:
-            SurfaceStatusInvariantLogger.invariantViolated(
+            invariantLogger?.invariantViolated(
                 "resource-block rule matched an unknown cause: \(cause)"
             )
             return fallback(
@@ -304,7 +314,7 @@ private func _episodeSurfaceStatusCore(
                 readinessAnchor: readinessAnchor
             )
         default:
-            SurfaceStatusInvariantLogger.invariantViolated(
+            invariantLogger?.invariantViolated(
                 "transient-wait rule matched an unknown cause: \(cause)"
             )
             return fallback(
@@ -331,7 +341,7 @@ private func _episodeSurfaceStatusCore(
     // lets e2a3 aggregate unmapped-cause rates independently of the
     // surface behavior.
     if case .unknown(let raw) = cause {
-        SurfaceStatusInvariantLogger.invariantViolated(
+        invariantLogger?.invariantViolated(
             "reducer received unmapped InternalMissCause.unknown(\(raw)); surfaced conservative .failed/.couldntAnalyze/.retry triple"
         )
     }
