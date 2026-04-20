@@ -1,6 +1,7 @@
 // CandidateWindowSelector.swift
 // playhead-c3pi: pure-function selection of candidate ASR windows for the
-// pre-analysis cascade.
+// pre-analysis cascade + the thin cascade-coordinator that tracks the
+// readiness anchor across seek events.
 //
 // The Phase 2 detection cascade prioritises ASR work in this order:
 //
@@ -23,6 +24,7 @@
 // per-cohort experiment can move them without touching this file.
 
 import Foundation
+import OSLog
 
 /// A single candidate window the cascade will ASR before episode-wide
 /// backfill resumes. Returned by `CandidateWindowSelector.select(...)` in
@@ -200,5 +202,128 @@ enum CandidateWindowSelector {
 
         guard upper > anchor else { return nil }
         return CandidateWindow(range: anchor...upper, kind: .proximal)
+    }
+}
+
+// MARK: - CandidateWindowCascade
+
+/// Actor that tracks the current readiness anchor and the last-produced
+/// candidate-window list per episode. Call-sites push events into the
+/// cascade:
+///
+///   * `seed(episodeId:episodeDuration:playbackAnchor:chapterEvidence:)`
+///     on download-start / re-enqueue — replaces the current latch and
+///     returns the freshly-selected window order.
+///   * `noteSeek(episodeId:newPosition:episodeDuration:chapterEvidence:)`
+///     on every committed playhead update — when the delta exceeds
+///     `seekRelatchThresholdSeconds`, the latch is rebased and the new
+///     window order is returned. Otherwise returns `nil` (no re-latch).
+///
+/// The cascade is intentionally *advisory* in this bead: the windows it
+/// emits are logged for SLI consumption and surfaced via `currentWindows`
+/// so the scheduler (and tests) can assert on the cascade ordering
+/// without the execution pipeline yet committing to per-slice jobs.
+/// Per-slice execution is tracked by `TODO(playhead-1iq1)` in
+/// `AnalysisWorkScheduler.swift`.
+actor CandidateWindowCascade {
+
+    private let config: PreAnalysisConfig
+    private let logger: Logger
+
+    /// Per-episode current readiness anchor (last committed position /
+    /// `episodeStart` for unplayed episodes). `nil` when the episode
+    /// has never been seeded or noted.
+    private var anchors: [String: TimeInterval?] = [:]
+
+    /// Per-episode current ordered candidate windows (output of the most
+    /// recent selection). Preserved across seek events below the
+    /// re-latch threshold.
+    private var windowsByEpisode: [String: [CandidateWindow]] = [:]
+
+    init(
+        config: PreAnalysisConfig = .load(),
+        logger: Logger = Logger(subsystem: "com.playhead", category: "CandidateWindowCascade")
+    ) {
+        self.config = config
+        self.logger = logger
+    }
+
+    /// Seed (or re-seed) the cascade for an episode. Typically called
+    /// when the episode enters the scheduler queue — the call-site has
+    /// the chapter evidence + metadata on hand and the cascade stores
+    /// the latched anchor for subsequent seek notifications.
+    ///
+    /// - Returns: The ordered candidate windows the cascade now
+    ///   associates with this episode.
+    @discardableResult
+    func seed(
+        episodeId: String,
+        episodeDuration: TimeInterval?,
+        playbackAnchor: TimeInterval?,
+        chapterEvidence: [ChapterEvidence]
+    ) -> [CandidateWindow] {
+        anchors[episodeId] = playbackAnchor
+        let windows = CandidateWindowSelector.select(
+            episodeDuration: episodeDuration,
+            playbackAnchor: playbackAnchor,
+            chapterEvidence: chapterEvidence,
+            config: config
+        )
+        windowsByEpisode[episodeId] = windows
+        logger.info("Seeded cascade for episode=\(episodeId, privacy: .public) windows=\(windows.count) anchor=\(playbackAnchor ?? 0, privacy: .public)")
+        return windows
+    }
+
+    /// Note a seek (or playhead commit). If the delta from the last
+    /// latched anchor exceeds `seekRelatchThresholdSeconds`, the
+    /// cascade re-bases and returns the new window order; otherwise
+    /// returns `nil`.
+    ///
+    /// Callers that need the current list even when no relatch fired
+    /// use `currentWindows(for:)`.
+    func noteSeek(
+        episodeId: String,
+        newPosition: TimeInterval,
+        episodeDuration: TimeInterval?,
+        chapterEvidence: [ChapterEvidence]
+    ) -> [CandidateWindow]? {
+        let previous = anchors[episodeId] ?? nil
+        let relatch = CandidateWindowSelector.shouldRelatch(
+            previousAnchor: previous,
+            newPosition: newPosition,
+            threshold: config.seekRelatchThresholdSeconds
+        )
+        guard relatch else { return nil }
+
+        anchors[episodeId] = newPosition
+        let windows = CandidateWindowSelector.select(
+            episodeDuration: episodeDuration,
+            playbackAnchor: newPosition,
+            chapterEvidence: chapterEvidence,
+            config: config
+        )
+        windowsByEpisode[episodeId] = windows
+        logger.info("Re-latched cascade for episode=\(episodeId, privacy: .public) newAnchor=\(newPosition, privacy: .public) windows=\(windows.count)")
+        return windows
+    }
+
+    /// Current ordered windows for an episode, or `nil` if the cascade
+    /// has never been seeded for it. Exposed for tests and for
+    /// SLI emitters that need to report the planned order.
+    func currentWindows(for episodeId: String) -> [CandidateWindow]? {
+        windowsByEpisode[episodeId]
+    }
+
+    /// Current latched anchor for an episode. `.some(nil)` when the
+    /// cascade was seeded with no playback anchor (unplayed), `nil`
+    /// when the cascade has no record of the episode.
+    func currentAnchor(for episodeId: String) -> TimeInterval?? {
+        anchors[episodeId]
+    }
+
+    /// Forget an episode (call on deletion / download removal).
+    func forget(episodeId: String) {
+        anchors.removeValue(forKey: episodeId)
+        windowsByEpisode.removeValue(forKey: episodeId)
     }
 }
