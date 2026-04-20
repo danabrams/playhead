@@ -70,6 +70,8 @@
 		1F5499FD8C09D8E2B958AD11 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8402BA8379CC649522667AB1 /* OnboardingView.swift */; };
 		431557CA53A1D3C49CB81991 /* FirstSubscriptionOnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB7FC7E544645723D4E26F50 /* FirstSubscriptionOnboardingView.swift */; };
 		F0C6D89CC3F08CAA2A28259B /* FirstSubscriptionOnboardingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C628381436801BAD9379254 /* FirstSubscriptionOnboardingTests.swift */; };
+		853D7BBB3CA86D7C82B9D664 /* DownloadNextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 964B4AD1B62DEFEF15DB8DCC /* DownloadNextView.swift */; };
+		C5C55749084A4B0ECF795381 /* DownloadNextViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A8112BC5F08602A57B3C53 /* DownloadNextViewTests.swift */; };
 		1FCE674DA1CADD6D862C1464 /* SponsorKnowledgeStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0751E488FFBCE71F658F353 /* SponsorKnowledgeStoreTests.swift */; };
 		20D785808B9DC102352B6F0C /* DeviceClassTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6BC7EED088D1E62C9F21326 /* DeviceClassTests.swift */; };
 		21352E1F798159DAA9FEA833 /* BroadCorrectionEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B5EBCEEA3FAFA44B8220C3E /* BroadCorrectionEvaluator.swift */; };
@@ -718,6 +720,8 @@
 		8402BA8379CC649522667AB1 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		DB7FC7E544645723D4E26F50 /* FirstSubscriptionOnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstSubscriptionOnboardingView.swift; sourceTree = "<group>"; };
 		9C628381436801BAD9379254 /* FirstSubscriptionOnboardingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstSubscriptionOnboardingTests.swift; sourceTree = "<group>"; };
+		964B4AD1B62DEFEF15DB8DCC /* DownloadNextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadNextView.swift; sourceTree = "<group>"; };
+		F1A8112BC5F08602A57B3C53 /* DownloadNextViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadNextViewTests.swift; sourceTree = "<group>"; };
 		842382A1A5369363A4D358F3 /* DownloadManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadManager.swift; sourceTree = "<group>"; };
 		85361C153508BAB634696458 /* ReplayMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayMetrics.swift; sourceTree = "<group>"; };
 		858BBD6C21F9850E0297E56C /* ClassifierService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassifierService.swift; sourceTree = "<group>"; };
@@ -1600,6 +1604,7 @@
 		829664DA168C443AAC36A0E6 /* Library */ = {
 			isa = PBXGroup;
 			children = (
+				964B4AD1B62DEFEF15DB8DCC /* DownloadNextView.swift */,
 				BBA65DE1F0FE58539F95E479 /* EpisodeListView.swift */,
 				F9002A6E69AE43C9F38CAB4A /* LibraryView.swift */,
 			);
@@ -1986,6 +1991,7 @@
 		EE25475386C2123CFBA62523 /* Library */ = {
 			isa = PBXGroup;
 			children = (
+				F1A8112BC5F08602A57B3C53 /* DownloadNextViewTests.swift */,
 				B9E0ECF97A61872A81AD2496 /* EpisodeListViewHapticTests.swift */,
 				5A1B192A170335F238D45F67 /* EpisodeListViewTests.swift */,
 				893D79F29684D60E65402239 /* EpisodeRowReadinessTests.swift */,
@@ -2216,6 +2222,7 @@
 				839630CD08B9EC85C4AEE5AA /* EpisodeExecutionLease.swift in Sources */,
 				13D6606FF66A34208955052A /* EpisodeIdHasher.swift in Sources */,
 				837F2D68A2989CED47B9EDDE /* EpisodeListView.swift in Sources */,
+				853D7BBB3CA86D7C82B9D664 /* DownloadNextView.swift in Sources */,
 				9A753B79D9EB9D819D7E2301 /* EpisodeMetadataCue.swift in Sources */,
 				F0D3497A2FE7AEE8F3EB232B /* EpisodeSurfaceStatusObserver.swift in Sources */,
 				E20E8C5C29503A319570A7F6 /* EpisodeSurfaceStatusReducer.swift in Sources */,
@@ -2443,6 +2450,7 @@
 				2E3C60CCD0CEC24C18F1061D /* EpisodeLeaseAndWorkJournalTests.swift in Sources */,
 				13BBFACFBB1D34D9A3CBFF8B /* EpisodeListViewHapticTests.swift in Sources */,
 				3F0F8160121BFC0FAE15C14A /* EpisodeListViewTests.swift in Sources */,
+				C5C55749084A4B0ECF795381 /* DownloadNextViewTests.swift in Sources */,
 				030124646597FA272A69D7EC /* EpisodeRowReadinessTests.swift in Sources */,
 				39DAB671DEB74201B469BA98 /* EpisodeSurfaceStatusContractTests.swift in Sources */,
 				C32A207B7FB402E8FEF49786 /* EpisodeSurfaceStatusMatrix.swift in Sources */,
