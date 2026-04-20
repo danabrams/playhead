@@ -483,6 +483,11 @@
 		FEFCC10CFF7EF39FD043123F /* SensitiveWindowRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 117F1E41DE084B613166D952 /* SensitiveWindowRouter.swift */; };
 		FF4B955033ADAE3CA17F5C77 /* EpisodeStatusLineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75E4BD6B8E5FD41FE2C52FF3 /* EpisodeStatusLineView.swift */; };
 		FF5D6E825A52787AC7DD3218 /* DiagnosticsExportServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E85B05A45ED2EC4D70244642 /* DiagnosticsExportServiceTests.swift */; };
+		A0A0A0A0A0A0A0A0A0AA0004 /* ActivityRefreshNotification.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0A0A0A0A0A0A0A0A0AA0003 /* ActivityRefreshNotification.swift */; };
+		A0A0A0A0A0A0A0A0A0AA0006 /* ActivitySnapshotProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0A0A0A0A0A0A0A0A0AA0005 /* ActivitySnapshotProvider.swift */; };
+		A0A0A0A0A0A0A0A0A0AA0008 /* ActivityViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0A0A0A0A0A0A0A0A0AA0007 /* ActivityViewModel.swift */; };
+		A0A0A0A0A0A0A0A0A0AA000A /* ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0A0A0A0A0A0A0A0A0AA0009 /* ActivityView.swift */; };
+		A0A0A0A0A0A0A0A0A0AA000C /* ActivityViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0A0A0A0A0A0A0A0A0AA000B /* ActivityViewModelTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -800,6 +805,11 @@
 		9DE9DAA7D29BE189A0E9B0BA /* DesignTokenCatalogPreviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignTokenCatalogPreviewTests.swift; sourceTree = "<group>"; };
 		9DEF3BC3519118BAC27CBAB6 /* ImplicitFeedbackStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImplicitFeedbackStoreTests.swift; sourceTree = "<group>"; };
 		9E6485CC38D3C6315755D2C9 /* SurfaceStatusEpisodeIdHasherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceStatusEpisodeIdHasherTests.swift; sourceTree = "<group>"; };
+		A0A0A0A0A0A0A0A0A0AA0003 /* ActivityRefreshNotification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityRefreshNotification.swift; sourceTree = "<group>"; };
+		A0A0A0A0A0A0A0A0A0AA0005 /* ActivitySnapshotProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivitySnapshotProvider.swift; sourceTree = "<group>"; };
+		A0A0A0A0A0A0A0A0A0AA0007 /* ActivityViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityViewModel.swift; sourceTree = "<group>"; };
+		A0A0A0A0A0A0A0A0A0AA0009 /* ActivityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityView.swift; sourceTree = "<group>"; };
+		A0A0A0A0A0A0A0A0A0AA000B /* ActivityViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityViewModelTests.swift; sourceTree = "<group>"; };
 		A0BD72C058F608DD41DCA71C /* AsymmetricSnapScorerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsymmetricSnapScorerTests.swift; sourceTree = "<group>"; };
 		A10AE76A7837166F6EB25404 /* CorpusLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CorpusLoader.swift; sourceTree = "<group>"; };
 		A1AD4DBC4E0F6B815194B816 /* PermissiveAdClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissiveAdClassifier.swift; sourceTree = "<group>"; };
@@ -1039,6 +1049,8 @@
 		0F47941416FF6AEF8849C179 /* Activity */ = {
 			isa = PBXGroup;
 			children = (
+				A0A0A0A0A0A0A0A0A0AA0003 /* ActivityRefreshNotification.swift */,
+				A0A0A0A0A0A0A0A0A0AA0005 /* ActivitySnapshotProvider.swift */,
 				32953755E4416280532403A9 /* LiveActivityCopy.swift */,
 			);
 			path = Activity;
@@ -1282,6 +1294,7 @@
 		5719C88DB25F103D582FCADF /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				A0A0A0A0A0A0A0A0A0AA0001 /* Activity */,
 				6B0AF29EF3AE7801E54F7F4B /* Browse */,
 				E4CBE2CD974A5D736FD6D47C /* Components */,
 				829664DA168C443AAC36A0E6 /* Library */,
@@ -1697,6 +1710,23 @@
 			path = Settings;
 			sourceTree = "<group>";
 		};
+		A0A0A0A0A0A0A0A0A0AA0001 /* Activity */ = {
+			isa = PBXGroup;
+			children = (
+				A0A0A0A0A0A0A0A0A0AA0009 /* ActivityView.swift */,
+				A0A0A0A0A0A0A0A0A0AA0007 /* ActivityViewModel.swift */,
+			);
+			path = Activity;
+			sourceTree = "<group>";
+		};
+		A0A0A0A0A0A0A0A0A0AA0002 /* Activity */ = {
+			isa = PBXGroup;
+			children = (
+				A0A0A0A0A0A0A0A0A0AA000B /* ActivityViewModelTests.swift */,
+			);
+			path = Activity;
+			sourceTree = "<group>";
+		};
 		A7FC4BE8CADD5A18328AF7CF /* App */ = {
 			isa = PBXGroup;
 			children = (
@@ -1712,6 +1742,7 @@
 			isa = PBXGroup;
 			children = (
 				3754D36CCCA4C878D0551C61 /* AppNavigationStructureTests.swift */,
+				A0A0A0A0A0A0A0A0A0AA0002 /* Activity */,
 				6E109D30A17A3C38D60147E0 /* Components */,
 				EE25475386C2123CFBA62523 /* Library */,
 				C0570164C3EAC29B0E288016 /* NowPlaying */,
@@ -2188,6 +2219,10 @@
 			files = (
 				6C9FC56CA52EF4C5A3FBA5AF /* ASRVocabularyProvider.swift in Sources */,
 				90B5A4621CC0F68378C19785 /* AcousticBreakDetector.swift in Sources */,
+				A0A0A0A0A0A0A0A0A0AA0004 /* ActivityRefreshNotification.swift in Sources */,
+				A0A0A0A0A0A0A0A0A0AA0006 /* ActivitySnapshotProvider.swift in Sources */,
+				A0A0A0A0A0A0A0A0A0AA000A /* ActivityView.swift in Sources */,
+				A0A0A0A0A0A0A0A0A0AA0008 /* ActivityViewModel.swift in Sources */,
 				BA034F1325DCC5B06E9AE9E7 /* AdBannerView.swift in Sources */,
 				FB4C4A030BD7A0E240C0DC9C /* AdCopyFingerprintMatcher.swift in Sources */,
 				1B336F4B022082E41D7CCE12 /* AdCopyFingerprintStore.swift in Sources */,
@@ -2403,6 +2438,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A0A0A0A0A0A0A0A0A0AA000C /* ActivityViewModelTests.swift in Sources */,
 				ECA6FCE8EF9196076A907C61 /* AdBannerCopyTests.swift in Sources */,
 				22A524C389B96C4F7E7EA3B2 /* AdBannerQueueTests.swift in Sources */,
 				B203E5DFDFB80AA441D2B89A /* AdBannerViewHapticTests.swift in Sources */,
