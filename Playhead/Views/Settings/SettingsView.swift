@@ -1136,9 +1136,14 @@ private extension SettingsView {
 
             // Per-show capability profile (h6a6 is OPEN — hide when no data)
             // No producer API exists yet; the row stays hidden. When h6a6
-            // lands, add the provider call here and render when non-empty.
+            // lands, add the provider call here and render the row using
+            // `SettingsL274Copy.perShowCapabilityProfileLabel` as the
+            // row label (already test-pinned in `SettingsL274CopyTests`
+            // so the copy is locked-in for the future landing).
             // (Explicit no-op keeps the scope discipline visible.)
-            // TODO(bd playhead-h6a6): render per-show capability profile when producer lands
+            // TODO(bd playhead-h6a6): render per-show capability profile
+            //   row using `SettingsL274Copy.perShowCapabilityProfileLabel`
+            //   when the producer API lands.
 
             // Feature-flag placeholder toggles (all default OFF)
             DisclosureGroup(SettingsL274Copy.featureFlagsLabel) {

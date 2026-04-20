@@ -187,8 +187,9 @@ enum EpisodeStorageCap: Sendable, Equatable, Hashable, CaseIterable {
             return choice
         }
         // Nearest-upward match so an admission cap never silently shrinks.
-        let ordered: [EpisodeStorageCap] = [.gb1, .gb5, .gb10, .gb25, .gb50, .unlimited]
-        for choice in ordered where bytes <= choice.bytes {
+        // Iterate `allCases` directly — the explicit ordered array used here
+        // previously was identical to `allCases` (m1, code review).
+        for choice in EpisodeStorageCap.allCases where bytes <= choice.bytes {
             return choice
         }
         return .unlimited
