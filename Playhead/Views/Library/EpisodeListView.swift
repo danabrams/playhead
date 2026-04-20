@@ -263,6 +263,24 @@ private struct EpisodeRow: View {
                 }
             }
 
+            // Status line (playhead-zp5y).
+            //
+            // Sourced from `EpisodeSurfaceStatus` via the pure copy
+            // resolver — never from raw scheduler internals. Surfaced
+            // only when the status carries a meaningful analysis signal
+            // (complete / proximal / deferredOnly); suppressed for the
+            // default `.none` readiness to avoid adding a "Queued ·
+            // waiting" line to every un-analyzed row. The full 7-case
+            // rendering is exercised in EpisodeStatusLineCopyTests and
+            // will be surfaced end-to-end when a proper episode detail
+            // screen lands in a subsequent bead.
+            if let line = libraryRowStatusLine(episode: episode) {
+                Text(line)
+                    .font(AppTypography.mono(size: 11, weight: .regular))
+                    .foregroundStyle(AppColors.textTertiary)
+                    .accessibilityLabel(line)
+            }
+
             // Progress bar for partially played episodes
             if !episode.isPlayed, episode.playbackPosition > 0,
                let duration = episode.duration, duration > 0
@@ -324,6 +342,69 @@ func libraryRowShouldShowReadinessCheckmark(episode: Episode) -> Bool {
     case .none, .deferredOnly:
         return false
     }
+}
+
+// MARK: - Library Row Status Line (playhead-zp5y)
+
+/// Compute the optional status-line copy a library row should surface
+/// for the supplied episode. Returns `nil` for the default
+/// `.none` readiness so the row stays visually quiet for every
+/// un-analyzed episode.
+///
+/// Routes through the canonical reducer + copy resolver — the UI layer
+/// never reaches past the `EpisodeSurfaceStatus` boundary to the raw
+/// scheduler cause taxonomy. Because library rows don't have live
+/// eligibility or cause data in hand, the reducer is invoked with
+/// conservative defaults (fully-eligible device, no live cause) which
+/// land in the readiness-driven branch — exactly the one library rows
+/// care about.
+///
+/// Exposed at file scope (like `libraryRowShouldShowReadinessCheckmark`)
+/// so a behavioural test can exercise it without SwiftUI's environment.
+func libraryRowStatusLine(episode: Episode) -> String? {
+    // Only render the line for episodes carrying an analysis signal.
+    // The `.none` branch (no coverage yet) would say "Queued · waiting"
+    // for every un-analyzed episode in the list; suppress it at the
+    // row boundary instead.
+    let readiness = derivePlaybackReadiness(
+        coverage: episode.coverageSummary,
+        anchor: episode.playbackAnchor
+    )
+    switch readiness {
+    case .none:
+        return nil
+    case .deferredOnly, .proximal, .complete:
+        break
+    }
+
+    let state = AnalysisState(
+        persistedStatus: .queued,
+        hasUserPreemptedJob: false,
+        hasAppForceQuitFlag: false,
+        pendingSinceEnqueuedAt: nil,
+        hasAnyConfirmedAnalysis: episode.coverageSummary != nil
+    )
+    let eligibility = AnalysisEligibility(
+        hardwareSupported: true,
+        appleIntelligenceEnabled: true,
+        regionSupported: true,
+        languageSupported: true,
+        modelAvailableNow: true,
+        capturedAt: Date()
+    )
+    let status = episodeSurfaceStatus(
+        state: state,
+        cause: nil,
+        eligibility: eligibility,
+        coverage: episode.coverageSummary,
+        readinessAnchor: episode.playbackAnchor
+    )
+    let line = EpisodeStatusLineCopy.resolve(
+        status: status,
+        coverage: episode.coverageSummary,
+        anchor: episode.playbackAnchor
+    )
+    return line.primary
 }
 
 // MARK: - Preview
