@@ -749,6 +749,35 @@ final class PlayheadRuntime {
         return (episodeId, snapshot.currentTime)
     }
 
+    /// playhead-vhha: notify the candidate-window cascade of a committed
+    /// playhead update. Called from `PlayheadApp.persistPlaybackPosition`
+    /// after each successful SwiftData save so the cascade can re-latch
+    /// the resumed-window selection when the user seeks more than
+    /// `seekRelatchThresholdSeconds` (30 s by default) away from the
+    /// prior anchor. Sub-threshold commits are silently no-op'd inside
+    /// the cascade.
+    ///
+    /// `chapterEvidence` is intentionally left empty here: chapter
+    /// evidence is not yet sourced anywhere on the production commit
+    /// path (no live caller invokes `seedCandidateWindows` either), so
+    /// passing `[]` matches the empty seed and preserves the proximal
+    /// re-latch behavior. Sponsor-chapter preservation across re-latch
+    /// will land alongside the runner-side cascade consumption work
+    /// (`playhead-swws`) when chapter evidence becomes available on the
+    /// commit path.
+    func noteCommittedPlayhead(
+        episodeId: String,
+        position: TimeInterval,
+        episodeDuration: TimeInterval?
+    ) async {
+        await analysisWorkScheduler.noteCommittedPlayhead(
+            episodeId: episodeId,
+            newPosition: position,
+            episodeDuration: episodeDuration,
+            chapterEvidence: []
+        )
+    }
+
     func setPlaybackPositionPersistenceHandler(
         _ handler: @escaping @MainActor (PlaybackPositionPersistenceTrigger) async -> Void
     ) {
