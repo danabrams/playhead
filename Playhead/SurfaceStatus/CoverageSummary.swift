@@ -124,6 +124,55 @@ struct CoverageSummary: Sendable, Hashable, Codable {
         self.updatedAt = updatedAt
     }
 
+    // MARK: - Codable
+    //
+    // The compiler-synthesized Decodable implementation would decode each
+    // stored property directly, bypassing the designated initializer's
+    // `normalize(coverageRanges)` step and its derivation of
+    // `firstCoveredOffset`. A hand-edited or externally-written JSON blob
+    // with unsorted/overlapping ranges (or a stale `firstCoveredOffset`)
+    // would therefore decode into a non-canonical instance and violate the
+    // invariants documented above. We override `init(from:)` so every
+    // decode path flows through the designated init, producing the same
+    // canonical form callers get from direct construction.
+    //
+    // `updatedAt` is preserved as decoded rather than overwritten — a
+    // round-tripped record must retain its original write timestamp.
+
+    enum CodingKeys: String, CodingKey {
+        case coverageRanges
+        case firstCoveredOffset
+        case isComplete
+        case modelVersion
+        case policyVersion
+        case featureSchemaVersion
+        case updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Decode the raw (potentially non-canonical) ranges then delegate
+        // through the designated initializer so normalization and
+        // `firstCoveredOffset` derivation run exactly as they do for
+        // in-process construction. The persisted `firstCoveredOffset`
+        // field is intentionally ignored — the designated init derives
+        // the canonical value from the normalized ranges.
+        let rawRanges = try container.decode([ClosedRange<TimeInterval>].self, forKey: .coverageRanges)
+        let isComplete = try container.decode(Bool.self, forKey: .isComplete)
+        let modelVersion = try container.decode(String.self, forKey: .modelVersion)
+        let policyVersion = try container.decode(Int.self, forKey: .policyVersion)
+        let featureSchemaVersion = try container.decode(Int.self, forKey: .featureSchemaVersion)
+        let updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        self.init(
+            coverageRanges: rawRanges,
+            isComplete: isComplete,
+            modelVersion: modelVersion,
+            policyVersion: policyVersion,
+            featureSchemaVersion: featureSchemaVersion,
+            updatedAt: updatedAt
+        )
+    }
+
     /// Construct an empty summary (no coverage yet). Useful when the
     /// analysis pipeline enqueues an episode but has not produced any
     /// confirmed windows. Derives to `PlaybackReadiness.none`.
@@ -237,6 +286,22 @@ let playbackReadinessProximalLookaheadSeconds: TimeInterval = 15 * 60
 /// look ahead from). It can still produce `.complete` (the whole
 /// episode is analyzed regardless of anchor) or `.deferredOnly` (some
 /// coverage exists but no anchor to evaluate proximity against).
+///
+/// **End-of-episode contract (for downstream producers — playhead-zp5y,
+/// playhead-quh7):** this function does not know the episode duration,
+/// so it cannot clamp the lookahead window when the anchor is within
+/// `playbackReadinessProximalLookaheadSeconds` of the episode's end.
+/// An episode analyzed up to `duration - 60s` with the user at anchor
+/// `duration - 120s` will never derive `.proximal` unless the producer
+/// sets `coverage.isComplete = true`. **Producers MUST set
+/// `isComplete = true` when analysis has covered up to
+/// `episodeDuration - playbackReadinessProximalLookaheadSeconds`** — i.e.
+/// once the remaining unanalyzed tail is shorter than the lookahead
+/// window — otherwise `.proximal` is unreachable near the end of the
+/// episode. Out of scope for this function to clamp: adding an
+/// `episodeDuration` parameter here would couple the derivation to a
+/// field that is not part of the `(coverage, anchor)` pair the spec
+/// mandates as the derivation's only inputs.
 ///
 /// - Parameters:
 ///   - coverage: The persisted coverage record, or `nil` when the

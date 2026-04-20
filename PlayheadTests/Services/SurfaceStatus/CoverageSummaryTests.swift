@@ -119,6 +119,23 @@ struct CoverageSummaryTests {
         #expect(derivePlaybackReadiness(coverage: coverage, anchor: 0.0) == .proximal)
     }
 
+    @Test(".deferredOnly — range ends one tick below the lookahead boundary")
+    func deferredOnlyJustBelowBoundary() {
+        // Symmetric pair to `proximalExactBoundary`: same anchor, same
+        // lookahead, but the range ends at 899.99 — strictly below the
+        // 900 lookaheadEnd. This locks in the INCLUSIVE-upper-bound
+        // interpretation of the `.proximal` boundary: a range must reach
+        // AT LEAST lookaheadEnd (not just approach it) to qualify. If
+        // the comparison ever flips to strict inequality in either
+        // direction, exactly one of `proximalExactBoundary` and this
+        // test flips, pinning the semantics at the boundary.
+        let coverage = Self.makeCoverage(
+            ranges: [0.0...899.99],
+            isComplete: false
+        )
+        #expect(derivePlaybackReadiness(coverage: coverage, anchor: 0.0) == .deferredOnly)
+    }
+
     @Test(".proximal — later range covers the anchor even when earlier ranges do not")
     func proximalSecondRangeCovers() {
         // Two ranges; only the second covers [anchor, anchor+900].

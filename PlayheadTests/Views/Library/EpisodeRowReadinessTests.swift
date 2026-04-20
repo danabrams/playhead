@@ -225,4 +225,58 @@ final class EpisodeRowReadinessTests: XCTestCase {
             "Checkmark must survive a SwiftData save+fetch round trip"
         )
     }
+
+    /// Regression guard for the Decodable normalization path. The
+    /// designated init normalizes `coverageRanges` (sorts + merges) and
+    /// derives `firstCoveredOffset`. If the compiler-synthesized decoder
+    /// runs it would skip that step, and an externally-written or hand-
+    /// mutated JSON row with unsorted/overlapping ranges (or a stale
+    /// `firstCoveredOffset`) would decode into a non-canonical instance.
+    /// This test feeds exactly such a pathological JSON payload through
+    /// the decode path and asserts the decoded value is canonical.
+    ///
+    /// Pairs with the SwiftData round-trip above — together they cover
+    /// both "encode produces canonical JSON" (round-trip) AND "decode
+    /// canonicalizes non-canonical JSON" (this test).
+    func testDecodableNormalizesOutOfOrderCoverageJSON() throws {
+        // Intentionally unsorted + overlapping ranges + a deliberately
+        // wrong `firstCoveredOffset` (2000 is larger than every lower
+        // bound). ClosedRange<Double> encodes as a two-element JSON array
+        // [lowerBound, upperBound] (Foundation's default encoding for
+        // ClosedRange where the bound is Codable).
+        let badJSON = """
+        {
+          "coverageRanges": [[500.0, 1000.0], [0.0, 100.0], [50.0, 200.0]],
+          "firstCoveredOffset": 2000.0,
+          "isComplete": false,
+          "modelVersion": "m1",
+          "policyVersion": 1,
+          "featureSchemaVersion": 1,
+          "updatedAt": 1700000000
+        }
+        """.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(CoverageSummary.self, from: badJSON)
+
+        // Ranges must be sorted ascending by lowerBound AND non-
+        // overlapping — the two pathological inputs [0,100] and [50,200]
+        // overlap, so the normalizer merges them into [0,200]. Combined
+        // with [500,1000] that leaves exactly two canonical ranges.
+        XCTAssertEqual(decoded.coverageRanges, [0.0...200.0, 500.0...1000.0])
+        // The designated init derives `firstCoveredOffset` from the
+        // normalized ranges — the deliberately-wrong persisted value
+        // (2000.0) must be discarded, not trusted.
+        XCTAssertEqual(decoded.firstCoveredOffset, decoded.coverageRanges.first?.lowerBound)
+        XCTAssertEqual(decoded.firstCoveredOffset, 0.0)
+
+        // And the derivation on the decoded instance matches what the
+        // ranges actually support: the canonical normalized ranges are
+        // [0, 200] and [500, 1000]; at anchor 42.5 the lookahead window
+        // [42.5, 942.5] is not contained in either range — first range
+        // ends at 200, second starts at 500 — so the correct derivation
+        // is `.deferredOnly`. This is the full path from raw JSON
+        // through the decode + normalize pipeline to the derivation.
+        XCTAssertEqual(decoded.readiness(anchor: 42.5), .deferredOnly)
+    }
 }
