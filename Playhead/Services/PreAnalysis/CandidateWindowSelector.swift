@@ -223,8 +223,10 @@ enum CandidateWindowSelector {
 /// emits are logged for SLI consumption and surfaced via `currentWindows`
 /// so the scheduler (and tests) can assert on the cascade ordering
 /// without the execution pipeline yet committing to per-slice jobs.
-/// Per-slice execution is tracked by `TODO(playhead-1iq1)` in
-/// `AnalysisWorkScheduler.swift`.
+/// Per-slice execution and runner-side cascade consumption are tracked
+/// by follow-up beads `playhead-xiz6` (runtime wiring),
+/// `playhead-vhha` (seek-event wiring), and `playhead-swws` (runner
+/// consumes cascade order + proves P90 ≤ 4h SLI).
 actor CandidateWindowCascade {
 
     private let config: PreAnalysisConfig
