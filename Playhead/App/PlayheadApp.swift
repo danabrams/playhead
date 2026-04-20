@@ -170,6 +170,7 @@ struct PlayheadApp: App {
         // the Library cell's ✓ derivation reflects real playback
         // progress without any separate subscription.
         episode.playbackAnchor = captured.position
+        let episodeDuration = episode.duration
         do {
             try context.save()
             logger.info(
@@ -180,6 +181,19 @@ struct PlayheadApp: App {
                 "Failed to save position \(captured.position)s for episode \(episodeId), trigger=\(trigger.rawValue): \(error)"
             )
         }
+
+        // playhead-vhha: notify the candidate-window cascade of the
+        // committed playhead so the resumed-window selection re-latches
+        // when the user has seeked > 30 s away from the prior anchor.
+        // Runs after the SwiftData save (success or failure): the
+        // cascade is purely advisory state and shouldn't be skipped on
+        // a transient persistence error — the commit point still
+        // represents the user's intended playhead.
+        await runtime.noteCommittedPlayhead(
+            episodeId: episodeId,
+            position: captured.position,
+            episodeDuration: episodeDuration
+        )
     }
 }
 
