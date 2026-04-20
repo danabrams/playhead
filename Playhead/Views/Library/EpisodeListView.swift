@@ -92,13 +92,20 @@ struct EpisodeListView: View {
     }
 
     /// Shows the tooltip on list appear (and on state changes) if the
-    /// user has never dismissed it and a ✓ badge is visible.
+    /// user has never dismissed it and a ✓ badge is visible. The
+    /// boolean gate lives in `OnboardingGating` (pure) for testability;
+    /// the `showsFirstCheckmarkTooltip` bookkeeping stays here because
+    /// it is SwiftUI view state.
     private func evaluateFirstCheckmarkTooltip() {
-        guard !hasSeenFirstCheckmarkTooltip else {
+        if hasSeenFirstCheckmarkTooltip {
             if showsFirstCheckmarkTooltip { showsFirstCheckmarkTooltip = false }
             return
         }
-        if anyEpisodeHasAnalysis, !showsFirstCheckmarkTooltip {
+        let shouldShow = OnboardingGating.shouldPresentFirstCheckmarkTooltip(
+            hasSeenFirstCheckmarkTooltip: hasSeenFirstCheckmarkTooltip,
+            anyEpisodeHasAnalysis: anyEpisodeHasAnalysis
+        )
+        if shouldShow, !showsFirstCheckmarkTooltip {
             showsFirstCheckmarkTooltip = true
         }
     }

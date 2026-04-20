@@ -84,6 +84,41 @@ enum OnboardingFlags {
     }
 }
 
+// MARK: - Gate Logic (pure)
+
+/// Pure, side-effect-free gate functions that decide whether each
+/// one-shot onboarding surface should be presented. Extracted from the
+/// SwiftUI call-sites (`RootView.evaluateFirstSubscriptionOnboarding`
+/// and `EpisodeListView.evaluateFirstCheckmarkTooltip`) so regressions
+/// in the trigger conditions can be caught by unit tests without a
+/// SwiftUI harness. Keep these functions free of framework imports and
+/// free of `@AppStorage` / `UserDefaults` access — inputs only.
+enum OnboardingGating {
+
+    /// First-subscription onboarding fires iff the user has completed
+    /// first-launch onboarding, has not yet tapped "Got it", and has at
+    /// least one podcast subscription.
+    static func shouldPresentFirstSubscriptionOnboarding(
+        hasCompletedOnboarding: Bool,
+        hasSeenFirstSubscriptionOnboarding: Bool,
+        podcastCount: Int
+    ) -> Bool {
+        hasCompletedOnboarding
+            && !hasSeenFirstSubscriptionOnboarding
+            && podcastCount > 0
+    }
+
+    /// First-✓ tooltip fires iff the user has not yet dismissed it and
+    /// at least one episode in the current list has a ready analysis
+    /// (✓ badge visible).
+    static func shouldPresentFirstCheckmarkTooltip(
+        hasSeenFirstCheckmarkTooltip: Bool,
+        anyEpisodeHasAnalysis: Bool
+    ) -> Bool {
+        !hasSeenFirstCheckmarkTooltip && anyEpisodeHasAnalysis
+    }
+}
+
 // MARK: - First Subscription Onboarding Screen
 
 /// One-screen modal shown the first time a podcast subscription is

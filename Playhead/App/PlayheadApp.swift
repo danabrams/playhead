@@ -226,14 +226,15 @@ private struct RootView: View {
     /// Show the one-screen first-subscription onboarding if (a) the user
     /// has completed first-launch onboarding, (b) at least one podcast
     /// is subscribed, and (c) the user has not yet tapped "Got it".
+    /// Gate logic lives in `OnboardingGating` (pure) for testability.
     private func evaluateFirstSubscriptionOnboarding() {
-        guard hasCompletedOnboarding,
-              !hasSeenFirstSubscriptionOnboarding,
-              !podcasts.isEmpty
-        else {
-            return
+        if OnboardingGating.shouldPresentFirstSubscriptionOnboarding(
+            hasCompletedOnboarding: hasCompletedOnboarding,
+            hasSeenFirstSubscriptionOnboarding: hasSeenFirstSubscriptionOnboarding,
+            podcastCount: podcasts.count
+        ) {
+            presentFirstSubscriptionOnboarding = true
         }
-        presentFirstSubscriptionOnboarding = true
     }
 
     private func errorView(_ message: String) -> some View {

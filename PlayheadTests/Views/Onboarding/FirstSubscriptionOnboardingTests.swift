@@ -243,15 +243,173 @@ final class FirstSubscriptionOnboardingViewSmokeTests: XCTestCase {
         _ = view.body
     }
 
-    func testOnboardingDismissCallbackFiresExactlyOnce() {
-        // Dismiss invokes the onDismiss closure synchronously when the
-        // internal button action runs. We can't tap through SwiftUI in
-        // a unit test, but we can verify the closure wiring compiles
-        // and that the persistence flag is independent of the
-        // callback.
+    func testDismissCallbackDoesNotFireOnConstruction() {
+        // Smoke-level check: constructing the view and reading `body`
+        // must not synthesize a dismiss event. A true "fires exactly
+        // once" assertion requires driving the button action through
+        // SwiftUI, which is out of scope for this unit-test harness;
+        // the one-shot guarantee is covered behaviorally by the
+        // UserDefaults flag tests above (markFirstSubscriptionOnboardingSeen
+        // is idempotent, and the button in the view always writes
+        // `hasSeen = true` before invoking `onDismiss`).
         var calls = 0
         let view = FirstSubscriptionOnboardingView(onDismiss: { calls += 1 })
         _ = view.body
         XCTAssertEqual(calls, 0, "Dismiss callback must not fire on construction")
+    }
+}
+
+// MARK: - Gate Logic (pure)
+
+/// Unit tests for the pure gate functions extracted from the SwiftUI
+/// call-sites. These lock in the trigger conditions for both one-shot
+/// surfaces so a regression in the gates is caught without a SwiftUI
+/// harness.
+final class OnboardingGatingTests: XCTestCase {
+
+    // MARK: First-subscription onboarding gate
+    //
+    // 8 combinations of the three booleans (hasCompletedOnboarding,
+    // hasSeenFirstSubscriptionOnboarding, podcastCount > 0), plus a
+    // podcastCount = 0 vs > 0 distinction. The gate is true iff
+    //   completed && !seen && count > 0.
+
+    func testOnboardingGate_completedUnseenWithPodcasts_presents() {
+        XCTAssertTrue(
+            OnboardingGating.shouldPresentFirstSubscriptionOnboarding(
+                hasCompletedOnboarding: true,
+                hasSeenFirstSubscriptionOnboarding: false,
+                podcastCount: 1
+            )
+        )
+    }
+
+    func testOnboardingGate_completedUnseenManyPodcasts_presents() {
+        // podcastCount > 1 — verifies the gate uses "> 0", not "== 1".
+        XCTAssertTrue(
+            OnboardingGating.shouldPresentFirstSubscriptionOnboarding(
+                hasCompletedOnboarding: true,
+                hasSeenFirstSubscriptionOnboarding: false,
+                podcastCount: 5
+            )
+        )
+    }
+
+    func testOnboardingGate_completedUnseenNoPodcasts_suppresses() {
+        XCTAssertFalse(
+            OnboardingGating.shouldPresentFirstSubscriptionOnboarding(
+                hasCompletedOnboarding: true,
+                hasSeenFirstSubscriptionOnboarding: false,
+                podcastCount: 0
+            )
+        )
+    }
+
+    func testOnboardingGate_completedSeenWithPodcasts_suppresses() {
+        // Once "Got it" has been tapped, the screen must not reappear
+        // even if the user adds more podcasts later.
+        XCTAssertFalse(
+            OnboardingGating.shouldPresentFirstSubscriptionOnboarding(
+                hasCompletedOnboarding: true,
+                hasSeenFirstSubscriptionOnboarding: true,
+                podcastCount: 1
+            )
+        )
+    }
+
+    func testOnboardingGate_completedSeenNoPodcasts_suppresses() {
+        XCTAssertFalse(
+            OnboardingGating.shouldPresentFirstSubscriptionOnboarding(
+                hasCompletedOnboarding: true,
+                hasSeenFirstSubscriptionOnboarding: true,
+                podcastCount: 0
+            )
+        )
+    }
+
+    func testOnboardingGate_notCompletedUnseenWithPodcasts_suppresses() {
+        // Until first-launch onboarding is done, this screen is gated
+        // off — the user is still in the initial flow.
+        XCTAssertFalse(
+            OnboardingGating.shouldPresentFirstSubscriptionOnboarding(
+                hasCompletedOnboarding: false,
+                hasSeenFirstSubscriptionOnboarding: false,
+                podcastCount: 1
+            )
+        )
+    }
+
+    func testOnboardingGate_notCompletedUnseenNoPodcasts_suppresses() {
+        XCTAssertFalse(
+            OnboardingGating.shouldPresentFirstSubscriptionOnboarding(
+                hasCompletedOnboarding: false,
+                hasSeenFirstSubscriptionOnboarding: false,
+                podcastCount: 0
+            )
+        )
+    }
+
+    func testOnboardingGate_notCompletedSeenWithPodcasts_suppresses() {
+        XCTAssertFalse(
+            OnboardingGating.shouldPresentFirstSubscriptionOnboarding(
+                hasCompletedOnboarding: false,
+                hasSeenFirstSubscriptionOnboarding: true,
+                podcastCount: 1
+            )
+        )
+    }
+
+    func testOnboardingGate_notCompletedSeenNoPodcasts_suppresses() {
+        XCTAssertFalse(
+            OnboardingGating.shouldPresentFirstSubscriptionOnboarding(
+                hasCompletedOnboarding: false,
+                hasSeenFirstSubscriptionOnboarding: true,
+                podcastCount: 0
+            )
+        )
+    }
+
+    // MARK: First-✓ tooltip gate
+    //
+    // 4 combinations of the two booleans. The gate is true iff
+    //   !seen && anyEpisodeHasAnalysis.
+
+    func testTooltipGate_unseenWithAnalysis_presents() {
+        XCTAssertTrue(
+            OnboardingGating.shouldPresentFirstCheckmarkTooltip(
+                hasSeenFirstCheckmarkTooltip: false,
+                anyEpisodeHasAnalysis: true
+            )
+        )
+    }
+
+    func testTooltipGate_unseenNoAnalysis_suppresses() {
+        // No ✓ badge visible yet — tooltip has nothing to point at.
+        XCTAssertFalse(
+            OnboardingGating.shouldPresentFirstCheckmarkTooltip(
+                hasSeenFirstCheckmarkTooltip: false,
+                anyEpisodeHasAnalysis: false
+            )
+        )
+    }
+
+    func testTooltipGate_seenWithAnalysis_suppresses() {
+        // Once the user dismisses the tooltip, it never reappears even
+        // if the badge condition later becomes true again.
+        XCTAssertFalse(
+            OnboardingGating.shouldPresentFirstCheckmarkTooltip(
+                hasSeenFirstCheckmarkTooltip: true,
+                anyEpisodeHasAnalysis: true
+            )
+        )
+    }
+
+    func testTooltipGate_seenNoAnalysis_suppresses() {
+        XCTAssertFalse(
+            OnboardingGating.shouldPresentFirstCheckmarkTooltip(
+                hasSeenFirstCheckmarkTooltip: true,
+                anyEpisodeHasAnalysis: false
+            )
+        )
     }
 }
