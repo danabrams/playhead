@@ -5,6 +5,11 @@ struct ContentView: View {
     @State private var showNowPlaying = false
     @State private var nowPlayingViewModel: NowPlayingViewModel?
 
+    /// playhead-l274: shared deep-link router. Lives at the tab root so
+    /// Library (hkg8 "Free up space" CTA) and Settings (consumer) share
+    /// a single instance. Installed into the SwiftUI environment below.
+    @State private var settingsRouter = SettingsRouter()
+
     var body: some View {
         TabView {
             tabRoot {
@@ -25,13 +30,15 @@ struct ContentView: View {
                 SettingsView(
                     inventory: runtime.modelInventory,
                     assetProvider: runtime.assetProvider,
-                    entitlementManager: runtime.entitlementManager
+                    entitlementManager: runtime.entitlementManager,
+                    router: settingsRouter
                 )
             }
                 .tabItem {
                     Label("Settings", systemImage: "gearshape")
                 }
         }
+        .environment(\.settingsRouter, settingsRouter)
         .tint(AppColors.accent)
         .animation(Motion.standard, value: runtime.isPlayingEpisode)
         .task {

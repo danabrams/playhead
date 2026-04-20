@@ -14,9 +14,10 @@
 //     (Phase 2, §G), NEVER scheduler behavior in v1.
 //   - "All unplayed" is deliberately NOT an option in v1.
 //   - Deep link from "Free up space" into Settings → Storage is wired
-//     behind a caller-supplied closure. The full Settings → Storage
-//     screen lands in bd playhead-l274; until then the default closure
-//     is a placeholder (see `DownloadNextView.init`).
+//     behind a caller-supplied closure. Call sites (see
+//     `EpisodeListView`) inject a closure that pushes `.storage` into
+//     a shared `SettingsRouter` (playhead-l274), which the
+//     `SettingsView` consumes to scroll/focus the Storage group.
 //
 // Copy lives in `DownloadNextCopy` so snapshot tests pin every
 // user-visible string character-for-character. Any edit here is a
@@ -238,10 +239,10 @@ struct DownloadNextView: View {
     let onDownload: (_ episodes: [Episode], _ context: DownloadTripContext) -> Void
 
     /// Deep-link tap target for the amber "Free up space →" CTA. Default
-    /// is a no-op placeholder: the Settings → Storage screen itself is
-    /// bd playhead-l274, not this bead. Call sites in the app should
-    /// inject a closure that routes through the existing Settings tab
-    /// (TODO playhead-l274: replace with a scoped navigation target).
+    /// is a no-op — the preview and tests use that default. In the app,
+    /// `EpisodeListView` injects a closure that calls
+    /// `SettingsRouter.request(.storage)` so the Settings tab scrolls to
+    /// the Storage group on next appearance (playhead-l274).
     var onFreeUpSpace: () -> Void = {}
 
     // MARK: UI state

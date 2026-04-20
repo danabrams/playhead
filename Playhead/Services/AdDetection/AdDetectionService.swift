@@ -168,6 +168,13 @@ extension AdDetectionProviding {
 /// ClassifierService (Layer 2), and MetadataExtractor (Layer 3) into a
 /// unified detection pipeline with hot-path and backfill flows.
 actor AdDetectionService {
+    /// `modelVersion` tag written to synthetic replay transcript chunks
+    /// produced by `syntheticReplayChunk(...)` and surfaced by the
+    /// Diagnostics UI as the detection model identifier. Exposed as a
+    /// static constant so the Settings panel reads the same symbol the
+    /// producer writes — see playhead-l274 code-review I1.
+    static let hotPathReplayModelVersion: String = "hot-path-replay"
+
     struct HotPathRunResult: Sendable {
         let windows: [AdWindow]
         let retiredWindowIDs: Set<String>
@@ -2096,7 +2103,7 @@ actor AdDetectionService {
             text: text,
             normalizedText: TranscriptEngineService.normalizeText(text),
             pass: TranscriptPassType.fast.rawValue,
-            modelVersion: "hot-path-replay",
+            modelVersion: Self.hotPathReplayModelVersion,
             transcriptVersion: nil,
             atomOrdinal: nil,
             weakAnchorMetadata: nil
