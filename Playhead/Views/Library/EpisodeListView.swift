@@ -274,11 +274,12 @@ private struct EpisodeRow: View {
             // rendering is exercised in EpisodeStatusLineCopyTests and
             // will be surfaced end-to-end when a proper episode detail
             // screen lands in a subsequent bead.
-            if let line = libraryRowStatusLine(episode: episode) {
-                Text(line)
-                    .font(AppTypography.mono(size: 11, weight: .regular))
-                    .foregroundStyle(AppColors.textTertiary)
-                    .accessibilityLabel(line)
+            if let inputs = libraryRowStatusLineInputs(episode: episode) {
+                EpisodeStatusLineView(
+                    status: inputs.status,
+                    coverage: inputs.coverage,
+                    anchor: inputs.anchor
+                )
             }
 
             // Progress bar for partially played episodes
@@ -346,22 +347,34 @@ func libraryRowShouldShowReadinessCheckmark(episode: Episode) -> Bool {
 
 // MARK: - Library Row Status Line (playhead-zp5y)
 
-/// Compute the optional status-line copy a library row should surface
+/// Inputs the library row needs in order to mount
+/// `EpisodeStatusLineView` for a given episode. Bundles the synthesized
+/// `EpisodeSurfaceStatus` with the same `coverage` / `anchor` pair the
+/// reducer consumed so the view's copy resolver can compute the
+/// "first|next X min" branch without re-deriving inputs.
+struct LibraryRowStatusLineInputs: Equatable {
+    let status: EpisodeSurfaceStatus
+    let coverage: CoverageSummary?
+    let anchor: TimeInterval?
+}
+
+/// Compute the optional status-line inputs a library row should surface
 /// for the supplied episode. Returns `nil` for the default
 /// `.none` readiness so the row stays visually quiet for every
 /// un-analyzed episode.
 ///
-/// Routes through the canonical reducer + copy resolver — the UI layer
-/// never reaches past the `EpisodeSurfaceStatus` boundary to the raw
-/// scheduler cause taxonomy. Because library rows don't have live
-/// eligibility or cause data in hand, the reducer is invoked with
-/// conservative defaults (fully-eligible device, no live cause) which
-/// land in the readiness-driven branch — exactly the one library rows
-/// care about.
+/// Routes through the canonical reducer — the UI layer never reaches
+/// past the `EpisodeSurfaceStatus` boundary to the raw scheduler cause
+/// taxonomy. Because library rows don't have live eligibility or cause
+/// data in hand, the reducer is invoked with conservative defaults
+/// (fully-eligible device, no live cause) which land in the
+/// readiness-driven branch — exactly the one library rows care about.
 ///
-/// Exposed at file scope (like `libraryRowShouldShowReadinessCheckmark`)
-/// so a behavioural test can exercise it without SwiftUI's environment.
-func libraryRowStatusLine(episode: Episode) -> String? {
+/// String resolution lives inside `EpisodeStatusLineView`; this function
+/// stops at the inputs so the view can own its own copy lookup. Exposed
+/// at file scope (like `libraryRowShouldShowReadinessCheckmark`) so a
+/// behavioural test can exercise it without SwiftUI's environment.
+func libraryRowStatusLineInputs(episode: Episode) -> LibraryRowStatusLineInputs? {
     // Only render the line for episodes carrying an analysis signal.
     // The `.none` branch (no coverage yet) would say "Queued · waiting"
     // for every un-analyzed episode in the list; suppress it at the
@@ -399,12 +412,11 @@ func libraryRowStatusLine(episode: Episode) -> String? {
         coverage: episode.coverageSummary,
         readinessAnchor: episode.playbackAnchor
     )
-    let line = EpisodeStatusLineCopy.resolve(
+    return LibraryRowStatusLineInputs(
         status: status,
         coverage: episode.coverageSummary,
         anchor: episode.playbackAnchor
     )
-    return line.primary
 }
 
 // MARK: - Preview
