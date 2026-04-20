@@ -65,6 +65,15 @@ actor AnalysisWorkScheduler {
     /// production behavior is unchanged until a real
     /// `NWPathMonitor`-backed provider lands in playhead-ml96.
     private let transportStatusProvider: any TransportStatusProviding
+    /// playhead-c3pi: advisory cascade that tracks the readiness anchor
+    /// and candidate-window ordering per episode. When nil, the
+    /// scheduler operates exactly as it did before c3pi — the
+    /// cascade is a side channel consumed by the Phase 2 surfaces
+    /// (CoverageSummary derivation, future per-slice execution in
+    /// playhead-1iq1). A production runtime supplies a real instance
+    /// via `PlayheadRuntime`; tests that don't care about candidate
+    /// windows can omit it.
+    private let candidateWindowCascade: CandidateWindowCascade?
     private let config: PreAnalysisConfig
     private let logger = Logger(subsystem: "com.playhead", category: "WorkScheduler")
 
@@ -228,6 +237,7 @@ actor AnalysisWorkScheduler {
         downloadManager: any DownloadProviding,
         batteryProvider: any BatteryStateProviding = UIDeviceBatteryProvider(),
         transportStatusProvider: any TransportStatusProviding = WifiTransportStatusProvider(),
+        candidateWindowCascade: CandidateWindowCascade? = nil,
         config: PreAnalysisConfig = .load()
     ) {
         self.store = store
@@ -236,6 +246,7 @@ actor AnalysisWorkScheduler {
         self.downloadManager = downloadManager
         self.batteryProvider = batteryProvider
         self.transportStatusProvider = transportStatusProvider
+        self.candidateWindowCascade = candidateWindowCascade
         self.config = config
         var continuation: AsyncStream<Void>.Continuation?
         self.wakeStream = AsyncStream<Void> { continuation = $0 }
@@ -295,6 +306,65 @@ actor AnalysisWorkScheduler {
         wakeSchedulerLoop()
     }
 
+    /// playhead-c3pi: seed the candidate-window cascade for an episode.
+    /// Call this after `enqueue(...)` once the metadata + chapter
+    /// evidence have been parsed (typically from the download
+    /// completion path). When no cascade was injected at construction
+    /// the call is a no-op and returns an empty window list.
+    ///
+    /// - Returns: The ordered candidate windows the cascade now
+    ///   associates with this episode (empty when no cascade is wired).
+    @discardableResult
+    func seedCandidateWindows(
+        episodeId: String,
+        episodeDuration: TimeInterval?,
+        playbackAnchor: TimeInterval?,
+        chapterEvidence: [ChapterEvidence]
+    ) async -> [CandidateWindow] {
+        guard let cascade = candidateWindowCascade else { return [] }
+        return await cascade.seed(
+            episodeId: episodeId,
+            episodeDuration: episodeDuration,
+            playbackAnchor: playbackAnchor,
+            chapterEvidence: chapterEvidence
+        )
+    }
+
+    /// playhead-c3pi: notify the scheduler of a committed playhead
+    /// update for an episode. Invoked from the playback service /
+    /// `PlayheadApp.persistPlaybackPosition` so the cascade can re-latch
+    /// when the user seeks more than `seekRelatchThresholdSeconds` away
+    /// from the prior anchor.
+    ///
+    /// - Returns: The new candidate-window order on a re-latch, or
+    ///   `nil` when the delta did not exceed the threshold (no
+    ///   re-latch). When no cascade was injected, always returns nil.
+    @discardableResult
+    func noteCommittedPlayhead(
+        episodeId: String,
+        newPosition: TimeInterval,
+        episodeDuration: TimeInterval?,
+        chapterEvidence: [ChapterEvidence]
+    ) async -> [CandidateWindow]? {
+        guard let cascade = candidateWindowCascade else { return nil }
+        return await cascade.noteSeek(
+            episodeId: episodeId,
+            newPosition: newPosition,
+            episodeDuration: episodeDuration,
+            chapterEvidence: chapterEvidence
+        )
+    }
+
+    /// playhead-c3pi: read-only accessor for the current candidate
+    /// windows associated with an episode. Surfaces / SLI emitters use
+    /// this to report the planned cascade order without standing up a
+    /// fresh selector. Returns an empty array when no cascade is
+    /// wired or the episode is unknown to the cascade.
+    func currentCandidateWindows(for episodeId: String) async -> [CandidateWindow] {
+        guard let cascade = candidateWindowCascade else { return [] }
+        return await cascade.currentWindows(for: episodeId) ?? []
+    }
+
     /// Notify the scheduler that playback has started for an episode.
     /// Cancel any running pre-analysis work while the foreground hot path owns
     /// the shared analysis pipeline.
@@ -333,6 +403,9 @@ actor AnalysisWorkScheduler {
         } catch {
             logger.error("Failed to supersede jobs for deleted episode \(episodeId): \(error)")
         }
+        // playhead-c3pi: drop the cascade entry so a re-subscribe to
+        // the same episode does not inherit a stale anchor.
+        await candidateWindowCascade?.forget(episodeId: episodeId)
     }
 
     /// Cancel the currently executing analysis job.

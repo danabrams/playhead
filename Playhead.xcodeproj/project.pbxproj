@@ -52,6 +52,7 @@
 		C3D11A0001000000000000C2 /* CandidateWindowSelector.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D11A0001000000000000C1 /* CandidateWindowSelector.swift */; };
 		C3D11A0001000000000000C4 /* CandidateWindowSelectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D11A0001000000000000C3 /* CandidateWindowSelectorTests.swift */; };
 		C3D11A0001000000000000C6 /* CandidateWindowCascadeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D11A0001000000000000C5 /* CandidateWindowCascadeTests.swift */; };
+		C3D11A0001000000000000C8 /* AnalysisWorkSchedulerCandidateWindowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D11A0001000000000000C7 /* AnalysisWorkSchedulerCandidateWindowTests.swift */; };
 		16436A482FD3906765AF4F2B /* TrustScoringServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C088315362D4161754AFC069 /* TrustScoringServiceTests.swift */; };
 		16C33A7BF751AB434102C4D5 /* SpanHypothesisConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6814F4D18CAB4C008D30231 /* SpanHypothesisConfig.swift */; };
 		1796911820CAA8E93BAF0609 /* SLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9287EE203AF797E624F417DB /* SLI.swift */; };
@@ -695,6 +696,7 @@
 		C3D11A0001000000000000C1 /* CandidateWindowSelector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidateWindowSelector.swift; sourceTree = "<group>"; };
 		C3D11A0001000000000000C3 /* CandidateWindowSelectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidateWindowSelectorTests.swift; sourceTree = "<group>"; };
 		C3D11A0001000000000000C5 /* CandidateWindowCascadeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidateWindowCascadeTests.swift; sourceTree = "<group>"; };
+		C3D11A0001000000000000C7 /* AnalysisWorkSchedulerCandidateWindowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisWorkSchedulerCandidateWindowTests.swift; sourceTree = "<group>"; };
 		7242AD0B2C5B3EAA17332FE1 /* CorrectionAttribution.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CorrectionAttribution.swift; sourceTree = "<group>"; };
 		725EAAFB66D56F8F7DA47189 /* EpisodeSurfaceStatusObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EpisodeSurfaceStatusObserver.swift; sourceTree = "<group>"; };
 		738948F6E82CA823583583BA /* MusicBracketTrustStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicBracketTrustStore.swift; sourceTree = "<group>"; };
@@ -1545,6 +1547,7 @@
 				EAC3C9C1978C5634AA850DA1 /* BackfillJobStoreTests.swift */,
 				C3D11A0001000000000000C3 /* CandidateWindowSelectorTests.swift */,
 				C3D11A0001000000000000C5 /* CandidateWindowCascadeTests.swift */,
+				C3D11A0001000000000000C7 /* AnalysisWorkSchedulerCandidateWindowTests.swift */,
 				FE5DD1A344E740FC5E1E183E /* BackfillProgressCursorTests.swift */,
 				E3150112F48F50917A495A58 /* BackgroundProcessingServiceTests.swift */,
 				6FBA32BCAB319B95E3E521C2 /* BackgroundRuntimeTests.swift */,
@@ -2398,6 +2401,7 @@
 				B5C2F24F4F74AC22108835C1 /* AnalysisWorkSchedulerThreeLaneTests.swift in Sources */,
 				C3D11A0001000000000000C4 /* CandidateWindowSelectorTests.swift in Sources */,
 				C3D11A0001000000000000C6 /* CandidateWindowCascadeTests.swift in Sources */,
+				C3D11A0001000000000000C8 /* AnalysisWorkSchedulerCandidateWindowTests.swift in Sources */,
 				B26426AC1F3925DFD3D4FB39 /* AppConfigurationTests.swift in Sources */,
 				39CFF9CDA6B5890562DC294A /* AppNavigationStructureTests.swift in Sources */,
 				48673BEA76B639DB9CC62BDE /* ArtifactClassMigrationTests.swift in Sources */,
