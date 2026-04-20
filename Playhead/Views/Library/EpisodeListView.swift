@@ -236,8 +236,18 @@ private struct EpisodeRow: View {
 
                 Spacer()
 
-                // Transcription status
-                if let summary = episode.analysisSummary, summary.hasAnalysis {
+                // Readiness status (playhead-cthe)
+                //
+                // The ✓ affordance is a DERIVED view of
+                // `(coverageSummary, playbackAnchor)`. Per the Phase 2
+                // spec, we render the checkmark only for `.proximal` or
+                // `.complete` — the two states where starting playback
+                // now yields a usable skip-prepared experience. A
+                // `.deferredOnly` episode has analysis somewhere, but
+                // not near the current playback point, so showing a ✓
+                // would mislead the user into thinking ads will be
+                // skipped from the start.
+                if libraryRowShouldShowReadinessCheckmark(episode: episode) {
                     Image(systemName: "checkmark.circle")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(Palette.mutedSage)
@@ -287,6 +297,32 @@ private struct EpisodeRow: View {
             return date.formatted(.dateTime.month(.abbreviated).day().year())
         }
         return date.formatted(.dateTime.month(.abbreviated).day())
+    }
+}
+
+// MARK: - Library Row Readiness (playhead-cthe)
+
+/// `true` when a Library row should render the ✓ affordance for the
+/// supplied episode. Routes through
+/// `derivePlaybackReadiness(coverage:anchor:)` so every readiness
+/// decision in the app uses the same pure function (NowPlaying /
+/// Activity / Library cannot drift).
+///
+/// Exposed at file scope (rather than nested inside the private
+/// `EpisodeRow`) so the behavioral readiness test can exercise it
+/// directly without instantiating SwiftUI's @Query / ModelContext
+/// environment. The function has no SwiftUI dependency — it reads two
+/// Codable attributes off the Episode and computes a Bool.
+func libraryRowShouldShowReadinessCheckmark(episode: Episode) -> Bool {
+    let readiness = derivePlaybackReadiness(
+        coverage: episode.coverageSummary,
+        anchor: episode.playbackAnchor
+    )
+    switch readiness {
+    case .proximal, .complete:
+        return true
+    case .none, .deferredOnly:
+        return false
     }
 }
 

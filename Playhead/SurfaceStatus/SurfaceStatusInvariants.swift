@@ -57,6 +57,16 @@
 //   * playbackReadiness ∈ {.proximal,.complete} AND analysisUnavailableReason != nil
 //   * coverage.isComplete == true AND playbackReadiness != .complete
 //
+// Phase 2 — playhead-cthe invariants on the derived `(coverage, readiness)`
+// pair. Enforced via `violations(coverage:readiness:)` below:
+//   A. `readiness == .complete` implies `coverage?.isComplete == true`
+//      AND `firstCoveredOffset != nil` (complete implies proximal).
+//   B. `readiness == .proximal` implies `coverage?.firstCoveredOffset != nil`
+//      (proximal requires a non-empty coverage record).
+//   These are spec-mandated impossible-state assertions — reaching either
+//   branch means something upstream persisted an inconsistent
+//   CoverageSummary (e.g. `isComplete=true` with empty ranges).
+//
 // Layered relationship to the reducer:
 //   * The reducer (`episodeSurfaceStatus`) is the producer of every
 //     `EpisodeSurfaceStatus` consumed by the rest of the app. Validation
@@ -139,6 +149,99 @@ enum SurfaceStatusInvariants {
                     description: "EpisodeSurfaceStatus has analysisUnavailableReason=\(status.analysisUnavailableReason!) but disposition=\(status.disposition); the reason must only appear on .unavailable."
                 )
             )
+        }
+
+        return found
+    }
+
+    // MARK: - Coverage / readiness validation (playhead-cthe)
+
+    /// Run the Phase 2 coverage/readiness invariants against the derived
+    /// `(coverage, readiness)` pair. Callers that have just derived a
+    /// readiness (reducer, Library cell, NowPlaying overlay) may route
+    /// the pair through this helper to catch an upstream producer that
+    /// persisted an inconsistent CoverageSummary.
+    ///
+    /// Returns the list of violations (empty when the pair is valid).
+    /// Always passes through to `enforce(_:)` at the caller site — this
+    /// helper itself is pure.
+    ///
+    /// Invariants enforced:
+    ///   * `readiness == .complete` ⇒ `coverage?.isComplete == true` AND
+    ///     `coverage?.firstCoveredOffset != nil`. "complete implies
+    ///     proximal" — a complete episode trivially covers every
+    ///     possible 15-minute lookahead, so the coverage record must at
+    ///     minimum carry a non-nil first offset.
+    ///   * `readiness == .proximal` ⇒ `coverage?.firstCoveredOffset != nil`.
+    ///     Reaching `.proximal` means the derivation found a range
+    ///     containing the anchor; by construction that range is the first
+    ///     non-empty element of `coverageRanges`, which implies
+    ///     `firstCoveredOffset != nil`. A logged violation here means
+    ///     someone hand-constructed a `.proximal` via a path that
+    ///     bypasses `derivePlaybackReadiness`.
+    static func violations(
+        coverage: CoverageSummary?,
+        readiness: PlaybackReadiness
+    ) -> [InvariantViolation] {
+        var found: [InvariantViolation] = []
+
+        switch readiness {
+        case .complete:
+            // Invariant A: complete implies proximal. A `.complete`
+            // readiness must be backed by a coverage record with
+            // `isComplete=true`. `firstCoveredOffset == nil` on a
+            // `.complete` record would mean "the whole episode is
+            // analyzed but there is no first covered offset", which is
+            // a contradiction.
+            guard let coverage else {
+                found.append(
+                    InvariantViolation(
+                        code: .completeReadinessMissingCoverage,
+                        description: "PlaybackReadiness=.complete but coverage is nil; complete requires a coverage record with isComplete=true."
+                    )
+                )
+                return found
+            }
+            if !coverage.isComplete {
+                found.append(
+                    InvariantViolation(
+                        code: .completeReadinessMissingCoverage,
+                        description: "PlaybackReadiness=.complete but coverage.isComplete=false; the readiness derivation must not return .complete for an incomplete coverage record."
+                    )
+                )
+            }
+            if coverage.firstCoveredOffset == nil {
+                found.append(
+                    InvariantViolation(
+                        code: .completeReadinessMissingFirstOffset,
+                        description: "PlaybackReadiness=.complete but coverage.firstCoveredOffset=nil; complete implies proximal which requires a non-nil first offset."
+                    )
+                )
+            }
+        case .proximal:
+            // Invariant B: proximal requires firstCoveredOffset != nil.
+            guard let coverage else {
+                found.append(
+                    InvariantViolation(
+                        code: .proximalReadinessMissingFirstOffset,
+                        description: "PlaybackReadiness=.proximal but coverage is nil; .proximal requires a non-empty coverage record with firstCoveredOffset != nil."
+                    )
+                )
+                return found
+            }
+            if coverage.firstCoveredOffset == nil {
+                found.append(
+                    InvariantViolation(
+                        code: .proximalReadinessMissingFirstOffset,
+                        description: "PlaybackReadiness=.proximal but coverage.firstCoveredOffset=nil; .proximal derivation must not fire against empty coverage."
+                    )
+                )
+            }
+        case .none, .deferredOnly:
+            // These states do not carry the "some range covers the
+            // anchor" assertion, so the first-offset / isComplete checks
+            // above are vacuous. Nothing to enforce here.
+            break
         }
 
         return found
@@ -271,6 +374,30 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         /// filing a follow-up bead: a dedicated code is a ~1-line change
         /// that makes the audit stream unambiguous today.
         case reducerInternalBug = "reducer_internal_bug"
+
+        /// playhead-cthe Invariant A (part 1): `PlaybackReadiness
+        /// == .complete` but the coverage record is nil OR its
+        /// `isComplete` flag is false. "complete" must be backed by a
+        /// coverage record with `isComplete=true`.
+        case completeReadinessMissingCoverage =
+            "complete_readiness_missing_coverage"
+
+        /// playhead-cthe Invariant A (part 2): `PlaybackReadiness
+        /// == .complete` but `coverage.firstCoveredOffset == nil`.
+        /// "complete implies proximal" — a complete episode covers
+        /// every anchor's lookahead and therefore must carry a non-nil
+        /// first offset.
+        case completeReadinessMissingFirstOffset =
+            "complete_readiness_missing_first_offset"
+
+        /// playhead-cthe Invariant B: `PlaybackReadiness == .proximal`
+        /// but `coverage.firstCoveredOffset == nil` (or coverage is
+        /// nil). By construction `.proximal` is derived from a range
+        /// that contains the anchor, which implies `firstCoveredOffset
+        /// != nil`. Reaching this code means someone bypassed
+        /// `derivePlaybackReadiness(coverage:anchor:)`.
+        case proximalReadinessMissingFirstOffset =
+            "proximal_readiness_missing_first_offset"
     }
 
     let code: Code

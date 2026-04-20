@@ -163,6 +163,13 @@ struct PlayheadApp: App {
         }
 
         episode.playbackPosition = captured.position
+        // playhead-cthe: the readiness anchor tracks the play-loop commit
+        // point 1:1. Updating it here means a force-quit mid-playback
+        // preserves the last persisted commit as the readiness anchor
+        // (per the bead spec's "last persisted commit wins" rule), and
+        // the Library cell's ✓ derivation reflects real playback
+        // progress without any separate subscription.
+        episode.playbackAnchor = captured.position
         do {
             try context.save()
             logger.info(

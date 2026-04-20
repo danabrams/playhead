@@ -113,9 +113,28 @@ enum EpisodeSurfaceStatusMatrix {
         ("failed", failedState),
     ]
 
+    /// A coverage record that:
+    ///   * yields `.proximal` at anchor `42.5` (range `0...1000` ⊇
+    ///     `[42.5, 942.5]`);
+    ///   * yields `.deferredOnly` at anchor `nil` (non-empty coverage,
+    ///     no anchor to evaluate proximity against);
+    ///   * never yields `.complete` (isComplete=false).
+    /// The two anchor cases combined with this single record exercise
+    /// three of the four `PlaybackReadiness` values across the matrix;
+    /// `.complete` is pinned by targeted unit tests in
+    /// `EpisodeSurfaceStatusReducerTests` and `CoverageSummaryTests`.
+    private static let presentCoverage = CoverageSummary(
+        coverageRanges: [0.0...1000.0],
+        isComplete: false,
+        modelVersion: "m1",
+        policyVersion: 1,
+        featureSchemaVersion: 1,
+        updatedAt: t0
+    )
+
     private static let coverageCases: [(String, CoverageSummary?)] = [
         ("coverageNil", nil),
-        ("coveragePresent", CoverageSummary(hasAnyCoverage: true)),
+        ("coveragePresent", presentCoverage),
     ]
 
     private static let anchorCases: [(String, TimeInterval?)] = [

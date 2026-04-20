@@ -68,6 +68,31 @@ final class Episode {
     /// or `.failed`.
     var diagnosticsOptIn: Bool = false
 
+    /// Phase 2 coverage record (playhead-cthe). JSON-encoded Codable
+    /// field following the `analysisSummary` pattern so the additive
+    /// SwiftData migration is non-destructive — existing rows decode
+    /// with the property set to `nil` and the derivation pipeline
+    /// returns `PlaybackReadiness.none` until the analysis pipeline
+    /// (playhead-zp5y / playhead-quh7) starts writing records.
+    ///
+    /// Readiness is NEVER persisted — always re-derive via
+    /// `derivePlaybackReadiness(coverage:anchor:)` so multiple UI
+    /// surfaces at different anchors cannot diverge.
+    var coverageSummary: CoverageSummary?
+
+    /// Phase 2 readiness anchor (playhead-cthe). The time (seconds from
+    /// episode start) from which readiness should be evaluated. Updated
+    /// at the existing play-loop commit points (`PlayheadApp
+    /// .persistPlaybackPosition`) alongside `playbackPosition`, so a
+    /// force-quit mid-playback preserves the last persisted anchor as
+    /// the spec requires ("on force-quit mid-playback, last persisted
+    /// commit wins").
+    ///
+    /// Kept distinct from `playbackPosition` so a future scope can
+    /// decouple "where the user is listening" from "where readiness is
+    /// evaluated". For now the two are updated together.
+    var playbackAnchor: TimeInterval?
+
     init(
         feedItemGUID: String,
         feedURL: URL,
@@ -83,7 +108,9 @@ final class Episode {
         playbackPosition: TimeInterval = 0,
         isPlayed: Bool = false,
         feedMetadata: FeedDescriptionMetadata? = nil,
-        diagnosticsOptIn: Bool = false
+        diagnosticsOptIn: Bool = false,
+        coverageSummary: CoverageSummary? = nil,
+        playbackAnchor: TimeInterval? = nil
     ) {
         self.feedItemGUID = feedItemGUID
         self.canonicalEpisodeKey = Self.makeCanonicalKey(
@@ -102,6 +129,8 @@ final class Episode {
         self.isPlayed = isPlayed
         self.feedMetadata = feedMetadata
         self.diagnosticsOptIn = diagnosticsOptIn
+        self.coverageSummary = coverageSummary
+        self.playbackAnchor = playbackAnchor
     }
 
     /// Derives the canonical key from feedItemGUID + feedURL for preview budget tracking.
