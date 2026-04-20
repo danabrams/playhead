@@ -358,17 +358,21 @@ struct DiagnosticsVersions: Sendable, Equatable {
 // MARK: - Feature flag placeholders
 
 /// Placeholder storage shape for the Diagnostics → Feature flags toggle
-/// group. Each flag bead (xr3t, zx6i, 2hpn, 43ed) is OPEN — when those
-/// beads land they will supply the real storage + rollback wiring and
-/// this shim will be replaced at the call site. Defaults must remain
-/// `false` across all flags.
+/// group. Four of the flag beads (xr3t, zx6i, 2hpn, 43ed) are OPEN — when
+/// those beads land they will supply the real storage + rollback wiring
+/// and this shim will be replaced at the call site. The fifth slug
+/// (`24cm`) is ALREADY a live flag (see
+/// `DownloadManager.useDualBackgroundSessions`); it is surfaced here so
+/// the Diagnostics group exposes a rollback affordance for it alongside
+/// the open ones. Defaults must remain `false` across all flags.
 ///
 /// Identifiers match the bd slugs so grep-cross-references are trivial:
 /// a flag named `zx6i` in the UI maps to bd playhead-zx6i.
 struct FeatureFlagPlaceholders: Sendable, Equatable {
     /// Stable, user-facing ordering of the flags in the Diagnostics
     /// group. Kept as an explicit array so tests can pin the render order.
-    static let orderedSlugs: [String] = ["xr3t", "zx6i", "2hpn", "43ed"]
+    /// Order matches the playhead-l274 spec verbatim.
+    static let orderedSlugs: [String] = ["xr3t", "zx6i", "2hpn", "43ed", "24cm"]
 
     /// Default (off) values, one per slug.
     static var defaultValues: [String: Bool] {

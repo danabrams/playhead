@@ -213,11 +213,24 @@ struct SettingsL274DefaultsTests {
     @Test func featureFlagPlaceholdersDefaultOff() {
         // Spec: placeholders default to OFF; toggling is inert until the
         // underlying flag-implementation beads (xr3t/zx6i/2hpn/43ed) land.
+        // 24cm is already a live flag but is surfaced here with the same
+        // OFF default for a consistent rollback-toggle UX.
         let defaults = FeatureFlagPlaceholders.defaultValues
         for slug in FeatureFlagPlaceholders.orderedSlugs {
             #expect(defaults[slug] == false, "Flag \(slug) must default to OFF")
         }
         #expect(defaults.count == FeatureFlagPlaceholders.orderedSlugs.count)
+    }
+
+    @Test func featureFlagPlaceholdersPinExactSlugListFromSpec() {
+        // Spec (playhead-l274): Diagnostics → Feature flags exposes five
+        // rollback toggles in this exact order:
+        //   xr3t, zx6i, 2hpn, 43ed, 24cm
+        // Pin the full list so a drift (e.g. dropping 24cm, reordering) is
+        // a loud test failure rather than a silent UX regression.
+        #expect(
+            FeatureFlagPlaceholders.orderedSlugs == ["xr3t", "zx6i", "2hpn", "43ed", "24cm"]
+        )
     }
 }
 
@@ -539,6 +552,50 @@ struct DiagnosticsMailComposerSpyTests {
             #expect(!data.isEmpty)
         }
         #expect(result == .sent)
+    }
+
+    @Test func sendDiagnosticsReleasePathStillOpensMailComposer() async throws {
+        // Guards the playhead-l274 fix that wired the Release-build
+        // "Send diagnostics" button through the same coordinator graph
+        // as DEBUG (previously Release was a TODO no-op).
+        //
+        // This test never references a `#if DEBUG`-gated symbol so it
+        // compiles and executes in BOTH DEBUG and Release configurations
+        // — same coverage on either.
+        let spy = SpyPresenter()
+        spy.scriptedResult = .saved
+        let sink = RecordingSink()
+        let env = DiagnosticsExportEnvironment(
+            appVersion: "rel-1.2.3",
+            osVersion: "0.0.0",
+            deviceClass: .iPhone17Pro,
+            buildType: .release,
+            eligibility: AnalysisEligibility(
+                hardwareSupported: true,
+                appleIntelligenceEnabled: true,
+                regionSupported: true,
+                languageSupported: true,
+                modelAvailableNow: true,
+                capturedAt: .init(timeIntervalSince1970: 0)
+            ),
+            installID: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+            now: .init(timeIntervalSince1970: 0)
+        )
+        let coordinator = DiagnosticsExportCoordinator(
+            environment: env,
+            presenter: spy,
+            journalFetch: { [] },
+            optInSink: sink,
+            optInEpisodes: []
+        )
+
+        let result = try await coordinator.exportAndPresent()
+
+        // Release users MUST see an actual composer invocation — not a
+        // silent no-op (the bug this test locks in).
+        #expect(spy.presentCallCount == 1)
+        #expect(spy.presentedData != nil)
+        #expect(result == .saved)
     }
 
     @Test func sendDiagnosticsPerformsNoNetworkIO() async throws {
