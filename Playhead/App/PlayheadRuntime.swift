@@ -452,12 +452,24 @@ final class PlayheadRuntime {
             cueMaterializer: cueMaterializer,
             preemptionCoordinator: lanePreemptionCoordinator
         )
+        // playhead-xiz6: wire a real `CandidateWindowCascade` into the
+        // scheduler so the c3pi entry points (`seedCandidateWindows`,
+        // `noteCommittedPlayhead`, `currentCandidateWindows`) are
+        // reachable in production. Without this, the previous bead's
+        // foundation is unused: the scheduler's optional cascade
+        // defaults to `nil` and every entry point silently no-ops,
+        // which would block the seek-event wiring (`playhead-vhha`)
+        // and runner consumption (`playhead-swws`) from doing anything
+        // observable on a real device. Constructed with the cascade's
+        // own defaults — both `PreAnalysisConfig.load()` and the
+        // canonical `Logger` subsystem/category live on the cascade.
         self.analysisWorkScheduler = AnalysisWorkScheduler(
             store: analysisStore,
             jobRunner: analysisJobRunner,
             capabilitiesService: capabilitiesService,
             downloadManager: downloadManager,
-            batteryProvider: batteryProvider
+            batteryProvider: batteryProvider,
+            candidateWindowCascade: CandidateWindowCascade()
         )
         self.analysisJobReconciler = AnalysisJobReconciler(
             store: analysisStore,
