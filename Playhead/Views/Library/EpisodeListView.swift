@@ -147,6 +147,42 @@ private extension EpisodeListView {
 
     var episodeList: some View {
         List {
+            Section {
+                DownloadNextView(
+                    episodes: episodes,
+                    mediaCapBytes: StorageBudgetSettings.load().mediaCapBytes,
+                    onDownload: { picked, _ in
+                        // v1 picker only changes notification copy
+                        // (bd playhead-hkg8 / UI design §D). Scheduler
+                        // behavior is identical regardless of `context`.
+                        Task {
+                            for episode in picked {
+                                await runtime.downloadManager.backgroundDownload(
+                                    episodeId: episode.canonicalEpisodeKey,
+                                    from: episode.audioURL
+                                )
+                            }
+                        }
+                    },
+                    onFreeUpSpace: {
+                        // TODO(bd playhead-l274): route into the dedicated
+                        // Settings → Storage screen once it exists. Today
+                        // Settings → Storage is a section inside
+                        // SettingsView — no scoped destination yet. This
+                        // closure is a stub placeholder on the show page;
+                        // the full screen is l274's responsibility.
+                    }
+                )
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(
+                    top: Spacing.sm,
+                    leading: Spacing.md,
+                    bottom: Spacing.sm,
+                    trailing: Spacing.md
+                ))
+            }
+
             ForEach(episodes) { episode in
                 EpisodeRow(episode: episode)
                     .listRowBackground(AppColors.background)
