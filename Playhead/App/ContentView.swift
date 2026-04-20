@@ -1,7 +1,9 @@
+import SwiftData
 import SwiftUI
 
 struct ContentView: View {
     @Environment(PlayheadRuntime.self) private var runtime
+    @Environment(\.modelContext) private var modelContext
     @State private var showNowPlaying = false
     @State private var nowPlayingViewModel: NowPlayingViewModel?
 
@@ -24,6 +26,23 @@ struct ContentView: View {
             }
                 .tabItem {
                     Label("Browse", systemImage: "magnifyingglass")
+                }
+
+            // playhead-quh7: Activity tab. Sibling of Library / Settings;
+            // SF Symbol matches the design doc §E suggestion
+            // (`chart.bar.doc.horizontal`).
+            tabRoot {
+                ActivityView(
+                    inputProvider: { [runtime, modelContext] in
+                        let provider = runtime.makeActivitySnapshotProvider(
+                            modelContext: modelContext
+                        )
+                        return await provider.loadInputs()
+                    }
+                )
+            }
+                .tabItem {
+                    Label("Activity", systemImage: "chart.bar.doc.horizontal")
                 }
 
             tabRoot {

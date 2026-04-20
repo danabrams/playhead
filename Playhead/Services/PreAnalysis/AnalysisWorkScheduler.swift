@@ -627,6 +627,15 @@ actor AnalysisWorkScheduler {
         laneActive[lane] ?? 0
     }
 
+    /// playhead-quh7: episode id for the job currently held by the
+    /// scheduler's run loop, if any. Read-only accessor consumed by
+    /// `LiveActivitySnapshotProvider` to drive the Now-vs-Up-Next
+    /// split for `disposition == .queued` rows. `nil` when the loop
+    /// is idle or between admissions.
+    func currentlyRunningEpisodeId() -> String? {
+        currentEpisodeId
+    }
+
     /// Whether `job` may be admitted under the current per-lane count. T0
     /// playback jobs (`jobType == "playback"`) bypass the Now cap
     /// unconditionally — the hot-path must always be able to drain.
@@ -648,6 +657,7 @@ actor AnalysisWorkScheduler {
     func didStart(job: AnalysisJob) {
         let lane = job.schedulerLane
         laneActive[lane, default: 0] += 1
+        Self.postActivityRefreshNotification()
     }
 
     /// Record that `job` has finished running in its lane. Clamped at zero
@@ -656,6 +666,25 @@ actor AnalysisWorkScheduler {
         let lane = job.schedulerLane
         let current = laneActive[lane, default: 0]
         laneActive[lane] = max(0, current - 1)
+        Self.postActivityRefreshNotification()
+    }
+
+    /// playhead-quh7: notify the Activity screen to re-aggregate its
+    /// snapshot. Posted from the two scheduler-state edges that flip
+    /// the section bucketing (a job moving from queued → running, and
+    /// a job moving from running → terminal). The Activity view
+    /// observes this notification as its sole refresh trigger; without
+    /// it the view would have to poll on a Timer, which the bead spec
+    /// explicitly forbids.
+    ///
+    /// `nonisolated` so the call site inside the actor's isolated
+    /// methods does not need to hop off the actor — `NotificationCenter`
+    /// is thread-safe.
+    nonisolated static func postActivityRefreshNotification() {
+        NotificationCenter.default.post(
+            name: ActivityRefreshNotification.name,
+            object: nil
+        )
     }
 
     /// Evaluate the full multi-resource admission gate for `job`. Returns
