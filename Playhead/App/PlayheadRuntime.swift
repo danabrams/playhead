@@ -5,6 +5,7 @@
 import Foundation
 import os
 import OSLog
+import SwiftData
 import UIKit
 
 enum PlaybackPositionPersistenceTrigger: String, Sendable {
@@ -1070,6 +1071,33 @@ final class PlayheadRuntime {
             await trustService.setUserOverride(podcastId: podcastId, mode: mode)
         }
         await orchestrator.setActiveSkipMode(mode)
+    }
+
+    // MARK: - Activity screen wiring (playhead-quh7)
+
+    /// Build a `LiveActivitySnapshotProvider` bound to this runtime's
+    /// long-lived services. Called from `ContentView` so the Activity
+    /// tab's view-model can re-aggregate from real persistence + live
+    /// scheduler state on each `ActivityRefreshNotification` post.
+    ///
+    /// Lives on the runtime (not on a SwiftUI view) so the closure
+    /// captures only Sendable references; the view passes the model
+    /// context through because the SwiftData container is owned by the
+    /// app's environment, not the runtime.
+    func makeActivitySnapshotProvider(
+        modelContext: ModelContext
+    ) -> LiveActivitySnapshotProvider {
+        LiveActivitySnapshotProvider(
+            store: analysisStore,
+            capabilitySnapshotProvider: { [capabilitiesService] in
+                let snapshot = await capabilitiesService.currentSnapshot
+                return Optional(snapshot)
+            },
+            runningEpisodeIdProvider: { [analysisWorkScheduler] in
+                await analysisWorkScheduler.currentlyRunningEpisodeId()
+            },
+            modelContext: modelContext
+        )
     }
 
 }
