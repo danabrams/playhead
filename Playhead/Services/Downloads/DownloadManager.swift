@@ -336,8 +336,15 @@ actor DownloadManager {
         // produced needless closure churn under repeated session
         // instantiation (e.g. cold-launch rehydration of multiple
         // identifiers).
-        self.sessionDelegate.onDownloadComplete = { [manager = self] episodeId, fileURL in
+        //
+        // Retain-cycle note: `[weak manager = self]` mirrors
+        // `onResumeDataHarvested` above. The cycle would otherwise be
+        // `delegate → closure → manager → sessionDelegate → closure`,
+        // leaking every `DownloadManager` forever and defeating
+        // `deinit` cleanup of the willResignActive observer.
+        self.sessionDelegate.onDownloadComplete = { [weak manager = self] episodeId, fileURL in
             Task {
+                guard let manager else { return }
                 await manager.handleBackgroundDownloadComplete(
                     episodeId: episodeId,
                     fileURL: fileURL
@@ -784,13 +791,6 @@ actor DownloadManager {
     /// Overridable for tests: flip the 24cm feature flag in-process.
     func setUseDualBackgroundSessionsForTesting(_ value: Bool) {
         self.useDualBackgroundSessions = value
-    }
-
-    /// Overridable for tests / uzdq integration: replace the work-journal
-    /// recorder after construction.
-    func setWorkJournalRecorder(_ recorder: WorkJournalRecording) {
-        self.workJournalRecorder = recorder
-        self.sessionDelegate.workJournal = recorder
     }
 
     // MARK: - Test hooks (internal)
@@ -1628,10 +1628,12 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
     /// and `onUrlSessionDidFinishEvents` above.
     nonisolated(unsafe) var onResumeDataHarvested: ((String, Data) -> Void)?
 
-    /// WorkJournal recorder for finalized / failed events. Swapped from
-    /// `NoopWorkJournalRecorder` to the real implementation by
-    /// `DownloadManager.setWorkJournalRecorder(_:)` once playhead-uzdq
-    /// is wired up.
+    /// WorkJournal recorder for finalized / failed events. Defaults to
+    /// `NoopWorkJournalRecorder`; the real implementation is injected at
+    /// init via `DownloadManager(workJournalRecorder:)` and assigned
+    /// here in one shot by `DownloadManager.init(...)` before the
+    /// delegate is handed to any URLSession (same init-once contract as
+    /// `onDownloadComplete`). Mutation after init is forbidden.
     nonisolated(unsafe) var workJournal: WorkJournalRecording = NoopWorkJournalRecorder()
 
     func urlSession(
@@ -1763,7 +1765,13 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
         // point this callback fires with the process alive and running
         // `scanForSuspendedTransfers`). The FileManager write is
         // therefore guaranteed to complete before the process exits.
-        if let resumeData = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data,
+        let nsError = error as NSError
+        // Only URLSession populates `NSURLSessionDownloadTaskResumeData`
+        // in `NSURLErrorDomain` errors. Filtering on domain prevents a
+        // foreign-domain error that coincidentally carries the key from
+        // being persisted as if it were a valid resume blob.
+        if nsError.domain == NSURLErrorDomain,
+           let resumeData = nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data,
            !resumeData.isEmpty {
             onResumeDataHarvested?(episodeId, resumeData)
         }

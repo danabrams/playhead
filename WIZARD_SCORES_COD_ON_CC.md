@@ -1,171 +1,137 @@
-# Playhead — Codex Scores on Claude's Ad-Detection Top 5
+# Playhead - Codex Scores on Claude's Top 5 (Goal-Weighted Re-evaluation)
 
-**Date:** 2026-04-14
-**Input evaluated:** `WIZARD_IDEAS_CC.md` (Claude Code top 5)
+**Date:** 2026-04-16  
+**Input evaluated:** Claude Code top 5 ideas from your pasted list
 
-## Scoring Method
+## Scoring Lens (0-1000)
 
-Each idea gets a single **0–1000 overall score** reflecting:
-- Real user impact in daily listening
-- Expected lift to recall / precision / boundary accuracy
-- Practicality in the current Playhead architecture
-- Complexity and tech-debt burden vs benefit
-- Reliability risk and rollout safety
+Each score is a single overall score combining:
+1. Technical quality/smartness
+2. Real-world usefulness
+3. Practical implementation risk and correctness burden
+4. Utility vs added complexity/tech debt
+5. Alignment to the core goal: episodes should be ready-to-skip before users open them
 
-These are not "is the idea clever" scores; they are "should we actually build this now" scores.
+Important candid note: these five ideas are mostly ad-detection quality improvements, not background queue architecture improvements. So they can be good ideas while still scoring lower on the core goal fit.
 
 ## Final Ranking (Best to Worst)
 
-| Rank | Idea | Score |
+| Rank | Idea | Overall Score |
 |---|---|---:|
-| 1 | Music-bed envelope as dominant boundary cue | **888** |
-| 2 | RSS / show-notes sponsor pre-seeding | **842** |
-| 3 | Episode-level ad-inventory sanity check | **830** |
-| 4 | ID3 / Podcasting 2.0 chapter-marker ingestion | **804** |
-| 5 | Host-voice editorial counter-classifier | **612** |
+| 1 | ID3 / Podcasting 2.0 chapter-marker ingestion | **784** |
+| 2 | RSS / show-notes sponsor pre-seeding | **732** |
+| 3 | Music-bed envelope as dominant boundary cue | **603** |
+| 4 | Host-voice editorial counter-classifier | **451** |
+| 5 | Episode-level ad-inventory sanity check | **394** |
 
 ---
 
-## 1) RSS / Show-Notes Sponsor Pre-Seeding
+## 1) ID3 / Podcasting 2.0 Chapter-Marker Ingestion
 
-**Score: 842 / 1000**
+**Score: 784 / 1000**
 
-What is strong:
-- High leverage on cold-start episodes where show priors are weak.
-- Fits existing lexical/evidence architecture well.
-- Deterministic, cheap compute, fully on-device.
+Why this scores highest:
+- Strong practical leverage when chapter metadata exists: can collapse detection/search space and improve boundary precision quickly.
+- Can reduce compute cost in background by using publisher hints, which helps readiness windows on constrained BG task time.
+- On-device and legally clean.
 
-What is weak:
-- Show notes are often stale, templated, or include sponsors not actually read in that episode audio.
-- Dynamic insertion can diverge from feed text, especially for geographically targeted ads.
-
-Implementation reality in this repo:
-- Feed parser already captures `description/showNotes`, but `Episode` persistence currently drops this metadata.
-- You need plumbing from feed ingestion to analysis inputs before this affects detection.
-- Must add strict corroboration rules (metadata cannot act alone as a skip trigger).
+Limits:
+- Coverage is inconsistent across feeds; this cannot be the primary strategy.
+- Quality/format variance means you need robust parsing, normalization, and conservative weighting.
 
 Complexity vs payoff:
-- Good trade if scoped to **weak prior only** and bounded fusion weight.
-- Bad trade if treated as pre-anchored evidence with too much authority.
+- Good trade overall. Moderate implementation complexity, often high payoff on supporting shows.
 
-Candid verdict:
-- Strong idea, but only if implemented as a conservative prior channel, not as direct actionable evidence.
+Core-goal fit:
+- Good but not complete. It helps episodes become ready faster on a subset of content, but does not solve queue orchestration, persistence, recovery, or prioritization.
 
 ---
 
-## 2) ID3 / Podcasting 2.0 Chapter-Marker Ingestion
+## 2) RSS / Show-Notes Sponsor Pre-Seeding
 
-**Score: 804 / 1000**
+**Score: 732 / 1000**
 
-What is strong:
-- Very high precision when chapter labels are good.
-- Can materially improve boundary accuracy and reduce FM work on covered episodes.
-- Natural fit for boundary snapping logic.
+Why it is strong:
+- Cheap signal source available before audio analysis begins.
+- Helps cold-start episodes/shows and can improve first-pass lexical detection.
+- Fully on-device and easy to layer onto existing evidence systems.
 
-What is weak:
-- Coverage is inconsistent across publishers.
-- Chapter semantics are noisy (“support us”, “housekeeping”, “cold open with sponsor mention”).
-- ID3 CHAP parsing from audio files is extra engineering surface.
-
-Implementation reality in this repo:
-- Feed parser already parses inline `podcast:chapter`; external chapter URLs are noted but not fetched.
-- Chapters are not persisted to `Episode`, and ad detection does not currently consume them.
-- This idea is partly started, but integration is non-trivial end-to-end.
+Limits:
+- Show notes are noisy, stale, templated, and sometimes misaligned with dynamic ad insertion.
+- High false-positive risk if granted too much weight.
 
 Complexity vs payoff:
-- Good for shows that publish clean chapters.
-- Moderate overall upside because corpus coverage is limited.
+- Worth doing if constrained as weak prior evidence plus corroboration gates.
+- Not worth doing if it starts directly driving skip decisions.
 
-Candid verdict:
-- Smart and practical, but not as universally impactful as it appears.
+Core-goal fit:
+- Moderately good. Helps reduce time to useful markers, but still does not address the background queue machinery that determines whether work runs and survives interruptions.
 
 ---
 
-## 3) Host-Voice Editorial Counter-Classifier
+## 3) Music-Bed Envelope as Dominant Boundary Cue
 
-**Score: 612 / 1000**
+**Score: 603 / 1000**
 
-What is strong:
-- Targets a real false-positive pattern: editorial host monologues misread as ads.
-- In theory, this could raise precision on talk-heavy shows.
+Why it has merit:
+- Targets a user-visible pain point (boundary slop).
+- Uses signals likely already present in your pipeline.
+- Potentially meaningful quality gains for produced shows with consistent beds/jingles.
 
-What is weak:
-- Highest implementation and reliability risk of the five.
-- Host-read ads are exactly where this signal can backfire.
-- Co-host rotation and guest-heavy formats make stable host profiling hard.
-
-Implementation reality in this repo:
-- Current system has speaker-change proxy and optional validated labels path, but validated ASR speaker labels are effectively not active.
-- No robust, production speaker-embedding pipeline exists in current code.
-- Building and maintaining host voice profiles is a substantial new subsystem.
+Limits:
+- Strongly content-style dependent; many shows do not have clean bracket patterns.
+- Risk of over-snapping to non-ad music transitions unless heavily guarded.
 
 Complexity vs payoff:
-- Expensive to do correctly and easy to get wrong.
-- High long-term maintenance burden for uncertain incremental gain.
+- Moderate complexity for moderate benefit.
+- Better as an additional weighted cue than as truly dominant in most cases.
 
-Candid verdict:
-- Intellectually good, practically premature for this codebase right now.
+Core-goal fit:
+- Limited. This is mostly a quality refinement after analysis runs, not a readiness accelerator for background queue completion.
 
 ---
 
-## 4) Music-Bed Envelope as Dominant Boundary Cue
+## 4) Host-Voice Editorial Counter-Classifier
 
-**Score: 888 / 1000**
+**Score: 451 / 1000**
 
-What is strong:
-- Directly attacks one of the most user-visible failure modes: bad boundaries.
-- Leverages existing features (`musicBedOnsetScore`, `musicBedOffsetScore`) already in pipeline.
-- Can be rolled out safely with clear gating conditions.
+Why it is intellectually strong:
+- Conceptually good anti-false-positive mechanism.
+- Fits precision-oriented product posture.
 
-What is weak:
-- Music-heavy editorial shows can create false boundary candidates.
-- Needs robust guardrails to avoid over-snapping to unrelated music events.
-
-Implementation reality in this repo:
-- `TimeBoundaryResolver` already supports directional music cues, currently as moderate-weight inputs.
-- This is mostly a scoring policy upgrade plus bracket-detection logic, not a framework change.
-- Easy to A/B in replay harness and boundary-MAE metrics.
+Why the score is much lower:
+- Hard to implement robustly on-device across diverse podcasts without becoming a major new subsystem.
+- High correctness burden and edge-case complexity (co-hosts, guests, host-read ads, tone/style shifts).
+- Can become a long tuning project with unclear net gain vs simpler cues.
 
 Complexity vs payoff:
-- Excellent trade.
-- Low-to-moderate complexity for a high, immediately felt UX win.
+- High complexity and maintenance burden relative to expected near-term readiness gains.
 
-Candid verdict:
-- Best proposal in Claude’s list for near-term detection quality improvement.
+Core-goal fit:
+- Weak. It primarily tunes classification precision and does little for "episodes ready before open" throughput/latency/reliability.
 
 ---
 
 ## 5) Episode-Level Ad-Inventory Sanity Check
 
-**Score: 830 / 1000**
+**Score: 394 / 1000**
 
-What is strong:
-- Adds system-level self-awareness for catastrophic misses and over-detection.
-- Strong trust protection mechanism during model drift or OS behavior changes.
-- Pairs well with correction and replay workflows.
+What is good:
+- Valuable guardrail/observability mechanism.
+- Can reduce catastrophic trust failures by flagging suspicious outcomes.
 
-What is weak:
-- Does not itself improve detection quality; it is a safety governor.
-- Outlier logic can be noisy for specials, live episodes, or format changes.
-
-Implementation reality in this repo:
-- There is already per-podcast planner state and counters in backfill/coverage paths.
-- Extending this to anomaly flags is feasible without architectural churn.
-- UI behavior changes (downgrading auto-skip) must be conservative to avoid user frustration.
+Why it ranks last here:
+- It is mostly a post-hoc safety layer, not a readiness driver.
+- Adds product and state complexity (health modes, fallback behavior) without directly increasing completed background-ready episodes.
 
 Complexity vs payoff:
-- Good reliability ROI if thresholds and exemptions are tuned carefully.
-- Moderate complexity, mostly in policy tuning and UX behavior.
+- Reasonable as a later-stage reliability feature, but low immediate leverage for the primary goal in this prompt.
 
-Candid verdict:
-- Very good safety-net idea; less glamorous than boundary improvements but high practical value.
+Core-goal fit:
+- Low. It helps quality governance after processing, not the core problem of dependable background prep.
 
 ---
 
-## Bottom-Line Take
+## Candid Bottom Line
 
-Claude’s top 5 are overall strong and pragmatic. The two best engineering bets for immediate core-quality gain are:
-1. **Music-envelope-dominant boundary scoring**
-2. **RSS/show-notes pre-seeding (as weak priors only)**
-
-The **host-voice counter-classifier** is the only one I would explicitly deprioritize for now due to implementation risk and fragile assumptions relative to current pipeline maturity.
+Claude's top five are generally smart ad-detection ideas, but they are not the strongest set for the specific problem statement you gave (best-in-class background download queue + pre-open readiness). For that core goal, infrastructure ideas like durable queue DAGs, strict preemption, BG task orchestration, power/thermal governors, and resumable checkpoints are materially more important and should be prioritized first.

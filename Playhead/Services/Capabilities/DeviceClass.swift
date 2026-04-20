@@ -22,6 +22,12 @@ enum DeviceClass: String, Sendable, Codable, CaseIterable, Equatable {
     case iPhone16Pro
     case iPhone16
     case iPhone15Pro
+    /// A16-era hardware: iPhone 14 Pro / Pro Max (iPhone15,2 / iPhone15,3)
+    /// and iPhone 15 / 15 Plus (iPhone15,4 / iPhone15,5). All four share
+    /// the A16 Bionic SoC; keeping them in a single bucket avoids the
+    /// prior gap where these chassis strings silently fell through to
+    /// `.iPhone14andOlder` and got the slowest slice budget.
+    case iPhone15
     case iPhoneSE3
     /// Catch-all for A15-era and older hardware, simulator, and any
     /// unrecognized `utsname.machine` string.
@@ -61,6 +67,10 @@ enum DeviceClass: String, Sendable, Codable, CaseIterable, Equatable {
         // iPhone 15 Pro / Pro Max — chassis iPhone16,1 / iPhone16,2
         case "iPhone16,1", "iPhone16,2":
             return .iPhone15Pro
+        // A16-era: iPhone 14 Pro / Pro Max (iPhone15,2 / iPhone15,3) and
+        // iPhone 15 / 15 Plus (iPhone15,4 / iPhone15,5).
+        case "iPhone15,2", "iPhone15,3", "iPhone15,4", "iPhone15,5":
+            return .iPhone15
         // iPhone SE (3rd generation) — chassis iPhone14,6
         case "iPhone14,6":
             return .iPhoneSE3

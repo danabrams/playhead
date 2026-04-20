@@ -4492,10 +4492,18 @@ actor AnalysisStore {
                 try exec("ROLLBACK")
                 throw LeaseError.staleEpoch(expected: schedulerEpoch, actual: currentEpoch)
             }
+            // Guard against zombie resurrection: if our own lease has
+            // already expired we must NOT extend it here. A live lease
+            // (`leaseExpiresAt >= now`) is still ours to renew; an
+            // expired one means acquire-time eligibility has to run
+            // again. Without this check, a worker that slept past its
+            // TTL would silently reclaim a row that another acquirer
+            // could legitimately take.
             let sql = """
                 UPDATE analysis_jobs
                 SET leaseExpiresAt = ?, updatedAt = ?
                 WHERE episodeId = ? AND generationID = ? AND schedulerEpoch = ?
+                  AND leaseExpiresAt IS NOT NULL AND leaseExpiresAt >= ?
                 """
             let stmt = try prepare(sql)
             defer { sqlite3_finalize(stmt) }
@@ -4504,6 +4512,7 @@ actor AnalysisStore {
             bind(stmt, 3, episodeId)
             bind(stmt, 4, generationID)
             bind(stmt, 5, schedulerEpoch)
+            bind(stmt, 6, now)
             try step(stmt, expecting: SQLITE_DONE)
             if sqlite3_changes(db) == 0 {
                 try exec("ROLLBACK")

@@ -47,6 +47,15 @@
       "avgShardDurationMs": 3400
     },
     {
+      "deviceClass": "iPhone15",
+      "grantWindowMedianSeconds": 30,
+      "grantWindowP95Seconds": 65,
+      "nominalSliceSizeBytes": 12000000,
+      "cpuWindowSeconds": 25,
+      "bytesPerCpuSecond": 520000,
+      "avgShardDurationMs": 4200
+    },
+    {
       "deviceClass": "iPhoneSE3",
       "grantWindowMedianSeconds": 25,
       "grantWindowP95Seconds": 55,

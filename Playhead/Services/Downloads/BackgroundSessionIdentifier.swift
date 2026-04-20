@@ -92,8 +92,8 @@ extension InternalMissCause {
 /// types (which land on a parallel branch).
 ///
 /// The default in-process binding (`NoopWorkJournalRecorder`) swallows
-/// events; uzdq will register a real recorder via
-/// `DownloadManager.setWorkJournalRecorder(_:)`.
+/// events; uzdq wires a real recorder by passing it to
+/// `DownloadManager(workJournalRecorder:)` at construction time.
 protocol WorkJournalRecording: Sendable {
     /// Record that the background transfer for `episodeId` finished
     /// successfully and its artifact is in place.

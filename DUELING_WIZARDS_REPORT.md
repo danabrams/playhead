@@ -1,145 +1,194 @@
-# Dueling Idea Wizards Report: Playhead Ad Detection
+# Dueling Idea Wizards Report: Playhead Background Download Queue
 
 ## Executive Summary
 
-Two AI models (Claude Code Opus 4.6 and OpenAI Codex GPT-5.3) independently studied the Playhead codebase and generated 30 ideas each for improving ad detection, winnowed to 5 each (10 total). Near-zero overlap between the top-5 lists: Claude focused on **new signal sources** (metadata, acoustic features), Codex focused on **decision calibration and feedback loops**. After adversarial cross-scoring and a reveal phase with genuine concessions from both sides, **3 consensus winners** emerged, **2 strong ideas with caveats**, and **2 ideas that should be deprioritized**.
+Two AI models (Claude Code / Opus 4.6 and Codex / GPT-5.3) independently generated 30 ideas each for designing a best-in-class background download queue for podcast subscriptions, winnowed to 5 finalists each, then adversarially cross-scored and debated. The models naturally diverged into **complementary domains**: CC focused on ad-detection signal intelligence while Codex focused on queue infrastructure. After cross-scoring, a reveal phase with genuine concessions, and a blind-spot probe, the synthesis identifies **8 consensus priorities** spanning both domains plus **5 blind-spot ideas** neither initially proposed.
 
-**Top 3 consensus picks:**
-1. RSS / show-notes sponsor pre-seeding (new signal, cold-start win)
-2. Music-bed envelope as dominant boundary cue (boundary accuracy, immediate UX win)
-3. Granular user correction learning (trust flywheel, scoped persistence)
+**Core insight: a best-in-class background queue requires BOTH infrastructure reliability AND detection intelligence.** Building the queue without smarter detection just delivers bad results faster. Improving detection without a durable queue means analysis never completes in the background.
+
+**Top consensus picks:**
+1. Two-Tier BG Orchestration (BGAppRefreshTask + BGProcessingTask + Background URLSession)
+2. Three-Lane Priority Scheduler with hard user preemption
+3. RSS / show-notes sponsor pre-seeding (cold-start detection win)
+4. ID3 / chapter-marker ingestion (precision gold)
+5. Readiness Score + visible "Ready to Skip" UX contract
+
+---
 
 ## Methodology
 
-- **Agents used:** Claude Code (Opus 4.6) + Codex (GPT-5.3)
+- **Agents:** Claude Code (Opus 4.6) + Codex (GPT-5.3). Gemini spawned but excluded per user request.
 - **Ideas generated:** 30 per agent, winnowed to 5 each
 - **Scoring:** Adversarial cross-model 0-1000 scale
-- **Phases:** study -> ideate -> cross-score -> reveal -> synthesize
-- **Focus:** Ad detection pipeline improvements
-- **Duration:** ~35 minutes total
+- **Phases:** study -> ideate -> cross-score -> reveal/concessions -> blind spot probe -> synthesis
+- **Duration:** ~30 minutes
 
-## Score Matrix
+---
 
-| Idea | Origin | Self-Rank | CC Score | COD Score | Post-Reveal CC | Post-Reveal COD | Verdict |
-|---|---|---|---|---|---|---|---|
-| RSS / show-notes pre-seeding | CC | #1 | -- | 842 | 835 | -- | **CONSENSUS WIN** |
-| Music-bed envelope boundary | CC | #4 | -- | 888 | 820 | -- | **CONSENSUS WIN** |
-| Granular correction learning | COD | #2 | 780 | -- | -- | still #1 | **CONSENSUS WIN** |
-| Chapter-marker ingestion | CC | #2 | -- | 804 | 785 | -- | **STRONG** |
-| Episode-level sanity check | CC | #5 | -- | 830 | 730 | -- | **STRONG** |
-| Boundary feedback loop | COD | #3 | 710 | -- | -- | still top-3 | Good, with caveats |
-| Sponsor memory + fingerprints | COD | #5 | 670 | -- | -- | decomposed | Good (unbundle first) |
-| Replay-calibrated confidence | COD | #1 | 645 | -- | -- | dropped to #3 | Overrated by originator |
-| Refusal-resistant FM path | COD | #4 | 590 | -- | -- | dropped to #5 | Mostly already shipped |
-| Host-voice counter-classifier | CC | #3 | -- | 612 | 620 | -- | **KILLED** (premature) |
+## The Natural Divergence
 
-## Consensus Winners (scored 700+ by both agents)
+The most revealing finding: given the same prompt, the models answered **different halves of the same question**.
 
-### 1. RSS / Show-Notes Sponsor Pre-Seeding
-**CC: 835 | COD: 842 | Avg: 839**
+| Dimension | Claude Code (Opus 4.6) | Codex (GPT-5.3) |
+|-----------|----------------------|-----------------|
+| **Focus** | Ad-detection signal quality | Queue infrastructure reliability |
+| **Top ideas** | RSS pre-seeding, chapter markers, music-bed boundaries, host-voice counter, inventory sanity | Durable job DAG, priority scheduler, energy/thermal governor, BG task orchestration, readiness UX |
+| **Implicit question** | "How do we make detection *smarter*?" | "How do we make processing *reliable*?" |
+| **Lens** | Capability per effort | Felt quality per risk |
 
-Parse RSS `<description>`, `<itunes:summary>`, and `<content:encoded>` for sponsor names, promo codes, and URLs at episode enqueue time. Inject into per-episode ephemeral sponsor lexicon consumed by `LexicalScanner` during hot path.
+This divergence is the strongest output of the duel: it proves both dimensions are necessary and neither alone is sufficient.
 
-**Why both agree:** Deterministic, cheap, fully on-device, uniquely addresses cold-start episodes. Both agents independently flagged the corroboration requirement (metadata cannot act alone as a skip trigger).
+---
 
-**Key caveat from Codex:** Show notes can be stale or diverge from dynamic-insertion audio. Must be weak priors only, not direct actionable evidence. Bounded fusion weight (0.15 cap suggested).
+## Consensus Winners: The Combined Architecture
 
-**Implementation surface:** RSS parser + provenance tag + lexicon-merge point. `Episode` persistence needs to retain description metadata (currently dropped).
+### Tier 1: Queue Infrastructure Foundation (Build First)
 
-### 2. Music-Bed Envelope as Dominant Boundary Cue
-**CC: 820 | COD: 888 | Avg: 854**
+#### 1. Two-Tier Background Orchestration
+- **Origin:** Codex #4 | **CC score:** 850 ("right answer, should be #1")
+- `BGAppRefreshTask` for lightweight feed polling + queue updates (runs frequently, cheap)
+- `BGProcessingTask` for heavy transcription/classification (runs on power, longer windows)
+- `URLSessionConfiguration.background(...)` for downloads independent of process lifetime
+- Each task invocation advances bounded work, then reschedules itself
+- **Why consensus:** Both models agree this is the non-negotiable iOS-native backbone. Matches the OS execution model instead of fighting it.
 
-When a candidate ad region is flanked by symmetric music-bed onset/offset patterns (symmetry score >= 0.6, both scores >= 0.7), treat envelope peaks as primary boundary snap targets with elevated weight (0.45) and 10s snap radius.
+#### 2. Three-Lane Priority Scheduler with Hard User Preemption
+- **Origin:** Codex #2 | **CC score:** 750
+- Lane 1 (`Now`): user-tapped episodes always preempt all other work
+- Lane 2 (`Soon`): high readiness-score episodes likely to be played next
+- Lane 3 (`Background`): long-tail subscription maintenance
+- Preemption safely pauses lower-lane jobs at shard boundaries using persisted checkpoints
+- **Why consensus:** Directly aligns system behavior with perceived quality. The user's intent always wins.
 
-**Why both agree:** Boundary errors are the most viscerally annoying failure mode. Existing `musicBedOnsetScore`/`musicBedOffsetScore` features are already computed but underutilized. Low complexity, high felt-UX improvement.
+#### 3. Durable Episode Job DAG + Checkpoint Ledger
+- **Origin:** Codex #1 | **CC score:** 520 (argued ~85% already exists)
+- Each episode as a persisted DAG: `feed_discovered -> download -> shard -> transcribe -> classify -> finalize`
+- Write-ahead progress ledger for every stage transition
+- Shard-level checkpoints persist cursor, partial transcript, classifier progress
+- Recovery replays ledger into latest consistent state after crash/termination/reboot
+- **Post-reveal synthesis:** Audit existing pipeline state machine. Formalize gaps + add write-ahead ledger where missing. Don't rebuild what's built.
 
-**Key disagreement (resolved):** Claude originally ranked this #4; conceded after reveal that boundary quality matters more than metadata harvesting for user trust. Codex's 888 is slightly optimistic per Claude (guardrails limit applicability to jingle-heavy shows).
+#### 4. Energy/Thermal Adaptive Governor with Quality Profiles
+- **Origin:** Codex #3 | **CC score:** 450 (argued ~80% already built)
+- Quality profiles: `full` (download + transcribe + classify), `reduced` (download + transcribe, defer FM), `pause` (metadata only)
+- Reads `ProcessInfo.thermalState`, `isLowPowerModeEnabled`, `UIDevice.batteryState/Level`
+- Re-evaluates at every stage boundary
+- **Post-reveal synthesis:** Codify quality profiles as an explicit policy enum the scheduler reads. Verify existing thermal handling covers profile switching.
 
-**Implementation surface:** Bracket detection scanner + new cue class in `TimeBoundaryResolver`. Easy to validate via boundary-MAE in replay harness.
+### Tier 2: Detection Intelligence (What the Queue Delivers)
 
-### 3. Granular User Correction Learning
-**CC: 780 | COD: #1 pick | Avg: ~780+**
+#### 5. RSS / Show-Notes Sponsor Pre-Seeding
+- **Origin:** CC #1 | **Codex score:** 732 | **CC revised:** 835
+- Parse RSS `<description>`, `<itunes:summary>`, `<content:encoded>` for sponsor names, promo codes, URLs at enqueue time
+- Inject into per-episode ephemeral sponsor lexicon consumed by `LexicalScanner`
+- Corroboration gate: pre-seeded evidence only contributes to fusion when corroborated by at least one audio signal
+- Cap contribution at 0.15 of fusion budget
+- **Why consensus (700+ from both):** Free, deterministic signal. Uniquely solves cold-start (new shows where no per-show priors exist). Cheapest possible lift at the lowest pipeline layer.
 
-Upgrade `UserCorrectionStore` with typed scopes (`episode-span`, `phrase-on-show`, `sponsor-on-show`, `domain-ownership-on-show`) and TTL/decay semantics. Apply in skip decisions, boundary adjustments, and sponsor memory promotion.
+#### 6. ID3 / Podcasting 2.0 Chapter-Marker Ingestion
+- **Origin:** CC #2 | **Codex score:** 784 | **CC revised:** 785
+- Parse ID3 CHAP frames and `<podcast:chapters>` JSON
+- Chapters labeled "Sponsor", "Ad Break", "Mid-Roll" become high-confidence bounded regions with preferred snap targets (+-12s snap radius)
+- Content-labeled chapters ("Main Interview", "Q&A") serve as hard negative signals
+- Shares the RSS parsing pass at enqueue time with #5
+- **Why consensus (~785 from both):** Publisher-declared precision gold. When it works, boundary errors drop to seconds. Also saves FM compute budget on chapter-covered spans.
 
-**Why both agree:** User corrections are the highest-quality ground truth the system will ever see. Current correction primitives are coarse. Scoped persistence turns a blunt tool into a precision instrument.
+#### 7. Music-Bed Envelope as Dominant Boundary Cue
+- **Origin:** CC #4 | **Codex score:** 603 | **CC revised:** 820
+- Promote symmetric music-envelope brackets to primary boundary cue (weight 0.45, snap radius 10s)
+- Symmetry gate (>= 0.6) + lexical-anchor co-occurrence prevents false activation on editorial music
+- **Contested:** Codex scored lower citing content-style dependence. CC conceded limited coverage but argued boundary accuracy is the most viscerally visible quality lever.
+- **Synthesis verdict:** Include but scope to shows with detected jingle patterns. Not universally "dominant."
 
-**Key caveat from Claude:** Users don't think in scope taxonomies -- the system must infer scope from evidence context, not burden the user. Routing logic is trickier than the proposal admits.
+### Tier 3: User-Facing Magic
 
-**Implementation surface:** Schema extension to existing `UserCorrectionStore`, consume in `SkipOrchestrator`, `DecisionMapper`, and backfill fusion.
+#### 8. Readiness Score + Visible "Ready to Skip" UX Contract
+- **Origin:** Codex #5 | **CC score:** 700
+- Per-episode readiness score: recency x listening probability x queue position x show affinity
+- Library cells show concrete state: `Ready to Skip`, `Partially Ready`, `Queued`
+- Optional "Prepare Next 3" quick action for flights/commutes
+- Optional widget surfacing ready-episode count
+- **Why it matters:** Turns invisible backend work into perceived magic. Users understand what the app is doing.
 
-## Strong Ideas (one-sided high scores, worth pursuing)
+---
 
-### 4. ID3 / Podcasting 2.0 Chapter-Marker Ingestion
-**COD: 804 | CC revised: 785**
+## Killed / Deprioritized Ideas
 
-Chapter-labeled ad breaks are precision gold when available. Natural companion to RSS pre-seeding (same parser pass at enqueue time). Limited by inconsistent publisher adoption.
+| Idea | Origin | Score Gap | Why Killed |
+|------|--------|-----------|-----------|
+| Host-Voice Counter-Classifier | CC #3 | CC: 620, Codex: 451 | CC conceded after reveal. No production speaker-embedding pipeline exists. Host-read ads without anchors are exactly where it backfires. "I was seduced by the architectural symmetry argument." |
+| Inventory Sanity Check (as top-tier) | CC #5 | CC: 730, Codex: 394 | Post-hoc safety layer, not a readiness driver. Build lightweight, don't over-invest. |
 
-### 5. Episode-Level Ad-Inventory Sanity Check
-**COD: 830 | CC revised: 730**
+---
 
-Statistical outlier detection on total ad time vs per-show history. Doesn't improve detection directly but catches catastrophic silent failures and modulates UX accordingly. Valuable safety net for opaque FM behavior changes across iOS updates.
+## Blind Spot Ideas (Phase 6.9 -- Codex)
 
-## Contested Ideas (decompose before building)
+These emerged after the full adversarial exchange. Neither model initially covered them.
 
-### 6. Boundary Feedback From Listening Behavior
-**CC: 710 | COD: agrees post-reveal**
+### B1. BG Grant-Window Prediction + Slice Sizing Controller
+Learn a per-device distribution of granted background run windows (duration, expiration frequency, thermal interruptions). Dynamically size work slices to fit within >=95% completion probability. **This directly attacks the #1 reason "ready before open" fails: repeated partial work that never completes.**
 
-Both agree the signal exists but is noisier than initially framed. **Resolution:** Split into (a) deterministic two-pass boundary snap (ship first, low risk) and (b) behavioral learning from post-skip seeks (ship second, needs noise engineering).
+### B2. Playhead-Proximal Partial Readiness
+Don't optimize for episode-level readiness -- optimize for current playhead position. Prioritize analysis of the first 12-20 minutes + known mid-roll windows. Mark episodes as "Ready Near Playhead" before full completion. **Creates perceived magic faster than waiting for full-episode analysis.**
 
-### 7. Sponsor Memory + Multi-Feature Fingerprints
-**CC: 670 | COD: agrees to decompose**
+### B3. Repeated-Ad Tile Memoization (Inference Reuse)
+Cache short audio tile fingerprints for high-confidence ad segments. When matched in new episodes, reuse prior transcript/classification/boundary data instead of re-running full ASR+FM. **Dynamically inserted ads are frequently reused across shows -- this cuts background compute dramatically.**
 
-**Resolution:** Ship alias canonicalization first (easy, high ROI). Transfer-tier cleanup second. Acoustic fingerprinting is a longer-horizon R&D effort, not a near-term feature.
+### B4. Model-Update Fast Revalidation via Feature Persistence
+Persist model-agnostic intermediate features (shard timing, tokenized transcript, lexical hits, acoustic features, candidate spans). On model/policy update, run "revalidate from features" instead of full re-transcription. **Keeps library readiness high after app updates without re-burning battery.**
 
-## Killed Ideas
+### B5. Explicit Readiness SLO + Closed-Loop Queue Control
+Define a measurable service objective: "Top 25 likely-to-play episodes are playhead-ready within X hours of publish at >= 90% success." Continuously measure misses by reason (no BG grant, thermal throttle, network unavailable, storage eviction, pipeline failure). Controller adjusts scheduling knobs automatically. **Converts static heuristics into an adaptive system.**
 
-### Host-Voice Editorial Counter-Classifier
-**COD: 612 | CC conceded: 620**
-
-Both agents agreed post-reveal this is premature. No production speaker-embedding pipeline exists in the codebase. Host-read ads without tidy anchors are exactly where it backfires. Claude conceded this was their biggest error: "I was seduced by the architectural symmetry argument."
-
-### Replay-Calibrated Confidence (as originally framed)
-**CC: 645 | COD: dropped from #1 to #3**
-
-Codex's own #1 pick was their biggest concession post-reveal. Claude's critique -- that it bundles two ideas, the defer band largely already exists, and calibration has real MLOps maintenance cost -- was accepted. Codex decomposed it into: (a) replay-calibrated confidence as standalone P1, (b) explicit uncertainty defer policy as P2.
+---
 
 ## Meta-Analysis
 
-### Model Biases Revealed
+### Model Biases
 
-| Bias | Claude (Opus 4.6) | Codex (GPT-5.3) |
-|---|---|---|
-| **Signal philosophy** | New data sources, metadata harvesting | Tune existing decision surfaces |
-| **Risk appetite** | Higher (host-voice embeddings, new ML infra) | Lower (sharpen what exists, replay-validate) |
-| **Quality lens** | Capability per effort | Felt quality per risk |
-| **Bundling tendency** | Clean single ideas | 2-3 sub-ideas per slot |
-| **Blind spot** | Overvalued architectural symmetry as a reason to build | Overvalued ideas that overlap with shipped infrastructure |
+| Dimension | Claude Code (Opus 4.6) | Codex (GPT-5.3) |
+|-----------|----------------------|-----------------|
+| Signal philosophy | New data sources, metadata harvesting | Tune existing systems, reliable delivery |
+| Risk appetite | Higher (host-voice embeddings, new ML infra) | Lower (sharpen what exists, replay-validate) |
+| Quality lens | Capability per effort | Felt quality per risk |
+| Bundling tendency | Clean single ideas | 2-3 sub-ideas per slot |
+| Blind spot | Overvalued architectural symmetry | Proposed ideas overlapping with shipped infra |
 
-### Key Dynamics
+### Key Concessions
 
-- **Largest concession:** Claude dropping host-voice counter from #3 to #5 after Codex pointed out no speaker-embedding pipeline exists. "I got it wrong" -- rare and high-signal.
-- **Largest upgrade:** Claude moving music-envelope boundary from #4 to #2 after accepting Codex's "boundary errors are the most visceral failure mode" argument.
-- **Codex's self-correction:** Dropping their own #1 (calibration) after accepting Claude's critique about bundling and maintenance cost.
-- **Methodological insight from Claude:** "Codex and I applied different implicit loss functions -- mine 'capability-per-effort,' theirs 'felt-quality-per-risk.' For an MVP-stage product, theirs is the more appropriate lens."
+**CC's biggest concession:** Dropping host-voice counter from #3 to #5 after Codex pointed out no speaker-embedding pipeline exists. "I was overconfident. Codex got that call right and I got it wrong."
 
-### Where Adversarial Pressure Added Value
+**CC's methodological concession:** "Codex's lens -- 'felt quality per risk' -- is probably the right one for a pre-revenue MVP where user trust is the currency. That's a genuine update, not a diplomatic concession."
 
-1. **Forced decomposition** of bundled ideas (Codex's calibration+defer, sponsor+fingerprint+tiers)
-2. **Exposed premature proposals** (host-voice counter was killed by implementation-reality critique)
-3. **Rebalanced priorities** (boundary quality elevated over metadata harvesting by user-perception argument)
-4. **Validated cross-model convergence** on corrections and RSS pre-seeding
+**Codex's biggest concession:** Accepting that idea bundling inflated apparent scope and that several proposals overlapped with already-shipped infrastructure.
 
-## Recommended Next Steps
+---
 
-**Implementation order (both agents converged on this post-reveal):**
+## Recommended Implementation Order
 
-1. **RSS / show-notes sponsor pre-seeding** -- Largest recall lift at cheapest layer. Cold-start win. Ship first.
-2. **Music-bed envelope boundary scoring** -- Most visible UX improvement. Leverage existing features. Ship second.
-3. **Chapter-marker ingestion** -- Same parser pass as #1. Concentrated value on structured podcasts. Ship alongside #1.
-4. **Episode-level ad-inventory sanity check** -- Safety net before rolling out aggressive detection improvements. Ship before expanding skip aggressiveness.
-5. **Granular correction learning** -- Trust flywheel. Schema extension on existing store. Ship as corrections UX matures.
-6. **Sponsor alias canonicalization** -- Easy win extracted from decomposed fingerprint proposal.
-7. **Two-pass boundary snap** -- Deterministic improvement extracted from decomposed behavioral loop.
+### Phase A: Queue Foundation (nothing works without this)
+1. **Two-Tier BG Orchestration** -- BGAppRefreshTask + BGProcessingTask + Background URLSession
+2. **Three-Lane Priority Scheduler** -- Now/Soon/Background with hard user preemption
+3. **Audit existing DAG + add checkpoint ledger** where gaps exist
+4. **Codify energy/thermal quality profiles** as explicit policy enum
 
-Items 1-3 are metadata/signal improvements. Items 4-5 are reliability/trust improvements. Items 6-7 are precision refinements. This ordering balances new capability against risk management.
+### Phase B: Detection Intelligence (what the queue delivers)
+5. **RSS sponsor pre-seeding** -- cheapest signal, biggest cold-start win
+6. **Chapter-marker ingestion** -- same parser pass, precision gold
+7. **Music-bed envelope boundary** -- scoped to jingle-detected shows
+
+### Phase C: User-Facing Magic + Optimization
+8. **Readiness Score + "Ready to Skip" badges** -- visible magic
+9. **BG grant-window prediction** (blind spot B1) -- adaptive slice sizing
+10. **Playhead-proximal partial readiness** (blind spot B2) -- perceived magic faster
+11. **Repeated-ad tile memoization** (blind spot B3) -- compute savings
+
+### Future Arc
+- Readiness SLO + closed-loop control (B5)
+- Model-update fast revalidation (B4)
+- Inventory sanity check (lightweight version)
+- Host-voice counter-classifier (when real diarization ships)
+
+---
+
+*Generated by Dueling Idea Wizards: Claude Code (Opus 4.6) vs Codex (GPT-5.3), 2026-04-16*

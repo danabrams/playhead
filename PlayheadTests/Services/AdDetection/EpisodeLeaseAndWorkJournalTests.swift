@@ -288,6 +288,138 @@ struct EpisodeLeaseAndWorkJournalTests {
         }
     }
 
+    @Test("Renew after lease expiry: throws generationMismatch; zombie cannot resurrect")
+    func renewAfterExpiryThrows() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "ep-expired"
+        try await store.insertJob(makeAnalysisJob(jobId: "j-exp", episodeId: episodeId, workKey: "wk-exp"))
+        let gen = UUID()
+        let epoch = try await store.fetchSchedulerEpoch() ?? 0
+        let acquireAt: Double = 7_000_000
+        let ttl: Double = 30
+        let descriptor = try await store.acquireEpisodeLease(
+            episodeId: episodeId,
+            ownerWorkerId: "worker-zombie",
+            generationID: gen.uuidString,
+            schedulerEpoch: epoch,
+            now: acquireAt,
+            ttlSeconds: ttl
+        )
+        // Worker goes to sleep past its TTL, then wakes up and tries to
+        // extend its own already-expired lease. The renew must fail
+        // loudly so another acquirer can take the row.
+        let afterExpiry = descriptor.expiresAt + 1
+        do {
+            try await store.renewEpisodeLease(
+                episodeId: episodeId,
+                generationID: gen.uuidString,
+                schedulerEpoch: epoch,
+                newExpiresAt: afterExpiry + 300,
+                now: afterExpiry
+            )
+            Issue.record("Expected LeaseError.generationMismatch for expired lease")
+        } catch LeaseError.generationMismatch(let ep) {
+            #expect(ep == episodeId)
+        }
+        // Expiry timestamp untouched so another acquirer sees it as free.
+        let fetched = try await store.fetchJob(byId: "j-exp")
+        #expect(fetched?.leaseExpiresAt == descriptor.expiresAt)
+    }
+
+    @Test("Renew at exact expiry boundary succeeds: leaseExpiresAt == now is live")
+    func renewAtExpiryBoundarySucceeds() async throws {
+        // Boundary control for the `leaseExpiresAt >= ?` predicate in
+        // `renewEpisodeLease`. A mutation from `>=` to `>` would pass
+        // both `renewAfterExpiryThrows` (strict expiry, `now > expiry`)
+        // and the generation-mismatch test (different gen entirely),
+        // but this case — where the owner renews exactly at the TTL
+        // cliff — distinguishes the two and locks in the inclusive
+        // boundary.
+        let store = try await makeTestStore()
+        let episodeId = "ep-boundary"
+        try await store.insertJob(
+            makeAnalysisJob(jobId: "j-boundary", episodeId: episodeId, workKey: "wk-boundary")
+        )
+        let gen = UUID()
+        let epoch = try await store.fetchSchedulerEpoch() ?? 0
+        let acquireAt: Double = 9_000_000
+        let ttl: Double = 30
+        let descriptor = try await store.acquireEpisodeLease(
+            episodeId: episodeId,
+            ownerWorkerId: "worker-boundary",
+            generationID: gen.uuidString,
+            schedulerEpoch: epoch,
+            now: acquireAt,
+            ttlSeconds: ttl
+        )
+        // Renew exactly AT the expiry instant. With `>=`, this succeeds;
+        // with `>`, this would spuriously throw.
+        let atExpiry = descriptor.expiresAt
+        try await store.renewEpisodeLease(
+            episodeId: episodeId,
+            generationID: gen.uuidString,
+            schedulerEpoch: epoch,
+            newExpiresAt: atExpiry + 60,
+            now: atExpiry
+        )
+        let fetched = try await store.fetchJob(byId: "j-boundary")
+        #expect(fetched?.leaseExpiresAt == atExpiry + 60)
+    }
+
+    @Test("Fresh acquirer reclaims row after zombie renew failed: proves repair path")
+    func freshAcquirerReclaimsAfterZombieFailed() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "ep-repair"
+        try await store.insertJob(makeAnalysisJob(jobId: "j-repair", episodeId: episodeId, workKey: "wk-repair"))
+        let zombieGen = UUID()
+        let epoch = try await store.fetchSchedulerEpoch() ?? 0
+        let descriptor = try await store.acquireEpisodeLease(
+            episodeId: episodeId,
+            ownerWorkerId: "worker-zombie",
+            generationID: zombieGen.uuidString,
+            schedulerEpoch: epoch,
+            now: 8_000_000,
+            ttlSeconds: 30
+        )
+        // Phase 1: zombie wakes past TTL, attempt to renew → must throw.
+        let afterExpiry = descriptor.expiresAt + 1
+        do {
+            try await store.renewEpisodeLease(
+                episodeId: episodeId,
+                generationID: zombieGen.uuidString,
+                schedulerEpoch: epoch,
+                newExpiresAt: afterExpiry + 300,
+                now: afterExpiry
+            )
+            Issue.record("Expected zombie renew to throw")
+        } catch LeaseError.generationMismatch {
+            // expected
+        }
+
+        // Phase 2: fresh worker takes over with a new generationID. The
+        // row's `leaseExpiresAt` is still the stale zombie expiry, which
+        // is < now — so `acquireEpisodeLease`'s eligibility predicate
+        // (`leaseOwner IS NULL OR leaseExpiresAt < ?`) must treat the
+        // slot as free and hand the lease to the new worker.
+        let freshGen = UUID()
+        let reclaimed = try await store.acquireEpisodeLease(
+            episodeId: episodeId,
+            ownerWorkerId: "worker-fresh",
+            generationID: freshGen.uuidString,
+            schedulerEpoch: epoch,
+            now: afterExpiry,
+            ttlSeconds: 30
+        )
+        #expect(reclaimed.ownerWorkerId == "worker-fresh")
+        #expect(reclaimed.generationID == freshGen.uuidString)
+        #expect(reclaimed.expiresAt == afterExpiry + 30)
+
+        // Persisted row reflects the new owner, not the zombie.
+        let fetched = try await store.fetchJob(byId: "j-repair")
+        #expect(fetched?.leaseOwner == "worker-fresh")
+        #expect(fetched?.generationID == freshGen.uuidString)
+    }
+
     // MARK: - Acceptance 4: idempotent finalize
 
     @Test("Duplicate releaseLease(finalized) is a no-op; journal has exactly one entry")

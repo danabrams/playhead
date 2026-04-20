@@ -1,0 +1,23 @@
+{
+  "default" : {
+    "app_version" : "1.0",
+    "build_type" : "debug",
+    "device_class" : "iPhone16Pro",
+    "eligibility_snapshot" : {
+      "appleIntelligenceEnabled" : true,
+      "capturedAt" : "2026-04-19T23:36:12Z",
+      "hardwareSupported" : true,
+      "languageSupported" : true,
+      "modelAvailableNow" : true,
+      "regionSupported" : true
+    },
+    "os_version" : "26.4.1",
+    "scheduler_events" : [
+
+    ],
+    "work_journal_tail" : [
+
+    ]
+  },
+  "generated_at" : "2026-04-19T23:36:12Z"
+}

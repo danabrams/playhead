@@ -42,6 +42,16 @@ struct DeviceClassTests {
         #expect(DeviceClass.classify(machineIdentifier: "iPhone16,2") == .iPhone15Pro)
     }
 
+    @Test("A16-era devices (iPhone 14 Pro + iPhone 15 non-Pro) map to .iPhone15")
+    func testClassifyiPhone15A16Bucket() {
+        // iPhone 14 Pro / Pro Max
+        #expect(DeviceClass.classify(machineIdentifier: "iPhone15,2") == .iPhone15)
+        #expect(DeviceClass.classify(machineIdentifier: "iPhone15,3") == .iPhone15)
+        // iPhone 15 / 15 Plus
+        #expect(DeviceClass.classify(machineIdentifier: "iPhone15,4") == .iPhone15)
+        #expect(DeviceClass.classify(machineIdentifier: "iPhone15,5") == .iPhone15)
+    }
+
     @Test("iPhone SE (3rd gen) maps to .iPhoneSE3")
     func testClassifyiPhoneSE3() {
         #expect(DeviceClass.classify(machineIdentifier: "iPhone14,6") == .iPhoneSE3)
@@ -103,8 +113,8 @@ struct DeviceClassTests {
         }
     }
 
-    @Test("DeviceClass.allCases covers all seven documented buckets")
+    @Test("DeviceClass.allCases covers all eight documented buckets")
     func testAllCasesCount() {
-        #expect(DeviceClass.allCases.count == 7)
+        #expect(DeviceClass.allCases.count == 8)
     }
 }

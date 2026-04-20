@@ -90,6 +90,19 @@ struct DeviceClassProfile: Codable, Sendable, Equatable {
                 bytesPerCpuSecond: 533_000,
                 avgShardDurationMs: 3400
             )
+        case .iPhone15:
+            // A16 Bionic: sits between A17 Pro (iPhone15Pro) and A15
+            // (iPhone14andOlder). Seed values interpolate the adjacent
+            // buckets; Phase 3 will replace this with empirical data.
+            return DeviceClassProfile(
+                deviceClass: deviceClass.rawValue,
+                grantWindowMedianSeconds: 30,
+                grantWindowP95Seconds: 65,
+                nominalSliceSizeBytes: 12_000_000,
+                cpuWindowSeconds: 25,
+                bytesPerCpuSecond: 520_000,
+                avgShardDurationMs: 4200
+            )
         case .iPhoneSE3:
             return DeviceClassProfile(
                 deviceClass: deviceClass.rawValue,
