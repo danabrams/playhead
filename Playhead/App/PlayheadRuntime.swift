@@ -460,21 +460,16 @@ final class PlayheadRuntime {
         // defaults to `nil` and every entry point silently no-ops,
         // which would block the seek-event wiring (`playhead-vhha`)
         // and runner consumption (`playhead-swws`) from doing anything
-        // observable on a real device. The cascade is constructed with
-        // the same `PreAnalysisConfig.load()` snapshot the scheduler
-        // uses by default, so window-length / re-latch tuning stays in
-        // a single source of truth.
-        let candidateWindowCascade = CandidateWindowCascade(
-            config: PreAnalysisConfig.load(),
-            logger: Logger(subsystem: "com.playhead", category: "CandidateWindowCascade")
-        )
+        // observable on a real device. Constructed with the cascade's
+        // own defaults — both `PreAnalysisConfig.load()` and the
+        // canonical `Logger` subsystem/category live on the cascade.
         self.analysisWorkScheduler = AnalysisWorkScheduler(
             store: analysisStore,
             jobRunner: analysisJobRunner,
             capabilitiesService: capabilitiesService,
             downloadManager: downloadManager,
             batteryProvider: batteryProvider,
-            candidateWindowCascade: candidateWindowCascade
+            candidateWindowCascade: CandidateWindowCascade()
         )
         self.analysisJobReconciler = AnalysisJobReconciler(
             store: analysisStore,
