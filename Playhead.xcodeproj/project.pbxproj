@@ -487,6 +487,7 @@
 		F69744A5F61FF6C9464EF57F /* DiagnosticsOptInResetPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = B80D862BD3E04C867A450845 /* DiagnosticsOptInResetPolicy.swift */; };
 		F719F594AE3E6A6D772FDC01 /* BatchNotificationReducer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 213E2C268B5CCFED87C82CBE /* BatchNotificationReducer.swift */; };
 		0A0500000000000000000001 /* BatchSummaryBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A0500000000000000000002 /* BatchSummaryBuilder.swift */; };
+		0A0500000000000000000003 /* BatchSummaryBuilderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A0500000000000000000004 /* BatchSummaryBuilderTests.swift */; };
 		F728D50BE1D48A7D10E2E837 /* CompositeFingerprint.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C8C3DE7DD4332AA9199F129 /* CompositeFingerprint.swift */; };
 		F796791242C2C56AF5AAF201 /* ForegroundAssistHandoffTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B14C26D4938A8A307BFEFA4F /* ForegroundAssistHandoffTests.swift */; };
 		F7E2D5A07C78B255FE3D6DC0 /* BackgroundProcessingServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3150112F48F50917A495A58 /* BackgroundProcessingServiceTests.swift */; };
@@ -589,6 +590,7 @@
 		20CB23B43F2C0DF5CCD0CCCE /* FoundationModelClassifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoundationModelClassifierTests.swift; sourceTree = "<group>"; };
 		213E2C268B5CCFED87C82CBE /* BatchNotificationReducer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchNotificationReducer.swift; sourceTree = "<group>"; };
 		0A0500000000000000000002 /* BatchSummaryBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchSummaryBuilder.swift; sourceTree = "<group>"; };
+		0A0500000000000000000004 /* BatchSummaryBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchSummaryBuilderTests.swift; sourceTree = "<group>"; };
 		214B75E0FEC1F75ABF14FBF9 /* fixture-06-30min-chapter-rich.wav */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; path = "fixture-06-30min-chapter-rich.wav"; sourceTree = "<group>"; };
 		21E319F52631904CBCA63F0B /* ShowTraitProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShowTraitProfile.swift; sourceTree = "<group>"; };
 		21FC75C2BFC7BC682E7F3B50 /* SpanDecisionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpanDecisionTests.swift; sourceTree = "<group>"; };
@@ -1030,6 +1032,7 @@
 				CF386EEC863941EE71876F22 /* BatchNotificationCoordinatorTests.swift */,
 				BA3CC3F6C39171C4B8C987B9 /* BatchNotificationReducerTests.swift */,
 				AF0A000EA2E06709A3EC093C /* BatchNotificationServiceTests.swift */,
+				0A0500000000000000000004 /* BatchSummaryBuilderTests.swift */,
 				8EB8FB87DD0F737950A79060 /* DownloadBatchEvictorTests.swift */,
 				B81F7278D896051D99AECC16 /* DownloadBatchSchemaTests.swift */,
 			);
@@ -2558,6 +2561,7 @@
 				53B94F796E43F054E807AA84 /* BatchNotificationCoordinatorTests.swift in Sources */,
 				A1B1D967CEE9789119FC5A84 /* BatchNotificationReducerTests.swift in Sources */,
 				9C928DA1D08519D3BBCE7A90 /* BatchNotificationServiceTests.swift in Sources */,
+				0A0500000000000000000003 /* BatchSummaryBuilderTests.swift in Sources */,
 				B2FD0A86943C48E8551B59D3 /* BenchmarkBaselines.swift in Sources */,
 				7250DB195C4713A7DEFEDA82 /* BoundaryExpanderTests.swift in Sources */,
 				845006A50923648B7A1864C1 /* BoundaryExtractionTests.swift in Sources */,
