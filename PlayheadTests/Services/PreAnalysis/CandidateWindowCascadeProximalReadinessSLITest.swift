@@ -1,30 +1,65 @@
 // CandidateWindowCascadeProximalReadinessSLITest.swift
-// playhead-swws: deterministic, in-process simulation that proves the
-// `time_to_proximal_skip_ready` SLI's P90 threshold (≤ 4 hours,
-// pinned in `TimeToProximalSkipReadyThresholds.p90Seconds`) holds
-// when the candidate-window cascade is the source of "first proximal
-// window ready" timing.
+// playhead-swws: deterministic, in-process simulation that the
+// defended `time_to_proximal_skip_ready` SLI thresholds
+// (P50 ≤ 45 min, P90 ≤ 4 h, pinned in
+// `TimeToProximalSkipReadyThresholds`) are satisfied by a
+// representative-shape synthetic latency model.
 //
-// What this test is and is NOT
+// HONEST SCOPE — read this before tightening or relying on this test
+// ------------------------------------------------------------------
+// This test is a SIMULATION of latency under a representative load
+// model. It does NOT measure the candidate-window cascade's
+// contribution to that latency. The synthetic samples are generated
+// from a log-normal model independently of the cascade; the
+// cascade is exercised inside the loop only to confirm it produces
+// a `.proximal` window per seeded episode (a no-op assertion on the
+// cascade, NOT a timing measurement).
+//
+// In particular, this test will continue to pass even if the
+// cascade's seed/relatch latency regresses, because the latency
+// numbers come from the synthetic model, not from clock-driven
+// observation of the cascade. A real cascade-attributed P90 SLI
+// requires:
+//   1. An injected clock,
+//   2. End-to-end driving of the production explicit-download →
+//      first-proximal-window-ready event sequence (download
+//      complete → enqueue → cascade seed → scheduler dispatch →
+//      first proximal slice ready),
+//   3. Aggregation across many synthetic episodes with that real
+//      timing.
+// That harness is its own bead-sized chunk and is tracked as the
+// follow-up bead `playhead-e2vw`
+// (discovered-from:playhead-swws):
+// "B2-followup: real cascade-attributed proximal-readiness SLI from
+// production timing".
+//
+// What this test IS useful for
 // ----------------------------
-// This is NOT a production telemetry pipeline test. The Phase 1 SLI
-// emitter (playhead-1nl6) writes to `WorkJournal.cause` only; there
-// is no `time_to_proximal_skip_ready` sample-recording infrastructure
-// today (Phase 2 work). Inventing one from scratch is explicitly out
-// of scope per the swws bead spec.
+// * Anchoring the defended P50 / P90 thresholds in a runnable
+//   assertion so that tightening
+//   `TimeToProximalSkipReadyThresholds` without updating the model
+//   is loud (the model's P50/P90 fall above the new threshold and
+//   the test fails).
+// * Documenting the latency-component decomposition (download,
+//   queue-wait + admission gating, ASR slice) the d99 SLI was
+//   defended against, so that future cascade work can revisit the
+//   model when it shifts.
+// * Smoke-testing that the cascade still emits a `.proximal`
+//   window across the 30–90 min episode cohort (the inner cascade
+//   call is genuine and would fail loudly if the cascade regressed
+//   to no-window).
 //
-// What this test IS: a self-contained, in-process simulation that
-// (1) generates 50 synthetic episode latency samples representative
-// of the explicit-download → first-proximal-ready path under a
-// realistic load model, (2) drives those latencies through the real
-// `CandidateWindowCascade` (the actor cascade-aware dispatch
-// consults), and (3) computes the empirical P90 against the threshold
-// pinned in `TimeToProximalSkipReadyThresholds.p90Seconds`. If the
-// cascade's seed semantics regress in a way that delays the proximal
-// window beyond the SLI envelope, this test fails.
+// What this test is NOT
+// ---------------------
+// * A production telemetry pipeline test. Phase 1's SLI emitter
+//   (playhead-1nl6) writes only to `WorkJournal.cause`; there is
+//   no `time_to_proximal_skip_ready` sample-recording
+//   infrastructure today (Phase 2 work).
+// * A causal measurement of the cascade's contribution to the
+//   measured latency. The cascade is exercised but not timed.
 //
-// The simulated latency model (justified, not arbitrary)
-// ------------------------------------------------------
+// The simulated latency model (representative-shape, not derived)
+// ---------------------------------------------------------------
 // The d99 SLI scope is "explicit download, eligible-and-available
 // mode, 30–90 min episode" with P50 ≤ 45 min, P90 ≤ 4 h. The
 // dominant latency contributors on this path are:
@@ -36,9 +71,8 @@
 // We model the per-episode latency as the sum of three log-normally
 // distributed components with means/sigmas chosen so that the
 // resulting empirical P50 lands near 30 minutes and P90 stays
-// comfortably below 4 hours under the cascade's current seed
-// semantics. The model is deterministic (seeded RNG) so the test is
-// not flaky.
+// comfortably below 4 hours under the documented load model. The
+// model is deterministic (seeded RNG) so the test is not flaky.
 //
 // Sample size
 // -----------
@@ -52,7 +86,7 @@ import Foundation
 import Testing
 @testable import Playhead
 
-@Suite("playhead-swws: time_to_proximal_skip_ready P90 ≤ 4h SLI (simulated)")
+@Suite("playhead-swws: time_to_proximal_skip_ready P50/P90 — SYNTHETIC LATENCY MODEL (cascade-decoupled, see file header)")
 struct CandidateWindowCascadeProximalReadinessSLITest {
 
     // MARK: - Simulation parameters
@@ -68,25 +102,34 @@ struct CandidateWindowCascadeProximalReadinessSLITest {
 
     // MARK: - Test
 
-    @Test("Simulated explicit-download → first-proximal-ready P90 ≤ TimeToProximalSkipReadyThresholds.p90Seconds")
-    func proximalReadinessP90WithinSLI() async throws {
+    @Test("Synthetic latency model satisfies defended P50/P90 thresholds (NOT a cascade timing measurement — see file header)")
+    func syntheticLatencyModelSatisfiesDefendedThresholds() async throws {
         var rng = SeededRNG(seed: Self.rngSeed)
         var samples: [TimeInterval] = []
         samples.reserveCapacity(Self.sampleCount)
 
-        // Run each episode through the real cascade. The cascade
-        // is per-test (not shared) so anchor/window state from one
+        // For each synthetic episode: generate its model latency,
+        // then run the cascade once as a sanity check that the
+        // cascade still emits a `.proximal` window for the 30–90
+        // min cohort. The cascade call is NOT timed and does NOT
+        // contribute to the latency sample — that is the
+        // limitation called out in the file header. The cascade is
+        // per-test (not shared) so anchor/window state from one
         // episode does not leak into another.
         for index in 0..<Self.sampleCount {
             let cascade = CandidateWindowCascade(config: PreAnalysisConfig())
 
-            // Generate this episode's simulated wall-clock latency
-            // from explicit-download tap to first-proximal-ready.
+            // Generate this episode's synthetic wall-clock latency
+            // from the representative-shape model (see file
+            // header). This number is what feeds the P50/P90
+            // assertion below; it is independent of the cascade.
             let simulatedLatencySec = simulatedTimeToProximalReadySeconds(rng: &rng)
 
-            // Drive the cascade: download completes, episode is
-            // seeded, first proximal window is "ready" iff the
-            // cascade returns a non-empty `.proximal` window.
+            // Cascade smoke test: confirm the cascade still emits
+            // a `.proximal` window for an unplayed 30–90 min
+            // episode. This guards against cascade regressions
+            // that would silently break the proximal-readiness
+            // surface; it does NOT measure cascade timing.
             let episodeId = "ep-swws-sli-\(index)"
             let windows = await cascade.seed(
                 episodeId: episodeId,
@@ -94,14 +137,9 @@ struct CandidateWindowCascadeProximalReadinessSLITest {
                 playbackAnchor: nil,
                 chapterEvidence: []
             )
-
-            // Cascade contract: an unplayed episode within the
-            // 30–90 min cohort must yield exactly one proximal
-            // window. If this fails, the cascade has regressed
-            // and the SLI sample is meaningless — fail loudly.
             #expect(
                 windows.contains(where: { $0.kind == .proximal }),
-                "cascade did not produce a proximal window for episode \(episodeId) — SLI sample is meaningless"
+                "cascade did not produce a proximal window for episode \(episodeId) — cascade regression, not a latency-model failure"
             )
 
             samples.append(simulatedLatencySec)
@@ -122,18 +160,18 @@ struct CandidateWindowCascadeProximalReadinessSLITest {
 
         #expect(
             p90 <= p90Threshold,
-            "time_to_proximal_skip_ready P90 = \(p90)s exceeds defended threshold \(p90Threshold)s (4 h). Sample size = \(samples.count). The cascade's first-proximal-ready path is too slow under the simulated load model — investigate before raising the threshold."
+            "Synthetic-model P90 = \(p90)s exceeds defended threshold \(p90Threshold)s (4 h). Sample size = \(samples.count). NOTE: this is a model assertion, not a cascade timing measurement (see file header). Either the model has been re-tuned without regard to the threshold, or `TimeToProximalSkipReadyThresholds.p90Seconds` has been tightened without updating the model."
         )
 
         // P50 sanity check — the simulated load model is calibrated
         // so the central tendency is well within the median
         // threshold. If P50 starts blowing the threshold the model
-        // (or the cascade) has shifted enough that the P90 bound is
-        // probably accidentally satisfied by extreme tails — fail
-        // so the operator looks.
+        // has shifted enough that the P90 bound is probably
+        // accidentally satisfied by extreme tails — fail so the
+        // operator looks.
         #expect(
             p50 <= p50Threshold,
-            "time_to_proximal_skip_ready P50 = \(p50)s exceeds defended threshold \(p50Threshold)s (45 min). Even the median is over-budget — the cascade or the simulation model has regressed."
+            "Synthetic-model P50 = \(p50)s exceeds defended threshold \(p50Threshold)s (45 min). Model has been re-tuned or `TimeToProximalSkipReadyThresholds.p50Seconds` has tightened. NOTE: this is a model assertion, not a cascade timing measurement (see file header)."
         )
     }
 
