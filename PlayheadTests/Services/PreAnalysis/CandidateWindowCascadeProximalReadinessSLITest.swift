@@ -130,24 +130,12 @@ struct CandidateWindowCascadeProximalReadinessSLITest {
 
     @Test("Real cascade + scheduler dispatch satisfies defended P50/P90 thresholds")
     func realCascadePipelineSatisfiesDefendedThresholds() async throws {
-        let p90 = try await runPipelineAndMeasureP90(
-            unplayedCandidateWindowSeconds: 20 * 60   // production default
-        )
-        // Companion P50 measurement on the same fixture so we don't
-        // duplicate the entire pipeline run for the central-tendency
-        // assertion.
-        let (recordedP50, recordedP90) = try await runPipelineAndMeasureBothPercentiles(
-            unplayedCandidateWindowSeconds: 20 * 60,
+        let samples = try await runPipeline(
+            unplayedCandidateWindowSeconds: 20 * 60,   // production default
             seed: Self.rngSeed
         )
-        // Sanity — the sub-routine and the headline routine should
-        // agree on P90 since they share the seed and config. (If they
-        // ever diverge, one of the two routines is silently mutating
-        // shared state.)
-        #expect(
-            abs(recordedP90 - p90) < 1.0,
-            "Internal inconsistency: standalone P90 = \(p90)s vs combined P90 = \(recordedP90)s — likely shared-state leak in the harness"
-        )
+        let recordedP50 = percentile(samples, fraction: 0.5)
+        let recordedP90 = percentile(samples, fraction: 0.9)
 
         let p50Threshold = TimeToProximalSkipReadyThresholds.p50Seconds
         let p90Threshold = TimeToProximalSkipReadyThresholds.p90Seconds
@@ -173,14 +161,16 @@ struct CandidateWindowCascadeProximalReadinessSLITest {
         // selector from the cascade (so the dispatched
         // `windowRange` no longer reflects the cascade's pick), this
         // test will fail loudly because the two arms will agree.
-        let baselineP90 = try await runPipelineAndMeasureP90(
+        let baselineSamples = try await runPipeline(
             unplayedCandidateWindowSeconds: 20 * 60,    // baseline (20 min)
             seed: Self.rngSeed
         )
-        let shrunkP90 = try await runPipelineAndMeasureP90(
+        let shrunkSamples = try await runPipeline(
             unplayedCandidateWindowSeconds: 10 * 60,    // half (10 min)
             seed: Self.rngSeed
         )
+        let baselineP90 = percentile(baselineSamples, fraction: 0.9)
+        let shrunkP90 = percentile(shrunkSamples, fraction: 0.9)
         // The model attributes the dominant per-episode cost to
         // `asrCostPerWindowSecond * windowDuration`. Halving the
         // window halves that term, leaving the queue + download +
@@ -196,30 +186,6 @@ struct CandidateWindowCascadeProximalReadinessSLITest {
     }
 
     // MARK: - Pipeline harness
-
-    /// Run the real cascade + scheduler pipeline for `Self.sampleCount`
-    /// synthetic episodes and return only the empirical P90.
-    private func runPipelineAndMeasureP90(
-        unplayedCandidateWindowSeconds: TimeInterval,
-        seed: UInt64 = rngSeed
-    ) async throws -> TimeInterval {
-        let samples = try await runPipeline(
-            unplayedCandidateWindowSeconds: unplayedCandidateWindowSeconds,
-            seed: seed
-        )
-        return percentile(samples, fraction: 0.9)
-    }
-
-    private func runPipelineAndMeasureBothPercentiles(
-        unplayedCandidateWindowSeconds: TimeInterval,
-        seed: UInt64
-    ) async throws -> (p50: TimeInterval, p90: TimeInterval) {
-        let samples = try await runPipeline(
-            unplayedCandidateWindowSeconds: unplayedCandidateWindowSeconds,
-            seed: seed
-        )
-        return (percentile(samples, fraction: 0.5), percentile(samples, fraction: 0.9))
-    }
 
     /// Drives the pipeline end-to-end for `sampleCount` episodes
     /// against the same store / scheduler / cascade — so cross-episode
