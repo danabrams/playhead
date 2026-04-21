@@ -509,6 +509,9 @@
 		FEFCC10CFF7EF39FD043123F /* SensitiveWindowRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 117F1E41DE084B613166D952 /* SensitiveWindowRouter.swift */; };
 		FF4B955033ADAE3CA17F5C77 /* EpisodeStatusLineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75E4BD6B8E5FD41FE2C52FF3 /* EpisodeStatusLineView.swift */; };
 		FF5D6E825A52787AC7DD3218 /* DiagnosticsExportServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E85B05A45ED2EC4D70244642 /* DiagnosticsExportServiceTests.swift */; };
+		F708F2BEE10B4136AB6DBD66 /* DecisionLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B2FFC8053B445F68E38AD57 /* DecisionLogger.swift */; };
+		FD0FDB0E8FE04DE396845FB7 /* DecisionLoggerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0B85C9C80BA494BBA7B66DB /* DecisionLoggerTests.swift */; };
+		D5DEC06E9CF34056BD8FB084 /* MetadataActivationOverrideTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2BC190660B74BEA9917BF56 /* MetadataActivationOverrideTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -1027,6 +1030,9 @@
 		FF045B17B4F22BA08A3F4582 /* DownloadNextViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadNextViewTests.swift; sourceTree = "<group>"; };
 		FF38243D35CA07BE595A877C /* FoundationModelExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoundationModelExtractor.swift; sourceTree = "<group>"; };
 		FFAC0AF611301A8AF53A5A5F /* MetadataEvidenceFusionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataEvidenceFusionTests.swift; sourceTree = "<group>"; };
+		6B2FFC8053B445F68E38AD57 /* DecisionLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionLogger.swift; sourceTree = "<group>"; };
+		D0B85C9C80BA494BBA7B66DB /* DecisionLoggerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionLoggerTests.swift; sourceTree = "<group>"; };
+		F2BC190660B74BEA9917BF56 /* MetadataActivationOverrideTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataActivationOverrideTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -1463,6 +1469,7 @@
 				8D0628EFF839DFADD9C12635 /* EVIScorer.swift */,
 				C88C581D76FB38A767A535CC /* FallbackExtractor.swift */,
 				9C46F6F910FC57AF6BC4B379 /* FeedDescriptionEvidenceBuilder.swift */,
+				6B2FFC8053B445F68E38AD57 /* DecisionLogger.swift */,
 				BC08DC8B4A22D0FC54D8159D /* FineBoundaryRefiner.swift */,
 				1ED0C092F615C536018D5062 /* FineFeatureBandCache.swift */,
 				4AEAC08A1DD2872D180B0ED3 /* FMBackfillMode.swift */,
@@ -1854,6 +1861,8 @@
 				EF1C0BE568B1961036AE15F8 /* ConfidenceBandTests.swift */,
 				73D71E4D542C44BA72F83A01 /* CorrectionAttributionTests.swift */,
 				40342061406C6B194F4AEAC0 /* CorrectionSuppressionTests.swift */,
+				F2BC190660B74BEA9917BF56 /* MetadataActivationOverrideTests.swift */,
+				D0B85C9C80BA494BBA7B66DB /* DecisionLoggerTests.swift */,
 				254FF357F55E85902C9C6E70 /* CoveragePlannerTests.swift */,
 				F17F13D6FC3E40821F1140B7 /* Cycle2AgentBTests.swift */,
 				FBC89EAA12A076E690BB655E /* Cycle2FixesTests.swift */,
@@ -2523,6 +2532,8 @@
 				D05E78F322430B7BF735E3A8 /* UIKitDiagnosticsPresenter.swift in Sources */,
 				8EF6DEABE12727DEE137E015 /* UserCorrectionStore.swift in Sources */,
 				1E96C274F4B8282CC3B8374B /* UserPreferences.swift in Sources */,
+				F708F2BEE10B4136AB6DBD66 /* DecisionLogger.swift in Sources */,
+
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -2789,6 +2800,10 @@
 				2934CB0BDEFD261C285BD3AC /* WithTestRuntime.swift in Sources */,
 				E517D642282F2FF5DD23A010 /* WorkJournalReadCorruptionTests.swift in Sources */,
 				885C8E3A4D8E7A1BF24135C6 /* WorkJournalTailFetchTests.swift in Sources */,
+				FD0FDB0E8FE04DE396845FB7 /* DecisionLoggerTests.swift in Sources */,
+				D5DEC06E9CF34056BD8FB084 /* MetadataActivationOverrideTests.swift in Sources */,
+
+
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -2987,6 +3002,8 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				DEVELOPMENT_TEAM = 36Z6VYTT9X;
 				INFOPLIST_FILE = Playhead/Support/Info.plist;
+				"INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace" = YES;
+				"INFOPLIST_KEY_UIFileSharingEnabled" = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

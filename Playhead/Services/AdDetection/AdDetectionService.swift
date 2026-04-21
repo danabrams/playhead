@@ -285,6 +285,14 @@ actor AdDetectionService {
     /// are both alive).
     private(set) var episodeMetadataProvider: EpisodeMetadataProvider
 
+    /// playhead-8em9 (narL): Optional decision logger. When set (only in
+    /// DEBUG builds via `PlayheadRuntime`), every fusion-phase window
+    /// decision is serialized as a `DecisionLogEntry` and appended to
+    /// `Documents/decision-log.jsonl` for offline replay. Defaults to
+    /// a no-op instance so existing call sites and release builds
+    /// produce no log file.
+    private(set) var decisionLogger: DecisionLoggerProtocol = NoOpDecisionLogger()
+
     // MARK: - Cached State
 
     /// Scanner is recreated per-episode when profile changes.
@@ -351,6 +359,15 @@ actor AdDetectionService {
     /// (actor property writes must be asynchronous from an init context).
     func setUserCorrectionStore(_ store: any UserCorrectionStore) {
         self.correctionStore = store
+    }
+
+    /// playhead-8em9 (narL): Install a decision logger. Production release
+    /// builds never call this (no-op stays installed); DEBUG builds can
+    /// install a `DecisionLogger` via `PlayheadRuntime` to capture per-
+    /// window decisions for offline replay against alternate activation
+    /// configs.
+    func setDecisionLogger(_ logger: DecisionLoggerProtocol) {
+        self.decisionLogger = logger
     }
 
     /// playhead-z3ch: Set the EpisodeMetadataProvider. Called from
@@ -1022,6 +1039,34 @@ actor AdDetectionService {
                 createdAt: Date().timeIntervalSince1970,
                 explanationJSON: explanationJSON
             ))
+
+            // playhead-8em9 (narL): emit per-window DecisionLogEntry to the
+            // JSONL logger (no-op in release builds). Synchronously resolves
+            // the MetadataActivationConfig so the snapshot matches what the
+            // gated metadata consumers would have seen for this decision.
+            let logEntry = DecisionLogEntry(
+                schemaVersion: DecisionLogEntry.currentSchemaVersion,
+                episodeID: analysisAssetId,
+                timestamp: Date().timeIntervalSince1970,
+                windowBounds: .init(
+                    start: refinedSpan.startTime,
+                    end: refinedSpan.endTime
+                ),
+                activationConfig: .init(MetadataActivationConfig.resolved()),
+                evidence: effectiveLedger.map(DecisionLogEntry.LedgerEntry.init),
+                fusedConfidence: .init(
+                    proposalConfidence: decision.proposalConfidence,
+                    skipConfidence: decision.skipConfidence,
+                    breakdown: explanation.evidenceBreakdown
+                ),
+                finalDecision: .init(
+                    action: policyAction.rawValue,
+                    gate: decision.eligibilityGate.rawValue,
+                    skipConfidence: decision.skipConfidence,
+                    thresholdCrossed: autoSkipThreshold
+                )
+            )
+            await decisionLogger.record(logEntry)
         }
 
         // Persist fusion windows.

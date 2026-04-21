@@ -17,6 +17,12 @@ struct PlayheadApp: App {
     private static let playbackPositionMeaningfulDelta: TimeInterval = 0.5
 
     init() {
+        // playhead-8em9 (narL): DEBUG builds honor `-MetadataActivationOverride
+        // allEnabled` passed via Xcode scheme arguments so personal dogfooding
+        // can flip the counterfactual gate without editing source. Release
+        // builds strip this via `#if DEBUG` inside the override type.
+        MetadataActivationOverride.applyLaunchArguments(CommandLine.arguments)
+
         // Attempt to create the SwiftData container. On failure, delete the
         // store and retry once. If that also fails, fall back to in-memory.
         do {

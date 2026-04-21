@@ -527,6 +527,24 @@ final class PlayheadRuntime {
             await adDetectionService.setUserCorrectionStore(correctionStore)
         }
 
+        // playhead-8em9 (narL): DEBUG-only DecisionLogger installation.
+        // Production release builds never compile this branch, so no
+        // decision-log.jsonl is ever written on a shipping binary. The
+        // logger is safe to construct on a best-effort basis — any
+        // FileManager failure (e.g. read-only Documents directory) is
+        // logged and the service falls back to the installed NoOp.
+        #if DEBUG
+        Task { [adDetectionService] in
+            do {
+                let logger = try DecisionLogger()
+                await adDetectionService.setDecisionLogger(logger)
+            } catch {
+                Logger(subsystem: "com.playhead", category: "Runtime")
+                    .warning("DecisionLogger init failed — logging disabled: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        #endif
+
         Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator] in
             // Migrate the analysis store before any component queries its tables.
             do {
