@@ -878,7 +878,12 @@ actor AdDetectionService {
                 ledger: effectiveLedger,
                 config: fusionConfig,
                 transcriptQuality: transcriptQuality,
-                correctionFactor: assetCorrectionFactor
+                correctionFactor: assetCorrectionFactor,
+                // playhead-p2iv: Consume the typical-ad-duration prior as a soft
+                // monotonic multiplier. Until the full 4-level PriorHierarchyResolver
+                // is wired into this actor, use the resolved-global default (30...90s).
+                // When resolver plumbing lands, pass `DurationPrior(resolvedPriors:)`.
+                durationPrior: .standard
             )
             let rawDecision = mapper.map()
 
