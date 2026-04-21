@@ -48,6 +48,19 @@ struct CorpusExportResult: Sendable, Equatable {
     let decisionLogManifestURL: URL?
 }
 
+// MARK: - CorpusExportSource
+
+/// Narrow test seam the exporter queries against. `AnalysisStore` conforms
+/// below; tests can supply a mock that throws on specific methods to exercise
+/// the SQL-error path without corrupting a real sqlite file.
+protocol CorpusExportSource: Sendable {
+    func fetchAllAssets() async throws -> [AnalysisAsset]
+    func fetchDecodedSpans(assetId: String) async throws -> [DecodedSpan]
+    func loadCorrectionEvents(analysisAssetId: String) async throws -> [CorrectionEvent]
+}
+
+extension AnalysisStore: CorpusExportSource {}
+
 // MARK: - CorpusExporter
 
 enum CorpusExporter {
@@ -63,11 +76,14 @@ enum CorpusExporter {
 
     /// Build the filename used for an export written at `date`.
     ///
-    /// ISO-8601 seconds in UTC, with colons replaced by dashes so the file is
-    /// Finder / Files-app friendly.
+    /// ISO-8601 with millisecond fractional seconds in UTC, with colons replaced
+    /// by dashes so the file is Finder / Files-app friendly. Milliseconds defeat
+    /// the same-second collision case: two back-to-back exports (e.g. a user
+    /// double-tapping the action) land in distinct files rather than silently
+    /// overwriting each other.
     static func filename(for date: Date) -> String {
         let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]  // YYYY-MM-DDTHH:MM:SSZ
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         formatter.timeZone = TimeZone(identifier: "UTC")
         let iso = formatter.string(from: date)
         let safe = iso.replacingOccurrences(of: ":", with: "-")
@@ -161,7 +177,7 @@ enum CorpusExporter {
     /// accumulation of the full corpus. Memory use is bounded by the largest
     /// single asset's span or correction count.
     static func export(
-        store: AnalysisStore,
+        store: some CorpusExportSource,
         documentsURL: URL,
         now: Date = Date()
     ) async throws -> CorpusExportResult {
@@ -176,9 +192,10 @@ enum CorpusExporter {
         // FileHandle so we never hold all rows in memory simultaneously.
         fm.createFile(atPath: fileURL.path, contents: nil, attributes: nil)
         let handle = try FileHandle(forWritingTo: fileURL)
-        // Ensure the handle is closed on every path so the fsync on close
-        // flushes our final writes (otherwise the last record can trail in
-        // the buffer when a test reads the file right after this returns).
+        // Ensure the handle is closed on every path so close() flushes buffered
+        // writes (otherwise the last record can trail in the buffer when a test
+        // reads the file right after this returns). close() flushes; it does
+        // not fsync — durability on power-loss is not a goal here.
         defer {
             try? handle.close()
         }
@@ -196,7 +213,18 @@ enum CorpusExporter {
             assetCount += 1
 
             // decision (DecodedSpan) records for this asset
-            let spans = (try? await store.fetchDecodedSpans(assetId: asset.id)) ?? []
+            let spans: [DecodedSpan]
+            do {
+                spans = try await store.fetchDecodedSpans(assetId: asset.id)
+            } catch {
+                // Log and continue: a transient SQL failure on one asset must
+                // not abort the whole export. Downstream tooling can detect
+                // the gap because other assets' records still serialize.
+                logger.warning(
+                    "export: fetchDecodedSpans failed for asset=\(asset.id, privacy: .public) error=\(String(describing: error), privacy: .public) — emitting 0 decisions for this asset"
+                )
+                spans = []
+            }
             for span in spans {
                 let spanData = try spanLine(span)
                 try write(line: spanData, to: handle)
@@ -204,12 +232,23 @@ enum CorpusExporter {
             }
 
             // correction records for this asset
-            let events = (try? await store.loadCorrectionEvents(analysisAssetId: asset.id)) ?? []
+            let events: [CorrectionEvent]
+            do {
+                events = try await store.loadCorrectionEvents(analysisAssetId: asset.id)
+            } catch {
+                logger.warning(
+                    "export: loadCorrectionEvents failed for asset=\(asset.id, privacy: .public) error=\(String(describing: error), privacy: .public) — emitting 0 corrections for this asset"
+                )
+                events = []
+            }
             for event in events {
                 guard let data = try correctionLine(event) else {
                     skippedCorrectionCount += 1
+                    // Scope strings can contain user-authored substrings (e.g.
+                    // correction text) — keep at .private so a corrupt value
+                    // doesn't leak to a public log reader.
                     logger.warning(
-                        "export: skipping correction row id=\(event.id, privacy: .public) asset=\(event.analysisAssetId, privacy: .public) — unparseable scope \(event.scope, privacy: .public)"
+                        "export: skipping correction row id=\(event.id, privacy: .public) asset=\(event.analysisAssetId, privacy: .public) — unparseable scope \(event.scope, privacy: .private)"
                     )
                     continue
                 }

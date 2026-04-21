@@ -17,10 +17,11 @@ struct CorpusExporterTests {
 
     // MARK: - Filename
 
-    @Test("filename(for:) uses ISO-8601 seconds, filesystem-safe colons replaced")
+    @Test("filename(for:) uses ISO-8601 with millisecond fractional seconds, filesystem-safe colons replaced")
     func filenameFormat() {
-        // 2026-04-21T15:30:45Z → "corpus-export.2026-04-21T15-30-45Z.jsonl"
-        // (colons replaced with dashes; Z suffix kept).
+        // 2026-04-21T15:30:45.000Z → "corpus-export.2026-04-21T15-30-45.000Z.jsonl"
+        // (colons replaced with dashes; millisecond fraction preserved so
+        // two exports in the same second land in distinct files).
         var comps = DateComponents()
         comps.year = 2026
         comps.month = 4
@@ -32,10 +33,23 @@ struct CorpusExporterTests {
         let date = Calendar(identifier: .iso8601).date(from: comps)!
 
         let name = CorpusExporter.filename(for: date)
-        #expect(name == "corpus-export.2026-04-21T15-30-45Z.jsonl",
+        #expect(name == "corpus-export.2026-04-21T15-30-45.000Z.jsonl",
                 "got \(name)")
         // No colon allowed in filename (Files app / Finder hostility).
         #expect(!name.contains(":"))
+    }
+
+    @Test("filename(for:) resolves dates in the same UTC second to distinct filenames via milliseconds")
+    func filenameMillisecondDisambiguation() {
+        // Two exports 500ms apart within the same UTC second must produce
+        // different filenames, otherwise M1 (second-clobber) returns.
+        let whole = Date(timeIntervalSince1970: 1_700_000_000)
+        let half = whole.addingTimeInterval(0.5)
+        let a = CorpusExporter.filename(for: whole)
+        let b = CorpusExporter.filename(for: half)
+        #expect(a != b, "same-second exports collapsed: \(a) == \(b)")
+        #expect(a.contains(".000Z."))
+        #expect(b.contains(".500Z."))
     }
 
     // MARK: - schemaVersion constant
@@ -83,11 +97,17 @@ struct CorpusExporterTests {
         #expect(json["episodeId"] as? String == "ep-asset-A")
         #expect(json["sourceURL"] as? String == "file:///tmp/asset-A.m4a")
         #expect(json["analysisState"] as? String == "new")
-        // Missing optional metadata (coverage times not set) must be null, not missing.
-        #expect(json.keys.contains("featureCoverageEndTime"))
-        #expect(json.keys.contains("fastTranscriptCoverageEndTime"))
-        #expect(json.keys.contains("confirmedAdCoverageEndTime"))
-        #expect(json["featureCoverageEndTime"] is NSNull)
+        // Every nullable asset field must be present as null, not missing — downstream
+        // tooling needs the key set stable across records so it can coerce columns.
+        for key in [
+            "weakFingerprint",
+            "featureCoverageEndTime",
+            "fastTranscriptCoverageEndTime",
+            "confirmedAdCoverageEndTime",
+        ] {
+            #expect(json.keys.contains(key), "\(key) must be present as a key")
+            #expect(json[key] is NSNull, "\(key) must serialize as null for a minimal asset, not omitted or empty-string")
+        }
     }
 
     // MARK: - Decision record (DecodedSpan)
@@ -332,6 +352,183 @@ struct CorpusExporterTests {
         #expect(result.fileURL.lastPathComponent.hasSuffix(".jsonl"))
     }
 
+    // MARK: - G1: Filename collision (millisecond timestamps disambiguate)
+
+    @Test("back-to-back export() calls produce two distinct files — no same-second clobber")
+    func backToBackExportsProduceTwoFiles() async throws {
+        let store = try await makeTestStore()
+        let docs = try makeTempDir(prefix: "CorpusExport-collide")
+        try await store.insertAsset(makeTestAsset(id: "asset-k"))
+
+        // Inject explicit `now:` values 1ms apart so the test is deterministic
+        // across machines. Milliseconds resolve the collision; pre-fix the
+        // filename used second precision and the second file overwrote the
+        // first.
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let a = try await CorpusExporter.export(store: store, documentsURL: docs, now: base)
+        let b = try await CorpusExporter.export(store: store, documentsURL: docs, now: base.addingTimeInterval(0.001))
+
+        #expect(a.fileURL != b.fileURL, "two exports produced the same filename: \(a.fileURL.lastPathComponent)")
+        #expect(FileManager.default.fileExists(atPath: a.fileURL.path))
+        #expect(FileManager.default.fileExists(atPath: b.fileURL.path))
+
+        // Enumerate the docs dir and confirm two corpus-export.*.jsonl files.
+        let contents = try FileManager.default.contentsOfDirectory(atPath: docs.path)
+        let exports = contents.filter { $0.hasPrefix("corpus-export.") && $0.hasSuffix(".jsonl") }
+        #expect(exports.count == 2, "expected 2 corpus-export files, got \(exports)")
+    }
+
+    // MARK: - G3: anchorProvenance round-trip
+
+    @Test("export: anchorProvenance round-trips through spanLine with fmConsensus + evidenceCatalog entries")
+    func anchorProvenanceRoundTrip() throws {
+        // Build a span with two distinct anchor types so the Codable adapter
+        // contract is exercised — not just an empty []. Locks in the on-disk
+        // JSON shape that downstream tooling parses.
+        let entry = EvidenceEntry(
+            evidenceRef: 7,
+            category: .promoCode,
+            matchedText: "CODE42",
+            normalizedText: "code42",
+            atomOrdinal: 15,
+            startTime: 21.0,
+            endTime: 22.5,
+            count: 2,
+            firstTime: 21.0,
+            lastTime: 45.0
+        )
+        let provenance: [AnchorRef] = [
+            .fmConsensus(regionId: "region-alpha", consensusStrength: 0.82),
+            .evidenceCatalog(entry: entry),
+        ]
+        let span = DecodedSpan(
+            id: DecodedSpan.makeId(assetId: "asset-P", firstAtomOrdinal: 10, lastAtomOrdinal: 20),
+            assetId: "asset-P",
+            firstAtomOrdinal: 10,
+            lastAtomOrdinal: 20,
+            startTime: 20.0,
+            endTime: 50.0,
+            anchorProvenance: provenance
+        )
+
+        let data = try CorpusExporter.spanLine(span)
+        let json = try decodeJSONObject(from: data)
+        guard let provArray = json["anchorProvenance"] as? [[String: Any]] else {
+            Issue.record("anchorProvenance not serialized as an array of objects")
+            return
+        }
+        #expect(provArray.count == 2)
+
+        // First entry: fmConsensus.
+        #expect(provArray[0]["type"] as? String == "fmConsensus")
+        #expect(provArray[0]["regionId"] as? String == "region-alpha")
+        #expect(provArray[0]["consensusStrength"] as? Double == 0.82)
+
+        // Second entry: evidenceCatalog wrapping an EvidenceEntry dictionary.
+        #expect(provArray[1]["type"] as? String == "evidenceCatalog")
+        guard let entryJSON = provArray[1]["entry"] as? [String: Any] else {
+            Issue.record("evidenceCatalog.entry not serialized as a dictionary")
+            return
+        }
+        #expect(entryJSON["evidenceRef"] as? Int == 7)
+        #expect(entryJSON["category"] as? String == "promoCode")
+        #expect(entryJSON["matchedText"] as? String == "CODE42")
+        #expect(entryJSON["atomOrdinal"] as? Int == 15)
+        #expect(entryJSON["count"] as? Int == 2)
+
+        // Full round-trip: re-decode the serialized JSON into [AnchorRef] via
+        // the same Codable adapter the persistence layer uses. If this fails,
+        // downstream tooling would be broken.
+        let re = try JSONEncoder().encode(provenance)
+        let decoded = try JSONDecoder().decode([AnchorRef].self, from: re)
+        #expect(decoded == provenance, "AnchorRef Codable adapter did not round-trip")
+    }
+
+    // MARK: - G4: decisionLogManifestURL pairing
+
+    @Test("export: decisionLogManifestURL is surfaced when decision-log.jsonl exists as a sibling")
+    func decisionLogManifestURLSurfacedWhenPresent() async throws {
+        let store = try await makeTestStore()
+        let docs = try makeTempDir(prefix: "CorpusExport-sibling-yes")
+        let sibling = docs.appendingPathComponent("decision-log.jsonl")
+        try Data("{\"fake\":true}\n".utf8).write(to: sibling)
+
+        let result = try await CorpusExporter.export(store: store, documentsURL: docs)
+        #expect(result.decisionLogManifestURL == sibling,
+                "expected \(sibling.path), got \(String(describing: result.decisionLogManifestURL?.path))")
+    }
+
+    @Test("export: decisionLogManifestURL is nil when no sibling decision-log.jsonl exists")
+    func decisionLogManifestURLNilWhenAbsent() async throws {
+        let store = try await makeTestStore()
+        let docs = try makeTempDir(prefix: "CorpusExport-sibling-no")
+        // Deliberately no decision-log.jsonl written.
+        let result = try await CorpusExporter.export(store: store, documentsURL: docs)
+        #expect(result.decisionLogManifestURL == nil)
+    }
+
+    // MARK: - G5: SQL-error path tolerated via test seam
+
+    @Test("export: a throwing fetchDecodedSpans for one asset is logged; other assets' records still serialize")
+    func exportToleratesFetchDecodedSpansFailure() async throws {
+        // Arrange a mock source with two assets. The second asset's span fetch
+        // throws; the first asset must still emit its records and the export
+        // must return successfully.
+        let docs = try makeTempDir(prefix: "CorpusExport-sqlerr-spans")
+        let a1 = makeTestAsset(id: "asset-ok")
+        let a2 = makeTestAsset(id: "asset-sqlerr")
+        let span1 = makeSpan(assetId: "asset-ok", firstOrdinal: 0, lastOrdinal: 10)
+        let source = FailingSource(
+            assets: [a1, a2],
+            spans: ["asset-ok": [span1]],
+            events: ["asset-ok": [], "asset-sqlerr": []],
+            failSpansFor: ["asset-sqlerr"],
+            failEventsFor: []
+        )
+
+        let result = try await CorpusExporter.export(store: source, documentsURL: docs)
+        #expect(result.assetCount == 2, "both asset rows must serialize even though one span-fetch failed")
+        #expect(result.spanCount == 1, "only asset-ok's single span survives; asset-sqlerr's fetch threw")
+
+        let records = try parseJSONL(at: result.fileURL)
+        let assets = records.filter { ($0["type"] as? String) == "asset" }.compactMap { $0["analysisAssetId"] as? String }
+        #expect(Set(assets) == ["asset-ok", "asset-sqlerr"])
+        let decisions = records.filter { ($0["type"] as? String) == "decision" }
+        #expect(decisions.count == 1)
+        #expect(decisions.first?["analysisAssetId"] as? String == "asset-ok")
+    }
+
+    @Test("export: a throwing loadCorrectionEvents for one asset is logged; other assets' records still serialize")
+    func exportToleratesLoadCorrectionEventsFailure() async throws {
+        let docs = try makeTempDir(prefix: "CorpusExport-sqlerr-events")
+        let a1 = makeTestAsset(id: "asset-ok")
+        let a2 = makeTestAsset(id: "asset-corr-err")
+        let scope = CorrectionScope.exactSpan(assetId: "asset-ok", ordinalRange: 1...5)
+        let goodEvent = CorrectionEvent(
+            id: "good",
+            analysisAssetId: "asset-ok",
+            scope: scope.serialized,
+            createdAt: 1_700_000_000,
+            source: .manualVeto
+        )
+        let source = FailingSource(
+            assets: [a1, a2],
+            spans: ["asset-ok": [], "asset-corr-err": []],
+            events: ["asset-ok": [goodEvent], "asset-corr-err": []],
+            failSpansFor: [],
+            failEventsFor: ["asset-corr-err"]
+        )
+
+        let result = try await CorpusExporter.export(store: source, documentsURL: docs)
+        #expect(result.assetCount == 2)
+        #expect(result.correctionCount == 1, "asset-ok's correction must survive the sibling's load failure")
+
+        let records = try parseJSONL(at: result.fileURL)
+        let corrections = records.filter { ($0["type"] as? String) == "correction" }
+        #expect(corrections.count == 1)
+        #expect(corrections.first?["analysisAssetId"] as? String == "asset-ok")
+    }
+
     // MARK: - Test helpers
 
     private func makeSpan(
@@ -377,6 +574,44 @@ struct CorpusExporterTests {
             out.append(json)
         }
         return out
+    }
+}
+
+// MARK: - FailingSource (G5 test seam)
+
+/// In-memory `CorpusExportSource` that can be configured to throw from
+/// `fetchDecodedSpans` or `loadCorrectionEvents` for specific asset IDs.
+/// Used to exercise the exporter's SQL-error tolerance without corrupting
+/// a real sqlite file.
+private struct FailingSource: CorpusExportSource {
+    struct SimulatedSQLError: Error, CustomStringConvertible {
+        let method: String
+        let assetId: String
+        var description: String { "SimulatedSQLError(\(method), asset=\(assetId))" }
+    }
+
+    let assets: [AnalysisAsset]
+    let spans: [String: [DecodedSpan]]
+    let events: [String: [CorrectionEvent]]
+    let failSpansFor: Set<String>
+    let failEventsFor: Set<String>
+
+    func fetchAllAssets() async throws -> [AnalysisAsset] {
+        return assets
+    }
+
+    func fetchDecodedSpans(assetId: String) async throws -> [DecodedSpan] {
+        if failSpansFor.contains(assetId) {
+            throw SimulatedSQLError(method: "fetchDecodedSpans", assetId: assetId)
+        }
+        return spans[assetId] ?? []
+    }
+
+    func loadCorrectionEvents(analysisAssetId: String) async throws -> [CorrectionEvent] {
+        if failEventsFor.contains(analysisAssetId) {
+            throw SimulatedSQLError(method: "loadCorrectionEvents", assetId: analysisAssetId)
+        }
+        return events[analysisAssetId] ?? []
     }
 }
 
