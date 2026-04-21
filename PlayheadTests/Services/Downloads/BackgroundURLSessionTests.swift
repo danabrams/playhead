@@ -226,7 +226,7 @@ struct DownloadManagerDualSessionsTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let manager = DownloadManager(cacheDirectory: dir)
-        await manager.setUseDualBackgroundSessionsForTesting(true)
+        await manager.setUseDualBackgroundSessions(true)
         try await manager.bootstrap()
 
         let session = await manager.backgroundSessionForTesting(role: .interactive)
@@ -241,7 +241,7 @@ struct DownloadManagerDualSessionsTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let manager = DownloadManager(cacheDirectory: dir)
-        await manager.setUseDualBackgroundSessionsForTesting(true)
+        await manager.setUseDualBackgroundSessions(true)
         try await manager.bootstrap()
 
         let session = await manager.backgroundSessionForTesting(role: .maintenance)
@@ -256,7 +256,7 @@ struct DownloadManagerDualSessionsTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let manager = DownloadManager(cacheDirectory: dir)
-        await manager.setUseDualBackgroundSessionsForTesting(true)
+        await manager.setUseDualBackgroundSessions(true)
         try await manager.bootstrap()
 
         let legacy = await manager.backgroundSessionForTesting(role: .legacy)
@@ -279,7 +279,7 @@ struct DownloadManagerDualSessionsTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let manager = DownloadManager(cacheDirectory: dir)
-        await manager.setUseDualBackgroundSessionsForTesting(true)
+        await manager.setUseDualBackgroundSessions(true)
         try await manager.bootstrap()
 
         // Before resuming, neither session is instantiated.

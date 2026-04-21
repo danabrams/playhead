@@ -134,7 +134,12 @@ final class BatchNotificationCoordinator {
         // (ready, failed, cancelled, unavailable). When true, mark the
         // batch closed so future passes skip it and the evictor can
         // hard-delete after 7 days.
-        let allTerminal = !summaries.isEmpty && summaries.allSatisfy { summary in
+        //
+        // Empty summaries close too: a batch with no children (or whose
+        // children have been deleted from SwiftData) has nothing left
+        // to wait for, so `closedAt` must be stamped or the row would
+        // leak indefinitely past the evictor's 7-day TTL.
+        let allTerminal = summaries.allSatisfy { summary in
             isTerminal(summary)
         }
         if allTerminal && batch.closedAt == nil {

@@ -138,6 +138,14 @@ struct SettingsView: View {
                     keepAnalysisWhenRemoving = UserDefaults.standard.bool(
                         forKey: keepAnalysisKey
                     )
+                    // playhead-l274 + playhead-24cm: the 24cm flag is
+                    // already wired (persisted via `PreAnalysisConfig`
+                    // and applied live via `DownloadManager`), so
+                    // initialize its toggle value from the persisted
+                    // config rather than the `FeatureFlagPlaceholders`
+                    // default. The other four slugs remain placeholder
+                    // shims until their beads land.
+                    featureFlagValues["24cm"] = PreAnalysisConfig.load().useDualBackgroundSessions
                 }
                 .task {
                     await viewModel.computeStorageSizes()
@@ -1145,14 +1153,26 @@ private extension SettingsView {
             //   row using `SettingsL274Copy.perShowCapabilityProfileLabel`
             //   when the producer API lands.
 
-            // Feature-flag placeholder toggles (all default OFF)
+            // Feature-flag toggles. `24cm` is wired to real storage
+            // (`PreAnalysisConfig.useDualBackgroundSessions`) and applied
+            // to the live `DownloadManager` on change. The other four
+            // slugs are placeholder shims that persist to in-memory state
+            // only — their real storage lands with their respective beads
+            // (xr3t, zx6i, 2hpn, 43ed). All default OFF per spec.
             DisclosureGroup(SettingsL274Copy.featureFlagsLabel) {
                 ForEach(FeatureFlagPlaceholders.orderedSlugs, id: \.self) { slug in
                     Toggle(isOn: Binding(
                         get: { featureFlagValues[slug] ?? false },
                         set: { newValue in
                             featureFlagValues[slug] = newValue
-                            // TODO(bd playhead-l274): wire actual flag storage
+                            if slug == "24cm" {
+                                var config = PreAnalysisConfig.load()
+                                config.useDualBackgroundSessions = newValue
+                                config.save()
+                                Task { @MainActor in
+                                    await DownloadManager.shared?.setUseDualBackgroundSessions(newValue)
+                                }
+                            }
                         }
                     )) {
                         Text("playhead-\(slug)")

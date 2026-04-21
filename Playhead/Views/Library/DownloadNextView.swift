@@ -251,6 +251,13 @@ struct DownloadNextView: View {
     @State private var count: Int = DownloadNextStepper.defaultCount
     @State private var context: DownloadTripContext = .generic
 
+    /// Short in-flight guard that disables the primary button for a beat
+    /// after the user taps. Prevents a double-tap (or a quick "tap,
+    /// adjust stepper, tap again while the async permission-ask Task is
+    /// still in flight") from inserting two `DownloadBatch` rows for the
+    /// same prefix.
+    @State private var isSubmitting: Bool = false
+
     // MARK: Body
 
     var body: some View {
@@ -277,8 +284,19 @@ struct DownloadNextView: View {
     /// feel the UI design calls out.
     private var primaryRow: some View {
         Button {
+            guard !isSubmitting else { return }
+            isSubmitting = true
             let picked = Array(episodes.prefix(count))
             onDownload(picked, context)
+            // Release the guard after a beat so a user who legitimately
+            // wants to queue a second batch (e.g. different stepper
+            // value) can tap again. 1 s is long enough to cover the
+            // async permission-ask Task's first hop but short enough
+            // that the UI doesn't feel frozen.
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(1))
+                isSubmitting = false
+            }
         } label: {
             HStack(spacing: 0) {
                 Text("Download next ")
@@ -307,6 +325,7 @@ struct DownloadNextView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .buttonStyle(.plain)
+        .disabled(isSubmitting)
         .accessibilityIdentifier("downloadNext.primaryButton")
         .accessibilityLabel(DownloadNextCopy.buttonLabel(count: count))
     }

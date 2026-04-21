@@ -295,4 +295,37 @@ struct BatchNotificationCoordinatorTests {
 
         #expect(batch.closedAt != nil)
     }
+
+    /// Regression guard: a batch with zero children (either constructed
+    /// empty, or left with all episodes deleted from SwiftData) must
+    /// close on the next pass. Prior to this guard, the coordinator
+    /// required `summaries.isEmpty == false` before setting `closedAt`,
+    /// which meant an empty batch stayed open forever — the evictor's
+    /// 7-day TTL keys off `closedAt`, so the row would leak indefinitely.
+    @Test("Empty batch closes on first pass (no children to wait on)")
+    func emptyBatchClosesImmediately() async throws {
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        let scheduler = RecordingScheduler()
+        let service = BatchNotificationService(scheduler: scheduler)
+
+        let batch = DownloadBatch(
+            tripContextRaw: DownloadTripContext.flight.rawValue,
+            episodeKeys: []
+        )
+        context.insert(batch)
+        try context.save()
+
+        let coordinator = BatchNotificationCoordinator(
+            modelContext: context,
+            service: service,
+            summaryBuilder: Self.allReadyBuilder
+        )
+
+        await coordinator.runOncePass(now: Self.t0)
+
+        #expect(batch.closedAt != nil)
+        let requests = await scheduler.snapshot()
+        #expect(requests.isEmpty)
+    }
 }

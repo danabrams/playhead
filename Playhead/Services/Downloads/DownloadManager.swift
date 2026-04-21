@@ -788,8 +788,15 @@ actor DownloadManager {
         _ = backgroundSession(for: role)
     }
 
-    /// Overridable for tests: flip the 24cm feature flag in-process.
-    func setUseDualBackgroundSessionsForTesting(_ value: Bool) {
+    /// Flip the 24cm feature flag in-process. Called from two paths:
+    ///   1. Tests that want to exercise the dual-session code path
+    ///      without touching UserDefaults.
+    ///   2. Settings → Diagnostics → Feature flags: when the user
+    ///      toggles `playhead-24cm`, `SettingsView` persists the value
+    ///      via `PreAnalysisConfig.save()` and then calls this method
+    ///      on the shared manager so the new lane selection takes
+    ///      effect without waiting for the next app launch.
+    func setUseDualBackgroundSessions(_ value: Bool) {
         self.useDualBackgroundSessions = value
     }
 
