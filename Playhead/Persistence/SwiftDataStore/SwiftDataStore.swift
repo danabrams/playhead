@@ -61,6 +61,12 @@ enum PlayheadSchemaV1: VersionedSchema {
             // there is nothing to migrate FROM. Once V2 is introduced
             // we MUST replace these with frozen type snapshots — see
             // the MIGRATION WARNING above.
+            //
+            // playhead-cjqq: `Episode.queuePosition: Int?` was added as
+            // an additive optional field on the live `Episode` type.
+            // No schema list change required — existing rows decode
+            // with `queuePosition == nil` and inherit the provider's
+            // natural ordering until a drag-reorder writes through.
             DownloadBatch.self,
         ]
     }
