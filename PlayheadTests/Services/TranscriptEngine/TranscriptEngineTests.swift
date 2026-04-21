@@ -1050,6 +1050,34 @@ struct AppleSpeechAnalyzerRunnerTests {
         #expect(!source.contains("makeAnalysisAudioFile("))
         #expect(!source.contains("bufferStartTime: .zero"))
     }
+
+    // Regression guard for SFSpeechErrorDomain Code=16 cascade. If apply()
+    // or prepare() throw outside the do/catch, cancelAndFinishNow() never
+    // runs and the analyzer's session slot leaks, poisoning every
+    // subsequent shard with "Maximum number of simultaneous requests reached".
+    @Test("apply/prepare failures always reach cancelAndFinishNow cleanup")
+    func runnerCleansUpAnalyzerOnApplyOrPrepareFailure() throws {
+        let source = try appleSpeechAnalyzerRunnerSource()
+
+        for funcName in ["func transcribe(", "func detectVoiceActivity("] {
+            let funcStart = try #require(source.range(of: funcName))
+            let funcBody = String(source[funcStart.lowerBound...])
+            let doStart = try #require(funcBody.range(of: "do {"))
+
+            if let prepareRange = funcBody.range(of: "try await prepare(analyzer:") {
+                #expect(
+                    prepareRange.lowerBound > doStart.lowerBound,
+                    "\(funcName) calls prepare() before the do-block — a prepare failure would leak the SF session slot"
+                )
+            }
+            if let applyRange = funcBody.range(of: "try await apply(context:") {
+                #expect(
+                    applyRange.lowerBound > doStart.lowerBound,
+                    "\(funcName) calls apply() before the do-block — an apply failure would leak the SF session slot"
+                )
+            }
+        }
+    }
 }
 
 @Suite("SpeechTranscriber extraction")

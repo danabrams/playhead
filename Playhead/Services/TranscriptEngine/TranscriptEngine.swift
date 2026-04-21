@@ -800,27 +800,29 @@ struct AppleSpeechAnalyzerRunner {
         let transcriber = AppleSpeechResultMapper.makeSpeechTranscriber(locale: locale)
         let analysisContext = await makeAnalysisContext(for: podcastId)
         let analyzer = SpeechAnalyzer(modules: [transcriber], options: options)
-        try await apply(context: analysisContext, to: analyzer)
-        try await prepare(analyzer: analyzer, in: format)
-        let inputSequence = try Self.singleBufferSequence(buffer: buffer)
-
-        let collector = Task { try await AppleSpeechResultMapper.collectSegments(from: transcriber.results) }
-        var shouldCancelAnalyzer = true
+        var collector: Task<[TranscriptSegment], Error>?
+        var needsCleanup = true
 
         do {
+            try await apply(context: analysisContext, to: analyzer)
+            try await prepare(analyzer: analyzer, in: format)
+            let inputSequence = try Self.singleBufferSequence(buffer: buffer)
+
+            collector = Task { try await AppleSpeechResultMapper.collectSegments(from: transcriber.results) }
+
             if let lastSample = try await analyzer.analyzeSequence(inputSequence) {
                 try await analyzer.finalizeAndFinish(through: lastSample)
             } else {
                 try await analyzer.finalizeAndFinishThroughEndOfInput()
             }
-            shouldCancelAnalyzer = false
+            needsCleanup = false
             withExtendedLifetime(buffer) {}
-            return try await collector.value
+            return try await collector!.value
         } catch {
-            if shouldCancelAnalyzer {
+            if needsCleanup {
                 await analyzer.cancelAndFinishNow()
             }
-            collector.cancel()
+            collector?.cancel()
             if let boundaryError = error as? AppleSpeechBoundaryError {
                 throw boundaryError
             }
@@ -834,26 +836,28 @@ struct AppleSpeechAnalyzerRunner {
     ) async throws -> [VADResult] {
         let detector = SpeechDetector()
         let analyzer = SpeechAnalyzer(modules: [detector], options: options)
-        try await prepare(analyzer: analyzer, in: format)
-        let inputSequence = try Self.singleBufferSequence(buffer: buffer)
-
-        let collector = Task { try await AppleSpeechResultMapper.collectVAD(from: detector.results) }
-        var shouldCancelAnalyzer = true
+        var collector: Task<[VADResult], Error>?
+        var needsCleanup = true
 
         do {
+            try await prepare(analyzer: analyzer, in: format)
+            let inputSequence = try Self.singleBufferSequence(buffer: buffer)
+
+            collector = Task { try await AppleSpeechResultMapper.collectVAD(from: detector.results) }
+
             if let lastSample = try await analyzer.analyzeSequence(inputSequence) {
                 try await analyzer.finalizeAndFinish(through: lastSample)
             } else {
                 try await analyzer.finalizeAndFinishThroughEndOfInput()
             }
-            shouldCancelAnalyzer = false
+            needsCleanup = false
             withExtendedLifetime(buffer) {}
-            return try await collector.value
+            return try await collector!.value
         } catch {
-            if shouldCancelAnalyzer {
+            if needsCleanup {
                 await analyzer.cancelAndFinishNow()
             }
-            collector.cancel()
+            collector?.cancel()
             if let boundaryError = error as? AppleSpeechBoundaryError {
                 throw boundaryError
             }
