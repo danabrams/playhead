@@ -42,6 +42,11 @@ struct SettingsView: View {
     /// playhead-ct2q: transient UI state for the "Send diagnostics" hatch.
     @State private var sendDiagnosticsInProgress = false
     @State private var sendDiagnosticsLastResult: String?
+    /// Escape hatch: copy the AnalysisStore SQLite DB into Documents/ so
+    /// Xcode's "Download Container" can pull it down (the production DB is
+    /// FileProtectionType.complete and is therefore opaque to Xcode).
+    @State private var analysisStoreExportInProgress = false
+    @State private var analysisStoreExportLastResult: String?
     #endif
 
     /// Injected dependencies — set via environment or passed directly.
@@ -694,6 +699,37 @@ private extension SettingsView {
             .disabled(debugExportInProgress)
             .listRowBackground(AppColors.surface)
 
+            // Escape hatch for Xcode "Download Container": copies the live
+            // AnalysisStore SQLite DB into Documents/ (the production path is
+            // FileProtectionType.complete, which Xcode refuses to transfer).
+            Button {
+                Task { await exportAnalysisStoreToDocuments() }
+            } label: {
+                HStack {
+                    Label("Export AnalysisStore to Documents", systemImage: "externaldrive.badge.icloud")
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.accent)
+
+                    Spacer()
+
+                    if analysisStoreExportInProgress {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(analysisStoreExportInProgress)
+            .listRowBackground(AppColors.surface)
+
+            if let outcome = analysisStoreExportLastResult {
+                Text(outcome)
+                    .font(AppTypography.caption)
+                    .foregroundStyle(AppColors.textTertiary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .listRowBackground(AppColors.surface)
+            }
+
             if let export = debugExport {
                 ShareLink(
                     item: export,
@@ -765,6 +801,37 @@ private extension SettingsView {
         debugExport = await DebugEpisodeExporter.buildLibraryExport(
             store: runtime.analysisStore
         )
+    }
+
+    /// DEBUG-only: copies the live AnalysisStore SQLite DB into
+    /// `Documents/ExportedAnalysisStore/analysis.sqlite` using SQLite's
+    /// `VACUUM INTO`. The snapshot is a single standalone file (no
+    /// `-wal`/`-shm`), safe to take while the DB is open, and lives in
+    /// Documents/ (default protection) so Xcode's Download Container can
+    /// pull it down for offline inspection.
+    @MainActor
+    func exportAnalysisStoreToDocuments() async {
+        analysisStoreExportInProgress = true
+        defer { analysisStoreExportInProgress = false }
+
+        let fm = FileManager.default
+        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let dir = docs.appendingPathComponent("ExportedAnalysisStore", isDirectory: true)
+        let destFile = dir.appendingPathComponent("analysis.sqlite")
+
+        do {
+            // Wipe and recreate so re-exports are clean. VACUUM INTO
+            // also refuses to overwrite an existing file.
+            try? fm.removeItem(at: dir)
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+
+            try await runtime.analysisStore.vacuumInto(destinationURL: destFile)
+
+            let size = (try? fm.attributesOfItem(atPath: destFile.path)[.size] as? Int64) ?? 0
+            analysisStoreExportLastResult = "Exported \(SettingsViewModel.formattedSize(size)) to Documents/ExportedAnalysisStore/analysis.sqlite"
+        } catch {
+            analysisStoreExportLastResult = "Export failed: \(error.localizedDescription)"
+        }
     }
 
     // MARK: - playhead-ct2q: Send diagnostics (dogfood #if DEBUG hatch)

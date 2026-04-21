@@ -2010,6 +2010,21 @@ actor AnalysisStore {
             .appendingPathComponent("AnalysisStore", isDirectory: true)
     }
 
+    #if DEBUG
+    /// Produces an atomic snapshot of the live DB at `destinationURL` using
+    /// SQLite's `VACUUM INTO`. This handles WAL/concurrent-reader correctness
+    /// and emits a single standalone `.sqlite` file (no sidecar `-wal`/`-shm`).
+    /// The destination file must NOT already exist — callers must remove it
+    /// first. DEBUG-only export paths use this to sidestep the
+    /// `FileProtectionType.complete` attribute on the primary DB so Xcode's
+    /// Download Container can transfer the snapshot for offline inspection.
+    func vacuumInto(destinationURL: URL) throws {
+        // Escape single quotes in the path for the SQL string literal.
+        let escaped = destinationURL.path.replacingOccurrences(of: "'", with: "''")
+        try exec("VACUUM INTO '\(escaped)'")
+    }
+    #endif
+
     // MARK: Pragmas
 
     private func configurePragmas() throws {

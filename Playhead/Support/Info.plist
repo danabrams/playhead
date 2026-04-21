@@ -28,6 +28,8 @@
 	<string>1</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Playhead uses on-device speech transcription to generate episode transcripts and ad-skip markers.</string>
 	<key>UIBackgroundModes</key>
@@ -36,6 +38,8 @@
 		<string>processing</string>
 		<string>fetch</string>
 	</array>
+	<key>UIFileSharingEnabled</key>
+	<true/>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>
