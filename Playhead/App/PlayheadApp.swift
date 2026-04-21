@@ -293,14 +293,12 @@ struct PlayheadApp: App {
                     summaries.append(
                         BatchChildSurfaceSummary(
                             canonicalEpisodeKey: key,
-                            disposition: isReady ? .queued : .queued,
-                            // Default to a transient non-fixable reason
-                            // so the reducer never promotes a not-yet-
-                            // ready child to an action-required
-                            // notification on the basis of a missing
-                            // signal. The full per-episode
-                            // EpisodeSurfaceStatus reducer wiring is a
-                            // separate epic.
+                            // Placeholder until per-episode SurfaceReason
+                            // wiring lands (see follow-up bead). All
+                            // non-ready children get the same transient
+                            // non-fixable shape so the reducer never
+                            // promotes them to action-required.
+                            disposition: .queued,
                             reason: .waitingForTime,
                             analysisUnavailableReason: nil,
                             isReady: isReady,
