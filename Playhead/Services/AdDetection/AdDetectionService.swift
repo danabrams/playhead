@@ -396,23 +396,23 @@ actor AdDetectionService {
         }
 
         // Record a false-negative correction event for the trust/learning pipeline.
+        // playhead-zskc: the caller (NowPlayingViewModel.reportHearingAd) has
+        // already run BoundaryExpander, so `startTime` and `endTime` represent
+        // the real ad boundaries. Persist them as `.exactTimeSpan` rather than
+        // collapsing to the coarse `exactSpan:0:Int.max` whole-episode veto.
+        //
+        // This path does NOT call `recordFalseNegative`: that API is for
+        // contexts where we only have a single reported time and must
+        // synthesize a ±15s window + AdWindow. Here the AdWindow is already
+        // persisted above and the boundaries came from real features.
         if let correctionStore {
-            let scope = CorrectionScope.exactSpan(
+            await correctionStore.recordVeto(
+                startTime: startTime,
+                endTime: endTime,
                 assetId: analysisAssetId,
-                ordinalRange: 0...Int.max
+                podcastId: podcastId,
+                source: .falseNegative
             )
-            let event = CorrectionEvent(
-                analysisAssetId: analysisAssetId,
-                scope: scope.serialized,
-                createdAt: Date().timeIntervalSince1970,
-                source: .falseNegative,
-                podcastId: podcastId
-            )
-            do {
-                try await correctionStore.record(event)
-            } catch {
-                logger.warning("Failed to record user-marked ad correction: \(error.localizedDescription)")
-            }
         }
     }
 

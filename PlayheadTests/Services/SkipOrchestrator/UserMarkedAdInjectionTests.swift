@@ -232,6 +232,23 @@ struct UserMarkedAdPersistenceTests {
 
         let fnCorrection = corrections.first { $0.source == .falseNegative }
         #expect(fnCorrection != nil, "Expected a falseNegative correction event")
+
+        // playhead-zskc: verify the scope is window-precise (exactTimeSpan
+        // with the user-supplied start/end), NOT the old whole-episode
+        // `exactSpan:0:Int.max` fallback.
+        let fn = try #require(fnCorrection)
+        let parsed = CorrectionScope.deserialize(fn.scope)
+        guard case .exactTimeSpan(let assetId, let startTime, let endTime) = parsed else {
+            Issue.record("Expected exactTimeSpan scope, got \(fn.scope)")
+            return
+        }
+        #expect(assetId == "asset-1")
+        #expect(startTime == 30.0, "startTime must match caller's boundary")
+        #expect(endTime == 90.0, "endTime must match caller's boundary")
+        // playhead-zskc code review M4: confirm correctionType mapping from
+        // source.kind persists through the AdDetectionService path.
+        #expect(fn.correctionType == .falseNegative,
+                "falseNegative source must persist as correctionType.falseNegative")
     }
 }
 
@@ -294,5 +311,11 @@ struct UserMarkedAdIntegrationTests {
         let corrections = try await store.loadCorrectionEvents(analysisAssetId: "asset-1")
         let fnCorrection = corrections.first { $0.source == .falseNegative }
         #expect(fnCorrection != nil, "Expected persisted falseNegative correction")
+        if let fn = fnCorrection {
+            // playhead-zskc: persisted correction must use window-precise
+            // exactTimeSpan scope rather than the old 0...Int.max fallback.
+            #expect(fn.scope.hasPrefix("exactTimeSpan:"),
+                    "Expected exactTimeSpan scope, got \(fn.scope)")
+        }
     }
 }

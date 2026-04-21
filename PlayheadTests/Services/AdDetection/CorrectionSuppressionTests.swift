@@ -91,6 +91,47 @@ struct CorrectionSuppressionTests {
                 "Effective confidence must be below candidate threshold (0.40)")
     }
 
+    // MARK: - Active exactTimeSpan correction blocks detection for that asset
+
+    @Test("Fresh exactTimeSpan correction (via recordVeto) → passthrough factor ≈ 0.0 → blocks span")
+    func freshExactTimeSpanCorrectionBlocksBackfill() async throws {
+        // playhead-zskc code review I3: the headline suppression test above uses
+        // `.exactSpan`, but the whole point of the bead is that manual UI gestures
+        // now persist as `.exactTimeSpan`. Passthrough is scope-agnostic
+        // (filters by `event.source?.kind`), so the behaviour should mirror —
+        // but the invariant deserves direct coverage.
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-time-suppress"))
+
+        // Use the recordVeto entry point — the actual production path.
+        await correctionStore.recordVeto(
+            startTime: 10.0,
+            endTime: 40.0,
+            assetId: "asset-time-suppress",
+            podcastId: nil,
+            source: .manualVeto
+        )
+
+        // Passthrough factor should be ≈ 0.0 for a fresh time-range correction.
+        let factor = await correctionStore.correctionPassthroughFactor(for: "asset-time-suppress")
+        #expect(factor < 0.05,
+                "Fresh exactTimeSpan correction must yield passthrough ≈ 0.0, got \(factor)")
+
+        // And DecisionMapper must gate the span.
+        let span = makeSpan(assetId: "asset-time-suppress")
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: moderateEvidenceLedger(),
+            config: defaultConfig(),
+            transcriptQuality: .good,
+            correctionFactor: factor
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .blockedByUserCorrection,
+                "Active fresh exactTimeSpan correction must block span via DecisionMapper")
+    }
+
     // MARK: - Active sponsorOnShow correction blocks detection for that sponsor
 
     @Test("Fresh sponsorOnShow correction → passthrough factor ≈ 0.0 → blocks span on same asset")
@@ -396,7 +437,7 @@ struct CorrectionSuppressionTests {
 @Suite("SkipOrchestrator — Correction Scope Inference from AdWindow")
 struct SkipOrchestratorCorrectionScopeTests {
 
-    @Test("recordListenRevert writes exactSpan scope using AdWindow's assetId and INT range placeholders")
+    @Test("recordListenRevert writes exactTimeSpan scope with window's snapped start/end (playhead-zskc)")
     func listenRevertScopeContent() async throws {
         let analysisStore = try await makeTestStore()
         try await analysisStore.insertAsset(makeSkipTestAnalysisAsset())
@@ -443,13 +484,25 @@ struct SkipOrchestratorCorrectionScopeTests {
         let events = try await correctionStore.activeCorrections(for: "asset-1")
         let event = try #require(events.first)
 
-        // Verify the scope is an exactSpan for the correct asset.
+        // Verify the scope is an exactTimeSpan with the window's actual time range.
+        // Pre-playhead-zskc this persisted `exactSpan:asset-1:0:Int.max` (whole-episode
+        // fallback). Now it must carry the snapped start/end so per-window metrics
+        // (precision, recall, IoU) become computable.
         let parsedScope = CorrectionScope.deserialize(event.scope)
-        guard case .exactSpan(let assetId, _) = parsedScope else {
-            Issue.record("Expected exactSpan scope, got: \(event.scope)")
+        guard case .exactTimeSpan(let assetId, let startTime, let endTime) = parsedScope else {
+            Issue.record("Expected exactTimeSpan scope, got: \(event.scope)")
             return
         }
         #expect(assetId == "asset-1", "Scope assetId must match the window's analysisAssetId")
+        // The window's snapped boundaries may be expanded slightly by the
+        // orchestrator; sanity-check that they fall within a plausible range
+        // of the original 60...120 ad boundaries and carry finite values (not
+        // the sentinel Int.max that the old coarse fallback encoded).
+        #expect(startTime.isFinite, "startTime must be a finite time, not sentinel")
+        #expect(endTime.isFinite, "endTime must be a finite time, not sentinel")
+        #expect(endTime > startTime, "endTime must follow startTime")
+        #expect(startTime < 120 && endTime > 60,
+                "Scope time range must overlap the original ad window")
         #expect(event.source == .listenRevert)
         #expect(event.podcastId == "podcast-1")
     }
@@ -472,12 +525,13 @@ struct ListenRevertSponsorScopeTests {
     // evidence.
     //
     // This is a known design limitation: the "Listen" revert path (banner →
-    // SkipOrchestrator.recordListenRevert) only writes exactSpan scope.
-    // A future phase could enrich AdWindow with evidence catalog entries to
-    // enable sponsor scope inference on the revert path.
+    // SkipOrchestrator.recordListenRevert) only writes a single exactTimeSpan
+    // scope (playhead-zskc changed it from exactSpan). A future phase could
+    // enrich AdWindow with evidence catalog entries to enable sponsor scope
+    // inference on the revert path.
 
-    @Test("recordListenRevert writes only exactSpan — no sponsorOnShow (by design)")
-    func listenRevertWritesOnlyExactSpan() async throws {
+    @Test("recordListenRevert writes only exactTimeSpan — no sponsorOnShow (by design)")
+    func listenRevertWritesOnlyExactTimeSpan() async throws {
         let analysisStore = try await makeTestStore()
         try await analysisStore.insertAsset(makeSkipTestAnalysisAsset())
 
@@ -522,12 +576,15 @@ struct ListenRevertSponsorScopeTests {
         #expect(found, "CorrectionEvent should be written after recordListenRevert")
 
         let events = try await correctionStore.activeCorrections(for: "asset-1")
-        // KEY ASSERTION: only one event (exactSpan), NOT two (no sponsorOnShow).
-        #expect(events.count == 1, "recordListenRevert should write exactly 1 event (exactSpan only), got \(events.count)")
+        // KEY ASSERTION: only one event (exactTimeSpan), NOT two (no sponsorOnShow).
+        // playhead-zskc: changed from `exactSpan:` prefix to `exactTimeSpan:` now
+        // that listenRevert persists window-precise time boundaries rather than
+        // the old `ordinalRange: 0...Int.max` whole-episode fallback.
+        #expect(events.count == 1, "recordListenRevert should write exactly 1 event (exactTimeSpan only), got \(events.count)")
 
         let scopes = events.map { $0.scope }
-        #expect(scopes.allSatisfy { $0.hasPrefix("exactSpan:") },
-                "All scopes should be exactSpan — no sponsorOnShow inferred from AdWindow")
+        #expect(scopes.allSatisfy { $0.hasPrefix("exactTimeSpan:") },
+                "All scopes should be exactTimeSpan — no sponsorOnShow inferred from AdWindow")
     }
 }
 
@@ -536,13 +593,14 @@ struct ListenRevertSponsorScopeTests {
 @Suite("AdBanner — 'Not an ad' Correction Behavioral Contract")
 struct AdBannerNotAnAdBehavioralTests {
 
-    // The onNotAnAd closure in NowPlayingView creates a CorrectionEvent with:
-    //   - analysisAssetId: current asset ID
-    //   - scope: exactSpan(assetId:, ordinalRange: 0...Int.max)
-    //   - source: .manualVeto
-    //   - podcastId: from the banner item
-    // This test verifies the behavioral contract: a .manualVeto event with
-    // exactSpan scope persists and is retrievable, matching the closure's behavior.
+    // playhead-zskc: the onNotAnAd closure in NowPlayingView now routes through
+    // SkipOrchestrator.revertWindow(windowId:) instead of constructing a
+    // CorrectionEvent directly. The orchestrator persists an `.exactTimeSpan`
+    // correction with the window's snapped start/end.
+    //
+    // These tests retain their prior generic exactSpan persistence shape — they
+    // still exercise store round-trip behavior that must continue to work for
+    // back-compat with any legacy data and for the generic record(_:) API.
 
     @Test("manualVeto correction event with exactSpan scope round-trips through PersistentUserCorrectionStore")
     func manualVetoCorrectionRoundTrips() async throws {
