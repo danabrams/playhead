@@ -4621,6 +4621,32 @@ actor AnalysisStore {
         return out
     }
 
+    /// Fetches the most-recent WorkJournal `cause` for `episodeId`,
+    /// across ALL generations. Returns `nil` when no entry exists or the
+    /// most-recent entry has a NULL cause column.
+    ///
+    /// Used by the batch-notification summary builder (playhead-0a0s) to
+    /// derive a per-episode `InternalMissCause` for the surface-status
+    /// reducer without taking on full WorkJournal-row deserialization.
+    /// The query intentionally collapses across generations because the
+    /// batch path only cares about the latest blocker the episode
+    /// experienced — not which scheduler-epoch it belongs to.
+    func fetchLastWorkJournalCause(episodeId: String) throws -> InternalMissCause? {
+        let sql = """
+            SELECT cause
+            FROM work_journal
+            WHERE episode_id = ? AND cause IS NOT NULL
+            ORDER BY timestamp DESC, rowid DESC
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, episodeId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        guard let raw = optionalText(stmt, 0) else { return nil }
+        return InternalMissCause(rawValue: raw) ?? .unknown(raw)
+    }
+
     /// Fetches the most-recent WorkJournal entry for the given
     /// {episodeId, generationID}. Returns `nil` when no entry exists.
     func fetchLastWorkJournalEntry(
