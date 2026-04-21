@@ -65,6 +65,27 @@ struct PlayheadApp: App {
                             trigger: trigger
                         )
                     }
+                    // playhead-z3ch: install the SwiftData-backed
+                    // EpisodeMetadataProvider so the fusion pipeline can
+                    // pre-seed metadata-derived ledger entries (capped at
+                    // 0.15, gated by corroboration). Wired here — not in
+                    // PlayheadRuntime.init — because the SwiftData
+                    // ModelContainer is only available once the App scene
+                    // has constructed both the runtime and the container.
+                    let analysisStore = runtime.analysisStore
+                    let provider = SwiftDataEpisodeMetadataProvider(
+                        assetLookup: { assetId in
+                            try? await analysisStore.fetchAsset(id: assetId)
+                        },
+                        metadataLookup: { episodeId in
+                            let context = modelContainer.mainContext
+                            let descriptor = FetchDescriptor<Episode>(
+                                predicate: #Predicate { $0.canonicalEpisodeKey == episodeId }
+                            )
+                            return (try? context.fetch(descriptor).first)?.feedMetadata
+                        }
+                    )
+                    await runtime.adDetectionService.setEpisodeMetadataProvider(provider)
                 }
                 .task {
                     let stateStream = await runtime.playbackService.observeStates()

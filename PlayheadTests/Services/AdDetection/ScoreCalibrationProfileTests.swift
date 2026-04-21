@@ -212,8 +212,12 @@ struct ScoreCalibrationProfileTests {
         let profile = ScoreCalibrationProfile.v1
         #expect(profile.version == .v1)
 
-        // Every source (except fusedScore which uses identity) should have a non-identity calibrator
-        for source in EvidenceSourceType.allCases where source != .fusedScore {
+        // Every source should have a non-identity calibrator EXCEPT:
+        //   - .fusedScore: post-fusion aggregate uses identity by design.
+        //   - .metadata (playhead-z3ch): metadata cues are pre-clamped at fusion
+        //     ingress to a hard 0.15 cap; calibration would distort the cap, so
+        //     identity is intentional.
+        for source in EvidenceSourceType.allCases where source != .fusedScore && source != .metadata {
             let cal = profile.calibrator(for: source)
             let testValues = [0.1, 0.3, 0.5, 0.7, 0.9]
             let hasNonIdentity = testValues.contains { abs(cal.calibrate($0) - $0) > 1e-6 }

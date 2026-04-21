@@ -272,6 +272,19 @@ actor AdDetectionService {
     /// spans gate to `.blockedByUserCorrection` without making the struct async.
     private(set) var correctionStore: (any UserCorrectionStore)?
 
+    /// playhead-z3ch: Provider for feed-description metadata. `runBackfill`
+    /// queries it once per asset and synthesizes `.metadata` ledger entries
+    /// that are clamped at `metadataCap` (0.15) and gated by the corroboration
+    /// check in `BackfillEvidenceFusion`. Production wiring lives in
+    /// `PlayheadRuntime` (SwiftData-backed lookup); tests inject a
+    /// deterministic stub. Defaults to a `NullEpisodeMetadataProvider` so
+    /// existing call sites continue to behave identically. Mutable so the
+    /// runtime can install a SwiftData-backed implementation post-init
+    /// (mirrors the `setUserCorrectionStore` pattern — the SwiftData
+    /// `ModelContext` isn't available until after the runtime + container
+    /// are both alive).
+    private(set) var episodeMetadataProvider: EpisodeMetadataProvider
+
     // MARK: - Cached State
 
     /// Scanner is recreated per-episode when profile changes.
@@ -300,7 +313,8 @@ actor AdDetectionService {
         shadowSkipMarker: @escaping @Sendable (_ sessionId: String, _ podcastId: String) async -> Void = { _, _ in },
         regionShadowObserver: RegionShadowObserver? = nil,
         phase5ProjectorObserver: Phase5ProjectorObserver? = nil,
-        skipOrchestrator: SkipOrchestrator? = nil
+        skipOrchestrator: SkipOrchestrator? = nil,
+        episodeMetadataProvider: EpisodeMetadataProvider = NullEpisodeMetadataProvider()
     ) {
         self.store = store
         self.classifier = classifier
@@ -315,6 +329,7 @@ actor AdDetectionService {
         self.regionShadowObserver = regionShadowObserver
         self.phase5ProjectorObserver = phase5ProjectorObserver
         self.skipOrchestrator = skipOrchestrator
+        self.episodeMetadataProvider = episodeMetadataProvider
     }
 
     #if DEBUG
@@ -336,6 +351,14 @@ actor AdDetectionService {
     /// (actor property writes must be asynchronous from an init context).
     func setUserCorrectionStore(_ store: any UserCorrectionStore) {
         self.correctionStore = store
+    }
+
+    /// playhead-z3ch: Set the EpisodeMetadataProvider. Called from
+    /// `PlayheadApp` (after the SwiftData ModelContainer is available) so
+    /// `runBackfill` can pre-seed metadata-derived ledger entries. Mirrors
+    /// the `setUserCorrectionStore` pattern.
+    func setEpisodeMetadataProvider(_ provider: EpisodeMetadataProvider) {
+        self.episodeMetadataProvider = provider
     }
 
     // MARK: - User Correction Persistence
@@ -820,6 +843,21 @@ actor AdDetectionService {
         // transcriptQuality is the same for every span (derived from the full atom array),
         // so compute it once outside the loop rather than redundantly per span.
         let transcriptQuality = estimateTranscriptQuality(atoms: atomEvidence)
+        // playhead-z3ch: pre-compute metadata cues once per asset. The lookup
+        // is feed-level (description + summary) so it has no per-span variance;
+        // fanning out the same cues across every span keeps the corroboration
+        // gate honest while sharing the extraction cost.
+        let metadataCues: [EpisodeMetadataCue]
+        if let feedMetadata = await episodeMetadataProvider.metadata(for: analysisAssetId) {
+            let extractor = MetadataCueExtractor()
+            metadataCues = extractor.extractCues(
+                description: feedMetadata.feedDescription,
+                summary: feedMetadata.feedSummary
+            )
+        } else {
+            metadataCues = []
+        }
+        let metadataEvidenceBuilder = FeedDescriptionEvidenceBuilder()
         var fusionWindows: [AdWindow] = []
         var decisionEvents: [DecisionEvent] = []
         // Phase 6.5 (playhead-4my.16): accumulate AdDecisionResult for step 17 forwarding.
@@ -860,6 +898,13 @@ actor AdDetectionService {
                 anchorProvenance: span.anchorProvenance
             )
 
+            // playhead-z3ch: build per-span metadata entries from the cached cues.
+            // Builder is pure; the heavy work (cue extraction) was done once above.
+            let metadataEntries = metadataEvidenceBuilder.buildEntries(
+                cues: metadataCues,
+                for: refinedSpan
+            )
+
             let ledger = buildEvidenceLedger(
                 span: refinedSpan,
                 classifierResults: classifierResults,
@@ -867,6 +912,7 @@ actor AdDetectionService {
                 featureWindows: featureWindows,
                 catalogEntries: evidenceCatalog.entries,
                 semanticScanResults: semanticScanResults,
+                metadataEntries: metadataEntries,
                 fusionConfig: fusionConfig
             )
 
@@ -1053,6 +1099,7 @@ actor AdDetectionService {
         featureWindows: [FeatureWindow],
         catalogEntries: [EvidenceEntry],
         semanticScanResults: [SemanticScanResult],
+        metadataEntries: [EvidenceLedgerEntry] = [],
         fusionConfig: FusionWeightConfig
     ) -> [EvidenceLedgerEntry] {
         // Classifier entry: find the best-matching ClassifierResult for this span.
@@ -1097,6 +1144,7 @@ actor AdDetectionService {
             lexicalEntries: lexicalEntries,
             acousticEntries: acousticEntries,
             catalogEntries: catalogLedgerEntries,
+            metadataEntries: metadataEntries,
             mode: config.fmBackfillMode,
             config: fusionConfig
         )

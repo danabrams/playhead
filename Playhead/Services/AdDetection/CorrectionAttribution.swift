@@ -161,6 +161,7 @@ enum CausalInference {
         case .classifier:  return .foundationModel  // legacy classifier ≈ FM
         case .fingerprint: return .fingerprint
         case .fusedScore:  return .foundationModel  // fused aggregate ≈ FM pipeline
+        case .metadata:    return .lexical  // playhead-z3ch: metadata cues are lexical-family pre-seeds
         }
     }
 
