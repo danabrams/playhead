@@ -710,7 +710,7 @@ private extension SettingsView {
                 Task { await exportAnalysisStoreToDocuments() }
             } label: {
                 HStack {
-                    Label("Export AnalysisStore to Documents", systemImage: "externaldrive.badge.icloud")
+                    Label("Export Analysis DB to Documents", systemImage: "externaldrive.badge.icloud")
                         .font(AppTypography.body)
                         .foregroundStyle(AppColors.accent)
 
