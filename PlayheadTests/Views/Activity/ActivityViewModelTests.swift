@@ -17,6 +17,7 @@
 //     `refresh(from:)` entry point; observation glue is the View's job.
 
 import Foundation
+import SwiftData
 import Testing
 
 @testable import Playhead
@@ -407,4 +408,328 @@ struct ActivityViewModelTests {
         let row = try! #require(snapshot.recentlyFinished.first)
         #expect(row.outcome == .couldntAnalyze)
     }
+
+    // MARK: - playhead-cjqq: queuePosition sort + persistence
+
+    /// Variant of `makeInput` that sets `queuePosition` so the
+    /// queuePosition-aware tests stay readable. The default `nil` lets
+    /// the existing fixtures keep their pre-cjqq behavior unchanged.
+    static func makeInput(
+        id: String,
+        title: String = "Some Episode",
+        podcast: String? = "Some Show",
+        status: EpisodeSurfaceStatus,
+        isRunning: Bool = false,
+        finishedAt: Date? = nil,
+        queuePosition: Int?
+    ) -> ActivityEpisodeInput {
+        ActivityEpisodeInput(
+            episodeId: id,
+            episodeTitle: title,
+            podcastTitle: podcast,
+            status: status,
+            isRunning: isRunning,
+            finishedAt: finishedAt,
+            queuePosition: queuePosition
+        )
+    }
+
+    @Test("Up Next sort: queuePosition ascending, nil last, episodeId tiebreak")
+    func upNextSortRespectsQueuePositionWithNilLast() {
+        // Mixed ordering: provider hands rows in scheduler-priority
+        // order; the VM must re-sort so the user's persisted
+        // queuePosition wins, with un-reordered (nil) episodes at the
+        // tail and a deterministic id-tiebreak between equal-position
+        // entries.
+        let upNextStatus = Self.makeStatus(
+            disposition: .queued, reason: .waitingForTime
+        )
+        let inputs: [ActivityEpisodeInput] = [
+            // Provider order intentionally scrambled relative to
+            // queuePosition so the test would fail under the pre-cjqq
+            // "input order preserved" rule.
+            Self.makeInput(id: "ep-nil-b", status: upNextStatus, queuePosition: nil),
+            Self.makeInput(id: "ep-pos-2", status: upNextStatus, queuePosition: 2),
+            Self.makeInput(id: "ep-pos-0", status: upNextStatus, queuePosition: 0),
+            Self.makeInput(id: "ep-nil-a", status: upNextStatus, queuePosition: nil),
+            Self.makeInput(id: "ep-pos-1", status: upNextStatus, queuePosition: 1),
+            // Two rows with the same queuePosition exercise the
+            // episodeId tiebreak.
+            Self.makeInput(id: "ep-pos-2-tie", status: upNextStatus, queuePosition: 2),
+        ]
+        let snapshot = ActivityViewModel.aggregate(inputs: inputs, now: Date())
+        #expect(snapshot.upNext.map(\.episodeId) == [
+            "ep-pos-0",       // queuePosition 0 first
+            "ep-pos-1",       // then 1
+            "ep-pos-2",       // then 2 (id "ep-pos-2" < "ep-pos-2-tie")
+            "ep-pos-2-tie",   // tiebreak by episodeId asc
+            "ep-nil-a",       // nil rows last, sorted by id
+            "ep-nil-b",
+        ])
+    }
+
+    @Test("Up Next sort: all-nil queuePositions still produce deterministic order")
+    func upNextSortDeterministicWhenAllNil() {
+        // Pre-cjqq behavior was "input order preserved". That bound is
+        // weakened by cjqq — when every queuePosition is nil, the sort
+        // falls back to `episodeId` to keep the order deterministic
+        // across multiple aggregate calls.
+        let upNextStatus = Self.makeStatus(
+            disposition: .queued, reason: .waitingForTime
+        )
+        let inputs: [ActivityEpisodeInput] = [
+            Self.makeInput(id: "ep-c", status: upNextStatus, queuePosition: nil),
+            Self.makeInput(id: "ep-a", status: upNextStatus, queuePosition: nil),
+            Self.makeInput(id: "ep-b", status: upNextStatus, queuePosition: nil),
+        ]
+        let snapshot = ActivityViewModel.aggregate(inputs: inputs, now: Date())
+        #expect(snapshot.upNext.map(\.episodeId) == ["ep-a", "ep-b", "ep-c"])
+    }
+
+    @Test("moveUpNext writes through to persistQueueOrder with sequential renumber")
+    @MainActor
+    func moveUpNextPersistsSequentialRenumber() {
+        var captured: [[(String, Int)]] = []
+        let vm = ActivityViewModel(persistQueueOrder: { ordering in
+            captured.append(ordering.map { ($0.episodeId, $0.queuePosition) })
+        })
+
+        let inputs: [ActivityEpisodeInput] = (0..<4).map { i in
+            Self.makeInput(
+                id: "ep-\(i)",
+                title: "Episode \(i)",
+                status: Self.makeStatus(
+                    disposition: .queued, reason: .waitingForTime
+                ),
+                queuePosition: nil
+            )
+        }
+        vm.refresh(from: inputs)
+        // Initial order is the deterministic id-asc fallback.
+        #expect(vm.snapshot.upNext.map(\.episodeId) == [
+            "ep-0", "ep-1", "ep-2", "ep-3"
+        ])
+
+        // Move ep-3 to the front.
+        vm.moveUpNext(from: IndexSet(integer: 3), to: 0)
+        #expect(vm.snapshot.upNext.map(\.episodeId) == [
+            "ep-3", "ep-0", "ep-1", "ep-2"
+        ])
+        // Persistence callback fired exactly once with the sequential
+        // renumber matching the new on-screen order.
+        #expect(captured.count == 1)
+        #expect(captured[0].map(\.0) == ["ep-3", "ep-0", "ep-1", "ep-2"])
+        #expect(captured[0].map(\.1) == [0, 1, 2, 3])
+    }
+
+    @Test("moveUpNext is idempotent: no-op move skips persistQueueOrder")
+    @MainActor
+    func moveUpNextIdempotentWhenOrderUnchanged() {
+        var callCount = 0
+        let vm = ActivityViewModel(persistQueueOrder: { _ in callCount += 1 })
+
+        let inputs: [ActivityEpisodeInput] = (0..<3).map { i in
+            Self.makeInput(
+                id: "ep-\(i)",
+                status: Self.makeStatus(
+                    disposition: .queued, reason: .waitingForTime
+                ),
+                queuePosition: nil
+            )
+        }
+        vm.refresh(from: inputs)
+
+        // SwiftUI's `.onMove` can fire (source: {1}, destination: 1)
+        // for a drag that ends at its origin; `.move(fromOffsets:
+        // toOffset:)` returns the array unchanged in that case. The VM
+        // must not write through.
+        vm.moveUpNext(from: IndexSet(integer: 1), to: 1)
+        #expect(callCount == 0)
+        #expect(vm.snapshot.upNext.map(\.episodeId) == [
+            "ep-0", "ep-1", "ep-2"
+        ])
+
+        // A real reorder still writes through once.
+        vm.moveUpNext(from: IndexSet(integer: 2), to: 0)
+        #expect(callCount == 1)
+    }
+
+    // MARK: - playhead-cjqq: schema migration round-trip
+
+    @Test("Episode round-trips with queuePosition unset (additive optional default)")
+    @MainActor
+    func episodeRoundTripsWithQueuePositionNil() throws {
+        let ctx = try makeCjqqInMemoryContext()
+        let ep = Episode(
+            feedItemGUID: "guid-nil",
+            feedURL: URL(string: "https://example.com/rss")!,
+            title: "Nil-position Episode",
+            audioURL: URL(string: "https://example.com/a.mp3")!
+        )
+        ctx.insert(ep)
+        try ctx.save()
+
+        let rows = try ctx.fetch(FetchDescriptor<Episode>())
+        #expect(rows.count == 1)
+        #expect(rows.first?.queuePosition == nil)
+    }
+
+    @Test("Episode round-trips with queuePosition set (mutable + persisted)")
+    @MainActor
+    func episodeRoundTripsWithQueuePositionSet() throws {
+        let ctx = try makeCjqqInMemoryContext()
+        let ep = Episode(
+            feedItemGUID: "guid-numbered",
+            feedURL: URL(string: "https://example.com/rss")!,
+            title: "Numbered Episode",
+            audioURL: URL(string: "https://example.com/a.mp3")!,
+            queuePosition: 5
+        )
+        ctx.insert(ep)
+        try ctx.save()
+
+        var rows = try ctx.fetch(FetchDescriptor<Episode>())
+        #expect(rows.first?.queuePosition == 5)
+
+        // Mutability — re-assigning the column persists.
+        rows.first?.queuePosition = 0
+        try ctx.save()
+        let rereads = try ctx.fetch(FetchDescriptor<Episode>())
+        #expect(rereads.first?.queuePosition == 0)
+    }
+
+    // MARK: - playhead-cjqq: drag survives ActivityRefreshNotification
+
+    /// Central acceptance test (per bd spec): drag-reorder is persisted
+    /// to the SwiftData column, so the next `loadInputs()` call (which
+    /// is what the production `ActivityRefreshNotification` handler
+    /// triggers) returns episodes in the user's manual order rather
+    /// than scheduler-derived order.
+    ///
+    /// We exercise the full path:
+    ///   1. Insert N episodes (all queuePosition == nil).
+    ///   2. Build a provider closure that fetches them and produces
+    ///      `ActivityEpisodeInput`s (mirrors `LiveActivitySnapshotProvider`'s
+    ///      forwarder logic without needing AnalysisStore).
+    ///   3. Refresh → reorder → call the persistence closure (the same
+    ///      one production wires) → refresh again from the same model
+    ///      context. Assert the post-refresh order matches the
+    ///      post-move order.
+    ///
+    /// This is the test the spec specifically calls out: "drag (call
+    /// moveUpNext), then post the refresh notification, then assert
+    /// the order is preserved".
+    @Test("drag-reorder persists across simulated ActivityRefreshNotification")
+    @MainActor
+    func dragSurvivesRefreshNotification() throws {
+        let ctx = try makeCjqqInMemoryContext()
+        let feedURL = URL(string: "https://example.com/rss")!
+
+        // Insert four episodes in canonical id order. They start with
+        // `queuePosition == nil` so the aggregator's nil-last sort
+        // gives a deterministic id-asc fallback.
+        for i in 0..<4 {
+            ctx.insert(
+                Episode(
+                    feedItemGUID: "guid-\(i)",
+                    feedURL: feedURL,
+                    title: "Episode \(i)",
+                    audioURL: URL(string: "https://example.com/a\(i).mp3")!
+                )
+            )
+        }
+        try ctx.save()
+
+        // Provider closure: SwiftData fetch → ActivityEpisodeInput list.
+        // Mirrors the relevant forwarder slice of
+        // `LiveActivitySnapshotProvider.loadInputs()`. We bypass the
+        // AnalysisStore filter (unrelated to queuePosition routing) by
+        // synthesizing a queued/non-running status for every row.
+        let queuedStatus = Self.makeStatus(
+            disposition: .queued, reason: .waitingForTime
+        )
+        let loadInputs: @MainActor () -> [ActivityEpisodeInput] = {
+            let rows = (try? ctx.fetch(FetchDescriptor<Episode>())) ?? []
+            return rows.map { episode in
+                Self.makeInput(
+                    id: episode.canonicalEpisodeKey,
+                    title: episode.title,
+                    podcast: nil,
+                    status: queuedStatus,
+                    isRunning: false,
+                    queuePosition: episode.queuePosition
+                )
+            }
+        }
+
+        // Persist callback identical in shape to the one wired in
+        // ContentView.
+        let persist: @MainActor ([(episodeId: String, queuePosition: Int)]) -> Void = { ordering in
+            for entry in ordering {
+                let key = entry.episodeId
+                let descriptor = FetchDescriptor<Episode>(
+                    predicate: #Predicate { $0.canonicalEpisodeKey == key }
+                )
+                if let row = try? ctx.fetch(descriptor).first {
+                    row.queuePosition = entry.queuePosition
+                }
+            }
+            try? ctx.save()
+        }
+
+        let vm = ActivityViewModel(persistQueueOrder: persist)
+
+        // Initial refresh → all-nil → id-asc fallback.
+        vm.refresh(from: loadInputs())
+        let initialIds = vm.snapshot.upNext.map(\.episodeId)
+        #expect(initialIds.count == 4)
+        // Capture index of the row we will move so the assertion does
+        // not assume a particular hash-order (canonicalEpisodeKey is
+        // derived from feedURL + guid; ordering is deterministic but
+        // the test reads more cleanly with explicit lookup).
+        let movedId = initialIds[3]
+
+        // User drags the last row to the front.
+        vm.moveUpNext(from: IndexSet(integer: 3), to: 0)
+        let postMoveIds = vm.snapshot.upNext.map(\.episodeId)
+        #expect(postMoveIds.first == movedId)
+        #expect(postMoveIds.count == 4)
+
+        // Simulate an ActivityRefreshNotification post: the production
+        // handler is `Task { await refresh() }` which calls
+        // `loadInputs()` and then `viewModel.refresh(from:)`. We do
+        // exactly that here against the same model context — the
+        // queuePosition column the persist closure just wrote must
+        // round-trip into the next snapshot.
+        vm.refresh(from: loadInputs())
+        let postRefreshIds = vm.snapshot.upNext.map(\.episodeId)
+        #expect(postRefreshIds == postMoveIds,
+                "Drag-reorder lost across refresh — expected \(postMoveIds), got \(postRefreshIds)")
+
+        // Sanity: the persisted queuePositions are 0,1,2,3 in the new
+        // visual order (sequential renumber).
+        let allRows = try ctx.fetch(FetchDescriptor<Episode>())
+        let positionByKey = Dictionary(
+            uniqueKeysWithValues: allRows.compactMap { row -> (String, Int)? in
+                guard let pos = row.queuePosition else { return nil }
+                return (row.canonicalEpisodeKey, pos)
+            }
+        )
+        for (i, id) in postMoveIds.enumerated() {
+            #expect(positionByKey[id] == i,
+                    "Episode \(id) at visual index \(i) should have queuePosition \(i)")
+        }
+    }
+}
+
+/// Builds an in-memory `ModelContext` for the cjqq tests. Mirrors
+/// `makeDiagnosticsInMemoryContext()` but kept private to this suite so
+/// future schema additions in the diagnostics suites do not silently
+/// re-shape the cjqq fixtures.
+@MainActor
+private func makeCjqqInMemoryContext() throws -> ModelContext {
+    let schema = Schema([Podcast.self, Episode.self, UserPreferences.self])
+    let config = ModelConfiguration(isStoredInMemoryOnly: true)
+    let container = try ModelContainer(for: schema, configurations: [config])
+    return ModelContext(container)
 }

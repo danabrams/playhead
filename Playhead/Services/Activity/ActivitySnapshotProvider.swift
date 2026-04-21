@@ -139,7 +139,14 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
                     podcastTitle: episode.podcast?.title,
                     status: status,
                     isRunning: isRunning,
-                    finishedAt: finishedAt
+                    finishedAt: finishedAt,
+                    // playhead-cjqq: forward the persisted user
+                    // ordering so the aggregator's Up Next sort
+                    // (queuePosition asc, nil-last, episodeId
+                    // tiebreak) reflects the user's drag-reorder
+                    // history. The aggregator owns the sort comparator
+                    // — this provider is purely a forwarder.
+                    queuePosition: episode.queuePosition
                 )
             )
         }

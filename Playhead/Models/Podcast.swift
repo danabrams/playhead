@@ -93,6 +93,22 @@ final class Episode {
     /// evaluated". For now the two are updated together.
     var playbackAnchor: TimeInterval?
 
+    /// Persisted user ordering for the Activity screen's Up Next section
+    /// (playhead-cjqq). `nil` means the user has never reordered this
+    /// episode — it inherits the production provider's natural
+    /// (scheduler-derived) ordering. After a drag, the visible Up Next
+    /// rows are renumbered sequentially (0, 1, 2, …) so subsequent
+    /// reorders compose deterministically and the Int domain cannot
+    /// overflow.
+    ///
+    /// Sort rule used by `LiveActivitySnapshotProvider`:
+    ///   `(queuePosition asc, nil-last, canonicalEpisodeKey tiebreak)`
+    ///
+    /// Additive optional field — defaults to `nil` so existing rows
+    /// decode under the V1 schema without a migration stage. Do NOT
+    /// promote to non-optional (would break decode of pre-cjqq rows).
+    var queuePosition: Int?
+
     init(
         feedItemGUID: String,
         feedURL: URL,
@@ -110,7 +126,8 @@ final class Episode {
         feedMetadata: FeedDescriptionMetadata? = nil,
         diagnosticsOptIn: Bool = false,
         coverageSummary: CoverageSummary? = nil,
-        playbackAnchor: TimeInterval? = nil
+        playbackAnchor: TimeInterval? = nil,
+        queuePosition: Int? = nil
     ) {
         self.feedItemGUID = feedItemGUID
         self.canonicalEpisodeKey = Self.makeCanonicalKey(
@@ -131,6 +148,7 @@ final class Episode {
         self.diagnosticsOptIn = diagnosticsOptIn
         self.coverageSummary = coverageSummary
         self.playbackAnchor = playbackAnchor
+        self.queuePosition = queuePosition
     }
 
     /// Derives the canonical key from feedItemGUID + feedURL for preview budget tracking.

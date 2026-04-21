@@ -57,6 +57,32 @@ struct ActivityEpisodeInput: Sendable, Hashable {
     /// (done / failed / cancelled / unavailable). `nil` for in-flight
     /// jobs. Drives Recently-Finished membership and ordering.
     let finishedAt: Date?
+    /// Persisted user ordering for the Up Next section
+    /// (playhead-cjqq). `nil` means the user has never reordered this
+    /// episode — it inherits the provider's natural ordering and sorts
+    /// after every numbered row. The aggregator applies the
+    /// `(queuePosition asc, nil-last, episodeId tiebreak)` sort to the
+    /// Up Next bucket only; Now / Paused / Recently-Finished ordering
+    /// is unaffected.
+    let queuePosition: Int?
+
+    init(
+        episodeId: String,
+        episodeTitle: String,
+        podcastTitle: String?,
+        status: EpisodeSurfaceStatus,
+        isRunning: Bool,
+        finishedAt: Date?,
+        queuePosition: Int? = nil
+    ) {
+        self.episodeId = episodeId
+        self.episodeTitle = episodeTitle
+        self.podcastTitle = podcastTitle
+        self.status = status
+        self.isRunning = isRunning
+        self.finishedAt = finishedAt
+        self.queuePosition = queuePosition
+    }
 }
 
 // MARK: - ActivitySnapshot
@@ -162,8 +188,39 @@ final class ActivityViewModel {
     /// through `@Observable` and re-renders the four sections.
     private(set) var snapshot: ActivitySnapshot = .empty
 
-    init(snapshot: ActivitySnapshot = .empty) {
+    /// Persistence callback invoked by `moveUpNext` to write the new
+    /// `(episodeId, queuePosition)` ordering through to the SwiftData
+    /// `Episode` rows. The default no-op keeps unit tests and previews
+    /// pure (no SwiftData dependency); production wires a closure that
+    /// updates the model context so the next refresh observes the new
+    /// order (playhead-cjqq).
+    ///
+    /// Contract:
+    ///   * Called with the renumbered ordering of all visible Up Next
+    ///     rows after a successful move (`from != to`). Position 0 is
+    ///     the top of the list.
+    ///   * Episodes whose `queuePosition` was previously `nil` get a
+    ///     concrete number on first move; episodes outside the visible
+    ///     Up Next bucket are NOT touched (the callback receives only
+    ///     the rows that were on screen).
+    ///   * **Visibility invariant:** sequential renumber `[0, N)` only
+    ///     avoids collisions with off-screen rows because the production
+    ///     provider returns the FULL queued set today (no pagination /
+    ///     filtering of Up Next). If a future feature pages or filters
+    ///     Up Next, this assignment scheme must change (e.g. renumber
+    ///     only moved rows, or use sparse indices) — otherwise the
+    ///     `[0, N)` block can collide with persisted positions on
+    ///     hidden episodes, producing nondeterministic sort.
+    ///   * Idempotency: a no-op move (`from == to`) does NOT invoke
+    ///     the callback to avoid save churn.
+    private let persistQueueOrder: @MainActor ([(episodeId: String, queuePosition: Int)]) -> Void
+
+    init(
+        snapshot: ActivitySnapshot = .empty,
+        persistQueueOrder: @escaping @MainActor ([(episodeId: String, queuePosition: Int)]) -> Void = { _ in }
+    ) {
         self.snapshot = snapshot
+        self.persistQueueOrder = persistQueueOrder
     }
 
     /// Re-aggregate the snapshot from a fresh batch of inputs. Called by
@@ -178,27 +235,49 @@ final class ActivityViewModel {
     /// handler funnels through here so the snapshot's `upNext` ordering
     /// is the single source of truth the view re-renders against.
     ///
-    /// v1 scope (playhead-quh7 fix): the reorder lives only on the
-    /// in-memory snapshot — the next `refresh(from:)` will overwrite the
-    /// user's manual order with whatever the production
-    /// `ActivitySnapshotProvider` hands back. Persisting the order
-    /// across refreshes requires a new column on the `Episode` SwiftData
-    /// model (e.g. `queuePosition: Int?`) and is intentionally deferred
-    /// to a follow-up bead per the spec-fix scope guidance ("if nothing
-    /// supports persisted user ordering today, STOP and ask before going
-    /// wider"). The ergonomic gap is real but bounded: refreshes today
-    /// arrive only on scheduler-state changes, not on a polling loop, so
-    /// the manual order persists for the duration of the user's
-    /// interaction with the screen.
+    /// Persistence (playhead-cjqq): after the in-memory reorder, the
+    /// VM renumbers every visible Up Next row sequentially (0, 1, 2, …)
+    /// and calls `persistQueueOrder` so the new ordering is written
+    /// through to the SwiftData `Episode.queuePosition` column. The
+    /// next `ActivityRefreshNotification` post then re-aggregates from
+    /// persistence and the user's drag survives. Sequential renumber
+    /// (vs. sparse / fractional indices) keeps the Int domain bounded
+    /// no matter how many drags occur, and is trivially deterministic
+    /// for the sort comparator's tiebreak.
+    ///
+    /// Idempotency: a no-op move (`from == to` for a single index, or
+    /// `move(fromOffsets:toOffset:)` returning the same sequence) does
+    /// NOT invoke `persistQueueOrder` — the snapshot is left unchanged
+    /// and no save is requested. This avoids spurious SwiftData saves
+    /// when SwiftUI re-emits a no-op `.onMove` callback (e.g. on a
+    /// drag that ends at its origin).
     func moveUpNext(from source: IndexSet, to destination: Int) {
         var reordered = snapshot.upNext
         reordered.move(fromOffsets: source, toOffset: destination)
+
+        // Idempotency guard: if the move did not change the ordering,
+        // skip both the snapshot replacement and the persistence
+        // callback. Compare by episodeId because `ActivityUpNextRow` is
+        // a value type and array equality already implies same order,
+        // but explicit ID comparison reads more clearly at the call
+        // site.
+        let beforeIds = snapshot.upNext.map(\.episodeId)
+        let afterIds = reordered.map(\.episodeId)
+        guard beforeIds != afterIds else { return }
+
         snapshot = ActivitySnapshot(
             now: snapshot.now,
             upNext: reordered,
             paused: snapshot.paused,
             recentlyFinished: snapshot.recentlyFinished
         )
+
+        // Renumber sequentially so the persisted queuePosition column
+        // matches the new on-screen ordering, then write through.
+        let renumbered = reordered.enumerated().map { index, row in
+            (episodeId: row.episodeId, queuePosition: index)
+        }
+        persistQueueOrder(renumbered)
     }
 
     // MARK: - Pure aggregation
@@ -216,10 +295,18 @@ final class ActivityViewModel {
     /// Stable enough for snapshot tests and SwiftUI Previews.
     ///
     /// Ordering rules:
-    /// - Now / Up Next / Paused: input order preserved (the production
-    ///   provider hands rows in scheduler-priority order). Drag-to-
-    ///   reorder for Up Next ships via `moveUpNext(from:to:)` which
-    ///   mutates the in-memory snapshot after aggregation.
+    /// - Now / Paused: input order preserved (the production
+    ///   provider hands rows in scheduler-priority order).
+    /// - Up Next (playhead-cjqq): sort by `queuePosition` ascending,
+    ///   with `nil` last, then deterministic tiebreak by `episodeId`.
+    ///   This gives the user's persisted drag-reorder priority over
+    ///   scheduler-derived ordering, while episodes that have never
+    ///   been reordered (`queuePosition == nil`) keep their relative
+    ///   provider-order at the tail. Drag-to-reorder ships via
+    ///   `moveUpNext(from:to:)` which both mutates the in-memory
+    ///   snapshot AND writes the new sequence through to the
+    ///   `persistQueueOrder` callback so the next refresh observes
+    ///   the new order.
     /// - Recently Finished: newest-first by `finishedAt`, capped at
     ///   `recentlyFinishedCap`, filtered to the trailing 24h window
     ///   ending at `now`.
@@ -232,7 +319,11 @@ final class ActivityViewModel {
         now: Date
     ) -> ActivitySnapshot {
         var nowRows: [ActivityNowRow] = []
-        var upNextRows: [ActivityUpNextRow] = []
+        // Track Up Next rows alongside their (queuePosition, episodeId)
+        // sort keys so the final sort can apply the (queuePosition asc,
+        // nil-last, episodeId tiebreak) rule without re-querying the
+        // input list.
+        var upNextRowsWithKeys: [(row: ActivityUpNextRow, queuePosition: Int?, episodeId: String)] = []
         var pausedRows: [ActivityPausedRow] = []
         var finishedRows: [ActivityRecentlyFinishedRow] = []
 
@@ -281,13 +372,16 @@ final class ActivityViewModel {
                         )
                     )
                 } else {
-                    upNextRows.append(
-                        ActivityUpNextRow(
-                            episodeId: input.episodeId,
-                            title: input.episodeTitle,
-                            podcastTitle: input.podcastTitle
-                        )
+                    let row = ActivityUpNextRow(
+                        episodeId: input.episodeId,
+                        title: input.episodeTitle,
+                        podcastTitle: input.podcastTitle
                     )
+                    upNextRowsWithKeys.append((
+                        row: row,
+                        queuePosition: input.queuePosition,
+                        episodeId: input.episodeId
+                    ))
                 }
 
             case .failed, .cancelled, .unavailable:
@@ -304,6 +398,25 @@ final class ActivityViewModel {
         if finishedRows.count > recentlyFinishedCap {
             finishedRows = Array(finishedRows.prefix(recentlyFinishedCap))
         }
+
+        // Up Next sort (playhead-cjqq): queuePosition asc, nil-last,
+        // deterministic episodeId tiebreak. Stable across calls so a
+        // refresh after a drag-reorder produces the same visual order
+        // the user just constructed.
+        upNextRowsWithKeys.sort { lhs, rhs in
+            switch (lhs.queuePosition, rhs.queuePosition) {
+            case let (l?, r?):
+                if l != r { return l < r }
+                return lhs.episodeId < rhs.episodeId
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (nil, nil):
+                return lhs.episodeId < rhs.episodeId
+            }
+        }
+        let upNextRows = upNextRowsWithKeys.map(\.row)
 
         return ActivitySnapshot(
             now: nowRows,
