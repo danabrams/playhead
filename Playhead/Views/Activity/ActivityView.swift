@@ -100,7 +100,7 @@ struct ActivityView: View {
                 for: ActivityRefreshNotification.name
             )
         ) { _ in
-            Task { await refresh() }
+            Task { @MainActor in await refresh() }
         }
     }
 
