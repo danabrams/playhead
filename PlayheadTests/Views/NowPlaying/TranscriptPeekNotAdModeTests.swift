@@ -19,8 +19,34 @@ private final class SpyCorrectionStore: UserCorrectionStore, @unchecked Sendable
     var recordedEvents: [CorrectionEvent] = []
     var vetoedSpans: [DecodedSpan] = []
 
+    /// playhead-zskc: captures calls to the time-range veto API that the
+    /// transcript "not an ad" submission now funnels through.
+    struct TimeRangeVeto: Sendable {
+        let timeRange: ClosedRange<Double>
+        let assetId: String
+        let podcastId: String?
+        let source: CorrectionSource
+    }
+    var timeRangeVetoes: [TimeRangeVeto] = []
+
     func recordVeto(span: DecodedSpan) async {
         vetoedSpans.append(span)
+    }
+
+    func recordVeto(
+        timeRange: ClosedRange<Double>,
+        assetId: String,
+        podcastId: String?,
+        source: CorrectionSource
+    ) async {
+        timeRangeVetoes.append(
+            TimeRangeVeto(
+                timeRange: timeRange,
+                assetId: assetId,
+                podcastId: podcastId,
+                source: source
+            )
+        )
     }
 
     func record(_ event: CorrectionEvent) async throws {

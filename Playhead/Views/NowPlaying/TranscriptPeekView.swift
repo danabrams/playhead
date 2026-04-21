@@ -593,10 +593,14 @@ private extension TranscriptPeekView {
         let endTime = selectedChunks.map(\.endTime).max() ?? 0
         let assetId = peekViewModel.analysisAssetId
 
-        // Build a synthetic DecodedSpan covering the selected range.
-        // Use a unique ID per veto to avoid collisions when the same asset
-        // has multiple not-ad corrections at different time ranges.
-        // Format times with fixed precision to avoid floating-point representation drift.
+        // Build a synthetic DecodedSpan covering the selected range. This is
+        // ONLY passed to `onRevertAdWindows`, which uses its startTime/endTime
+        // to call orchestrator.revertByTimeRange. It is never persisted (that
+        // path previously collapsed to scope `exactSpan:0:Int.max` — see
+        // playhead-zskc).
+        //
+        // Format times with fixed precision to avoid floating-point
+        // representation drift in the synthesized id.
         let vetoId = String(format: "%@-veto-%.3f-%.3f", assetId, startTime, endTime)
         let syntheticSpan = DecodedSpan(
             id: vetoId,
@@ -613,10 +617,16 @@ private extension TranscriptPeekView {
         let revertCallback = onRevertAdWindows
         let store = correctionStore
         Task {
-            // recordVeto persists a CorrectionEvent internally (exactSpan scope
-            // + optional sponsorOnShow scope), so no separate store.record() call
-            // is needed — that was causing a double-write inflating correction factors.
-            await store.recordVeto(span: syntheticSpan)
+            // playhead-zskc: persist with precise time scope rather than the
+            // coarse DecodedSpan path. recordVeto(timeRange:) writes a single
+            // `.exactTimeSpan` CorrectionEvent, giving us per-window metric
+            // precision without the `exactSpan:0:Int.max` whole-episode fallback.
+            await store.recordVeto(
+                timeRange: startTime...endTime,
+                assetId: assetId,
+                podcastId: pid,
+                source: .manualVeto
+            )
 
             // Revert overlapping ad windows via the orchestrator callback.
             if let revertCallback {

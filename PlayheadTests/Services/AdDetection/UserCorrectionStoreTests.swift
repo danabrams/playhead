@@ -17,6 +17,106 @@ final class UserCorrectionStoreTests: XCTestCase {
         XCTAssertEqual(deserialized, scope, "exactSpan must round-trip through serialization")
     }
 
+    // MARK: - exactTimeSpan round-trip (playhead-zskc)
+
+    func testExactTimeSpanSerializationRoundTrip() {
+        let scope = CorrectionScope.exactTimeSpan(
+            assetId: "asset-time",
+            startTime: 123.456,
+            endTime: 789.012
+        )
+        let serialized = scope.serialized
+        let deserialized = CorrectionScope.deserialize(serialized)
+        XCTAssertEqual(deserialized, scope,
+            "exactTimeSpan must round-trip through serialization at 3-decimal precision")
+    }
+
+    func testExactTimeSpanSerializedFormat() {
+        // Fixed 3-decimal precision: avoids FP drift across encode/decode cycles.
+        let scope = CorrectionScope.exactTimeSpan(
+            assetId: "my-asset",
+            startTime: 60.0,
+            endTime: 120.5
+        )
+        XCTAssertEqual(scope.serialized, "exactTimeSpan:my-asset:60.000:120.500")
+    }
+
+    func testExactTimeSpanTruncatesHighPrecisionInputs() {
+        // Input with >3 decimals must still round-trip — the serialized form
+        // is canonicalized to 3 decimals, and deserialize/reserialize must be
+        // a fixpoint.
+        let scope = CorrectionScope.exactTimeSpan(
+            assetId: "asset-precision",
+            startTime: 10.123456789,
+            endTime: 20.987654321
+        )
+        let serialized = scope.serialized
+        let deserialized = CorrectionScope.deserialize(serialized)
+        // The deserialized scope carries 3-decimal-truncated times.
+        guard case .exactTimeSpan(let id, let s, let e) = deserialized else {
+            XCTFail("Expected exactTimeSpan, got \(String(describing: deserialized))")
+            return
+        }
+        XCTAssertEqual(id, "asset-precision")
+        XCTAssertEqual(s, 10.123, accuracy: 1e-6)
+        XCTAssertEqual(e, 20.988, accuracy: 1e-6)
+
+        // Reserialize must be a fixpoint.
+        if case .exactTimeSpan = deserialized {
+            XCTAssertEqual(deserialized?.serialized, serialized,
+                "Re-serializing a deserialized exactTimeSpan must be a fixpoint")
+        }
+    }
+
+    func testExactTimeSpanWithColonInAssetIdRoundTrip() {
+        let scope = CorrectionScope.exactTimeSpan(
+            assetId: "asset:with:colons",
+            startTime: 1.5,
+            endTime: 2.5
+        )
+        let deserialized = CorrectionScope.deserialize(scope.serialized)
+        XCTAssertEqual(deserialized, scope,
+            "exactTimeSpan with colons in assetId must round-trip (times are the last two components)")
+    }
+
+    func testExactTimeSpanZeroDurationSpanRoundTrips() {
+        let scope = CorrectionScope.exactTimeSpan(
+            assetId: "asset-zero",
+            startTime: 42.0,
+            endTime: 42.0
+        )
+        let deserialized = CorrectionScope.deserialize(scope.serialized)
+        XCTAssertEqual(deserialized, scope, "zero-duration exactTimeSpan must round-trip")
+    }
+
+    func testExactTimeSpanLargeTimesRoundTrip() {
+        // Very long episode (e.g. 12-hour livestream archive).
+        let scope = CorrectionScope.exactTimeSpan(
+            assetId: "asset-long",
+            startTime: 42_000.125,
+            endTime: 42_420.750
+        )
+        let deserialized = CorrectionScope.deserialize(scope.serialized)
+        XCTAssertEqual(deserialized, scope, "Large time values must round-trip")
+    }
+
+    func testExactTimeSpanMalformedDeserialize() {
+        XCTAssertNil(CorrectionScope.deserialize("exactTimeSpan:assetOnly"),
+            "exactTimeSpan with only assetId must fail to parse")
+        XCTAssertNil(CorrectionScope.deserialize("exactTimeSpan:asset:notADouble:10"),
+            "exactTimeSpan with non-numeric startTime must fail to parse")
+        XCTAssertNil(CorrectionScope.deserialize("exactTimeSpan:asset:1.0:notADouble"),
+            "exactTimeSpan with non-numeric endTime must fail to parse")
+    }
+
+    func testExactTimeSpanBroadScopeIsNil() {
+        // exactTimeSpan is a Layer A scope (like exactSpan) — it must not
+        // participate in broad-scope promotion evaluation.
+        let scope = CorrectionScope.exactTimeSpan(assetId: "a", startTime: 0, endTime: 5)
+        XCTAssertNil(scope.broadScope,
+            "exactTimeSpan must have nil broadScope (Layer A, not a promotable broad scope)")
+    }
+
     func testSponsorOnShowSerializationRoundTrip() {
         let scope = CorrectionScope.sponsorOnShow(podcastId: "pod-123", sponsor: "BrandName")
         let serialized = scope.serialized
@@ -662,6 +762,108 @@ final class UserCorrectionStoreTests: XCTestCase {
 
         let loaded = try await correctionStore.activeCorrections(for: "asset-idem")
         XCTAssertEqual(loaded.count, 1)
+    }
+
+    // MARK: - recordVeto(timeRange:) integration (playhead-zskc)
+
+    /// The new API on UserCorrectionStore that accepts a precise `[startTime, endTime]`
+    /// range without requiring atom ordinals. Replaces the old
+    /// `recordVeto(span:)` + synthetic `0...Int.max` fallback at the six UI call sites.
+    func testRecordVetoTimeRangePersistsExactTimeSpan() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-time-veto"))
+
+        await correctionStore.recordVeto(
+            timeRange: 12.5...47.875,
+            assetId: "asset-time-veto",
+            podcastId: "pod-time",
+            source: .manualVeto
+        )
+
+        let events = try await correctionStore.activeCorrections(for: "asset-time-veto")
+        XCTAssertEqual(events.count, 1)
+        let event = try XCTUnwrap(events.first)
+        XCTAssertTrue(event.scope.hasPrefix("exactTimeSpan:"),
+            "Scope must be exactTimeSpan, NOT exactSpan with 0...Int.max (got \(event.scope))")
+
+        // Parse and verify the actual times survived.
+        let parsed = CorrectionScope.deserialize(event.scope)
+        guard case .exactTimeSpan(let assetId, let startTime, let endTime) = parsed else {
+            XCTFail("Expected exactTimeSpan, got \(String(describing: parsed))")
+            return
+        }
+        XCTAssertEqual(assetId, "asset-time-veto")
+        XCTAssertEqual(startTime, 12.5, accuracy: 0.001)
+        XCTAssertEqual(endTime, 47.875, accuracy: 0.001)
+
+        XCTAssertEqual(event.source, .manualVeto)
+        XCTAssertEqual(event.podcastId, "pod-time")
+        XCTAssertEqual(event.correctionType, .falsePositive,
+            "manualVeto source must infer falsePositive correctionType")
+    }
+
+    func testRecordVetoTimeRangeFalseNegativeSourceSetsFalseNegativeType() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-fn-time"))
+
+        await correctionStore.recordVeto(
+            timeRange: 100.0...130.0,
+            assetId: "asset-fn-time",
+            podcastId: "pod-fn",
+            source: .falseNegative
+        )
+
+        let events = try await correctionStore.activeCorrections(for: "asset-fn-time")
+        XCTAssertEqual(events.count, 1)
+        let event = try XCTUnwrap(events.first)
+        XCTAssertEqual(event.source, .falseNegative)
+        XCTAssertEqual(event.correctionType, .falseNegative,
+            "falseNegative source must infer falseNegative correctionType")
+    }
+
+    func testRecordVetoTimeRangeListenRevertSourceSetsFalsePositiveType() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-lr-time"))
+
+        await correctionStore.recordVeto(
+            timeRange: 5.0...25.0,
+            assetId: "asset-lr-time",
+            podcastId: "pod-lr",
+            source: .listenRevert
+        )
+
+        let events = try await correctionStore.activeCorrections(for: "asset-lr-time")
+        XCTAssertEqual(events.count, 1)
+        let event = try XCTUnwrap(events.first)
+        XCTAssertEqual(event.source, .listenRevert)
+        XCTAssertEqual(event.correctionType, .falsePositive,
+            "listenRevert source must infer falsePositive correctionType")
+    }
+
+    /// Regression test matching the bead's acceptance criteria: the new API
+    /// must NEVER produce the old coarse `exactSpan:asset:0:9223372036854775807`
+    /// scope that the 19 real-world rows on Dan's device exhibited.
+    func testRecordVetoTimeRangeDoesNotProduceIntMaxFallback() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-no-intmax"))
+
+        await correctionStore.recordVeto(
+            timeRange: 1.0...2.0,
+            assetId: "asset-no-intmax",
+            podcastId: nil,
+            source: .manualVeto
+        )
+
+        let events = try await correctionStore.activeCorrections(for: "asset-no-intmax")
+        let event = try XCTUnwrap(events.first)
+        XCTAssertFalse(event.scope.contains("9223372036854775807"),
+            "Scope must never encode Int.max sentinel (regression on playhead-zskc)")
+        XCTAssertFalse(event.scope.hasPrefix("exactSpan:"),
+            "Time-range veto must persist as exactTimeSpan, not exactSpan")
     }
 
     // MARK: - CASCADE delete

@@ -85,30 +85,23 @@ struct NowPlayingView: View {
                 onListen: { item in
                     viewModel.handleListenRewind(item: item)
                 },
-                // Phase 7.2: "Not an ad" correction from the banner.
-                // Uses the current analysis asset ID from the runtime. If the
-                // episode changed between skip and tap, the veto silently drops
-                // (assetId is nil) — acceptable for this UI path.
+                // Phase 7.2 / playhead-zskc: "Not an ad" correction from the
+                // banner. Route through `revertWindow(windowId:)` rather than
+                // constructing a CorrectionEvent directly — the orchestrator
+                // path writes a precise `.exactTimeSpan` correction (covering
+                // the window's snapped start/end) and handles the state,
+                // trust signal, and persistence atomically. Previously this
+                // site bypassed the orchestrator and persisted an
+                // `exactSpan:0:Int.max` whole-episode veto.
                 onNotAnAd: { item in
-                    guard let assetId = runtime.currentAnalysisAssetId else { return }
-                    let correctionStore = runtime.correctionStore
+                    let orchestrator = runtime.skipOrchestrator
+                    let podcastId = item.podcastId
+                    let windowId = item.windowId
                     Task {
-                        let event = CorrectionEvent(
-                            analysisAssetId: assetId,
-                            scope: CorrectionScope.exactSpan(
-                                assetId: assetId,
-                                ordinalRange: 0...Int.max
-                            ).serialized,
-                            createdAt: Date().timeIntervalSince1970,
-                            source: .manualVeto,
-                            podcastId: item.podcastId
+                        await orchestrator.revertWindow(
+                            windowId: windowId,
+                            podcastId: podcastId
                         )
-                        do {
-                            try await correctionStore.record(event)
-                        } catch {
-                            Logger(subsystem: "com.playhead", category: "NowPlayingView")
-                                .warning("Failed to record manual-veto correction: \(error)")
-                        }
                     }
                 }
             )

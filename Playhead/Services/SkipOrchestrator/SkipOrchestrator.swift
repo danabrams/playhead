@@ -584,30 +584,23 @@ actor SkipOrchestrator {
             await trustService.recordFalseSkipSignal(podcastId: podcastId)
         }
 
-        // Phase 7.2: persist a listenRevert CorrectionEvent (fire-and-forget).
+        // Phase 7.2 / playhead-zskc: persist a listenRevert CorrectionEvent
+        // with window-precise time scope (fire-and-forget). AdWindow does not
+        // carry atom ordinals, so we use the snapped start/end times directly
+        // via the `.exactTimeSpan` correction scope.
         if let correctionStore {
             let assetId = managed.adWindow.analysisAssetId
-            let scope = CorrectionScope.exactSpan(
-                assetId: assetId,
-                // AdWindow does not carry atom ordinals; use the widest plausible range
-                // as a conservative veto. Phase 7.3 can narrow this when ordinals are available.
-                ordinalRange: 0...Int.max
-            )
-            let event = CorrectionEvent(
-                analysisAssetId: assetId,
-                scope: scope.serialized,
-                createdAt: Date().timeIntervalSince1970,
-                source: .listenRevert,
-                podcastId: podcastId
-            )
+            let startTime = managed.snappedStart
+            let endTime = managed.snappedEnd
+            let pid = podcastId
             let store = correctionStore
             Task {
-                do {
-                    try await store.record(event)
-                } catch {
-                    Logger(subsystem: "com.playhead", category: "SkipOrchestrator")
-                        .warning("Failed to record listen-revert correction: \(error)")
-                }
+                await store.recordVeto(
+                    timeRange: startTime...endTime,
+                    assetId: assetId,
+                    podcastId: pid,
+                    source: .listenRevert
+                )
             }
         }
 
@@ -651,28 +644,25 @@ actor SkipOrchestrator {
                 logger.warning("Failed to persist revert for \(id): \(error.localizedDescription)")
             }
 
-            // Persist a manualVeto CorrectionEvent.
+            // Persist a manualVeto CorrectionEvent with precise time scope.
+            // playhead-zskc: use the user-supplied `start...end` (the time
+            // range the user identified) rather than the managed window's
+            // snapped boundaries, so the correction matches what the user
+            // actually gestured against when multiple overlapping windows
+            // intersect the range.
             if let correctionStore {
                 let assetId = managed.adWindow.analysisAssetId
-                let scope = CorrectionScope.exactSpan(
-                    assetId: assetId,
-                    ordinalRange: 0...Int.max
-                )
-                let event = CorrectionEvent(
-                    analysisAssetId: assetId,
-                    scope: scope.serialized,
-                    createdAt: Date().timeIntervalSince1970,
-                    source: .manualVeto,
-                    podcastId: podcastId
-                )
+                let pid = podcastId
+                let rangeStart = start
+                let rangeEnd = end
                 let store = correctionStore
                 Task {
-                    do {
-                        try await store.record(event)
-                    } catch {
-                        Logger(subsystem: "com.playhead", category: "SkipOrchestrator")
-                            .warning("Failed to record manual-veto correction: \(error)")
-                    }
+                    await store.recordVeto(
+                        timeRange: rangeStart...rangeEnd,
+                        assetId: assetId,
+                        podcastId: pid,
+                        source: .manualVeto
+                    )
                 }
             }
         }
@@ -719,28 +709,22 @@ actor SkipOrchestrator {
             await trustService.recordFalseSkipSignal(podcastId: podcastId)
         }
 
-        // Persist a manualVeto CorrectionEvent.
+        // Persist a manualVeto CorrectionEvent with precise time scope.
+        // playhead-zskc: use the managed window's snapped start/end so the
+        // correction carries per-window precision rather than whole-episode.
         if let correctionStore {
             let assetId = managed.adWindow.analysisAssetId
-            let scope = CorrectionScope.exactSpan(
-                assetId: assetId,
-                ordinalRange: 0...Int.max
-            )
-            let event = CorrectionEvent(
-                analysisAssetId: assetId,
-                scope: scope.serialized,
-                createdAt: Date().timeIntervalSince1970,
-                source: .manualVeto,
-                podcastId: podcastId
-            )
+            let startTime = managed.snappedStart
+            let endTime = managed.snappedEnd
+            let pid = podcastId
             let store = correctionStore
             Task {
-                do {
-                    try await store.record(event)
-                } catch {
-                    Logger(subsystem: "com.playhead", category: "SkipOrchestrator")
-                        .warning("Failed to record manual-veto correction: \(error)")
-                }
+                await store.recordVeto(
+                    timeRange: startTime...endTime,
+                    assetId: assetId,
+                    podcastId: pid,
+                    source: .manualVeto
+                )
             }
         }
 

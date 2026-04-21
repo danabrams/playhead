@@ -19,12 +19,25 @@ import OSLog
 ///
 /// Serialized to/from a colon-delimited string for SQLite storage:
 ///   exactSpan:assetId:firstOrdinal:lastOrdinal
+///   exactTimeSpan:assetId:startTimeSeconds:endTimeSeconds
 ///   sponsorOnShow:podcastId:sponsor
 ///   phraseOnShow:podcastId:phrase
 ///   campaignOnShow:podcastId:campaign
 enum CorrectionScope: Sendable, Equatable {
     /// Exact span veto: the specific atom range in a specific asset.
     case exactSpan(assetId: String, ordinalRange: ClosedRange<Int>)
+    /// Exact time-range veto: a specific `[startTime, endTime]` range in an asset.
+    ///
+    /// Used when the UI has precise time boundaries (from `BoundaryExpander`,
+    /// transcript selection, or `AdWindow.snappedStart`/`.snappedEnd`) but no
+    /// corresponding atom ordinals at persistence time. Previously these sites
+    /// fell back to `.exactSpan(ordinalRange: 0...Int.max)`, which collapsed
+    /// window-level corrections to whole-episode vetoes and made per-window
+    /// metrics (precision, recall, IoU) impossible.
+    ///
+    /// Serialized times use fixed 3-decimal precision to avoid floating-point
+    /// representation drift across round-trips.
+    case exactTimeSpan(assetId: String, startTime: Double, endTime: Double)
     /// Sponsor veto across all episodes of a podcast.
     case sponsorOnShow(podcastId: String, sponsor: String)
     /// Phrase veto across all episodes of a podcast.
@@ -45,6 +58,13 @@ enum CorrectionScope: Sendable, Equatable {
         switch self {
         case .exactSpan(let assetId, let range):
             return "exactSpan:\(assetId):\(range.lowerBound):\(range.upperBound)"
+        case .exactTimeSpan(let assetId, let startTime, let endTime):
+            // Fixed 3-decimal precision avoids FP drift over serialize/deserialize
+            // round-trips; mirrors the existing pattern in TranscriptPeekView
+            // which formats veto IDs as "%.3f-%.3f".
+            let startStr = String(format: "%.3f", startTime)
+            let endStr = String(format: "%.3f", endTime)
+            return "exactTimeSpan:\(assetId):\(startStr):\(endStr)"
         case .sponsorOnShow(let podcastId, let sponsor):
             return "sponsorOnShow:\(podcastId):\(sponsor)"
         case .phraseOnShow(let podcastId, let phrase):
@@ -81,6 +101,16 @@ enum CorrectionScope: Sendable, Equatable {
                   let upper = Int(parts[parts.count - 1]) else { return nil }
             let assetId = parts[0..<(parts.count - 2)].joined(separator: ":")
             return .exactSpan(assetId: assetId, ordinalRange: lower...upper)
+        case "exactTimeSpan":
+            // remainder = "assetId:startTime:endTime"
+            // assetId may itself contain colons; the times are the last two parts.
+            let parts = remainder.split(separator: ":", maxSplits: Int.max, omittingEmptySubsequences: false)
+                .map(String.init)
+            guard parts.count >= 3,
+                  let startTime = Double(parts[parts.count - 2]),
+                  let endTime = Double(parts[parts.count - 1]) else { return nil }
+            let assetId = parts[0..<(parts.count - 2)].joined(separator: ":")
+            return .exactTimeSpan(assetId: assetId, startTime: startTime, endTime: endTime)
         case "sponsorOnShow":
             // remainder = "podcastId:sponsor" — split on first colon only so sponsor may contain colons.
             guard let sep = remainder.firstIndex(of: ":") else { return nil }
@@ -115,14 +145,14 @@ enum CorrectionScope: Sendable, Equatable {
     // MARK: - Layer B Mapping
 
     /// Returns the corresponding `BroadCorrectionScope` for Layer B scopes,
-    /// or `nil` for Layer A scopes (exactSpan, campaignOnShow).
+    /// or `nil` for Layer A scopes (exactSpan, exactTimeSpan, campaignOnShow).
     var broadScope: BroadCorrectionScope? {
         switch self {
         case .phraseOnShow:            return .phraseOnShow
         case .sponsorOnShow:           return .sponsorOnShow
         case .domainOwnershipOnShow:   return .domainOwnershipOnShow
         case .jingleOnShow:            return .jingleOnShow
-        case .exactSpan, .campaignOnShow:
+        case .exactSpan, .exactTimeSpan, .campaignOnShow:
             return nil
         }
     }
@@ -163,6 +193,19 @@ protocol UserCorrectionStore: Sendable {
     /// the span's metadata and persist a `CorrectionEvent` for each.
     func recordVeto(span: DecodedSpan) async
 
+    /// Record that the user vetoed an `[startTime, endTime]` range as not-an-ad.
+    ///
+    /// Used by UI paths that have precise time boundaries but no atom ordinals
+    /// (transcript selection, banner taps, orchestrator revert). Persists an
+    /// `.exactTimeSpan` correction scope rather than the coarse
+    /// `.exactSpan(ordinalRange: 0...Int.max)` fallback that preceded this API.
+    func recordVeto(
+        timeRange: ClosedRange<Double>,
+        assetId: String,
+        podcastId: String?,
+        source: CorrectionSource
+    ) async
+
     /// Append a fully-formed correction event to the store.
     func record(_ event: CorrectionEvent) async throws
 
@@ -194,6 +237,15 @@ protocol UserCorrectionStore: Sendable {
 /// Used in release builds and contexts that have not yet wired up persistence.
 struct NoOpUserCorrectionStore: UserCorrectionStore {
     func recordVeto(span: DecodedSpan) async {
+        // No-op.
+    }
+
+    func recordVeto(
+        timeRange: ClosedRange<Double>,
+        assetId: String,
+        podcastId: String?,
+        source: CorrectionSource
+    ) async {
         // No-op.
     }
 
@@ -306,6 +358,46 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
                     "recordVeto: failed to persist sponsorOnShow event for asset \(span.assetId, privacy: .public) sponsor \(entry.normalizedText, privacy: .public): \(error.localizedDescription, privacy: .public)"
                 )
             }
+        }
+    }
+
+    /// Record a veto from a user gesture that carries a precise `[startTime, endTime]`
+    /// range but no atom ordinals.
+    ///
+    /// Persists a single `.exactTimeSpan` correction event. The correction type
+    /// (false positive vs false negative) is derived from `source.kind` so the
+    /// resulting event participates correctly in passthrough / boost aggregation.
+    func recordVeto(
+        timeRange: ClosedRange<Double>,
+        assetId: String,
+        podcastId: String?,
+        source: CorrectionSource
+    ) async {
+        let scope = CorrectionScope.exactTimeSpan(
+            assetId: assetId,
+            startTime: timeRange.lowerBound,
+            endTime: timeRange.upperBound
+        )
+        let correctionType: CorrectionType = {
+            switch source.kind {
+            case .falseNegative: return .falseNegative
+            case .falsePositive: return .falsePositive
+            }
+        }()
+        let event = CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: scope.serialized,
+            createdAt: Date().timeIntervalSince1970,
+            source: source,
+            podcastId: podcastId,
+            correctionType: correctionType
+        )
+        do {
+            try await record(event)
+        } catch {
+            logger.error(
+                "recordVeto(timeRange:): failed to persist exactTimeSpan event for asset \(assetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
         }
     }
 
