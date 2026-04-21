@@ -80,9 +80,14 @@ final class ManualClock: @unchecked Sendable {
     /// Closure-form accessor matching the actors' `clock` init
     /// parameter signature. Capturing `self` is safe because the
     /// closure carries the same internal lock the direct calls use.
+    ///
+    /// Uses `[unowned self]` to fail loud if the clock outlives its
+    /// owner: a silent wall-clock fallback would corrupt synthetic
+    /// timing in any test that hands the closure to a longer-lived
+    /// context (e.g. a `Task.detached` racing teardown).
     var dateProvider: @Sendable () -> Date {
-        { [weak self] in
-            self?.now() ?? Date()
+        { [unowned self] in
+            self.now()
         }
     }
 }
