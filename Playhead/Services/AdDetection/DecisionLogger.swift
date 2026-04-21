@@ -73,7 +73,7 @@ struct NoOpDecisionLogger: DecisionLoggerProtocol {
 ///   - `fusedConfidence.breakdown` mirrors `DecisionExplanation` per-source.
 struct DecisionLogEntry: Codable, Equatable, Sendable {
 
-    /// Schema version; increment on breaking changes. Current: 1.
+    /// Schema version; increment on breaking changes. Current: 2.
     let schemaVersion: Int
 
     /// Analysis-asset content fingerprint (SHA-256-derived). Not the canonical
