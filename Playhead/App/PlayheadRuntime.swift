@@ -382,6 +382,27 @@ final class PlayheadRuntime {
             invariantLogger: surfaceStatusLogger,
             episodeIdHasher: surfaceStatusHasher
         )
+        // playhead-8em9 (narL): DEBUG-only DecisionLogger. Constructed
+        // synchronously BEFORE AdDetectionService so the very first
+        // backfill or hot-path run observes the installed logger (the
+        // prior async `setDecisionLogger` Task could race the first
+        // backfill and drop its decision records). Production release
+        // builds never compile this branch; any FileManager failure
+        // (e.g. read-only Documents) is logged and the service keeps
+        // its built-in NoOp default.
+        let preBuiltDecisionLogger: DecisionLoggerProtocol?
+        #if DEBUG
+        do {
+            preBuiltDecisionLogger = try DecisionLogger()
+        } catch {
+            Logger(subsystem: "com.playhead", category: "Runtime")
+                .warning("DecisionLogger init failed — logging disabled: \(error.localizedDescription, privacy: .public)")
+            preBuiltDecisionLogger = nil
+        }
+        #else
+        preBuiltDecisionLogger = nil
+        #endif
+
         self.adDetectionService = AdDetectionService(
             store: analysisStore,
             metadataExtractor: FallbackExtractor(),
@@ -405,7 +426,8 @@ final class PlayheadRuntime {
             phase5ProjectorObserver: phase5ProjectorObserver,
             // Phase 6.5 (playhead-4my.16): forward eligible fusion decisions
             // to the orchestrator after each backfill run (step 17).
-            skipOrchestrator: skipOrchestrator
+            skipOrchestrator: skipOrchestrator,
+            decisionLogger: preBuiltDecisionLogger
         )
         self.downloadManager = DownloadManager()
 
@@ -526,6 +548,10 @@ final class PlayheadRuntime {
         Task { [adDetectionService, correctionStore] in
             await adDetectionService.setUserCorrectionStore(correctionStore)
         }
+
+        // playhead-8em9 (narL): DecisionLogger installation moved upstream
+        // — it's now constructed before AdDetectionService and passed via
+        // init, so there's no race with the first backfill/hot-path run.
 
         Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator] in
             // Migrate the analysis store before any component queries its tables.
