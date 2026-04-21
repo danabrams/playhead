@@ -19,18 +19,28 @@ final class UserPreferences {
     /// available (e.g. URLSession configuration at app boot).
     var allowsCellular: Bool
 
+    /// playhead-zp0x: whether the single notification-permission ask
+    /// (gated to non-Generic Download-Next-N submits) has been
+    /// performed. Once true — regardless of whether the user accepted
+    /// or denied — we never re-ask. Defaults to `false` so first-
+    /// launch users see the ask exactly once when they first pick a
+    /// trip context other than Generic.
+    var notificationPermissionAsked: Bool = false
+
     init(
         skipBehavior: SkipBehavior = .auto,
         playbackSpeed: Double = 1.0,
         skipIntervals: SkipIntervals = .init(),
         backgroundProcessingEnabled: Bool = true,
-        allowsCellular: Bool = true
+        allowsCellular: Bool = true,
+        notificationPermissionAsked: Bool = false
     ) {
         self.skipBehavior = skipBehavior
         self.playbackSpeed = playbackSpeed
         self.skipIntervals = skipIntervals
         self.backgroundProcessingEnabled = backgroundProcessingEnabled
         self.allowsCellular = allowsCellular
+        self.notificationPermissionAsked = notificationPermissionAsked
     }
 }
 

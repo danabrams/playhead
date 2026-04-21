@@ -12,6 +12,11 @@ enum SwiftDataStore {
             Episode.self,
             UserPreferences.self,
             InstallIdentity.self,
+            // playhead-zp0x: persisted batch state for the trip-ready /
+            // action-required notification reducer. Survives app
+            // suspension/restart so an overnight-completed download
+            // still fires `tripReady`.
+            DownloadBatch.self,
         ])
     }
 
@@ -46,7 +51,18 @@ enum PlayheadSchemaV1: VersionedSchema {
     static var versionIdentifier: Schema.Version { Schema.Version(1, 0, 0) }
 
     static var models: [any PersistentModel.Type] {
-        [Podcast.self, Episode.self, UserPreferences.self, InstallIdentity.self]
+        [
+            Podcast.self,
+            Episode.self,
+            UserPreferences.self,
+            InstallIdentity.self,
+            // playhead-zp0x: schema is still V1 (zero migration stages
+            // declared below). Adding to V1 is acceptable here because
+            // there is nothing to migrate FROM. Once V2 is introduced
+            // we MUST replace these with frozen type snapshots — see
+            // the MIGRATION WARNING above.
+            DownloadBatch.self,
+        ]
     }
 }
 

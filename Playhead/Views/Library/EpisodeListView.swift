@@ -156,10 +156,21 @@ private extension EpisodeListView {
                 DownloadNextView(
                     episodes: episodes,
                     mediaCapBytes: StorageBudgetSettings.load().mediaCapBytes,
-                    onDownload: { picked, _ in
-                        // v1 picker only changes notification copy
-                        // (bd playhead-hkg8 / UI design §D). Scheduler
-                        // behavior is identical regardless of `context`.
+                    onDownload: { picked, context in
+                        // playhead-zp0x: non-Generic submits create a
+                        // persistent `DownloadBatch` row and trigger
+                        // the single notification-permission ask
+                        // (gated by `UserPreferences.notificationPermissionAsked`).
+                        // Generic submits are unchanged (no row, no
+                        // permission ask) — the v1 scheduler-behavior
+                        // contract from playhead-hkg8 still holds.
+                        if context != .generic {
+                            DownloadBatchAdmission.admit(
+                                episodes: picked,
+                                context: context,
+                                modelContext: modelContext
+                            )
+                        }
                         Task {
                             for episode in picked {
                                 await runtime.downloadManager.backgroundDownload(
