@@ -47,6 +47,10 @@ struct SettingsView: View {
     /// FileProtectionType.complete and is therefore opaque to Xcode).
     @State private var analysisStoreExportInProgress = false
     @State private var analysisStoreExportLastResult: String?
+    /// playhead-dgzw (narE): transient UI state for "Export corpus log".
+    @State private var corpusExportInProgress = false
+    @State private var corpusExportResult: CorpusExportResult?
+    @State private var corpusExportError: String?
     #endif
 
     /// Injected dependencies — set via environment or passed directly.
@@ -730,6 +734,61 @@ private extension SettingsView {
                     .listRowBackground(AppColors.surface)
             }
 
+            // playhead-dgzw (narE): corpus-export action. Writes JSONL to
+            // Documents/ so it lands in the file-sharing-visible directory
+            // (UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace —
+            // dev builds only). Unlike the text-export ShareLink above,
+            // this one is retrieved via Files.app or Finder and is
+            // designed to compose with narL's decision-log.jsonl into a
+            // single corpus bundle.
+            Button {
+                Task { await generateCorpusExport() }
+            } label: {
+                HStack {
+                    Label("Export Corpus Log", systemImage: "doc.append")
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.accent)
+
+                    Spacer()
+
+                    if corpusExportInProgress {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(corpusExportInProgress)
+            .listRowBackground(AppColors.surface)
+
+            if let result = corpusExportResult {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(result.fileURL.lastPathComponent)
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppColors.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text("\(result.assetCount) assets · \(result.spanCount) spans · \(result.correctionCount) corrections"
+                        + (result.skippedCorrectionCount > 0
+                            ? " · \(result.skippedCorrectionCount) skipped"
+                            : ""))
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppColors.textTertiary)
+                    if let manifest = result.decisionLogManifestURL {
+                        Text("paired with \(manifest.lastPathComponent)")
+                            .font(AppTypography.caption)
+                            .foregroundStyle(AppColors.textTertiary)
+                    }
+                }
+                .listRowBackground(AppColors.surface)
+            }
+
+            if let error = corpusExportError {
+                Text(error)
+                    .font(AppTypography.caption)
+                    .foregroundStyle(.red)
+                    .listRowBackground(AppColors.surface)
+            }
+
             if let export = debugExport {
                 ShareLink(
                     item: export,
@@ -831,6 +890,34 @@ private extension SettingsView {
             analysisStoreExportLastResult = "Exported \(SettingsViewModel.formattedSize(size)) to Documents/ExportedAnalysisStore/analysis.sqlite"
         } catch {
             analysisStoreExportLastResult = "Export failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// playhead-dgzw (narE): write `Documents/corpus-export.<ts>.jsonl` via
+    /// `CorpusExporter`. The file lives in the UIFileSharingEnabled Documents
+    /// directory so it can be pulled off-device via Finder / Files.app without
+    /// the Xcode "Download Container" dance.
+    @MainActor
+    func generateCorpusExport() async {
+        corpusExportInProgress = true
+        corpusExportError = nil
+        defer { corpusExportInProgress = false }
+
+        let fm = FileManager.default
+        guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            corpusExportError = "Could not locate Documents directory."
+            return
+        }
+
+        do {
+            let result = try await CorpusExporter.export(
+                store: runtime.analysisStore,
+                documentsURL: docs
+            )
+            corpusExportResult = result
+        } catch {
+            corpusExportError = "Export failed: \(error.localizedDescription)"
+            corpusExportResult = nil
         }
     }
 

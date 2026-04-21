@@ -83,11 +83,19 @@ final class SurfaceStatusUILintTests: XCTestCase {
     /// tracked as a separate followup — see bead filed after ol05 merge.
     /// They are allow-listed here so that the extended UI lint can land
     /// without blocking on a scope-creep refactor.
+    ///
+    /// `CorpusExporter.swift` (playhead-dgzw, narE) is a DEBUG-only
+    /// developer tool that intentionally reads `AnalysisStore` rows to
+    /// write a JSONL corpus for offline analysis. Like
+    /// `DebugEpisodeExporter`, it is not a SwiftUI View and never renders
+    /// user-facing copy — it lives under `Playhead/Views/Settings/` purely
+    /// for file-system locality with the Settings-debug-section call site.
     private static let uiPathExemptFilenames: Set<String> = [
         "PlayheadRuntime.swift",
         "PlayheadAppDelegate.swift",
         "DebugEpisodeExporter.swift",
         "TranscriptPeekViewModel.swift",
+        "CorpusExporter.swift",
     ]
 
     func testInternalMissCauseIsNotReferencedInUIViews() throws {
