@@ -353,4 +353,63 @@ struct SkipOrchestratorRevertTests {
         let overlapping = receivedSegments?.filter { $0.start < 120 && $0.end > 60 } ?? []
         #expect(overlapping.isEmpty)
     }
+
+    // MARK: - playhead-zskc code review I5: one gesture, one correction event
+
+    @Test("revertByTimeRange persists exactly one CorrectionEvent per gesture, even when N windows overlap")
+    func revertByTimeRangeWritesOneCorrectionPerGesture() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        // Three adjacent ad windows, all overlapping the user's 50..130 gesture.
+        let ads = [
+            makeSkipTestAdWindow(id: "ad-dedupe-1", startTime: 55, endTime: 80,
+                                 confidence: 0.9, decisionState: "confirmed"),
+            makeSkipTestAdWindow(id: "ad-dedupe-2", startTime: 85, endTime: 105,
+                                 confidence: 0.9, decisionState: "confirmed"),
+            makeSkipTestAdWindow(id: "ad-dedupe-3", startTime: 110, endTime: 125,
+                                 confidence: 0.9, decisionState: "confirmed"),
+        ]
+        for ad in ads { try await store.insertAdWindow(ad) }
+        await orchestrator.receiveAdWindows(ads)
+
+        // One gesture: "none of this is an ad" from 50..130.
+        await orchestrator.revertByTimeRange(start: 50, end: 130, podcastId: "podcast-1")
+
+        // The veto persistence is fire-and-forget via an unstructured Task —
+        // poll (with a ceiling) until a CorrectionEvent appears.
+        var corrections: [CorrectionEvent] = []
+        for _ in 0..<20 {  // up to ~1s
+            corrections = try await correctionStore.activeCorrections(for: "asset-1")
+            if !corrections.isEmpty { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        #expect(corrections.count == 1,
+                "Three overlapping windows reverted by one gesture must produce exactly one CorrectionEvent, got \(corrections.count)")
+        // And the persisted scope must span the user's gesture, not a window's snapped boundary.
+        if let scope = corrections.first.flatMap({ CorrectionScope.deserialize($0.scope) }),
+           case .exactTimeSpan(_, let startTime, let endTime) = scope {
+            #expect(startTime == 50.0, "persisted start must be the user's gesture start")
+            #expect(endTime == 130.0, "persisted end must be the user's gesture end")
+        } else {
+            Issue.record("Expected exactTimeSpan scope from the revert, got \(corrections.first?.scope ?? "<none>")")
+        }
+    }
 }

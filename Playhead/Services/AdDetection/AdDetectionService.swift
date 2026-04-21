@@ -377,7 +377,8 @@ actor AdDetectionService {
         // persisted above and the boundaries came from real features.
         if let correctionStore {
             await correctionStore.recordVeto(
-                timeRange: startTime...endTime,
+                startTime: startTime,
+                endTime: endTime,
                 assetId: analysisAssetId,
                 podcastId: podcastId,
                 source: .falseNegative

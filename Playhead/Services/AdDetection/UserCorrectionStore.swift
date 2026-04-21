@@ -28,12 +28,14 @@ enum CorrectionScope: Sendable, Equatable {
     case exactSpan(assetId: String, ordinalRange: ClosedRange<Int>)
     /// Exact time-range veto: a specific `[startTime, endTime]` range in an asset.
     ///
-    /// Used when the UI has precise time boundaries (from `BoundaryExpander`,
-    /// transcript selection, or `AdWindow.snappedStart`/`.snappedEnd`) but no
-    /// corresponding atom ordinals at persistence time. Previously these sites
-    /// fell back to `.exactSpan(ordinalRange: 0...Int.max)`, which collapsed
-    /// window-level corrections to whole-episode vetoes and made per-window
-    /// metrics (precision, recall, IoU) impossible.
+    /// Prefer `.exactSpan` whenever the caller holds a `DecodedSpan` with real
+    /// atom ordinals (the backfill path). Use `.exactTimeSpan` only when the UI
+    /// has precise time boundaries (from `BoundaryExpander`, transcript
+    /// selection, or `AdWindow.snappedStart`/`.snappedEnd`) but no corresponding
+    /// atom ordinals at persistence time. Previously these sites fell back to
+    /// `.exactSpan(ordinalRange: 0...Int.max)`, which collapsed window-level
+    /// corrections to whole-episode vetoes and made per-window metrics
+    /// (precision, recall, IoU) impossible.
     ///
     /// Serialized times use fixed 3-decimal precision to avoid floating-point
     /// representation drift across round-trips.
@@ -85,6 +87,13 @@ enum CorrectionScope: Sendable, Equatable {
     /// (e.g. sponsors like "Squarespace: Build It", URLs in phrases, compound
     /// campaign names). The type prefix is extracted first; then the remainder
     /// is split with the minimum number of splits needed for each case.
+    ///
+    /// Contract: the `.exactTimeSpan` parser depends on `serialized` using
+    /// non-localized fixed-point decimal output (`String(format: "%.3f", …)`)
+    /// for startTime/endTime. If you change the formatter (e.g. scientific
+    /// notation, localized decimals, variable precision), update the parser
+    /// so the "last two colon-separated tokens are the times" invariant still
+    /// holds.
     static func deserialize(_ string: String) -> CorrectionScope? {
         guard let typeEnd = string.firstIndex(of: ":") else { return nil }
         let typeStr = String(string[string.startIndex..<typeEnd])
@@ -199,8 +208,22 @@ protocol UserCorrectionStore: Sendable {
     /// (transcript selection, banner taps, orchestrator revert). Persists an
     /// `.exactTimeSpan` correction scope rather than the coarse
     /// `.exactSpan(ordinalRange: 0...Int.max)` fallback that preceded this API.
+    ///
+    /// The signature takes `startTime` / `endTime` as separate parameters
+    /// rather than a `ClosedRange<Double>` so call sites don't construct a
+    /// range via `start...end` — that operator traps on `start > end` or
+    /// non-finite bounds, moving the crash surface up into the callers.
+    /// Implementations are responsible for clamping / rejecting as needed.
+    ///
+    /// Limitation: unlike `recordVeto(span:)`, this entry point does not
+    /// populate `causalSource` or `targetRefs` on the persisted event — the
+    /// anchor provenance / evidence ledger that drive `CausalInference` are
+    /// not carried through the UI gesture boundary. Per-window metrics work
+    /// (scope is preserved); causal attribution does not. Callers with access
+    /// to anchor provenance should prefer `recordVeto(span:)`.
     func recordVeto(
-        timeRange: ClosedRange<Double>,
+        startTime: Double,
+        endTime: Double,
         assetId: String,
         podcastId: String?,
         source: CorrectionSource
@@ -241,7 +264,8 @@ struct NoOpUserCorrectionStore: UserCorrectionStore {
     }
 
     func recordVeto(
-        timeRange: ClosedRange<Double>,
+        startTime: Double,
+        endTime: Double,
         assetId: String,
         podcastId: String?,
         source: CorrectionSource
@@ -367,36 +391,53 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
     /// Persists a single `.exactTimeSpan` correction event. The correction type
     /// (false positive vs false negative) is derived from `source.kind` so the
     /// resulting event participates correctly in passthrough / boost aggregation.
+    ///
+    /// Non-finite bounds (NaN / ±Infinity) are rejected and logged — they would
+    /// otherwise serialize to "nan"/"inf" strings and round-trip back into
+    /// unsafe downstream `ClosedRange<Double>` construction.
+    ///
+    /// Inverted ranges (`endTime < startTime`) are silently clamped via
+    /// `min`/`max` so an upstream bug does not corrupt storage. See the
+    /// protocol doccomment for why the signature takes two Doubles rather
+    /// than a `ClosedRange`.
     func recordVeto(
-        timeRange: ClosedRange<Double>,
+        startTime: Double,
+        endTime: Double,
         assetId: String,
         podcastId: String?,
         source: CorrectionSource
     ) async {
+        guard startTime.isFinite, endTime.isFinite else {
+            logger.warning(
+                "recordVeto(startTime:endTime:): rejecting non-finite range [\(startTime), \(endTime)] for asset \(assetId, privacy: .public)"
+            )
+            return
+        }
+        let clampedStart = Swift.min(startTime, endTime)
+        let clampedEnd = Swift.max(startTime, endTime)
+        if clampedStart != startTime || clampedEnd != endTime {
+            logger.warning(
+                "recordVeto(startTime:endTime:): inverted range [\(startTime), \(endTime)] clamped to [\(clampedStart), \(clampedEnd)] for asset \(assetId, privacy: .public)"
+            )
+        }
         let scope = CorrectionScope.exactTimeSpan(
             assetId: assetId,
-            startTime: timeRange.lowerBound,
-            endTime: timeRange.upperBound
+            startTime: clampedStart,
+            endTime: clampedEnd
         )
-        let correctionType: CorrectionType = {
-            switch source.kind {
-            case .falseNegative: return .falseNegative
-            case .falsePositive: return .falsePositive
-            }
-        }()
         let event = CorrectionEvent(
             analysisAssetId: assetId,
             scope: scope.serialized,
             createdAt: Date().timeIntervalSince1970,
             source: source,
             podcastId: podcastId,
-            correctionType: correctionType
+            correctionType: source.kind.correctionType
         )
         do {
             try await record(event)
         } catch {
             logger.error(
-                "recordVeto(timeRange:): failed to persist exactTimeSpan event for asset \(assetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                "recordVeto(startTime:endTime:): failed to persist exactTimeSpan event for asset \(assetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
             )
         }
     }

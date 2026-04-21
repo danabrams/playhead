@@ -91,6 +91,47 @@ struct CorrectionSuppressionTests {
                 "Effective confidence must be below candidate threshold (0.40)")
     }
 
+    // MARK: - Active exactTimeSpan correction blocks detection for that asset
+
+    @Test("Fresh exactTimeSpan correction (via recordVeto) → passthrough factor ≈ 0.0 → blocks span")
+    func freshExactTimeSpanCorrectionBlocksBackfill() async throws {
+        // playhead-zskc code review I3: the headline suppression test above uses
+        // `.exactSpan`, but the whole point of the bead is that manual UI gestures
+        // now persist as `.exactTimeSpan`. Passthrough is scope-agnostic
+        // (filters by `event.source?.kind`), so the behaviour should mirror —
+        // but the invariant deserves direct coverage.
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-time-suppress"))
+
+        // Use the recordVeto entry point — the actual production path.
+        await correctionStore.recordVeto(
+            startTime: 10.0,
+            endTime: 40.0,
+            assetId: "asset-time-suppress",
+            podcastId: nil,
+            source: .manualVeto
+        )
+
+        // Passthrough factor should be ≈ 0.0 for a fresh time-range correction.
+        let factor = await correctionStore.correctionPassthroughFactor(for: "asset-time-suppress")
+        #expect(factor < 0.05,
+                "Fresh exactTimeSpan correction must yield passthrough ≈ 0.0, got \(factor)")
+
+        // And DecisionMapper must gate the span.
+        let span = makeSpan(assetId: "asset-time-suppress")
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: moderateEvidenceLedger(),
+            config: defaultConfig(),
+            transcriptQuality: .good,
+            correctionFactor: factor
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .blockedByUserCorrection,
+                "Active fresh exactTimeSpan correction must block span via DecisionMapper")
+    }
+
     // MARK: - Active sponsorOnShow correction blocks detection for that sponsor
 
     @Test("Fresh sponsorOnShow correction → passthrough factor ≈ 0.0 → blocks span on same asset")
@@ -484,12 +525,13 @@ struct ListenRevertSponsorScopeTests {
     // evidence.
     //
     // This is a known design limitation: the "Listen" revert path (banner →
-    // SkipOrchestrator.recordListenRevert) only writes exactSpan scope.
-    // A future phase could enrich AdWindow with evidence catalog entries to
-    // enable sponsor scope inference on the revert path.
+    // SkipOrchestrator.recordListenRevert) only writes a single exactTimeSpan
+    // scope (playhead-zskc changed it from exactSpan). A future phase could
+    // enrich AdWindow with evidence catalog entries to enable sponsor scope
+    // inference on the revert path.
 
     @Test("recordListenRevert writes only exactTimeSpan — no sponsorOnShow (by design)")
-    func listenRevertWritesOnlyExactSpan() async throws {
+    func listenRevertWritesOnlyExactTimeSpan() async throws {
         let analysisStore = try await makeTestStore()
         try await analysisStore.insertAsset(makeSkipTestAnalysisAsset())
 

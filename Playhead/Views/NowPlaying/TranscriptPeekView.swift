@@ -618,11 +618,12 @@ private extension TranscriptPeekView {
         let store = correctionStore
         Task {
             // playhead-zskc: persist with precise time scope rather than the
-            // coarse DecodedSpan path. recordVeto(timeRange:) writes a single
+            // coarse DecodedSpan path. recordVeto writes a single
             // `.exactTimeSpan` CorrectionEvent, giving us per-window metric
             // precision without the `exactSpan:0:Int.max` whole-episode fallback.
             await store.recordVeto(
-                timeRange: startTime...endTime,
+                startTime: startTime,
+                endTime: endTime,
                 assetId: assetId,
                 podcastId: pid,
                 source: .manualVeto

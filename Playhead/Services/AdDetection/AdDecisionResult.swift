@@ -220,6 +220,18 @@ extension CorrectionSource {
     }
 }
 
+extension CorrectionKind {
+    /// Map to the persisted `CorrectionType` value. FP/FN `CorrectionType`
+    /// cases share names with `CorrectionKind` — this extension centralises
+    /// the mapping so call sites don't reimplement the switch.
+    var correctionType: CorrectionType {
+        switch self {
+        case .falseNegative: return .falseNegative
+        case .falsePositive: return .falsePositive
+        }
+    }
+}
+
 // MARK: - CorrectionEvent
 
 /// Append-only record of a user correction. Schema owned here; Phase 7 writes to it.

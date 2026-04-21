@@ -245,6 +245,10 @@ struct UserMarkedAdPersistenceTests {
         #expect(assetId == "asset-1")
         #expect(startTime == 30.0, "startTime must match caller's boundary")
         #expect(endTime == 90.0, "endTime must match caller's boundary")
+        // playhead-zskc code review M4: confirm correctionType mapping from
+        // source.kind persists through the AdDetectionService path.
+        #expect(fn.correctionType == .falseNegative,
+                "falseNegative source must persist as correctionType.falseNegative")
     }
 }
 
