@@ -157,6 +157,7 @@
 		46F95851988FF94547A1B5B2 /* Phase8IntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98F869C807630D405AD6FEA7 /* Phase8IntegrationTests.swift */; };
 		471038AEDD9AF022E7FCD931 /* RegionFeatureExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0319DD76563086B00208363B /* RegionFeatureExtractor.swift */; };
 		472F422C41261146C1A31024 /* TestFactories.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6ED6F7FD4D7DCFA3E1987397 /* TestFactories.swift */; };
+		3ADF03DD4532A7A8AC6D3D84 /* ManualClock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A088FF8CB6E1DB9C9DDDA2F /* ManualClock.swift */; };
 		475BC09C69A1094B40DDA058 /* EpisodeSurfaceStatusObserverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 572E5C5803C25FD3E0F60300 /* EpisodeSurfaceStatusObserverTests.swift */; };
 		47C3CA87F0F634436BC7A946 /* CandidateWindowCascadeProximalReadinessSLITest.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA221BBBA9BF4266FF470543 /* CandidateWindowCascadeProximalReadinessSLITest.swift */; };
 		47CB84CB13FE7B1D6E7810B9 /* MetadataPriorShift.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09296900B2ECE34006E65C79 /* MetadataPriorShift.swift */; };
@@ -735,6 +736,7 @@
 		6D9C6511B5CC01D7FF96C232 /* CounterfactualEvaluatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CounterfactualEvaluatorTests.swift; sourceTree = "<group>"; };
 		6E2A6E8C01F29AE9B73B3688 /* ModelDownloadViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelDownloadViewModel.swift; sourceTree = "<group>"; };
 		6ED6F7FD4D7DCFA3E1987397 /* TestFactories.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestFactories.swift; sourceTree = "<group>"; };
+		8A088FF8CB6E1DB9C9DDDA2F /* ManualClock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualClock.swift; sourceTree = "<group>"; };
 		6EF50CC35FAAB117F9B5FC18 /* NowPlayingBarHapticTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingBarHapticTests.swift; sourceTree = "<group>"; };
 		6FBA32BCAB319B95E3E521C2 /* BackgroundRuntimeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundRuntimeTests.swift; sourceTree = "<group>"; };
 		706B2C65A529A7841685AB7E /* ReplaySimulatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplaySimulatorTests.swift; sourceTree = "<group>"; };
@@ -1055,6 +1057,7 @@
 		0753BFE37D1F1FA4F930D2DD /* Helpers */ = {
 			isa = PBXGroup;
 			children = (
+				8A088FF8CB6E1DB9C9DDDA2F /* ManualClock.swift */,
 				5709B3C33C59DCCFE4B0CCCA /* Stubs.swift */,
 				6ED6F7FD4D7DCFA3E1987397 /* TestFactories.swift */,
 				5A4EB1B31B07312CD71E6889 /* TestFMRuntime.swift */,
@@ -2755,6 +2758,7 @@
 				CEF2B3F5548674AD9E0F81F9 /* TargetedWindowNarrowerTests.swift in Sources */,
 				2F300A7B04024052E6AB9575 /* TestFMRuntime.swift in Sources */,
 				983B586CC34C7992D6399B9E /* TestFMRuntimeRegexTests.swift in Sources */,
+				3ADF03DD4532A7A8AC6D3D84 /* ManualClock.swift in Sources */,
 				472F422C41261146C1A31024 /* TestFactories.swift in Sources */,
 				2AFEBC16762D1A2321E0E142 /* TestFixtureValidationTests.swift in Sources */,
 				B5429AA526891A3F746344EE /* TestHelpers.swift in Sources */,
