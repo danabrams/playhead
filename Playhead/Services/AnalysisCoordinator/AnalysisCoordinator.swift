@@ -165,6 +165,19 @@ actor AnalysisCoordinator {
     /// Last time we processed a time update, to debounce.
     private var lastTimeUpdateProcessed: TimeInterval = 0
 
+    /// Minimum fraction of `episodeDuration` that the transcript must
+    /// cover before `finalizeBackfill` may transition the session to
+    /// `.complete`. If coverage falls short we transition to `.failed`
+    /// so the scheduler re-queues the job; better to retry on a future
+    /// session than stamp `analysisState=complete` on a partial result.
+    ///
+    /// Tuning note: 0.95 was picked to tolerate the few-seconds tail
+    /// that a decoder can chop off the very end of an episode (trailing
+    /// silence, unfinished frames) while still catching the order-of-
+    /// magnitude shortfalls we saw in production (e.g. 689s of
+    /// coverage on a 3600s episode, ratio 0.19).
+    static let finalizeBackfillMinCoverageRatio: Double = 0.95
+
     /// Set to `true` when `stop()` is called. Observed by `runPendingBackfill`
     /// so that a coordinator stop initiated mid-backfill (e.g. thermal=critical
     /// triggering `BackgroundProcessingService.handleCapabilityUpdate`) tears
@@ -1478,6 +1491,16 @@ actor AnalysisCoordinator {
                 }
             }
 
+            // The decoder closed its shard stream, so no more shards
+            // will arrive from this streaming session. Tell the
+            // transcript engine so it can drain remaining backlog and
+            // emit `.completed`. Without this the engine would park
+            // forever on its append-waiter and `.completed` would never
+            // fire, leaving `finalizeBackfill` unreachable — or (before
+            // the fix) the engine would race to `.completed` on a
+            // momentarily empty queue mid-stream.
+            await self.transcriptEngine.finishAppending(analysisAssetId: assetId)
+
             await decoder.cleanup()
             self.activeDecoder = nil
             self.logger.info("Streaming decode complete: \(self.streamingShardsEmitted) shards emitted")
@@ -1609,8 +1632,83 @@ actor AnalysisCoordinator {
             return
         }
 
+        // Coverage guard: refuse to mark `.complete` when the transcript
+        // covers less than `finalizeBackfillMinCoverageRatio` of the
+        // episode. This defends against upstream races (e.g. streaming
+        // decoder finishing before the engine has transcribed every
+        // shard) that would otherwise stamp `analysisState=complete` on
+        // a heavily partial result. When the guard fires we transition
+        // to `.failed` with a descriptive reason; the scheduler will
+        // re-queue the job on a future session.
+        let episodeDuration = currentEpisodeDuration()
+        let verdict = Self.finalizeBackfillVerdict(
+            chunks: allChunks,
+            episodeDuration: episodeDuration
+        )
+        switch verdict {
+        case .blockComplete(let coverageEnd, let duration, let ratio):
+            let reason = String(
+                format: "transcript coverage %.1f/%.1fs (ratio %.3f < %.3f)",
+                coverageEnd, duration, ratio, Self.finalizeBackfillMinCoverageRatio
+            )
+            logger.warning(
+                "Coverage guard BLOCKED .complete for asset \(assetId): \(reason) — transitioning to .failed for retry"
+            )
+            try await transition(
+                sessionId: sessionId,
+                assetId: assetId,
+                to: .failed,
+                failureReason: reason
+            )
+            return
+        case .allowComplete:
+            break
+        }
+
         try await transition(sessionId: sessionId, assetId: assetId, to: .complete)
         logger.info("Analysis complete for asset \(assetId)")
+    }
+
+    /// Decision returned by ``finalizeBackfillVerdict(chunks:episodeDuration:)``.
+    /// Static enum so it can be referenced from tests without depending on
+    /// the coordinator's actor isolation.
+    enum FinalizeBackfillVerdict: Equatable {
+        /// Coverage is sufficient — proceed to transition `.complete`.
+        case allowComplete
+        /// Coverage is below the required ratio. The backfill finalizer
+        /// transitions to `.failed` instead of `.complete` with the
+        /// attached diagnostic numbers.
+        case blockComplete(coverageEnd: Double, episodeDuration: Double, ratio: Double)
+    }
+
+    /// Pure helper that decides whether `finalizeBackfill` may mark the
+    /// session `.complete` given the persisted transcript chunks and the
+    /// resolved episode duration. Extracted as a static function so it
+    /// can be exercised by unit tests without instantiating the full
+    /// coordinator graph (audio, feature, ad-detection, etc.).
+    ///
+    /// - When `episodeDuration <= 0` the helper returns `.allowComplete`
+    ///   because we have no reliable denominator to compare against;
+    ///   treat that as "guard unavailable" rather than synthesize a
+    ///   spurious failure.
+    /// - Empty `chunks` with a known duration evaluates to
+    ///   `coverageEnd == 0` and therefore `.blockComplete`.
+    static func finalizeBackfillVerdict(
+        chunks: [TranscriptChunk],
+        episodeDuration: Double
+    ) -> FinalizeBackfillVerdict {
+        guard episodeDuration > 0 else { return .allowComplete }
+
+        let coverageEnd = chunks.map(\.endTime).max() ?? 0
+        let ratio = coverageEnd / episodeDuration
+        if ratio + 1e-9 < finalizeBackfillMinCoverageRatio {
+            return .blockComplete(
+                coverageEnd: coverageEnd,
+                episodeDuration: episodeDuration,
+                ratio: ratio
+            )
+        }
+        return .allowComplete
     }
 
     private func currentEpisodeDuration() -> Double {

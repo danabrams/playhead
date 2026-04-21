@@ -122,6 +122,21 @@ actor TranscriptEngineService {
     /// Shards queued for processing while the main loop is running.
     private var appendedShards: [AnalysisShard] = []
 
+    /// True once the caller has explicitly signalled that no more shards
+    /// will be appended for the currently active asset (via
+    /// `finishAppending(analysisAssetId:)`). The transcription loop will
+    /// only emit `.completed` after this flag is set — a momentarily
+    /// empty `appendedShards` queue is NOT sufficient.
+    ///
+    /// Reset to `false` in `startTranscription` / `stop` so a new session
+    /// does not inherit the prior session's end-of-input signal.
+    private var inputClosed: Bool = false
+
+    /// Continuations waiting for additional shards (or an end-of-input
+    /// signal). `waitForMoreShards` appends here; `appendShards`,
+    /// `finishAppending`, and `stop` resume every pending continuation.
+    private var appendWaiters: [CheckedContinuation<Void, Never>] = []
+
     /// True while the transcription loop is actively processing.
     /// Used by appendShards to decide whether to start a new loop.
     private var loopRunning: Bool = false
@@ -171,11 +186,20 @@ actor TranscriptEngineService {
         activeTask?.cancel()
 
         // A fresh start should not inherit queued append work from a prior
-        // loop. When the asset changes, also reset the per-asset chunk index.
+        // loop. When the asset changes, also reset the per-asset chunk
+        // index and the end-of-input flag. When the asset matches,
+        // preserve `inputClosed` so a streaming producer that already
+        // finished (and called `finishAppending`) earlier in the pipeline
+        // does not get its end-of-input signal silently discarded by this
+        // reset.
         if activeAssetId != analysisAssetId {
             chunkCounter = 0
+            inputClosed = false
         }
         appendedShards = []
+        // Wake any leftover waiters from a previous loop so they exit
+        // promptly; this keeps stale continuations from being orphaned.
+        resumeAllAppendWaiters()
 
         activeAssetId = analysisAssetId
         activePodcastId = podcastId
@@ -252,6 +276,11 @@ actor TranscriptEngineService {
 
         appendedShards.append(contentsOf: newShards)
 
+        // Appending more work cancels any prior end-of-input signal and
+        // wakes the loop if it was suspended waiting for shards.
+        inputClosed = false
+        resumeAllAppendWaiters()
+
         // If no active loop, start one for the appended shards.
         if !loopRunning {
             activeAssetId = analysisAssetId
@@ -265,6 +294,28 @@ actor TranscriptEngineService {
         }
     }
 
+    /// Signal that no more shards will be appended for the given asset.
+    /// The transcription loop will drain any remaining backlog and then
+    /// emit `.completed`.
+    ///
+    /// The assetId is validated against `activeAssetId`; a mismatch is
+    /// logged and ignored so a stale end-of-input signal from a previous
+    /// session cannot terminate the current loop early.
+    func finishAppending(analysisAssetId: String) {
+        guard let activeAssetId else {
+            logger.debug("finishAppending(\(analysisAssetId)): no active asset — ignoring")
+            return
+        }
+        guard activeAssetId == analysisAssetId else {
+            logger.info(
+                "finishAppending(\(analysisAssetId)): stale signal; active asset is \(activeAssetId)"
+            )
+            return
+        }
+        inputClosed = true
+        resumeAllAppendWaiters()
+    }
+
     /// Stop all transcription work (e.g., episode ended or user switched).
     func stop() {
         activeTask?.cancel()
@@ -276,6 +327,11 @@ actor TranscriptEngineService {
         appendedShards = []
         loopRunning = false
         preemption = nil
+        // Close input and release any suspended waiter so a loop that is
+        // parked on `waitForMoreShards()` returns promptly when the task
+        // is cancelled.
+        inputClosed = true
+        resumeAllAppendWaiters()
     }
 
     /// Clear the active task reference when the loop completes,
@@ -379,38 +435,56 @@ actor TranscriptEngineService {
             }
         }
 
-        // Drain any shards that were appended while we were processing.
-        while !appendedShards.isEmpty {
-            let newBatch = appendedShards
-            appendedShards = []
+        // Drain any shards that were appended while we were processing,
+        // and wait for either more shards or an explicit end-of-input
+        // signal before emitting `.completed`. Emitting on a momentarily
+        // empty queue was the root cause of analysisState=complete
+        // races against a streaming decoder that hadn't finished yet.
+        drainLoop: while true {
+            while !appendedShards.isEmpty {
+                let newBatch = appendedShards
+                appendedShards = []
 
-            let newPrioritized = prioritizeShards(
-                newBatch,
-                existingCoverage: existingCoverage
-            )
+                let newPrioritized = prioritizeShards(
+                    newBatch,
+                    existingCoverage: existingCoverage
+                )
 
-            for shard in newPrioritized {
-                guard !Task.isCancelled else {
-                    logger.info("Transcription cancelled during appended batch")
-                    return
-                }
-                do {
-                    try await transcribeShard(shard, analysisAssetId: analysisAssetId)
-                } catch is CancellationError {
-                    logger.info("Transcription cancelled during appended shard \(shard.id)")
-                    return
-                } catch is TranscriptEnginePreempted {
-                    logger.info("Transcription preempted at safe point after appended shard \(shard.id)")
-                    return
-                } catch {
-                    logger.error("""
-                        Transcription failed for appended shard \(shard.id) \
-                        [start=\(String(format: "%.2f", shard.startTime))s]: \(error)
-                        """)
-                    continue
+                for shard in newPrioritized {
+                    guard !Task.isCancelled else {
+                        logger.info("Transcription cancelled during appended batch")
+                        return
+                    }
+                    do {
+                        try await transcribeShard(shard, analysisAssetId: analysisAssetId)
+                    } catch is CancellationError {
+                        logger.info("Transcription cancelled during appended shard \(shard.id)")
+                        return
+                    } catch is TranscriptEnginePreempted {
+                        logger.info("Transcription preempted at safe point after appended shard \(shard.id)")
+                        return
+                    } catch {
+                        logger.error("""
+                            Transcription failed for appended shard \(shard.id) \
+                            [start=\(String(format: "%.2f", shard.startTime))s]: \(error)
+                            """)
+                        continue
+                    }
                 }
             }
+
+            // Backlog is empty. If the caller has signalled end-of-input,
+            // we're done. Otherwise suspend until someone appends more
+            // shards, calls finishAppending, or stops the engine.
+            if inputClosed { break drainLoop }
+            if Task.isCancelled { return }
+            await waitForMoreShards()
         }
+
+        // If the task was cancelled while we were suspended on a waiter,
+        // exit without emitting `.completed`. Cancellation is not a
+        // legitimate end-of-input.
+        if Task.isCancelled { return }
 
         // Verify the first shard was transcribed. If the first 30s is missing,
         // transcribe shard 0 explicitly.
@@ -433,6 +507,30 @@ actor TranscriptEngineService {
         let loopElapsed = ContinuousClock.now - loopStart
         logger.info("Transcription loop complete for asset \(analysisAssetId) in \(loopElapsed)")
         emitEvent(.completed(analysisAssetId: analysisAssetId))
+    }
+
+    // MARK: - Append-wait plumbing
+
+    /// Suspend until another actor touches the append queue or the
+    /// session ends. The resume side is any of `appendShards`,
+    /// `finishAppending`, `stop`, or a fresh `startTranscription`.
+    private func waitForMoreShards() async {
+        await withCheckedContinuation { continuation in
+            appendWaiters.append(continuation)
+        }
+    }
+
+    /// Wake every suspended waiter. Safe to call repeatedly; it drains
+    /// the continuation list before resuming so a waiter that
+    /// immediately re-suspends (because `appendedShards` is still empty
+    /// and `inputClosed` is still false) does not race a resume from a
+    /// previous wake cycle.
+    private func resumeAllAppendWaiters() {
+        let waiters = appendWaiters
+        appendWaiters = []
+        for continuation in waiters {
+            continuation.resume()
+        }
     }
 
     // MARK: - Single shard transcription

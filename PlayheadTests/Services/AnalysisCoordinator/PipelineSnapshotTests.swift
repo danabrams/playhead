@@ -487,3 +487,115 @@ struct HotPathContextSelectionTests {
         #expect(closeSeedContext.map(\.id) == ["close"])
     }
 }
+
+// MARK: - finalizeBackfill coverage guard
+
+/// Regression: `AnalysisCoordinator.finalizeBackfill` used to transition
+/// the session to `.complete` unconditionally, even when the transcript
+/// covered only a small fraction of the episode duration. Combined with
+/// the streaming engine race (see
+/// `TranscriptEngine/IncrementalShardAppendTests.completedWaitsForFinishAppending`),
+/// this left real episodes at `analysisState=complete` with one or two
+/// chunks of coverage.
+///
+/// The guard is exposed as a pure static helper on `AnalysisCoordinator`
+/// so it can be unit-tested without standing up the full pipeline.
+@Suite("AnalysisCoordinator – Coverage Guard")
+struct CoverageGuardTests {
+
+    private func chunk(startTime: Double, endTime: Double) -> TranscriptChunk {
+        TranscriptChunk(
+            id: UUID().uuidString,
+            analysisAssetId: "asset-coverage",
+            segmentFingerprint: "fp-\(startTime)-\(endTime)",
+            chunkIndex: 0,
+            startTime: startTime,
+            endTime: endTime,
+            text: "x",
+            normalizedText: "x",
+            pass: TranscriptPassType.fast.rawValue,
+            modelVersion: "speech-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil,
+            weakAnchorMetadata: nil
+        )
+    }
+
+    @Test("coverage well below threshold blocks complete transition")
+    func shortCoverageBlocksComplete() {
+        // Matches asset A53E3CE0 from the production export: 60+ min
+        // episode, transcript ended near 690s = ~19% of duration.
+        let chunks = [chunk(startTime: 0, endTime: 689.82)]
+        let episodeDuration = 3600.0
+
+        let verdict = AnalysisCoordinator.finalizeBackfillVerdict(
+            chunks: chunks,
+            episodeDuration: episodeDuration
+        )
+
+        switch verdict {
+        case .blockComplete(let coverageEnd, let duration, let ratio):
+            #expect(coverageEnd == 689.82)
+            #expect(duration == 3600.0)
+            #expect(ratio < 0.95)
+        case .allowComplete:
+            Issue.record("Expected blockComplete for ratio \(689.82 / 3600.0)")
+        }
+    }
+
+    @Test("coverage equal to episode duration permits complete")
+    func fullCoverageAllowsComplete() {
+        let chunks = [chunk(startTime: 0, endTime: 3600)]
+        let verdict = AnalysisCoordinator.finalizeBackfillVerdict(
+            chunks: chunks,
+            episodeDuration: 3600
+        )
+        switch verdict {
+        case .allowComplete: break
+        case .blockComplete:
+            Issue.record("Full coverage must allow complete")
+        }
+    }
+
+    @Test("coverage at the 95% threshold permits complete")
+    func atThresholdAllowsComplete() {
+        let chunks = [chunk(startTime: 0, endTime: 3420)]  // 3420/3600 == 0.95
+        let verdict = AnalysisCoordinator.finalizeBackfillVerdict(
+            chunks: chunks,
+            episodeDuration: 3600
+        )
+        switch verdict {
+        case .allowComplete: break
+        case .blockComplete:
+            Issue.record("Exactly-at-threshold coverage should allow complete")
+        }
+    }
+
+    @Test("unknown episode duration allows complete (no guard available)")
+    func unknownDurationAllowsComplete() {
+        let chunks = [chunk(startTime: 0, endTime: 100)]
+        let verdict = AnalysisCoordinator.finalizeBackfillVerdict(
+            chunks: chunks,
+            episodeDuration: 0
+        )
+        switch verdict {
+        case .allowComplete: break
+        case .blockComplete:
+            Issue.record("With unknown duration the guard should not fire")
+        }
+    }
+
+    @Test("empty chunk set blocks complete when duration is known")
+    func emptyChunksWithKnownDurationBlocks() {
+        let verdict = AnalysisCoordinator.finalizeBackfillVerdict(
+            chunks: [],
+            episodeDuration: 3600
+        )
+        switch verdict {
+        case .blockComplete(let coverageEnd, _, _):
+            #expect(coverageEnd == 0)
+        case .allowComplete:
+            Issue.record("Empty chunks with known duration must block")
+        }
+    }
+}

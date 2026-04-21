@@ -201,6 +201,11 @@ actor AnalysisJobRunner {
             podcastId: request.podcastId,
             preemption: preemption
         )
+        // Batch-mode caller: we hand the engine a static shard set and
+        // have no streaming producer, so signal end-of-input immediately.
+        // Without this the engine will park on `waitForMoreShards()`
+        // forever and `.completed` never fires.
+        await transcriptEngine.finishAppending(analysisAssetId: assetId)
 
         // Observe the event stream for completion, with a 5-minute timeout
         // to avoid hanging indefinitely if the stream never emits .completed.

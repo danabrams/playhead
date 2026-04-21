@@ -647,6 +647,11 @@ struct IncrementalShardAppendTests {
             analysisAssetId: "asset-1",
             snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
         )
+        // Signal end-of-input for the initial batch so `.completed`
+        // fires once the backlog drains. The engine no longer emits
+        // completion on a momentarily empty queue; see
+        // `completedWaitsForFinishAppending`.
+        await engine.finishAppending(analysisAssetId: "asset-1")
 
         // Wait for .completed event.
         for await event in events {
@@ -670,6 +675,8 @@ struct IncrementalShardAppendTests {
             analysisAssetId: "asset-1",
             snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
         )
+        // Signal end-of-input for the appended batch.
+        await engine.finishAppending(analysisAssetId: "asset-1")
 
         // Wait for the append loop to complete (it starts a new loop that emits .completed).
         for await event in appendEvents {
@@ -680,6 +687,81 @@ struct IncrementalShardAppendTests {
         let allIds = recognizer.transcribedShardIds
         #expect(allIds.contains(10), "Shard 10 should have been transcribed after append")
         #expect(allIds.contains(11), "Shard 11 should have been transcribed after append")
+    }
+
+    /// Regression: the engine used to emit `.completed` as soon as
+    /// `appendedShards` was momentarily empty, even when a streaming
+    /// producer still had more shards to deliver. The resulting race
+    /// caused `AnalysisCoordinator.finalizeBackfill` to run on partial
+    /// coverage and mark the asset `.complete`.
+    ///
+    /// After the fix, `.completed` only fires once the caller
+    /// explicitly calls `finishAppending(analysisAssetId:)` to signal
+    /// that no more shards are coming.
+    @Test("engine does not emit .completed until finishAppending is called", .timeLimit(.minutes(1)))
+    func completedWaitsForFinishAppending() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeTranscriptAsset(id: "asset-race", episodeId: "ep-race"))
+        let recognizer = TrackingRecognizer()
+        let speech = SpeechService(recognizer: recognizer)
+        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        // Use independent event subscriptions for the two windows. Each
+        // `events()` call creates a distinct AsyncStream continuation
+        // inside the engine, so cancelling one consumer does not drop
+        // the other's pending events.
+        let earlyEvents = await engine.events()
+
+        // Single shard. Without a fix, the engine drains the backlog
+        // and fires `.completed` unconditionally within a few ms.
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, startTime: 0, duration: 30)],
+            analysisAssetId: "asset-race",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+
+        // Poll briefly — `.completed` must NOT fire in this window
+        // because no finishAppending signal has been sent yet.
+        let earlyCompletion = await firstCompletion(from: earlyEvents, within: .milliseconds(500))
+        #expect(earlyCompletion == nil, "engine must not emit .completed before finishAppending")
+
+        // Subscribe to a fresh event stream before sending end-of-input
+        // so the completion event lands on a live consumer.
+        let lateEvents = await engine.events()
+
+        // Now signal end-of-input.
+        await engine.finishAppending(analysisAssetId: "asset-race")
+
+        // Completion should now fire within a generous timeout.
+        let lateCompletion = await firstCompletion(from: lateEvents, within: .seconds(5))
+        #expect(lateCompletion == "asset-race",
+                "engine must emit .completed for asset-race after finishAppending")
+    }
+}
+
+/// Consume the event stream until the first `.completed` event or the timeout
+/// expires. Returns the completed asset ID, or nil if the deadline elapsed.
+private func firstCompletion(
+    from events: AsyncStream<TranscriptEngineEvent>,
+    within duration: Duration
+) async -> String? {
+    await withTaskGroup(of: String?.self) { group in
+        group.addTask {
+            for await event in events {
+                if case .completed(let assetId) = event {
+                    return assetId
+                }
+            }
+            return nil
+        }
+        group.addTask {
+            try? await Task.sleep(for: duration)
+            return nil
+        }
+        let first = await group.next() ?? nil
+        group.cancelAll()
+        return first
     }
 }
 
@@ -703,6 +785,7 @@ struct TranscriptEngineAssetSwitchingTests {
             analysisAssetId: "asset-1",
             snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
         )
+        await engine.finishAppending(analysisAssetId: "asset-1")
 
         for await event in firstEvents {
             if case .completed(let assetId) = event, assetId == "asset-1" { break }
@@ -714,6 +797,7 @@ struct TranscriptEngineAssetSwitchingTests {
             analysisAssetId: "asset-2",
             snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
         )
+        await engine.finishAppending(analysisAssetId: "asset-2")
 
         for await event in secondEvents {
             if case .completed(let assetId) = event, assetId == "asset-2" { break }
@@ -745,6 +829,7 @@ struct TranscriptEngineAssetSwitchingTests {
             analysisAssetId: "asset-1",
             snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
         )
+        await engine.finishAppending(analysisAssetId: "asset-1")
 
         for await event in events {
             if case .completed(let assetId) = event, assetId == "asset-1" { break }
@@ -798,6 +883,7 @@ struct TranscriptEngineAssetSwitchingTests {
             analysisAssetId: "asset-weak",
             snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
         )
+        await engine.finishAppending(analysisAssetId: "asset-weak")
 
         for await event in events {
             if case .completed(let assetId) = event, assetId == "asset-weak" { break }
@@ -1324,6 +1410,7 @@ struct TranscriptEngineWeakAnchorMetadataTests {
             analysisAssetId: "asset-weak-anchor",
             snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
         )
+        await engine.finishAppending(analysisAssetId: "asset-weak-anchor")
 
         for await event in events {
             if case .completed(let assetId) = event, assetId == "asset-weak-anchor" {
@@ -1375,6 +1462,7 @@ struct TranscriptEngineWeakAnchorMetadataTests {
             analysisAssetId: "asset-weak-upgrade",
             snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
         )
+        await engine.finishAppending(analysisAssetId: "asset-weak-upgrade")
         for await event in firstEvents {
             if case .completed(let assetId) = event, assetId == "asset-weak-upgrade" {
                 break
@@ -1402,6 +1490,7 @@ struct TranscriptEngineWeakAnchorMetadataTests {
             analysisAssetId: "asset-weak-upgrade",
             snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
         )
+        await engine.finishAppending(analysisAssetId: "asset-weak-upgrade")
 
         var upgradedEventChunks: [TranscriptChunk] = []
         var sawCompletion = false
@@ -1481,6 +1570,7 @@ struct TranscriptEngineWeakAnchorMetadataTests {
             analysisAssetId: "asset-weak-downgrade",
             snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
         )
+        await engine.finishAppending(analysisAssetId: "asset-weak-downgrade")
         for await event in firstEvents {
             if case .completed(let assetId) = event, assetId == "asset-weak-downgrade" {
                 break
@@ -1508,6 +1598,7 @@ struct TranscriptEngineWeakAnchorMetadataTests {
             analysisAssetId: "asset-weak-downgrade",
             snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
         )
+        await engine.finishAppending(analysisAssetId: "asset-weak-downgrade")
 
         var sawPersistedChunk = false
         for await event in secondEvents {
