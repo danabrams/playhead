@@ -48,10 +48,47 @@ struct PlayheadApp: App {
         }
     }
 
+    /// playhead-zp0x: live notification service used by the
+    /// `BatchNotificationCoordinator`. Constructed once at App scope so
+    /// the `@MainActor` Task that drives periodic reductions has a
+    /// stable reference. The service wraps `UNUserNotificationCenter`
+    /// via `SystemNotificationScheduler`.
+    @State private var batchNotificationService = BatchNotificationService()
+
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(runtime)
+                .task {
+                    // playhead-zp0x: drive the batch-notification
+                    // coordinator on a periodic tick. v1 uses a simple
+                    // hourly Task timer; if a richer scheduler-pass
+                    // signal is later added, this can be migrated to an
+                    // event-driven loop without changing the
+                    // coordinator's contract.
+                    //
+                    // The coordinator runs against an open-batch fetch
+                    // and exits cheaply when no rows match — safe to
+                    // tick aggressively. Cold-start eviction also runs
+                    // here so closed-and-aged rows do not accumulate.
+                    let context = modelContainer.mainContext
+                    DownloadBatchEvictor.evict(modelContext: context, now: .now)
+                    let summaryBuilder = Self.makeBatchSummaryBuilder(
+                        modelContainer: modelContainer
+                    )
+                    let coordinator = BatchNotificationCoordinator(
+                        modelContext: context,
+                        service: batchNotificationService,
+                        summaryBuilder: summaryBuilder
+                    )
+                    while !Task.isCancelled {
+                        await coordinator.runOncePass(now: .now)
+                        // 1-hour interval — balances responsiveness
+                        // (overnight downloads still fire promptly on
+                        // first foreground) against battery / wakeups.
+                        try? await Task.sleep(nanoseconds: UInt64(60 * 60) * 1_000_000_000)
+                    }
+                }
                 .task {
                     // playhead-24cm: register the live DownloadManager
                     // and AppDelegate for background URLSession wake-up
@@ -215,6 +252,65 @@ struct PlayheadApp: App {
             position: captured.position,
             episodeDuration: episodeDuration
         )
+    }
+
+    // MARK: - playhead-zp0x: batch summary builder
+
+    /// Build the `summaryBuilder` closure passed into
+    /// `BatchNotificationCoordinator`. The closure walks each batch
+    /// child by canonical episode key and produces a
+    /// `BatchChildSurfaceSummary` from the persisted Episode row.
+    ///
+    /// Production reads `downloadState` + `analysisSummary?.hasAnalysis`
+    /// to derive `isReady` (downloaded AND analyzed). The blocker fields
+    /// (`reason`, `disposition`, `analysisUnavailableReason`,
+    /// `userFixable`) default to a transient non-fixable shape so the
+    /// reducer correctly produces `.tripReady` once every child is
+    /// ready and `.none` while children are still in progress. Wiring
+    /// the full per-episode `EpisodeSurfaceStatus` reducer (which would
+    /// allow the `blocked*` notifications to fire on real per-episode
+    /// failures) requires plumbing CapabilitySnapshot and
+    /// AnalysisEligibility through the coordinator — that is a separate
+    /// epic. The notification surface is in place; the wider blocker-
+    /// detection wiring slots in cleanly when that epic lands.
+    @MainActor
+    static func makeBatchSummaryBuilder(
+        modelContainer: ModelContainer
+    ) -> @Sendable ([String]) async -> [BatchChildSurfaceSummary] {
+        return { episodeKeys in
+            await MainActor.run {
+                let context = modelContainer.mainContext
+                var summaries: [BatchChildSurfaceSummary] = []
+                summaries.reserveCapacity(episodeKeys.count)
+                for key in episodeKeys {
+                    let descriptor = FetchDescriptor<Episode>(
+                        predicate: #Predicate { $0.canonicalEpisodeKey == key }
+                    )
+                    let episode = try? context.fetch(descriptor).first
+                    let downloaded = (episode?.downloadState == .downloaded)
+                    let analyzed = (episode?.analysisSummary?.hasAnalysis == true)
+                    let isReady = downloaded && analyzed
+                    summaries.append(
+                        BatchChildSurfaceSummary(
+                            canonicalEpisodeKey: key,
+                            disposition: isReady ? .queued : .queued,
+                            // Default to a transient non-fixable reason
+                            // so the reducer never promotes a not-yet-
+                            // ready child to an action-required
+                            // notification on the basis of a missing
+                            // signal. The full per-episode
+                            // EpisodeSurfaceStatus reducer wiring is a
+                            // separate epic.
+                            reason: .waitingForTime,
+                            analysisUnavailableReason: nil,
+                            isReady: isReady,
+                            userFixable: false
+                        )
+                    )
+                }
+                return summaries
+            }
+        }
     }
 }
 

@@ -25,6 +25,7 @@
 
 import SwiftUI
 import SwiftData
+import UserNotifications
 
 // MARK: - Verbatim copy
 
@@ -400,6 +401,82 @@ struct DownloadNextView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("downloadNext.systemPromise")
         }
+    }
+}
+
+// MARK: - Batch admission (playhead-zp0x)
+
+/// Side-effecting helper invoked from the `DownloadNextView` `onDownload`
+/// closure when the user submits a NON-generic Download-Next-N batch.
+///
+/// Two effects:
+///   1. Inserts a `DownloadBatch` SwiftData row so the
+///      `BatchNotificationCoordinator` can drive the trip-ready /
+///      action-required reducer against this batch's children.
+///   2. Triggers the single notification-permission ask, gated by
+///      `UserPreferences.notificationPermissionAsked` — flipped to
+///      `true` regardless of whether the user accepted or denied so
+///      we never re-ask.
+///
+/// Generic submits are excluded by the caller — see
+/// `EpisodeListView.episodeList`. Generic batches NEVER reach this
+/// helper, never insert a row, and never trigger a permission ask.
+enum DownloadBatchAdmission {
+
+    @MainActor
+    static func admit(
+        episodes: [Episode],
+        context: DownloadTripContext,
+        modelContext: ModelContext,
+        notificationCenter: UNUserNotificationCenter = .current()
+    ) {
+        // Defensive: caller (EpisodeListView) already guards against
+        // generic, but the helper enforces the contract again so a
+        // future call site cannot accidentally admit a generic batch.
+        guard context != .generic else { return }
+
+        let batch = DownloadBatch(
+            tripContextRaw: context.rawValue,
+            episodeKeys: episodes.map { $0.canonicalEpisodeKey }
+        )
+        modelContext.insert(batch)
+        try? modelContext.save()
+
+        // One-time permission ask. Hop async because
+        // UNUserNotificationCenter's authorization API is awaitable.
+        // We mark `notificationPermissionAsked = true` immediately
+        // after the request returns (success or failure) so we never
+        // re-ask, mirroring the spec contract.
+        Task { @MainActor [modelContext, notificationCenter] in
+            await Self.requestPermissionIfNeeded(
+                modelContext: modelContext,
+                notificationCenter: notificationCenter
+            )
+        }
+    }
+
+    @MainActor
+    private static func requestPermissionIfNeeded(
+        modelContext: ModelContext,
+        notificationCenter: UNUserNotificationCenter
+    ) async {
+        // Fetch (or create) the singleton UserPreferences row. The
+        // existing app pattern is "first row wins"; if no row exists
+        // we create one.
+        let prefs: UserPreferences
+        let descriptor = FetchDescriptor<UserPreferences>()
+        if let existing = try? modelContext.fetch(descriptor).first {
+            prefs = existing
+        } else {
+            let fresh = UserPreferences()
+            modelContext.insert(fresh)
+            prefs = fresh
+        }
+        guard !prefs.notificationPermissionAsked else { return }
+
+        _ = try? await notificationCenter.requestAuthorization(options: [.alert, .sound])
+        prefs.notificationPermissionAsked = true
+        try? modelContext.save()
     }
 }
 
