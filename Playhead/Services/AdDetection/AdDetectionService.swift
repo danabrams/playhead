@@ -285,12 +285,9 @@ actor AdDetectionService {
     /// are both alive).
     private(set) var episodeMetadataProvider: EpisodeMetadataProvider
 
-    /// playhead-8em9 (narL): Optional decision logger. When set (only in
-    /// DEBUG builds via `PlayheadRuntime`), every fusion-phase window
-    /// decision is serialized as a `DecisionLogEntry` and appended to
-    /// `Documents/decision-log.jsonl` for offline replay. Defaults to
-    /// a no-op instance so existing call sites and release builds
-    /// produce no log file.
+    /// playhead-8em9 (narL): Optional decision logger for offline replay.
+    /// DEBUG-only; release builds keep the `NoOpDecisionLogger` default so
+    /// no log file is ever written on a shipping binary.
     private(set) var decisionLogger: DecisionLoggerProtocol = NoOpDecisionLogger()
 
     // MARK: - Cached State
@@ -322,7 +319,8 @@ actor AdDetectionService {
         regionShadowObserver: RegionShadowObserver? = nil,
         phase5ProjectorObserver: Phase5ProjectorObserver? = nil,
         skipOrchestrator: SkipOrchestrator? = nil,
-        episodeMetadataProvider: EpisodeMetadataProvider = NullEpisodeMetadataProvider()
+        episodeMetadataProvider: EpisodeMetadataProvider = NullEpisodeMetadataProvider(),
+        decisionLogger: DecisionLoggerProtocol? = nil
     ) {
         self.store = store
         self.classifier = classifier
@@ -338,6 +336,14 @@ actor AdDetectionService {
         self.phase5ProjectorObserver = phase5ProjectorObserver
         self.skipOrchestrator = skipOrchestrator
         self.episodeMetadataProvider = episodeMetadataProvider
+        // playhead-8em9 (narL): allow the logger to be installed at init
+        // time so there is no race with the first backfill. PlayheadRuntime
+        // passes a real DecisionLogger under DEBUG; production and tests
+        // that don't care about logging leave this nil, keeping the
+        // NoOpDecisionLogger default already on `decisionLogger`.
+        if let decisionLogger {
+            self.decisionLogger = decisionLogger
+        }
     }
 
     #if DEBUG
@@ -606,6 +612,17 @@ actor AdDetectionService {
                     evidenceStartTime: candidatesByID[result.candidateId]?.evidenceStartTime
                 )
             }
+
+        // playhead-8em9 (narL): log per-candidate hot-path decisions. The
+        // hot path is pre-fusion: the only evidence we have here is the
+        // classifier score, so the DecisionLogEntry carries a single
+        // `.classifier` ledger entry and a degenerate one-source fused
+        // breakdown. Replay tooling distinguishes hot-path from backfill
+        // entries by evidence cardinality + finalDecision.action value.
+        await emitHotPathDecisionLogs(
+            classifierResults: classifierResults,
+            analysisAssetId: analysisAssetId
+        )
 
         guard !adWindows.isEmpty else {
             logger.info("Hot path: all \(classifierResults.count) results below threshold")
@@ -1026,6 +1043,11 @@ actor AdDetectionService {
             let explanationJSON = (try? JSONEncoder().encode(explanation))
                 .flatMap { String(data: $0, encoding: .utf8) }
 
+            // Capture a single wall-clock once so DecisionEvent and
+            // DecisionLogEntry share the exact same timestamp (previously
+            // each called Date() independently, diverging by microseconds).
+            let decisionTimestamp = Date().timeIntervalSince1970
+
             decisionEvents.append(DecisionEvent(
                 id: UUID().uuidString,
                 analysisAssetId: analysisAssetId,
@@ -1036,18 +1058,17 @@ actor AdDetectionService {
                 eligibilityGate: decision.eligibilityGate.rawValue,
                 policyAction: policyAction.rawValue,
                 decisionCohortJSON: cohortJSON,
-                createdAt: Date().timeIntervalSince1970,
+                createdAt: decisionTimestamp,
                 explanationJSON: explanationJSON
             ))
 
-            // playhead-8em9 (narL): emit per-window DecisionLogEntry to the
-            // JSONL logger (no-op in release builds). Synchronously resolves
-            // the MetadataActivationConfig so the snapshot matches what the
-            // gated metadata consumers would have seen for this decision.
+            // playhead-8em9 (narL): emit per-window DecisionLogEntry for
+            // offline replay. Resolves MetadataActivationConfig so the
+            // snapshot matches the gated consumers' view at this decision.
             let logEntry = DecisionLogEntry(
                 schemaVersion: DecisionLogEntry.currentSchemaVersion,
                 episodeID: analysisAssetId,
-                timestamp: Date().timeIntervalSince1970,
+                timestamp: decisionTimestamp,
                 windowBounds: .init(
                     start: refinedSpan.startTime,
                     end: refinedSpan.endTime
@@ -2695,6 +2716,61 @@ actor AdDetectionService {
 
         // Layer 2: Classify all candidates.
         return classifier.classify(inputs: inputs, priors: showPriors)
+    }
+
+    // MARK: - Hot-path Decision Logging
+
+    /// playhead-8em9 (narL): emit one DecisionLogEntry per classifier
+    /// result produced by the hot path. Pre-fusion, so the ledger has a
+    /// single `.classifier` entry and the fused breakdown degenerates
+    /// to one source. `finalDecision.action` is "hotPathCandidate" when
+    /// the result passed the candidate threshold and "hotPathBelowThreshold"
+    /// otherwise — replay tooling can filter on this to distinguish from
+    /// backfill-fusion entries.
+    private func emitHotPathDecisionLogs(
+        classifierResults: [ClassifierResult],
+        analysisAssetId: String
+    ) async {
+        let snapshot = DecisionLogEntry.ActivationConfigSnapshot(
+            MetadataActivationConfig.resolved()
+        )
+        for result in classifierResults {
+            let timestamp = Date().timeIntervalSince1970
+            let passed = result.adProbability >= config.candidateThreshold
+            let classifierEntry = EvidenceLedgerEntry(
+                source: .classifier,
+                weight: result.adProbability,
+                detail: .classifier(score: result.adProbability)
+            )
+            let breakdown = [
+                SourceEvidence(
+                    source: EvidenceSourceType.classifier.rawValue,
+                    weight: result.adProbability,
+                    capApplied: result.adProbability,
+                    authority: .strong
+                )
+            ]
+            let logEntry = DecisionLogEntry(
+                schemaVersion: DecisionLogEntry.currentSchemaVersion,
+                episodeID: analysisAssetId,
+                timestamp: timestamp,
+                windowBounds: .init(start: result.startTime, end: result.endTime),
+                activationConfig: snapshot,
+                evidence: [DecisionLogEntry.LedgerEntry(classifierEntry)],
+                fusedConfidence: .init(
+                    proposalConfidence: result.adProbability,
+                    skipConfidence: result.adProbability,
+                    breakdown: breakdown
+                ),
+                finalDecision: .init(
+                    action: passed ? "hotPathCandidate" : "hotPathBelowThreshold",
+                    gate: "eligible",
+                    skipConfidence: result.adProbability,
+                    thresholdCrossed: config.candidateThreshold
+                )
+            )
+            await decisionLogger.record(logEntry)
+        }
     }
 
     // MARK: - AdWindow Construction (hot path)

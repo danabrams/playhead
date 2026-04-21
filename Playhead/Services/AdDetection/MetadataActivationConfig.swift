@@ -107,28 +107,16 @@ struct MetadataActivationConfig: Sendable, Equatable {
 
     // MARK: - Resolution
     //
-    // playhead-8em9 (narL): DEBUG-only override gate.
-    //
-    // Callers at the pipeline edge (e.g. PlayheadRuntime when constructing
-    // MetadataLexiconInjector/MetadataPriorShift/BackfillJob) should use
-    // `MetadataActivationConfig.resolved()` instead of `.default` so that
-    // personal dogfooding can flip the counterfactual gate to `.allEnabled`
-    // without touching production behavior.
-    //
-    // In a production release build (`DEBUG` undefined), this method is
-    // statically wired to return `.default` — the override module is not
-    // compiled in, so no dev override can take effect at runtime.
-    //
-    // The `releaseLockActive` parameter simulates the release-build branch
-    // under unit test, letting us prove that the gate is honored without
-    // having to actually build a release binary.
+    // playhead-8em9 (narL): DEBUG-only override gate. Release safety is the
+    // non-obvious constraint: the `#if DEBUG` branch and the `isReleaseLockActive`
+    // short-circuit together guarantee that no override path can execute on a
+    // shipping binary, even if a test or misconfigured flag tries to flip it.
 
-    /// Resolve the effective activation config. See file header.
+    /// Resolve the effective activation config. See `resolved()` behavior
+    /// in the file header.
     ///
-    /// - Parameter releaseLockActive: when `true`, forces `.default` even in
-    ///   DEBUG builds. Defaults to `false` in DEBUG and is hard-wired to
-    ///   `true` in release (non-DEBUG) builds via the private computed
-    ///   property below. The public caller never passes this argument.
+    /// - Parameter releaseLockActive: test-only override simulating the
+    ///   release-build branch; real callers never pass this.
     static func resolved(releaseLockActive: Bool = isReleaseLockActive) -> MetadataActivationConfig {
         if releaseLockActive {
             return .default
@@ -159,16 +147,10 @@ struct MetadataActivationConfig: Sendable, Equatable {
 // MARK: - MetadataActivationOverride
 
 /// Debug-only override store for `MetadataActivationConfig.resolved()`.
-///
-/// The public API (`set`, `reset`, `applyLaunchArguments`) is always
-/// compiled so callers don't need `#if DEBUG` at the call site. In a
-/// release (non-DEBUG) build every mutating operation is a no-op and the
-/// stored value is unused — `MetadataActivationConfig.resolved()` returns
-/// `.default` unconditionally.
-///
-/// Thread safety: writes are serialized through a dispatch queue; the
-/// override is stored behind a lock-protected class reference so reads
-/// from any thread are safe and cheap.
+/// The public mutators are always compiled (so call sites don't need
+/// `#if DEBUG`) but degrade to no-ops in release — this is the release-
+/// safety rationale: even an accidental call on a shipping binary
+/// cannot flip the gate. Thread-safe via `NSLock`.
 enum MetadataActivationOverride {
 
     /// Currently installed override, or `nil` if none.

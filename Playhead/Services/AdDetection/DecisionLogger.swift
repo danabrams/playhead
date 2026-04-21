@@ -4,20 +4,21 @@
 // Design:
 //   • Actor-backed append-only JSONL writer at Documents/decision-log.jsonl.
 //   • Rotates to decision-log.N.jsonl on 10 MB thresholds. Rotation is
-//     idempotent across warm starts — the next index is derived from the
-//     highest existing rotated file's number, so re-running the app does
-//     not cause spurious renames.
-//   • Each record carries enough structured inputs (evidence ledger,
-//     activation config snapshot, fused explanation, final decision) to
-//     replay `.default`-equivalent decisions offline without re-running
-//     the pipeline.
-//   • Non-blocking from the caller's perspective: the actor serializes
-//     writes and the pipeline's `Task { await ... }` ingest call returns
-//     as soon as the continuation is scheduled.
+//     idempotent across warm starts and crash-safe (uses
+//     `FileManager.replaceItemAt`).
+//   • Records from both the hot path (per-candidate classifier decision,
+//     no fused ledger yet) and the backfill path (full fusion ledger).
+//     Hot-path entries carry a single `.classifier` ledger entry so replay
+//     tooling sees a consistent schema, and the fused-confidence breakdown
+//     degenerates to the classifier's own contribution.
+//   • Each record carries enough structured inputs to replay `.default`-
+//     equivalent decisions offline without re-running the pipeline.
+//   • Non-blocking: the actor serializes writes and the ingest call
+//     returns as soon as the continuation is scheduled.
 //   • DEBUG-only by convention — production wiring in `PlayheadRuntime`
-//     must gate construction behind `#if DEBUG`, mirroring
-//     `FoundationModelsFeedbackStore`. Release builds never instantiate
-//     this logger, so no log file is ever written on a shipping binary.
+//     gates construction behind `#if DEBUG`. Release builds never
+//     instantiate this logger, so no log file is written on a shipping
+//     binary.
 //
 // Schema version: 1.
 //
@@ -332,6 +333,10 @@ actor DecisionLogger: DecisionLoggerProtocol {
         self.rotationThresholdBytes = rotationThresholdBytes
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]  // stable, line-diff-friendly
+        // ISO-8601 so replay tooling can parse deterministically across OS
+        // versions. No Date-typed fields today, but setting the strategy
+        // now prevents silent drift when one is added later.
+        encoder.dateEncodingStrategy = .iso8601
         self.encoder = encoder
 
         // Ensure directory exists.
@@ -407,9 +412,42 @@ actor DecisionLogger: DecisionLoggerProtocol {
         let url = activeLogURL
         let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
         let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
-        if size >= rotationThresholdBytes {
-            try rotateNow()
+        guard size >= rotationThresholdBytes else { return }
+
+        // Livelock guard: if a single record is itself larger than the
+        // rotation threshold, rotating would produce a fresh file that is
+        // still oversized (it still holds that one record). Skip rotation
+        // when the active file contains only one line so we don't loop
+        // forever rotating the same >threshold record. We warn once so
+        // the operator can investigate, but we do not truncate the record
+        // — corpus replay tooling prefers a valid oversized record to a
+        // silently truncated one.
+        if try lineCount(at: url) <= 1 {
+            logger.warning(
+                "DecisionLogger: active log exceeds threshold but has \u{2264}1 line; skipping rotation to avoid livelock"
+            )
+            return
         }
+        try rotateNow()
+    }
+
+    /// Count newlines in `url` up to a small budget. A full byte count is
+    /// not required — we only need to distinguish "one record" from
+    /// "more than one record" for the livelock guard, so we stop reading
+    /// after seeing a second newline.
+    private func lineCount(at url: URL) throws -> Int {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var count = 0
+        // 64 KiB is larger than any realistic single-record JSON
+        // projection but small enough to stay off the wide-path.
+        while let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
+            for byte in chunk where byte == 0x0A {
+                count += 1
+                if count >= 2 { return count }
+            }
+        }
+        return count
     }
 
     private func rotateNow() throws {
@@ -418,10 +456,22 @@ actor DecisionLogger: DecisionLoggerProtocol {
         let dst = directory.appendingPathComponent(dstName)
 
         closeHandle()
-        if FileManager.default.fileExists(atPath: dst.path) {
-            try FileManager.default.removeItem(at: dst)
+
+        // Crash-safe rotation: use `replaceItemAt` when a destination
+        // already exists (atomic swap), otherwise fall back to `moveItem`.
+        // The previous close → removeItem → moveItem sequence could leave
+        // a gap where both `src` and `dst` were missing if the process
+        // died between the two filesystem operations.
+        let fm = FileManager.default
+        if fm.fileExists(atPath: dst.path) {
+            // `replaceItemAt` performs an atomic replace where supported.
+            // The source must exist — which it does here because we only
+            // call rotateNow() after rotateIfNeeded() verified a >0 byte
+            // active log.
+            _ = try fm.replaceItemAt(dst, withItemAt: src)
+        } else {
+            try fm.moveItem(at: src, to: dst)
         }
-        try FileManager.default.moveItem(at: src, to: dst)
         nextRotationIndex += 1
         logger.info("DecisionLogger: rotated active log to \(dstName, privacy: .public)")
     }

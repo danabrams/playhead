@@ -204,27 +204,25 @@ struct DecisionLoggerFileIOTests {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        // Tiny threshold so one write triggers rotation.
+        // Tiny threshold so two records trigger rotation. The livelock
+        // guard intentionally refuses to rotate a single-line file even
+        // when it exceeds the threshold (the rotation would be infinite
+        // — the rotated file would still be oversized), so we write two
+        // entries: the first establishes >=2 lines after the second, and
+        // the second record's post-write check then rotates.
         let logger = try DecisionLogger(directory: dir, rotationThresholdBytes: 1)
         await logger.record(sampleEntry(episode: "asset-a"))
-        // Each record() call checks the size after the write, so after
-        // this one call the file is already > 1 byte and should rotate
-        // before the NEXT write. The rotation happens synchronously on
-        // the actor, so by the time record() returns the file has been
-        // moved to decision-log.1.jsonl.
+        await logger.record(sampleEntry(episode: "asset-b"))
         await logger.flushAndClose()
 
-        let active = dir.appendingPathComponent(DecisionLogger.activeLogFilename)
         let rotated = dir.appendingPathComponent("decision-log.1.jsonl")
-        #expect(!FileManager.default.fileExists(atPath: active.path),
-                "Active log should have been rotated away")
         #expect(FileManager.default.fileExists(atPath: rotated.path),
                 "Expected decision-log.1.jsonl to exist after rotation")
 
-        // The rotated file should contain the one line we wrote.
         let data = try Data(contentsOf: rotated)
         let text = String(decoding: data, as: UTF8.self)
         #expect(text.contains("\"episodeID\":\"asset-a\""))
+        #expect(text.contains("\"episodeID\":\"asset-b\""))
     }
 
     @Test("Two rotations produce decision-log.1.jsonl and decision-log.2.jsonl")
@@ -233,8 +231,11 @@ struct DecisionLoggerFileIOTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let logger = try DecisionLogger(directory: dir, rotationThresholdBytes: 1)
+        // Two records per rotation under the livelock guard.
         await logger.record(sampleEntry(episode: "a"))
-        await logger.record(sampleEntry(episode: "b"))
+        await logger.record(sampleEntry(episode: "b"))  // triggers rotation 1
+        await logger.record(sampleEntry(episode: "c"))
+        await logger.record(sampleEntry(episode: "d"))  // triggers rotation 2
         await logger.flushAndClose()
 
         let r1 = dir.appendingPathComponent("decision-log.1.jsonl")
@@ -257,9 +258,11 @@ struct DecisionLoggerFileIOTests {
         #expect(seed == 6,
                 "Next rotation index must be one past highest existing file, got \(seed)")
 
-        // Trigger a rotation and verify it writes to decision-log.6.jsonl,
-        // NOT re-rotating or clobbering decision-log.5.jsonl.
-        await logger.record(sampleEntry(episode: "warm"))
+        // Trigger a rotation (two records — see livelock guard) and
+        // verify it writes to decision-log.6.jsonl, NOT re-rotating or
+        // clobbering decision-log.5.jsonl.
+        await logger.record(sampleEntry(episode: "warm-a"))
+        await logger.record(sampleEntry(episode: "warm-b"))
         await logger.flushAndClose()
 
         let r5 = dir.appendingPathComponent("decision-log.5.jsonl")
@@ -308,8 +311,6 @@ actor SpyDecisionLogger: DecisionLoggerProtocol {
     func record(_ entry: DecisionLogEntry) async {
         entries.append(entry)
     }
-
-    func snapshotEntries() -> [DecisionLogEntry] { entries }
 }
 
 @Suite("DecisionLogger — pipeline integration", .serialized)
@@ -389,7 +390,7 @@ struct DecisionLoggerPipelineTests {
             episodeDuration: 90.0
         )
 
-        let entries = await spy.snapshotEntries()
+        let entries = await spy.entries
         #expect(!entries.isEmpty,
                 "Expected at least one DecisionLogEntry to be recorded for a chunk set with ad signals")
 
@@ -423,12 +424,263 @@ struct DecisionLoggerPipelineTests {
             episodeDuration: 90.0
         )
 
-        let entries = await spy.snapshotEntries()
+        let entries = await spy.entries
         guard let first = entries.first else {
             Issue.record("Expected at least one entry")
             return
         }
         #expect(first.activationConfig.counterfactualGateOpen == false,
                 "Without override, snapshot must report default (gate closed).")
+    }
+
+    @Test("runHotPath emits a DecisionLogEntry for every classifier result")
+    func runHotPathEmitsEntries() async throws {
+        let analysisStore = try await makeTestStore()
+        let assetId = "asset-logger-hot-path"
+        try await analysisStore.insertAsset(makeAsset(id: assetId))
+
+        let spy = SpyDecisionLogger()
+        let service = makeService(store: analysisStore)
+        await service.setDecisionLogger(spy)
+
+        _ = try await service.runHotPath(
+            chunks: makeAdChunks(assetId: assetId),
+            analysisAssetId: assetId,
+            episodeDuration: 90.0
+        )
+
+        let entries = await spy.entries
+        #expect(!entries.isEmpty,
+                "Expected at least one hot-path DecisionLogEntry for a chunk set with lexical ad signals")
+        for entry in entries {
+            #expect(entry.episodeID == assetId)
+            // Hot-path entries carry exactly one `.classifier` ledger
+            // entry (pre-fusion), and finalDecision.action distinguishes
+            // them from backfill-fusion entries.
+            #expect(entry.evidence.count == 1)
+            #expect(entry.evidence.first?.detail.kind == "classifier")
+            #expect(entry.finalDecision.action == "hotPathCandidate"
+                    || entry.finalDecision.action == "hotPathBelowThreshold")
+        }
+    }
+}
+
+// MARK: - Concurrency / failure / rotation-gap tests
+
+@Suite("DecisionLogger — concurrency, directory failure, rotation-index gaps", .serialized)
+struct DecisionLoggerEdgeCaseTests {
+
+    private func makeTempDir(function: String = #function) throws -> URL {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("decision-logger-edge-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
+    }
+
+    private func sampleEntry(episode: String) -> DecisionLogEntry {
+        DecisionLogEntry(
+            schemaVersion: DecisionLogEntry.currentSchemaVersion,
+            episodeID: episode,
+            timestamp: 1_745_000_000.0,
+            windowBounds: .init(start: 0, end: 30),
+            activationConfig: .init(.default),
+            evidence: [],
+            fusedConfidence: .init(
+                proposalConfidence: 0.5,
+                skipConfidence: 0.5,
+                breakdown: []
+            ),
+            finalDecision: .init(
+                action: "detectOnly",
+                gate: "eligible",
+                skipConfidence: 0.5,
+                thresholdCrossed: 0.55
+            )
+        )
+    }
+
+    @Test("Concurrent record(_:) calls serialize without line corruption")
+    func concurrentRecordsSerializeCleanly() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let logger = try DecisionLogger(directory: dir,
+                                        rotationThresholdBytes: 10 * 1024 * 1024)
+        // Issue 50 concurrent writes. The actor guarantees serialization;
+        // this test asserts the observable contract (one decodable JSON
+        // object per line, all 50 present).
+        let count = 50
+        await withTaskGroup(of: Void.self) { group in
+            for i in 0..<count {
+                group.addTask {
+                    await logger.record(self.sampleEntry(episode: "ep-\(i)"))
+                }
+            }
+        }
+        await logger.flushAndClose()
+
+        let url = dir.appendingPathComponent(DecisionLogger.activeLogFilename)
+        let data = try Data(contentsOf: url)
+        let text = String(decoding: data, as: UTF8.self)
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+        #expect(lines.count == count, "Expected \(count) JSONL lines, got \(lines.count)")
+
+        let decoder = JSONDecoder()
+        var episodes = Set<String>()
+        for line in lines {
+            let decoded = try decoder.decode(DecisionLogEntry.self,
+                                             from: Data(line.utf8))
+            episodes.insert(decoded.episodeID)
+        }
+        #expect(episodes.count == count,
+                "Every concurrent write must be persisted exactly once")
+    }
+
+    @Test("Init on a read-only parent swallows write failures without crashing")
+    func readOnlyDirectoryDoesNotCrash() async throws {
+        // Use a genuinely non-creatable path (no write permission at
+        // the first path component). On iOS simulator / macOS / Linux
+        // the root filesystem is not writable for the process, so
+        // `/this-cannot-be-created` is a reliable choice.
+        let bogusDir = URL(fileURLWithPath: "/decision-logger-cannot-create-\(UUID().uuidString)")
+
+        do {
+            // Construction itself may throw (createDirectory fails) — that
+            // is one acceptable outcome per the bead spec.
+            let logger = try DecisionLogger(directory: bogusDir,
+                                            rotationThresholdBytes: 10 * 1024 * 1024)
+            // If construction somehow succeeded, a subsequent record must
+            // not crash; the actor logs the failure and swallows it.
+            await logger.record(sampleEntry(episode: "should-fail"))
+            await logger.flushAndClose()
+            // Reaching here proves the "records+swallows" branch holds.
+        } catch {
+            // Init-time throw is the other acceptable outcome.
+            #expect(error is CocoaError || (error as NSError).domain == NSCocoaErrorDomain
+                    || (error as NSError).domain == NSPOSIXErrorDomain,
+                    "Expected a filesystem error, got \(type(of: error))")
+        }
+    }
+
+    @Test("Rotation-index scan honors gaps and picks max+1, not next empty slot")
+    func rotationIndexScanSkipsGaps() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Pre-seed files at indices 1 and 3 (skip 2). The next rotation
+        // must land on 4 (max + 1), not 2 (first gap), so we never
+        // overwrite a future-ordered file that a previous process wrote.
+        try "stub-1\n".data(using: .utf8)!.write(
+            to: dir.appendingPathComponent("decision-log.1.jsonl")
+        )
+        try "stub-3\n".data(using: .utf8)!.write(
+            to: dir.appendingPathComponent("decision-log.3.jsonl")
+        )
+
+        let logger = try DecisionLogger(directory: dir, rotationThresholdBytes: 1)
+        #expect(await logger.currentNextRotationIndex() == 4,
+                "Next rotation index must be max(existing)+1, not first gap")
+
+        // Actually trigger a rotation — at threshold=1 bytes, two records
+        // are enough: the first leaves the file >1 byte with >1 line (the
+        // livelock guard requires line count >1, so we record twice
+        // before rotating).
+        await logger.record(sampleEntry(episode: "warm-a"))
+        await logger.record(sampleEntry(episode: "warm-b"))
+        await logger.flushAndClose()
+
+        let r4 = dir.appendingPathComponent("decision-log.4.jsonl")
+        #expect(FileManager.default.fileExists(atPath: r4.path),
+                "Rotation must land on decision-log.4.jsonl (max+1)")
+        let r2 = dir.appendingPathComponent("decision-log.2.jsonl")
+        #expect(!FileManager.default.fileExists(atPath: r2.path),
+                "First-gap slot must stay empty — index math is max+1, not first-empty")
+    }
+
+    @Test("Active decision-log.jsonl is excluded from the rotation-index scan")
+    func activeFileFilteredFromRotationScan() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Create only the active file. No rotated files anywhere.
+        try "stub\n".data(using: .utf8)!.write(
+            to: dir.appendingPathComponent(DecisionLogger.activeLogFilename)
+        )
+
+        let logger = try DecisionLogger(directory: dir,
+                                        rotationThresholdBytes: 10 * 1024 * 1024)
+        // extractRotationIndex must return nil for "decision-log.jsonl",
+        // so the scan sees zero rotated files and seeds nextRotationIndex
+        // at 1. If the filter were wrong, it would try to parse "jsonl"
+        // as an Int, still return nil — but to be exhaustive we also
+        // assert no URL returned from listRotatedLogs points at the
+        // active file.
+        let seed = await logger.currentNextRotationIndex()
+        #expect(seed == 1, "Active file must not contribute to rotation-index scan")
+        let rotated = await logger.rotatedLogURLs()
+        #expect(!rotated.contains(where: { $0.lastPathComponent == DecisionLogger.activeLogFilename }),
+                "Active file must be excluded from rotatedLogURLs")
+    }
+
+    @Test("Single-record oversized write does not livelock on rotation")
+    func oversizedSingleRecordSkipsRotation() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Threshold = 1 byte. A single record is much larger than that.
+        // Without the livelock guard, rotateNow would rotate, the next
+        // call into record() would write a fresh line into a file that
+        // is still oversized after one write, and the check would loop.
+        // With the guard, the first record stays put (>threshold but
+        // only 1 line), and the second record triggers rotation at 2 lines.
+        let logger = try DecisionLogger(directory: dir, rotationThresholdBytes: 1)
+        await logger.record(sampleEntry(episode: "big-1"))
+        // After one record, livelock guard prevents rotation.
+        let preRotate = await logger.currentNextRotationIndex()
+        #expect(preRotate == 1, "Single-line oversized file must not rotate")
+
+        await logger.record(sampleEntry(episode: "big-2"))
+        await logger.flushAndClose()
+        // After two records, rotation fires normally.
+        let r1 = dir.appendingPathComponent("decision-log.1.jsonl")
+        #expect(FileManager.default.fileExists(atPath: r1.path),
+                "Once >1 line, rotation should proceed")
+    }
+
+    @Test("schemaVersion mismatch: decoder accepts unknown version, surfaces the value verbatim")
+    func schemaVersionMismatchSurfacesValue() throws {
+        // Document the chosen behavior: DecisionLogEntry treats
+        // `schemaVersion` as a raw Int, so an unknown value (99) decodes
+        // successfully and is surfaced on the decoded struct. Replay
+        // tooling is expected to branch on this field, not the decoder.
+        let entry = DecisionLogEntry(
+            schemaVersion: 1,
+            episodeID: "asset-schema-v",
+            timestamp: 1_745_000_000.0,
+            windowBounds: .init(start: 0, end: 30),
+            activationConfig: .init(.default),
+            evidence: [],
+            fusedConfidence: .init(
+                proposalConfidence: 0.5,
+                skipConfidence: 0.5,
+                breakdown: []
+            ),
+            finalDecision: .init(
+                action: "detectOnly",
+                gate: "eligible",
+                skipConfidence: 0.5,
+                thresholdCrossed: 0.55
+            )
+        )
+        let data = try JSONEncoder().encode(entry)
+        var json = String(decoding: data, as: UTF8.self)
+        // Swap the schema version field from 1 to 99.
+        #expect(json.contains("\"schemaVersion\":1"))
+        json = json.replacingOccurrences(of: "\"schemaVersion\":1",
+                                         with: "\"schemaVersion\":99")
+        let mutated = Data(json.utf8)
+        let decoded = try JSONDecoder().decode(DecisionLogEntry.self, from: mutated)
+        #expect(decoded.schemaVersion == 99,
+                "Unknown schema versions must decode successfully with the value surfaced so replay tooling can branch")
     }
 }
