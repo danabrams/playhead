@@ -1097,6 +1097,93 @@ final class PlayheadRuntime {
         )
     }
 
+    // MARK: - playhead-zp0x / playhead-0a0s: batch summary builder
+
+    /// Build the `summaryBuilder` closure passed into
+    /// `BatchNotificationCoordinator`.
+    ///
+    /// playhead-0a0s wired the full per-episode `EpisodeSurfaceStatus`
+    /// reducer through the batch path so `blocked*` notifications fire
+    /// on real per-episode failures (storage cap, Wi-Fi-only policy,
+    /// Apple Intelligence disabled, etc). The closure resolves three
+    /// inputs per child:
+    ///   1. The persisted `Episode` row (downloadState + analysisSummary
+    ///      → isReady, plus coverage/anchor for the reducer).
+    ///   2. The most-recent `InternalMissCause` from the work-journal
+    ///      (drives Rules 3 / 4 of the reducer — storage and transient-
+    ///      wait blockers).
+    ///   3. The live `AnalysisEligibility` derived from
+    ///      `CapabilitiesService.currentSnapshot` (drives Rule 1 —
+    ///      analysis-unavailable blockers).
+    ///
+    /// `BatchSummaryBuilder.makeSummary(...)` is the pure projection
+    /// from those inputs to a `BatchChildSurfaceSummary`; it routes
+    /// through `episodeSurfaceStatus(...)` and centralises the
+    /// `userFixable` derivation at the boundary the
+    /// `BatchNotificationReducer` documents as its source of truth.
+    ///
+    /// Lives on PlayheadRuntime (rather than PlayheadApp) so the
+    /// PlayheadApp UI layer never references `AnalysisStore` by type —
+    /// `SurfaceStatusUILintTests` polices that boundary. The runtime
+    /// owns both `analysisStore` and `capabilitiesService`, so the
+    /// caller only has to pass the `ModelContainer` through (the one
+    /// long-lived dependency owned by the `App`-scope environment).
+    func makeBatchSummaryBuilder(
+        modelContainer: ModelContainer
+    ) -> @Sendable ([String]) async -> [BatchChildSurfaceSummary] {
+        let analysisStore = self.analysisStore
+        let capabilitiesService = self.capabilitiesService
+        let builder = BatchSummaryBuilder(
+            episodeLookup: { @Sendable key in
+                await MainActor.run {
+                    let context = modelContainer.mainContext
+                    let descriptor = FetchDescriptor<Episode>(
+                        predicate: #Predicate { $0.canonicalEpisodeKey == key }
+                    )
+                    guard let episode = try? context.fetch(descriptor).first else {
+                        return nil
+                    }
+                    return EpisodeProjection(episode)
+                }
+            },
+            causeLookup: { @Sendable key in
+                // Best-effort: a SQLite read failure surfaces as `nil`
+                // (no live cause), which the reducer treats as Rule 5
+                // "queued / waitingForTime" — a safe fallback that
+                // never promotes a child to action-required.
+                try? await analysisStore.fetchLastWorkJournalCause(episodeId: key)
+            },
+            eligibilityProvider: { @Sendable in
+                let snapshot = await capabilitiesService.currentSnapshot
+                return PlayheadRuntime.eligibility(from: snapshot)
+            }
+        )
+        return { episodeKeys in
+            await builder.summaries(for: episodeKeys)
+        }
+    }
+
+    /// Map the live `CapabilitySnapshot` to the surface-status reducer's
+    /// `AnalysisEligibility` input. Mirrors
+    /// `EpisodeSurfaceStatusObserver.eligibility(from:)` — three of the
+    /// five fields are observable from the snapshot today; hardware and
+    /// region default to `true` because the per-field providers in
+    /// `AnalysisEligibilityEvaluator` are not yet wired into the
+    /// runtime (Phase 2 scope). Defaulting to `true` is the conservative
+    /// choice for the batch path: it does NOT manufacture spurious
+    /// `analysisUnavailable` blockers on hardware that has not actually
+    /// flagged itself ineligible.
+    nonisolated static func eligibility(from snapshot: CapabilitySnapshot) -> AnalysisEligibility {
+        AnalysisEligibility(
+            hardwareSupported: true,
+            appleIntelligenceEnabled: snapshot.appleIntelligenceEnabled,
+            regionSupported: true,
+            languageSupported: snapshot.foundationModelsLocaleSupported,
+            modelAvailableNow: snapshot.canUseFoundationModels,
+            capturedAt: snapshot.capturedAt
+        )
+    }
+
 }
 
 /// Thread-safe holder for the lazily-initialized `ShadowRetryObserver`.
