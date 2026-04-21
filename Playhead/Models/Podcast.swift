@@ -191,7 +191,52 @@ struct FeedDescriptionMetadata: Codable, Sendable, Equatable {
     var sourceHashes: SourceHashes
 
     struct SourceHashes: Codable, Sendable, Equatable, Hashable {
-        var descriptionHash: UInt64?
-        var summaryHash: UInt64?
+        // Stored as Int64 (raw bit-pattern of the original FNV-1a 64-bit
+        // UInt64). SwiftData persists `feedMetadata` as a Codable blob and
+        // the NSNumber bridge traps on UInt64 values > Int64.max when the
+        // getter deserializes — see the "feedMetadata UInt64 bridge" crash.
+        // Consumers treat these as opaque equality tokens, so a bit-cast
+        // preserves identity: equal UInt64s bit-cast to equal Int64s.
+        var descriptionHash: Int64?
+        var summaryHash: Int64?
+
+        init(descriptionHash: Int64? = nil, summaryHash: Int64? = nil) {
+            self.descriptionHash = descriptionHash
+            self.summaryHash = summaryHash
+        }
+
+        // Custom Codable with legacy-row migration.
+        //
+        // Decode strategy:
+        //   - New writes: Int64 numeric token — decode directly.
+        //   - Legacy rows that wrote UInt64 and whose value was <= Int64.max:
+        //     the JSON/plist number round-trips cleanly into an Int64 of the
+        //     same numeric value; same bit pattern in that range.
+        //   - Legacy rows whose UInt64 was > Int64.max: decoding as Int64
+        //     overflows and throws. We swallow that error and store nil —
+        //     the row simply loses its hash and gets re-synced on the next
+        //     feed fetch. No user-facing data is lost.
+        //   - Missing key: nil.
+        //
+        // Encode strategy: plain Int64 (or nil as absent key).
+
+        private enum CodingKeys: String, CodingKey {
+            case descriptionHash
+            case summaryHash
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            // `try?` collapses both "key missing" and "number overflows Int64"
+            // into nil. The latter is the legacy-UInt64-with-high-bit case.
+            self.descriptionHash = try? container.decodeIfPresent(Int64.self, forKey: .descriptionHash)
+            self.summaryHash = try? container.decodeIfPresent(Int64.self, forKey: .summaryHash)
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeIfPresent(descriptionHash, forKey: .descriptionHash)
+            try container.encodeIfPresent(summaryHash, forKey: .summaryHash)
+        }
     }
 }

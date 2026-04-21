@@ -294,6 +294,55 @@ struct FeedDescriptionMetadataPersistenceTests {
     }
 
     @MainActor
+    @Test("Episode feedMetadata survives SwiftData roundtrip with high-bit hash")
+    func persistenceRoundtripHighBitHash() throws {
+        // Regression: UInt64 hash values with the high bit set (> Int64.max)
+        // used to crash with "Unable to bridge NSNumber to UInt64" when
+        // SwiftData decoded the feedMetadata Codable blob. Store hashes as
+        // Int64 bit patterns so the NSNumber bridge does not trap.
+        let config = ModelConfiguration(
+            "FeedMetadataHighBitTest",
+            schema: SwiftDataStore.schema,
+            isStoredInMemoryOnly: true
+        )
+        let container = try ModelContainer(
+            for: SwiftDataStore.schema,
+            configurations: [config]
+        )
+        let context = container.mainContext
+
+        // Sentinel value: 0xFFFF_FFFF_FFFF_FFFE is > Int64.max when viewed
+        // as UInt64. Bit-cast to Int64 yields -2.
+        let sentinel: Int64 = Int64(bitPattern: 0xFFFF_FFFF_FFFF_FFFE)
+        let metadata = FeedDescriptionMetadata(
+            feedDescription: "desc",
+            feedSummary: "sum",
+            sourceHashes: .init(
+                descriptionHash: sentinel,
+                summaryHash: sentinel
+            )
+        )
+        let episode = Episode(
+            feedItemGUID: "high-bit-roundtrip",
+            feedURL: URL(string: "https://example.com/feed.xml")!,
+            title: "Test",
+            audioURL: URL(string: "https://example.com/ep.mp3")!,
+            feedMetadata: metadata
+        )
+        context.insert(episode)
+        try context.save()
+
+        let fetched = try context.fetch(FetchDescriptor<Episode>())
+        #expect(fetched.count == 1)
+        let ep = fetched[0]
+        // The getter for feedMetadata used to trap here when hashes were
+        // UInt64 with the high bit set. Reading it must succeed and return
+        // the original sentinel bit pattern.
+        #expect(ep.feedMetadata?.sourceHashes.descriptionHash == sentinel)
+        #expect(ep.feedMetadata?.sourceHashes.summaryHash == sentinel)
+    }
+
+    @MainActor
     @Test("Episode feedMetadata nil by default")
     func defaultNil() throws {
         let config = ModelConfiguration(

@@ -63,10 +63,17 @@ enum FeedTextNormalizer {
 
     /// Stable hash of raw source text for rebuild detection.
     /// Uses FNV-1a 64-bit for speed and determinism (no cryptographic need).
-    static func stableHash(_ raw: String?) -> UInt64? {
+    ///
+    /// Returns `Int64?` holding the raw bit pattern of the FNV-1a UInt64.
+    /// We bit-cast rather than store UInt64 directly because SwiftData
+    /// persists `FeedDescriptionMetadata` as a Codable blob, and the
+    /// NSNumber bridge on the read path traps on UInt64 values > Int64.max.
+    /// Equality is preserved across the cast: equal UInt64s produce equal
+    /// Int64s. Consumers only compare these hashes for identity.
+    static func stableHash(_ raw: String?) -> Int64? {
         guard let raw, !raw.isEmpty else { return nil }
         let bytes = Array(raw.utf8)
-        return fnv1a64(bytes)
+        return Int64(bitPattern: fnv1a64(bytes))
     }
 
     /// Build `FeedDescriptionMetadata` from raw parsed episode fields.
