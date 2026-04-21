@@ -22,11 +22,26 @@ enum BackfillJobStatus: String, Codable, Sendable, Hashable, CaseIterable {
 }
 
 struct BackfillProgressCursor: Codable, Sendable, Equatable, Hashable {
-    let processedUnitCount: Int
+    /// Number of backfill phases that have completed for this job. In
+    /// practice this is a 1-bit counter: each job enqueues exactly one
+    /// phase, so the field is 0 before `runJob` succeeds and 1 afterward.
+    /// The name used to be `processedUnitCount`, which suggested
+    /// chunk/unit granularity and misled a production debugging pass.
+    /// The on-disk JSON key remains `processedUnitCount` (see `CodingKeys`)
+    /// so existing `backfill_jobs.progressCursorJSON` rows stay readable
+    /// without a database migration.
+    let processedPhaseCount: Int
     let lastProcessedUpperBoundSec: Double?
 
-    init(processedUnitCount: Int, lastProcessedUpperBoundSec: Double? = nil) {
-        self.processedUnitCount = max(0, processedUnitCount)
+    private enum CodingKeys: String, CodingKey {
+        // Preserve the legacy JSON key for backward compatibility with
+        // rows written before the Swift rename. Do NOT change this string.
+        case processedPhaseCount = "processedUnitCount"
+        case lastProcessedUpperBoundSec
+    }
+
+    init(processedPhaseCount: Int, lastProcessedUpperBoundSec: Double? = nil) {
+        self.processedPhaseCount = max(0, processedPhaseCount)
         if let value = lastProcessedUpperBoundSec {
             self.lastProcessedUpperBoundSec = max(0, value)
         } else {
@@ -36,10 +51,10 @@ struct BackfillProgressCursor: Codable, Sendable, Equatable, Hashable {
 
     /// Returns a cursor whose fields are the field-wise maximum of `self` and
     /// `other`. Used to defend against backward checkpoint writes (e.g. a
-    /// stale resume racing a fresh chunk completion). `nil` upper bounds are
+    /// stale resume racing a fresh phase completion). `nil` upper bounds are
     /// treated as the smaller value.
     func monotonic(from other: BackfillProgressCursor) -> BackfillProgressCursor {
-        let mergedCount = max(processedUnitCount, other.processedUnitCount)
+        let mergedCount = max(processedPhaseCount, other.processedPhaseCount)
         let mergedUpper: Double?
         switch (lastProcessedUpperBoundSec, other.lastProcessedUpperBoundSec) {
         case let (lhs?, rhs?):
@@ -52,7 +67,7 @@ struct BackfillProgressCursor: Codable, Sendable, Equatable, Hashable {
             mergedUpper = nil
         }
         return BackfillProgressCursor(
-            processedUnitCount: mergedCount,
+            processedPhaseCount: mergedCount,
             lastProcessedUpperBoundSec: mergedUpper
         )
     }
@@ -74,7 +89,7 @@ struct BackfillJob: Sendable, Equatable {
 
     func remainingUnitRange(totalUnits: Int) -> Range<Int> {
         let boundedTotal = max(0, totalUnits)
-        let start = min(progressCursor?.processedUnitCount ?? 0, boundedTotal)
+        let start = min(progressCursor?.processedPhaseCount ?? 0, boundedTotal)
         return start..<boundedTotal
     }
 }

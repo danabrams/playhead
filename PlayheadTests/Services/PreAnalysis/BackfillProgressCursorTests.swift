@@ -1,6 +1,7 @@
 // BackfillProgressCursorTests.swift
 // Unit tests for BackfillProgressCursor clamping and monotonic merge.
 
+import Foundation
 import Testing
 
 @testable import Playhead
@@ -8,16 +9,16 @@ import Testing
 @Suite("BackfillProgressCursor")
 struct BackfillProgressCursorTests {
 
-    @Test("processedUnitCount is clamped to non-negative")
-    func testProcessedUnitCountClamp() {
-        let cursor = BackfillProgressCursor(processedUnitCount: -5)
-        #expect(cursor.processedUnitCount == 0)
+    @Test("processedPhaseCount is clamped to non-negative")
+    func testProcessedPhaseCountClamp() {
+        let cursor = BackfillProgressCursor(processedPhaseCount: -5)
+        #expect(cursor.processedPhaseCount == 0)
     }
 
     @Test("lastProcessedUpperBoundSec is clamped to non-negative")
     func testLastProcessedUpperBoundClampNegative() {
         let cursor = BackfillProgressCursor(
-            processedUnitCount: 1,
+            processedPhaseCount: 1,
             lastProcessedUpperBoundSec: -1
         )
         #expect(cursor.lastProcessedUpperBoundSec == 0)
@@ -26,7 +27,7 @@ struct BackfillProgressCursorTests {
     @Test("nil lastProcessedUpperBoundSec stays nil")
     func testLastProcessedUpperBoundNilPassthrough() {
         let cursor = BackfillProgressCursor(
-            processedUnitCount: 1,
+            processedPhaseCount: 1,
             lastProcessedUpperBoundSec: nil
         )
         #expect(cursor.lastProcessedUpperBoundSec == nil)
@@ -35,11 +36,11 @@ struct BackfillProgressCursorTests {
     @Test("monotonic(from:) picks the larger of each field")
     func testMonotonicMergePicksLargerFields() {
         let older = BackfillProgressCursor(
-            processedUnitCount: 5,
+            processedPhaseCount: 5,
             lastProcessedUpperBoundSec: 60
         )
         let newer = BackfillProgressCursor(
-            processedUnitCount: 8,
+            processedPhaseCount: 8,
             lastProcessedUpperBoundSec: 90
         )
 
@@ -51,31 +52,63 @@ struct BackfillProgressCursorTests {
     func testMonotonicMergeMixedFields() {
         // Mixed: lhs has higher count, rhs has higher upperBound.
         let lhs = BackfillProgressCursor(
-            processedUnitCount: 10,
+            processedPhaseCount: 10,
             lastProcessedUpperBoundSec: 30
         )
         let rhs = BackfillProgressCursor(
-            processedUnitCount: 4,
+            processedPhaseCount: 4,
             lastProcessedUpperBoundSec: 90
         )
 
         let merged = lhs.monotonic(from: rhs)
-        #expect(merged.processedUnitCount == 10)
+        #expect(merged.processedPhaseCount == 10)
         #expect(merged.lastProcessedUpperBoundSec == 90)
     }
 
     @Test("monotonic(from:) treats nil lastProcessedUpperBoundSec as the smaller value")
     func testMonotonicMergeWithNil() {
         let withTime = BackfillProgressCursor(
-            processedUnitCount: 1,
+            processedPhaseCount: 1,
             lastProcessedUpperBoundSec: 42
         )
         let withoutTime = BackfillProgressCursor(
-            processedUnitCount: 1,
+            processedPhaseCount: 1,
             lastProcessedUpperBoundSec: nil
         )
 
         #expect(withTime.monotonic(from: withoutTime).lastProcessedUpperBoundSec == 42)
         #expect(withoutTime.monotonic(from: withTime).lastProcessedUpperBoundSec == 42)
+    }
+
+    // MARK: - JSON persistence compatibility (rename safety)
+
+    /// The Swift property was renamed from `processedUnitCount` to
+    /// `processedPhaseCount` to reflect how it is actually written (0 or 1
+    /// per phase completion). The on-disk JSON key stays `processedUnitCount`
+    /// so existing `backfill_jobs.progressCursorJSON` rows remain readable
+    /// without a database migration. See BackfillJob.swift CodingKeys.
+    @Test("encode preserves legacy processedUnitCount JSON key")
+    func testEncodeUsesLegacyJSONKey() throws {
+        let cursor = BackfillProgressCursor(
+            processedPhaseCount: 1,
+            lastProcessedUpperBoundSec: 689.82
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(cursor)
+        let json = String(decoding: data, as: UTF8.self)
+        #expect(json.contains("\"processedUnitCount\":1"))
+        #expect(!json.contains("processedPhaseCount"))
+    }
+
+    @Test("decode reads legacy processedUnitCount JSON key into processedPhaseCount")
+    func testDecodeReadsLegacyJSONKey() throws {
+        let json = #"{"processedUnitCount":1,"lastProcessedUpperBoundSec":689.82}"#
+        let cursor = try JSONDecoder().decode(
+            BackfillProgressCursor.self,
+            from: Data(json.utf8)
+        )
+        #expect(cursor.processedPhaseCount == 1)
+        #expect(cursor.lastProcessedUpperBoundSec == 689.82)
     }
 }

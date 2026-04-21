@@ -435,7 +435,7 @@ actor BackfillJobRunner {
                     try await store.markBackfillJobComplete(
                         jobId: job.jobId,
                         progressCursor: BackfillProgressCursor(
-                            processedUnitCount: 0,
+                            processedPhaseCount: 0,
                             lastProcessedUpperBoundSec: nil
                         )
                     )
@@ -453,7 +453,7 @@ actor BackfillJobRunner {
                 try await store.markBackfillJobComplete(
                     jobId: job.jobId,
                     progressCursor: BackfillProgressCursor(
-                        processedUnitCount: 1,
+                        processedPhaseCount: 1,
                         lastProcessedUpperBoundSec: jobInputs.segments.last?.endTime
                     )
                 )

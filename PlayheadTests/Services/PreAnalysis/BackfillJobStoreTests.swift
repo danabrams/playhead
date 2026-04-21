@@ -79,7 +79,7 @@ struct BackfillJobStoreTests {
             jobId: job.jobId,
             status: .running,
             progressCursor: BackfillProgressCursor(
-                processedUnitCount: 2,
+                processedPhaseCount: 2,
                 lastProcessedUpperBoundSec: 90
             )
         )
@@ -89,7 +89,7 @@ struct BackfillJobStoreTests {
 
         #expect(resumed.phase == .scanLikelyAdSlots)
         #expect(resumed.progressCursor == BackfillProgressCursor(
-            processedUnitCount: 2,
+            processedPhaseCount: 2,
             lastProcessedUpperBoundSec: 90
         ))
         #expect(Array(resumed.remainingUnitRange(totalUnits: 5)) == [2, 3, 4])
@@ -103,7 +103,7 @@ struct BackfillJobStoreTests {
             jobId: "phase-advance",
             phase: .scanHarvesterProposals,
             coveragePolicy: .targetedWithAudit,
-            progressCursor: BackfillProgressCursor(processedUnitCount: 3),
+            progressCursor: BackfillProgressCursor(processedPhaseCount: 3),
             status: .running
         )
 
@@ -157,12 +157,12 @@ struct BackfillJobStoreTests {
         try await store.insertBackfillJob(job)
         try await store.checkpointBackfillJobProgress(
             jobId: job.jobId,
-            progressCursor: BackfillProgressCursor(processedUnitCount: 4)
+            progressCursor: BackfillProgressCursor(processedPhaseCount: 4)
         )
 
         let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
         #expect(fetched.deferReason == "thermal")
-        #expect(fetched.progressCursor?.processedUnitCount == 4)
+        #expect(fetched.progressCursor?.processedPhaseCount == 4)
     }
 
     @Test("H5: markBackfillJobDeferred preserves existing progressCursor")
@@ -174,7 +174,7 @@ struct BackfillJobStoreTests {
             phase: .scanLikelyAdSlots,
             coveragePolicy: .targetedWithAudit,
             progressCursor: BackfillProgressCursor(
-                processedUnitCount: 7,
+                processedPhaseCount: 7,
                 lastProcessedUpperBoundSec: 123.0
             )
         )
@@ -186,7 +186,7 @@ struct BackfillJobStoreTests {
         #expect(fetched.status == .deferred)
         #expect(fetched.deferReason == "battery")
         #expect(fetched.progressCursor == BackfillProgressCursor(
-            processedUnitCount: 7,
+            processedPhaseCount: 7,
             lastProcessedUpperBoundSec: 123.0
         ))
     }
@@ -290,7 +290,7 @@ struct BackfillJobStoreTests {
             phase: .scanLikelyAdSlots,
             coveragePolicy: .targetedWithAudit,
             progressCursor: BackfillProgressCursor(
-                processedUnitCount: 3,
+                processedPhaseCount: 3,
                 lastProcessedUpperBoundSec: 45
             ),
             retryCount: 2
@@ -301,7 +301,7 @@ struct BackfillJobStoreTests {
 
         let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
         #expect(fetched.status == .running)
-        #expect(fetched.progressCursor?.processedUnitCount == 3)
+        #expect(fetched.progressCursor?.processedPhaseCount == 3)
         #expect(fetched.retryCount == 2)
     }
 
@@ -318,13 +318,13 @@ struct BackfillJobStoreTests {
         try await store.insertBackfillJob(job)
         try await store.checkpointBackfillJobProgress(
             jobId: job.jobId,
-            progressCursor: BackfillProgressCursor(processedUnitCount: 3)
+            progressCursor: BackfillProgressCursor(processedPhaseCount: 3)
         )
 
         try await store.markBackfillJobComplete(
             jobId: job.jobId,
             progressCursor: BackfillProgressCursor(
-                processedUnitCount: 5,
+                processedPhaseCount: 5,
                 lastProcessedUpperBoundSec: 120
             )
         )
@@ -332,7 +332,7 @@ struct BackfillJobStoreTests {
         let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
         #expect(fetched.status == .complete)
         #expect(fetched.progressCursor == BackfillProgressCursor(
-            processedUnitCount: 5,
+            processedPhaseCount: 5,
             lastProcessedUpperBoundSec: 120
         ))
         // Audit trail preserved.
@@ -401,7 +401,7 @@ struct BackfillJobStoreTests {
         try await store.insertBackfillJob(job)
         try await store.markBackfillJobComplete(
             jobId: job.jobId,
-            progressCursor: BackfillProgressCursor(processedUnitCount: 1)
+            progressCursor: BackfillProgressCursor(processedPhaseCount: 1)
         )
 
         await #expect(throws: AnalysisStoreError.self) {
@@ -468,7 +468,7 @@ struct BackfillJobStoreTests {
             phase: .scanLikelyAdSlots,
             coveragePolicy: .targetedWithAudit,
             progressCursor: BackfillProgressCursor(
-                processedUnitCount: 7,
+                processedPhaseCount: 7,
                 lastProcessedUpperBoundSec: 210
             ),
             retryCount: 3,
@@ -483,7 +483,7 @@ struct BackfillJobStoreTests {
         let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
         #expect(fetched.status == .running)
         #expect(fetched.progressCursor == BackfillProgressCursor(
-            processedUnitCount: 7,
+            processedPhaseCount: 7,
             lastProcessedUpperBoundSec: 210
         ))
         #expect(fetched.retryCount == 3)
@@ -504,7 +504,7 @@ struct BackfillJobStoreTests {
             jobId: "zombie-running",
             phase: .scanLikelyAdSlots,
             coveragePolicy: .targetedWithAudit,
-            progressCursor: BackfillProgressCursor(processedUnitCount: 2),
+            progressCursor: BackfillProgressCursor(processedPhaseCount: 2),
             retryCount: 1
         )
         try await store.insertBackfillJob(job)
@@ -515,7 +515,7 @@ struct BackfillJobStoreTests {
 
         let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
         #expect(fetched.status == .running)
-        #expect(fetched.progressCursor?.processedUnitCount == 2)
+        #expect(fetched.progressCursor?.processedPhaseCount == 2)
         #expect(fetched.retryCount == 1)
     }
 
@@ -536,7 +536,7 @@ struct BackfillJobStoreTests {
         await #expect(throws: AnalysisStoreError.self) {
             try await store.markBackfillJobComplete(
                 jobId: job.jobId,
-                progressCursor: BackfillProgressCursor(processedUnitCount: 1)
+                progressCursor: BackfillProgressCursor(processedPhaseCount: 1)
             )
         }
 
@@ -550,7 +550,7 @@ struct BackfillJobStoreTests {
         try await insertParentAsset(store)
         let job = makeBackfillJob(jobId: "c32-complete-idempotent")
         try await store.insertBackfillJob(job)
-        let cursor = BackfillProgressCursor(processedUnitCount: 2)
+        let cursor = BackfillProgressCursor(processedPhaseCount: 2)
         try await store.markBackfillJobComplete(jobId: job.jobId, progressCursor: cursor)
 
         // Second call must not throw.
@@ -579,7 +579,7 @@ struct BackfillJobStoreTests {
         try await store.insertBackfillJob(job)
         try await store.markBackfillJobComplete(
             jobId: job.jobId,
-            progressCursor: BackfillProgressCursor(processedUnitCount: 1)
+            progressCursor: BackfillProgressCursor(processedPhaseCount: 1)
         )
 
         await #expect(throws: AnalysisStoreError.self) {
@@ -664,7 +664,7 @@ struct BackfillJobStoreTests {
         try await store.insertBackfillJob(job)
         try await store.markBackfillJobComplete(
             jobId: job.jobId,
-            progressCursor: BackfillProgressCursor(processedUnitCount: 1)
+            progressCursor: BackfillProgressCursor(processedPhaseCount: 1)
         )
 
         await #expect(throws: AnalysisStoreError.self) {
