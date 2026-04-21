@@ -73,7 +73,7 @@ struct AnalysisRangeRequest: Sendable {
 /// for the job's episode if the cascade has been seeded for it.
 ///
 /// Surfaced as a public, side-effect-free accessor on
-/// `AnalysisWorkScheduler` (`peekNextDispatchableSlice()`) so the
+/// `AnalysisWorkScheduler` (`selectNextDispatchableSlice()`) so the
 /// playhead-swws ordering test can prove that proximal-first cascade
 /// order overrides the store's `priority DESC, createdAt ASC` (FIFO
 /// at equal priority) ordering for episodes the cascade has been
