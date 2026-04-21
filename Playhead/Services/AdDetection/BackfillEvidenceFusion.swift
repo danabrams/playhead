@@ -73,6 +73,10 @@ struct FusionWeightConfig: Sendable {
     let catalogCap: Double
     /// Maximum weight contribution from fingerprint evidence.
     let fingerprintCap: Double
+    /// playhead-z3ch: Maximum weight contribution from a single metadata
+    /// (RSS-feed-derived) entry. Spec mandates 0.15 of fusion budget per
+    /// Plan §7.4. Hard-clamped via `FusionBudgetClamp`; never redistributed.
+    let metadataCap: Double
 
     init(
         fmCap: Double = 0.4,
@@ -80,7 +84,8 @@ struct FusionWeightConfig: Sendable {
         lexicalCap: Double = 0.2,
         acousticCap: Double = 0.2,
         catalogCap: Double = 0.2,
-        fingerprintCap: Double = 0.25
+        fingerprintCap: Double = 0.25,
+        metadataCap: Double = 0.15
     ) {
         self.fmCap = fmCap
         self.classifierCap = classifierCap
@@ -88,6 +93,7 @@ struct FusionWeightConfig: Sendable {
         self.acousticCap = acousticCap
         self.catalogCap = catalogCap
         self.fingerprintCap = fingerprintCap
+        self.metadataCap = metadataCap
     }
 }
 
@@ -120,8 +126,37 @@ struct BackfillEvidenceFusion: Sendable {
     let catalogEntries: [EvidenceLedgerEntry]
     /// Pre-constructed fingerprint ledger entries (Phase 9).
     private(set) var fingerprintEntries: [EvidenceLedgerEntry] = []
+    /// playhead-z3ch: Pre-constructed metadata (feed-description-derived)
+    /// ledger entries. Each entry is hard-clamped to `config.metadataCap`
+    /// via `FusionBudgetClamp` inside `buildLedger()`. Defaults to empty
+    /// to keep all existing call sites byte-compatible.
+    let metadataEntries: [EvidenceLedgerEntry]
     let mode: FMBackfillMode
     let config: FusionWeightConfig
+
+    init(
+        span: DecodedSpan,
+        classifierScore: Double,
+        fmEntries: [EvidenceLedgerEntry],
+        lexicalEntries: [EvidenceLedgerEntry],
+        acousticEntries: [EvidenceLedgerEntry],
+        catalogEntries: [EvidenceLedgerEntry],
+        fingerprintEntries: [EvidenceLedgerEntry] = [],
+        metadataEntries: [EvidenceLedgerEntry] = [],
+        mode: FMBackfillMode,
+        config: FusionWeightConfig
+    ) {
+        self.span = span
+        self.classifierScore = classifierScore
+        self.fmEntries = fmEntries
+        self.lexicalEntries = lexicalEntries
+        self.acousticEntries = acousticEntries
+        self.catalogEntries = catalogEntries
+        self.fingerprintEntries = fingerprintEntries
+        self.metadataEntries = metadataEntries
+        self.mode = mode
+        self.config = config
+    }
 
     /// Build the decision ledger for this span.
     ///
@@ -210,6 +245,18 @@ struct BackfillEvidenceFusion: Sendable {
                 detail: entry.detail
             )
             ledger.append(capped)
+        }
+
+        // playhead-z3ch: Metadata entries (feed-description / itunes:summary).
+        // Hard-clamped via FusionBudgetClamp to `config.metadataCap` (Plan §7.4 = 0.15).
+        // Per the Expert Review contract: pre-seeded metadata contributes to evidence
+        // fusion but cannot trigger a skip on its own — the corroboration gate in
+        // `DecisionMapper.computeGate()` enforces that requirement separately.
+        // Excess weight is clamped (NOT redistributed) and audited via the clamp.
+        let metadataClamp = FusionBudgetClamp(sourceWeightCap: config.metadataCap)
+        for entry in metadataEntries {
+            let clamped = metadataClamp.clamp(entry, logger: Self.logger)
+            ledger.append(clamped)
         }
 
         return ledger
@@ -356,9 +403,48 @@ struct DecisionMapper: Sendable {
         } else if hasFMAcoustic {
             return quorumGateForFMAcoustic()
         } else {
-            // No FM provenance — quorum not applicable
+            // No FM provenance — quorum normally not applicable, but
+            // playhead-z3ch enforces a metadata-corroboration gate: a span
+            // whose only weighted evidence is metadata-derived MUST NOT
+            // trigger a skip on its own. The Expert Review contract:
+            // "Pre-seeded metadata contributes to evidence fusion but
+            // cannot trigger a skip decision on its own. At least one
+            // corroborating in-audio signal is required."
+            return metadataCorroborationGate()
+        }
+    }
+
+    /// playhead-z3ch: corroboration check for metadata-only spans.
+    ///
+    /// Returns `.blockedByEvidenceQuorum` when the ledger's only weighted
+    /// contribution is `.metadata` (the always-present zero-weight
+    /// `.classifier` entry from `buildLedger()` does NOT count as
+    /// corroboration). Otherwise returns `.eligible` — preserving the
+    /// pre-z3ch "no FM provenance → eligible" semantics for any ledger
+    /// that contains at least one in-audio signal.
+    private func metadataCorroborationGate() -> SkipEligibilityGate {
+        let hasMetadata = ledger.contains { $0.source == .metadata }
+        guard hasMetadata else {
+            // No metadata contribution at all — preserve pre-z3ch behavior.
             return .eligible
         }
+        // Treat the always-present zero-weight `.classifier` entry as
+        // non-corroborating (it carries no in-audio signal when its
+        // adProbability is zero). Any other in-audio source — or a
+        // classifier entry with a non-zero weight — counts as corroboration.
+        let inAudioCorroboratingSources: Set<EvidenceSourceType> = [
+            .lexical, .acoustic, .catalog, .fingerprint, .fm
+        ]
+        let hasInAudioCorroboration = ledger.contains { entry in
+            if inAudioCorroboratingSources.contains(entry.source) {
+                return true
+            }
+            if entry.source == .classifier, entry.weight > 0 {
+                return true
+            }
+            return false
+        }
+        return hasInAudioCorroboration ? .eligible : .blockedByEvidenceQuorum
     }
 
     /// Quorum check for spans anchored by fmConsensus.
