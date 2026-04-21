@@ -25,6 +25,13 @@ actor AnalysisJobRunner {
     private let adDetection: AdDetectionProviding
     private let cueMaterializer: SkipCueMaterializer
     private let thermalStateProvider: @Sendable () -> ProcessInfo.ThermalState
+    /// playhead-e2vw: injectable clock for synthetic-time test harnesses.
+    /// Defaults to `Date.init` so production behavior is byte-identical;
+    /// the cascade-attributed proximal-readiness SLI test
+    /// (`CandidateWindowCascadeProximalReadinessSLITest`) installs a
+    /// `ManualClock` to drive lease/registration timestamps off
+    /// synthetic time.
+    private let clock: @Sendable () -> Date
     /// Optional coordinator (playhead-01t8). When non-nil, every
     /// `run(_:)` registers with the coordinator at start-of-work,
     /// threads the returned `PreemptionSignal` down into feature
@@ -45,7 +52,8 @@ actor AnalysisJobRunner {
         thermalStateProvider: @escaping @Sendable () -> ProcessInfo.ThermalState = {
             ProcessInfo.processInfo.thermalState
         },
-        preemptionCoordinator: LanePreemptionCoordinator? = nil
+        preemptionCoordinator: LanePreemptionCoordinator? = nil,
+        clock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.store = store
         self.audioProvider = audioProvider
@@ -55,6 +63,7 @@ actor AnalysisJobRunner {
         self.cueMaterializer = cueMaterializer
         self.thermalStateProvider = thermalStateProvider
         self.preemptionCoordinator = preemptionCoordinator
+        self.clock = clock
     }
 
     // MARK: - Run
@@ -470,7 +479,7 @@ actor AnalysisJobRunner {
     private func makeRegistrationLease(
         request: AnalysisRangeRequest
     ) -> EpisodeExecutionLease {
-        let now = Date().timeIntervalSince1970
+        let now = clock().timeIntervalSince1970
         return EpisodeExecutionLease(
             episodeId: request.episodeId,
             ownerWorkerId: "preAnalysis:\(request.jobId)",

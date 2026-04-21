@@ -75,6 +75,15 @@ actor AnalysisWorkScheduler {
     /// windows can omit it.
     private let candidateWindowCascade: CandidateWindowCascade?
     private let config: PreAnalysisConfig
+    /// playhead-e2vw: injectable clock for synthetic-time test harnesses.
+    /// Defaults to `Date.init` so production behavior is byte-identical;
+    /// the cascade-attributed proximal-readiness SLI test
+    /// (`CandidateWindowCascadeProximalReadinessSLITest`) installs a
+    /// `ManualClock` and drives the full enqueue → seed →
+    /// selectNextDispatchableSlice → lease/timestamp pipeline through
+    /// it so the recorded latencies are clock-driven rather than
+    /// model-derived.
+    private let clock: @Sendable () -> Date
     private let logger = Logger(subsystem: "com.playhead", category: "WorkScheduler")
 
     // MARK: - SchedulerLane (playhead-r835)
@@ -238,7 +247,8 @@ actor AnalysisWorkScheduler {
         batteryProvider: any BatteryStateProviding = UIDeviceBatteryProvider(),
         transportStatusProvider: any TransportStatusProviding = WifiTransportStatusProvider(),
         candidateWindowCascade: CandidateWindowCascade? = nil,
-        config: PreAnalysisConfig = .load()
+        config: PreAnalysisConfig = .load(),
+        clock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.store = store
         self.jobRunner = jobRunner
@@ -248,6 +258,7 @@ actor AnalysisWorkScheduler {
         self.transportStatusProvider = transportStatusProvider
         self.candidateWindowCascade = candidateWindowCascade
         self.config = config
+        self.clock = clock
         var continuation: AsyncStream<Void>.Continuation?
         self.wakeStream = AsyncStream<Void> { continuation = $0 }
         self.wakeContinuation = continuation
@@ -272,7 +283,7 @@ actor AnalysisWorkScheduler {
             analysisVersion: PreAnalysisConfig.analysisVersion,
             jobType: "preAnalysis"
         )
-        let now = Date().timeIntervalSince1970
+        let now = clock().timeIntervalSince1970
         let job = AnalysisJob(
             jobId: UUID().uuidString,
             jobType: "preAnalysis",
@@ -413,7 +424,7 @@ actor AnalysisWorkScheduler {
 
         let deferredWorkAllowed = admission.policy.allowSoonLane
             || admission.policy.allowBackgroundLane
-        let now = Date().timeIntervalSince1970
+        let now = clock().timeIntervalSince1970
 
         guard let selected = await selectNextDispatchableJob(
             deferredWorkAllowed: deferredWorkAllowed,
@@ -789,7 +800,7 @@ actor AnalysisWorkScheduler {
             // Background.
             let deferredWorkAllowed = admission.policy.allowSoonLane
                 || admission.policy.allowBackgroundLane
-            let now = Date().timeIntervalSince1970
+            let now = clock().timeIntervalSince1970
 
             // playhead-swws: cascade-aware job selection. When the
             // candidate-window cascade has at least one seeded
@@ -1089,7 +1100,7 @@ actor AnalysisWorkScheduler {
         }
 
         // Acquire lease.
-        let leaseExpiry = Date().timeIntervalSince1970 + Self.leaseExpirySeconds
+        let leaseExpiry = clock().timeIntervalSince1970 + Self.leaseExpirySeconds
         let leaseAcquired = (try? await store.acquireLease(
             jobId: job.jobId,
             owner: "preAnalysis",
@@ -1117,10 +1128,10 @@ actor AnalysisWorkScheduler {
         // write (state revert, progress update, backoff, releaseLease)
         // that would otherwise clobber the new owner's bookkeeping, then
         // cancel the running task so the run loop unwinds promptly.
-        leaseRenewalTask = Task {
+        leaseRenewalTask = Task { [clock] in
             while !Task.isCancelled {
                 try await Task.sleep(for: .seconds(Self.leaseRenewalIntervalSeconds))
-                let newExpiry = Date().timeIntervalSince1970 + Self.leaseExpirySeconds
+                let newExpiry = clock().timeIntervalSince1970 + Self.leaseExpirySeconds
                 let stillOwned = (try? await self.store.renewLease(
                     jobId: job.jobId,
                     owner: "preAnalysis",
@@ -1156,7 +1167,7 @@ actor AnalysisWorkScheduler {
                 try await store.updateJobState(
                     jobId: job.jobId,
                     state: "failed",
-                    nextEligibleAt: Date().timeIntervalSince1970 + backoff,
+                    nextEligibleAt: clock().timeIntervalSince1970 + backoff,
                     lastErrorCode: "assetResolution: \(error)"
                 )
             }
@@ -1322,7 +1333,7 @@ actor AnalysisWorkScheduler {
                         analysisVersion: PreAnalysisConfig.analysisVersion,
                         jobType: "preAnalysis"
                     ) + ":\(Int(nextCoverage))"
-                    let now = Date().timeIntervalSince1970
+                    let now = clock().timeIntervalSince1970
                     let nextJob = AnalysisJob(
                         jobId: UUID().uuidString,
                         jobType: "preAnalysis",
@@ -1402,14 +1413,14 @@ actor AnalysisWorkScheduler {
                             try await store.updateJobState(
                                 jobId: job.jobId,
                                 state: "queued",
-                                nextEligibleAt: Date().timeIntervalSince1970 + backoff
+                                nextEligibleAt: clock().timeIntervalSince1970 + backoff
                             )
                         }
                     }
                 }
 
             case .blockedByModel:
-                let nextEligible = Date().timeIntervalSince1970 + 300
+                let nextEligible = clock().timeIntervalSince1970 + 300
                 await writeIfStillOwned("blockedByModel") {
                     try await store.updateJobState(
                         jobId: job.jobId,
@@ -1420,7 +1431,7 @@ actor AnalysisWorkScheduler {
                 logger.info("Job \(job.jobId) blocked: model unavailable, retry in 300s")
 
             case .pausedForThermal, .memoryPressure:
-                let nextEligible = Date().timeIntervalSince1970 + 30
+                let nextEligible = clock().timeIntervalSince1970 + 30
                 await writeIfStillOwned("pausedThermalOrMemory") {
                     try await store.updateJobState(
                         jobId: job.jobId,
@@ -1447,7 +1458,7 @@ actor AnalysisWorkScheduler {
                     logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: \(reason)")
                 } else {
                     let backoff = Self.exponentialBackoffSeconds(attempt: attempts)
-                    let nextEligible = Date().timeIntervalSince1970 + backoff
+                    let nextEligible = clock().timeIntervalSince1970 + backoff
                     await writeIfStillOwned("failed.requeue") {
                         try await store.updateJobState(
                             jobId: job.jobId,
@@ -1498,7 +1509,7 @@ actor AnalysisWorkScheduler {
                 }
             } else {
                 let backoff = Self.exponentialBackoffSeconds(attempt: attempts)
-                let nextEligible = Date().timeIntervalSince1970 + backoff
+                let nextEligible = clock().timeIntervalSince1970 + backoff
                 await writeIfStillOwned("outerCatch.requeue") {
                     try await store.updateJobState(
                         jobId: job.jobId,
