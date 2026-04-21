@@ -1155,33 +1155,12 @@ final class PlayheadRuntime {
             },
             eligibilityProvider: { @Sendable in
                 let snapshot = await capabilitiesService.currentSnapshot
-                return PlayheadRuntime.eligibility(from: snapshot)
+                return EpisodeSurfaceStatusObserver.eligibility(from: snapshot)
             }
         )
         return { episodeKeys in
             await builder.summaries(for: episodeKeys)
         }
-    }
-
-    /// Map the live `CapabilitySnapshot` to the surface-status reducer's
-    /// `AnalysisEligibility` input. Mirrors
-    /// `EpisodeSurfaceStatusObserver.eligibility(from:)` — three of the
-    /// five fields are observable from the snapshot today; hardware and
-    /// region default to `true` because the per-field providers in
-    /// `AnalysisEligibilityEvaluator` are not yet wired into the
-    /// runtime (Phase 2 scope). Defaulting to `true` is the conservative
-    /// choice for the batch path: it does NOT manufacture spurious
-    /// `analysisUnavailable` blockers on hardware that has not actually
-    /// flagged itself ineligible.
-    nonisolated static func eligibility(from snapshot: CapabilitySnapshot) -> AnalysisEligibility {
-        AnalysisEligibility(
-            hardwareSupported: true,
-            appleIntelligenceEnabled: snapshot.appleIntelligenceEnabled,
-            regionSupported: true,
-            languageSupported: snapshot.foundationModelsLocaleSupported,
-            modelAvailableNow: snapshot.canUseFoundationModels,
-            capturedAt: snapshot.capturedAt
-        )
     }
 
 }
