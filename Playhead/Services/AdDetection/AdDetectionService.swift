@@ -367,14 +367,16 @@ actor AdDetectionService {
         self.correctionStore = store
     }
 
-    /// playhead-8em9 (narL): Install a decision logger. Production release
-    /// builds never call this (no-op stays installed); DEBUG builds can
-    /// install a `DecisionLogger` via `PlayheadRuntime` to capture per-
-    /// window decisions for offline replay against alternate activation
-    /// configs.
+    #if DEBUG
+    /// playhead-8em9 (narL): Test seam for installing a decision logger
+    /// post-init. Production wires the logger via `init(decisionLogger:)`
+    /// to avoid a Task-install race; this setter exists only for tests that
+    /// swap the logger mid-life. DEBUG-only to prevent a future regression
+    /// from re-introducing the race in release builds.
     func setDecisionLogger(_ logger: DecisionLoggerProtocol) {
         self.decisionLogger = logger
     }
+    #endif
 
     /// playhead-z3ch: Set the EpisodeMetadataProvider. Called from
     /// `PlayheadApp` (after the SwiftData ModelContainer is available) so
@@ -1067,7 +1069,7 @@ actor AdDetectionService {
             // snapshot matches the gated consumers' view at this decision.
             let logEntry = DecisionLogEntry(
                 schemaVersion: DecisionLogEntry.currentSchemaVersion,
-                episodeID: analysisAssetId,
+                analysisAssetID: analysisAssetId,
                 timestamp: decisionTimestamp,
                 windowBounds: .init(
                     start: refinedSpan.startTime,
@@ -2734,25 +2736,33 @@ actor AdDetectionService {
         let snapshot = DecisionLogEntry.ActivationConfigSnapshot(
             MetadataActivationConfig.resolved()
         )
+        // Match BackfillEvidenceFusion.buildLedger: cap-scale the classifier
+        // score so hot-path and backfill ledger entries are directly comparable.
+        let fusionConfig = FusionWeightConfig()
+        let classifierCap = fusionConfig.classifierCap
         for result in classifierResults {
             let timestamp = Date().timeIntervalSince1970
             let passed = result.adProbability >= config.candidateThreshold
+            let clampedScore = max(0.0, min(1.0, result.adProbability))
+            let cappedWeight = min(clampedScore * classifierCap, classifierCap)
             let classifierEntry = EvidenceLedgerEntry(
                 source: .classifier,
-                weight: result.adProbability,
+                weight: cappedWeight,
                 detail: .classifier(score: result.adProbability)
             )
+            // Authority mirrors DecisionExplanation.build: weight > cap/2 → strong.
+            let authority: ProposalAuthority = cappedWeight > classifierCap * 0.5 ? .strong : .weak
             let breakdown = [
                 SourceEvidence(
                     source: EvidenceSourceType.classifier.rawValue,
-                    weight: result.adProbability,
-                    capApplied: result.adProbability,
-                    authority: .strong
+                    weight: cappedWeight,
+                    capApplied: classifierCap,
+                    authority: authority
                 )
             ]
             let logEntry = DecisionLogEntry(
                 schemaVersion: DecisionLogEntry.currentSchemaVersion,
-                episodeID: analysisAssetId,
+                analysisAssetID: analysisAssetId,
                 timestamp: timestamp,
                 windowBounds: .init(start: result.startTime, end: result.endTime),
                 activationConfig: snapshot,

@@ -4,9 +4,10 @@
 // Covers:
 //   - Debug builds: programmatic override flips the resolved config.
 //   - Debug builds: override can be reset.
-//   - Release builds: `PLAYHEAD_RELEASE_CONFIG_LOCK` env variable forces
-//     `.default` regardless of any override, proving that a production
-//     binary cannot pick up a dev-only override.
+//   - Release-lock simulation: `MetadataActivationConfig.resolved` short-circuits
+//     to `.default` when the compile-time release lock is active. The override
+//     system is DEBUG-only by design; the lock is simulated here because release
+//     builds cannot run XCTest.
 
 import Foundation
 import Testing

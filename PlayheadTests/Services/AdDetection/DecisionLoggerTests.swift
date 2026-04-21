@@ -13,7 +13,7 @@ struct DecisionLogEntryCodableTests {
     func encodesCompactJSON() throws {
         let entry = DecisionLogEntry(
             schemaVersion: DecisionLogEntry.currentSchemaVersion,
-            episodeID: "asset-a",
+            analysisAssetID: "asset-a",
             timestamp: 1_745_000_000.0,
             windowBounds: .init(start: 10.0, end: 40.0),
             activationConfig: .init(.default),
@@ -106,7 +106,7 @@ struct DecisionLoggerFileIOTests {
                              timestamp: Double = 1_745_000_000.0) -> DecisionLogEntry {
         DecisionLogEntry(
             schemaVersion: DecisionLogEntry.currentSchemaVersion,
-            episodeID: episode,
+            analysisAssetID: episode,
             timestamp: timestamp,
             windowBounds: .init(start: 10.0, end: 40.0),
             activationConfig: .init(.default),
@@ -160,8 +160,8 @@ struct DecisionLoggerFileIOTests {
                                        from: Data(lines[0].utf8))
         let second = try decoder.decode(DecisionLogEntry.self,
                                         from: Data(lines[1].utf8))
-        #expect(first.episodeID == "a")
-        #expect(second.episodeID == "b")
+        #expect(first.analysisAssetID == "a")
+        #expect(second.analysisAssetID == "b")
     }
 
     @Test("record(_:) persists the MetadataActivationConfig snapshot verbatim")
@@ -174,7 +174,7 @@ struct DecisionLoggerFileIOTests {
         // Swap in an allEnabled snapshot.
         entry = DecisionLogEntry(
             schemaVersion: entry.schemaVersion,
-            episodeID: entry.episodeID,
+            analysisAssetID: entry.analysisAssetID,
             timestamp: entry.timestamp,
             windowBounds: entry.windowBounds,
             activationConfig: .init(.allEnabled),
@@ -221,8 +221,8 @@ struct DecisionLoggerFileIOTests {
 
         let data = try Data(contentsOf: rotated)
         let text = String(decoding: data, as: UTF8.self)
-        #expect(text.contains("\"episodeID\":\"asset-a\""))
-        #expect(text.contains("\"episodeID\":\"asset-b\""))
+        #expect(text.contains("\"analysisAssetID\":\"asset-a\""))
+        #expect(text.contains("\"analysisAssetID\":\"asset-b\""))
     }
 
     @Test("Two rotations produce decision-log.1.jsonl and decision-log.2.jsonl")
@@ -396,7 +396,7 @@ struct DecisionLoggerPipelineTests {
 
         // Each entry must belong to the asset and carry a valid schema version.
         for entry in entries {
-            #expect(entry.episodeID == assetId)
+            #expect(entry.analysisAssetID == assetId)
             #expect(entry.schemaVersion == DecisionLogEntry.currentSchemaVersion)
             #expect(entry.windowBounds.end >= entry.windowBounds.start)
             #expect(entry.finalDecision.thresholdCrossed >= 0)
@@ -453,7 +453,7 @@ struct DecisionLoggerPipelineTests {
         #expect(!entries.isEmpty,
                 "Expected at least one hot-path DecisionLogEntry for a chunk set with lexical ad signals")
         for entry in entries {
-            #expect(entry.episodeID == assetId)
+            #expect(entry.analysisAssetID == assetId)
             // Hot-path entries carry exactly one `.classifier` ledger
             // entry (pre-fusion), and finalDecision.action distinguishes
             // them from backfill-fusion entries.
@@ -480,7 +480,7 @@ struct DecisionLoggerEdgeCaseTests {
     private func sampleEntry(episode: String) -> DecisionLogEntry {
         DecisionLogEntry(
             schemaVersion: DecisionLogEntry.currentSchemaVersion,
-            episodeID: episode,
+            analysisAssetID: episode,
             timestamp: 1_745_000_000.0,
             windowBounds: .init(start: 0, end: 30),
             activationConfig: .init(.default),
@@ -530,7 +530,7 @@ struct DecisionLoggerEdgeCaseTests {
         for line in lines {
             let decoded = try decoder.decode(DecisionLogEntry.self,
                                              from: Data(line.utf8))
-            episodes.insert(decoded.episodeID)
+            episodes.insert(decoded.analysisAssetID)
         }
         #expect(episodes.count == count,
                 "Every concurrent write must be persisted exactly once")
@@ -655,7 +655,7 @@ struct DecisionLoggerEdgeCaseTests {
         // tooling is expected to branch on this field, not the decoder.
         let entry = DecisionLogEntry(
             schemaVersion: 1,
-            episodeID: "asset-schema-v",
+            analysisAssetID: "asset-schema-v",
             timestamp: 1_745_000_000.0,
             windowBounds: .init(start: 0, end: 30),
             activationConfig: .init(.default),

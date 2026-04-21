@@ -20,12 +20,14 @@
 //     instantiate this logger, so no log file is written on a shipping
 //     binary.
 //
-// Schema version: 1.
+// Schema version: 2.
+//   v2: rename `episodeID` → `analysisAssetID` (value is a content fingerprint,
+//       not a canonical episode key; prior name was misleading for replay tools).
 //
 // Example record (pretty-printed; on disk is one line, compact JSON):
 //   {
-//     "schemaVersion": 1,
-//     "episodeID": "asset-abc",
+//     "schemaVersion": 2,
+//     "analysisAssetID": "asset-abc",
 //     "timestamp": 1745284800.1,
 //     "windowBounds": { "start": 120.5, "end": 150.0 },
 //     "activationConfig": { "counterfactualGateOpen": true, ... },
@@ -74,8 +76,9 @@ struct DecisionLogEntry: Codable, Equatable, Sendable {
     /// Schema version; increment on breaking changes. Current: 1.
     let schemaVersion: Int
 
-    /// The analysis asset id (episode identifier).
-    let episodeID: String
+    /// Analysis-asset content fingerprint (SHA-256-derived). Not the canonical
+    /// episode key; downstream tooling must join on this, not on podcast IDs.
+    let analysisAssetID: String
 
     /// Unix time at which the decision was observed (seconds since epoch).
     let timestamp: Double
@@ -95,7 +98,7 @@ struct DecisionLogEntry: Codable, Equatable, Sendable {
     /// The final decision (action, gate, threshold).
     let finalDecision: FinalDecision
 
-    static let currentSchemaVersion: Int = 1
+    static let currentSchemaVersion: Int = 2
 
     struct Bounds: Codable, Equatable, Sendable {
         let start: Double
@@ -203,8 +206,8 @@ extension DecisionLogEntry.LedgerEntry.Detail {
             self.init(
                 kind: "fm",
                 score: nil,
-                disposition: String(describing: disposition),
-                band: String(describing: band),
+                disposition: disposition.rawValue,
+                band: band.rawValue,
                 cohortPromptLabel: cohortPromptLabel,
                 matchedCategories: nil,
                 breakStrength: nil,
@@ -266,8 +269,8 @@ extension DecisionLogEntry.LedgerEntry.Detail {
                 entryCount: nil,
                 matchCount: nil, averageSimilarity: nil,
                 cueCount: cueCount,
-                sourceField: String(describing: sourceField),
-                dominantCueType: String(describing: dominantCueType)
+                sourceField: sourceField.rawValue,
+                dominantCueType: dominantCueType.rawValue
             )
         }
     }
