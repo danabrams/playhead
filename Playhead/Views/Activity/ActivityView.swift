@@ -38,7 +38,13 @@ struct ActivityView: View {
     /// Aggregator that owns the current `ActivitySnapshot` payload. The
     /// view re-renders whenever the snapshot is replaced via
     /// `viewModel.refresh(from:)`.
-    @State private var viewModel = ActivityViewModel()
+    ///
+    /// Constructed with a `persistQueueOrder` closure (playhead-cjqq)
+    /// so drag-reorders are written back to SwiftData. The default
+    /// closure is a no-op for SwiftUI Previews / empty-state usage;
+    /// production wires a closure that updates `Episode.queuePosition`
+    /// via the model context.
+    @State private var viewModel: ActivityViewModel
 
     /// Closure that produces a fresh batch of inputs. Injected so
     /// production wires it to a `ActivitySnapshotProvider` actor and
@@ -48,9 +54,13 @@ struct ActivityView: View {
     let inputProvider: @MainActor () async -> [ActivityEpisodeInput]
 
     init(
-        inputProvider: @escaping @MainActor () async -> [ActivityEpisodeInput] = { [] }
+        inputProvider: @escaping @MainActor () async -> [ActivityEpisodeInput] = { [] },
+        persistQueueOrder: @escaping @MainActor ([(episodeId: String, queuePosition: Int)]) -> Void = { _ in }
     ) {
         self.inputProvider = inputProvider
+        _viewModel = State(
+            initialValue: ActivityViewModel(persistQueueOrder: persistQueueOrder)
+        )
     }
 
     var body: some View {
