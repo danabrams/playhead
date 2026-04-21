@@ -253,7 +253,10 @@ struct FMSuppressionApplicator: Sendable {
             return false
         case .fingerprint:
             return true
-        case .classifier, .lexical, .acoustic, .catalog, .fusedScore:
+        case .classifier, .lexical, .acoustic, .catalog, .fusedScore, .metadata:
+            // playhead-z3ch: metadata is a coarse pre-seed prior, not strong
+            // evidence. It must yield to FM noAds suppression like the other
+            // soft signals.
             return false
         }
     }

@@ -59,6 +59,16 @@ enum EvidenceLedgerDetail: Sendable {
     case catalog(entryCount: Int)
     /// Ad copy fingerprint matches for this span.
     case fingerprint(matchCount: Int, averageSimilarity: Double)
+    /// playhead-z3ch: Pre-seeded evidence derived from RSS feed metadata
+    /// (description / summary cues). `cueCount` is the number of distinct
+    /// metadata cues that contributed; `sourceField` records which RSS
+    /// field contributed the strongest cue; `dominantCueType` is the
+    /// strongest contributing cue type for diagnostics.
+    case metadata(
+        cueCount: Int,
+        sourceField: MetadataCueSourceField,
+        dominantCueType: MetadataCueType
+    )
 }
 
 // MARK: - EvidenceLedgerEntry

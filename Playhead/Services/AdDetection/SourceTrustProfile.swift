@@ -100,6 +100,12 @@ enum SourceEvidenceFamily: String, Sendable, Equatable, CaseIterable {
             return .reference
         case .fusedScore:
             return .model
+        case .metadata:
+            // playhead-z3ch: metadata cues are textual feed-derived pre-seeds.
+            // They share the textual family with lexical signals so the
+            // orthogonal-corroboration rule continues to require a different-
+            // family signal (e.g. acoustic, model, reference) to corroborate.
+            return .textual
         }
     }
 }
@@ -217,6 +223,11 @@ struct SourceTrustProfile: Sendable, Equatable {
         .fm:          BetaPosterior(alpha: 8, beta: 2),   // 0.80
         .lexical:     BetaPosterior(alpha: 17, beta: 3),  // 0.85
         .fusedScore:  BetaPosterior(alpha: 1, beta: 1),   // 0.50 — uninformative (post-fusion aggregate)
+        // playhead-z3ch: feed-description metadata is a pre-clamped textual
+        // pre-seed (0.15 cap, gated by orthogonal corroboration). Mirror the
+        // classifier/catalog tier (Beta(6,4) → 0.60) — same metadata reliability
+        // family, but never strong enough to drive a skip alone because of the cap.
+        .metadata:    BetaPosterior(alpha: 6, beta: 4),   // 0.60 — metadata reliability
     ]
 
     // MARK: - Query

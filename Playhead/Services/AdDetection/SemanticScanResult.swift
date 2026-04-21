@@ -184,6 +184,14 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
     /// Distinct from `.classifier` to avoid conflating per-source classifier calibration
     /// with the post-fusion score mapping.
     case fusedScore
+    /// playhead-z3ch: Pre-seeded evidence derived from RSS feed description /
+    /// itunes:summary metadata. Capped at `FusionWeightConfig.metadataCap`
+    /// (Plan §7.4 = 0.15) and gated by a corroboration check — metadata-only
+    /// ledgers MUST resolve to `.blockedByEvidenceQuorum`.
+    /// Persistence note: this enum is `Codable` and persisted via SQLite in
+    /// `EvidenceEvent.sourceType`. The case is purely additive; no migration
+    /// is required because no rows reference it pre-shipping.
+    case metadata
 }
 
 struct EvidenceEvent: Sendable, Equatable {

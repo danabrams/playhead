@@ -154,6 +154,7 @@ struct ScoreCalibrationProfile: Sendable {
         case .acoustic: return acousticCalibrator
         case .catalog: return catalogCalibrator
         case .fingerprint: return fingerprintCalibrator
+        case .metadata: return .identity  // playhead-z3ch: metadata is pre-clamped at fusion ingress; identity is the v0 default.
         case .fusedScore: return .identity
         }
     }
