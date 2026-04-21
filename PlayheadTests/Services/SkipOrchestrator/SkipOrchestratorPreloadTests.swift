@@ -11,8 +11,7 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
 
     override func setUp() async throws {
         try await super.setUp()
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("SkipOrchestratorPreloadTests-\(UUID().uuidString)")
+        let dir = try makeTempDir(prefix: "SkipOrchestratorPreloadTests")
         store = try await AnalysisStore.open(directory: dir)
 
         // Insert a dummy analysis asset so store lookups work.

@@ -31,10 +31,7 @@ import Testing
 struct SurfaceStatusCrossProducerHashAgreementTests {
 
     private static func makeTempDirectory() -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("o45p-cross-\(UUID().uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
+        try! makeTempDir(prefix: "o45p-cross")
     }
 
     private static func readAllEntries(_ url: URL) throws -> [SurfaceStateTransitionEntry] {

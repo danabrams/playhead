@@ -28,10 +28,7 @@ struct SurfaceStatusInvariantLoggerTests {
     /// Returns a fresh temp directory the logger will write into for the
     /// duration of one test.
     private static func makeTempDirectory() -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ol05-logger-\(UUID().uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
+        try! makeTempDir(prefix: "ol05-logger")
     }
 
     private static func sampleEntry(

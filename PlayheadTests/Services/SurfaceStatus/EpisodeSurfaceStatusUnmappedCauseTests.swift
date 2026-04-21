@@ -37,10 +37,7 @@ struct EpisodeSurfaceStatusUnmappedCauseTests {
     )
 
     private static func makeTempDirectory() -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("o45p-gap-d-\(UUID().uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
+        try! makeTempDir(prefix: "o45p-gap-d")
     }
 
     @Test(".unknown(_) cause triggers an impossible-state log entry")

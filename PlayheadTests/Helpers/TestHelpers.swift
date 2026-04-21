@@ -1,50 +1,57 @@
 // TestHelpers.swift
 // Shared test utilities used across PlayheadTests suites.
 
+import Darwin
 import Foundation
 import SQLite3
 @testable import Playhead
 
+/// Vestigial compatibility shim. Originally tracked temp dirs for cleanup in
+/// `deinit`, but Swift does not run deinit for globals/static members at
+/// process exit, so this never actually cleaned up. Cleanup is now handled
+/// centrally by `makeTempDir`'s scratch-root + atexit mechanism below;
+/// call sites that construct one of these and call `track(_:)` are no-ops
+/// that remain only to avoid churning every test file that referenced them.
+final class TestTempDirTracker: @unchecked Sendable {
+    func track(_ dir: URL) {}
+}
+
+// Process-wide scratch root. Every `makeTempDir` call creates a subdirectory
+// under `PlayheadTestScratch/` in the test app's tmp. The root is wiped on
+// first use so leftover directories from the previous test process are
+// reclaimed (historically 140k+ dirs / 70 GiB accumulated before cleanup
+// existed). An atexit hook also removes the root on normal exit — Swift
+// does not run deinit for globals at process termination, so a tracker
+// class can't be used here.
+private nonisolated(unsafe) var _scratchRoot: URL = {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("PlayheadTestScratch", isDirectory: true)
+    try? FileManager.default.removeItem(at: root)
+    try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    atexit {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PlayheadTestScratch", isDirectory: true)
+        try? FileManager.default.removeItem(at: url)
+    }
+    return root
+}()
+
 /// Creates a uniquely-named temporary directory for test isolation.
-/// Caller is responsible for cleanup (e.g., via `defer`, `addTeardownBlock`,
-/// or `TestTempDirTracker`).
+/// All such directories live under a shared scratch root that is wiped on
+/// the next test process startup and on normal exit.
 func makeTempDir(prefix: String = "PlayheadTests") throws -> URL {
-    let url = FileManager.default.temporaryDirectory
+    let url = _scratchRoot
         .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
 }
 
-/// Thread-safe collector for temp directories that cleans up on deinit.
-/// Use at file scope alongside `makeTestStore()`-style helpers to ensure
-/// temp directories are removed when the test suite finishes.
-final class TestTempDirTracker: @unchecked Sendable {
-    private var dirs: [URL] = []
-    private let lock = NSLock()
-
-    func track(_ dir: URL) {
-        lock.lock()
-        dirs.append(dir)
-        lock.unlock()
-    }
-
-    deinit {
-        for dir in dirs {
-            try? FileManager.default.removeItem(at: dir)
-        }
-    }
-}
-
 // MARK: - AnalysisStore Factory
-
-/// Shared tracker for test store temp directories.
-private let _sharedTestStoreDirs = TestTempDirTracker()
 
 /// Creates an AnalysisStore backed by a temporary directory for isolated testing.
 /// The directory is automatically cleaned up when the test process ends.
 func makeTestStore() async throws -> AnalysisStore {
     let dir = try makeTempDir(prefix: "PlayheadTests")
-    _sharedTestStoreDirs.track(dir)
     let store = try AnalysisStore(directory: dir)
     try await store.migrate()
     return store

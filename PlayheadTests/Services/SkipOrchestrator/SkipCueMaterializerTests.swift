@@ -10,8 +10,7 @@ final class SkipCueMaterializerTests: XCTestCase {
     override func setUp() async throws {
         try await super.setUp()
         // In-memory store (unique temp dir per test).
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("SkipCueMaterializerTests-\(UUID().uuidString)")
+        let dir = try makeTempDir(prefix: "SkipCueMaterializerTests")
         store = try await AnalysisStore.open(directory: dir)
 
         // Insert a dummy analysis asset so foreign-key-like lookups work.

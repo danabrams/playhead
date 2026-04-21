@@ -13,9 +13,7 @@ private func makeTestRequest(
     outputPolicy: OutputPolicy = .writeWindowsAndCues,
     priority: TaskPriority = .medium
 ) -> AnalysisRangeRequest {
-    let tmpDir = FileManager.default.temporaryDirectory
-        .appendingPathComponent("AnalysisJobRunnerTests-\(UUID().uuidString)", isDirectory: true)
-    try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+    let tmpDir = try! makeTempDir(prefix: "AnalysisJobRunnerTests")
     let audioFile = tmpDir.appendingPathComponent("episode.m4a")
     FileManager.default.createFile(atPath: audioFile.path, contents: Data())
     let localURL = LocalAudioURL(audioFile)!

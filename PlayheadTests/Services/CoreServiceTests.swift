@@ -1403,8 +1403,7 @@ struct CapabilitiesServiceTests {
 struct AssetProviderLifecycleTests {
 
     private func makeTestInventory() throws -> ModelInventory {
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("PlayheadModelTests-\(UUID().uuidString)")
+        let tempRoot = try makeTempDir(prefix: "PlayheadModelTests")
         let manifest = ModelManifest(
             version: 1,
             generatedAt: .now,
@@ -1586,8 +1585,7 @@ struct ModelInventoryTests {
 
     @Test("Scan detects missing models")
     func scanDetectsMissing() async throws {
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("InvTests-\(UUID().uuidString)")
+        let tempRoot = try makeTempDir(prefix: "InvTests")
         let manifest = ModelManifest(
             version: 1,
             generatedAt: .now,
@@ -1615,8 +1613,7 @@ struct ModelInventoryTests {
 
     @Test("missingModels returns models sorted by priority")
     func missingModelsPriority() async throws {
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("InvTests-\(UUID().uuidString)")
+        let tempRoot = try makeTempDir(prefix: "InvTests")
         let manifest = ModelManifest(
             version: 1,
             generatedAt: .now,

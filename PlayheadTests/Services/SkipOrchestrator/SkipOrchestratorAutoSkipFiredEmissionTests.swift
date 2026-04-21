@@ -19,10 +19,7 @@ import Testing
 struct SkipOrchestratorAutoSkipFiredEmissionTests {
 
     private static func makeTempDirectory() -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("o45p-orchestrator-\(UUID().uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
+        try! makeTempDir(prefix: "o45p-orchestrator")
     }
 
     private static func readAllEntries(_ url: URL) throws -> [SurfaceStateTransitionEntry] {
