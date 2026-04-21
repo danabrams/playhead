@@ -35,8 +35,6 @@ struct TimelineRailView: View {
 
     /// Tracks whether the playhead is gliding through a skip (smooth animation).
     @State private var isGliding = false
-    /// The previous progress value, used to detect skip-induced jumps.
-    @State private var previousProgress: Double = 0
     /// Task for resetting the glide state after animation settles.
     @State private var glideResetTask: Task<Void, Never>?
 
@@ -151,18 +149,16 @@ struct TimelineRailView: View {
         }
         .onChange(of: progress) { oldValue, newValue in
             let jump = newValue - oldValue
-            if jump > skipJumpThreshold {
-                // A skip just fired — animate the glide.
-                isGliding = true
-                // End the glide state after the animation settles.
-                glideResetTask?.cancel()
-                glideResetTask = Task {
-                    try? await Task.sleep(for: .milliseconds(500))
-                    guard !Task.isCancelled else { return }
-                    isGliding = false
-                }
+            guard jump > skipJumpThreshold else { return }
+            // A skip just fired — animate the glide.
+            isGliding = true
+            // End the glide state after the animation settles.
+            glideResetTask?.cancel()
+            glideResetTask = Task {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard !Task.isCancelled else { return }
+                isGliding = false
             }
-            previousProgress = newValue
         }
     }
 

@@ -56,6 +56,11 @@ struct TranscriptPeekView: View {
     /// Confirmation alert for submitting not-ad chunks.
     @State private var showNotAdConfirmation = false
 
+    /// Last whole-second of `currentTime` applied to the view model. Used to
+    /// coalesce sub-second `onChange` fires that would otherwise trigger
+    /// same-frame state updates (SwiftUI warns; chunk boundaries are seconds-scale).
+    @State private var lastAppliedSecond: Int = .min
+
     var body: some View {
         VStack(spacing: 0) {
             grabHandle
@@ -79,10 +84,14 @@ struct TranscriptPeekView: View {
         }
         .background(AppColors.surface)
         .onChange(of: currentTime) { _, newTime in
+            let second = Int(newTime)
+            guard second != lastAppliedSecond else { return }
+            lastAppliedSecond = second
             peekViewModel.updatePlaybackPosition(newTime)
         }
         .onAppear {
             peekViewModel.startPolling()
+            lastAppliedSecond = Int(currentTime)
             peekViewModel.updatePlaybackPosition(currentTime)
         }
         .onDisappear {
