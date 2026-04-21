@@ -242,6 +242,22 @@ actor CandidateWindowCascade {
     /// re-latch threshold.
     private var windowsByEpisode: [String: [CandidateWindow]] = [:]
 
+    /// playhead-swws: per-episode chapter evidence captured at `seed(...)`
+    /// time so subsequent `noteSeek(...)` calls don't have to re-supply
+    /// it. Without this cache, the persist-time relatch path
+    /// (`PlayheadRuntime.noteCommittedPlayhead` →
+    /// `AnalysisWorkScheduler.noteCommittedPlayhead`) would erase any
+    /// sponsor-chapter windows the cascade selected at seed time —
+    /// callers on the commit path don't carry chapter evidence in scope
+    /// (the evidence comes from the metadata parse path).
+    ///
+    /// Stored alongside `anchors` so `forget(...)` clears both in lock
+    /// step. Read by `noteSeek(...)` when the caller passes `nil` for
+    /// the override; an explicit `.some([...])` override still wins so
+    /// a future metadata-reparse path can refresh the evidence without
+    /// re-seeding from scratch.
+    private var chapterEvidenceByEpisode: [String: [ChapterEvidence]] = [:]
+
     init(
         config: PreAnalysisConfig = .load(),
         logger: Logger = Logger(subsystem: "com.playhead", category: "CandidateWindowCascade")
@@ -265,6 +281,7 @@ actor CandidateWindowCascade {
         chapterEvidence: [ChapterEvidence]
     ) -> [CandidateWindow] {
         anchors[episodeId] = playbackAnchor
+        chapterEvidenceByEpisode[episodeId] = chapterEvidence
         let windows = CandidateWindowSelector.select(
             episodeDuration: episodeDuration,
             playbackAnchor: playbackAnchor,
@@ -283,11 +300,20 @@ actor CandidateWindowCascade {
     ///
     /// Callers that need the current list even when no relatch fired
     /// use `currentWindows(for:)`.
+    ///
+    /// playhead-swws: `chapterEvidence` is now optional. When the caller
+    /// passes `nil`, the cascade reuses the evidence captured at the
+    /// most recent `seed(...)` for this episode. This lets the
+    /// commit-point caller (`PlayheadRuntime.noteCommittedPlayhead`)
+    /// drop its `chapterEvidence: []` placeholder — sponsor-chapter
+    /// windows now survive a re-latch instead of being erased on every
+    /// seek. Callers that genuinely have fresh evidence (e.g. a
+    /// metadata reparse) may pass `.some([...])` to override the cache.
     func noteSeek(
         episodeId: String,
         newPosition: TimeInterval,
         episodeDuration: TimeInterval?,
-        chapterEvidence: [ChapterEvidence]
+        chapterEvidence: [ChapterEvidence]? = nil
     ) -> [CandidateWindow]? {
         let previous = anchors[episodeId] ?? nil
         let relatch = CandidateWindowSelector.shouldRelatch(
@@ -297,11 +323,19 @@ actor CandidateWindowCascade {
         )
         guard relatch else { return nil }
 
+        let evidence: [ChapterEvidence]
+        if let override = chapterEvidence {
+            evidence = override
+            chapterEvidenceByEpisode[episodeId] = override
+        } else {
+            evidence = chapterEvidenceByEpisode[episodeId] ?? []
+        }
+
         anchors[episodeId] = newPosition
         let windows = CandidateWindowSelector.select(
             episodeDuration: episodeDuration,
             playbackAnchor: newPosition,
-            chapterEvidence: chapterEvidence,
+            chapterEvidence: evidence,
             config: config
         )
         windowsByEpisode[episodeId] = windows
@@ -309,11 +343,29 @@ actor CandidateWindowCascade {
         return windows
     }
 
+    /// playhead-swws: read-only accessor for the chapter evidence the
+    /// cascade has cached for this episode. Returns `nil` when the
+    /// episode has never been seeded; an empty array when the episode
+    /// was seeded with no chapter evidence.
+    func currentChapterEvidence(for episodeId: String) -> [ChapterEvidence]? {
+        chapterEvidenceByEpisode[episodeId]
+    }
+
     /// Current ordered windows for an episode, or `nil` if the cascade
     /// has never been seeded for it. Exposed for tests and for
     /// SLI emitters that need to report the planned order.
     func currentWindows(for episodeId: String) -> [CandidateWindow]? {
         windowsByEpisode[episodeId]
+    }
+
+    /// playhead-swws: episode IDs the cascade has currently latched
+    /// windows for. The scheduler uses this to short-circuit
+    /// cascade-aware re-ordering: when the cascade has no seeded
+    /// episodes, the FIFO winner from `fetchNextEligibleJob` is the
+    /// dispatched job and we avoid the extra Swift-side scan over
+    /// queued / paused / failed rows.
+    func seededEpisodeIds() -> Set<String> {
+        Set(windowsByEpisode.keys)
     }
 
     /// Current latched anchor for an episode. `.some(nil)` when the
@@ -327,5 +379,6 @@ actor CandidateWindowCascade {
     func forget(episodeId: String) {
         anchors.removeValue(forKey: episodeId)
         windowsByEpisode.removeValue(forKey: episodeId)
+        chapterEvidenceByEpisode.removeValue(forKey: episodeId)
     }
 }
