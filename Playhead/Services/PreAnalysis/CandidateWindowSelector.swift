@@ -358,6 +358,16 @@ actor CandidateWindowCascade {
         windowsByEpisode[episodeId]
     }
 
+    /// playhead-swws: episode IDs the cascade has currently latched
+    /// windows for. The scheduler uses this to short-circuit
+    /// cascade-aware re-ordering: when the cascade has no seeded
+    /// episodes, the FIFO winner from `fetchNextEligibleJob` is the
+    /// dispatched job and we avoid the extra Swift-side scan over
+    /// queued / paused / failed rows.
+    func seededEpisodeIds() -> Set<String> {
+        Set(windowsByEpisode.keys)
+    }
+
     /// Current latched anchor for an episode. `.some(nil)` when the
     /// cascade was seeded with no playback anchor (unplayed), `nil`
     /// when the cascade has no record of the episode.

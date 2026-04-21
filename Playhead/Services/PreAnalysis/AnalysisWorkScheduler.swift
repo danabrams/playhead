@@ -373,30 +373,40 @@ actor AnalysisWorkScheduler {
         return await cascade.currentWindows(for: episodeId) ?? []
     }
 
-    /// playhead-swws: peek the next slice the scheduler would dispatch
-    /// on the next loop iteration WITHOUT mutating any state (no lease
-    /// acquisition, no state transitions, no signposts). Returns the
-    /// next eligible job paired with the cascade's first candidate
+    /// playhead-swws: select the next slice the scheduler would
+    /// dispatch on the next loop iteration WITHOUT mutating any state
+    /// (no lease acquisition, no state transitions, no signposts).
+    /// Returns the chosen job paired with the cascade's first candidate
     /// window for that job's episode.
     ///
-    /// Used by the swws ordering test to prove that the cascade's
-    /// proximal-first order is the order the scheduler ACTUALLY
-    /// dispatches in, not just what the cascade reports it would
-    /// prefer. When the cascade has been seeded with a sponsor window
-    /// at e.g. [10min, 11min] and the proximal window at [0, 20min],
-    /// the cascade's first window is the sponsor — and the dispatched
-    /// slice's `cascadeWindow` matches it. With no cascade seed for
-    /// the episode, `cascadeWindow` is `nil` and the dispatched job is
-    /// exactly what `fetchNextEligibleJob` would return on its own —
-    /// preserving FIFO behavior for the long tail of episodes that
-    /// have not been seeded.
+    /// This is the production selector consumed by `runLoop()`. The
+    /// loop calls `selectNextDispatchableJob(...)` (the value-bearing
+    /// inner helper); this `DispatchableSlice` form exists for the
+    /// swws ordering test which asserts on the same selector that the
+    /// production loop uses — there is no longer a test-only seam.
+    ///
+    /// Selection rule:
+    ///
+    ///   1. Fetch the FIFO winner from the store
+    ///      (`priority DESC, createdAt ASC` via
+    ///      `fetchNextEligibleJob`). This preserves the existing job
+    ///      contract for the long tail of unseeded episodes.
+    ///   2. If the candidate-window cascade is wired AND has at least
+    ///      one seeded episode, scan the eligible-state rows
+    ///      (queued / paused / failed) and pick the highest
+    ///      cascade-priority candidate. Sponsor-chapter > proximal >
+    ///      no cascade window; ties fall back to the same FIFO order
+    ///      the store would have applied (priority DESC, createdAt
+    ///      ASC).
+    ///   3. With no cascade seeds, return the FIFO winner unchanged —
+    ///      no re-scan, no extra store work.
     ///
     /// Returns `nil` when no eligible job exists OR when the
     /// admission policy currently bars all work (`pauseAllWork`); the
     /// loop's per-pass back-off behavior still applies, this accessor
     /// just reports the absence of a dispatchable slice without
     /// taking the standard sleep.
-    func peekNextDispatchableSlice() async -> DispatchableSlice? {
+    func selectNextDispatchableSlice() async -> DispatchableSlice? {
         guard config.isEnabled else { return nil }
         let admission = await currentLaneAdmission()
         guard !admission.pauseAllWork else { return nil }
@@ -405,27 +415,204 @@ actor AnalysisWorkScheduler {
             || admission.policy.allowBackgroundLane
         let now = Date().timeIntervalSince1970
 
-        guard let job = try? await store.fetchNextEligibleJob(
+        guard let selected = await selectNextDispatchableJob(
+            deferredWorkAllowed: deferredWorkAllowed,
+            now: now
+        ) else { return nil }
+
+        return DispatchableSlice(
+            jobId: selected.job.jobId,
+            episodeId: selected.job.episodeId,
+            cascadeWindow: selected.cascadeWindow
+        )
+    }
+
+    /// Inner cascade-aware selector used by both `runLoop()` (the
+    /// production dispatch path) and `selectNextDispatchableSlice()`
+    /// (the test-facing peek). Encodes the cascade-overrides-FIFO
+    /// rule documented on `selectNextDispatchableSlice`. Returns
+    /// `nil` when no eligible job exists.
+    ///
+    /// Implementation detail: the FIFO winner is always fetched first
+    /// because (a) it is the cheapest single-row store call and (b)
+    /// it is the answer for every iteration where the cascade is
+    /// either unwired or has no seeded episodes. Only when the
+    /// cascade is wired AND has seeds do we pay for the
+    /// `fetchJobsByState` scan + Swift-side eligibility filter.
+    private func selectNextDispatchableJob(
+        deferredWorkAllowed: Bool,
+        now: TimeInterval
+    ) async -> (job: AnalysisJob, cascadeWindow: CandidateWindow?)? {
+        // 1. FIFO winner. This is the legacy contract — preserved as
+        // the answer for every code path where the cascade has
+        // nothing to say.
+        guard let fifoJob = try? await store.fetchNextEligibleJob(
             deferredWorkAllowed: deferredWorkAllowed,
             t0ThresholdSec: config.defaultT0DepthSeconds,
             now: now
-        ) else {
-            return nil
+        ) else { return nil }
+
+        guard let cascade = candidateWindowCascade else {
+            return (fifoJob, nil)
         }
 
-        let cascadeWindow: CandidateWindow?
-        if let cascade = candidateWindowCascade,
-           let windows = await cascade.currentWindows(for: job.episodeId) {
-            cascadeWindow = windows.first
-        } else {
-            cascadeWindow = nil
+        let seededIds = await cascade.seededEpisodeIds()
+        // No seeded episodes ⇒ cascade has no preference; FIFO wins
+        // and the cascade window is `nil` (the FIFO winner is some
+        // unseeded episode). Skip the rescan for the steady-state
+        // "no Phase 2 episodes seeded yet" hot path.
+        guard !seededIds.isEmpty else {
+            return (fifoJob, nil)
         }
 
-        return DispatchableSlice(
-            jobId: job.jobId,
-            episodeId: job.episodeId,
-            cascadeWindow: cascadeWindow
+        let fifoCascadeWindow = (await cascade.currentWindows(for: fifoJob.episodeId))?.first
+
+        // 2. Gather candidate eligible rows. Only scan the three
+        // states `fetchNextEligibleJob` itself selects from
+        // (queued / paused / failed); other states are not
+        // eligible. Apply the same eligibility predicate in Swift.
+        let candidates = await gatherCascadeRescanCandidates(
+            deferredWorkAllowed: deferredWorkAllowed,
+            now: now
         )
+
+        // 3. Score each candidate by cascade priority. Sponsor >
+        // proximal > none. Higher score wins.
+        struct Scored {
+            let job: AnalysisJob
+            let cascadeWindow: CandidateWindow?
+            let cascadePriority: Int
+        }
+        var scored: [Scored] = []
+        scored.reserveCapacity(candidates.count)
+        for candidate in candidates {
+            let window: CandidateWindow?
+            if seededIds.contains(candidate.episodeId) {
+                window = (await cascade.currentWindows(for: candidate.episodeId))?.first
+            } else {
+                window = nil
+            }
+            scored.append(
+                Scored(
+                    job: candidate,
+                    cascadeWindow: window,
+                    cascadePriority: cascadePriorityRank(window)
+                )
+            )
+        }
+
+        let fifoPriority = cascadePriorityRank(fifoCascadeWindow)
+        guard let best = scored.max(by: { lhs, rhs in
+            // Higher cascadePriority wins. Tiebreak using
+            // `priority DESC, createdAt ASC` so we preserve the
+            // store's FIFO ordering inside an equal cascade tier.
+            if lhs.cascadePriority != rhs.cascadePriority {
+                return lhs.cascadePriority < rhs.cascadePriority
+            }
+            if lhs.job.priority != rhs.job.priority {
+                return lhs.job.priority < rhs.job.priority
+            }
+            return lhs.job.createdAt > rhs.job.createdAt
+        }) else {
+            return (fifoJob, fifoCascadeWindow)
+        }
+
+        // Cascade-aware override only fires when the best candidate
+        // genuinely outranks the FIFO winner. If the cascade has
+        // nothing to add (best matches FIFO tier), keep the FIFO
+        // winner so we do not invent reordering churn for ties.
+        if best.cascadePriority > fifoPriority {
+            logger.info(
+                "Cascade override: dispatching job \(best.job.jobId) episode=\(best.job.episodeId) cascadePriority=\(best.cascadePriority) over FIFO winner \(fifoJob.jobId) episode=\(fifoJob.episodeId) cascadePriority=\(fifoPriority)"
+            )
+            return (best.job, best.cascadeWindow)
+        }
+        return (fifoJob, fifoCascadeWindow)
+    }
+
+    /// playhead-swws: rank a cascade window by dispatch priority.
+    /// Higher number wins. Sponsor-chapter (high-confidence positive)
+    /// outranks proximal (default unplayed depth) outranks no
+    /// cascade window at all (unseeded episode → legacy FIFO).
+    private func cascadePriorityRank(_ window: CandidateWindow?) -> Int {
+        guard let window else { return 0 }
+        switch window.kind {
+        case .sponsorChapter: return 2
+        case .proximal:       return 1
+        }
+    }
+
+    /// playhead-swws: collect the eligible-state job rows that the
+    /// cascade-aware selector should consider re-ordering, applying
+    /// the same Swift-side predicate `fetchNextEligibleJob` encodes
+    /// in SQL (states queued/paused/failed; lease expired or
+    /// absent; nextEligibleAt due; deferredWorkAllowed gate). This
+    /// helper does NOT change SQL — it composes existing
+    /// `fetchJobsByState` calls and replays the eligibility check
+    /// in Swift so the cascade can pick among the same candidate
+    /// set the store's FIFO query would have considered.
+    private func gatherCascadeRescanCandidates(
+        deferredWorkAllowed: Bool,
+        now: TimeInterval
+    ) async -> [AnalysisJob] {
+        var collected: [AnalysisJob] = []
+        let states = ["queued", "paused", "failed"]
+        for state in states {
+            guard let rows = try? await store.fetchJobsByState(state) else { continue }
+            for job in rows {
+                guard isEligibleForDispatch(
+                    job: job,
+                    deferredWorkAllowed: deferredWorkAllowed,
+                    now: now
+                ) else { continue }
+                collected.append(job)
+            }
+        }
+        return collected
+    }
+
+    /// playhead-swws: Swift-side eligibility predicate that mirrors
+    /// the SQL `fetchNextEligibleJob` uses. Kept in lock step with
+    /// the store query — any change to the SQL predicate here MUST
+    /// be reflected in `AnalysisStore.fetchNextEligibleJob`. Lives
+    /// on the scheduler (not the store) because adding a "fetch
+    /// many eligible" SQL primitive would change the persistence
+    /// surface; this Swift mirror sidesteps that.
+    private func isEligibleForDispatch(
+        job: AnalysisJob,
+        deferredWorkAllowed: Bool,
+        now: TimeInterval
+    ) -> Bool {
+        // State / lease / nextEligibleAt: queued|paused are eligible
+        // when the lease is absent or expired AND nextEligibleAt is
+        // due. failed rows require an explicit nextEligibleAt that
+        // is due (and ignore the lease — failed rows have already
+        // released).
+        let leaseFree: Bool = {
+            guard let owner = job.leaseOwner, !owner.isEmpty else { return true }
+            guard let expires = job.leaseExpiresAt else { return true }
+            return expires < now
+        }()
+        let nextEligibleDue: Bool = {
+            guard let next = job.nextEligibleAt else { return true }
+            return next <= now
+        }()
+        let stateEligible: Bool
+        switch job.state {
+        case "queued", "paused":
+            stateEligible = leaseFree && nextEligibleDue
+        case "failed":
+            stateEligible = (job.nextEligibleAt != nil) && nextEligibleDue
+        default:
+            stateEligible = false
+        }
+        guard stateEligible else { return false }
+
+        // T0 / deferred split — same as the SQL.
+        let isT0Playback = job.jobType == "playback"
+            && job.featureCoverageSec < config.defaultT0DepthSeconds
+        let isDeferredAllowed = deferredWorkAllowed && nextEligibleDue
+        return isT0Playback || isDeferredAllowed
     }
 
     /// Notify the scheduler that playback has started for an episode.
@@ -604,14 +791,23 @@ actor AnalysisWorkScheduler {
                 || admission.policy.allowBackgroundLane
             let now = Date().timeIntervalSince1970
 
-            guard let job = try? await store.fetchNextEligibleJob(
+            // playhead-swws: cascade-aware job selection. When the
+            // candidate-window cascade has at least one seeded
+            // episode, prefer the queued job whose episode has the
+            // highest-priority cascade window (sponsor > proximal)
+            // over the strict FIFO winner from
+            // `fetchNextEligibleJob`. Falls back to FIFO when the
+            // cascade is unwired, has no seeds, or has nothing to
+            // re-order.
+            guard let selected = await selectNextDispatchableJob(
                 deferredWorkAllowed: deferredWorkAllowed,
-                t0ThresholdSec: config.defaultT0DepthSeconds,
                 now: now
             ) else {
                 await sleepOrWake(seconds: Self.idlePollSeconds)
                 continue
             }
+            let job = selected.job
+            let dispatchedCascadeWindow = selected.cascadeWindow
 
             // Secondary filter for the Soon-vs-Background lane split. Only
             // deferred jobs are subject to this; T0 playback jobs are always
@@ -676,7 +872,7 @@ actor AnalysisWorkScheduler {
             }
 
             didStart(job: job)
-            await processJob(job)
+            await processJob(job, cascadeWindow: dispatchedCascadeWindow)
             didFinish(job: job)
         }
     }
@@ -841,7 +1037,7 @@ actor AnalysisWorkScheduler {
 
     // MARK: - Job Processing
 
-    private func processJob(_ job: AnalysisJob) async {
+    private func processJob(_ job: AnalysisJob, cascadeWindow: CandidateWindow? = nil) async {
         // Resolve audio URL from download cache.
         guard let fileURL = await downloadManager.cachedFileURL(for: job.episodeId) else {
             logger.warning("No cached audio for episode \(job.episodeId), blocking job \(job.jobId)")
@@ -940,21 +1136,16 @@ actor AnalysisWorkScheduler {
             }
             return
         }
-        // playhead-swws: consult the candidate-window cascade for
-        // this episode and surface its first window on the request.
-        // The runner (and downstream slice-execution work in
-        // playhead-1iq1) will use this to prioritize the
-        // proximal/sponsor window over the legacy "process [0,
-        // desiredCoverageSec]" depth-first behavior. `nil` when the
-        // cascade is unwired or the episode has not been seeded —
-        // existing FIFO behavior is preserved in that case.
-        let cascadeWindow: CandidateWindow?
-        if let cascade = candidateWindowCascade,
-           let windows = await cascade.currentWindows(for: job.episodeId) {
-            cascadeWindow = windows.first
-        } else {
-            cascadeWindow = nil
-        }
+        // playhead-swws: cascade window is now resolved by the
+        // production selector (`selectNextDispatchableJob`) and
+        // threaded in by `runLoop()`. Callers that invoke
+        // `processJob` directly (none today outside the run loop)
+        // pass `nil` and inherit the legacy "process [0,
+        // desiredCoverageSec]" depth-first behavior. The runner
+        // (and downstream slice-execution work in playhead-1iq1)
+        // will use this `windowRange` to prioritize the
+        // proximal/sponsor window.
+        let resolvedCascadeWindow = cascadeWindow
         let request = AnalysisRangeRequest(
             jobId: job.jobId,
             episodeId: job.episodeId,
@@ -966,7 +1157,7 @@ actor AnalysisWorkScheduler {
             outputPolicy: .writeWindowsAndCues,
             priority: .medium,
             schedulerLane: job.schedulerLane,
-            windowRange: cascadeWindow?.range
+            windowRange: resolvedCascadeWindow?.range
         )
 
         let jobSignpost = PreAnalysisInstrumentation.beginJobDuration(jobId: job.jobId)
