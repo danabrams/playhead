@@ -231,6 +231,15 @@ actor CandidateWindowCascade {
 
     private let config: PreAnalysisConfig
     private let logger: Logger
+    /// playhead-e2vw: injectable clock surface. Today the cascade has no
+    /// time-dependent decisions (selection is anchor + chapter-evidence
+    /// driven, not wall-clock), so this is stored but never read; it is
+    /// part of the uniform clock-injection surface introduced across
+    /// `AnalysisWorkScheduler`, `AnalysisJobRunner`, and this cascade
+    /// so future cascade work that needs synthetic time (e.g. anchor
+    /// expiry, latch-staleness gating) can use it without re-opening
+    /// the cascade's public API.
+    private let clock: @Sendable () -> Date
 
     /// Per-episode current readiness anchor (last committed position /
     /// `episodeStart` for unplayed episodes). `nil` when the episode
@@ -260,10 +269,12 @@ actor CandidateWindowCascade {
 
     init(
         config: PreAnalysisConfig = .load(),
-        logger: Logger = Logger(subsystem: "com.playhead", category: "CandidateWindowCascade")
+        logger: Logger = Logger(subsystem: "com.playhead", category: "CandidateWindowCascade"),
+        clock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.config = config
         self.logger = logger
+        self.clock = clock
     }
 
     /// Seed (or re-seed) the cascade for an episode. Typically called
