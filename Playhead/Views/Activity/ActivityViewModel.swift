@@ -203,6 +203,14 @@ final class ActivityViewModel {
     ///     concrete number on first move; episodes outside the visible
     ///     Up Next bucket are NOT touched (the callback receives only
     ///     the rows that were on screen).
+    ///   * **Visibility invariant:** sequential renumber `[0, N)` only
+    ///     avoids collisions with off-screen rows because the production
+    ///     provider returns the FULL queued set today (no pagination /
+    ///     filtering of Up Next). If a future feature pages or filters
+    ///     Up Next, this assignment scheme must change (e.g. renumber
+    ///     only moved rows, or use sparse indices) — otherwise the
+    ///     `[0, N)` block can collide with persisted positions on
+    ///     hidden episodes, producing nondeterministic sort.
     ///   * Idempotency: a no-op move (`from == to`) does NOT invoke
     ///     the callback to avoid save churn.
     private let persistQueueOrder: @MainActor ([(episodeId: String, queuePosition: Int)]) -> Void

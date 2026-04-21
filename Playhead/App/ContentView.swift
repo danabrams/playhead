@@ -1,7 +1,10 @@
+import OSLog
 import SwiftData
 import SwiftUI
 
 struct ContentView: View {
+    private static let logger = Logger(subsystem: "com.playhead", category: "Activity")
+
     @Environment(PlayheadRuntime.self) private var runtime
     @Environment(\.modelContext) private var modelContext
     @State private var showNowPlaying = false
@@ -55,11 +58,23 @@ struct ContentView: View {
                                     $0.canonicalEpisodeKey == episodeId
                                 }
                             )
-                            if let row = try? modelContext.fetch(descriptor).first {
-                                row.queuePosition = entry.queuePosition
+                            do {
+                                if let row = try modelContext.fetch(descriptor).first {
+                                    row.queuePosition = entry.queuePosition
+                                }
+                            } catch {
+                                Self.logger.error("queuePosition fetch failed for \(episodeId, privacy: .public): \(error.localizedDescription, privacy: .public)")
                             }
                         }
-                        try? modelContext.save()
+                        do {
+                            try modelContext.save()
+                        } catch {
+                            // Silent failure would leave the in-memory snapshot
+                            // ahead of persistence — drag would visually succeed
+                            // but revert on next refresh. Log so a future
+                            // telemetry consumer can surface this.
+                            Self.logger.error("queuePosition save failed: \(error.localizedDescription, privacy: .public)")
+                        }
                     }
                 )
             }
