@@ -73,20 +73,71 @@ struct CorpusExporterSourceCanaryTests {
         #expect(source.contains("CorpusExporter"),
                 "Settings must reference CorpusExporter to expose the debug action")
         let lines = source.split(separator: "\n", omittingEmptySubsequences: false)
-        var depth = 0
+        // Stack of "active branch is DEBUG?" per preprocessor frame. A reference
+        // is DEBUG-guarded iff ALL enclosing frames are currently in their
+        // DEBUG branch. This correctly handles `#elseif` / `#else` arms that
+        // execute in the non-DEBUG path.
+        var stack: [Bool] = []
         var unguardedReference = false
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("#if DEBUG") {
-                depth += 1
-            } else if trimmed.hasPrefix("#endif") && depth > 0 {
-                depth -= 1
+            if trimmed.hasPrefix("#if ") {
+                stack.append(trimmed == "#if DEBUG")
+            } else if trimmed.hasPrefix("#elseif ") {
+                if !stack.isEmpty {
+                    // Any `#elseif` body is, by definition, NOT the DEBUG branch.
+                    stack[stack.count - 1] = false
+                }
+            } else if trimmed.hasPrefix("#else") {
+                if !stack.isEmpty {
+                    stack[stack.count - 1] = false
+                }
+            } else if trimmed.hasPrefix("#endif") {
+                if !stack.isEmpty { stack.removeLast() }
             }
-            if line.contains("CorpusExporter") && depth == 0 {
+            let inDebug = !stack.isEmpty && stack.allSatisfy { $0 }
+            if line.contains("CorpusExporter") && !inDebug {
                 unguardedReference = true
             }
         }
         #expect(!unguardedReference,
                 "CorpusExporter must only appear inside #if DEBUG regions of SettingsView")
+    }
+
+    @Test("Canary depth tracker rejects a CorpusExporter reference in a #elseif non-DEBUG arm")
+    func canaryTrackerRejectsNonDebugElseifArm() {
+        // Self-test of the preprocessor state machine used by
+        // `settingsCallSiteGuarded`: a synthetic source that puts
+        // `CorpusExporter` inside an `#elseif canImport(UIKit)` branch of a
+        // `#if DEBUG ... #elseif ... #endif` construct is an un-guarded
+        // reference and must be flagged.
+        let synthetic = """
+        #if DEBUG
+        _ = CorpusExporter.export(store: store, documentsURL: url)
+        #elseif canImport(UIKit)
+        _ = CorpusExporter.self  // release-branch reference — must fail the canary
+        #endif
+        """
+        let lines = synthetic.split(separator: "\n", omittingEmptySubsequences: false)
+        var stack: [Bool] = []
+        var unguardedReference = false
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("#if ") {
+                stack.append(trimmed == "#if DEBUG")
+            } else if trimmed.hasPrefix("#elseif ") {
+                if !stack.isEmpty { stack[stack.count - 1] = false }
+            } else if trimmed.hasPrefix("#else") {
+                if !stack.isEmpty { stack[stack.count - 1] = false }
+            } else if trimmed.hasPrefix("#endif") {
+                if !stack.isEmpty { stack.removeLast() }
+            }
+            let inDebug = !stack.isEmpty && stack.allSatisfy { $0 }
+            if line.contains("CorpusExporter") && !inDebug {
+                unguardedReference = true
+            }
+        }
+        #expect(unguardedReference,
+                "Depth tracker must classify a CorpusExporter reference inside a #elseif arm as unguarded")
     }
 }

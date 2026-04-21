@@ -529,6 +529,28 @@ struct CorpusExporterTests {
         #expect(corrections.first?["analysisAssetId"] as? String == "asset-ok")
     }
 
+    @Test("export: if fetchAllAssets throws, no partial corpus-export file remains in Documents/")
+    func exportCleansUpOnEarlyThrow() async throws {
+        let docs = try makeTempDir(prefix: "CorpusExport-cleanup")
+        let source = FailingSource(
+            assets: [],
+            spans: [:],
+            events: [:],
+            failSpansFor: [],
+            failEventsFor: [],
+            failAllAssets: true
+        )
+        do {
+            _ = try await CorpusExporter.export(store: source, documentsURL: docs)
+            Issue.record("export should have thrown")
+        } catch {
+            // Expected: SimulatedSQLError propagated from fetchAllAssets.
+        }
+        let contents = try FileManager.default.contentsOfDirectory(atPath: docs.path)
+        let orphans = contents.filter { $0.hasPrefix("corpus-export.") }
+        #expect(orphans.isEmpty, "Documents/ must not accumulate partial exports; found: \(orphans)")
+    }
+
     // MARK: - Test helpers
 
     private func makeSpan(
@@ -595,8 +617,28 @@ private struct FailingSource: CorpusExportSource {
     let events: [String: [CorrectionEvent]]
     let failSpansFor: Set<String>
     let failEventsFor: Set<String>
+    let failAllAssets: Bool
+
+    init(
+        assets: [AnalysisAsset],
+        spans: [String: [DecodedSpan]],
+        events: [String: [CorrectionEvent]],
+        failSpansFor: Set<String>,
+        failEventsFor: Set<String>,
+        failAllAssets: Bool = false
+    ) {
+        self.assets = assets
+        self.spans = spans
+        self.events = events
+        self.failSpansFor = failSpansFor
+        self.failEventsFor = failEventsFor
+        self.failAllAssets = failAllAssets
+    }
 
     func fetchAllAssets() async throws -> [AnalysisAsset] {
+        if failAllAssets {
+            throw SimulatedSQLError(method: "fetchAllAssets", assetId: "")
+        }
         return assets
     }
 

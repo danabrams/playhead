@@ -192,12 +192,15 @@ enum CorpusExporter {
         // FileHandle so we never hold all rows in memory simultaneously.
         fm.createFile(atPath: fileURL.path, contents: nil, attributes: nil)
         let handle = try FileHandle(forWritingTo: fileURL)
-        // Ensure the handle is closed on every path so close() flushes buffered
-        // writes (otherwise the last record can trail in the buffer when a test
-        // reads the file right after this returns). close() flushes; it does
-        // not fsync — durability on power-loss is not a goal here.
+        // Unlink partially-written file on any throw between here and the
+        // successful return, so the Documents/ directory the user sees in
+        // Files.app never accumulates empty or partial export artifacts.
+        var didSucceed = false
         defer {
             try? handle.close()
+            if !didSucceed {
+                try? fm.removeItem(at: fileURL)
+            }
         }
 
         var assetCount = 0
@@ -266,6 +269,7 @@ enum CorpusExporter {
             ? siblingDecisionLog
             : nil
 
+        didSucceed = true
         return CorpusExportResult(
             fileURL: fileURL,
             assetCount: assetCount,
