@@ -206,6 +206,69 @@ struct BatchNotificationCoordinatorTests {
         #expect(batch.tripReadyNotified == false)
     }
 
+    // MARK: - Persistence-rule AND-gate (integration)
+
+    @Test("≥2 passes within <30 min does NOT fire actionRequired (wall-clock bar)")
+    func passesWithoutWallClockDoesNotFire() async throws {
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        let scheduler = RecordingScheduler()
+        let service = BatchNotificationService(scheduler: scheduler)
+
+        let batch = DownloadBatch(
+            tripContextRaw: DownloadTripContext.flight.rawValue,
+            episodeKeys: ["ep-a"]
+        )
+        context.insert(batch)
+        try context.save()
+
+        let coordinator = BatchNotificationCoordinator(
+            modelContext: context,
+            service: service,
+            summaryBuilder: Self.allStorageBlockedBuilder
+        )
+
+        // Two passes 5 min apart — pass-count bar cleared, wall-clock not.
+        await coordinator.runOncePass(now: Self.t0)
+        await coordinator.runOncePass(now: Self.t0.addingTimeInterval(5 * 60))
+
+        let requests = await scheduler.snapshot()
+        #expect(requests.isEmpty)
+        #expect(batch.actionRequiredNotified == false)
+        #expect(batch.consecutiveBlockedPasses == 2)
+    }
+
+    @Test("1 pass at ≥30 min wall-clock does NOT fire actionRequired (count bar)")
+    func wallClockWithoutPassesDoesNotFire() async throws {
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        let scheduler = RecordingScheduler()
+        let service = BatchNotificationService(scheduler: scheduler)
+
+        let batch = DownloadBatch(
+            tripContextRaw: DownloadTripContext.flight.rawValue,
+            episodeKeys: ["ep-a"]
+        )
+        context.insert(batch)
+        try context.save()
+
+        let coordinator = BatchNotificationCoordinator(
+            modelContext: context,
+            service: service,
+            summaryBuilder: Self.allStorageBlockedBuilder
+        )
+
+        // Single pass 60 min after t0. Wall-clock cleared on its own
+        // pass would not be possible without two ticks, so simulate by
+        // running just one pass — `consecutiveBlockedPasses` reaches 1.
+        await coordinator.runOncePass(now: Self.t0.addingTimeInterval(60 * 60))
+
+        let requests = await scheduler.snapshot()
+        #expect(requests.isEmpty)
+        #expect(batch.actionRequiredNotified == false)
+        #expect(batch.consecutiveBlockedPasses == 1)
+    }
+
     // MARK: - Trip-ready closes the batch when all children terminal
 
     @Test("All-ready pass marks batch closed (closedAt set)")

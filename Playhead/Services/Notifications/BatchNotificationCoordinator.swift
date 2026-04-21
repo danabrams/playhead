@@ -173,22 +173,34 @@ final class BatchNotificationCoordinator {
         }
 
         // Cap enforcement: trip-ready and action-required each fire
-        // at most once per batch lifetime.
+        // at most once per batch lifetime. The cap flag is persisted
+        // BEFORE the emit call so a process kill in the window between
+        // emit and save cannot cause a duplicate notification on next
+        // launch. Failure mode if save-then-emit is interrupted: the
+        // user gets no notification (silence is preferable to spam).
         switch verdict {
         case .tripReady:
             if !batch.tripReadyNotified {
-                await service.emit(eligibility: .tripReady, batch: batch)
                 batch.tripReadyNotified = true
+                persist(batch)
+                await service.emit(eligibility: .tripReady, batch: batch)
+                return
             }
         case .blockedAnalysisUnavailable, .blockedStorage, .blockedWifiPolicy:
             if !batch.actionRequiredNotified {
-                await service.emit(eligibility: verdict, batch: batch)
                 batch.actionRequiredNotified = true
+                persist(batch)
+                await service.emit(eligibility: verdict, batch: batch)
+                return
             }
         case .none:
             break
         }
 
+        persist(batch)
+    }
+
+    private func persist(_ batch: DownloadBatch) {
         do {
             try modelContext.save()
         } catch {
