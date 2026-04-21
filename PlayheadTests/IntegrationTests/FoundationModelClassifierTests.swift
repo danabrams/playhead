@@ -3224,6 +3224,225 @@ struct FoundationModelClassifierTests {
         #expect(snapshot.respondCalls.isEmpty)
     }
 
+    // MARK: - Single-segment subdivision fallback
+    //
+    // Real podcasts routinely produce segments whose token estimate
+    // alone exceeds the coarse budget. Smart-shrink can't recover a
+    // single-segment window (nothing to drop below one segment), so
+    // the classifier now packs the segment's atoms into sub-prompts
+    // that each fit the budget, runs them as separate coarse calls,
+    // and aggregates the sub-dispositions with permissive precedence
+    // (containsAd > uncertain > abstain > noAds).
+
+    /// Budget calculation shared by the subdivision tests — contextSize 3688
+    /// divided by the coarseBudgetDivisor (8), minus schema/response/safety
+    /// tokens, lands at 456 per-window. Each token-count rule below keys its
+    /// return values off this number: fullSegment > 456 forces the pre-check
+    /// to invoke subdivision; single-atom prompts < 456 allow chunking to
+    /// succeed.
+    private var subdivisionBudgetFixture: (contextSize: Int, coarseSchemaTokens: Int, safetyMargin: Int, maxResponse: Int) {
+        (contextSize: 3_688, coarseSchemaTokens: 16, safetyMargin: 8, maxResponse: 16)
+    }
+
+    /// Shared token-count rule for subdivision tests:
+    /// - Prompt containing all three atom markers → 700 (full segment, over budget)
+    /// - Prompt containing two markers → 500 (over budget — any 2-atom chunk flushes)
+    /// - Prompt containing one marker → 200 (under budget)
+    /// - Prompt with zero markers → 50 (preamble/setup)
+    private let subdivisionTokenCountRule: @Sendable (String) -> Int = { prompt in
+        let hasAlpha = prompt.contains("alphaTOKENaaa")
+        let hasBeta = prompt.contains("betaTOKENbbb")
+        let hasGamma = prompt.contains("gammaTOKENccc")
+        let markerCount = (hasAlpha ? 1 : 0) + (hasBeta ? 1 : 0) + (hasGamma ? 1 : 0)
+        switch markerCount {
+        case 3: return 700
+        case 2: return 500
+        case 1: return 200
+        default: return 50
+        }
+    }
+
+    @Test("coarse pass subdivides a single oversized multi-atom segment and aggregates noAds")
+    func coarsePassSubdividesOversizedSegmentAllNoAds() async throws {
+        let fixture = subdivisionBudgetFixture
+        let segments = [
+            makeMultiAtomSegment(
+                index: 77,
+                atomTexts: ["alphaTOKENaaa", "betaTOKENbbb", "gammaTOKENccc"],
+                startTime: 100,
+                endTime: 130
+            )
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: fixture.contextSize,
+            coarseSchemaTokens: fixture.coarseSchemaTokens,
+            refinementSchemaTokens: 32,
+            tokenCountRule: subdivisionTokenCountRule,
+            responses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: fixture.safetyMargin, maximumResponseTokens: fixture.maxResponse)
+        )
+
+        let plans = try await classifier.planPassA(segments: segments)
+        #expect(plans.count == 1)
+        #expect(plans[0].lineRefs == [77])
+        #expect(plans[0].promptTokenCount == 700, "planner must measure the full segment as oversized")
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 1, "subdivision must recover a single window-level screening")
+        #expect(output.windows.first?.lineRefs == [77])
+        #expect(output.windows.first?.screening.disposition == .noAds)
+        #expect(output.failedWindowStatuses.isEmpty)
+        #expect(snapshot.respondCalls.count == 3, "one coarse call per sub-atom chunk")
+    }
+
+    @Test("coarse pass subdivision short-circuits when a sub-chunk screens containsAd")
+    func coarsePassSubdivisionShortCircuitsOnContainsAd() async throws {
+        let fixture = subdivisionBudgetFixture
+        let segments = [
+            makeMultiAtomSegment(
+                index: 88,
+                atomTexts: ["alphaTOKENaaa", "betaTOKENbbb", "gammaTOKENccc"]
+            )
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: fixture.contextSize,
+            coarseSchemaTokens: fixture.coarseSchemaTokens,
+            refinementSchemaTokens: 32,
+            tokenCountRule: subdivisionTokenCountRule,
+            responses: [
+                CoarseScreeningSchema(disposition: .containsAd, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: fixture.safetyMargin, maximumResponseTokens: fixture.maxResponse)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .success)
+        #expect(output.windows.first?.screening.disposition == .containsAd)
+        #expect(
+            snapshot.respondCalls.count == 1,
+            "containsAd from the first sub-chunk must short-circuit remaining FM calls"
+        )
+    }
+
+    @Test("coarse pass subdivision aggregates uncertain over noAds")
+    func coarsePassSubdivisionAggregatesUncertainOverNoAds() async throws {
+        let fixture = subdivisionBudgetFixture
+        let segments = [
+            makeMultiAtomSegment(
+                index: 99,
+                atomTexts: ["alphaTOKENaaa", "betaTOKENbbb", "gammaTOKENccc"]
+            )
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: fixture.contextSize,
+            coarseSchemaTokens: fixture.coarseSchemaTokens,
+            refinementSchemaTokens: 32,
+            tokenCountRule: subdivisionTokenCountRule,
+            responses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .uncertain, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: fixture.safetyMargin, maximumResponseTokens: fixture.maxResponse)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.windows.first?.screening.disposition == .uncertain)
+        #expect(
+            snapshot.respondCalls.count == 3,
+            "non-containsAd sub-dispositions must not short-circuit; all chunks run"
+        )
+    }
+
+    @Test("coarse pass subdivision abandons when every sub-run refuses")
+    func coarsePassSubdivisionAbandonsWhenAllSubRunsRefuse() async throws {
+        let fixture = subdivisionBudgetFixture
+        let segments = [
+            makeMultiAtomSegment(
+                index: 101,
+                atomTexts: ["alphaTOKENaaa", "betaTOKENbbb", "gammaTOKENccc"]
+            )
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: fixture.contextSize,
+            coarseSchemaTokens: fixture.coarseSchemaTokens,
+            refinementSchemaTokens: 32,
+            tokenCountRule: subdivisionTokenCountRule,
+            coarseFailures: [.refusal, .refusal, .refusal]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: fixture.safetyMargin, maximumResponseTokens: fixture.maxResponse)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .exceededContextWindow)
+        #expect(output.windows.isEmpty)
+        #expect(output.failedWindowStatuses == [.exceededContextWindow])
+        #expect(snapshot.respondCalls.count == 3, "subdivision still attempts every chunk before giving up")
+    }
+
+    @Test("coarse pass subdivision declines when a single atom alone exceeds budget")
+    func coarsePassSubdivisionDeclinesWhenAtomAloneOverflows() async throws {
+        // Token-count rule that reports every prompt containing ANY atom
+        // marker as over-budget. Subdivision cannot descend below one atom,
+        // so the helper returns nil and the legacy abandonment path runs.
+        let overflowRule: @Sendable (String) -> Int = { prompt in
+            let hasAlpha = prompt.contains("alphaTOKENaaa")
+            let hasBeta = prompt.contains("betaTOKENbbb")
+            return (hasAlpha || hasBeta) ? 700 : 50
+        }
+        let fixture = subdivisionBudgetFixture
+        let segments = [
+            makeMultiAtomSegment(
+                index: 202,
+                atomTexts: ["alphaTOKENaaa", "betaTOKENbbb"]
+            )
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: fixture.contextSize,
+            coarseSchemaTokens: fixture.coarseSchemaTokens,
+            refinementSchemaTokens: 32,
+            tokenCountRule: overflowRule
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: fixture.safetyMargin, maximumResponseTokens: fixture.maxResponse)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .exceededContextWindow)
+        #expect(output.windows.isEmpty)
+        #expect(output.failedWindowStatuses == [.exceededContextWindow])
+        #expect(snapshot.respondCalls.isEmpty, "never reach a session call when every atom alone overflows")
+    }
+
     // bd-3h7: graceful degradation for refusal. Window 1 of 3 refuses
     // (simulating Apple's safety classifier rejecting specific content
     // topics), and the pass must continue to windows 2 and 3 instead of
@@ -4792,6 +5011,36 @@ private func makeSegment(
         ],
         segmentIndex: index
     )
+}
+
+/// Build an `AdTranscriptSegment` whose `atoms` array has one entry per
+/// `atomTexts` element. Each atom occupies a 1s slice of the segment's
+/// timespan; atom ordinals are namespaced by `index * 1000 + i` so multiple
+/// multi-atom segments in one test don't collide.
+private func makeMultiAtomSegment(
+    index: Int,
+    atomTexts: [String],
+    startTime: Double = 0,
+    endTime: Double = 5
+) -> AdTranscriptSegment {
+    precondition(!atomTexts.isEmpty, "multi-atom segment needs at least one atom")
+    let span = max(endTime - startTime, Double(atomTexts.count))
+    let perAtom = span / Double(atomTexts.count)
+    let atoms = atomTexts.enumerated().map { offset, text in
+        TranscriptAtom(
+            atomKey: TranscriptAtomKey(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                atomOrdinal: index * 1_000 + offset
+            ),
+            contentHash: "hash-\(index)-\(offset)",
+            startTime: startTime + Double(offset) * perAtom,
+            endTime: startTime + Double(offset + 1) * perAtom,
+            text: text,
+            chunkIndex: index * 1_000 + offset
+        )
+    }
+    return AdTranscriptSegment(atoms: atoms, segmentIndex: index)
 }
 
 private func buildFixtureSegments() -> [AdTranscriptSegment] {

@@ -1354,6 +1354,38 @@ struct FoundationModelClassifier: Sendable {
         let totalWindows = plans.count
         for (planIndex, plan) in plans.enumerated() {
             if plan.promptTokenCount > budget {
+                // Smart-shrink can't rescue a single-segment window — there
+                // is nothing below "one segment" to drop. But such segments
+                // are usually made of many atoms, and we can chunk those
+                // atoms into sub-prompts that each fit under budget, run
+                // each through the coarse path, and OR their dispositions
+                // into a window-level screening for the original segment.
+                // Aggregation precedence: containsAd > uncertain > abstain
+                // > noAds — "more permissive" matches coarse's recall role.
+                if plan.lineRefs.count == 1,
+                   let segment = segmentByIndex[plan.lineRefs[0]],
+                   let recovered = await subdividedCoarseOutput(
+                       for: plan,
+                       segment: segment,
+                       budget: budget,
+                       clock: clock,
+                       windowIndex: planIndex + 1,
+                       totalWindows: totalWindows
+                   )
+                {
+                    windows.append(
+                        FMCoarseWindowOutput(
+                            windowIndex: windows.count,
+                            lineRefs: recovered.lineRefs,
+                            startTime: recovered.startTime,
+                            endTime: recovered.endTime,
+                            transcriptQuality: recovered.transcriptQuality,
+                            screening: recovered.screening,
+                            latencyMillis: recovered.latencyMillis
+                        )
+                    )
+                    continue
+                }
                 failedWindowStatuses.append(.exceededContextWindow)
                 logger.error(
                     """
@@ -3442,6 +3474,128 @@ struct FoundationModelClassifier: Sendable {
                 return .failure(status)
             }
         }
+    }
+
+    /// Recover a coarse screening for a single-segment window whose prompt
+    /// exceeds the context budget. Packs the segment's atoms into
+    /// consecutive chunks that each fit under `budget`, runs each as its
+    /// own single-line coarse prompt on a fresh prewarmed session, and
+    /// aggregates the sub-dispositions via permissive precedence
+    /// (containsAd > uncertain > abstain > noAds).
+    ///
+    /// Returns `nil` when subdivision cannot help — either the segment has
+    /// a single atom (no cut point), an atom alone exceeds budget, or all
+    /// sub-runs errored. The caller treats `nil` as the legacy abandonment
+    /// path so no window-level accounting regresses.
+    private func subdividedCoarseOutput(
+        for plan: CoarsePassWindowPlan,
+        segment: AdTranscriptSegment,
+        budget: Int,
+        clock: ContinuousClock,
+        windowIndex: Int,
+        totalWindows: Int
+    ) async -> FMCoarseWindowOutput? {
+        guard segment.atoms.count > 1 else { return nil }
+
+        let windowStart = clock.now
+        let validLineRefs: Set<Int> = [segment.segmentIndex]
+
+        func subSegment(from atoms: [TranscriptAtom]) -> AdTranscriptSegment {
+            AdTranscriptSegment(
+                atoms: atoms,
+                segmentIndex: segment.segmentIndex,
+                boundaryReason: segment.boundaryReason,
+                boundaryConfidence: segment.boundaryConfidence,
+                segmentType: segment.segmentType
+            )
+        }
+
+        var chunks: [[TranscriptAtom]] = []
+        var current: [TranscriptAtom] = []
+        for atom in segment.atoms {
+            let candidate = current + [atom]
+            let candidatePrompt = Self.buildPrompt(for: [subSegment(from: candidate)], redactor: redactor)
+            let candidateTokens = (try? await runtime.tokenCount(candidatePrompt)) ?? Int.max
+            if candidateTokens <= budget {
+                current = candidate
+                continue
+            }
+            if current.isEmpty {
+                // A single atom alone already exceeds budget — subdivision
+                // can't descend below one atom, so give up.
+                return nil
+            }
+            chunks.append(current)
+            current = [atom]
+            let aloneTokens = (try? await runtime.tokenCount(
+                Self.buildPrompt(for: [subSegment(from: current)], redactor: redactor)
+            )) ?? Int.max
+            if aloneTokens > budget {
+                return nil
+            }
+        }
+        if !current.isEmpty {
+            chunks.append(current)
+        }
+        guard chunks.count >= 2 else { return nil }
+
+        var anyContainsAd = false
+        var anyUncertain = false
+        var anyAbstain = false
+        var succeededCount = 0
+        var refusalCount = 0
+        for atoms in chunks {
+            let prompt = Self.buildPrompt(for: [subSegment(from: atoms)], redactor: redactor)
+            let sessionBox = await makePrewarmedSessionBox(promptPrefix: Self.promptPrefix)
+            do {
+                let response = try await sessionBox.respondCoarse(prompt)
+                let screening = sanitize(schema: response, validLineRefs: validLineRefs)
+                succeededCount += 1
+                switch screening.disposition {
+                case .containsAd: anyContainsAd = true
+                case .uncertain: anyUncertain = true
+                case .abstain: anyAbstain = true
+                case .noAds: break
+                }
+                if anyContainsAd { break }
+            } catch {
+                if SemanticScanStatus.from(error: error) == .refusal {
+                    refusalCount += 1
+                }
+            }
+        }
+
+        guard succeededCount > 0 else { return nil }
+
+        let disposition: CoarseDisposition
+        if anyContainsAd { disposition = .containsAd }
+        else if anyUncertain { disposition = .uncertain }
+        else if anyAbstain { disposition = .abstain }
+        else { disposition = .noAds }
+
+        logger.debug(
+            """
+            fm.classifier.coarse_pass_window_subdivided \
+            window=\(windowIndex, privacy: .public) \
+            totalWindows=\(totalWindows, privacy: .public) \
+            segmentIndex=\(segment.segmentIndex, privacy: .public) \
+            atomCount=\(segment.atoms.count, privacy: .public) \
+            chunks=\(chunks.count, privacy: .public) \
+            succeeded=\(succeededCount, privacy: .public) \
+            refusals=\(refusalCount, privacy: .public) \
+            disposition=\(disposition.rawValue, privacy: .public)
+            """
+        )
+
+        return FMCoarseWindowOutput(
+            windowIndex: 0,
+            lineRefs: plan.lineRefs,
+            startTime: plan.startTime,
+            endTime: plan.endTime,
+            transcriptQuality: plan.transcriptQuality,
+            screening: CoarseScreeningSchema(disposition: disposition, support: nil),
+            latencyMillis: Self.latencyMillis(since: windowStart, clock: clock)
+        )
     }
 
     private func runCoarseRetry(
