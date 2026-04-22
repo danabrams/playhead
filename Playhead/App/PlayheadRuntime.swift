@@ -727,7 +727,18 @@ final class PlayheadRuntime {
                     // signal provider internally (no args), gates on the kill
                     // switch + strict-playback + rate-limit, and returns
                     // promptly on any no-op branch.
-                    await shadowCaptureCoordinator?.tickLaneA()
+                    //
+                    // Fire-and-forget: the coordinator is an actor with its
+                    // own in-flight accounting (`laneAInFlight`,
+                    // `laneAMaxInFlight = 1`), so an unstructured Task cannot
+                    // race itself. Awaiting here would stall subsequent
+                    // `skipOrchestrator.updatePlayheadTime(...)` ticks on the
+                    // ~3s FM call and regress user-visible skip-cue latency.
+                    // Capture the coordinator by value (not via `self`) to
+                    // avoid retaining the runtime through this hot loop.
+                    Task { [shadowCaptureCoordinator] in
+                        await shadowCaptureCoordinator?.tickLaneA()
+                    }
 
                 case .paused:
                     if lastStatus != .paused {
