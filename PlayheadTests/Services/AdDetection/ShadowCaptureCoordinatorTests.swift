@@ -151,6 +151,7 @@ struct ShadowCaptureCoordinatorTests {
             laneAMaxCallsPerMinute: 4,
             laneAMaxInFlight: 1,
             laneBCallsPerTick: 1,
+            laneBMaxCallsPerMinute: 8,
             laneBMaxInFlight: 1
         )
         let coord = ShadowCaptureCoordinator(
@@ -244,6 +245,53 @@ struct ShadowCaptureCoordinatorTests {
         #expect(await dispatcher.callCount == 0)
     }
 
+    // AC-2: thermal and charging predicates must gate Lane B *independently*.
+    // Both legs gating at the same boundary is fine (that's what .default
+    // does), but one failing without the other must still short-circuit
+    // the tick. These two tests flip each leg with the other held true.
+
+    @Test("Lane B .notIdle when thermal nominal but not charging")
+    func laneBNotIdleWhenThermalOkButNotCharging() async throws {
+        let store = try await makeTestStore()
+        let dispatcher = RecordingDispatcher()
+        let playback = StubPlaybackSignal(isPlaying: false, asset: nil)
+        let environment = StubEnvironmentSignal(thermalNominal: true, charging: false)
+        let windows = StubWindowSource(
+            laneA: [],
+            laneB: ["b": [ShadowWindow(start: 0, end: 10)]],
+            assetsWithGaps: ["b"]
+        )
+        let coord = ShadowCaptureCoordinator(
+            store: store, dispatcher: dispatcher, windowSource: windows,
+            playbackSignal: playback, environmentSignal: environment,
+            clock: { 1_700_000_000 },
+            readConfig: { .default }
+        )
+        #expect(await coord.tickLaneB() == .notIdle)
+        #expect(await dispatcher.callCount == 0)
+    }
+
+    @Test("Lane B .notIdle when charging but thermal not nominal")
+    func laneBNotIdleWhenChargingButThermalSerious() async throws {
+        let store = try await makeTestStore()
+        let dispatcher = RecordingDispatcher()
+        let playback = StubPlaybackSignal(isPlaying: false, asset: nil)
+        let environment = StubEnvironmentSignal(thermalNominal: false, charging: true)
+        let windows = StubWindowSource(
+            laneA: [],
+            laneB: ["b": [ShadowWindow(start: 0, end: 10)]],
+            assetsWithGaps: ["b"]
+        )
+        let coord = ShadowCaptureCoordinator(
+            store: store, dispatcher: dispatcher, windowSource: windows,
+            playbackSignal: playback, environmentSignal: environment,
+            clock: { 1_700_000_000 },
+            readConfig: { .default }
+        )
+        #expect(await coord.tickLaneB() == .notIdle)
+        #expect(await dispatcher.callCount == 0)
+    }
+
     @Test("Lane B fires when idle; walks up to laneBCallsPerTick windows")
     func laneBFiresWhenIdleWalksMultiple() async throws {
         let store = try await makeTestStore()
@@ -266,6 +314,7 @@ struct ShadowCaptureCoordinatorTests {
             laneAMaxCallsPerMinute: 4,
             laneAMaxInFlight: 1,
             laneBCallsPerTick: 2,
+            laneBMaxCallsPerMinute: 8,
             laneBMaxInFlight: 1
         )
         let coord = ShadowCaptureCoordinator(
@@ -336,9 +385,24 @@ private final class MutablePlaybackSignal: ShadowPlaybackSignalProvider, @unchec
     }
 }
 
+/// Test stub that independently controls the two legs of the split env
+/// protocol. The `idle:` convenience initializer keeps the legacy
+/// `AND-composed` shape (both legs return the same value) for call sites
+/// that don't care about the split; tests that specifically target AC-2
+/// (thermal vs charging independence) use the designated init.
 private struct StubEnvironmentSignal: ShadowEnvironmentSignalProvider {
-    let idle: Bool
-    func isIdleForBackfill() -> Bool { idle }
+    let thermalNominal: Bool
+    let charging: Bool
+    init(thermalNominal: Bool, charging: Bool) {
+        self.thermalNominal = thermalNominal
+        self.charging = charging
+    }
+    init(idle: Bool) {
+        self.thermalNominal = idle
+        self.charging = idle
+    }
+    func thermalStateIsNominal() -> Bool { thermalNominal }
+    func deviceIsCharging() -> Bool { charging }
 }
 
 /// Mutable test clock that stays safe across the @Sendable `clock` closure

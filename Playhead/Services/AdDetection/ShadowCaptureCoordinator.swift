@@ -58,13 +58,24 @@ struct ShadowActiveAsset: Sendable, Equatable {
 /// `isBatteryMonitoringEnabled = true` set once at app launch and left on
 /// per bead spec guidance — don't churn the flag).
 ///
-/// Lane B only runs when ``isIdleForBackfill()`` returns `true`.
+/// Lane B only runs when BOTH legs are green. Keeping them on separate
+/// protocol methods (rather than collapsing to a single
+/// `isIdleForBackfill()` boolean) is deliberate — it lets unit tests flip
+/// each axis independently to prove the gate composes them with `AND`.
+/// Without this split, a mock could return `true` for one reason while
+/// the coordinator was actually checking the other, and the test would
+/// pass silently.
 protocol ShadowEnvironmentSignalProvider: Sendable {
-    /// `true` iff `thermalState == .nominal` AND device is charging
-    /// (battery state `charging` or `full`). `.fair` thermal is deliberately
-    /// insufficient — Lane B's "thorough pass" should run only under
-    /// genuinely cold conditions.
-    func isIdleForBackfill() -> Bool
+    /// `true` iff `ProcessInfo.processInfo.thermalState == .nominal`.
+    /// `.fair` thermal is deliberately insufficient — Lane B's "thorough
+    /// pass" should run only under genuinely cold conditions.
+    func thermalStateIsNominal() -> Bool
+
+    /// `true` iff the device battery is either `.charging` or `.full`.
+    /// Unplugged-but-full is accepted because Lane B's power ceiling is
+    /// fundamentally about "don't drain the user's battery during a
+    /// background pass", and full-on-USB is a valid quiescent state.
+    func deviceIsCharging() -> Bool
 }
 
 // MARK: - Shadow FM dispatcher
@@ -199,6 +210,13 @@ actor ShadowCaptureCoordinator {
 
     // MARK: - Lane B state
 
+    /// Timestamps (unix seconds) of the last N Lane-B dispatches. Same
+    /// leaky-bucket shape as Lane A so Lane B also can't spike past a
+    /// documented ceiling under repeated idle ticks. Kept as a separate
+    /// bucket (not shared with Lane A) so a busy playback session doesn't
+    /// starve the background lane, and vice versa.
+    private var laneBRecentDispatchTimes: [TimeInterval] = []
+
     /// Current in-flight count for Lane B.
     private var laneBInFlight: Int = 0
 
@@ -299,18 +317,46 @@ actor ShadowCaptureCoordinator {
     ///
     /// Guards, in order:
     ///   1. Kill switch off → no-op.
-    ///   2. Thermal not nominal OR device not charging → no-op.
-    ///   3. Max in-flight reached → no-op.
-    ///   4. No assets with incomplete coverage → no-op.
+    ///   2. Thermal not nominal → no-op.                     (split for testability)
+    ///   3. Device not charging → no-op.                     (split for testability)
+    ///   4. Max in-flight reached → no-op.
+    ///   5. Per-minute rate limit exhausted → no-op.
+    ///   6. No assets with incomplete coverage → no-op.
+    ///
+    /// Thermal and charging are checked independently (see
+    /// ``ShadowEnvironmentSignalProvider``) so unit tests can flip each
+    /// axis in isolation and prove the AND-composition actually holds.
     ///
     /// On success: dispatches up to `laneBCallsPerTick` shadow FM calls
-    /// across one asset and persists the results.
+    /// across one asset and persists the results, each one consuming one
+    /// token from the per-minute bucket.
     @discardableResult
     func tickLaneB() async -> ShadowCaptureTickOutcome {
         let config = readConfig()
         guard config.dualFMCaptureEnabled else { return .killSwitchOff }
-        guard environmentSignal.isIdleForBackfill() else { return .notIdle }
+        // AC-2 HIGH: split thermal/charging into two predicates so tests
+        // can flip each leg independently. Collapsing them into a single
+        // boolean (prior shape) made "thermal-ok-but-not-charging" and
+        // "charging-but-thermal-serious" indistinguishable from the
+        // test's perspective, masking bugs that dropped one of the two
+        // checks.
+        guard environmentSignal.thermalStateIsNominal() else { return .notIdle }
+        guard environmentSignal.deviceIsCharging() else { return .notIdle }
         guard laneBInFlight < config.laneBMaxInFlight else { return .laneBusy }
+
+        // Per-minute rate-limit check (mirrors Lane A's leaky bucket).
+        // `laneBMaxCallsPerMinute` is the combined ceiling across a single
+        // minute of idle-tick wall-clock; laneBCallsPerTick is the
+        // per-tick burst cap. Both must be satisfied for a dispatch to
+        // land. When the bucket is full, the coordinator returns
+        // `.rateLimited` and waits for the next idle tick (at which
+        // point the oldest token has likely fallen outside the window).
+        let nowForLaneB = clock()
+        let windowOpensB = nowForLaneB - 60.0
+        laneBRecentDispatchTimes.removeAll(where: { $0 < windowOpensB })
+        guard laneBRecentDispatchTimes.count < config.laneBMaxCallsPerMinute else {
+            return .rateLimited
+        }
 
         let assetIds: [String]
         do {
@@ -348,6 +394,19 @@ actor ShadowCaptureCoordinator {
 
         var lastOutcome: ShadowCaptureTickOutcome = .noCandidates
         for window in candidates.prefix(config.laneBCallsPerTick) {
+            // Re-check the per-minute bucket inside the loop so a single
+            // tick that exceeds its burst cap mid-walk doesn't blow past
+            // the ceiling. Consume the token BEFORE the dispatch so a
+            // failure still counts against the budget (protects against
+            // a failing dispatcher being retried at maximum rate).
+            let tokenTime = clock()
+            let tokenWindowOpens = tokenTime - 60.0
+            laneBRecentDispatchTimes.removeAll(where: { $0 < tokenWindowOpens })
+            if laneBRecentDispatchTimes.count >= config.laneBMaxCallsPerMinute {
+                return lastOutcome == .dispatched ? lastOutcome : .rateLimited
+            }
+            laneBRecentDispatchTimes.append(tokenTime)
+
             lastOutcome = await dispatchAndPersist(
                 assetId: assetId,
                 window: window,

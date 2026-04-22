@@ -63,6 +63,16 @@ struct ShadowCaptureConfig: Sendable, Equatable {
     /// excursions per tick.
     let laneBCallsPerTick: Int
 
+    /// Maximum number of shadow FM calls Lane B may dispatch per minute of
+    /// wall-clock time. Same leaky-bucket treatment as
+    /// ``laneAMaxCallsPerMinute``. Kept as a separate bucket (not combined
+    /// with Lane A) so a busy playback session doesn't starve the
+    /// background lane, and vice versa. Together with
+    /// ``laneAMaxCallsPerMinute`` the combined dual-run ceiling is
+    /// `laneAMaxCallsPerMinute + laneBMaxCallsPerMinute` shadow FM calls
+    /// per minute when both lanes are maximally engaged.
+    let laneBMaxCallsPerMinute: Int
+
     /// Maximum number of shadow FM calls in flight at any instant for Lane B.
     let laneBMaxInFlight: Int
 
@@ -71,12 +81,18 @@ struct ShadowCaptureConfig: Sendable, Equatable {
     /// Production/Dan-build default: dual-run capture ON, conservative budget
     /// constants. If this produces measurable thermal regression in the field,
     /// tighten the constants — or flip ``dualFMCaptureEnabled`` to `false`.
+    ///
+    /// Per-minute ceilings: Lane A caps at 4 / min (hot-path, conservative);
+    /// Lane B caps at 8 / min (background idle, a bit more aggressive since
+    /// the device is charging + cool by construction). Combined ceiling on a
+    /// dual-engaged minute: 12 shadow FM calls / min.
     static let `default` = ShadowCaptureConfig(
         dualFMCaptureEnabled: true,
         laneALookaheadSeconds: 60,
         laneAMaxCallsPerMinute: 4,
         laneAMaxInFlight: 1,
         laneBCallsPerTick: 2,
+        laneBMaxCallsPerMinute: 8,
         laneBMaxInFlight: 1
     )
 
@@ -89,6 +105,7 @@ struct ShadowCaptureConfig: Sendable, Equatable {
         laneAMaxCallsPerMinute: 0,
         laneAMaxInFlight: 0,
         laneBCallsPerTick: 0,
+        laneBMaxCallsPerMinute: 0,
         laneBMaxInFlight: 0
     )
 }
