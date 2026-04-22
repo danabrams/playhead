@@ -778,6 +778,11 @@ private extension SettingsView {
                             .font(AppTypography.caption)
                             .foregroundStyle(AppColors.textTertiary)
                     }
+                    if let shadow = result.shadowManifestURL {
+                        Text("shadow sidecar: \(shadow.lastPathComponent) (\(result.shadowRowCount) rows)")
+                            .font(AppTypography.caption)
+                            .foregroundStyle(AppColors.textTertiary)
+                    }
                 }
                 .listRowBackground(AppColors.surface)
             }

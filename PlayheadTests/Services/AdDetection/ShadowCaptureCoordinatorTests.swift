@@ -333,6 +333,95 @@ struct ShadowCaptureCoordinatorTests {
             #expect(row.capturedBy == .laneB)
         }
     }
+
+    // MARK: - Dispatcher failure paths (LOW)
+
+    /// A throwing dispatcher must:
+    ///   - yield `.dispatchFailed` on the tick,
+    ///   - NOT leave a row in the store (we never call upsert on failure),
+    ///   - and consume a rate-limit token. The coordinator's documented
+    ///     contract is "the budget token is consumed BEFORE the dispatch
+    ///     so a failing dispatcher cannot be retried at maximum rate" —
+    ///     this test locks that contract in place.
+    @Test("Lane A: dispatcher throws yields .dispatchFailed; no row; token consumed")
+    func laneADispatchThrowsConsumesBudgetAndEmitsNoRow() async throws {
+        let store = try await makeTestStore()
+        let dispatcher = ThrowingDispatcher()
+        let playback = StubPlaybackSignal(
+            isPlaying: true,
+            asset: ShadowActiveAsset(assetId: "pod-throws", playheadSeconds: 0)
+        )
+        let environment = StubEnvironmentSignal(idle: true)
+        let windows = StubWindowSource(
+            laneA: [ShadowWindow(start: 10, end: 20)],
+            laneB: [:],
+            assetsWithGaps: []
+        )
+        let config = ShadowCaptureConfig(
+            dualFMCaptureEnabled: true,
+            laneALookaheadSeconds: 60,
+            laneAMaxCallsPerMinute: 1,  // exactly one token
+            laneAMaxInFlight: 1,
+            laneBCallsPerTick: 1,
+            laneBMaxCallsPerMinute: 8,
+            laneBMaxInFlight: 1
+        )
+        let coord = ShadowCaptureCoordinator(
+            store: store, dispatcher: dispatcher, windowSource: windows,
+            playbackSignal: playback, environmentSignal: environment,
+            clock: { 1_700_000_000 },
+            readConfig: { config }
+        )
+
+        #expect(await coord.tickLaneA() == .dispatchFailed)
+        #expect(await dispatcher.callCount == 1)
+        // Store did not receive a write.
+        #expect(try await store.shadowFMResponseCount() == 0)
+        // Budget token is consumed: the next tick (same simulated wall
+        // clock, so token is still in the window) returns .rateLimited.
+        #expect(await coord.tickLaneA() == .rateLimited)
+        #expect(await dispatcher.callCount == 1,
+                "dispatcher must NOT be re-called while rate-limited")
+    }
+
+    @Test("Lane B: dispatcher throws yields .dispatchFailed and breaks the walk")
+    func laneBDispatchThrowsBreaksWalk() async throws {
+        let store = try await makeTestStore()
+        let dispatcher = ThrowingDispatcher()
+        let playback = StubPlaybackSignal(isPlaying: false, asset: nil)
+        let environment = StubEnvironmentSignal(idle: true)
+        let windows = StubWindowSource(
+            laneA: [],
+            laneB: ["ep": [
+                ShadowWindow(start: 0, end: 10),
+                ShadowWindow(start: 10, end: 20),
+                ShadowWindow(start: 20, end: 30),
+            ]],
+            assetsWithGaps: ["ep"]
+        )
+        let config = ShadowCaptureConfig(
+            dualFMCaptureEnabled: true,
+            laneALookaheadSeconds: 60,
+            laneAMaxCallsPerMinute: 4,
+            laneAMaxInFlight: 1,
+            laneBCallsPerTick: 3,
+            laneBMaxCallsPerMinute: 8,
+            laneBMaxInFlight: 1
+        )
+        let coord = ShadowCaptureCoordinator(
+            store: store, dispatcher: dispatcher, windowSource: windows,
+            playbackSignal: playback, environmentSignal: environment,
+            clock: { 1_700_000_000 },
+            readConfig: { config }
+        )
+
+        #expect(await coord.tickLaneB() == .dispatchFailed)
+        // Only ONE call attempted — the loop broke on the first failure
+        // rather than chewing through the remaining two windows at burst
+        // speed.
+        #expect(await dispatcher.callCount == 1)
+        #expect(try await store.shadowFMResponseCount() == 0)
+    }
 }
 
 // MARK: - Stubs
@@ -350,6 +439,27 @@ private actor RecordingDispatcher: ShadowFMDispatcher {
         // payloads.
         let payload = Data([0xA0, UInt8(truncatingIfNeeded: callCount)])
         return ShadowFMDispatchResult(fmResponse: payload, fmModelVersion: "fm-test")
+    }
+}
+
+/// Dispatcher that throws on every call. Used by the LOW-priority
+/// "dispatcher-throws" tests to prove (a) the tick returns
+/// `.dispatchFailed`, (b) no ghost row lands in the store, and
+/// (c) the failed dispatch counts toward the per-minute budget
+/// (documented contract in the coordinator's dispatch loop — a failing
+/// dispatcher cannot get retried at maximum rate).
+private actor ThrowingDispatcher: ShadowFMDispatcher {
+    struct DispatchBoom: Error, CustomStringConvertible {
+        var description: String { "ThrowingDispatcher: simulated FM failure" }
+    }
+    private(set) var callCount: Int = 0
+    func dispatchShadowCall(
+        assetId: String,
+        window: ShadowWindow,
+        configVariant: ShadowConfigVariant
+    ) async throws -> ShadowFMDispatchResult {
+        callCount += 1
+        throw DispatchBoom()
     }
 }
 

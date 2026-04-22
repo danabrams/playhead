@@ -467,6 +467,66 @@ struct CorpusExporterTests {
         #expect(result.decisionLogManifestURL == nil)
     }
 
+    // MARK: - narl.2: shadow sidecar write
+
+    /// End-to-end proof that `CorpusExporter.export` writes the sibling
+    /// `shadow-decisions.jsonl` — and that the resulting file round-trips
+    /// every row through `ShadowDecisionsExporter.parse`. Without this
+    /// wiring the harness's corpus builder cannot replay `.allEnabled`
+    /// FM evidence.
+    @Test("export: writes shadow-decisions.jsonl sibling round-trippable via parser")
+    func exportWritesShadowSidecarAndRoundTrips() async throws {
+        let store = try await makeTestStore()
+        let docs = try makeTempDir(prefix: "CorpusExport-shadow")
+
+        // Seed a couple of shadow rows under a realistic config variant.
+        let rowA = ShadowFMResponse(
+            assetId: "asset-shadow-1",
+            windowStart: 0, windowEnd: 10,
+            configVariant: .allEnabledShadow,
+            fmResponse: Data([0xAA, 0xBB]),
+            capturedAt: 1_700_000_000,
+            capturedBy: .laneA,
+            fmModelVersion: "fm-1.0"
+        )
+        let rowB = ShadowFMResponse(
+            assetId: "asset-shadow-1",
+            windowStart: 10, windowEnd: 20,
+            configVariant: .allEnabledShadow,
+            fmResponse: Data([0xCC]),
+            capturedAt: 1_700_000_050,
+            capturedBy: .laneB,
+            fmModelVersion: "fm-1.0"
+        )
+        try await store.upsertShadowFMResponse(rowA)
+        try await store.upsertShadowFMResponse(rowB)
+
+        let result = try await CorpusExporter.export(store: store, documentsURL: docs)
+
+        let shadow = try #require(result.shadowManifestURL)
+        #expect(result.shadowRowCount == 2)
+        #expect(shadow.lastPathComponent == "shadow-decisions.jsonl")
+
+        // Round-trip every row through the exporter's parser.
+        let parsed = try ShadowDecisionsExporter.parseAll(fileURL: shadow)
+        #expect(parsed.count == 2)
+        #expect(Set(parsed) == Set([rowA, rowB]))
+    }
+
+    @Test("export: shadow sidecar with no rows is a zero-row file (not missing)")
+    func exportShadowSidecarIsEmptyFileWhenStoreHasNoRows() async throws {
+        let store = try await makeTestStore()
+        let docs = try makeTempDir(prefix: "CorpusExport-shadow-empty")
+
+        let result = try await CorpusExporter.export(store: store, documentsURL: docs)
+
+        let shadow = try #require(result.shadowManifestURL)
+        #expect(result.shadowRowCount == 0)
+        // File exists even though it's empty.
+        let data = try Data(contentsOf: shadow)
+        #expect(data.isEmpty)
+    }
+
     // MARK: - G5: SQL-error path tolerated via test seam
 
     @Test("export: a throwing fetchDecodedSpans for one asset is logged; other assets' records still serialize")
@@ -654,6 +714,13 @@ private struct FailingSource: CorpusExportSource {
             throw SimulatedSQLError(method: "loadCorrectionEvents", assetId: analysisAssetId)
         }
         return events[analysisAssetId] ?? []
+    }
+
+    /// playhead-narl.2: no shadow rows in the failing-source fixtures. The
+    /// sidecar exporter still writes a zero-row `shadow-decisions.jsonl`
+    /// so the corpus-export path exercises end-to-end.
+    func allShadowFMResponses() async throws -> [ShadowFMResponse] {
+        return []
     }
 }
 
