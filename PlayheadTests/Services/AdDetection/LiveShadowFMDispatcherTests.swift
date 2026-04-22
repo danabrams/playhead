@@ -122,6 +122,49 @@ struct LiveShadowFMDispatcherTests {
         )
     }
 
+    /// Typed-error path: `CancellationError` is recognized by
+    /// `SemanticScanStatus.from(error:)` and short-circuits the
+    /// substring classifier. A plain `CancellationError()` has no
+    /// interesting description, so without the typed path the
+    /// substring fallback would return "other". Here we assert the
+    /// typed path wins.
+    @Test("CancellationError → tag = 'cancelled' via typed path")
+    func errorTagTypedCancellation() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store: store, id: "asset-cancel")
+        try await seedTranscriptChunk(
+            store: store, assetId: "asset-cancel",
+            startTime: 0, endTime: 30, chunkIndex: 0, ordinal: 0,
+            text: "some text"
+        )
+        let runtime = makeStubRuntime(
+            respondRefinement: { _ in throw CancellationError() }
+        )
+        let dispatcher = LiveShadowFMDispatcher(store: store, runtime: runtime)
+        let result = try await dispatcher.dispatchShadowCall(
+            assetId: "asset-cancel",
+            window: ShadowWindow(start: 0, end: 30),
+            configVariant: .allEnabledShadow
+        )
+        let decoded = try JSONDecoder().decode(
+            ShadowFMPayload.self, from: result.fmResponse
+        )
+        #expect(decoded.errorTag == "cancelled")
+    }
+
+    /// Multi-keyword opaque errors land on the first substring match.
+    /// This test pins the documented order-sensitivity of the fallback
+    /// — a description that contains both "refusal" and "decoding"
+    /// resolves to "refusal" because it appears first in the classifier.
+    /// Updating the fallback order should break this test deliberately.
+    @Test("multi-keyword opaque error resolves to first-match tag")
+    func errorTagMultiKeywordFallbackOrder() async throws {
+        try await assertErrorTag(
+            errorDescription: "refusal happened during decoding",
+            expectedTag: "refusal"
+        )
+    }
+
     // MARK: - Helpers
 
     /// Run one dispatcher call whose refinement closure throws an error

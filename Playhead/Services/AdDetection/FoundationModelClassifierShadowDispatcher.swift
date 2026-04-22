@@ -194,10 +194,88 @@ actor LiveShadowFMDispatcher: ShadowFMDispatcher {
     // MARK: - Error classification
 
     /// Map a caught error to a short wire-format tag for the payload's
-    /// `errorTag` field. Stringly-typed because the FM framework's error
-    /// surface moves across OS versions and we want the exporter to keep
-    /// writing the tag without churn.
+    /// `errorTag` field.
+    ///
+    /// Strategy:
+    /// 1. Prefer typed matching via `SemanticScanStatus.from(error:)` —
+    ///    this understands `LanguageModelSession.GenerationError` on
+    ///    iOS 26+ (refusal, decodingFailure, exceededContextWindow,
+    ///    assetsUnavailable, rateLimited, guardrailViolation,
+    ///    unsupportedLocale) and `CancellationError`. This is the
+    ///    order-independent, framework-version-resilient path.
+    /// 2. Fall back to substring matching on `String(describing: error)`
+    ///    for opaque errors that don't bridge to a known typed case.
+    ///    Opaque errors still need a best-effort tag so downstream
+    ///    harness code can distinguish "FM errored, wire format unknown"
+    ///    from "FM refused" without re-running the model.
+    ///
+    /// Tag strings are stable; consumers filter on them. Keep new tags
+    /// additive — don't rename existing ones.
     private static func errorTag(for error: any Error) -> String {
+        // Primary: typed cases via the shared status mapper.
+        if let typed = Self.typedErrorTag(for: error) {
+            return typed
+        }
+        // Fallback: substring classification for opaque errors. Order
+        // still matters here — a multi-keyword error string lands on the
+        // first matching branch — but this path is only reached when no
+        // typed case fired, which keeps blast radius narrow.
+        return Self.substringErrorTag(for: error)
+    }
+
+    /// Match the error against known typed cases. Returns nil when the
+    /// error doesn't bridge to any typed case we recognize.
+    private static func typedErrorTag(for error: any Error) -> String? {
+        // `CancellationError` maps to .cancelled via SemanticScanStatus; we
+        // surface it explicitly so the wire tag is stable even if the
+        // mapper grows additional cases.
+        if error is CancellationError {
+            return "cancelled"
+        }
+
+        let status = SemanticScanStatus.from(error: error)
+        // `.failedTransient` is the mapper's "didn't match anything typed"
+        // sentinel — defer to the substring fallback rather than tagging
+        // `other` here (the substring path might still pick up a useful
+        // signal from the error description).
+        guard status != .failedTransient else { return nil }
+
+        switch status {
+        case .refusal:
+            return "refusal"
+        case .decodingFailure:
+            return "decodingFailure"
+        case .exceededContextWindow:
+            return "exceededContextWindow"
+        case .unavailable, .assetsUnavailable:
+            return "runtimeUnavailable"
+        case .unsupportedLocale:
+            return "unsupportedLocale"
+        case .guardrailViolation:
+            return "guardrailViolation"
+        case .rateLimited:
+            return "rateLimited"
+        case .cancelled:
+            return "cancelled"
+        // Non-error statuses (.queued/.running/.success/.noAds) and
+        // statuses that shouldn't arise from an error surface
+        // (.thermalDeferred — that's a capability-gate decision, not a
+        // throw; permissive-* variants — set by the router, not thrown)
+        // fall through to nil so the substring fallback can try.
+        case .queued, .running, .success, .noAds,
+             .thermalDeferred, .failedTransient,
+             .permissiveRefusal, .permissiveDecodingFailure,
+             .permissiveContextOverflow:
+            return nil
+        }
+    }
+
+    /// Substring classifier for opaque errors. Kept as a fallback so
+    /// errors that don't bridge to `LanguageModelSession.GenerationError`
+    /// (e.g. future framework errors, swift runtime errors wrapping a
+    /// description) still get a best-effort tag. Order-sensitive — the
+    /// first match wins, so earlier branches should be more specific.
+    private static func substringErrorTag(for error: any Error) -> String {
         let description = String(describing: error).lowercased()
         if description.contains("refusal") { return "refusal" }
         if description.contains("decoding") { return "decodingFailure" }
