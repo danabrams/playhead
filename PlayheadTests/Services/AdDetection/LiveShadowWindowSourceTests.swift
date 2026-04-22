@@ -203,15 +203,15 @@ struct LiveShadowWindowSourceTests {
 
     // MARK: - assetsWithIncompleteCoverage
 
-    @Test("assetsWithIncompleteCoverage lists uncovered assets")
+    @Test("assetsWithIncompleteCoverage lists uncovered assets, id-ASC tie-break")
     func assetsWithIncompleteCoverageOrdered() async throws {
         let store = try await makeTestStore()
         // Both have transcripts, no shadow rows → both are incomplete.
-        // The store query orders by (createdAt ASC, id ASC). Since both
-        // assets are inserted in the same test within the integer-second
-        // `strftime('%s','now')` default, ties break on id — alphabetical
-        // ids give us a deterministic order without needing a raw-SQL
-        // UPDATE on the createdAt column.
+        // The store query orders by (createdAt ASC, id ASC). Pin both
+        // rows' `createdAt` to the same value via the DEBUG-only setter
+        // so the tie-break on id is exercised deterministically — no
+        // reliance on `strftime('%s','now')` producing identical
+        // second-granularity timestamps for back-to-back inserts.
         try await seedAsset(store: store, id: "asset-a")
         try await seedTranscriptChunk(
             store: store, assetId: "asset-a",
@@ -222,18 +222,21 @@ struct LiveShadowWindowSourceTests {
             store: store, assetId: "asset-b",
             startTime: 0, endTime: 30, chunkIndex: 0, ordinal: 0
         )
+        // Pin identical createdAt timestamps so id-ASC is the sole
+        // tie-break axis. Value is arbitrary — just needs to match.
+        try await store.setAssetCreatedAtForTesting(id: "asset-a", createdAt: 1_700_000_000)
+        try await store.setAssetCreatedAtForTesting(id: "asset-b", createdAt: 1_700_000_000)
 
         let source = LiveShadowWindowSource(store: store)
         let result = try await source.assetsWithIncompleteCoverage()
         #expect(result.contains("asset-a"))
         #expect(result.contains("asset-b"))
-        // With integer-second createdAt ties, id ASC should put "asset-a"
-        // before "asset-b". Even if the timestamps happen to differ, the
-        // primary sort is createdAt ASC — asset-a (inserted first) wins.
-        if let ai = result.firstIndex(of: "asset-a"),
-           let bi = result.firstIndex(of: "asset-b") {
-            #expect(ai < bi)
-        }
+        // Assert absolute positions rather than the old silent-pass guard:
+        // if either id is absent from the result, `firstIndex(of:)` returns
+        // nil and the test should fail, not silently pass.
+        let ai = try #require(result.firstIndex(of: "asset-a"))
+        let bi = try #require(result.firstIndex(of: "asset-b"))
+        #expect(ai < bi, "id-ASC tie-break should place asset-a before asset-b")
     }
 
     @Test("assetsWithIncompleteCoverage excludes fully covered assets")

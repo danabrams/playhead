@@ -2615,6 +2615,23 @@ actor AnalysisStore {
         return results
     }
 
+    /// DEBUG-only: pin the `createdAt` of an existing `analysis_assets`
+    /// row to an explicit value. Used by ordering tests that need
+    /// deterministic tie-break semantics without relying on wall-clock
+    /// behavior of `strftime('%s','now')` at insert time. The production
+    /// insert path populates `createdAt` via the schema default; this
+    /// setter exists solely so narl.2 tests can assert "two assets with
+    /// identical `createdAt` tie-break by id ASC" without flaking when
+    /// the clock rolls a second mid-insert.
+    func setAssetCreatedAtForTesting(id: String, createdAt: Double) throws {
+        let sql = "UPDATE analysis_assets SET createdAt = ? WHERE id = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_double(stmt, 1, createdAt)
+        bind(stmt, 2, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
     /// Debug-only: look up the `podcastId` recorded for an episode in the
     /// `analysis_jobs` table. Returns `nil` when no job row exists or when
     /// the stored `podcastId` is NULL. The `analysis_jobs` row is the only
