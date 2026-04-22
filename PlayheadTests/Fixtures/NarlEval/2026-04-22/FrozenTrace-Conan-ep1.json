@@ -1,0 +1,44 @@
+{
+  "episodeId": "conan-ep-001",
+  "podcastId": "simplecast:conan-needs-a-friend",
+  "episodeDuration": 3600.0,
+  "traceVersion": "frozen-trace-v2",
+  "capturedAt": "2026-04-22T14:10:00Z",
+  "showLabel": "Conan",
+  "holdoutDesignation": "training",
+  "featureWindows": [],
+  "atoms": [
+    { "startTime": 0.0,    "endTime": 120.0,  "text": "cold open with sona matt" },
+    { "startTime": 120.0,  "endTime": 180.0,  "text": "sponsor read for squarespace" },
+    { "startTime": 180.0,  "endTime": 1800.0, "text": "main conversation" },
+    { "startTime": 1800.0, "endTime": 1860.0, "text": "comedy banter about snacks" },
+    { "startTime": 1860.0, "endTime": 3600.0, "text": "tail" }
+  ],
+  "evidenceCatalog": [
+    { "source": "metadata", "weight": 0.7, "windowStart": 120.0, "windowEnd": 180.0, "classificationTrust": 0.2  },
+    { "source": "lexical",  "weight": 0.4, "windowStart": 1800.0, "windowEnd": 1860.0, "classificationTrust": 0.0 }
+  ],
+  "corrections": [
+    {
+      "source": "listenRevert",
+      "scope": "exactTimeSpan:conan-ep-001:1800.000:1860.000",
+      "createdAt": 773520900.0,
+      "correctionType": null
+    }
+  ],
+  "decisionEvents": [
+    { "windowId": "w-120", "proposalConfidence": 0.78, "skipConfidence": 0.78, "eligibilityGate": "passed", "policyAction": "autoskip", "explanationJSON": null },
+    { "windowId": "w-1800", "proposalConfidence": 0.55, "skipConfidence": 0.55, "eligibilityGate": "passed", "policyAction": "autoskip", "explanationJSON": null }
+  ],
+  "baselineReplaySpanDecisions": [
+    { "startTime": 120.0,  "endTime": 180.0,  "confidence": 0.78, "isAd": true, "sourceTag": "baseline" },
+    { "startTime": 1800.0, "endTime": 1860.0, "confidence": 0.55, "isAd": true, "sourceTag": "baseline" }
+  ],
+  "windowScores": [
+    { "windowStart": 120.0,  "windowEnd": 150.0,  "fusedSkipConfidence": 0.77, "classificationTrust": 0.2,  "hasMetadataEvidence": true,  "isAdUnderDefault": true  },
+    { "windowStart": 150.0,  "windowEnd": 180.0,  "fusedSkipConfidence": 0.79, "classificationTrust": 0.2,  "hasMetadataEvidence": true,  "isAdUnderDefault": true  },
+    { "windowStart": 1200.0, "windowEnd": 1230.0, "fusedSkipConfidence": 0.06, "classificationTrust": 0.0,  "hasMetadataEvidence": false, "isAdUnderDefault": false },
+    { "windowStart": 1800.0, "windowEnd": 1830.0, "fusedSkipConfidence": 0.55, "classificationTrust": 0.04, "hasMetadataEvidence": false, "isAdUnderDefault": true  },
+    { "windowStart": 1830.0, "windowEnd": 1860.0, "fusedSkipConfidence": 0.54, "classificationTrust": 0.04, "hasMetadataEvidence": false, "isAdUnderDefault": true  }
+  ]
+}

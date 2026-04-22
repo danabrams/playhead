@@ -1,0 +1,671 @@
+{
+  "episodes" : [
+    {
+      "config" : "default",
+      "episodeId" : "doac-ep-002",
+      "groundTruthWindowCount" : 2,
+      "hasShadowCoverage" : false,
+      "isExcluded" : false,
+      "lexicalInjectionAdds" : 0,
+      "podcastId" : "flightcast:diary-of-a-ceo",
+      "predictedWindowCount" : 1,
+      "priorShiftAdds" : 0,
+      "secondLevel" : {
+        "f1" : 0.5714285714285715,
+        "falseNegativeSeconds" : 60,
+        "falsePositiveSeconds" : 0,
+        "precision" : 1,
+        "recall" : 0.4,
+        "truePositiveSeconds" : 40
+      },
+      "show" : "DoaC",
+      "windowMetrics" : [
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 1,
+          "falsePositives" : 0,
+          "meanMatchedIoU" : 1,
+          "precision" : 1,
+          "recall" : 0.5,
+          "threshold" : 0.3,
+          "truePositives" : 1
+        },
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 1,
+          "falsePositives" : 0,
+          "meanMatchedIoU" : 1,
+          "precision" : 1,
+          "recall" : 0.5,
+          "threshold" : 0.5,
+          "truePositives" : 1
+        },
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 1,
+          "falsePositives" : 0,
+          "meanMatchedIoU" : 1,
+          "precision" : 1,
+          "recall" : 0.5,
+          "threshold" : 0.7,
+          "truePositives" : 1
+        }
+      ]
+    },
+    {
+      "config" : "allEnabled",
+      "episodeId" : "doac-ep-002",
+      "groundTruthWindowCount" : 2,
+      "hasShadowCoverage" : false,
+      "isExcluded" : false,
+      "lexicalInjectionAdds" : 0,
+      "podcastId" : "flightcast:diary-of-a-ceo",
+      "predictedWindowCount" : 1,
+      "priorShiftAdds" : 0,
+      "secondLevel" : {
+        "f1" : 0.5714285714285715,
+        "falseNegativeSeconds" : 60,
+        "falsePositiveSeconds" : 0,
+        "precision" : 1,
+        "recall" : 0.4,
+        "truePositiveSeconds" : 40
+      },
+      "show" : "DoaC",
+      "windowMetrics" : [
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 1,
+          "falsePositives" : 0,
+          "meanMatchedIoU" : 1,
+          "precision" : 1,
+          "recall" : 0.5,
+          "threshold" : 0.3,
+          "truePositives" : 1
+        },
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 1,
+          "falsePositives" : 0,
+          "meanMatchedIoU" : 1,
+          "precision" : 1,
+          "recall" : 0.5,
+          "threshold" : 0.5,
+          "truePositives" : 1
+        },
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 1,
+          "falsePositives" : 0,
+          "meanMatchedIoU" : 1,
+          "precision" : 1,
+          "recall" : 0.5,
+          "threshold" : 0.7,
+          "truePositives" : 1
+        }
+      ]
+    },
+    {
+      "config" : "default",
+      "episodeId" : "conan-ep-001",
+      "groundTruthWindowCount" : 1,
+      "hasShadowCoverage" : false,
+      "isExcluded" : false,
+      "lexicalInjectionAdds" : 0,
+      "podcastId" : "simplecast:conan-needs-a-friend",
+      "predictedWindowCount" : 2,
+      "priorShiftAdds" : 0,
+      "secondLevel" : {
+        "f1" : 0.6666666666666666,
+        "falseNegativeSeconds" : 0,
+        "falsePositiveSeconds" : 60,
+        "precision" : 0.5,
+        "recall" : 1,
+        "truePositiveSeconds" : 60
+      },
+      "show" : "Conan",
+      "windowMetrics" : [
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 0,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.5,
+          "recall" : 1,
+          "threshold" : 0.3,
+          "truePositives" : 1
+        },
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 0,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.5,
+          "recall" : 1,
+          "threshold" : 0.5,
+          "truePositives" : 1
+        },
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 0,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.5,
+          "recall" : 1,
+          "threshold" : 0.7,
+          "truePositives" : 1
+        }
+      ]
+    },
+    {
+      "config" : "allEnabled",
+      "episodeId" : "conan-ep-001",
+      "groundTruthWindowCount" : 1,
+      "hasShadowCoverage" : false,
+      "isExcluded" : false,
+      "lexicalInjectionAdds" : 0,
+      "podcastId" : "simplecast:conan-needs-a-friend",
+      "predictedWindowCount" : 2,
+      "priorShiftAdds" : 0,
+      "secondLevel" : {
+        "f1" : 0.6666666666666666,
+        "falseNegativeSeconds" : 0,
+        "falsePositiveSeconds" : 60,
+        "precision" : 0.5,
+        "recall" : 1,
+        "truePositiveSeconds" : 60
+      },
+      "show" : "Conan",
+      "windowMetrics" : [
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 0,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.5,
+          "recall" : 1,
+          "threshold" : 0.3,
+          "truePositives" : 1
+        },
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 0,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.5,
+          "recall" : 1,
+          "threshold" : 0.5,
+          "truePositives" : 1
+        },
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 0,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.5,
+          "recall" : 1,
+          "threshold" : 0.7,
+          "truePositives" : 1
+        }
+      ]
+    },
+    {
+      "config" : "default",
+      "episodeId" : "conan-ep-002",
+      "exclusionReason" : "wholeAssetVeto:conan-ep-002",
+      "groundTruthWindowCount" : 0,
+      "hasShadowCoverage" : false,
+      "isExcluded" : true,
+      "lexicalInjectionAdds" : 0,
+      "podcastId" : "simplecast:conan-needs-a-friend",
+      "predictedWindowCount" : 0,
+      "priorShiftAdds" : 0,
+      "secondLevel" : {
+        "f1" : 0,
+        "falseNegativeSeconds" : 0,
+        "falsePositiveSeconds" : 0,
+        "precision" : 0,
+        "recall" : 0,
+        "truePositiveSeconds" : 0
+      },
+      "show" : "Conan",
+      "windowMetrics" : [
+
+      ]
+    },
+    {
+      "config" : "allEnabled",
+      "episodeId" : "conan-ep-002",
+      "exclusionReason" : "wholeAssetVeto:conan-ep-002",
+      "groundTruthWindowCount" : 0,
+      "hasShadowCoverage" : false,
+      "isExcluded" : true,
+      "lexicalInjectionAdds" : 0,
+      "podcastId" : "simplecast:conan-needs-a-friend",
+      "predictedWindowCount" : 0,
+      "priorShiftAdds" : 0,
+      "secondLevel" : {
+        "f1" : 0,
+        "falseNegativeSeconds" : 0,
+        "falsePositiveSeconds" : 0,
+        "precision" : 0,
+        "recall" : 0,
+        "truePositiveSeconds" : 0
+      },
+      "show" : "Conan",
+      "windowMetrics" : [
+
+      ]
+    },
+    {
+      "config" : "default",
+      "episodeId" : "doac-ep-001",
+      "groundTruthWindowCount" : 1,
+      "hasShadowCoverage" : false,
+      "isExcluded" : false,
+      "lexicalInjectionAdds" : 0,
+      "podcastId" : "flightcast:diary-of-a-ceo",
+      "predictedWindowCount" : 1,
+      "priorShiftAdds" : 0,
+      "secondLevel" : {
+        "f1" : 1,
+        "falseNegativeSeconds" : 0,
+        "falsePositiveSeconds" : 0,
+        "precision" : 1,
+        "recall" : 1,
+        "truePositiveSeconds" : 60
+      },
+      "show" : "DoaC",
+      "windowMetrics" : [
+        {
+          "f1" : 1,
+          "falseNegatives" : 0,
+          "falsePositives" : 0,
+          "meanMatchedIoU" : 1,
+          "precision" : 1,
+          "recall" : 1,
+          "threshold" : 0.3,
+          "truePositives" : 1
+        },
+        {
+          "f1" : 1,
+          "falseNegatives" : 0,
+          "falsePositives" : 0,
+          "meanMatchedIoU" : 1,
+          "precision" : 1,
+          "recall" : 1,
+          "threshold" : 0.5,
+          "truePositives" : 1
+        },
+        {
+          "f1" : 1,
+          "falseNegatives" : 0,
+          "falsePositives" : 0,
+          "meanMatchedIoU" : 1,
+          "precision" : 1,
+          "recall" : 1,
+          "threshold" : 0.7,
+          "truePositives" : 1
+        }
+      ]
+    },
+    {
+      "config" : "allEnabled",
+      "episodeId" : "doac-ep-001",
+      "groundTruthWindowCount" : 1,
+      "hasShadowCoverage" : false,
+      "isExcluded" : false,
+      "lexicalInjectionAdds" : 0,
+      "podcastId" : "flightcast:diary-of-a-ceo",
+      "predictedWindowCount" : 2,
+      "priorShiftAdds" : 2,
+      "secondLevel" : {
+        "f1" : 0.6666666666666666,
+        "falseNegativeSeconds" : 0,
+        "falsePositiveSeconds" : 60,
+        "precision" : 0.5,
+        "recall" : 1,
+        "truePositiveSeconds" : 60
+      },
+      "show" : "DoaC",
+      "windowMetrics" : [
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 0,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.5,
+          "recall" : 1,
+          "threshold" : 0.3,
+          "truePositives" : 1
+        },
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 0,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.5,
+          "recall" : 1,
+          "threshold" : 0.5,
+          "truePositives" : 1
+        },
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 0,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.5,
+          "recall" : 1,
+          "threshold" : 0.7,
+          "truePositives" : 1
+        }
+      ]
+    }
+  ],
+  "generatedAt" : "2026-04-22T13:31:37Z",
+  "iouThresholds" : [
+    0.3,
+    0.5,
+    0.7
+  ],
+  "notes" : [
+
+  ],
+  "rollups" : [
+    {
+      "config" : "allEnabled",
+      "episodeCount" : 3,
+      "excludedEpisodeCount" : 1,
+      "secondLevel" : {
+        "f1" : 0.64,
+        "falseNegativeSeconds" : 60,
+        "falsePositiveSeconds" : 120,
+        "precision" : 0.5714285714285714,
+        "recall" : 0.7272727272727273,
+        "truePositiveSeconds" : 160
+      },
+      "show" : "ALL",
+      "totalEpisodesWithShadowCoverage" : 0,
+      "totalLexicalInjectionAdds" : 0,
+      "totalPriorShiftAdds" : 2,
+      "windowMetrics" : [
+        {
+          "f1" : 0.6666666666666665,
+          "falseNegatives" : 1,
+          "falsePositives" : 2,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.6,
+          "recall" : 0.75,
+          "threshold" : 0.3,
+          "truePositives" : 3
+        },
+        {
+          "f1" : 0.6666666666666665,
+          "falseNegatives" : 1,
+          "falsePositives" : 2,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.6,
+          "recall" : 0.75,
+          "threshold" : 0.5,
+          "truePositives" : 3
+        },
+        {
+          "f1" : 0.6666666666666665,
+          "falseNegatives" : 1,
+          "falsePositives" : 2,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.6,
+          "recall" : 0.75,
+          "threshold" : 0.7,
+          "truePositives" : 3
+        }
+      ]
+    },
+    {
+      "config" : "default",
+      "episodeCount" : 3,
+      "excludedEpisodeCount" : 1,
+      "secondLevel" : {
+        "f1" : 0.7272727272727273,
+        "falseNegativeSeconds" : 60,
+        "falsePositiveSeconds" : 60,
+        "precision" : 0.7272727272727273,
+        "recall" : 0.7272727272727273,
+        "truePositiveSeconds" : 160
+      },
+      "show" : "ALL",
+      "totalEpisodesWithShadowCoverage" : 0,
+      "totalLexicalInjectionAdds" : 0,
+      "totalPriorShiftAdds" : 0,
+      "windowMetrics" : [
+        {
+          "f1" : 0.75,
+          "falseNegatives" : 1,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.75,
+          "recall" : 0.75,
+          "threshold" : 0.3,
+          "truePositives" : 3
+        },
+        {
+          "f1" : 0.75,
+          "falseNegatives" : 1,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.75,
+          "recall" : 0.75,
+          "threshold" : 0.5,
+          "truePositives" : 3
+        },
+        {
+          "f1" : 0.75,
+          "falseNegatives" : 1,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.75,
+          "recall" : 0.75,
+          "threshold" : 0.7,
+          "truePositives" : 3
+        }
+      ]
+    },
+    {
+      "config" : "allEnabled",
+      "episodeCount" : 1,
+      "excludedEpisodeCount" : 1,
+      "secondLevel" : {
+        "f1" : 0.6666666666666666,
+        "falseNegativeSeconds" : 0,
+        "falsePositiveSeconds" : 60,
+        "precision" : 0.5,
+        "recall" : 1,
+        "truePositiveSeconds" : 60
+      },
+      "show" : "Conan",
+      "totalEpisodesWithShadowCoverage" : 0,
+      "totalLexicalInjectionAdds" : 0,
+      "totalPriorShiftAdds" : 0,
+      "windowMetrics" : [
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 0,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.5,
+          "recall" : 1,
+          "threshold" : 0.3,
+          "truePositives" : 1
+        },
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 0,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.5,
+          "recall" : 1,
+          "threshold" : 0.5,
+          "truePositives" : 1
+        },
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 0,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.5,
+          "recall" : 1,
+          "threshold" : 0.7,
+          "truePositives" : 1
+        }
+      ]
+    },
+    {
+      "config" : "default",
+      "episodeCount" : 1,
+      "excludedEpisodeCount" : 1,
+      "secondLevel" : {
+        "f1" : 0.6666666666666666,
+        "falseNegativeSeconds" : 0,
+        "falsePositiveSeconds" : 60,
+        "precision" : 0.5,
+        "recall" : 1,
+        "truePositiveSeconds" : 60
+      },
+      "show" : "Conan",
+      "totalEpisodesWithShadowCoverage" : 0,
+      "totalLexicalInjectionAdds" : 0,
+      "totalPriorShiftAdds" : 0,
+      "windowMetrics" : [
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 0,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.5,
+          "recall" : 1,
+          "threshold" : 0.3,
+          "truePositives" : 1
+        },
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 0,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.5,
+          "recall" : 1,
+          "threshold" : 0.5,
+          "truePositives" : 1
+        },
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 0,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.5,
+          "recall" : 1,
+          "threshold" : 0.7,
+          "truePositives" : 1
+        }
+      ]
+    },
+    {
+      "config" : "allEnabled",
+      "episodeCount" : 2,
+      "excludedEpisodeCount" : 0,
+      "secondLevel" : {
+        "f1" : 0.625,
+        "falseNegativeSeconds" : 60,
+        "falsePositiveSeconds" : 60,
+        "precision" : 0.625,
+        "recall" : 0.625,
+        "truePositiveSeconds" : 100
+      },
+      "show" : "DoaC",
+      "totalEpisodesWithShadowCoverage" : 0,
+      "totalLexicalInjectionAdds" : 0,
+      "totalPriorShiftAdds" : 2,
+      "windowMetrics" : [
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 1,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.6666666666666666,
+          "recall" : 0.6666666666666666,
+          "threshold" : 0.3,
+          "truePositives" : 2
+        },
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 1,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.6666666666666666,
+          "recall" : 0.6666666666666666,
+          "threshold" : 0.5,
+          "truePositives" : 2
+        },
+        {
+          "f1" : 0.6666666666666666,
+          "falseNegatives" : 1,
+          "falsePositives" : 1,
+          "meanMatchedIoU" : 1,
+          "precision" : 0.6666666666666666,
+          "recall" : 0.6666666666666666,
+          "threshold" : 0.7,
+          "truePositives" : 2
+        }
+      ]
+    },
+    {
+      "config" : "default",
+      "episodeCount" : 2,
+      "excludedEpisodeCount" : 0,
+      "secondLevel" : {
+        "f1" : 0.7692307692307693,
+        "falseNegativeSeconds" : 60,
+        "falsePositiveSeconds" : 0,
+        "precision" : 1,
+        "recall" : 0.625,
+        "truePositiveSeconds" : 100
+      },
+      "show" : "DoaC",
+      "totalEpisodesWithShadowCoverage" : 0,
+      "totalLexicalInjectionAdds" : 0,
+      "totalPriorShiftAdds" : 0,
+      "windowMetrics" : [
+        {
+          "f1" : 0.8,
+          "falseNegatives" : 1,
+          "falsePositives" : 0,
+          "meanMatchedIoU" : 1,
+          "precision" : 1,
+          "recall" : 0.6666666666666666,
+          "threshold" : 0.3,
+          "truePositives" : 2
+        },
+        {
+          "f1" : 0.8,
+          "falseNegatives" : 1,
+          "falsePositives" : 0,
+          "meanMatchedIoU" : 1,
+          "precision" : 1,
+          "recall" : 0.6666666666666666,
+          "threshold" : 0.5,
+          "truePositives" : 2
+        },
+        {
+          "f1" : 0.8,
+          "falseNegatives" : 1,
+          "falsePositives" : 0,
+          "meanMatchedIoU" : 1,
+          "precision" : 1,
+          "recall" : 0.6666666666666666,
+          "threshold" : 0.7,
+          "truePositives" : 2
+        }
+      ]
+    }
+  ],
+  "runId" : "20260422-133137-689491",
+  "schemaVersion" : 1
+}
