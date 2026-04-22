@@ -138,10 +138,29 @@ final class PlayheadRuntime {
 
     private(set) var currentEpisodeId: String?
     private(set) var currentPodcastId: String?
+    /// MainActor-confined observable property. External readers go through
+    /// `@Observable` change tracking. Writers MUST use
+    /// ``setCurrentAnalysisAssetId(_:)`` so the Sendable-closure-readable
+    /// `currentAssetIdMirror` stays in sync — a forgotten mirror update
+    /// would silently break Lane A. `private(set)` enforces this at the
+    /// type boundary; the setter is the only internal write site.
     private(set) var currentAnalysisAssetId: String?
     private(set) var currentEpisodeTitle: String?
     private(set) var currentPodcastTitle: String?
     private(set) var currentArtworkURL: URL?
+
+    /// Single write site for `currentAnalysisAssetId`. Updates both the
+    /// `@Observable` property (for SwiftUI/main-actor observers) and the
+    /// `OSAllocatedUnfairLock`-protected `currentAssetIdMirror` that the
+    /// `LivePlaybackSignalProvider`'s `@Sendable` closure reads. Call
+    /// this instead of assigning `currentAnalysisAssetId` directly;
+    /// future mutation sites that forget the mirror would silently break
+    /// Lane A.
+    private func setCurrentAnalysisAssetId(_ newValue: String?) {
+        currentAnalysisAssetId = newValue
+        // playhead-narl.2: mirror for Sendable closure access.
+        currentAssetIdMirror.withLock { $0 = newValue }
+    }
 
     /// Background download task for the current episode's audio cache.
     private var audioCacheTask: Task<Void, Never>?
@@ -926,9 +945,7 @@ final class PlayheadRuntime {
         currentEpisodeTitle = episode.title
         currentPodcastTitle = episode.podcast?.title
         currentArtworkURL = episode.podcast?.artworkURL
-        currentAnalysisAssetId = nil
-        // playhead-narl.2: keep the Sendable-closure-readable mirror in sync.
-        currentAssetIdMirror.withLock { $0 = nil }
+        setCurrentAnalysisAssetId(nil)
 
         await backgroundProcessingService.playbackDidStart()
 
@@ -1025,9 +1042,7 @@ final class PlayheadRuntime {
                             rate: 1.0
                         )
                     )
-                    self.currentAnalysisAssetId = resolvedAssetId
-                    // playhead-narl.2: mirror for Sendable closure access.
-                    self.currentAssetIdMirror.withLock { $0 = resolvedAssetId }
+                    self.setCurrentAnalysisAssetId(resolvedAssetId)
                     if let assetId = resolvedAssetId {
                         await self.skipOrchestrator.beginEpisode(
                             analysisAssetId: assetId,
@@ -1071,9 +1086,7 @@ final class PlayheadRuntime {
                 rate: 1.0
             )
         )
-        currentAnalysisAssetId = resolvedAssetId
-        // playhead-narl.2: mirror for Sendable closure access.
-        currentAssetIdMirror.withLock { $0 = resolvedAssetId }
+        setCurrentAnalysisAssetId(resolvedAssetId)
 
         if let assetId = resolvedAssetId {
             await skipOrchestrator.beginEpisode(
@@ -1095,9 +1108,7 @@ final class PlayheadRuntime {
         await playbackService.pause()
         currentEpisodeId = nil
         currentPodcastId = nil
-        currentAnalysisAssetId = nil
-        // playhead-narl.2: mirror for Sendable closure access.
-        currentAssetIdMirror.withLock { $0 = nil }
+        setCurrentAnalysisAssetId(nil)
         currentEpisodeTitle = nil
         currentPodcastTitle = nil
         currentArtworkURL = nil
