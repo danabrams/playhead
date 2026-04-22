@@ -88,35 +88,99 @@ enum NarlCorrectionScope: Sendable, Equatable {
 
 // MARK: - Correction semantic classification
 
-/// Maps `FrozenCorrection.source` strings to a narl-semantic category.
+/// Maps `FrozenCorrection` payloads to a narl-semantic category.
 ///
-/// The production `CorrectionEvent.source` enum has several raw values. We map
-/// them here rather than coupling to the prod enum: this lets the test-target
-/// helper keep working even if prod adds new sources. Unknown sources are
-/// treated as `.unknown` and ignored for ground-truth computation.
+/// Preferred source of truth (v2): the `correctionType` field on
+/// `FrozenCorrection`, which is the raw value of the production
+/// `CorrectionType` enum (`falsePositive`, `falseNegative`,
+/// `startTooEarly/Late`, `endTooEarly/Late`). We map these directly.
+///
+/// Fallback (v1 fixtures or rows missing `correctionType`): explicit mapping
+/// of `CorrectionSource` raw values (`listenRevert`, `manualVeto`,
+/// `falseNegative`). Unknown sources are `.unknown` and ignored — and
+/// crucially, `manualVeto` (a documented production source that was
+/// previously dropped by the substring heuristic) is mapped explicitly.
+///
+/// Boundary cases (`startTooEarly/Late`, `endTooEarly/Late`) do not add or
+/// remove entire positive windows; they describe sub-second boundary drift
+/// in an already-detected ad. Window-level IoU can't score the difference
+/// between a clean 0.5 s boundary shift and a perfect match, so we
+/// deliberately treat boundary corrections as `.unknown` (i.e. ignored) for
+/// ground-truth construction and surface them in the `skippedCorrectionCount`
+/// counter. See narl design §A.4 rule 4.
 enum NarlCorrectionKind: Sendable, Equatable {
     case falsePositive  // user flagged a detected span as not an ad
     case falseNegative  // user flagged a missed span as an ad
+    /// Boundary refinement — intentionally ignored for ground-truth
+    /// construction (see note above). Tallied separately for diagnostics.
+    case boundaryRefinement
     case unknown
 }
 
-/// Return a best-guess kind from the raw correction source string. This is
-/// tolerant by design — see explanation above.
-func narlCorrectionKind(fromSource raw: String) -> NarlCorrectionKind {
-    let lowered = raw.lowercased()
-    // "listenRevert", "listenTap", "dismissBanner", "autoSkipRevert" —
-    // variants that encode "user said this isn't an ad".
+/// Resolve a kind from a frozen correction, preferring the explicit
+/// `correctionType` payload when available.
+///
+/// Explicit `CorrectionType` mapping (matches
+/// `Playhead/Services/AdDetection/CorrectionAttribution.swift`):
+///   - `falsePositive` → `.falsePositive`
+///   - `falseNegative` → `.falseNegative`
+///   - `startTooEarly/Late`, `endTooEarly/Late` → `.boundaryRefinement`
+///
+/// Fallback `CorrectionSource` mapping (matches
+/// `Playhead/Services/AdDetection/AdDecisionResult.swift`):
+///   - `listenRevert`, `manualVeto` → `.falsePositive`
+///   - `falseNegative` → `.falseNegative`
+func narlCorrectionKind(
+    fromType correctionType: String?,
+    source: String
+) -> NarlCorrectionKind {
+    // Prefer explicit correctionType when present (v2 fixtures).
+    if let t = correctionType {
+        switch t {
+        case "falsePositive": return .falsePositive
+        case "falseNegative": return .falseNegative
+        case "startTooEarly", "startTooLate",
+             "endTooEarly", "endTooLate":
+            return .boundaryRefinement
+        default:
+            // Unknown correctionType — fall through to source-based mapping.
+            break
+        }
+    }
+
+    // Explicit CorrectionSource mapping (raw values on the production enum).
+    // Case-sensitive to match the enum's raw values; fixtures written by the
+    // corpus builder preserve the raw value verbatim.
+    switch source {
+    case "listenRevert", "manualVeto":
+        return .falsePositive
+    case "falseNegative":
+        return .falseNegative
+    default:
+        break
+    }
+
+    // Tolerant fallback for legacy raw strings that historically mixed
+    // gesture names with intent names. This branch exists specifically to
+    // keep older captures and test fixtures (e.g. "reportMissedAd",
+    // "dismissBanner") decodable; new captures should rely on
+    // `correctionType` instead.
+    let lowered = source.lowercased()
     if lowered.contains("listen") || lowered.contains("dismiss")
-        || lowered.contains("falsepositive") || lowered.contains("notanad") {
+        || lowered.contains("falsepositive") || lowered.contains("notanad")
+        || lowered.contains("manualveto") {
         return .falsePositive
     }
-    // "flagAsAd", "reportMissedAd", "falseNegative", "missedAd" —
-    // variants that encode "user said this was an ad we missed".
     if lowered.contains("flag") || lowered.contains("falsenegative")
         || lowered.contains("missedad") || lowered.contains("reportad") {
         return .falseNegative
     }
     return .unknown
+}
+
+/// Back-compat shim for existing tests that pass a raw source string.
+func narlCorrectionKind(fromSource raw: String) -> NarlCorrectionKind {
+    narlCorrectionKind(fromType: nil, source: raw)
 }
 
 // MARK: - Time range
@@ -162,8 +226,17 @@ struct NarlEpisodeGroundTruth: Sendable, Equatable {
     let falsePositiveCorrectionCount: Int
     /// Number of falseNegative corrections that added to the positive set.
     let falseNegativeCorrectionCount: Int
-    /// Number of ordinal-range corrections resolved to time via atoms.
+    /// Number of ordinal-range corrections resolved to time via atoms
+    /// (disjoint from fp/fn counts — `ordinalCorrectionCount` is a *subset*
+    /// counter that tallies how many of the above fp/fn corrections arrived
+    /// via `exactSpan` ordinal scopes rather than time-based scopes).
     let ordinalCorrectionCount: Int
+    /// Number of boundary-refinement corrections (startTooEarly/Late,
+    /// endTooEarly/Late). These do NOT move the ad-window set — window-
+    /// level IoU can't distinguish sub-second boundary drift cleanly — but
+    /// we count them so consumers can spot episodes where boundary quality
+    /// is the dominant failure mode.
+    let boundaryRefinementCount: Int
     /// Number of unhandled / malformed corrections silently skipped.
     let skippedCorrectionCount: Int
 
@@ -174,6 +247,7 @@ struct NarlEpisodeGroundTruth: Sendable, Equatable {
         falsePositiveCorrectionCount: 0,
         falseNegativeCorrectionCount: 0,
         ordinalCorrectionCount: 0,
+        boundaryRefinementCount: 0,
         skippedCorrectionCount: 0
     )
 }
@@ -200,6 +274,7 @@ enum NarlGroundTruth {
                     falsePositiveCorrectionCount: 0,
                     falseNegativeCorrectionCount: 0,
                     ordinalCorrectionCount: 0,
+                    boundaryRefinementCount: 0,
                     skippedCorrectionCount: 0
                 )
             default: break
@@ -216,6 +291,7 @@ enum NarlGroundTruth {
         var fpCount = 0
         var fnCount = 0
         var ordinalCount = 0
+        var boundaryCount = 0
         var skippedCount = 0
 
         // Atom ordinal → time lookup, for step 4. Atoms are ordered and
@@ -223,7 +299,10 @@ enum NarlGroundTruth {
         let atomsOrderedByStart = trace.atoms.sorted { $0.startTime < $1.startTime }
 
         for correction in trace.corrections {
-            let kind = narlCorrectionKind(fromSource: correction.source)
+            let kind = narlCorrectionKind(
+                fromType: correction.correctionType,
+                source: correction.source
+            )
             switch NarlCorrectionScope.parse(correction.scope) {
             case .exactTimeSpan(_, let startTime, let endTime):
                 let range = NarlTimeRange(start: startTime, end: endTime)
@@ -234,6 +313,10 @@ enum NarlGroundTruth {
                 case .falseNegative:
                     positives = unionAdd(range: range, into: positives)
                     fnCount += 1
+                case .boundaryRefinement:
+                    // Boundary-refinement corrections describe sub-second
+                    // drift on already-detected ads; do not alter the set.
+                    boundaryCount += 1
                 case .unknown:
                     skippedCount += 1
                 }
@@ -264,6 +347,8 @@ enum NarlGroundTruth {
                     positives = unionAdd(range: range, into: positives)
                     fnCount += 1
                     ordinalCount += 1
+                case .boundaryRefinement:
+                    boundaryCount += 1
                 case .unknown:
                     skippedCount += 1
                 }
@@ -285,6 +370,7 @@ enum NarlGroundTruth {
             falsePositiveCorrectionCount: fpCount,
             falseNegativeCorrectionCount: fnCount,
             ordinalCorrectionCount: ordinalCount,
+            boundaryRefinementCount: boundaryCount,
             skippedCorrectionCount: skippedCount
         )
     }
@@ -318,7 +404,18 @@ enum NarlGroundTruth {
         mergeOverlaps(positives + [range])
     }
 
-    /// Merge overlapping/adjacent ranges. Touching ranges (p.end == q.start) are merged.
+    /// Merge overlapping or touching ranges.
+    ///
+    /// Uses `r.start <= last.end` (inclusive), so ranges that touch at a single
+    /// point — e.g. `[100, 120)` and `[120, 140)` — are merged into
+    /// `[100, 140)`. This is the correct behavior for narl's ad-window set:
+    /// adjacent false-negative corrections describing the same contiguous
+    /// ad should collapse to one positive window rather than two zero-gap
+    /// windows (which would double-count under window-level F1). If you
+    /// ever need strict `<` semantics (e.g. "segmentation preserves
+    /// touching-but-distinct labels"), add a separate helper — don't change
+    /// this one, because the harness' metrics are calibrated on the merging
+    /// behavior.
     static func mergeOverlaps(_ ranges: [NarlTimeRange]) -> [NarlTimeRange] {
         guard !ranges.isEmpty else { return [] }
         let sorted = ranges.sorted { $0.start < $1.start }

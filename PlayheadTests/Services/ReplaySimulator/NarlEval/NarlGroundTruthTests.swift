@@ -242,6 +242,87 @@ struct NarlGroundTruthBuildTests {
         #expect(gt.adWindows == [NarlTimeRange(start: 120, end: 180)])
     }
 
+    @Test("manualVeto CorrectionSource is classified as falsePositive (HIGH-1)")
+    func manualVetoFalsePositive() {
+        // Production emits CorrectionSource.manualVeto when the user taps
+        // "This isn't an ad". The previous substring heuristic returned
+        // .unknown for "manualVeto" (no "listen"/"dismiss"/"falsepositive"
+        // substring), silently dropping the correction. Explicit enum
+        // mapping must catch it.
+        let trace = makeTrace(
+            baselineAdSpans: [(120, 180)],
+            corrections: [(source: "manualVeto", scope: "exactTimeSpan:ep-test:120.000:180.000")]
+        )
+        let gt = NarlGroundTruth.build(for: trace)
+        #expect(!gt.isExcluded)
+        #expect(gt.falsePositiveCorrectionCount == 1)
+        #expect(gt.adWindows.isEmpty)
+    }
+
+    @Test("correctionType is preferred over source when both present")
+    func correctionTypePreferredOverSource() {
+        // A correction with ambiguous source="listenRevert" but an explicit
+        // correctionType="falseNegative" should be treated as a false-
+        // negative — the `correctionType` column is production's honest
+        // label.
+        let trace = FrozenTrace(
+            episodeId: "ep-test",
+            podcastId: "pod-test",
+            episodeDuration: 3600,
+            traceVersion: FrozenTrace.currentTraceVersion,
+            capturedAt: Date(),
+            featureWindows: [], atoms: [],
+            evidenceCatalog: [],
+            corrections: [
+                FrozenTrace.FrozenCorrection(
+                    source: "listenRevert",  // superficially reads as FP
+                    scope: "exactTimeSpan:ep-test:500.000:560.000",
+                    createdAt: 1000,
+                    correctionType: "falseNegative"
+                )
+            ],
+            decisionEvents: [],
+            baselineReplaySpanDecisions: [],
+            holdoutDesignation: .training
+        )
+        let gt = NarlGroundTruth.build(for: trace)
+        #expect(gt.falseNegativeCorrectionCount == 1)
+        #expect(gt.adWindows.contains(NarlTimeRange(start: 500, end: 560)))
+    }
+
+    @Test("Boundary-refinement corrections are tallied, not applied")
+    func boundaryCorrectionTallied() {
+        let trace = FrozenTrace(
+            episodeId: "ep-test",
+            podcastId: "pod-test",
+            episodeDuration: 3600,
+            traceVersion: FrozenTrace.currentTraceVersion,
+            capturedAt: Date(),
+            featureWindows: [], atoms: [],
+            evidenceCatalog: [],
+            corrections: [
+                FrozenTrace.FrozenCorrection(
+                    source: "listenRevert",
+                    scope: "exactTimeSpan:ep-test:120.000:180.000",
+                    createdAt: 1000,
+                    correctionType: "startTooEarly"
+                )
+            ],
+            decisionEvents: [],
+            baselineReplaySpanDecisions: [
+                ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline")
+            ],
+            holdoutDesignation: .training
+        )
+        let gt = NarlGroundTruth.build(for: trace)
+        #expect(!gt.isExcluded)
+        #expect(gt.boundaryRefinementCount == 1)
+        // Baseline positive is untouched by a boundary refinement.
+        #expect(gt.adWindows == [NarlTimeRange(start: 120, end: 180)])
+        #expect(gt.falsePositiveCorrectionCount == 0)
+        #expect(gt.falseNegativeCorrectionCount == 0)
+    }
+
     @Test("Non-ad baseline spans do not appear in ground truth")
     func nonAdBaselineIgnored() {
         let baseline = [
