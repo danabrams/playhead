@@ -77,6 +77,13 @@ actor LiveShadowWindowSource: ShadowWindowSource {
         alreadyCaptured: Set<ShadowWindowKey>
     ) async throws -> [ShadowWindow] {
         // Lane A: windows in `[fromSeconds, fromSeconds + lookaheadSeconds]`.
+        // Short-circuit a zero/negative lookahead explicitly. The later
+        // `end > from` guard handles the common case but silently admits
+        // windows when `fromSeconds > 0 && lookaheadSeconds == 0` (end
+        // still exceeds the grid-floored `from`). That combination isn't
+        // realistic today but a future hot-flip of the lookahead to zero
+        // should produce an empty backlog, not a full grid slice.
+        guard lookaheadSeconds > 0 else { return [] }
         // Clamp `from` to the grid's origin so moving windows produce
         // stable keys: Lane A dispatched at playhead=7s and at playhead=8s
         // should resolve to the same 0..30 window, not 7..37 and 8..38.

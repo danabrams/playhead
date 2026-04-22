@@ -135,6 +135,33 @@ struct LiveShadowWindowSourceTests {
         #expect(result.isEmpty)
     }
 
+    /// Regression: without the explicit `lookaheadSeconds > 0` short-circuit,
+    /// a non-zero `fromSeconds` with zero lookahead would fall through the
+    /// `end > from` guard (end = 60, floored from = 60) and still return an
+    /// empty result for this particular pair — but swap `fromSeconds` to a
+    /// non-grid multiple (e.g. 61) and the guard silently admits a window.
+    /// Pinning both scenarios here so any future regression trips a test.
+    @Test("laneACandidates with zero lookahead at non-zero fromSeconds returns no windows")
+    func laneACandidatesZeroLookaheadNonZeroFrom() async throws {
+        let store = try await makeTestStore()
+        let source = LiveShadowWindowSource(store: store, strideSeconds: 30, widthSeconds: 30)
+        // On-grid `fromSeconds`: floored from=60, end=60 → old guard would
+        // already reject. Included as a control case.
+        let onGrid = try await source.laneACandidates(
+            assetId: "x", fromSeconds: 60, lookaheadSeconds: 0,
+            alreadyCaptured: []
+        )
+        #expect(onGrid.isEmpty)
+        // Off-grid `fromSeconds`: floored from=60, end=61 → old guard would
+        // admit a 60..61 window. The new `lookaheadSeconds > 0` short-circuit
+        // keeps the backlog empty.
+        let offGrid = try await source.laneACandidates(
+            assetId: "x", fromSeconds: 61, lookaheadSeconds: 0,
+            alreadyCaptured: []
+        )
+        #expect(offGrid.isEmpty)
+    }
+
     // MARK: - laneBCandidates
 
     @Test("laneBCandidates: empty when asset has no transcript rows")
