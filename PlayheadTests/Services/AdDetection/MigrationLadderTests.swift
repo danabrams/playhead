@@ -412,13 +412,44 @@ struct MigrationLadderTests {
     /// the migration ladder notices when v12 → v13 stops creating the
     /// shadow table (e.g. if someone accidentally renames or removes
     /// `migrateShadowFMResponsesV13IfNeeded`).
+    ///
+    /// Pattern: we can't just seed `_meta.schema_version = 12` against a
+    /// bare DB, because the intermediate V*IfNeeded blocks short-circuit
+    /// and the tail `addColumnIfNeeded` calls in migrate() would fail
+    /// against non-existent tables. Instead, we do a real migrate first
+    /// (which builds v13), then regress the DB back to v12 by dropping
+    /// the v13 table + index and rewinding `_meta.schema_version` to
+    /// '12'. The next migrate() must re-create the v13 table/index.
     @Test("narl.2: v12-seeded DB picks up shadow_fm_responses at v13")
     func seededV12AddsShadowFMResponses() async throws {
         let dir = try freshTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        try seedSchemaVersion(12, in: dir)
+        // First: a real migrate to build the full v13 DB shape.
+        AnalysisStore.resetMigratedPathsForTesting()
+        let bootstrap = try AnalysisStore(directory: dir)
+        try await bootstrap.migrate()
+        #expect(try await bootstrap.schemaVersion() == 13)
+        #expect(try probeTableExists(in: dir, table: "shadow_fm_responses"))
 
+        // Rewind to v12: drop the shadow table + index, reset _meta.
+        let dbURL = dir.appendingPathComponent("analysis.sqlite")
+        var db: OpaquePointer?
+        #expect(sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+        let rewind = """
+            DROP INDEX IF EXISTS idx_shadow_fm_asset_variant;
+            DROP TABLE IF EXISTS shadow_fm_responses;
+            UPDATE _meta SET value = '12' WHERE key = 'schema_version';
+            """
+        #expect(sqlite3_exec(db, rewind, nil, nil, nil) == SQLITE_OK)
+        sqlite3_close_v2(db)
+
+        // Sanity: the v12 rewind actually removed the table.
+        #expect(!(try probeTableExists(in: dir, table: "shadow_fm_responses")))
+        #expect(!(try probeIndexExists(in: dir, indexName: "idx_shadow_fm_asset_variant")))
+
+        // Re-migrate via a fresh store. The v12 → v13 block must re-create
+        // the shadow table + its lookup index.
         AnalysisStore.resetMigratedPathsForTesting()
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
