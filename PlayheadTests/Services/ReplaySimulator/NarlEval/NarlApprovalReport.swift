@@ -12,6 +12,18 @@ enum NarlApprovalReportSchema {
     static let version: Int = 1
 }
 
+/// Thrown by ``NarlApprovalReport.requireSchema(expected:)`` when a decoded
+/// report's `schemaVersion` doesn't match the expected value. Declared here
+/// (not inside the report struct) so callers can catch it without name-
+/// spacing noise.
+struct NarlApprovalReportSchemaMismatch: Error, CustomStringConvertible {
+    let expected: Int
+    let found: Int
+    var description: String {
+        "NarlApprovalReport schemaVersion mismatch: expected v\(expected), found v\(found)"
+    }
+}
+
 // MARK: - Report
 
 /// The JSON artifact. Carries the policy parameters used so a future reader
@@ -26,6 +38,24 @@ struct NarlApprovalReport: Sendable, Codable {
     /// Flat counts for quick at-a-glance scanning in dashboards.
     let summary: NarlApprovalSummary
     let notes: [String]
+
+    /// Forwards-compat gate for consumers. Call this after decoding a
+    /// `recommendations.json` artifact to assert the on-disk shape matches
+    /// the caller's expected schema version. Throws
+    /// ``NarlApprovalReportSchemaMismatch`` on mismatch.
+    ///
+    /// The decoder itself is permissive (Codable doesn't validate
+    /// business rules), so this helper is the narrow gate a reader calls
+    /// to refuse a mismatched report explicitly. Separating the gate
+    /// from the decode step lets tests exercise both "decode succeeds,
+    /// gate trips" and "decode + gate both pass" independently.
+    func requireSchema(expected: Int = NarlApprovalReportSchema.version) throws {
+        if schemaVersion != expected {
+            throw NarlApprovalReportSchemaMismatch(
+                expected: expected, found: schemaVersion
+            )
+        }
+    }
 }
 
 struct NarlApprovalSummary: Sendable, Codable, Equatable {
@@ -69,10 +99,18 @@ enum NarlApprovalRenderer {
         }
 
         out += "## Per-episode decisions\n\n"
-        out += "| Episode | Show | Decision | Reasoning |\n"
-        out += "|---|---|---|---|\n"
+        // Numeric columns surface the metric values that drove each
+        // recommendation so a reader doesn't have to parse the reasoning
+        // string. Reasoning stays for narrative context (failure mode,
+        // exclusion cause, etc.). Nil metrics render as "—" so missing-data
+        // rows are visually distinct from zero-valued rows.
+        out += "| Episode | Show | Decision | defRecall | allRecall | defPrecision | allPrecision | Reasoning |\n"
+        out += "|---|---|---|---|---|---|---|---|\n"
         for r in report.recommendations {
-            out += "| \(r.episodeId) | \(r.show) | \(r.decision.rawValue) | \(escapeTableCell(r.reasoning)) |\n"
+            out += "| \(r.episodeId) | \(r.show) | \(r.decision.rawValue) | "
+                + "\(fmtOrDash(r.defaultRecall)) | \(fmtOrDash(r.allEnabledRecall)) | "
+                + "\(fmtOrDash(r.defaultPrecision)) | \(fmtOrDash(r.allEnabledPrecision)) | "
+                + "\(escapeTableCell(r.reasoning)) |\n"
         }
         out += "\n"
         return out
@@ -83,10 +121,24 @@ enum NarlApprovalRenderer {
         return String(format: "%.3f", v)
     }
 
+    /// Format an optional metric as a 3-decimal fraction, or em-dash when
+    /// absent. Used by the per-episode numeric columns so missing-data rows
+    /// are visually distinct from zero-valued rows.
+    private static func fmtOrDash(_ v: Double?) -> String {
+        guard let v else { return "—" }
+        return fmt(v)
+    }
+
     private static func escapeTableCell(_ s: String) -> String {
         // Pipes would break the table layout. Replace with a unicode variant
-        // that renders identically in most fonts.
-        s.replacingOccurrences(of: "|", with: "\u{FF5C}")
+        // that renders identically in most fonts. Newlines (CR/LF) also
+        // break tables by wrapping a cell onto the next row; render them as
+        // HTML `<br/>` which most markdown flavors respect inside tables.
+        var out = s.replacingOccurrences(of: "|", with: "\u{FF5C}")
+        out = out.replacingOccurrences(of: "\r\n", with: "<br/>")
+        out = out.replacingOccurrences(of: "\n", with: "<br/>")
+        out = out.replacingOccurrences(of: "\r", with: "<br/>")
+        return out
     }
 
     /// Fresh ISO8601 formatter per call — ISO8601DateFormatter is not Sendable.

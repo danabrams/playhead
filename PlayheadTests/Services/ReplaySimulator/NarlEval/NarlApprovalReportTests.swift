@@ -43,6 +43,77 @@ struct NarlApprovalReportWriterTests {
         #expect(md.contains("| e-insuf |"))
     }
 
+    @Test("Markdown per-episode table includes numeric metric columns")
+    func markdownNumericColumns() throws {
+        let report = makeReport()
+        let md = NarlApprovalRenderer.renderMarkdown(report)
+        // Header row carries the new numeric columns.
+        #expect(md.contains("| defRecall | allRecall | defPrecision | allPrecision |"))
+        // Populated rows render values at 3-decimal precision.
+        #expect(md.contains("0.700"))
+        #expect(md.contains("0.720"))
+        #expect(md.contains("0.800"))
+        #expect(md.contains("0.790"))
+        // Missing-data row renders an em-dash rather than "0.000", so zero
+        // values and missing values are visually distinct.
+        #expect(md.contains("| — | — | — | — |"))
+    }
+
+    @Test("Markdown escapes newlines in reasoning so tables don't break")
+    func markdownEscapesNewlines() throws {
+        let newlineRec = NarlRecommendation(
+            episodeId: "e-nl",
+            podcastId: "p",
+            show: "S",
+            decision: .holdOff,
+            reasoning: "line one\nline two\r\nline three\rline four",
+            defaultRecall: 0, allEnabledRecall: 0,
+            defaultPrecision: 0, allEnabledPrecision: 0,
+            hasShadowCoverage: true,
+            thresholdTau: 0.5,
+            recallCheckPassed: false,
+            precisionCheckPassed: true
+        )
+        let report = NarlApprovalReport(
+            schemaVersion: NarlApprovalReportSchema.version,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            sourceRunId: "r",
+            policy: .default,
+            recommendations: [newlineRec],
+            summary: NarlApprovalSummary.compute(from: [newlineRec]),
+            notes: []
+        )
+        let md = NarlApprovalRenderer.renderMarkdown(report)
+        // Raw newlines must not appear inside the rendered reasoning cell;
+        // all three forms (LF, CRLF, CR) collapse to `<br/>`.
+        #expect(md.contains("line one<br/>line two<br/>line three<br/>line four"))
+        // Sanity-check: there are no rogue newlines breaking the "| e-nl |"
+        // cell across multiple rows.
+        let lines = md.split(separator: "\n", omittingEmptySubsequences: false)
+        let nlRows = lines.filter { $0.contains("| e-nl |") }
+        #expect(nlRows.count == 1, "reasoning newlines must not spill across table rows")
+    }
+
+    @Test("requireSchema throws on mismatch and passes on match")
+    func requireSchemaMismatch() throws {
+        let matching = makeReport()
+        // Default expected value == current schema version → no throw.
+        try matching.requireSchema()
+        // Hand-build a mismatched report with an older schemaVersion.
+        let older = NarlApprovalReport(
+            schemaVersion: NarlApprovalReportSchema.version + 1,
+            generatedAt: matching.generatedAt,
+            sourceRunId: matching.sourceRunId,
+            policy: matching.policy,
+            recommendations: matching.recommendations,
+            summary: matching.summary,
+            notes: matching.notes
+        )
+        #expect(throws: NarlApprovalReportSchemaMismatch.self) {
+            try older.requireSchema()
+        }
+    }
+
     @Test("Markdown escapes pipes in reasoning so tables don't break")
     func markdownEscapesPipes() throws {
         let pipeRec = NarlRecommendation(
