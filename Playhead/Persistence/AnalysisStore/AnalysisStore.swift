@@ -7656,4 +7656,70 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
         return Int(sqlite3_changes(db))
     }
+
+    /// List the asset ids that have at least one transcript chunk and
+    /// fewer `shadow_fm_responses` rows than the coarse grid would
+    /// produce under `(strideSeconds, widthSeconds)`. Used by
+    /// ``LiveShadowWindowSource.assetsWithIncompleteCoverage()`` to walk
+    /// Lane B's backlog earliest-first.
+    ///
+    /// The expected-window formula mirrors ``LiveShadowWindowSource.gridWindows``:
+    ///   - first window at `cursor = 0`
+    ///   - each iteration advances `cursor += strideSeconds` and emits one
+    ///     window while `cursor < duration`
+    ///   - so `expectedWindows = ceil(duration / strideSeconds)` when
+    ///     `duration > 0`, else `0`.
+    ///
+    /// `duration` for an asset is the MAX of `endTime` across its
+    /// transcript chunks. Assets with no transcript rows are excluded
+    /// (duration=0 → expectedWindows=0 → no incompleteness).
+    ///
+    /// Ordering: ascending by `analysis_assets.createdAt`, then `id` for
+    /// stability.
+    func assetsWithIncompleteShadowCoverage(
+        strideSeconds: TimeInterval,
+        widthSeconds: TimeInterval,
+        configVariant: String
+    ) throws -> [String] {
+        precondition(strideSeconds > 0, "stride must be positive")
+        precondition(widthSeconds > 0, "width must be positive")
+        // Join assets → max(transcript_chunks.endTime) → count of
+        // shadow_fm_responses for the given configVariant. Filter down
+        // to the rows where shadowCount < expected.
+        //
+        // We use CAST to INTEGER via CEIL() emulation: SQLite doesn't
+        // have CEIL, so we compute `((duration + stride - epsilon) /
+        // stride)` and truncate. The epsilon guards against a duration
+        // exactly divisible by stride producing an over-count.
+        let sql = """
+            SELECT a.id
+            FROM analysis_assets a
+            LEFT JOIN (
+                SELECT analysisAssetId, MAX(endTime) AS duration
+                FROM transcript_chunks
+                GROUP BY analysisAssetId
+            ) t ON t.analysisAssetId = a.id
+            LEFT JOIN (
+                SELECT assetId, COUNT(*) AS shadowCount
+                FROM shadow_fm_responses
+                WHERE configVariant = ?
+                GROUP BY assetId
+            ) s ON s.assetId = a.id
+            WHERE t.duration IS NOT NULL
+              AND t.duration > 0
+              AND COALESCE(s.shadowCount, 0) <
+                  CAST((t.duration + ? - 0.000001) / ? AS INTEGER)
+            ORDER BY a.createdAt ASC, a.id ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, configVariant)
+        sqlite3_bind_double(stmt, 2, strideSeconds)
+        sqlite3_bind_double(stmt, 3, strideSeconds)
+        var results: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(text(stmt, 0))
+        }
+        return results
+    }
 }
