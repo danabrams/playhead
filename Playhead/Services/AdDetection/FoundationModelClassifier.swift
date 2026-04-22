@@ -4993,3 +4993,26 @@ private extension FoundationModelClassifier {
     }
 
 }
+
+// MARK: - Runtime factory (narl.2)
+
+extension FoundationModelClassifier {
+    /// Narl.2 shadow-capture: expose a live `Runtime` factory for the
+    /// `LiveShadowFMDispatcher`, which uses a fresh session per window and
+    /// does NOT want to share state with the production classifier
+    /// instance. The returned value is a brand-new `Runtime` struct; calling
+    /// `makeSession()` on it creates an isolated live FM session suitable
+    /// for off-gate shadow calls.
+    ///
+    /// Internal (not public) to keep the surface small; the dispatcher is
+    /// the only intended caller. The underlying builder is the same
+    /// `liveRuntime(logger:config:)` the production classifier uses, so
+    /// behavior is identical to the production path modulo concurrency
+    /// (shadow runs serialize through the dispatcher's actor isolation).
+    static func makeLiveRuntimeForShadow(
+        logger: Logger = Logger(subsystem: "com.playhead", category: "ShadowFMDispatcher.Runtime"),
+        config: Config = .default
+    ) -> Runtime {
+        liveRuntime(logger: logger, config: config)
+    }
+}
