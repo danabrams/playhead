@@ -599,3 +599,104 @@ struct CoverageGuardTests {
         }
     }
 }
+
+// MARK: - Resume-from-backfill restart decision
+
+/// Regression: `AnalysisCoordinator.runFromBackfill` used to call
+/// `finalizeBackfill` on the resume-from-crash path as soon as any
+/// transcript chunks existed for the asset. A prior session that
+/// transcribed only some shards (e.g. half of a 2190s Conan episode)
+/// left partial chunks in the store; resuming then stamped `.failed` on
+/// the finalize coverage guard while the transcript backlog was still
+/// filling in, stranding user-tagged ad windows.
+///
+/// The resume path now consults a pure static helper that reuses the
+/// same 0.95 coverage floor: if coverage is short (or duration unknown
+/// with empty chunks), the path signals a full restart; otherwise it
+/// proceeds to finalize.
+@Suite("AnalysisCoordinator – Resume Backfill Decision")
+struct ResumeBackfillDecisionTests {
+
+    private func chunk(startTime: Double, endTime: Double) -> TranscriptChunk {
+        TranscriptChunk(
+            id: UUID().uuidString,
+            analysisAssetId: "asset-resume",
+            segmentFingerprint: "fp-\(startTime)-\(endTime)",
+            chunkIndex: 0,
+            startTime: startTime,
+            endTime: endTime,
+            text: "x",
+            normalizedText: "x",
+            pass: TranscriptPassType.fast.rawValue,
+            modelVersion: "speech-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil,
+            weakAnchorMetadata: nil
+        )
+    }
+
+    @Test("partial coverage on resume requests a restart")
+    func partialCoverageRequestsRestart() {
+        // 1170s of transcript against a 2190s episode — ratio 0.534,
+        // the exact shape of the reported production failure.
+        let chunks = [chunk(startTime: 0, endTime: 1170.0)]
+        let decision = AnalysisCoordinator.resumeBackfillDecision(
+            chunks: chunks,
+            episodeDuration: 2190.9
+        )
+        #expect(decision == .restart)
+    }
+
+    @Test("empty chunks always request a restart")
+    func emptyChunksRequestsRestart() {
+        let decision = AnalysisCoordinator.resumeBackfillDecision(
+            chunks: [],
+            episodeDuration: 2190.9
+        )
+        #expect(decision == .restart)
+    }
+
+    @Test("empty chunks with unknown duration still request a restart")
+    func emptyChunksUnknownDurationRequestsRestart() {
+        // Regression guard for the original `chunks.isEmpty` throw: when
+        // we can't measure coverage we still must not finalize on an
+        // empty transcript.
+        let decision = AnalysisCoordinator.resumeBackfillDecision(
+            chunks: [],
+            episodeDuration: 0
+        )
+        #expect(decision == .restart)
+    }
+
+    @Test("coverage at the 95% threshold permits finalize on resume")
+    func atThresholdAllowsFinalize() {
+        let chunks = [chunk(startTime: 0, endTime: 2080.5)]  // 2080.5/2190 == 0.95
+        let decision = AnalysisCoordinator.resumeBackfillDecision(
+            chunks: chunks,
+            episodeDuration: 2190.0
+        )
+        #expect(decision == .finalize)
+    }
+
+    @Test("full coverage permits finalize on resume")
+    func fullCoverageAllowsFinalize() {
+        let chunks = [chunk(startTime: 0, endTime: 2190.85)]
+        let decision = AnalysisCoordinator.resumeBackfillDecision(
+            chunks: chunks,
+            episodeDuration: 2190.9
+        )
+        #expect(decision == .finalize)
+    }
+
+    @Test("non-empty chunks with unknown duration allow finalize")
+    func unknownDurationWithChunksAllowsFinalize() {
+        // If we can't compute a denominator, fall back to the original
+        // "chunks exist → finalize" behaviour rather than loop forever.
+        let chunks = [chunk(startTime: 0, endTime: 100)]
+        let decision = AnalysisCoordinator.resumeBackfillDecision(
+            chunks: chunks,
+            episodeDuration: 0
+        )
+        #expect(decision == .finalize)
+    }
+}

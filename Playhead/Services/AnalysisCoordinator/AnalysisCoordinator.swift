@@ -1128,12 +1128,18 @@ actor AnalysisCoordinator {
         // queued, which will re-decode audio and restart fully.
         if transcriptEventTask == nil {
             let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
-            if chunks.isEmpty {
-                logger.info("Backfill resumed with 0 chunks — requesting full restart")
+            let episodeDuration = currentEpisodeDuration()
+            switch Self.resumeBackfillDecision(chunks: chunks, episodeDuration: episodeDuration) {
+            case .restart:
+                let coverageEnd = chunks.map(\.endTime).max() ?? 0
+                logger.info(
+                    "Backfill resumed with partial coverage \(String(format: "%.1f", coverageEnd))/\(String(format: "%.1f", episodeDuration))s — requesting full restart"
+                )
                 throw AnalysisCoordinatorError.noAudioAvailable(episodeId: activeEpisodeId ?? "unknown")
+            case .finalize:
+                try await finalizeBackfill(sessionId: sessionId, assetId: assetId)
+                return
             }
-            try await finalizeBackfill(sessionId: sessionId, assetId: assetId)
-            return
         }
 
         logger.info("Backfill waiting for transcript completion on asset \(assetId)")
@@ -1716,5 +1722,45 @@ actor AnalysisCoordinator {
         return shards.reduce(0) { partial, shard in
             max(partial, shard.startTime + shard.duration)
         }
+    }
+
+    /// Decision returned by ``resumeBackfillDecision(chunks:episodeDuration:)``.
+    enum ResumeBackfillDecision: Equatable {
+        /// Persisted chunks cover enough of the episode — finalize normally.
+        case finalize
+        /// No chunks, or coverage is short of the finalize guard threshold.
+        /// Callers should throw so the pipeline re-decodes from scratch.
+        case restart
+    }
+
+    /// Pure helper for the resume-from-crash branch of `runFromBackfill`.
+    /// Reuses the same ``finalizeBackfillMinCoverageRatio`` floor the
+    /// finalize coverage guard uses, so an asset that would later be
+    /// blocked by the finalize guard gets caught on resume and rebuilt
+    /// from scratch instead of being stamped `.failed` while a parallel
+    /// transcript backlog is still draining.
+    ///
+    /// - Empty chunks always return `.restart` — there is nothing to
+    ///   finalize. This preserves the original `chunks.isEmpty` behaviour
+    ///   even when `episodeDuration` is unknown.
+    /// - Non-empty chunks with unknown `episodeDuration` (<= 0) return
+    ///   `.finalize` because we have no denominator to compare against;
+    ///   better to let the finalize path run than loop forever.
+    static func resumeBackfillDecision(
+        chunks: [TranscriptChunk],
+        episodeDuration: Double
+    ) -> ResumeBackfillDecision {
+        if chunks.isEmpty {
+            return .restart
+        }
+        guard episodeDuration > 0 else {
+            return .finalize
+        }
+        let coverageEnd = chunks.map(\.endTime).max() ?? 0
+        let ratio = coverageEnd / episodeDuration
+        if ratio + 1e-9 < finalizeBackfillMinCoverageRatio {
+            return .restart
+        }
+        return .finalize
     }
 }
