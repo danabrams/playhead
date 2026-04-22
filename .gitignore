@@ -47,3 +47,12 @@ Package.resolved
 # Claude Code worktrees
 .claude/worktrees/
 .worktrees/
+
+# Dev-only analysis exports from the app
+*.xcappdata/
+
+# Auto-generated session summaries (ntm)
+.ntm/summaries/
+
+# Wizard round archive — cached locally, never committed
+.wizard-archive/
