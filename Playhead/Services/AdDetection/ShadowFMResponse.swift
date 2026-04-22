@@ -61,15 +61,56 @@ struct ShadowFMResponse: Sendable, Equatable, Hashable {
     /// (a) the model version can change across app launches, and
     /// (b) keeping it per-row lets the harness accept older rows by their
     /// own provenance rather than assuming a store-wide invariant.
+    ///
+    /// INVALIDATION CONTRACT:
+    /// On app launch (or at any explicit sweep point), call
+    /// `AnalysisStore.deleteShadowFMResponses(fmModelVersionOtherThan:)`
+    /// with the current FM model version string. That helper removes
+    /// every row whose `fmModelVersion` differs from the current value
+    /// and every row with a NULL `fmModelVersion` (legacy sentinel). The
+    /// coordinator's lanes then naturally re-capture the missing windows
+    /// on subsequent ticks, producing a clean per-model corpus without
+    /// mixing eras.
     let fmModelVersion: String?
 
     // MARK: - Validation
 
     /// Reject degenerate windows before binding. The persistence layer also
-    /// rejects `windowEnd < windowStart`, but front-loading the guard here
-    /// keeps the error close to the caller.
+    /// rejects `windowEnd < windowStart`, NaN/infinite bounds, and negative
+    /// starts, but front-loading the guard here keeps the error close to the
+    /// caller.
     var isWellFormed: Bool {
-        windowEnd >= windowStart
+        windowStart.isFinite &&
+            windowEnd.isFinite &&
+            windowStart >= 0 &&
+            windowEnd >= windowStart
+    }
+
+    // MARK: - Canonicalization
+    //
+    // AC-6 review finding: the composite PK uses REAL columns for
+    // `windowStart` and `windowEnd`. IEEE-754 equality is technically
+    // unsafe for an upsert key — two arithmetic paths that produce the
+    // "same" fractional seconds can differ in the last bit and land as
+    // distinct rows. We defend against this by canonicalizing every bound
+    // to integer-millisecond precision before binding. Integer values
+    // below 2^53 round-trip exactly through Double, so REAL equality is
+    // safe at ms resolution, and we don't need a schema migration to
+    // INTEGER columns.
+    //
+    // Callers (the coordinator's lanes) MUST either pass already-canonical
+    // values or let the store canonicalize via ``canonicalize(seconds:)``.
+    // The store does this defensively at bind time; the coordinator and
+    // its lookup path (``AnalysisStore/capturedShadowWindows``) apply the
+    // same rounding so the upsert/lookup keys agree.
+
+    /// Round a seconds value to the nearest integer millisecond. Used as
+    /// the PK canonicalization function for shadow windows. Returns the
+    /// same value for NaN/Infinity so the caller's well-formedness check
+    /// still fires.
+    static func canonicalize(seconds: TimeInterval) -> TimeInterval {
+        guard seconds.isFinite else { return seconds }
+        return (seconds * 1000.0).rounded() / 1000.0
     }
 }
 
@@ -81,6 +122,18 @@ struct ShadowFMResponse: Sendable, Equatable, Hashable {
 struct ShadowWindowKey: Sendable, Hashable {
     let start: TimeInterval
     let end: TimeInterval
+
+    /// Construct a key with both bounds canonicalized to integer milliseconds.
+    /// This is the entry point callers (both lanes) should use whenever they
+    /// compute a key from a ``ShadowWindow`` boundary — it guarantees the
+    /// key they consult matches what `AnalysisStore.capturedShadowWindows`
+    /// returns and what `upsertShadowFMResponse` wrote on the way in.
+    static func canonical(start: TimeInterval, end: TimeInterval) -> ShadowWindowKey {
+        ShadowWindowKey(
+            start: ShadowFMResponse.canonicalize(seconds: start),
+            end: ShadowFMResponse.canonicalize(seconds: end)
+        )
+    }
 }
 
 // MARK: - JSONL schema

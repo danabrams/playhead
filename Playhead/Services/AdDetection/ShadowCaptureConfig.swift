@@ -5,8 +5,11 @@
 // playback; Lane B: background thorough pass when thermal .nominal + charging).
 // Both lanes are globally kill-switched by ``dualFMCaptureEnabled``.
 //
-// Placed alongside ``MetadataActivationConfig`` per the design doc, but kept in
-// its own file so the two subsystems can evolve independently.
+// This config lives alongside other AdDetection tunables in
+// `Playhead/Services/AdDetection/`. It is intentionally NOT merged into
+// ``MetadataActivationConfig`` so the shadow lanes can be disabled
+// independently of the production activation flags — see the docstring on
+// ``ShadowCaptureConfig/dualFMCaptureEnabled`` for the separation rationale.
 
 import Foundation
 

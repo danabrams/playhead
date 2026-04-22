@@ -7439,9 +7439,27 @@ actor AnalysisStore {
     func upsertShadowFMResponse(_ row: ShadowFMResponse) throws {
         guard row.isWellFormed else {
             throw AnalysisStoreError.insertFailed(
-                "shadow_fm_responses: windowEnd (\(row.windowEnd)) < windowStart (\(row.windowStart))"
+                "shadow_fm_responses: non-well-formed row windowStart=\(row.windowStart) windowEnd=\(row.windowEnd)"
             )
         }
+        // Empty fmResponse is meaningless — no harness consumer can
+        // interpret a zero-length opaque BLOB, and a "successful capture"
+        // with no payload would silently pollute the per-asset coverage
+        // set. Reject explicitly rather than let it through as a
+        // zero-length blob.
+        guard !row.fmResponse.isEmpty else {
+            throw AnalysisStoreError.insertFailed(
+                "shadow_fm_responses: fmResponse payload is empty (asset=\(row.assetId))"
+            )
+        }
+        // AC-6 PK canonicalization: round every REAL bound to the nearest
+        // integer millisecond before binding. Integer-valued doubles below
+        // 2^53 round-trip through Double exactly, so REAL PK equality is
+        // stable at this resolution. This intentionally drops sub-ms
+        // precision — the planner produces second-aligned windows so the
+        // loss is zero in practice.
+        let canonicalStart = ShadowFMResponse.canonicalize(seconds: row.windowStart)
+        let canonicalEnd = ShadowFMResponse.canonicalize(seconds: row.windowEnd)
         let sql = """
             INSERT OR REPLACE INTO shadow_fm_responses
             (assetId, windowStart, windowEnd, configVariant,
@@ -7451,8 +7469,8 @@ actor AnalysisStore {
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, row.assetId)
-        bind(stmt, 2, row.windowStart)
-        bind(stmt, 3, row.windowEnd)
+        bind(stmt, 2, canonicalStart)
+        bind(stmt, 3, canonicalEnd)
         bind(stmt, 4, row.configVariant.rawValue)
         // Opaque BLOB payload — use SQLITE_TRANSIENT so sqlite copies the
         // bytes immediately and our `Data` can deallocate on return.
@@ -7592,7 +7610,13 @@ actor AnalysisStore {
         bind(stmt, 2, configVariant.rawValue)
         var out: Set<ShadowWindowKey> = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            out.insert(ShadowWindowKey(
+            // Canonicalize on read so callers who canonicalize their own
+            // prospective keys via `ShadowWindowKey.canonical(...)` get a
+            // byte-for-byte-matching set membership test. Defensive: rows
+            // written through `upsertShadowFMResponse` are already
+            // canonical, but pre-canonicalization rows that might exist
+            // in older DBs still normalize on read.
+            out.insert(ShadowWindowKey.canonical(
                 start: sqlite3_column_double(stmt, 0),
                 end:   sqlite3_column_double(stmt, 1)
             ))
@@ -7608,5 +7632,28 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
         return Int(sqlite3_column_int(stmt, 0))
+    }
+
+    /// Delete every shadow FM response whose `fmModelVersion` is NOT the
+    /// supplied current version. Used on boot to prune rows captured under
+    /// a stale FM model after the app ships a newer one — the harness
+    /// refuses to replay against a stale capture, so keeping the rows
+    /// around wastes disk without any downstream benefit.
+    ///
+    /// Rows with a `NULL` `fmModelVersion` (legacy pre-versioning rows, if
+    /// any ever appear) are considered stale by construction and deleted
+    /// on this sweep. Returns the number of rows removed so callers can
+    /// log the sweep's effect.
+    @discardableResult
+    func deleteShadowFMResponses(fmModelVersionOtherThan current: String) throws -> Int {
+        let sql = """
+            DELETE FROM shadow_fm_responses
+            WHERE fmModelVersion IS NULL OR fmModelVersion != ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, current)
+        try step(stmt, expecting: SQLITE_DONE)
+        return Int(sqlite3_changes(db))
     }
 }

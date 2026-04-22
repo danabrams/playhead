@@ -124,7 +124,7 @@ struct ShadowCaptureStorageTests {
         let bad = ShadowFMResponse(
             assetId: "asset-C", windowStart: 50, windowEnd: 10,
             configVariant: .allEnabledShadow,
-            fmResponse: Data(),
+            fmResponse: Data([0xAA]),  // non-empty so only the window gate fires
             capturedAt: 1_700_000_000,
             capturedBy: .laneA,
             fmModelVersion: nil
@@ -134,6 +134,43 @@ struct ShadowCaptureStorageTests {
         }
         let rows = try await store.fetchShadowFMResponses(assetId: "asset-C")
         #expect(rows.isEmpty)
+    }
+
+    @Test("Empty fmResponse payload is rejected at bind boundary")
+    func emptyPayloadRejected() async throws {
+        let store = try await makeTestStore()
+        let bad = ShadowFMResponse(
+            assetId: "asset-empty", windowStart: 0, windowEnd: 10,
+            configVariant: .allEnabledShadow,
+            fmResponse: Data(),  // empty — meaningless for the harness
+            capturedAt: 1_700_000_000,
+            capturedBy: .laneA,
+            fmModelVersion: "fm-1.0"
+        )
+        await #expect(throws: Error.self) {
+            try await store.upsertShadowFMResponse(bad)
+        }
+        // And no stray row was partially committed.
+        #expect(try await store.shadowFMResponseCount() == 0)
+    }
+
+    @Test("Non-finite window bounds rejected at bind boundary")
+    func nonFiniteBoundsRejected() async throws {
+        let store = try await makeTestStore()
+        let bad = ShadowFMResponse(
+            assetId: "asset-nan",
+            windowStart: .nan,
+            windowEnd: 10,
+            configVariant: .allEnabledShadow,
+            fmResponse: Data([0xAA]),
+            capturedAt: 1_700_000_000,
+            capturedBy: .laneA,
+            fmModelVersion: "fm-1.0"
+        )
+        await #expect(throws: Error.self) {
+            try await store.upsertShadowFMResponse(bad)
+        }
+        #expect(try await store.shadowFMResponseCount() == 0)
     }
 
     // MARK: - 5. capturedShadowWindows returns exact (start,end) set
@@ -207,6 +244,81 @@ struct ShadowCaptureStorageTests {
         #expect(try await store.shadowFMResponseCount() == 0)
         try await store.upsertShadowFMResponse(makeRow(asset: "a", start: 0, end: 1))
         #expect(try await store.shadowFMResponseCount() == 1)
+    }
+
+    // MARK: - 9. PK canonicalization
+
+    /// Two writes whose windowStart/windowEnd values agree to the nearest
+    /// millisecond must resolve to the *same* PK row (later write wins),
+    /// even if their last-bit REAL representations differ. This locks in
+    /// the AC-6 canonicalization: without it, two arithmetic paths that
+    /// produce "the same" fractional second could land as distinct rows.
+    @Test("Upsert canonicalizes REAL bounds to nearest ms for PK stability")
+    func upsertCanonicalizesMillisecondPK() async throws {
+        let store = try await makeTestStore()
+        let asset = "asset-canon"
+        // 12.5001 and 12.5004 both round to 12500 ms → same PK row.
+        let first = ShadowFMResponse(
+            assetId: asset, windowStart: 12.5001, windowEnd: 22.4999,
+            configVariant: .allEnabledShadow,
+            fmResponse: Data([0x01]),
+            capturedAt: 1_700_000_000,
+            capturedBy: .laneA,
+            fmModelVersion: "fm-1.0"
+        )
+        let second = ShadowFMResponse(
+            assetId: asset, windowStart: 12.5004, windowEnd: 22.5003,
+            configVariant: .allEnabledShadow,
+            fmResponse: Data([0x02, 0x03]),
+            capturedAt: 1_700_000_050,
+            capturedBy: .laneB,
+            fmModelVersion: "fm-1.0"
+        )
+        try await store.upsertShadowFMResponse(first)
+        try await store.upsertShadowFMResponse(second)
+        // Both writes landed on the same canonical PK — only one row.
+        #expect(try await store.shadowFMResponseCount() == 1)
+        let rows = try await store.fetchShadowFMResponses(assetId: asset)
+        // Later write wins.
+        #expect(rows.first?.fmResponse == Data([0x02, 0x03]))
+        // And the on-disk bounds are canonical (0.5 ms rounded to 0).
+        #expect(rows.first?.windowStart == 12.500)
+        #expect(rows.first?.windowEnd == 22.500)
+    }
+
+    // MARK: - 10. Invalidation: delete by stale fmModelVersion
+
+    @Test("deleteShadowFMResponses(fmModelVersionOtherThan:) removes only stale rows")
+    func deleteStaleByFMModelVersion() async throws {
+        let store = try await makeTestStore()
+        let current = "fm-2.0"
+        try await store.upsertShadowFMResponse(ShadowFMResponse(
+            assetId: "a", windowStart: 0, windowEnd: 10,
+            configVariant: .allEnabledShadow, fmResponse: Data([0x01]),
+            capturedAt: 1, capturedBy: .laneA, fmModelVersion: current
+        ))
+        try await store.upsertShadowFMResponse(ShadowFMResponse(
+            assetId: "a", windowStart: 10, windowEnd: 20,
+            configVariant: .allEnabledShadow, fmResponse: Data([0x02]),
+            capturedAt: 2, capturedBy: .laneA, fmModelVersion: "fm-1.0"
+        ))
+        try await store.upsertShadowFMResponse(ShadowFMResponse(
+            assetId: "b", windowStart: 0, windowEnd: 10,
+            configVariant: .allEnabledShadow, fmResponse: Data([0x03]),
+            capturedAt: 3, capturedBy: .laneB, fmModelVersion: nil  // legacy
+        ))
+        #expect(try await store.shadowFMResponseCount() == 3)
+
+        let removed = try await store.deleteShadowFMResponses(
+            fmModelVersionOtherThan: current
+        )
+
+        #expect(removed == 2)
+        // Survivor is the current-version row.
+        #expect(try await store.shadowFMResponseCount() == 1)
+        let survivors = try await store.fetchShadowFMResponses(assetId: "a")
+        #expect(survivors.count == 1)
+        #expect(survivors.first?.fmModelVersion == current)
     }
 
     // MARK: - Helpers

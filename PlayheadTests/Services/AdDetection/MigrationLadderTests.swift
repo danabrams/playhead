@@ -404,6 +404,43 @@ struct MigrationLadderTests {
         #expect(flagged.first?.id == "sess-rename")
     }
 
+    // MARK: - narl.2 v12 → v13: shadow_fm_responses table lands
+
+    /// A v12-shaped DB (pre-narl.2) should pick up the new
+    /// `shadow_fm_responses` table + its lookup index when migrate() climbs
+    /// to v13. This pins the boundary so a future reviewer who touches
+    /// the migration ladder notices when v12 → v13 stops creating the
+    /// shadow table (e.g. if someone accidentally renames or removes
+    /// `migrateShadowFMResponsesV13IfNeeded`).
+    @Test("narl.2: v12-seeded DB picks up shadow_fm_responses at v13")
+    func seededV12AddsShadowFMResponses() async throws {
+        let dir = try freshTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try seedSchemaVersion(12, in: dir)
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+
+        #expect(try await store.schemaVersion() == 13)
+        #expect(try probeTableExists(in: dir, table: "shadow_fm_responses"))
+        #expect(try probeIndexExists(in: dir, indexName: "idx_shadow_fm_asset_variant"))
+        // Migrated store must accept a row via the live CRUD path.
+        let row = ShadowFMResponse(
+            assetId: "asset-v12-narl2",
+            windowStart: 0,
+            windowEnd: 10,
+            configVariant: .allEnabledShadow,
+            fmResponse: Data([0x01, 0x02]),
+            capturedAt: 1_700_000_000,
+            capturedBy: .laneB,
+            fmModelVersion: "fm-1.0"
+        )
+        try await store.upsertShadowFMResponse(row)
+        #expect(try await store.shadowFMResponseCount() == 1)
+    }
+
     // MARK: - Rev3-M5: phase column reads/writes/filters
 
     @Test("Rev3-M5: semantic_scan_results phase column round-trips and filters distinctly")
