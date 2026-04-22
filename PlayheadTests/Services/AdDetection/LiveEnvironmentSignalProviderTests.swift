@@ -13,13 +13,11 @@
 //
 // Why we don't thread a synthetic `CapabilitySnapshot` through the real
 // service: `CapabilitiesService` doesn't expose a DEBUG seam for injecting
-// snapshots, and the observer's thermal-state mapping logic (`.nominal`
-// OR `.fair` → true) is reached via a simple enum switch. Testing that
-// mapping via the stream would require either system-level thermal
-// simulation or a parallel fake CapabilitiesService — both out of scope
-// for this unit test. The provider's state-plumbing is what we cover
-// here; the switch itself is narrow enough that the production call site
-// in PlayheadRuntime is the effective integration test.
+// snapshots. The observer's thermal-state mapping logic is now covered
+// directly via the pure static `thermalIsNominal(_:)` helper (see the
+// "Q2=B thermal mapping" tests below) — no need to drive the live
+// stream just to exercise the enum switch. The provider's lock-mirror
+// plumbing is covered by the three existing tests.
 
 import Foundation
 import Testing
@@ -69,5 +67,33 @@ struct LiveEnvironmentSignalProviderTests {
         provider._testingSetSnapshot(thermalNominal: false, charging: true)
         #expect(provider.thermalStateIsNominal() == false)
         #expect(provider.deviceIsCharging() == true)
+    }
+
+    // MARK: - Q2=B thermal mapping
+
+    // The locked Q2=B decision is "`.nominal` or `.fair` → true;
+    // `.serious` or `.critical` → false". All four cases of
+    // `ThermalState` (defined in `CapabilitySnapshot.swift`) must map
+    // correctly. A regression here silently flips Lane B's gate
+    // threshold, so each case is exercised explicitly.
+
+    @Test(".nominal thermal state maps to true (Q2=B)")
+    func thermalMappingNominalIsTrue() {
+        #expect(LiveEnvironmentSignalProvider.thermalIsNominal(.nominal) == true)
+    }
+
+    @Test(".fair thermal state maps to true (Q2=B widens the threshold)")
+    func thermalMappingFairIsTrue() {
+        #expect(LiveEnvironmentSignalProvider.thermalIsNominal(.fair) == true)
+    }
+
+    @Test(".serious thermal state maps to false (Q2=B refuses)")
+    func thermalMappingSeriousIsFalse() {
+        #expect(LiveEnvironmentSignalProvider.thermalIsNominal(.serious) == false)
+    }
+
+    @Test(".critical thermal state maps to false (Q2=B refuses)")
+    func thermalMappingCriticalIsFalse() {
+        #expect(LiveEnvironmentSignalProvider.thermalIsNominal(.critical) == false)
     }
 }

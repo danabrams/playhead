@@ -55,18 +55,31 @@ final class LiveEnvironmentSignalProvider: ShadowEnvironmentSignalProvider,
         self.observerTask = Task { [box, capabilitiesService] in
             let stream = await capabilitiesService.capabilityUpdates()
             for await snapshot in stream {
-                let thermalNominal: Bool = {
-                    switch snapshot.thermalState {
-                    case .nominal, .fair: return true
-                    case .serious, .critical: return false
-                    }
-                }()
+                let thermalNominal = Self.thermalIsNominal(snapshot.thermalState)
                 box.withLock { snap in
                     snap.thermalNominal = thermalNominal
                     snap.charging = snapshot.isCharging
                 }
                 if Task.isCancelled { break }
             }
+        }
+    }
+
+    // MARK: - Thermal mapping (Q2=B)
+
+    /// Pure mapping from the capability snapshot's `ThermalState` to the
+    /// `thermalStateIsNominal()` boolean leg.
+    ///
+    /// `.nominal` and `.fair` are both treated as "nominal" per narl.2
+    /// Q2=B — Lane B should still fire on lightly-loaded devices, not
+    /// only genuinely cold ones. `.serious` and `.critical` are hard
+    /// refusals. Extracted as a static helper so this mapping — which
+    /// encodes the locked Q2=B decision — is unit-testable without
+    /// driving the full `capabilityUpdates()` stream.
+    static func thermalIsNominal(_ state: ThermalState) -> Bool {
+        switch state {
+        case .nominal, .fair: return true
+        case .serious, .critical: return false
         }
     }
 

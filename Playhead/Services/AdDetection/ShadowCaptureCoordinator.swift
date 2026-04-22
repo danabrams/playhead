@@ -66,9 +66,10 @@ struct ShadowActiveAsset: Sendable, Equatable {
 /// the coordinator was actually checking the other, and the test would
 /// pass silently.
 protocol ShadowEnvironmentSignalProvider: Sendable {
-    /// `true` iff `ProcessInfo.processInfo.thermalState == .nominal`.
-    /// `.fair` thermal is deliberately insufficient — Lane B's "thorough
-    /// pass" should run only under genuinely cold conditions.
+    /// `true` iff the device's thermal state is `.nominal` or `.fair`
+    /// (i.e. NOT `.serious` or `.critical`). Widened from the original
+    /// `.nominal`-only threshold per narl.2 Q2=B: Lane B should still
+    /// fire on lightly-loaded devices, not only on genuinely cold ones.
     func thermalStateIsNominal() -> Bool
 
     /// `true` iff the device battery is either `.charging` or `.full`.
