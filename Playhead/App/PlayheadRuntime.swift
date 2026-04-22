@@ -553,7 +553,7 @@ final class PlayheadRuntime {
         // — it's now constructed before AdDetectionService and passed via
         // init, so there's no race with the first backfill/hot-path run.
 
-        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator] in
+        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator] in
             // Migrate the analysis store before any component queries its tables.
             do {
                 try await analysisStore.migrate()
@@ -562,6 +562,17 @@ final class PlayheadRuntime {
                     .fault("Analysis store migration failed — pre-analysis pipeline disabled: \(error)")
                 return  // Don't start the pipeline if tables don't exist
             }
+
+            // Recover any sessions that the finalizeBackfill coverage guard
+            // stranded in `.failed` before the transcript had fully caught
+            // up. The sweep re-checks each candidate's current transcript
+            // coverage against the preserved denominator and flips the
+            // row back to `.backfill` when the ratio now clears the
+            // minimum, so the next pipeline run finalizes them cleanly.
+            // Errors inside the sweep are logged and swallowed — the
+            // pipeline start below must not be blocked by diagnostic
+            // recovery work.
+            _ = await analysisCoordinator.recoverCoverageGuardFailures()
 
             // bd-200: prune scan rows under stale cohort hashes (locale change,
             // app upgrade, prompt/schema/plan/normalization revs). Best-effort —

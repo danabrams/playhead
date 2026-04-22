@@ -1717,4 +1717,203 @@ actor AnalysisCoordinator {
             max(partial, shard.startTime + shard.duration)
         }
     }
+
+    // MARK: - Coverage-Guard Recovery Sweep
+
+    /// Prefix used by the coverage guard when it transitions a session to
+    /// `.failed`. The sweep below selects `.failed` sessions whose
+    /// `failureReason` starts with this string and re-evaluates them
+    /// against the latest transcript coverage.
+    static let coverageGuardFailureReasonPrefix = "transcript coverage "
+
+    /// Verdict returned by ``coverageGuardRecoveryVerdict(failureReason:coverageEnd:)``.
+    /// Extracted as a pure enum so unit tests can drive the decision without
+    /// touching the store.
+    enum CoverageGuardRecoveryVerdict: Equatable {
+        /// Recover the session: transcript coverage now meets the threshold.
+        case recover(coverageEnd: Double, episodeDuration: Double, ratio: Double)
+        /// Leave the session alone: coverage is still below threshold.
+        case skipBelowThreshold(coverageEnd: Double, episodeDuration: Double, ratio: Double)
+        /// Leave the session alone: the failure reason is not a coverage-guard
+        /// failure (different prefix, or the encoded duration was unparseable).
+        case skipUnrelated
+    }
+
+    /// Decide whether a session whose last-known `failureReason` came from
+    /// the coverage guard should be requeued, based on the current
+    /// transcript coverage.
+    ///
+    /// The episode duration comes out of the preserved failure-reason
+    /// string (e.g. `"transcript coverage 689.8/3600.0s (ratio 0.192 <
+    /// 0.950)"` → `3600.0`). We re-use that denominator rather than
+    /// re-deriving it from shards because the sweep runs outside of an
+    /// active pipeline where `activeShards` is unavailable.
+    ///
+    /// - Parameters:
+    ///   - failureReason: The persisted `analysis_sessions.failureReason`.
+    ///     Any string that does not start with
+    ///     ``coverageGuardFailureReasonPrefix`` returns `.skipUnrelated`.
+    ///   - coverageEnd: Highest `endTime` across the asset's transcript
+    ///     chunks at the moment of the sweep.
+    static func coverageGuardRecoveryVerdict(
+        failureReason: String?,
+        coverageEnd: Double
+    ) -> CoverageGuardRecoveryVerdict {
+        guard let failureReason,
+              failureReason.hasPrefix(coverageGuardFailureReasonPrefix) else {
+            return .skipUnrelated
+        }
+        guard let episodeDuration = parseCoverageGuardEpisodeDuration(from: failureReason),
+              episodeDuration > 0 else {
+            return .skipUnrelated
+        }
+        let ratio = coverageEnd / episodeDuration
+        if ratio + 1e-9 >= finalizeBackfillMinCoverageRatio {
+            return .recover(
+                coverageEnd: coverageEnd,
+                episodeDuration: episodeDuration,
+                ratio: ratio
+            )
+        }
+        return .skipBelowThreshold(
+            coverageEnd: coverageEnd,
+            episodeDuration: episodeDuration,
+            ratio: ratio
+        )
+    }
+
+    /// Parse the episode duration out of a coverage-guard failure reason.
+    /// Returns `nil` when the string is not in the expected shape — the
+    /// caller then leaves the session alone. Exposed internal so tests
+    /// can exercise the parser independently.
+    static func parseCoverageGuardEpisodeDuration(from failureReason: String) -> Double? {
+        // Expected layout: "transcript coverage <cov>/<duration>s (...)".
+        // Locate the `/` after the prefix, then the first `s` after that.
+        guard failureReason.hasPrefix(coverageGuardFailureReasonPrefix) else { return nil }
+        let body = failureReason.dropFirst(coverageGuardFailureReasonPrefix.count)
+        guard let slashIdx = body.firstIndex(of: "/") else { return nil }
+        let afterSlash = body[body.index(after: slashIdx)...]
+        guard let sIdx = afterSlash.firstIndex(of: "s") else { return nil }
+        return Double(afterSlash[..<sIdx])
+    }
+
+    /// Summary of a single recovery sweep. Returned so callers (and
+    /// tests) can log or assert the outcome without inspecting store
+    /// state directly.
+    struct CoverageGuardRecoverySummary: Sendable, Equatable {
+        /// Sessions that were flipped from `.failed` back to `.backfill`.
+        var recoveredSessionIds: [String] = []
+        /// Sessions inspected but left alone because coverage is still
+        /// short of the threshold. Useful for diagnostics.
+        var stillBelowThreshold: Int = 0
+        /// Sessions skipped because their failure reason could not be
+        /// parsed as a coverage-guard failure.
+        var skippedUnrelated: Int = 0
+
+        var recoveredCount: Int { recoveredSessionIds.count }
+    }
+
+    /// Scan the session table for rows stranded by the coverage guard and
+    /// flip any whose transcript has since caught up back to `.backfill`
+    /// so the next pipeline run can re-call ``finalizeBackfill``.
+    ///
+    /// The sweep intentionally bypasses the normal `transition(...)`
+    /// validator because the persisted state machine does not permit a
+    /// direct `.failed → .backfill` edge — `.failed` rows only flow back
+    /// through `.queued`, which forces a redundant re-decode / re-
+    /// transcription. Bypassing the validator here is safe because:
+    ///
+    ///   * The sweep only ever writes `.backfill` into rows it has
+    ///     itself selected as `.failed` with the coverage-guard prefix.
+    ///   * `runFromBackfill` handles the empty-chunks case by throwing,
+    ///     which promotes the session back to `.failed` through the
+    ///     normal error path — so a spurious recovery is self-healing.
+    ///   * Ad windows (including user-marked `boundaryState = "userMarked"`
+    ///     rows) live in a separate table and are never touched here.
+    ///
+    /// Returns a summary of what was touched. Errors from the store are
+    /// logged and swallowed per-session so one bad row cannot sink the
+    /// whole sweep.
+    @discardableResult
+    func recoverCoverageGuardFailures() async -> CoverageGuardRecoverySummary {
+        var summary = CoverageGuardRecoverySummary()
+
+        let candidates: [AnalysisSession]
+        do {
+            candidates = try await store.fetchFailedSessions(
+                withFailureReasonPrefix: Self.coverageGuardFailureReasonPrefix
+            )
+        } catch {
+            logger.warning(
+                "Coverage-guard sweep: failed to enumerate candidate sessions: \(String(describing: error), privacy: .public)"
+            )
+            return summary
+        }
+
+        guard !candidates.isEmpty else {
+            return summary
+        }
+
+        logger.info("Coverage-guard sweep: inspecting \(candidates.count) candidate session(s)")
+
+        for session in candidates {
+            let assetId = session.analysisAssetId
+            let chunks: [TranscriptChunk]
+            do {
+                chunks = try await store.fetchTranscriptChunks(assetId: assetId)
+            } catch {
+                logger.warning(
+                    "Coverage-guard sweep: chunk fetch failed for asset \(assetId, privacy: .public): \(String(describing: error), privacy: .public)"
+                )
+                continue
+            }
+
+            let coverageEnd = chunks.map(\.endTime).max() ?? 0
+            let verdict = Self.coverageGuardRecoveryVerdict(
+                failureReason: session.failureReason,
+                coverageEnd: coverageEnd
+            )
+
+            switch verdict {
+            case .recover(let cov, let dur, let ratio):
+                do {
+                    // Flip the session back to `.backfill` and clear the
+                    // stored failure reason so the next pipeline run
+                    // enters `runFromBackfill` and re-invokes
+                    // `finalizeBackfill`.
+                    try await store.updateSessionState(
+                        id: session.id,
+                        state: SessionState.backfill.rawValue,
+                        failureReason: nil
+                    )
+                    try await store.updateAssetState(
+                        id: assetId,
+                        state: SessionState.backfill.rawValue
+                    )
+                    summary.recoveredSessionIds.append(session.id)
+                    logger.info(
+                        "Coverage-guard sweep: recovered session \(session.id, privacy: .public) (asset \(assetId, privacy: .public), coverage \(String(format: "%.1f", cov))/\(String(format: "%.1f", dur))s, ratio \(String(format: "%.3f", ratio)))"
+                    )
+                } catch {
+                    logger.warning(
+                        "Coverage-guard sweep: failed to requeue session \(session.id, privacy: .public): \(String(describing: error), privacy: .public)"
+                    )
+                }
+
+            case .skipBelowThreshold:
+                summary.stillBelowThreshold += 1
+
+            case .skipUnrelated:
+                summary.skippedUnrelated += 1
+            }
+        }
+
+        if summary.recoveredCount > 0 {
+            logger.info(
+                "Coverage-guard sweep: recovered \(summary.recoveredCount) session(s); \(summary.stillBelowThreshold) still below threshold"
+            )
+        }
+
+        return summary
+    }
 }

@@ -2775,6 +2775,33 @@ actor AnalysisStore {
         return results
     }
 
+    /// Fetch every session currently in `.failed` whose `failureReason`
+    /// begins with the supplied prefix. Used by the coverage-guard recovery
+    /// sweep to discover sessions that were aborted because the transcript
+    /// had not yet caught up to the minimum coverage ratio. Order is stable
+    /// (by `updatedAt ASC`) so sweeps are deterministic in tests.
+    func fetchFailedSessions(withFailureReasonPrefix prefix: String) throws -> [AnalysisSession] {
+        let sql = """
+            SELECT id, analysisAssetId, state, startedAt, updatedAt, failureReason,
+                   needsShadowRetry, shadowRetryPodcastId
+            FROM analysis_sessions
+            WHERE state = ? AND failureReason LIKE ?
+            ORDER BY updatedAt ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, SessionState.failed.rawValue)
+        // SQLite LIKE is case-insensitive on ASCII by default; we escape no
+        // metacharacters because the supplied prefix is always a literal
+        // string from production code (no user input path).
+        bind(stmt, 2, "\(prefix)%")
+        var results: [AnalysisSession] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(readSession(stmt))
+        }
+        return results
+    }
+
     func updateFeatureCoverage(id: String, endTime: Double) throws {
         let sql = "UPDATE analysis_assets SET featureCoverageEndTime = ? WHERE id = ?"
         let stmt = try prepare(sql)
