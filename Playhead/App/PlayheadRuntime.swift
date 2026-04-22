@@ -107,6 +107,30 @@ final class PlayheadRuntime {
     let phase5ProjectorObserver: Phase5ProjectorObserver? = nil
     #endif
 
+    /// playhead-narl.2 shadow FM dual-run capture coordinator. `nil` in
+    /// preview runtimes so SwiftUI canvas instances don't spin up an FM
+    /// runtime. Lane A is driven from the playback state loop below; Lane B
+    /// is driven from `AnalysisWorkScheduler`'s idle slot via
+    /// `setShadowLaneTickHandler`.
+    let shadowCaptureCoordinator: ShadowCaptureCoordinator?
+
+    /// Retained so the shadow coordinator's synchronous protocol getters
+    /// have a stable producer for the currently loaded episode's asset id.
+    /// Updated by `PlayheadRuntime.setCurrentEpisode(...)` indirectly through
+    /// `currentAnalysisAssetId`. Read via `@Sendable` closure by
+    /// `LivePlaybackSignalProvider`.
+    private let shadowPlaybackSignal: LivePlaybackSignalProvider?
+    private let shadowEnvironmentSignal: LiveEnvironmentSignalProvider?
+
+    /// playhead-narl.2: lock-protected mirror of `currentAnalysisAssetId` that
+    /// `LivePlaybackSignalProvider`'s `@Sendable` closure reads from. The
+    /// MainActor-confined `currentAnalysisAssetId` observable property can't
+    /// be touched by a `@Sendable` closure, so every site that mutates it
+    /// also publishes into this mirror. Declared in preview runtimes too so
+    /// the property layout is uniform; preview runtimes just never attach a
+    /// coordinator that would read it.
+    private let currentAssetIdMirror = OSAllocatedUnfairLock<String?>(initialState: nil)
+
     private let isPreviewRuntime: Bool
     private let logger = Logger(subsystem: "com.playhead", category: "Runtime")
     @ObservationIgnored
@@ -521,6 +545,45 @@ final class PlayheadRuntime {
             self.shadowRetryObserver = nil
         }
 
+        // playhead-narl.2: construct the shadow FM dual-run pipeline. Preview
+        // runtimes skip the entire block (no FM runtime, no observers, no
+        // coordinator) so SwiftUI canvases stay lightweight. Lane A is
+        // ticked from the playback state loop below; Lane B is ticked from
+        // the analysis work scheduler via `setShadowLaneTickHandler`.
+        if !isPreviewRuntime {
+            // Make a local capture so the @Sendable closure that reads the
+            // currently loaded episode's analysis asset id doesn't have to
+            // reach back into `self`. The lock instance is reference-typed,
+            // so capturing it by value carries the shared state.
+            let assetIdMirror = currentAssetIdMirror
+            let playbackSignal = LivePlaybackSignalProvider(
+                playbackService: playbackService,
+                assetIdProvider: { assetIdMirror.withLock { $0 } }
+            )
+            self.shadowPlaybackSignal = playbackSignal
+            let environmentSignal = LiveEnvironmentSignalProvider(
+                capabilitiesService: capabilitiesService
+            )
+            self.shadowEnvironmentSignal = environmentSignal
+            let shadowRuntime = FoundationModelClassifier.makeLiveRuntimeForShadow()
+            let dispatcher = LiveShadowFMDispatcher(
+                store: analysisStore,
+                runtime: shadowRuntime
+            )
+            let windowSource = LiveShadowWindowSource(store: analysisStore)
+            self.shadowCaptureCoordinator = ShadowCaptureCoordinator(
+                store: analysisStore,
+                dispatcher: dispatcher,
+                windowSource: windowSource,
+                playbackSignal: playbackSignal,
+                environmentSignal: environmentSignal
+            )
+        } else {
+            self.shadowPlaybackSignal = nil
+            self.shadowEnvironmentSignal = nil
+            self.shadowCaptureCoordinator = nil
+        }
+
         // Set error state after all stored properties are initialized.
         if let storeError {
             self.initializationError = storeError
@@ -553,7 +616,7 @@ final class PlayheadRuntime {
         // — it's now constructed before AdDetectionService and passed via
         // init, so there's no race with the first backfill/hot-path run.
 
-        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator] in
+        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator] in
             // Migrate the analysis store before any component queries its tables.
             do {
                 try await analysisStore.migrate()
@@ -613,6 +676,16 @@ final class PlayheadRuntime {
             // scheduler flips the flag on the exact signal the running
             // job is polling.
             await analysisWorkScheduler.setLanePreemptionHandler(lanePreemptionCoordinator)
+            // playhead-narl.2: install the shadow Lane B tick handler before
+            // starting the scheduler loop. The handler forwards idle ticks
+            // into `ShadowCaptureCoordinator.tickLaneB()`. `nil` coordinator
+            // (preview runtime) leaves the scheduler's handler unwired and
+            // the shadow pipeline silent.
+            if let shadowCaptureCoordinator {
+                await analysisWorkScheduler.setShadowLaneTickHandler(
+                    ShadowLaneBAdapter(coordinator: shadowCaptureCoordinator)
+                )
+            }
             do {
                 _ = try await analysisJobReconciler.reconcile()
             } catch {
@@ -622,7 +695,7 @@ final class PlayheadRuntime {
             await analysisWorkScheduler.startSchedulerLoop()
         }
 
-        Task { [playbackService, analysisCoordinator, skipOrchestrator] in
+        Task { [playbackService, analysisCoordinator, skipOrchestrator, shadowCaptureCoordinator] in
             await skipOrchestrator.setSkipCueHandler { cues in
                 Task { @PlaybackServiceActor in
                     playbackService.setSkipCues(cues)
@@ -649,6 +722,23 @@ final class PlayheadRuntime {
                     await analysisCoordinator.handlePlaybackEvent(
                         .timeUpdate(time: state.currentTime, rate: rate)
                     )
+                    // playhead-narl.2: Lane A tick piggybacks on the playback
+                    // heartbeat. The coordinator samples its own playback
+                    // signal provider internally (no args), gates on the kill
+                    // switch + strict-playback + rate-limit, and returns
+                    // promptly on any no-op branch.
+                    //
+                    // Fire-and-forget: the coordinator is an actor with its
+                    // own in-flight accounting (`laneAInFlight`,
+                    // `laneAMaxInFlight = 1`), so an unstructured Task cannot
+                    // race itself. Awaiting here would stall subsequent
+                    // `skipOrchestrator.updatePlayheadTime(...)` ticks on the
+                    // ~3s FM call and regress user-visible skip-cue latency.
+                    // Capture the coordinator by value (not via `self`) to
+                    // avoid retaining the runtime through this hot loop.
+                    Task { [shadowCaptureCoordinator] in
+                        await shadowCaptureCoordinator?.tickLaneA()
+                    }
 
                 case .paused:
                     if lastStatus != .paused {
@@ -837,6 +927,8 @@ final class PlayheadRuntime {
         currentPodcastTitle = episode.podcast?.title
         currentArtworkURL = episode.podcast?.artworkURL
         currentAnalysisAssetId = nil
+        // playhead-narl.2: keep the Sendable-closure-readable mirror in sync.
+        currentAssetIdMirror.withLock { $0 = nil }
 
         await backgroundProcessingService.playbackDidStart()
 
@@ -934,6 +1026,8 @@ final class PlayheadRuntime {
                         )
                     )
                     self.currentAnalysisAssetId = resolvedAssetId
+                    // playhead-narl.2: mirror for Sendable closure access.
+                    self.currentAssetIdMirror.withLock { $0 = resolvedAssetId }
                     if let assetId = resolvedAssetId {
                         await self.skipOrchestrator.beginEpisode(
                             analysisAssetId: assetId,
@@ -978,6 +1072,8 @@ final class PlayheadRuntime {
             )
         )
         currentAnalysisAssetId = resolvedAssetId
+        // playhead-narl.2: mirror for Sendable closure access.
+        currentAssetIdMirror.withLock { $0 = resolvedAssetId }
 
         if let assetId = resolvedAssetId {
             await skipOrchestrator.beginEpisode(
@@ -1000,6 +1096,8 @@ final class PlayheadRuntime {
         currentEpisodeId = nil
         currentPodcastId = nil
         currentAnalysisAssetId = nil
+        // playhead-narl.2: mirror for Sendable closure access.
+        currentAssetIdMirror.withLock { $0 = nil }
         currentEpisodeTitle = nil
         currentPodcastTitle = nil
         currentArtworkURL = nil
@@ -1226,5 +1324,20 @@ private final class ShadowRetryObserverHolder: Sendable {
     var observer: ShadowRetryObserver? {
         get { storage.withLock { $0 } }
         set { storage.withLock { $0 = newValue } }
+    }
+}
+
+// MARK: - ShadowLaneBAdapter
+
+/// playhead-narl.2: thin adapter so `AnalysisWorkScheduler` can install a
+/// `ShadowLaneTickHandler` that forwards into `ShadowCaptureCoordinator`'s
+/// actor-isolated `tickLaneB()`. The scheduler's protocol is deliberately
+/// narrow — a one-method `Sendable` — so this adapter has nothing to own
+/// besides a reference to the coordinator.
+private struct ShadowLaneBAdapter: ShadowLaneTickHandler {
+    let coordinator: ShadowCaptureCoordinator
+
+    func shadowLaneBTick() async {
+        await coordinator.tickLaneB()
     }
 }

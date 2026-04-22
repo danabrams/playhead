@@ -46,6 +46,15 @@ struct CorpusExportResult: Sendable, Equatable {
     /// if it exists in the same Documents directory — exposed so the
     /// caller can build a combined bundle.
     let decisionLogManifestURL: URL?
+    /// Absolute path of the `shadow-decisions.jsonl` written alongside the
+    /// corpus export by ``ShadowDecisionsExporter``. `nil` only if the
+    /// shadow sidecar write threw (logged); a shadow-empty store still
+    /// produces a zero-row file so downstream tooling can distinguish
+    /// "shadow capture never ran" from "shadow capture ran, no rows".
+    let shadowManifestURL: URL?
+    /// Number of shadow rows written to `shadow-decisions.jsonl`. Zero
+    /// when the store has no shadow rows yet.
+    let shadowRowCount: Int
 }
 
 // MARK: - CorpusExportSource
@@ -53,7 +62,11 @@ struct CorpusExportResult: Sendable, Equatable {
 /// Narrow test seam the exporter queries against. `AnalysisStore` conforms
 /// below; tests can supply a mock that throws on specific methods to exercise
 /// the SQL-error path without corrupting a real sqlite file.
-protocol CorpusExportSource: Sendable {
+///
+/// Also requires `ShadowDecisionsExportSource` because a corpus export
+/// writes `shadow-decisions.jsonl` as a sibling so the harness in
+/// `playhead-narl.1` can consume both files from a single Files.app pull.
+protocol CorpusExportSource: ShadowDecisionsExportSource {
     func fetchAllAssets() async throws -> [AnalysisAsset]
     func fetchDecodedSpans(assetId: String) async throws -> [DecodedSpan]
     func loadCorrectionEvents(analysisAssetId: String) async throws -> [CorrectionEvent]
@@ -294,6 +307,29 @@ enum CorpusExporter {
             ? siblingDecisionLog
             : nil
 
+        // playhead-narl.2 shadow sidecar: always write
+        // `shadow-decisions.jsonl` alongside the corpus bundle so the
+        // harness's corpus builder can consume both files from the same
+        // Files.app pull. A shadow-export failure is logged but does NOT
+        // abort the corpus export — the core corpus file has already been
+        // written at this point, and losing the shadow sidecar for a
+        // single debug export is strictly better than losing the whole
+        // bundle.
+        var shadowManifestURL: URL? = nil
+        var shadowRowCount: Int = 0
+        do {
+            let shadow = try await ShadowDecisionsExporter.export(
+                source: store,
+                documentsURL: documentsURL
+            )
+            shadowManifestURL = shadow.fileURL
+            shadowRowCount = shadow.rowCount
+        } catch {
+            logger.warning(
+                "export: shadow sidecar write failed error=\(String(describing: error), privacy: .public) — corpus file still valid"
+            )
+        }
+
         didSucceed = true
         return CorpusExportResult(
             fileURL: fileURL,
@@ -301,7 +337,9 @@ enum CorpusExporter {
             spanCount: spanCount,
             correctionCount: correctionCount,
             skippedCorrectionCount: skippedCorrectionCount,
-            decisionLogManifestURL: decisionLogManifestURL
+            decisionLogManifestURL: decisionLogManifestURL,
+            shadowManifestURL: shadowManifestURL,
+            shadowRowCount: shadowRowCount
         )
     }
 

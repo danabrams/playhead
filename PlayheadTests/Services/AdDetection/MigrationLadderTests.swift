@@ -34,7 +34,7 @@ struct MigrationLadderTests {
         try await store.migrate()
 
         // Reaches v5 (current).
-        #expect(try await store.schemaVersion() == 12)
+        #expect(try await store.schemaVersion() == 13)
 
         // analysis_sessions has the camelCase column (H10).
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
@@ -92,7 +92,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 12)
+        #expect(try await store.schemaVersion() == 13)
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "shadowRetryPodcastId"))
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
@@ -135,7 +135,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 12)
+        #expect(try await store.schemaVersion() == 13)
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "shadowRetryPodcastId"))
@@ -161,7 +161,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 12)
+        #expect(try await store.schemaVersion() == 13)
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "shadowRetryPodcastId"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_sessions_shadow_retry"))
@@ -198,7 +198,7 @@ struct MigrationLadderTests {
         try await store.migrateOnlyForTesting()
 
         // V2 → v3 → v4 → v5 ladder must have run, reaching the target version.
-        #expect(try await store.schemaVersion() == 12)
+        #expect(try await store.schemaVersion() == 13)
         // V3 added transcriptVersion to evidence_events.
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
         // V4 added needsShadowRetry + shadowRetryPodcastId + the partial
@@ -238,7 +238,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrateOnlyForTesting()
 
-        #expect(try await store.schemaVersion() == 12)
+        #expect(try await store.schemaVersion() == 13)
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "transcriptVersion"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "runMode"))
@@ -258,7 +258,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrateOnlyForTesting()
 
-        #expect(try await store.schemaVersion() == 12)
+        #expect(try await store.schemaVersion() == 13)
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "shadowRetryPodcastId"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "evidenceSources"))
@@ -282,7 +282,7 @@ struct MigrationLadderTests {
         let v2 = try await store.schemaVersion()
 
         #expect(v1 == v2)
-        #expect(v2 == 12)
+        #expect(v2 == 13)
     }
 
     // MARK: - C6: seeded v4 _meta-less data path
@@ -312,7 +312,7 @@ struct MigrationLadderTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 12)
+        #expect(try await store.schemaVersion() == 13)
         #expect(try probeColumnExists(in: dir, table: "analysis_sessions", column: "needsShadowRetry"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "evidenceSources"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "eligibilityGate"))
@@ -402,6 +402,74 @@ struct MigrationLadderTests {
         let flagged = try await store.fetchSessionsNeedingShadowRetry()
         #expect(flagged.count == 1)
         #expect(flagged.first?.id == "sess-rename")
+    }
+
+    // MARK: - narl.2 v12 → v13: shadow_fm_responses table lands
+
+    /// A v12-shaped DB (pre-narl.2) should pick up the new
+    /// `shadow_fm_responses` table + its lookup index when migrate() climbs
+    /// to v13. This pins the boundary so a future reviewer who touches
+    /// the migration ladder notices when v12 → v13 stops creating the
+    /// shadow table (e.g. if someone accidentally renames or removes
+    /// `migrateShadowFMResponsesV13IfNeeded`).
+    ///
+    /// Pattern: we can't just seed `_meta.schema_version = 12` against a
+    /// bare DB, because the intermediate V*IfNeeded blocks short-circuit
+    /// and the tail `addColumnIfNeeded` calls in migrate() would fail
+    /// against non-existent tables. Instead, we do a real migrate first
+    /// (which builds v13), then regress the DB back to v12 by dropping
+    /// the v13 table + index and rewinding `_meta.schema_version` to
+    /// '12'. The next migrate() must re-create the v13 table/index.
+    @Test("narl.2: v12-seeded DB picks up shadow_fm_responses at v13")
+    func seededV12AddsShadowFMResponses() async throws {
+        let dir = try freshTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // First: a real migrate to build the full v13 DB shape.
+        AnalysisStore.resetMigratedPathsForTesting()
+        let bootstrap = try AnalysisStore(directory: dir)
+        try await bootstrap.migrate()
+        #expect(try await bootstrap.schemaVersion() == 13)
+        #expect(try probeTableExists(in: dir, table: "shadow_fm_responses"))
+
+        // Rewind to v12: drop the shadow table + index, reset _meta.
+        let dbURL = dir.appendingPathComponent("analysis.sqlite")
+        var db: OpaquePointer?
+        #expect(sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+        let rewind = """
+            DROP INDEX IF EXISTS idx_shadow_fm_asset_variant;
+            DROP TABLE IF EXISTS shadow_fm_responses;
+            UPDATE _meta SET value = '12' WHERE key = 'schema_version';
+            """
+        #expect(sqlite3_exec(db, rewind, nil, nil, nil) == SQLITE_OK)
+        sqlite3_close_v2(db)
+
+        // Sanity: the v12 rewind actually removed the table.
+        #expect(!(try probeTableExists(in: dir, table: "shadow_fm_responses")))
+        #expect(!(try probeIndexExists(in: dir, indexName: "idx_shadow_fm_asset_variant")))
+
+        // Re-migrate via a fresh store. The v12 → v13 block must re-create
+        // the shadow table + its lookup index.
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+
+        #expect(try await store.schemaVersion() == 13)
+        #expect(try probeTableExists(in: dir, table: "shadow_fm_responses"))
+        #expect(try probeIndexExists(in: dir, indexName: "idx_shadow_fm_asset_variant"))
+        // Migrated store must accept a row via the live CRUD path.
+        let row = ShadowFMResponse(
+            assetId: "asset-v12-narl2",
+            windowStart: 0,
+            windowEnd: 10,
+            configVariant: .allEnabledShadow,
+            fmResponse: Data([0x01, 0x02]),
+            capturedAt: 1_700_000_000,
+            capturedBy: .laneB,
+            fmModelVersion: "fm-1.0"
+        )
+        try await store.upsertShadowFMResponse(row)
+        #expect(try await store.shadowFMResponseCount() == 1)
     }
 
     // MARK: - Rev3-M5: phase column reads/writes/filters

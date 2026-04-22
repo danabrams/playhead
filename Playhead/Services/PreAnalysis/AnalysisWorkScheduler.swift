@@ -24,6 +24,28 @@ protocol LanePreemptionHandler: Sendable {
     func preemptLowerLanes(for incoming: AnalysisWorkScheduler.SchedulerLane) async
 }
 
+/// playhead-narl.2: hook the scheduler invokes on idle ticks to let shadow
+/// capture Lane B piggyback on the existing background drain cadence. The
+/// handler is installed by `PlayheadRuntime` and forwards to
+/// `ShadowCaptureCoordinator.tickLaneB()`. The scheduler treats the call as
+/// best-effort — any error or long await is the handler's own concern, and
+/// the scheduler's sleep-until-wake cadence is unchanged regardless of the
+/// handler's return.
+///
+/// Why idle-tick vs. injecting an `AnalysisJob`: shadow capture is not a
+/// unit of user-visible work — it has no `episodeId`, no coverage target,
+/// and no JobRunner-compatible execution surface. Shoehorning it into the
+/// job table would pollute the work journal and admission gates with
+/// non-job rows. An idle-tick hook keeps shadow capture purely co-resident
+/// and lets us remove it by nil-ing the handler without a schema touch.
+protocol ShadowLaneTickHandler: Sendable {
+    /// Called when the scheduler finds no dispatchable job and is about to
+    /// sleep for `idlePollSeconds`. Implementations should dispatch at
+    /// most one Lane-B shadow tick and return promptly — the scheduler
+    /// will sleep regardless.
+    func shadowLaneBTick() async
+}
+
 // `TransportStatusProviding` + `WifiTransportStatusProvider` live in
 // TransportStatusProviding.swift in this directory. A live
 // `NWPathMonitor`-backed provider will land in playhead-ml96.
@@ -232,6 +254,14 @@ actor AnalysisWorkScheduler {
     /// admitted. Nil means "no preemption" — which is the only behavior this
     /// bead ships.
     private var preemptionHandler: (any LanePreemptionHandler)?
+
+    /// playhead-narl.2: hook installed by `PlayheadRuntime` to let
+    /// `ShadowCaptureCoordinator.tickLaneB()` piggyback on the scheduler's
+    /// idle ticks. Nil means "no shadow capture" — the normal state in
+    /// preview runtimes and in tests that don't wire shadow mode. When
+    /// non-nil, the scheduler calls `shadowLaneBTick()` exactly before
+    /// sleeping in the no-dispatchable-job branch of the run loop.
+    private var shadowLaneTickHandler: (any ShadowLaneTickHandler)?
 
     private var wakeContinuation: AsyncStream<Void>.Continuation?
     private var wakeStream: AsyncStream<Void>
@@ -749,6 +779,12 @@ actor AnalysisWorkScheduler {
         self.preemptionHandler = handler
     }
 
+    /// playhead-narl.2: install the shadow Lane B tick handler. Pass `nil`
+    /// to detach. Idempotent — re-installing replaces the prior handler.
+    func setShadowLaneTickHandler(_ handler: (any ShadowLaneTickHandler)?) {
+        self.shadowLaneTickHandler = handler
+    }
+
     /// Start the scheduler loop. Call after reconciliation is complete.
     func startSchedulerLoop() {
         schedulerTask?.cancel()
@@ -814,6 +850,24 @@ actor AnalysisWorkScheduler {
                 deferredWorkAllowed: deferredWorkAllowed,
                 now: now
             ) else {
+                // playhead-narl.2: no dispatchable job → the scheduler is
+                // genuinely idle. Give the shadow Lane B coordinator a
+                // chance to fire one tick before we sleep. The handler's
+                // own gate (thermal + charging + kill switch) determines
+                // whether the tick does any work; the scheduler treats the
+                // call as fire-and-forget and always sleeps afterward.
+                //
+                // Genuinely fire-and-forget (don't await): with
+                // `laneBCallsPerTick = 2` default, a single idle-tick can
+                // issue up to 2 sequential FM calls (~6s). Awaiting would
+                // delay the T0 job start when the user hits play
+                // mid-Lane-B tick. Capture the handler by value so the
+                // detached task does not close over the scheduler actor.
+                if let shadowLaneTickHandler {
+                    Task { [shadowLaneTickHandler] in
+                        await shadowLaneTickHandler.shadowLaneBTick()
+                    }
+                }
                 await sleepOrWake(seconds: Self.idlePollSeconds)
                 continue
             }

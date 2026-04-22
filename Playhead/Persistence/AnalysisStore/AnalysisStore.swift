@@ -620,7 +620,7 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 12
+    nonisolated private static let currentSchemaVersion = 13
 
     /// bd-m8k / Cycle 2 C4: Maximum number of recent full-rescan **recall**
     /// samples retained for the `stable_recall_flag` ring. Must match the
@@ -869,6 +869,8 @@ actor AnalysisStore {
             }
             try migrateSourceDemotionsV11IfNeeded()
             try migrateImplicitFeedbackV12IfNeeded()
+            // playhead-narl.2: FM dual-run shadow capture storage.
+            try migrateShadowFMResponsesV13IfNeeded()
             // ef2.5.1: ShowTraitProfile JSON on podcast_profiles.
             try addColumnIfNeeded(
                 table: "podcast_profiles",
@@ -978,6 +980,9 @@ actor AnalysisStore {
         try migrateBracketTrustV10IfNeeded()
         try migrateSourceDemotionsV11IfNeeded()
         try migrateImplicitFeedbackV12IfNeeded()
+        // playhead-narl.2: shadow capture storage — must also be applied in the
+        // ladder-only test seam so migration-ladder tests see the new table.
+        try migrateShadowFMResponsesV13IfNeeded()
         // H1 fix: mirror the addColumnIfNeeded calls from migrate() that
         // follow the versioned ladder steps. Without these, the isolated-
         // ladder test seam cannot catch regressions in column additions.
@@ -1986,6 +1991,42 @@ actor AnalysisStore {
         try exec("CREATE INDEX IF NOT EXISTS idx_ife_podcast ON implicit_feedback_events(podcastId)")
 
         try setSchemaVersion(12)
+    }
+
+    /// playhead-narl.2: new storage for `.allEnabled` FM shadow captures.
+    ///
+    /// The harness (`playhead-narl.1`) reads these rows to evaluate
+    /// `fmSchedulingEnabled` counterfactually — no production pipeline
+    /// consumes them. `CREATE TABLE IF NOT EXISTS` is idempotent so existing
+    /// installs upgrade cleanly.
+    ///
+    /// `fmResponse` is BLOB because the payload is opaque serialized FM
+    /// output; downstream consumers decode per-row using ``fmModelVersion``
+    /// as the gate. See ``ShadowFMResponse``.
+    private func migrateShadowFMResponsesV13IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 13 else { return }
+
+        try exec("""
+            CREATE TABLE IF NOT EXISTS shadow_fm_responses (
+                assetId        TEXT NOT NULL,
+                windowStart    REAL NOT NULL,
+                windowEnd      REAL NOT NULL,
+                configVariant  TEXT NOT NULL,
+                fmResponse     BLOB NOT NULL,
+                capturedAt     REAL NOT NULL,
+                capturedBy     TEXT NOT NULL,
+                fmModelVersion TEXT,
+                PRIMARY KEY (assetId, windowStart, windowEnd, configVariant)
+            )
+            """)
+        // Supports Lane-B "find episodes with incomplete shadow coverage"
+        // queries; the harness uses the same index for per-asset fetches.
+        try exec("""
+            CREATE INDEX IF NOT EXISTS idx_shadow_fm_asset_variant
+            ON shadow_fm_responses(assetId, configVariant)
+            """)
+
+        try setSchemaVersion(13)
     }
 
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
@@ -7404,6 +7445,308 @@ actor AnalysisStore {
                 timestamp: sqlite3_column_double(stmt, 5),
                 storedWeight: sqlite3_column_double(stmt, 6)
             ))
+        }
+        return results
+    }
+
+    // MARK: - CRUD: shadow_fm_responses (playhead-narl.2)
+    //
+    // The harness in `playhead-narl.1` reads these rows to replay the
+    // `.allEnabled` config variant with real FM evidence for windows
+    // that `.default` never scheduled FM on. No production pipeline
+    // consumes these rows.
+
+    /// Persist a shadow FM response. Uses `INSERT OR REPLACE` on the composite
+    /// primary key (assetId, windowStart, windowEnd, configVariant) so Lane A
+    /// and Lane B can both race to capture the same window without duplicate
+    /// rows; the later write wins. The `capturedBy` column records which
+    /// lane landed the final write.
+    ///
+    /// Rejects malformed windows (`windowEnd < windowStart`) — these
+    /// degenerate into zero-width rows that no consumer can interpret.
+    func upsertShadowFMResponse(_ row: ShadowFMResponse) throws {
+        guard row.isWellFormed else {
+            throw AnalysisStoreError.insertFailed(
+                "shadow_fm_responses: non-well-formed row windowStart=\(row.windowStart) windowEnd=\(row.windowEnd)"
+            )
+        }
+        // Empty fmResponse is meaningless — no harness consumer can
+        // interpret a zero-length opaque BLOB, and a "successful capture"
+        // with no payload would silently pollute the per-asset coverage
+        // set. Reject explicitly rather than let it through as a
+        // zero-length blob.
+        guard !row.fmResponse.isEmpty else {
+            throw AnalysisStoreError.insertFailed(
+                "shadow_fm_responses: fmResponse payload is empty (asset=\(row.assetId))"
+            )
+        }
+        // AC-6 PK canonicalization: round every REAL bound to the nearest
+        // integer millisecond before binding. Integer-valued doubles below
+        // 2^53 round-trip through Double exactly, so REAL PK equality is
+        // stable at this resolution. This intentionally drops sub-ms
+        // precision — the planner produces second-aligned windows so the
+        // loss is zero in practice.
+        let canonicalStart = ShadowFMResponse.canonicalize(seconds: row.windowStart)
+        let canonicalEnd = ShadowFMResponse.canonicalize(seconds: row.windowEnd)
+        let sql = """
+            INSERT OR REPLACE INTO shadow_fm_responses
+            (assetId, windowStart, windowEnd, configVariant,
+             fmResponse, capturedAt, capturedBy, fmModelVersion)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, row.assetId)
+        bind(stmt, 2, canonicalStart)
+        bind(stmt, 3, canonicalEnd)
+        bind(stmt, 4, row.configVariant.rawValue)
+        // Opaque BLOB payload — use SQLITE_TRANSIENT so sqlite copies the
+        // bytes immediately and our `Data` can deallocate on return.
+        let bytesCount = row.fmResponse.count
+        row.fmResponse.withUnsafeBytes { rawBuf in
+            if let base = rawBuf.baseAddress {
+                _ = sqlite3_bind_blob(stmt, 5, base, Int32(bytesCount), SQLITE_TRANSIENT_PTR)
+            } else {
+                // Empty Data() — bind as a zero-length blob, not NULL.
+                _ = sqlite3_bind_zeroblob(stmt, 5, 0)
+            }
+        }
+        bind(stmt, 6, row.capturedAt)
+        bind(stmt, 7, row.capturedBy.rawValue)
+        bind(stmt, 8, row.fmModelVersion)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Bulk insert helper — wraps the batch in a single transaction. Useful
+    /// for Lane B's tick-driven backfill, which may land multiple rows back-
+    /// to-back.
+    func upsertShadowFMResponses(_ rows: [ShadowFMResponse]) throws {
+        guard !rows.isEmpty else { return }
+        try exec("BEGIN TRANSACTION")
+        do {
+            for row in rows {
+                try upsertShadowFMResponse(row)
+            }
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Fetch all shadow FM responses for an asset. Ordered by `windowStart`
+    /// so the harness can walk them in timeline order. Rows with unrecognized
+    /// `configVariant` or `capturedBy` strings are skipped (forward-compatible
+    /// with future variant additions).
+    func fetchShadowFMResponses(assetId: String) throws -> [ShadowFMResponse] {
+        let sql = """
+            SELECT assetId, windowStart, windowEnd, configVariant,
+                   fmResponse, capturedAt, capturedBy, fmModelVersion
+            FROM shadow_fm_responses
+            WHERE assetId = ?
+            ORDER BY windowStart ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        var results: [ShadowFMResponse] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let variant = ShadowConfigVariant(rawValue: text(stmt, 3)),
+                  let capturedBy = ShadowCapturedBy(rawValue: text(stmt, 6))
+            else { continue }
+            // Pull the BLOB as Data. `sqlite3_column_bytes` gives the size in
+            // bytes; `sqlite3_column_blob` gives a pointer valid until the
+            // next `sqlite3_step`/`_reset`/`_finalize` on this stmt — copy
+            // into a Data before the loop continues.
+            let blobSize = Int(sqlite3_column_bytes(stmt, 4))
+            let blob: Data
+            if blobSize > 0, let ptr = sqlite3_column_blob(stmt, 4) {
+                blob = Data(bytes: ptr, count: blobSize)
+            } else {
+                blob = Data()
+            }
+            results.append(ShadowFMResponse(
+                assetId: text(stmt, 0),
+                windowStart: sqlite3_column_double(stmt, 1),
+                windowEnd: sqlite3_column_double(stmt, 2),
+                configVariant: variant,
+                fmResponse: blob,
+                capturedAt: sqlite3_column_double(stmt, 5),
+                capturedBy: capturedBy,
+                fmModelVersion: optionalText(stmt, 7)
+            ))
+        }
+        return results
+    }
+
+    /// Materialize every shadow FM response in the store, ordered by
+    /// (assetId, windowStart). Used by the `shadow-decisions.jsonl` exporter
+    /// via the ``ShadowDecisionsExportSource`` protocol.
+    ///
+    /// Memory cost scales with row count. At realistic volumes (thousands
+    /// of rows) this is a few MB, acceptable for an export path that runs
+    /// on demand.
+    func allShadowFMResponses() throws -> [ShadowFMResponse] {
+        let sql = """
+            SELECT assetId, windowStart, windowEnd, configVariant,
+                   fmResponse, capturedAt, capturedBy, fmModelVersion
+            FROM shadow_fm_responses
+            ORDER BY assetId ASC, windowStart ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        var results: [ShadowFMResponse] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let variant = ShadowConfigVariant(rawValue: text(stmt, 3)),
+                  let capturedBy = ShadowCapturedBy(rawValue: text(stmt, 6))
+            else { continue }
+            let blobSize = Int(sqlite3_column_bytes(stmt, 4))
+            let blob: Data
+            if blobSize > 0, let ptr = sqlite3_column_blob(stmt, 4) {
+                blob = Data(bytes: ptr, count: blobSize)
+            } else {
+                blob = Data()
+            }
+            results.append(ShadowFMResponse(
+                assetId: text(stmt, 0),
+                windowStart: sqlite3_column_double(stmt, 1),
+                windowEnd: sqlite3_column_double(stmt, 2),
+                configVariant: variant,
+                fmResponse: blob,
+                capturedAt: sqlite3_column_double(stmt, 5),
+                capturedBy: capturedBy,
+                fmModelVersion: optionalText(stmt, 7)
+            ))
+        }
+        return results
+    }
+
+    /// The set of `(windowStart, windowEnd)` pairs already captured for
+    /// `assetId` under `configVariant`. Lane A and Lane B both query this to
+    /// avoid re-capturing a window that has already been shadowed.
+    func capturedShadowWindows(
+        assetId: String,
+        configVariant: ShadowConfigVariant
+    ) throws -> Set<ShadowWindowKey> {
+        let sql = """
+            SELECT windowStart, windowEnd FROM shadow_fm_responses
+            WHERE assetId = ? AND configVariant = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        bind(stmt, 2, configVariant.rawValue)
+        var out: Set<ShadowWindowKey> = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            // Canonicalize on read so callers who canonicalize their own
+            // prospective keys via `ShadowWindowKey.canonical(...)` get a
+            // byte-for-byte-matching set membership test. Defensive: rows
+            // written through `upsertShadowFMResponse` are already
+            // canonical, but pre-canonicalization rows that might exist
+            // in older DBs still normalize on read.
+            out.insert(ShadowWindowKey.canonical(
+                start: sqlite3_column_double(stmt, 0),
+                end:   sqlite3_column_double(stmt, 1)
+            ))
+        }
+        return out
+    }
+
+    /// Count of shadow responses currently persisted. Cheap — primarily a
+    /// diagnostic helper for tests and the debug UI.
+    func shadowFMResponseCount() throws -> Int {
+        let sql = "SELECT COUNT(*) FROM shadow_fm_responses"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int(stmt, 0))
+    }
+
+    /// Delete every shadow FM response whose `fmModelVersion` is NOT the
+    /// supplied current version. Used on boot to prune rows captured under
+    /// a stale FM model after the app ships a newer one — the harness
+    /// refuses to replay against a stale capture, so keeping the rows
+    /// around wastes disk without any downstream benefit.
+    ///
+    /// Rows with a `NULL` `fmModelVersion` (legacy pre-versioning rows, if
+    /// any ever appear) are considered stale by construction and deleted
+    /// on this sweep. Returns the number of rows removed so callers can
+    /// log the sweep's effect.
+    @discardableResult
+    func deleteShadowFMResponses(fmModelVersionOtherThan current: String) throws -> Int {
+        let sql = """
+            DELETE FROM shadow_fm_responses
+            WHERE fmModelVersion IS NULL OR fmModelVersion != ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, current)
+        try step(stmt, expecting: SQLITE_DONE)
+        return Int(sqlite3_changes(db))
+    }
+
+    /// List the asset ids that have at least one transcript chunk and
+    /// fewer `shadow_fm_responses` rows than the coarse grid would
+    /// produce under `(strideSeconds, widthSeconds)`. Used by
+    /// ``LiveShadowWindowSource.assetsWithIncompleteCoverage()`` to walk
+    /// Lane B's backlog earliest-first.
+    ///
+    /// The expected-window formula mirrors ``LiveShadowWindowSource.gridWindows``:
+    ///   - first window at `cursor = 0`
+    ///   - each iteration advances `cursor += strideSeconds` and emits one
+    ///     window while `cursor < duration`
+    ///   - so `expectedWindows = ceil(duration / strideSeconds)` when
+    ///     `duration > 0`, else `0`.
+    ///
+    /// `duration` for an asset is the MAX of `endTime` across its
+    /// transcript chunks. Assets with no transcript rows are excluded
+    /// (duration=0 → expectedWindows=0 → no incompleteness).
+    ///
+    /// Ordering: ascending by `analysis_assets.createdAt`, then `id` for
+    /// stability.
+    func assetsWithIncompleteShadowCoverage(
+        strideSeconds: TimeInterval,
+        widthSeconds: TimeInterval,
+        configVariant: String
+    ) throws -> [String] {
+        precondition(strideSeconds > 0, "stride must be positive")
+        precondition(widthSeconds > 0, "width must be positive")
+        // Join assets → max(transcript_chunks.endTime) → count of
+        // shadow_fm_responses for the given configVariant. Filter down
+        // to the rows where shadowCount < expected.
+        //
+        // We use CAST to INTEGER via CEIL() emulation: SQLite doesn't
+        // have CEIL, so we compute `((duration + stride - epsilon) /
+        // stride)` and truncate. The epsilon guards against a duration
+        // exactly divisible by stride producing an over-count.
+        let sql = """
+            SELECT a.id
+            FROM analysis_assets a
+            LEFT JOIN (
+                SELECT analysisAssetId, MAX(endTime) AS duration
+                FROM transcript_chunks
+                GROUP BY analysisAssetId
+            ) t ON t.analysisAssetId = a.id
+            LEFT JOIN (
+                SELECT assetId, COUNT(*) AS shadowCount
+                FROM shadow_fm_responses
+                WHERE configVariant = ?
+                GROUP BY assetId
+            ) s ON s.assetId = a.id
+            WHERE t.duration IS NOT NULL
+              AND t.duration > 0
+              AND COALESCE(s.shadowCount, 0) <
+                  CAST((t.duration + ? - 0.000001) / ? AS INTEGER)
+            ORDER BY a.createdAt ASC, a.id ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, configVariant)
+        sqlite3_bind_double(stmt, 2, strideSeconds)
+        sqlite3_bind_double(stmt, 3, strideSeconds)
+        var results: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(text(stmt, 0))
         }
         return results
     }
