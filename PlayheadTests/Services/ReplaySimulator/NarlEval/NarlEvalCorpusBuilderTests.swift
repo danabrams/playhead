@@ -158,6 +158,10 @@ struct NarlEvalCorpusBuilderTests {
         let assetId: String
         let scope: String
         let source: String?
+        /// Raw value of production `CorrectionType` when present on the
+        /// correction row (v2 corpus-export emits it alongside `source`).
+        /// Preferred by NarlGroundTruth over substring inference on `source`.
+        let correctionType: String?
         let createdAt: Double
     }
 
@@ -216,9 +220,14 @@ struct NarlEvalCorpusBuilderTests {
                 guard let asset = obj["analysisAssetId"] as? String else { return }
                 guard let scope = obj["scope"] as? String else { return }
                 let source = obj["source"] as? String
+                let correctionType = obj["correctionType"] as? String
                 let createdAt = (obj["createdAt"] as? Double) ?? 0
                 byAsset[asset, default: []].append(BuilderCorrection(
-                    assetId: asset, scope: scope, source: source, createdAt: createdAt
+                    assetId: asset,
+                    scope: scope,
+                    source: source,
+                    correctionType: correctionType,
+                    createdAt: createdAt
                 ))
             }
         }
@@ -227,12 +236,24 @@ struct NarlEvalCorpusBuilderTests {
 
     // MARK: - decision-log parsing (per-window evidence + fused confidence)
 
+    struct BuilderDecisionLogEvidence {
+        let source: String
+        let weight: Double
+        /// Per-entry classificationTrust from production DecisionLogger schema v2+.
+        /// Defaults to 0 when the log row omits it (v1 fixtures).
+        let classificationTrust: Double
+    }
+
     struct BuilderDecisionLogEntry {
         let assetId: String
         let windowStart: Double
         let windowEnd: Double
-        let evidence: [(source: String, weight: Double)]
+        let evidence: [BuilderDecisionLogEvidence]
         let fusedConfidence: Double
+        /// Production `finalDecision.action` string (e.g. "autoSkipEligible",
+        /// "markOnly", "suppressed"). Used to derive `isAdUnderDefault` on
+        /// the FrozenWindowScore without needing a separate flag.
+        let finalAction: String
     }
 
     static func parseDecisionLog(from url: URL) throws -> [String: [BuilderDecisionLogEntry]] {
@@ -248,26 +269,35 @@ struct NarlEvalCorpusBuilderTests {
                   let start = (bounds["start"] as? Double) ?? ((bounds["start"] as? NSNumber).map(\.doubleValue)),
                   let end = (bounds["end"] as? Double) ?? ((bounds["end"] as? NSNumber).map(\.doubleValue))
             else { return }
-            var ev: [(String, Double)] = []
+            var ev: [BuilderDecisionLogEvidence] = []
             if let evList = obj["evidence"] as? [[String: Any]] {
                 for e in evList {
                     let source = (e["source"] as? String) ?? "unknown"
                     let weight = (e["weight"] as? Double)
                         ?? ((e["weight"] as? NSNumber).map(\.doubleValue))
                         ?? 0
-                    ev.append((source, weight))
+                    let trust = (e["classificationTrust"] as? Double)
+                        ?? ((e["classificationTrust"] as? NSNumber).map(\.doubleValue))
+                        ?? 0
+                    ev.append(BuilderDecisionLogEvidence(
+                        source: source,
+                        weight: weight,
+                        classificationTrust: trust
+                    ))
                 }
             }
             let fused = (obj["fusedConfidence"] as? [String: Any]).flatMap {
                 ($0["skipConfidence"] as? Double)
                     ?? (($0["skipConfidence"] as? NSNumber).map(\.doubleValue))
             } ?? 0
+            let finalAction = (obj["finalDecision"] as? [String: Any])?["action"] as? String ?? ""
             byAsset[assetId, default: []].append(BuilderDecisionLogEntry(
                 assetId: assetId,
                 windowStart: start,
                 windowEnd: end,
                 evidence: ev,
-                fusedConfidence: fused
+                fusedConfidence: fused,
+                finalAction: finalAction
             ))
         }
         return byAsset
@@ -322,14 +352,20 @@ struct NarlEvalCorpusBuilderTests {
         decisionLog: [BuilderDecisionLogEntry],
         shadow: [BuilderShadowEntry]
     ) -> FrozenTrace {
-        // Baseline span decisions = decoded-span rows. isAd=true by construction
-        // (corpus-export only emits promoted spans).
-        let baseline = decisions.map { d in
-            ReplaySpanDecision(
+        // Baseline span confidence is sourced from the decision-log row that
+        // most-overlaps the span (HIGH-4). Promoted spans are always `isAd=true`
+        // by construction (corpus-export only persists promoted rows), but we
+        // no longer hardcode the confidence scalar — we use the real
+        // `fusedConfidence.skipConfidence` so the predictor's counterfactual
+        // replay has the correct input magnitude. Fallback when no
+        // decision-log row overlaps: use the shifted-midpoint floor (0.22) as
+        // the honest lower bound for a promoted span, NOT a made-up 0.9.
+        let baseline: [ReplaySpanDecision] = decisions.map { d in
+            let bestConf = bestOverlappingConfidence(decisionLog: decisionLog, start: d.startTime, end: d.endTime)
+            return ReplaySpanDecision(
                 startTime: d.startTime,
                 endTime: d.endTime,
-                confidence: 0.9,  // narE export does not preserve confidence;
-                                  // use a conservative default for .default path.
+                confidence: bestConf,
                 isAd: true,
                 sourceTag: "baseline"
             )
@@ -337,14 +373,18 @@ struct NarlEvalCorpusBuilderTests {
 
         // Evidence catalog = flatten the decision-log evidence entries for
         // this asset. Each row contributes one FrozenEvidenceEntry per source.
+        // HIGH-6: thread classificationTrust through to the frozen entry so
+        // the predictor can honestly apply the prior-shift and lexical-
+        // injection gates using per-window trust values.
         var evidence: [FrozenTrace.FrozenEvidenceEntry] = []
         for entry in decisionLog {
-            for (source, weight) in entry.evidence {
+            for e in entry.evidence {
                 evidence.append(FrozenTrace.FrozenEvidenceEntry(
-                    source: source,
-                    weight: weight,
+                    source: e.source,
+                    weight: e.weight,
                     windowStart: entry.windowStart,
-                    windowEnd: entry.windowEnd
+                    windowEnd: entry.windowEnd,
+                    classificationTrust: e.classificationTrust
                 ))
             }
         }
@@ -359,7 +399,8 @@ struct NarlEvalCorpusBuilderTests {
             FrozenTrace.FrozenCorrection(
                 source: c.source ?? "unknown",
                 scope: c.scope,
-                createdAt: c.createdAt
+                createdAt: c.createdAt,
+                correctionType: c.correctionType
             )
         }
 
@@ -371,8 +412,34 @@ struct NarlEvalCorpusBuilderTests {
                 proposalConfidence: entry.fusedConfidence,
                 skipConfidence: entry.fusedConfidence,
                 eligibilityGate: "eligible",
-                policyAction: "skip",
+                policyAction: entry.finalAction.isEmpty ? "skip" : entry.finalAction,
                 explanationJSON: nil
+            )
+        }
+
+        // Window scores (v2): one per decisionLog row. classificationTrust is
+        // the max across evidence entries for this window (mirrors how
+        // MetadataPriorShift aggregates trust via an episode-level max before
+        // deciding the midpoint shift). hasMetadataEvidence fires when any
+        // evidence source starts with "metadata" (production's
+        // MetadataLexiconInjector / MetadataPriorShift both key off that
+        // string). isAdUnderDefault is derived from the production final
+        // action — autoSkip or markOnly means the .default path accepted it
+        // as an ad.
+        let windowScores: [FrozenTrace.FrozenWindowScore] = decisionLog.map { entry in
+            let trust = entry.evidence.map(\.classificationTrust).max() ?? 0
+            let hasMetadata = entry.evidence.contains { $0.source.hasPrefix("metadata") }
+            let action = entry.finalAction.lowercased()
+            let isAdUnderDefault = action.contains("autoskip")
+                || action.contains("markonly")
+                || action.contains("skip") && !action.contains("suppress")
+            return FrozenTrace.FrozenWindowScore(
+                windowStart: entry.windowStart,
+                windowEnd: entry.windowEnd,
+                fusedSkipConfidence: entry.fusedConfidence,
+                classificationTrust: trust,
+                hasMetadataEvidence: hasMetadata,
+                isAdUnderDefault: isAdUnderDefault
             )
         }
 
@@ -403,8 +470,33 @@ struct NarlEvalCorpusBuilderTests {
             corrections: frozenCorrections,
             decisionEvents: decisionEvents,
             baselineReplaySpanDecisions: baseline,
-            holdoutDesignation: .training
+            holdoutDesignation: .training,
+            windowScores: windowScores
         )
+    }
+
+    /// Find the decision-log window that most overlaps the given time span
+    /// and return its fusedSkipConfidence. Honest fallback (0.22, matching
+    /// the shifted-midpoint floor for a promoted span) when no row overlaps.
+    static func bestOverlappingConfidence(
+        decisionLog: [BuilderDecisionLogEntry],
+        start: Double,
+        end: Double
+    ) -> Double {
+        guard !decisionLog.isEmpty, end > start else { return 0.22 }
+        var bestOverlap: Double = 0
+        var bestConf: Double = 0.22
+        for entry in decisionLog {
+            let lo = max(start, entry.windowStart)
+            let hi = min(end, entry.windowEnd)
+            guard hi > lo else { continue }
+            let overlap = hi - lo
+            if overlap > bestOverlap {
+                bestOverlap = overlap
+                bestConf = entry.fusedConfidence
+            }
+        }
+        return bestConf
     }
 
     // MARK: - JSONL iteration

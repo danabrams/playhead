@@ -57,6 +57,13 @@ protocol CorpusExportSource: Sendable {
     func fetchAllAssets() async throws -> [AnalysisAsset]
     func fetchDecodedSpans(assetId: String) async throws -> [DecodedSpan]
     func loadCorrectionEvents(analysisAssetId: String) async throws -> [CorrectionEvent]
+    /// Look up the `podcastId` recorded for an episode in the
+    /// `analysis_jobs` table, or `nil` when no job row exists for the
+    /// episode. Used by the exporter so asset records carry the podcastId
+    /// needed for show-level aggregation downstream (playhead-narl.1
+    /// HIGH-3). The mock can return `nil` for all episodes to exercise the
+    /// "podcastId absent" JSONL path.
+    func fetchPodcastId(forEpisodeId episodeId: String) async throws -> String?
 }
 
 extension AnalysisStore: CorpusExportSource {}
@@ -95,12 +102,17 @@ enum CorpusExporter {
     /// Serialize an `AnalysisAsset` row as a single JSONL line body (no trailing newline).
     /// Throws if JSONSerialization fails, which in practice requires a non-UTF-8 field
     /// that shouldn't appear in real data.
-    static func assetLine(_ asset: AnalysisAsset) throws -> Data {
+    ///
+    /// `podcastId` is looked up by the caller via `CorpusExportSource.fetchPodcastId(forEpisodeId:)`
+    /// and threaded in here so show-level grouping works downstream (playhead-narl.1 HIGH-3).
+    /// Emitted as explicit null when the lookup returns nil.
+    static func assetLine(_ asset: AnalysisAsset, podcastId: String? = nil) throws -> Data {
         let obj: [String: Any] = [
             "type": "asset",
             "schemaVersion": schemaVersion,
             "analysisAssetId": asset.id,
             "episodeId": asset.episodeId,
+            "podcastId": podcastId as Any? ?? NSNull(),
             "assetFingerprint": asset.assetFingerprint,
             "weakFingerprint": asset.weakFingerprint as Any? ?? NSNull(),
             "sourceURL": asset.sourceURL,
@@ -210,8 +222,21 @@ enum CorpusExporter {
 
         let assets = try await store.fetchAllAssets()
         for asset in assets {
+            // Look up podcastId by episodeId. A failing lookup is non-fatal:
+            // downstream tooling reads podcastId as optional (HIGH-3 allows
+            // explicit null) so we log and emit null rather than abort.
+            let podcastId: String?
+            do {
+                podcastId = try await store.fetchPodcastId(forEpisodeId: asset.episodeId)
+            } catch {
+                logger.warning(
+                    "export: fetchPodcastId failed for asset=\(asset.id, privacy: .public) episode=\(asset.episodeId, privacy: .public) error=\(String(describing: error), privacy: .public) — emitting null"
+                )
+                podcastId = nil
+            }
+
             // asset record
-            let assetData = try assetLine(asset)
+            let assetData = try assetLine(asset, podcastId: podcastId)
             try write(line: assetData, to: handle)
             assetCount += 1
 
