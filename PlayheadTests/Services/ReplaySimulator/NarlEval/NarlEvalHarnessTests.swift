@@ -41,6 +41,12 @@ struct NarlEvalHarnessTests {
 
         var episodeEntries: [NarlReportEpisodeEntry] = []
         var perRollup: [String: [(entry: NarlReportEpisodeEntry, pred: [NarlTimeRange], gt: [NarlTimeRange])]] = [:]
+        // Per-rollup exclusion counter (HIGH-5). Episodes that triggered a
+        // whole-asset veto are tallied here under BOTH the per-show key
+        // (e.g. "DoaC|default") and the "ALL|default" aggregate, so the
+        // rendered report can distinguish "5 episodes, 1 excluded" from
+        // "4 episodes, 0 excluded" — same headline F1 but different denominators.
+        var excludedCounts: [String: Int] = [:]
         var notes: [String] = []
 
         if traces.isEmpty {
@@ -85,7 +91,13 @@ struct NarlEvalHarnessTests {
                         hasShadowCoverage: pred.hasShadowCoverage
                     )
                     episodeEntries.append(entry)
-                    // Don't fold excluded episodes into rollups.
+                    // Tally excluded episodes per-rollup so the report shows
+                    // how many episodes were dropped by whole-asset veto
+                    // (HIGH-5). Don't fold them into metric aggregation.
+                    let showKey = "\(show)|\(configName)"
+                    let allKey = "ALL|\(configName)"
+                    excludedCounts[showKey, default: 0] += 1
+                    excludedCounts[allKey, default: 0] += 1
                     continue
                 }
 
@@ -152,7 +164,7 @@ struct NarlEvalHarnessTests {
                     show: show,
                     config: config,
                     episodeCount: bundles.count,
-                    excludedEpisodeCount: 0,
+                    excludedEpisodeCount: excludedCounts[key] ?? 0,
                     windowMetrics: winMetrics,
                     secondLevel: secMetrics,
                     totalLexicalInjectionAdds: lexAdds,
@@ -161,12 +173,43 @@ struct NarlEvalHarnessTests {
                 )
             }
 
+        // Emit synthetic rollup rows for (show, config) pairs that had only
+        // excluded episodes — i.e. excludedCounts has a key that's not in
+        // perRollup. Without this branch, a show whose every episode was
+        // vetoed would disappear from the report entirely instead of showing
+        // as "5 episodes, 5 excluded".
+        let existingRollupKeys = Set(perRollup.keys)
+        let excludedOnlyKeys = excludedCounts.keys.filter { !existingRollupKeys.contains($0) }
+        let excludedOnlyRollups = excludedOnlyKeys.sorted().map { key -> NarlReportRollup in
+            let parts = key.split(separator: "|", maxSplits: 1).map(String.init)
+            let show = parts[0]
+            let config = parts.count > 1 ? parts[1] : ""
+            return NarlReportRollup(
+                show: show,
+                config: config,
+                episodeCount: 0,
+                excludedEpisodeCount: excludedCounts[key] ?? 0,
+                windowMetrics: [],
+                secondLevel: NarlSecondLevelMetrics(
+                    truePositiveSeconds: 0, falsePositiveSeconds: 0, falseNegativeSeconds: 0,
+                    precision: 0, recall: 0, f1: 0
+                ),
+                totalLexicalInjectionAdds: 0,
+                totalPriorShiftAdds: 0,
+                totalEpisodesWithShadowCoverage: 0
+            )
+        }
+        let allRollups = (rollups + excludedOnlyRollups).sorted { a, b in
+            if a.show == b.show { return a.config < b.config }
+            return a.show < b.show
+        }
+
         let report = NarlEvalReport(
             schemaVersion: NarlEvalReportSchema.version,
             generatedAt: Date(),
             runId: runId,
             iouThresholds: [0.3, 0.5, 0.7],
-            rollups: rollups,
+            rollups: allRollups,
             episodes: episodeEntries,
             notes: notes
         )
