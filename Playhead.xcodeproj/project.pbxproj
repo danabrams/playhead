@@ -524,6 +524,11 @@
 		FEFCC10CFF7EF39FD043123F /* SensitiveWindowRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 117F1E41DE084B613166D952 /* SensitiveWindowRouter.swift */; };
 		FF4B955033ADAE3CA17F5C77 /* EpisodeStatusLineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75E4BD6B8E5FD41FE2C52FF3 /* EpisodeStatusLineView.swift */; };
 		FF5D6E825A52787AC7DD3218 /* DiagnosticsExportServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E85B05A45ED2EC4D70244642 /* DiagnosticsExportServiceTests.swift */; };
+		FFFA0001000000000000000B /* NarlApprovalPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFFA0001000000000000000A /* NarlApprovalPolicy.swift */; };
+		FFFA0002000000000000000B /* NarlApprovalPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFFA0002000000000000000A /* NarlApprovalPolicyTests.swift */; };
+		FFFA0003000000000000000B /* NarlApprovalReport.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFFA0003000000000000000A /* NarlApprovalReport.swift */; };
+		FFFA0004000000000000000B /* NarlApprovalReportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFFA0004000000000000000A /* NarlApprovalReportTests.swift */; };
+		FFFA0005000000000000000B /* NarlApprovalIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFFA0005000000000000000A /* NarlApprovalIntegrationTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -1057,6 +1062,11 @@
 		FF38243D35CA07BE595A877C /* FoundationModelExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoundationModelExtractor.swift; sourceTree = "<group>"; };
 		FF87059092BDF6E5FF9B1DB4 /* DecisionLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionLogger.swift; sourceTree = "<group>"; };
 		FFAC0AF611301A8AF53A5A5F /* MetadataEvidenceFusionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataEvidenceFusionTests.swift; sourceTree = "<group>"; };
+		FFFA0001000000000000000A /* NarlApprovalPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NarlApprovalPolicy.swift; sourceTree = "<group>"; };
+		FFFA0002000000000000000A /* NarlApprovalPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NarlApprovalPolicyTests.swift; sourceTree = "<group>"; };
+		FFFA0003000000000000000A /* NarlApprovalReport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NarlApprovalReport.swift; sourceTree = "<group>"; };
+		FFFA0004000000000000000A /* NarlApprovalReportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NarlApprovalReportTests.swift; sourceTree = "<group>"; };
+		FFFA0005000000000000000A /* NarlApprovalIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NarlApprovalIntegrationTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -1362,6 +1372,11 @@
 		42E20656ABB6FBDCAB31952E /* NarlEval */ = {
 			isa = PBXGroup;
 			children = (
+				FFFA0005000000000000000A /* NarlApprovalIntegrationTests.swift */,
+				FFFA0001000000000000000A /* NarlApprovalPolicy.swift */,
+				FFFA0002000000000000000A /* NarlApprovalPolicyTests.swift */,
+				FFFA0003000000000000000A /* NarlApprovalReport.swift */,
+				FFFA0004000000000000000A /* NarlApprovalReportTests.swift */,
 				9E746F5198C3A5554B2AEB65 /* NarlEvalCorpusBuilderTests.swift */,
 				D35E231A43AD32000348A5A1 /* NarlEvalHarnessTests.swift */,
 				18BF608D6168E53F1DF7A685 /* NarlEvalMetrics.swift */,
@@ -2753,6 +2768,11 @@
 				B44055077A12D2680273B45D /* MigrationLadderTests.swift in Sources */,
 				12823485235C3ED3ED95C220 /* MinimalContiguousSpanDecoderTests.swift in Sources */,
 				C8DFF1453765A345FF297D0E /* MusicBedClassifierTests.swift in Sources */,
+				FFFA0005000000000000000B /* NarlApprovalIntegrationTests.swift in Sources */,
+				FFFA0001000000000000000B /* NarlApprovalPolicy.swift in Sources */,
+				FFFA0002000000000000000B /* NarlApprovalPolicyTests.swift in Sources */,
+				FFFA0003000000000000000B /* NarlApprovalReport.swift in Sources */,
+				FFFA0004000000000000000B /* NarlApprovalReportTests.swift in Sources */,
 				ED0B902577CD4E4472B3CBD3 /* NarlEvalCorpusBuilderTests.swift in Sources */,
 				E9F4DE783B3925BB80D2D1E4 /* NarlEvalHarnessTests.swift in Sources */,
 				6CA335CB271BCB29CD0B4BC3 /* NarlEvalMetrics.swift in Sources */,
