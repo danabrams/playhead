@@ -63,7 +63,8 @@ struct NarlApprovalIntegrationTests {
 
         let approvalReport = NarlApprovalReport(
             schemaVersion: NarlApprovalReportSchema.version,
-            generatedAt: Date(),
+            // playhead-narl: generatedAt derived from harness report for artifact determinism
+            generatedAt: harnessReport.generatedAt,
             sourceRunId: harnessReport.runId,
             policy: policy,
             recommendations: recs,
@@ -71,14 +72,44 @@ struct NarlApprovalIntegrationTests {
             notes: notes
         )
 
+        // Write into a `recommendations/` subdirectory under the run dir
+        // so the approval artifacts don't overlay harness outputs that
+        // share filenames. Provenance stays clear: harness owns the run
+        // dir root, the recommender owns its subdirectory.
+        let recommendationsDir = latestRunDir.appendingPathComponent(
+            "recommendations", isDirectory: true
+        )
         let (jsonURL, mdURL) = try NarlApprovalWriter.write(
             report: approvalReport,
-            to: latestRunDir
+            to: recommendationsDir
         )
         #expect(FileManager.default.fileExists(atPath: jsonURL.path),
                 "recommendations.json should be written at \(jsonURL.path)")
         #expect(FileManager.default.fileExists(atPath: mdURL.path),
                 "recommendations.md should be written at \(mdURL.path)")
+
+        // Content assertion: decoding the JSON round-trips the shape and
+        // preserves the episode count so a future regression that writes
+        // an empty / truncated artifact trips the test. `insufficientData`
+        // is the expected dominant state today pre-narl.2 shadow coverage.
+        let jsonData = try Data(contentsOf: jsonURL)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(NarlApprovalReport.self, from: jsonData)
+        try decoded.requireSchema()
+        #expect(decoded.recommendations.count == recs.count,
+                "decoded recommendation count should match source")
+        // Assert at least one recognized decision state appears. Don't
+        // pin to `.insufficientData` specifically — once narl.2 shadow
+        // coverage lands, flips become valid — but require SOMETHING
+        // decodes as a known state, catching a corrupt artifact.
+        if !recs.isEmpty {
+            let knownStates: Set<NarlRecommendationDecision> = [
+                .recommendFlip, .holdOff, .insufficientData
+            ]
+            #expect(decoded.recommendations.allSatisfy { knownStates.contains($0.decision) },
+                    "every decoded recommendation should carry a known decision state")
+        }
     }
 
     /// Find the most-recent `<runId>/` directory under `root` by
