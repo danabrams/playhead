@@ -856,8 +856,17 @@ actor AnalysisWorkScheduler {
                 // own gate (thermal + charging + kill switch) determines
                 // whether the tick does any work; the scheduler treats the
                 // call as fire-and-forget and always sleeps afterward.
+                //
+                // Genuinely fire-and-forget (don't await): with
+                // `laneBCallsPerTick = 2` default, a single idle-tick can
+                // issue up to 2 sequential FM calls (~6s). Awaiting would
+                // delay the T0 job start when the user hits play
+                // mid-Lane-B tick. Capture the handler by value so the
+                // detached task does not close over the scheduler actor.
                 if let shadowLaneTickHandler {
-                    await shadowLaneTickHandler.shadowLaneBTick()
+                    Task { [shadowLaneTickHandler] in
+                        await shadowLaneTickHandler.shadowLaneBTick()
+                    }
                 }
                 await sleepOrWake(seconds: Self.idlePollSeconds)
                 continue
