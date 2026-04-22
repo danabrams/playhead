@@ -229,6 +229,189 @@ struct NarlApprovalPartialCoverageTests {
     }
 }
 
+@Suite("NarlApprovalPolicy – multi-τ AND semantics")
+struct NarlApprovalMultiThresholdTests {
+
+    /// Construct an entry whose precision varies per τ: the episode passes
+    /// the precision gate at τ=0.3/0.5 but regresses at τ=0.7 (boundary-
+    /// sensitive degradation). Single-τ @ 0.5 would miss this; multi-τ
+    /// AND must catch it.
+    private static func makeEntryPerThreshold(
+        episodeId: String,
+        config: String,
+        precisionByTau: [(tau: Double, precision: Double, recall: Double)]
+    ) -> NarlReportEpisodeEntry {
+        let metrics = precisionByTau.map { row in
+            NarlWindowMetricsAtThreshold(
+                threshold: row.tau,
+                truePositives: 1, falsePositives: 0, falseNegatives: 0,
+                precision: row.precision, recall: row.recall, f1: 0,
+                meanMatchedIoU: 1.0
+            )
+        }
+        return NarlReportEpisodeEntry(
+            episodeId: episodeId,
+            podcastId: "podcast-\(episodeId)",
+            show: "TestShow",
+            config: config,
+            isExcluded: false,
+            exclusionReason: nil,
+            groundTruthWindowCount: 1,
+            predictedWindowCount: 1,
+            windowMetrics: metrics,
+            secondLevel: NarlSecondLevelMetrics(
+                truePositiveSeconds: 0, falsePositiveSeconds: 0, falseNegativeSeconds: 0,
+                precision: 0, recall: 0, f1: 0
+            ),
+            lexicalInjectionAdds: 0,
+            priorShiftAdds: 0,
+            hasShadowCoverage: true
+        )
+    }
+
+    @Test("holdOff when precision regresses only at τ=0.7 under multi-τ policy")
+    func boundaryPrecisionRegressionCaughtAtHighTau() {
+        // default: precision 0.80 across all τ. allEnabled: precision
+        // 0.80 at τ=0.3/0.5, drops to 0.60 at τ=0.7 (boundaries got
+        // sloppy). ε = 0.02 → 0.60 fails at τ=0.7.
+        let entries: [NarlReportEpisodeEntry] = [
+            Self.makeEntryPerThreshold(
+                episodeId: "e-boundary", config: "default",
+                precisionByTau: [(0.3, 0.80, 0.70), (0.5, 0.80, 0.70), (0.7, 0.80, 0.70)]
+            ),
+            Self.makeEntryPerThreshold(
+                episodeId: "e-boundary", config: "allEnabled",
+                precisionByTau: [(0.3, 0.80, 0.70), (0.5, 0.80, 0.70), (0.7, 0.60, 0.70)]
+            ),
+        ]
+        let report = NarlEvalReport(
+            schemaVersion: NarlEvalReportSchema.version,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            runId: "multi-tau-run",
+            iouThresholds: [0.3, 0.5, 0.7],
+            rollups: [],
+            episodes: entries,
+            notes: []
+        )
+
+        // Single-τ @ 0.5 misses the regression → would recommend flip.
+        let singleTau = NarlApprovalPolicy(
+            precisionEpsilon: 0.02,
+            requireShadowCoverage: true,
+            iouThreshold: 0.5
+        )
+        let singleRec = NarlApprovalPolicyEvaluator.evaluate(report: report, policy: singleTau)[0]
+        #expect(singleRec.decision == .recommendFlip,
+                "single-τ @ 0.5 should not see the τ=0.7 boundary regression")
+
+        // Multi-τ AND catches it and names τ=0.7 as the failure axis.
+        let multiTau = NarlApprovalPolicy(
+            precisionEpsilon: 0.02,
+            requireShadowCoverage: true,
+            iouThresholds: [0.3, 0.5, 0.7]
+        )
+        let multiRec = NarlApprovalPolicyEvaluator.evaluate(report: report, policy: multiTau)[0]
+        #expect(multiRec.decision == .holdOff)
+        #expect(multiRec.reasoning.contains("τ=0.70"),
+                "reasoning should name the failing threshold; got: \(multiRec.reasoning)")
+        #expect(multiRec.reasoning.contains("precision regressed"))
+        #expect(multiRec.precisionCheckPassed == false)
+        // Recall held at every τ, so the aggregate recall flag remains true.
+        #expect(multiRec.recallCheckPassed == true)
+    }
+
+    @Test("recommendFlip when every τ passes under multi-τ policy")
+    func multiTauAllPass() {
+        let entries: [NarlReportEpisodeEntry] = [
+            Self.makeEntryPerThreshold(
+                episodeId: "e-pass", config: "default",
+                precisionByTau: [(0.3, 0.80, 0.70), (0.5, 0.80, 0.70), (0.7, 0.80, 0.70)]
+            ),
+            Self.makeEntryPerThreshold(
+                episodeId: "e-pass", config: "allEnabled",
+                precisionByTau: [(0.3, 0.82, 0.72), (0.5, 0.79, 0.72), (0.7, 0.78, 0.72)]
+            ),
+        ]
+        let report = NarlEvalReport(
+            schemaVersion: NarlEvalReportSchema.version,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            runId: "multi-tau-run",
+            iouThresholds: [0.3, 0.5, 0.7],
+            rollups: [],
+            episodes: entries,
+            notes: []
+        )
+        // .default policy uses multi-τ [0.3, 0.5, 0.7].
+        let rec = NarlApprovalPolicyEvaluator.evaluate(report: report, policy: .default)[0]
+        #expect(rec.decision == .recommendFlip)
+        #expect(rec.reasoning.contains("flip ok"))
+        #expect(rec.recallCheckPassed == true)
+        #expect(rec.precisionCheckPassed == true)
+    }
+
+    @Test("Mixed failure: recall fails at τ=0.3, precision fails at τ=0.7")
+    func mixedFailureNamesBothAxes() {
+        // default: precision 0.80, recall 0.70 across τ.
+        // allEnabled: recall 0.60 at τ=0.3 (recall regression),
+        //              precision 0.60 at τ=0.7 (precision regression),
+        //              normal at τ=0.5.
+        let entries: [NarlReportEpisodeEntry] = [
+            Self.makeEntryPerThreshold(
+                episodeId: "e-mixed", config: "default",
+                precisionByTau: [(0.3, 0.80, 0.70), (0.5, 0.80, 0.70), (0.7, 0.80, 0.70)]
+            ),
+            Self.makeEntryPerThreshold(
+                episodeId: "e-mixed", config: "allEnabled",
+                precisionByTau: [(0.3, 0.80, 0.60), (0.5, 0.80, 0.70), (0.7, 0.60, 0.70)]
+            ),
+        ]
+        let report = NarlEvalReport(
+            schemaVersion: NarlEvalReportSchema.version,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            runId: "multi-tau-run",
+            iouThresholds: [0.3, 0.5, 0.7],
+            rollups: [],
+            episodes: entries,
+            notes: []
+        )
+        let rec = NarlApprovalPolicyEvaluator.evaluate(report: report, policy: .default)[0]
+        #expect(rec.decision == .holdOff)
+        #expect(rec.reasoning.contains("τ=0.30"), "got: \(rec.reasoning)")
+        #expect(rec.reasoning.contains("τ=0.70"), "got: \(rec.reasoning)")
+        #expect(rec.reasoning.contains("recall regressed"))
+        #expect(rec.reasoning.contains("precision regressed"))
+        // Aggregate flags: at least one τ failed each axis → both false.
+        #expect(rec.recallCheckPassed == false)
+        #expect(rec.precisionCheckPassed == false)
+    }
+
+    @Test("Single-τ convenience initializer round-trips through iouThreshold accessor")
+    func singleTauInitRoundTrip() {
+        let policy = NarlApprovalPolicy(
+            precisionEpsilon: 0.02,
+            requireShadowCoverage: true,
+            iouThreshold: 0.6
+        )
+        #expect(policy.iouThresholds == [0.6])
+        #expect(policy.iouThreshold == 0.6)
+    }
+
+    @Test("Legacy single-τ Codable payload decodes into iouThresholds")
+    func legacySingleTauDecodes() throws {
+        let legacyJSON = #"""
+        {
+          "precisionEpsilon": 0.02,
+          "requireShadowCoverage": true,
+          "iouThreshold": 0.5
+        }
+        """#
+        let data = try #require(legacyJSON.data(using: .utf8))
+        let decoded = try JSONDecoder().decode(NarlApprovalPolicy.self, from: data)
+        #expect(decoded.iouThresholds == [0.5])
+        #expect(decoded.iouThreshold == 0.5)
+    }
+}
+
 @Suite("NarlApprovalPolicy – aggregation & ordering")
 struct NarlApprovalAggregationTests {
 

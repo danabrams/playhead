@@ -38,17 +38,91 @@ struct NarlApprovalPolicy: Sendable, Codable, Equatable {
     /// recommendation is untrustworthy.
     let requireShadowCoverage: Bool
 
-    /// Which IoU threshold's window-level metrics drive the rule. The harness
-    /// emits τ ∈ {0.3, 0.5, 0.7}. The bead spec doesn't pin a single τ; we
-    /// default to 0.5 (standard PASCAL VOC) which balances "did the window
-    /// exist" (low τ) with "were boundaries clean" (high τ).
-    let iouThreshold: Double
+    /// Which IoU thresholds' window-level metrics drive the rule. AND
+    /// semantics: a `recommendFlip` requires every listed τ to pass the
+    /// (recall, precision − ε) gate. The default `[0.3, 0.5, 0.7]` mirrors
+    /// the harness §A.5 emission so a boundary-precision regression visible
+    /// only at τ=0.7 can't slip through a single-τ recommendation.
+    let iouThresholds: [Double]
+
+    /// Convenience accessor for a single-τ caller / legacy reader. Returns
+    /// the first threshold — useful for dashboards that pin one value. The
+    /// policy evaluator itself always walks the full `iouThresholds` array.
+    var iouThreshold: Double {
+        iouThresholds.first ?? 0.5
+    }
 
     static let `default` = NarlApprovalPolicy(
         precisionEpsilon: 0.02,
         requireShadowCoverage: true,
-        iouThreshold: 0.5
+        iouThresholds: [0.3, 0.5, 0.7]
     )
+
+    init(
+        precisionEpsilon: Double,
+        requireShadowCoverage: Bool,
+        iouThresholds: [Double]
+    ) {
+        precondition(!iouThresholds.isEmpty, "iouThresholds must have at least one τ")
+        self.precisionEpsilon = precisionEpsilon
+        self.requireShadowCoverage = requireShadowCoverage
+        self.iouThresholds = iouThresholds
+    }
+
+    /// Single-τ convenience initializer. Equivalent to passing
+    /// `iouThresholds: [iouThreshold]`; kept so existing callers (and
+    /// anyone preferring the one-τ story for a narrow evaluation) don't
+    /// need to allocate a one-element array.
+    init(
+        precisionEpsilon: Double,
+        requireShadowCoverage: Bool,
+        iouThreshold: Double
+    ) {
+        self.init(
+            precisionEpsilon: precisionEpsilon,
+            requireShadowCoverage: requireShadowCoverage,
+            iouThresholds: [iouThreshold]
+        )
+    }
+
+    // MARK: - Codable (backwards-compat)
+
+    private enum CodingKeys: String, CodingKey {
+        case precisionEpsilon
+        case requireShadowCoverage
+        case iouThresholds
+        case iouThreshold  // legacy single-τ field
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.precisionEpsilon = try c.decode(Double.self, forKey: .precisionEpsilon)
+        self.requireShadowCoverage = try c.decode(Bool.self, forKey: .requireShadowCoverage)
+        // Prefer the multi-τ array; fall back to the legacy single-τ
+        // scalar so previously-persisted `recommendations.json` artifacts
+        // still decode cleanly.
+        if let taus = try c.decodeIfPresent([Double].self, forKey: .iouThresholds) {
+            precondition(!taus.isEmpty, "iouThresholds must have at least one τ")
+            self.iouThresholds = taus
+        } else if let tau = try c.decodeIfPresent(Double.self, forKey: .iouThreshold) {
+            self.iouThresholds = [tau]
+        } else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.iouThresholds,
+                DecodingError.Context(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "missing both iouThresholds and legacy iouThreshold"
+                )
+            )
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(precisionEpsilon, forKey: .precisionEpsilon)
+        try c.encode(requireShadowCoverage, forKey: .requireShadowCoverage)
+        try c.encode(iouThresholds, forKey: .iouThresholds)
+    }
 }
 
 // MARK: - Recommendation types
@@ -201,40 +275,57 @@ enum NarlApprovalPolicyEvaluator {
             )
         }
 
-        // Fetch the metric row for the chosen τ. Missing τ (shouldn't happen
-        // with a well-formed harness report, but be defensive) → insufficientData.
-        guard let defMetrics = entryMetric(def, tau: policy.iouThreshold),
-              let allMetrics = entryMetric(all, tau: policy.iouThreshold)
-        else {
-            return NarlRecommendation(
-                episodeId: episodeId,
-                podcastId: def.podcastId,
-                show: def.show,
-                decision: .insufficientData,
-                reasoning: "harness did not emit τ=\(policy.iouThreshold) window metrics",
-                defaultRecall: nil, allEnabledRecall: nil,
-                defaultPrecision: nil, allEnabledPrecision: nil,
-                hasShadowCoverage: hasShadow,
-                thresholdTau: policy.iouThreshold,
-                recallCheckPassed: nil,
-                precisionCheckPassed: nil
-            )
+        // Multi-τ AND: fetch metrics for every listed threshold; a
+        // missing τ row renders the whole evaluation insufficient (be
+        // defensive against a malformed harness report).
+        var perTau: [(tau: Double, def: NarlWindowMetricsAtThreshold, all: NarlWindowMetricsAtThreshold)] = []
+        for tau in policy.iouThresholds {
+            guard let d = entryMetric(def, tau: tau),
+                  let a = entryMetric(all, tau: tau) else {
+                return NarlRecommendation(
+                    episodeId: episodeId,
+                    podcastId: def.podcastId,
+                    show: def.show,
+                    decision: .insufficientData,
+                    reasoning: "harness did not emit τ=\(tau) window metrics",
+                    defaultRecall: nil, allEnabledRecall: nil,
+                    defaultPrecision: nil, allEnabledPrecision: nil,
+                    hasShadowCoverage: hasShadow,
+                    thresholdTau: tau,
+                    recallCheckPassed: nil,
+                    precisionCheckPassed: nil
+                )
+            }
+            perTau.append((tau, d, a))
         }
 
-        let recallOK = allMetrics.recall >= defMetrics.recall
-        let precisionOK = allMetrics.precision >= defMetrics.precision - policy.precisionEpsilon
-        let decision: NarlRecommendationDecision = (recallOK && precisionOK) ? .recommendFlip : .holdOff
+        // Per-τ checks. AND across all thresholds: a single τ failure
+        // drops the recommendation to holdOff. Collect failures so the
+        // reasoning string can name which τ(s) blocked the flip.
+        var failures: [(tau: Double, recallOK: Bool, precisionOK: Bool)] = []
+        var allRecallOK = true
+        var allPrecisionOK = true
+        for row in perTau {
+            let recallOK = row.all.recall >= row.def.recall
+            let precisionOK = row.all.precision >= row.def.precision - policy.precisionEpsilon
+            if !recallOK { allRecallOK = false }
+            if !precisionOK { allPrecisionOK = false }
+            if !(recallOK && precisionOK) {
+                failures.append((row.tau, recallOK, precisionOK))
+            }
+        }
+        let decision: NarlRecommendationDecision = failures.isEmpty ? .recommendFlip : .holdOff
 
-        let reasoning = formatReasoning(
+        // Use the primary τ (first in the list) to populate the numeric
+        // columns on the recommendation — this keeps the existing single-τ
+        // reporting surface stable; the full multi-τ story lives in the
+        // reasoning string.
+        let primary = perTau[0]
+        let reasoning = formatMultiTauReasoning(
             decision: decision,
-            defRecall: defMetrics.recall,
-            allRecall: allMetrics.recall,
-            defPrecision: defMetrics.precision,
-            allPrecision: allMetrics.precision,
-            epsilon: policy.precisionEpsilon,
-            tau: policy.iouThreshold,
-            recallOK: recallOK,
-            precisionOK: precisionOK
+            perTau: perTau,
+            failures: failures,
+            epsilon: policy.precisionEpsilon
         )
 
         return NarlRecommendation(
@@ -243,14 +334,14 @@ enum NarlApprovalPolicyEvaluator {
             show: def.show,
             decision: decision,
             reasoning: reasoning,
-            defaultRecall: defMetrics.recall,
-            allEnabledRecall: allMetrics.recall,
-            defaultPrecision: defMetrics.precision,
-            allEnabledPrecision: allMetrics.precision,
+            defaultRecall: primary.def.recall,
+            allEnabledRecall: primary.all.recall,
+            defaultPrecision: primary.def.precision,
+            allEnabledPrecision: primary.all.precision,
             hasShadowCoverage: hasShadow,
-            thresholdTau: policy.iouThreshold,
-            recallCheckPassed: recallOK,
-            precisionCheckPassed: precisionOK
+            thresholdTau: primary.tau,
+            recallCheckPassed: allRecallOK,
+            precisionCheckPassed: allPrecisionOK
         )
     }
 
@@ -263,33 +354,44 @@ enum NarlApprovalPolicyEvaluator {
         return entry.windowMetrics.first(where: { abs($0.threshold - tau) < 1e-6 })
     }
 
-    private static func formatReasoning(
+    /// Compose the reasoning string for a multi-τ evaluation. When the
+    /// decision is `.holdOff`, the string names which τ(s) failed and how
+    /// (recall vs precision) so a mixed-result episode is auditable without
+    /// cross-referencing the numeric columns.
+    private static func formatMultiTauReasoning(
         decision: NarlRecommendationDecision,
-        defRecall: Double,
-        allRecall: Double,
-        defPrecision: Double,
-        allPrecision: Double,
-        epsilon: Double,
-        tau: Double,
-        recallOK: Bool,
-        precisionOK: Bool
+        perTau: [(tau: Double, def: NarlWindowMetricsAtThreshold, all: NarlWindowMetricsAtThreshold)],
+        failures: [(tau: Double, recallOK: Bool, precisionOK: Bool)],
+        epsilon: Double
     ) -> String {
         let prefix: String
         switch decision {
-        case .recommendFlip: prefix = "flip ok"
+        case .recommendFlip:
+            prefix = "flip ok"
         case .holdOff:
-            var failures: [String] = []
-            if !recallOK { failures.append("recall regressed") }
-            if !precisionOK { failures.append("precision regressed beyond ε") }
-            prefix = "hold off: " + failures.joined(separator: "; ")
-        case .insufficientData: prefix = "insufficient data"
+            // Name each failed τ with the axis that tripped it. Keeps the
+            // reasoning string scannable for multi-τ AND policies.
+            let parts = failures.map { f -> String in
+                var axes: [String] = []
+                if !f.recallOK { axes.append("recall regressed") }
+                if !f.precisionOK { axes.append("precision regressed beyond ε") }
+                let axisStr = axes.isEmpty ? "unknown failure" : axes.joined(separator: ", ")
+                return String(format: "τ=%.2f %@", f.tau, axisStr)
+            }
+            prefix = "hold off: " + parts.joined(separator: "; ")
+        case .insufficientData:
+            prefix = "insufficient data"
         }
-        return String(
-            format: "%@ @ τ=%.2f: recall %.3f→%.3f, precision %.3f→%.3f (ε=%.3f)",
-            prefix, tau,
-            defRecall, allRecall,
-            defPrecision, allPrecision,
-            epsilon
-        )
+        // Append per-τ numeric detail so readers don't have to read two
+        // fields to reconstruct the decision.
+        let detail = perTau.map { row in
+            String(
+                format: "τ=%.2f: recall %.3f→%.3f, precision %.3f→%.3f",
+                row.tau,
+                row.def.recall, row.all.recall,
+                row.def.precision, row.all.precision
+            )
+        }.joined(separator: " | ")
+        return String(format: "%@ (ε=%.3f) — %@", prefix, epsilon, detail)
     }
 }

@@ -85,7 +85,8 @@ enum NarlApprovalRenderer {
         out += "## Policy\n\n"
         out += "- precisionEpsilon: \(fmt(report.policy.precisionEpsilon))\n"
         out += "- requireShadowCoverage: \(report.policy.requireShadowCoverage)\n"
-        out += "- iouThreshold: \(fmt(report.policy.iouThreshold))\n\n"
+        let tauList = report.policy.iouThresholds.map(fmt).joined(separator: ", ")
+        out += "- iouThresholds: [\(tauList)]\n\n"
 
         out += "## Summary\n\n"
         out += "- recommendFlip: \(report.summary.recommendFlip)\n"
