@@ -1,0 +1,26 @@
+{
+  "episodeId": "conan-ep-002",
+  "podcastId": "simplecast:conan-needs-a-friend",
+  "episodeDuration": 2700.0,
+  "traceVersion": "frozen-trace-v2",
+  "capturedAt": "2026-04-22T14:15:00Z",
+  "showLabel": "Conan",
+  "holdoutDesignation": "training",
+  "featureWindows": [],
+  "atoms": [
+    { "startTime": 0.0,    "endTime": 60.0,   "text": "cold open" },
+    { "startTime": 60.0,   "endTime": 2700.0, "text": "full episode body" }
+  ],
+  "evidenceCatalog": [],
+  "corrections": [
+    {
+      "source": "listenRevert",
+      "scope": "exactSpan:conan-ep-002:0:9223372036854775807",
+      "createdAt": 773521100.0,
+      "correctionType": null
+    }
+  ],
+  "decisionEvents": [],
+  "baselineReplaySpanDecisions": [],
+  "windowScores": []
+}

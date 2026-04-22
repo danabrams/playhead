@@ -101,6 +101,7 @@ struct CorpusExporterTests {
         // tooling needs the key set stable across records so it can coerce columns.
         for key in [
             "weakFingerprint",
+            "podcastId",
             "featureCoverageEndTime",
             "fastTranscriptCoverageEndTime",
             "confirmedAdCoverageEndTime",
@@ -108,6 +109,14 @@ struct CorpusExporterTests {
             #expect(json.keys.contains(key), "\(key) must be present as a key")
             #expect(json[key] is NSNull, "\(key) must serialize as null for a minimal asset, not omitted or empty-string")
         }
+    }
+
+    @Test("asset record carries podcastId when threaded through from the store (HIGH-3)")
+    func assetRecordPodcastIdPassthrough() throws {
+        let asset = makeTestAsset(id: "asset-H3")
+        let data = try CorpusExporter.assetLine(asset, podcastId: "pod-abc-123")
+        let json = try decodeJSONObject(from: data)
+        #expect(json["podcastId"] as? String == "pod-abc-123")
     }
 
     // MARK: - Decision record (DecodedSpan)
@@ -654,6 +663,13 @@ private struct FailingSource: CorpusExportSource {
             throw SimulatedSQLError(method: "loadCorrectionEvents", assetId: analysisAssetId)
         }
         return events[analysisAssetId] ?? []
+    }
+
+    /// `FailingSource` doesn't model podcastId lookups — the exporter
+    /// tolerates `nil` (emits JSON null) so returning nil here exercises
+    /// the "podcastId absent" JSONL path.
+    func fetchPodcastId(forEpisodeId episodeId: String) async throws -> String? {
+        return nil
     }
 }
 

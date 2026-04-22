@@ -56,3 +56,6 @@ Package.resolved
 
 # Wizard round archive — cached locally, never committed
 .wizard-archive/
+
+# narl eval harness output (reports, trend log) — regenerated per run
+.eval-out/

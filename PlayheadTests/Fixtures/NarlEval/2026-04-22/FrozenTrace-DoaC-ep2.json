@@ -1,0 +1,39 @@
+{
+  "episodeId": "doac-ep-002",
+  "podcastId": "flightcast:diary-of-a-ceo",
+  "episodeDuration": 1800.0,
+  "traceVersion": "frozen-trace-v2",
+  "capturedAt": "2026-04-22T14:05:00Z",
+  "showLabel": "DoaC",
+  "holdoutDesignation": "training",
+  "featureWindows": [],
+  "atoms": [
+    { "startTime": 0.0,    "endTime": 400.0,  "text": "first guest segment" },
+    { "startTime": 400.0,  "endTime": 440.0,  "text": "first ad read for uppercut boxing" },
+    { "startTime": 440.0,  "endTime": 900.0,  "text": "second guest segment" },
+    { "startTime": 900.0,  "endTime": 960.0,  "text": "missed sponsorship segment" },
+    { "startTime": 960.0,  "endTime": 1800.0, "text": "closing" }
+  ],
+  "evidenceCatalog": [
+    { "source": "metadata", "weight": 0.6, "windowStart": 400.0, "windowEnd": 440.0, "classificationTrust": 0.14 }
+  ],
+  "corrections": [
+    {
+      "source": "reportMissedAd",
+      "scope": "exactTimeSpan:doac-ep-002:900.000:960.000",
+      "createdAt": 773520400.0,
+      "correctionType": "falseNegative"
+    }
+  ],
+  "decisionEvents": [
+    { "windowId": "w-400", "proposalConfidence": 0.68, "skipConfidence": 0.68, "eligibilityGate": "passed", "policyAction": "autoskip", "explanationJSON": null }
+  ],
+  "baselineReplaySpanDecisions": [
+    { "startTime": 400.0, "endTime": 440.0, "confidence": 0.68, "isAd": true, "sourceTag": "baseline" }
+  ],
+  "windowScores": [
+    { "windowStart": 400.0, "windowEnd": 440.0, "fusedSkipConfidence": 0.68, "classificationTrust": 0.14, "hasMetadataEvidence": true,  "isAdUnderDefault": true  },
+    { "windowStart": 900.0, "windowEnd": 930.0, "fusedSkipConfidence": 0.12, "classificationTrust": 0.0,  "hasMetadataEvidence": false, "isAdUnderDefault": false },
+    { "windowStart": 930.0, "windowEnd": 960.0, "fusedSkipConfidence": 0.14, "classificationTrust": 0.0,  "hasMetadataEvidence": false, "isAdUnderDefault": false }
+  ]
+}

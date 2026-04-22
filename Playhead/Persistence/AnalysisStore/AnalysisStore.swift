@@ -2573,6 +2573,34 @@ actor AnalysisStore {
         }
         return results
     }
+
+    /// Debug-only: look up the `podcastId` recorded for an episode in the
+    /// `analysis_jobs` table. Returns `nil` when no job row exists or when
+    /// the stored `podcastId` is NULL. The `analysis_jobs` row is the only
+    /// table that reliably carries podcastId for a given episodeId (the
+    /// `analysis_assets` table was never given that column), so the export
+    /// path queries it for show-level grouping downstream (playhead-narl.1
+    /// HIGH-3). Newest row wins if multiple jobs exist for the same episode
+    /// — in practice distinct podcastIds for the same episode would be a
+    /// data anomaly, not a real case.
+    ///
+    /// Debug-only: like `fetchAllAssets`, this is only intended for corpus
+    /// export and the test harness. Production callers should not depend
+    /// on it.
+    func fetchPodcastId(forEpisodeId episodeId: String) throws -> String? {
+        let sql = """
+            SELECT podcastId
+            FROM analysis_jobs
+            WHERE episodeId = ? AND podcastId IS NOT NULL
+            ORDER BY createdAt DESC, rowid DESC
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, episodeId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return optionalText(stmt, 0)
+    }
 #endif
 
     func updateAssetState(id: String, state: String) throws {

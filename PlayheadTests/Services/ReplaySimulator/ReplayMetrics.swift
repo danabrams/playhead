@@ -632,8 +632,19 @@ struct ReplaySpanDecision: Sendable, Codable, Equatable {
 /// Canonical serializable artifact capturing a complete episode analysis trace.
 /// Used for offline counterfactual evaluation: replay a new pipeline configuration
 /// against the same inputs and diff the resulting ReplaySpanDecisions.
+///
+/// Schema history:
+///   - `frozen-trace-v1`: original capture shape. Added fields on sub-types had
+///     no `classificationTrust`, `correctionType`, or per-window scoring.
+///   - `frozen-trace-v2` (playhead-narl.1 review): adds
+///     `FrozenEvidenceEntry.classificationTrust`,
+///     `FrozenCorrection.correctionType`, and `windowScores` (per-window
+///     fused skip confidence + classificationTrust, needed for an honest
+///     replay of the `MetadataPriorShift` + lexical-injection gate logic).
+///     All new fields decode as optional to preserve forward/backward
+///     compatibility with `frozen-trace-v1` fixtures.
 struct FrozenTrace: Sendable, Codable {
-    static let currentTraceVersion = "frozen-trace-v1"
+    static let currentTraceVersion = "frozen-trace-v2"
 
     let episodeId: String
     let podcastId: String
@@ -655,6 +666,107 @@ struct FrozenTrace: Sendable, Codable {
     let baselineReplaySpanDecisions: [ReplaySpanDecision]
     /// Whether this trace is held out from calibrator training.
     let holdoutDesignation: HoldoutDesignation
+    /// Per-window replay inputs: fused skip confidence + classificationTrust,
+    /// used by the narl counterfactual replay to faithfully model the
+    /// `MetadataPriorShift` gate and lexical-injection boost. Empty array is
+    /// a valid default when the capture didn't persist per-window decisions.
+    /// (Added in `frozen-trace-v2`; defaults to `[]` when absent.)
+    let windowScores: [FrozenWindowScore]
+    /// Optional human-readable show label (e.g. "DoaC", "Conan"). Capture
+    /// writes the mapped label when known so the harness doesn't need to
+    /// heuristically match on podcastId substrings. Absent = fall back to
+    /// podcastId-based lookup in `NarlShowLabels.json`.
+    /// (Added in `frozen-trace-v2`.)
+    let showLabel: String?
+
+    init(
+        episodeId: String,
+        podcastId: String,
+        episodeDuration: Double,
+        traceVersion: String,
+        capturedAt: Date,
+        featureWindows: [FrozenFeatureWindow],
+        atoms: [FrozenAtom],
+        evidenceCatalog: [FrozenEvidenceEntry],
+        corrections: [FrozenCorrection],
+        decisionEvents: [FrozenDecisionEvent],
+        baselineReplaySpanDecisions: [ReplaySpanDecision],
+        holdoutDesignation: HoldoutDesignation,
+        windowScores: [FrozenWindowScore] = [],
+        showLabel: String? = nil
+    ) {
+        self.episodeId = episodeId
+        self.podcastId = podcastId
+        self.episodeDuration = episodeDuration
+        self.traceVersion = traceVersion
+        self.capturedAt = capturedAt
+        self.featureWindows = featureWindows
+        self.atoms = atoms
+        self.evidenceCatalog = evidenceCatalog
+        self.corrections = corrections
+        self.decisionEvents = decisionEvents
+        self.baselineReplaySpanDecisions = baselineReplaySpanDecisions
+        self.holdoutDesignation = holdoutDesignation
+        self.windowScores = windowScores
+        self.showLabel = showLabel
+    }
+
+    // MARK: - Codable (manual to keep new fields optional)
+
+    private enum CodingKeys: String, CodingKey {
+        case episodeId
+        case podcastId
+        case episodeDuration
+        case traceVersion
+        case capturedAt
+        case featureWindows
+        case atoms
+        case evidenceCatalog
+        case corrections
+        case decisionEvents
+        case baselineReplaySpanDecisions
+        case holdoutDesignation
+        case windowScores
+        case showLabel
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            episodeId: try c.decode(String.self, forKey: .episodeId),
+            podcastId: try c.decode(String.self, forKey: .podcastId),
+            episodeDuration: try c.decode(Double.self, forKey: .episodeDuration),
+            traceVersion: try c.decode(String.self, forKey: .traceVersion),
+            capturedAt: try c.decode(Date.self, forKey: .capturedAt),
+            featureWindows: try c.decodeIfPresent([FrozenFeatureWindow].self, forKey: .featureWindows) ?? [],
+            atoms: try c.decodeIfPresent([FrozenAtom].self, forKey: .atoms) ?? [],
+            evidenceCatalog: try c.decodeIfPresent([FrozenEvidenceEntry].self, forKey: .evidenceCatalog) ?? [],
+            corrections: try c.decodeIfPresent([FrozenCorrection].self, forKey: .corrections) ?? [],
+            decisionEvents: try c.decodeIfPresent([FrozenDecisionEvent].self, forKey: .decisionEvents) ?? [],
+            baselineReplaySpanDecisions: try c.decodeIfPresent([ReplaySpanDecision].self, forKey: .baselineReplaySpanDecisions) ?? [],
+            holdoutDesignation: try c.decode(HoldoutDesignation.self, forKey: .holdoutDesignation),
+            windowScores: try c.decodeIfPresent([FrozenWindowScore].self, forKey: .windowScores) ?? [],
+            showLabel: try c.decodeIfPresent(String.self, forKey: .showLabel)
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(episodeId, forKey: .episodeId)
+        try c.encode(podcastId, forKey: .podcastId)
+        try c.encode(episodeDuration, forKey: .episodeDuration)
+        try c.encode(traceVersion, forKey: .traceVersion)
+        try c.encode(capturedAt, forKey: .capturedAt)
+        try c.encode(featureWindows, forKey: .featureWindows)
+        try c.encode(atoms, forKey: .atoms)
+        try c.encode(evidenceCatalog, forKey: .evidenceCatalog)
+        try c.encode(corrections, forKey: .corrections)
+        try c.encode(decisionEvents, forKey: .decisionEvents)
+        try c.encode(baselineReplaySpanDecisions, forKey: .baselineReplaySpanDecisions)
+        try c.encode(holdoutDesignation, forKey: .holdoutDesignation)
+        try c.encode(windowScores, forKey: .windowScores)
+        try c.encodeIfPresent(showLabel, forKey: .showLabel)
+    }
 
     /// Return a copy with a different holdout designation.
     /// Centralizes the copy logic so new fields don't get silently dropped.
@@ -671,7 +783,9 @@ struct FrozenTrace: Sendable, Codable {
             corrections: corrections,
             decisionEvents: decisionEvents,
             baselineReplaySpanDecisions: baselineReplaySpanDecisions,
-            holdoutDesignation: designation
+            holdoutDesignation: designation,
+            windowScores: windowScores,
+            showLabel: showLabel
         )
     }
 
@@ -691,17 +805,84 @@ struct FrozenTrace: Sendable, Codable {
         let text: String
     }
 
+    /// Per-source evidence entry with (v2) per-window classificationTrust.
+    /// `classificationTrust` is what the production
+    /// `EvidenceLedgerEntry.classificationTrust` carried at capture time —
+    /// 0.0 when absent (e.g. sources that don't score metadata trust).
     struct FrozenEvidenceEntry: Sendable, Codable {
         let source: String
         let weight: Double
         let windowStart: Double
         let windowEnd: Double
+        /// v2: classificationTrust at decision time. Absent = 0.0.
+        let classificationTrust: Double
+
+        init(
+            source: String,
+            weight: Double,
+            windowStart: Double,
+            windowEnd: Double,
+            classificationTrust: Double = 0.0
+        ) {
+            self.source = source
+            self.weight = weight
+            self.windowStart = windowStart
+            self.windowEnd = windowEnd
+            self.classificationTrust = classificationTrust
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case source, weight, windowStart, windowEnd, classificationTrust
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(
+                source: try c.decode(String.self, forKey: .source),
+                weight: try c.decode(Double.self, forKey: .weight),
+                windowStart: try c.decode(Double.self, forKey: .windowStart),
+                windowEnd: try c.decode(Double.self, forKey: .windowEnd),
+                classificationTrust: try c.decodeIfPresent(Double.self, forKey: .classificationTrust) ?? 0.0
+            )
+        }
     }
 
+    /// User correction. `correctionType` carries the production
+    /// `CorrectionType.rawValue` verbatim (v2); when present, the harness
+    /// prefers it over the heuristic `source`-substring classifier.
     struct FrozenCorrection: Sendable, Codable {
         let source: String
         let scope: String
         let createdAt: Double
+        /// v2: raw value of production `CorrectionType` (e.g. "falsePositive",
+        /// "falseNegative", "startTooEarly"). Absent on v1 fixtures.
+        let correctionType: String?
+
+        init(
+            source: String,
+            scope: String,
+            createdAt: Double,
+            correctionType: String? = nil
+        ) {
+            self.source = source
+            self.scope = scope
+            self.createdAt = createdAt
+            self.correctionType = correctionType
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case source, scope, createdAt, correctionType
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(
+                source: try c.decode(String.self, forKey: .source),
+                scope: try c.decode(String.self, forKey: .scope),
+                createdAt: try c.decode(Double.self, forKey: .createdAt),
+                correctionType: try c.decodeIfPresent(String.self, forKey: .correctionType)
+            )
+        }
     }
 
     struct FrozenDecisionEvent: Sendable, Codable {
@@ -712,6 +893,32 @@ struct FrozenTrace: Sendable, Codable {
         let policyAction: String
         /// Serialized explanation from DecisionExplanation system (ef2.1.4).
         let explanationJSON: String?
+    }
+
+    /// Per-window replay input: fused skip confidence + classificationTrust
+    /// at decision time, with a flag for metadata presence. Captured from
+    /// the production decision-log (one row per sliding detection window).
+    /// The predictor iterates these to model the prior-shift + lexical-
+    /// injection gate transitions under `.allEnabled`.
+    /// (Introduced in `frozen-trace-v2` for playhead-narl.1.)
+    struct FrozenWindowScore: Sendable, Codable, Equatable {
+        let windowStart: Double
+        let windowEnd: Double
+        /// Post-fusion skip confidence at capture time (under `.default`).
+        let fusedSkipConfidence: Double
+        /// Max classificationTrust across ledger entries for this window —
+        /// matches the aggregate metadataTrust scalar that
+        /// `MetadataPriorShift.isShiftActive(metadataTrust:)` consumes in
+        /// production. Sources that don't score trust contribute 0.
+        let classificationTrust: Double
+        /// Whether the episode metadata injector would have contributed
+        /// to this window — true iff the window has any source="metadata"
+        /// ledger entry OR a metadata-origin lexicon boost. Used by the
+        /// replay to know where lexical injection could have fired.
+        let hasMetadataEvidence: Bool
+        /// Whether the capture's `.default` path marked this window as an ad
+        /// (post-gate). Replayed `.default` predictions rely on this.
+        let isAdUnderDefault: Bool
     }
 }
 

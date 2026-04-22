@@ -1,0 +1,41 @@
+{
+  "episodeId": "doac-ep-001",
+  "podcastId": "flightcast:diary-of-a-ceo",
+  "episodeDuration": 2400.0,
+  "traceVersion": "frozen-trace-v2",
+  "capturedAt": "2026-04-22T14:00:00Z",
+  "showLabel": "DoaC",
+  "holdoutDesignation": "training",
+  "featureWindows": [],
+  "atoms": [
+    { "startTime": 0.0,    "endTime": 60.0,   "text": "cold open" },
+    { "startTime": 60.0,   "endTime": 200.0,  "text": "intro banter" },
+    { "startTime": 200.0,  "endTime": 260.0,  "text": "sponsor message visit masterclass dot com" },
+    { "startTime": 260.0,  "endTime": 1200.0, "text": "interview body" },
+    { "startTime": 1200.0, "endTime": 1260.0, "text": "mid-roll promo snippet" },
+    { "startTime": 1260.0, "endTime": 2400.0, "text": "tail segment" }
+  ],
+  "evidenceCatalog": [
+    { "source": "metadata", "weight": 0.7, "windowStart": 200.0, "windowEnd": 260.0, "classificationTrust": 0.18 },
+    { "source": "lexical",  "weight": 0.6, "windowStart": 200.0, "windowEnd": 260.0, "classificationTrust": 0.0 },
+    { "source": "metadata", "weight": 0.5, "windowStart": 1200.0, "windowEnd": 1260.0, "classificationTrust": 0.15 }
+  ],
+  "corrections": [],
+  "decisionEvents": [
+    { "windowId": "w-200", "proposalConfidence": 0.72, "skipConfidence": 0.72, "eligibilityGate": "passed", "policyAction": "autoskip", "explanationJSON": null },
+    { "windowId": "w-1200", "proposalConfidence": 0.24, "skipConfidence": 0.24, "eligibilityGate": "borderline", "policyAction": "suppress", "explanationJSON": null }
+  ],
+  "baselineReplaySpanDecisions": [
+    { "startTime": 200.0,  "endTime": 260.0,  "confidence": 0.72, "isAd": true,  "sourceTag": "baseline" },
+    { "startTime": 1200.0, "endTime": 1260.0, "confidence": 0.24, "isAd": false, "sourceTag": "baseline" }
+  ],
+  "windowScores": [
+    { "windowStart": 0.0,    "windowEnd": 30.0,   "fusedSkipConfidence": 0.05, "classificationTrust": 0.0,  "hasMetadataEvidence": false, "isAdUnderDefault": false },
+    { "windowStart": 200.0,  "windowEnd": 230.0,  "fusedSkipConfidence": 0.71, "classificationTrust": 0.18, "hasMetadataEvidence": true,  "isAdUnderDefault": true  },
+    { "windowStart": 230.0,  "windowEnd": 260.0,  "fusedSkipConfidence": 0.73, "classificationTrust": 0.18, "hasMetadataEvidence": true,  "isAdUnderDefault": true  },
+    { "windowStart": 600.0,  "windowEnd": 630.0,  "fusedSkipConfidence": 0.10, "classificationTrust": 0.0,  "hasMetadataEvidence": false, "isAdUnderDefault": false },
+    { "windowStart": 1200.0, "windowEnd": 1230.0, "fusedSkipConfidence": 0.24, "classificationTrust": 0.15, "hasMetadataEvidence": true,  "isAdUnderDefault": false },
+    { "windowStart": 1230.0, "windowEnd": 1260.0, "fusedSkipConfidence": 0.23, "classificationTrust": 0.15, "hasMetadataEvidence": true,  "isAdUnderDefault": false },
+    { "windowStart": 1800.0, "windowEnd": 1830.0, "fusedSkipConfidence": 0.08, "classificationTrust": 0.0,  "hasMetadataEvidence": false, "isAdUnderDefault": false }
+  ]
+}
