@@ -271,16 +271,29 @@ struct NarlEvalHarnessTests {
     /// Absolute URL of the fixtures root. Resolves from the source file at
     /// compile time via `#filePath`, then walks up to the repo root.
     static func fixturesRootURL() throws -> URL {
-        let thisFile = URL(fileURLWithPath: #filePath)
-        let repoRoot = try Self.repoRoot(startingAt: thisFile.deletingLastPathComponent())
+        let repoRoot = try Self.repoRootAny()
         return repoRoot.appendingPathComponent(fixturesRelpath)
     }
 
     /// Absolute URL of the eval output root (.eval-out/narl/).
     static func evalOutputRootURL() throws -> URL {
-        let thisFile = URL(fileURLWithPath: #filePath)
-        let repoRoot = try Self.repoRoot(startingAt: thisFile.deletingLastPathComponent())
+        let repoRoot = try Self.repoRootAny()
         return repoRoot.appendingPathComponent(evalOutputSubpath)
+    }
+
+    /// Resolve the repo root. Tries in order:
+    ///   1. `SRCROOT` env var (set by Xcode test runs) — covers the case
+    ///      where the test binary lives in derived-data and `#filePath`
+    ///      resolves to a path without sibling `CLAUDE.md`/`Playhead.xcodeproj`.
+    ///   2. Walk up from `#filePath` looking for those two markers.
+    /// Either path must validate that the candidate directory actually
+    /// contains the sentinels before returning. (MEDIUM-5)
+    static func repoRootAny(file thisFile: URL = URL(fileURLWithPath: #filePath)) throws -> URL {
+        if let srcroot = ProcessInfo.processInfo.environment["SRCROOT"], !srcroot.isEmpty {
+            let candidate = URL(fileURLWithPath: srcroot)
+            if Self.hasRepoMarkers(at: candidate) { return candidate }
+        }
+        return try Self.repoRoot(startingAt: thisFile.deletingLastPathComponent())
     }
 
     /// Walk upward until we find a directory containing both CLAUDE.md and
@@ -290,13 +303,7 @@ struct NarlEvalHarnessTests {
     static func repoRoot(startingAt start: URL) throws -> URL {
         var current = start
         while current.path != "/" {
-            let hasClaudeMd = FileManager.default.fileExists(
-                atPath: current.appendingPathComponent("CLAUDE.md").path
-            )
-            let hasProject = FileManager.default.fileExists(
-                atPath: current.appendingPathComponent("Playhead.xcodeproj").path
-            )
-            if hasClaudeMd && hasProject { return current }
+            if Self.hasRepoMarkers(at: current) { return current }
             current = current.deletingLastPathComponent()
         }
         throw NSError(
@@ -304,6 +311,13 @@ struct NarlEvalHarnessTests {
             code: 1,
             userInfo: [NSLocalizedDescriptionKey: "Could not locate repo root from \(start.path)"]
         )
+    }
+
+    private static func hasRepoMarkers(at dir: URL) -> Bool {
+        let fm = FileManager.default
+        let hasClaudeMd = fm.fileExists(atPath: dir.appendingPathComponent("CLAUDE.md").path)
+        let hasProject = fm.fileExists(atPath: dir.appendingPathComponent("Playhead.xcodeproj").path)
+        return hasClaudeMd && hasProject
     }
 
     // MARK: - Output writing
@@ -362,11 +376,21 @@ struct NarlEvalHarnessTests {
         return "\(base)-\(tag)"
     }
 
-    /// Map a podcastId to a human-readable show name. Covers the two test
-    /// shows explicitly; everything else uses the podcastId as-is.
+    /// Map a trace to a human-readable show label. Fallback chain (MEDIUM-2):
+    ///   1. `trace.showLabel` if the fixture carries one (set by the corpus
+    ///      builder when it has high-confidence metadata).
+    ///   2. `PlayheadTests/Fixtures/NarlEval/NarlShowLabels.json` sidecar —
+    ///      an `{ podcastId: label }` map Dan can edit by hand without
+    ///      touching code. Keyed by the exact podcastId string.
+    ///   3. Substring heuristic on the podcastId (covers the two test feeds
+    ///      used historically — flightcast / simplecast / diary-of-a-ceo /
+    ///      conan).
+    ///   4. The raw podcastId (or "unknown" if empty).
     static func showName(for trace: FrozenTrace) -> String {
-        // Heuristic: podcastId is a feed URL or a stable ID. We don't commit
-        // test-data labels to production code, so we use substring match.
+        if let label = trace.showLabel, !label.isEmpty { return label }
+        if let sidecar = Self.showLabelsSidecar, let match = sidecar[trace.podcastId] {
+            return match
+        }
         let lowered = trace.podcastId.lowercased()
         if lowered.contains("flightcast") || lowered.contains("diary-of-a-ceo")
             || lowered.contains("diaryofaceo") {
@@ -378,4 +402,21 @@ struct NarlEvalHarnessTests {
         }
         return trace.podcastId.isEmpty ? "unknown" : trace.podcastId
     }
+
+    /// Lazy-loaded sidecar `{ podcastId: show-label }` map. Returns `nil` if
+    /// the sidecar file is missing or unparseable — both are valid states
+    /// (the heuristic fallback still works).
+    static let showLabelsSidecar: [String: String]? = {
+        do {
+            let root = try Self.repoRootAny()
+            let url = root.appendingPathComponent(fixturesRelpath)
+                .appendingPathComponent("NarlShowLabels.json")
+            guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+            let data = try Data(contentsOf: url)
+            return try JSONDecoder().decode([String: String].self, from: data)
+        } catch {
+            print("NarlEvalHarness: failed to load NarlShowLabels.json sidecar: \(error)")
+            return nil
+        }
+    }()
 }

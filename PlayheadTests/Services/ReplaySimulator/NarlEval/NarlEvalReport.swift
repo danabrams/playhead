@@ -104,18 +104,38 @@ enum NarlEvalRenderer {
         }
         out += "\n"
 
+        // Split into metric table (non-excluded) and a deduped excluded list.
+        // Each episode appears once per config in `report.episodes`, so without
+        // deduping, an excluded episode would show up twice in the summary
+        // with identical zeros (LOW-4).
+        let included = report.episodes.filter { !$0.isExcluded }
+        let excluded = report.episodes.filter { $0.isExcluded }
+
         out += "## Per-episode\n\n"
-        out += "| Episode | Podcast | Config | GT | Pred | F1@0.3 | F1@0.5 | F1@0.7 | Sec-F1 | Excluded |\n"
-        out += "|---|---|---|---|---|---|---|---|---|---|\n"
-        for e in report.episodes {
+        out += "| Episode | Podcast | Config | GT | Pred | F1@0.3 | F1@0.5 | F1@0.7 | Sec-F1 |\n"
+        out += "|---|---|---|---|---|---|---|---|---|\n"
+        for e in included {
             let f13 = e.windowMetrics.first(where: { abs($0.threshold - 0.3) < 1e-6 })?.f1 ?? 0
             let f15 = e.windowMetrics.first(where: { abs($0.threshold - 0.5) < 1e-6 })?.f1 ?? 0
             let f17 = e.windowMetrics.first(where: { abs($0.threshold - 0.7) < 1e-6 })?.f1 ?? 0
-            let excludedNote = e.isExcluded ? (e.exclusionReason ?? "yes") : ""
             out += "| \(e.episodeId) | \(e.podcastId) | \(e.config) | \(e.groundTruthWindowCount) | \(e.predictedWindowCount) "
-            out += "| \(fmt(f13)) | \(fmt(f15)) | \(fmt(f17)) | \(fmt(e.secondLevel.f1)) | \(excludedNote) |\n"
+            out += "| \(fmt(f13)) | \(fmt(f15)) | \(fmt(f17)) | \(fmt(e.secondLevel.f1)) |\n"
         }
         out += "\n"
+
+        if !excluded.isEmpty {
+            // Dedupe by episodeId — the exclusion reason is the same across
+            // configs (ground-truth construction is config-agnostic).
+            var seen = Set<String>()
+            let dedupedExcluded = excluded.filter { seen.insert($0.episodeId).inserted }
+            out += "## Excluded episodes\n\n"
+            out += "| Episode | Podcast | Reason |\n"
+            out += "|---|---|---|\n"
+            for e in dedupedExcluded {
+                out += "| \(e.episodeId) | \(e.podcastId) | \(e.exclusionReason ?? "yes") |\n"
+            }
+            out += "\n"
+        }
 
         return out
     }
