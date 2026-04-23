@@ -135,6 +135,7 @@ enum CorpusExporter {
             "featureCoverageEndTime": asset.featureCoverageEndTime as Any? ?? NSNull(),
             "fastTranscriptCoverageEndTime": asset.fastTranscriptCoverageEndTime as Any? ?? NSNull(),
             "confirmedAdCoverageEndTime": asset.confirmedAdCoverageEndTime as Any? ?? NSNull(),
+            "terminalReason": asset.terminalReason as Any? ?? NSNull(),
         ]
         return try jsonLineData(from: obj)
     }
