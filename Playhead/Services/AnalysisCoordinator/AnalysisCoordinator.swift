@@ -1693,19 +1693,34 @@ actor AnalysisCoordinator {
     /// can be exercised by unit tests without instantiating the full
     /// coordinator graph (audio, feature, ad-detection, etc.).
     ///
-    /// - When `episodeDuration <= 0` the helper returns `.allowComplete`
-    ///   because we have no reliable denominator to compare against;
-    ///   treat that as "guard unavailable" rather than synthesize a
-    ///   spurious failure.
+    /// - When `episodeDuration <= 0` the helper returns `.blockComplete`
+    ///   with the recorded coverage and zero denominators. We cannot
+    ///   prove the transcript meets the ratio floor without a reliable
+    ///   denominator, so the guard fails safe and blocks rather than
+    ///   permissively allowing. See `playhead-gtt9.1.1` — the pre-fix
+    ///   `.allowComplete` shortcut was the root cause of four real
+    ///   episodes being stamped `analysisState='complete'` with only
+    ///   90s of fast-pass transcript covering 1800-7000s of audio, because
+    ///   `activeShards` was never rehydrated on resume paths.
     /// - Empty `chunks` with a known duration evaluates to
     ///   `coverageEnd == 0` and therefore `.blockComplete`.
     static func finalizeBackfillVerdict(
         chunks: [TranscriptChunk],
         episodeDuration: Double
     ) -> FinalizeBackfillVerdict {
-        guard episodeDuration > 0 else { return .allowComplete }
-
         let coverageEnd = chunks.map(\.endTime).max() ?? 0
+        guard episodeDuration > 0 else {
+            // playhead-gtt9.1.1: fail-safe. We preserve `coverageEnd` so
+            // the persisted `failureReason` still carries the observed
+            // transcript extent for the coverage-guard recovery sweep,
+            // even though the denominator is unknown (encoded as 0).
+            return .blockComplete(
+                coverageEnd: coverageEnd,
+                episodeDuration: 0,
+                ratio: 0
+            )
+        }
+
         let ratio = coverageEnd / episodeDuration
         if ratio + 1e-9 < finalizeBackfillMinCoverageRatio {
             return .blockComplete(
@@ -1744,8 +1759,13 @@ actor AnalysisCoordinator {
     ///   finalize. This preserves the original `chunks.isEmpty` behaviour
     ///   even when `episodeDuration` is unknown.
     /// - Non-empty chunks with unknown `episodeDuration` (<= 0) return
-    ///   `.finalize` because we have no denominator to compare against;
-    ///   better to let the finalize path run than loop forever.
+    ///   `.restart` (playhead-gtt9.1.1 fail-safe). Pre-fix behaviour
+    ///   returned `.finalize`, which then hit the finalize-time guard
+    ///   and — before the guard was also hardened — routed to
+    ///   `.allowComplete`, stamping assets complete with 90s of fast-pass
+    ///   transcript. The safe fallback is "restart the pipeline to
+    ///   re-decode audio so `activeShards` (and the cached persisted
+    ///   duration) become available on the next pass."
     static func resumeBackfillDecision(
         chunks: [TranscriptChunk],
         episodeDuration: Double
@@ -1754,7 +1774,7 @@ actor AnalysisCoordinator {
             return .restart
         }
         guard episodeDuration > 0 else {
-            return .finalize
+            return .restart
         }
         let coverageEnd = chunks.map(\.endTime).max() ?? 0
         let ratio = coverageEnd / episodeDuration

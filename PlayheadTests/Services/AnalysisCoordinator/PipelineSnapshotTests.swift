@@ -571,17 +571,24 @@ struct CoverageGuardTests {
         }
     }
 
-    @Test("unknown episode duration allows complete (no guard available)")
-    func unknownDurationAllowsComplete() {
-        let chunks = [chunk(startTime: 0, endTime: 100)]
+    @Test("unknown episode duration blocks complete (fail-safe — gtt9.1.1)")
+    func unknownDurationBlocksComplete() {
+        // playhead-gtt9.1.1: when the denominator is unknown we cannot
+        // prove coverage meets the ratio floor, so the guard must
+        // fail-safe and block rather than permissively allow. Pre-fix
+        // behaviour (.allowComplete) was the root cause of four real
+        // episodes being stamped `analysisState='complete'` with only
+        // 90s of fast-pass transcript covering 1800-7000s of audio.
+        let chunks = [chunk(startTime: 0, endTime: 90)]
         let verdict = AnalysisCoordinator.finalizeBackfillVerdict(
             chunks: chunks,
             episodeDuration: 0
         )
         switch verdict {
-        case .allowComplete: break
         case .blockComplete:
-            Issue.record("With unknown duration the guard should not fire")
+            break
+        case .allowComplete:
+            Issue.record("Unknown duration must fail-safe to .blockComplete (gtt9.1.1)")
         }
     }
 
@@ -688,15 +695,21 @@ struct ResumeBackfillDecisionTests {
         #expect(decision == .finalize)
     }
 
-    @Test("non-empty chunks with unknown duration allow finalize")
-    func unknownDurationWithChunksAllowsFinalize() {
-        // If we can't compute a denominator, fall back to the original
-        // "chunks exist → finalize" behaviour rather than loop forever.
-        let chunks = [chunk(startTime: 0, endTime: 100)]
+    @Test("non-empty chunks with unknown duration restart (fail-safe — gtt9.1.1)")
+    func unknownDurationWithChunksRestarts() {
+        // playhead-gtt9.1.1: when the denominator is unknown we cannot
+        // prove coverage meets the floor, so the resume path must
+        // fail-safe to .restart (re-decode audio + re-run transcript)
+        // rather than routing to finalize, which then hits the
+        // now-fail-safe finalize guard and transitions to .failed
+        // without recovering the full episode. Pre-fix behaviour
+        // (.finalize) silently bypassed the coverage check on any
+        // process relaunch because activeShards was never rehydrated.
+        let chunks = [chunk(startTime: 0, endTime: 90)]
         let decision = AnalysisCoordinator.resumeBackfillDecision(
             chunks: chunks,
             episodeDuration: 0
         )
-        #expect(decision == .finalize)
+        #expect(decision == .restart)
     }
 }
