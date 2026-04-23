@@ -135,6 +135,18 @@ actor AnalysisCoordinator {
     private var activePodcastId: String?
     /// Decoded shards for the current episode (cached in memory for reuse).
     private var activeShards: [AnalysisShard]?
+    /// playhead-gtt9.1.1: cached `analysis_assets.episodeDurationSec`
+    /// for the current session. Loaded from the store on spool entry
+    /// and on resume-from-persisted-`.backfill`; mirrored into the
+    /// store at spool time via ``AnalysisStore/updateEpisodeDuration``.
+    ///
+    /// Used by ``currentEpisodeDuration()`` when `activeShards` is
+    /// unavailable (which is the norm on resume paths: `activeShards`
+    /// is only populated inside `runFromSpooling` and is never
+    /// rehydrated when the pipeline restarts directly into backfill).
+    /// See ``resolveEpisodeDuration(activeShards:persistedDuration:)``
+    /// for the precedence rules.
+    private var cachedPersistedEpisodeDuration: Double?
     /// Audio file URL for incremental re-decode as download progresses.
     private var activeAudioURL: LocalAudioURL?
     /// Latest playback snapshot for prioritization.
@@ -255,6 +267,7 @@ actor AnalysisCoordinator {
         shardConsumerTask?.cancel()
         shardConsumerTask = nil
         activeShards = nil
+        cachedPersistedEpisodeDuration = nil
         activeAudioURL = nil
         latestSnapshot = nil
         logger.info("AnalysisCoordinator stopped")
@@ -1005,6 +1018,7 @@ actor AnalysisCoordinator {
         activeSessionId = nil
         activeAssetId = nil
         activeShards = nil
+        cachedPersistedEpisodeDuration = nil
         activeAudioURL = nil
         latestSnapshot = nil
     }
@@ -1044,6 +1058,29 @@ actor AnalysisCoordinator {
         logger.info("Spooling: decoded \(shards.count) shards (\(String(format: "%.0f", totalAudio))s audio) in \(decodeElapsed)")
         activeShards = shards
         activeAudioURL = audioURL
+
+        // playhead-gtt9.1.1: persist the shard-sum duration onto the
+        // `analysis_assets` row so the coverage guard has a durable
+        // denominator if the pipeline is restarted directly into
+        // `.backfill` (where `activeShards` is never rehydrated). We
+        // also cache it locally so `currentEpisodeDuration()` has a
+        // fallback when `activeShards` is later cleared.
+        if totalAudio > 0 {
+            do {
+                try await store.updateEpisodeDuration(
+                    id: assetId,
+                    episodeDurationSec: totalAudio
+                )
+                cachedPersistedEpisodeDuration = totalAudio
+            } catch {
+                // A failed duration write is not fatal to the pipeline
+                // — `activeShards` is still authoritative for the
+                // in-memory guard. Log and continue; the only cost is
+                // that if the process is killed before another write,
+                // the resume guard will fail safe (gtt9.1.1 intent).
+                logger.warning("Failed to persist episodeDurationSec=\(totalAudio) for asset \(assetId): \(error)")
+            }
+        }
 
         // Start streaming decode — feeds download bytes directly into
         // the decoder, emitting shards as audio arrives.
@@ -1127,6 +1164,22 @@ actor AnalysisCoordinator {
         // produced data. If not, throw so runPipeline marks as failed →
         // queued, which will re-decode audio and restart fully.
         if transcriptEventTask == nil {
+            // playhead-gtt9.1.1: hydrate the persisted duration cache
+            // before consulting `currentEpisodeDuration()`. On this
+            // path `activeShards` is never populated (the spool that
+            // set it ran in a previous process), so the resolver must
+            // fall back to the row's `episodeDurationSec`. Legacy
+            // rows predating the column return nil and fall through
+            // to the fail-safe `.restart` shortcut.
+            if cachedPersistedEpisodeDuration == nil {
+                do {
+                    if let asset = try await store.fetchAsset(id: assetId) {
+                        cachedPersistedEpisodeDuration = asset.episodeDurationSec
+                    }
+                } catch {
+                    logger.warning("Failed to load persisted episodeDurationSec for asset \(assetId): \(error)")
+                }
+            }
             let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
             let episodeDuration = currentEpisodeDuration()
             switch Self.resumeBackfillDecision(chunks: chunks, episodeDuration: episodeDuration) {
@@ -1732,11 +1785,50 @@ actor AnalysisCoordinator {
         return .allowComplete
     }
 
+    /// playhead-gtt9.1.1: resolver consulted by the coverage guards.
+    /// Prefers the live in-memory `activeShards` (authoritative when
+    /// the spool path has just decoded) and falls back to the value
+    /// persisted on `analysis_assets.episodeDurationSec` — cached into
+    /// ``cachedPersistedEpisodeDuration`` on resume so the guard does
+    /// not hit the store synchronously.
+    ///
+    /// Returns 0 when both sources are missing: the guards treat 0 as
+    /// "unknown denominator" and route to their fail-safe shortcuts.
     private func currentEpisodeDuration() -> Double {
-        guard let shards = activeShards else { return 0 }
-        return shards.reduce(0) { partial, shard in
-            max(partial, shard.startTime + shard.duration)
+        Self.resolveEpisodeDuration(
+            activeShards: activeShards,
+            persistedDuration: cachedPersistedEpisodeDuration
+        )
+    }
+
+    /// playhead-gtt9.1.1: pure resolver for the coverage-guard
+    /// denominator. Extracted as a static helper so unit tests can
+    /// cover the ordering rules without constructing a coordinator.
+    ///
+    /// Rules:
+    /// 1. If `activeShards` is non-nil AND non-empty, return the sum
+    ///    of `startTime + duration` maxima (matches the pre-gtt9.1.1
+    ///    behaviour of `currentEpisodeDuration()`).
+    /// 2. Else if `persistedDuration` is > 0, return it.
+    /// 3. Else return 0 ("unknown").
+    ///
+    /// Rule 1 wins over rule 2 even when the persisted value is
+    /// present: during an active spool the shard sum is the freshest
+    /// authority and the persisted row may be momentarily stale (the
+    /// spool-time write happens just after decode).
+    static func resolveEpisodeDuration(
+        activeShards: [AnalysisShard]?,
+        persistedDuration: Double?
+    ) -> Double {
+        if let shards = activeShards, !shards.isEmpty {
+            return shards.reduce(0) { partial, shard in
+                max(partial, shard.startTime + shard.duration)
+            }
         }
+        if let persistedDuration, persistedDuration > 0 {
+            return persistedDuration
+        }
+        return 0
     }
 
     /// Decision returned by ``resumeBackfillDecision(chunks:episodeDuration:)``.
@@ -1982,4 +2074,58 @@ actor AnalysisCoordinator {
 
         return summary
     }
+
+    // MARK: - Test seams (playhead-gtt9.1.1)
+
+    #if DEBUG
+    /// Test seam that mirrors the production resume-from-persisted-`.backfill`
+    /// path without requiring audio, a download manager, or a
+    /// playback snapshot.
+    ///
+    /// Production entry for this branch is `runPipeline` with
+    /// `resumeState: .backfill`; that in turn invokes the private
+    /// ``runFromBackfill`` and, when `transcriptEventTask == nil`,
+    /// hits the resume decision we are trying to cover. Invoking
+    /// `runPipeline` directly would require constructing a
+    /// `LocalAudioURL`, which has no bearing on the guard under test
+    /// (the resume branch never reaches audio-dependent code). This
+    /// seam is the smallest reproduction of that path.
+    ///
+    /// Behaviour:
+    /// - Sets the session-scoped state the way `runPipeline` does
+    ///   (`activeSessionId`, `activeAssetId`, `activeEpisodeId`),
+    ///   explicitly leaves `activeShards == nil` and
+    ///   `transcriptEventTask == nil`.
+    /// - Calls ``runFromBackfill`` inside the same do/catch the
+    ///   production pipeline uses, so a thrown
+    ///   `AnalysisCoordinatorError.noAudioAvailable` transitions
+    ///   the session to `.failed` via ``transition``.
+    ///
+    /// Only compiled in DEBUG — not a public production API.
+    func resumeBackfillForTesting(
+        sessionId: String,
+        assetId: String,
+        episodeId: String
+    ) async {
+        activeSessionId = sessionId
+        activeAssetId = assetId
+        activeEpisodeId = episodeId
+        // Intentionally do NOT populate `activeShards` or
+        // `transcriptEventTask`: the point of this seam is to
+        // exercise the resume branch of `runFromBackfill`.
+        do {
+            try await runFromBackfill(sessionId: sessionId, assetId: assetId)
+        } catch is CancellationError {
+            logger.info("resumeBackfillForTesting: cancelled for episode \(episodeId)")
+        } catch {
+            logger.info("resumeBackfillForTesting: pipeline failed: \(error)")
+            try? await transition(
+                sessionId: sessionId,
+                assetId: assetId,
+                to: .failed,
+                failureReason: String(describing: error)
+            )
+        }
+    }
+    #endif
 }
