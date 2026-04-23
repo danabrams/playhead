@@ -255,11 +255,131 @@ enum NarlCoverageMetricsCompute {
         groundTruth: [NarlTimeRange],
         candidateThreshold: Double = NarlCoverageMetricsCompute.defaultCandidateThreshold
     ) -> (metrics: NarlCoverageMetrics, fnDecomposition: [NarlFNDecomp]) {
-        // STUB: real implementation to follow test-by-test.
-        _ = candidateThreshold
-        _ = predicted
-        _ = groundTruth
-        _ = trace
-        return (NarlCoverageMetrics.zero, [])
+        // Build up range sets for each attribution stage.
+        let scoredRanges: [NarlTimeRange] = trace.windowScores.map {
+            NarlTimeRange(start: $0.windowStart, end: $0.windowEnd)
+        }
+        let candidateRanges: [NarlTimeRange] = trace.windowScores
+            .filter { $0.fusedSkipConfidence >= candidateThreshold }
+            .map { NarlTimeRange(start: $0.windowStart, end: $0.windowEnd) }
+        let transcriptRanges: [NarlTimeRange] = trace.evidenceCatalog
+            .filter { Self.transcriptEvidenceSources.contains($0.source) }
+            .map { NarlTimeRange(start: $0.windowStart, end: $0.windowEnd) }
+
+        let scoredMerged = NarlGroundTruth.mergeOverlaps(scoredRanges)
+        let candidateMerged = NarlGroundTruth.mergeOverlaps(candidateRanges)
+        let transcriptMerged = NarlGroundTruth.mergeOverlaps(transcriptRanges)
+        let predictedMerged = NarlGroundTruth.mergeOverlaps(predicted)
+        let gtMerged = NarlGroundTruth.mergeOverlaps(groundTruth)
+
+        let episodeDuration = trace.episodeDuration
+        let scoredCoverageRatio = episodeDuration > 0
+            ? unionLength(scoredMerged) / episodeDuration : 0
+        let transcriptCoverageRatio = episodeDuration > 0
+            ? unionLength(transcriptMerged) / episodeDuration : 0
+
+        let gtTotal = unionLength(gtMerged)
+
+        // candidateRecall = GT seconds overlapping candidate ranges / GT total.
+        let candidateOverlapSec = overlapLength(gtMerged, candidateMerged)
+        let candidateRecall = gtTotal > 0 ? candidateOverlapSec / gtTotal : 0
+
+        // Auto-skip precision / recall at seconds granularity.
+        let predTotal = unionLength(predictedMerged)
+        let predOverlapSec = overlapLength(predictedMerged, gtMerged)
+        let autoSkipPrecision = predTotal > 0 ? predOverlapSec / predTotal : 0
+        let autoSkipRecall = gtTotal > 0 ? predOverlapSec / gtTotal : 0
+
+        // Segment IoU (seconds-based set IoU, not averaged per-pair).
+        let unionSec = unionOfTwoSets(predictedMerged, gtMerged)
+        let segmentIoU = unionSec > 0 ? predOverlapSec / unionSec : 0
+
+        // FN decomposition per GT span.
+        var pipelineSec = 0.0
+        var classifierSec = 0.0
+        var promotionSec = 0.0
+        var decomp: [NarlFNDecomp] = []
+        for span in gtMerged {
+            let scoredOverlap = overlapLength([span], scoredMerged)
+            if scoredOverlap <= 0 {
+                pipelineSec += span.duration
+                decomp.append(NarlFNDecomp(
+                    span: span,
+                    kind: .pipelineCoverage,
+                    reason: "no scored windows overlap this GT span"
+                ))
+                continue
+            }
+            let candidateOverlap = overlapLength([span], candidateMerged)
+            if candidateOverlap <= 0 {
+                classifierSec += span.duration
+                decomp.append(NarlFNDecomp(
+                    span: span,
+                    kind: .classifierRecall,
+                    reason: "scored but no window above candidate threshold"
+                ))
+                continue
+            }
+            let autoSkipOverlap = overlapLength([span], predictedMerged)
+            if autoSkipOverlap <= 0 {
+                promotionSec += span.duration
+                decomp.append(NarlFNDecomp(
+                    span: span,
+                    kind: .promotionRecall,
+                    reason: "candidate windows present but none were promoted to auto-skip"
+                ))
+                continue
+            }
+            // correctlyDetected: not recorded in decomposition.
+        }
+
+        let unscoredFNRate = gtTotal > 0 ? pipelineSec / gtTotal : 0
+        let failureAsset = unscoredFNRate > pipelineCoverageFailureAssetThreshold
+
+        let metrics = NarlCoverageMetrics(
+            scoredCoverageRatio: scoredCoverageRatio,
+            transcriptCoverageRatio: transcriptCoverageRatio,
+            candidateRecall: candidateRecall,
+            autoSkipPrecision: autoSkipPrecision,
+            autoSkipRecall: autoSkipRecall,
+            segmentIoU: segmentIoU,
+            unscoredFNRate: unscoredFNRate,
+            pipelineCoverageFailureAsset: failureAsset,
+            pipelineCoverageFNSeconds: pipelineSec,
+            classifierRecallFNSeconds: classifierSec,
+            promotionRecallFNSeconds: promotionSec
+        )
+        return (metrics, decomp)
+    }
+
+    // MARK: - Range-set helpers
+
+    /// Total length of the union of a list of ranges. Assumes the caller has
+    /// already merged overlaps (no-op otherwise — we merge defensively).
+    static func unionLength(_ ranges: [NarlTimeRange]) -> Double {
+        NarlGroundTruth.mergeOverlaps(ranges).reduce(0.0) { $0 + $1.duration }
+    }
+
+    /// Total seconds where `a` and `b` overlap (both treated as range sets).
+    static func overlapLength(_ a: [NarlTimeRange], _ b: [NarlTimeRange]) -> Double {
+        let aMerged = NarlGroundTruth.mergeOverlaps(a)
+        let bMerged = NarlGroundTruth.mergeOverlaps(b)
+        var total = 0.0
+        for x in aMerged {
+            for y in bMerged {
+                if let inter = x.intersection(y) {
+                    total += inter.duration
+                }
+            }
+        }
+        return total
+    }
+
+    /// Length of the union of two range sets (|A ∪ B|).
+    private static func unionOfTwoSets(
+        _ a: [NarlTimeRange],
+        _ b: [NarlTimeRange]
+    ) -> Double {
+        unionLength(a + b)
     }
 }

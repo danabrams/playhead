@@ -188,11 +188,16 @@ struct NarlCoverageMetricsComputeTests {
 
     @Test("pipelineCoverageFailureAsset flags above 50% unscored-FN rate")
     func pipelineCoverageFailureAssetFlagsAbove50Percent() {
+        // Two disjoint GT spans. Gap > 0 keeps mergeOverlaps from collapsing
+        // them into one; otherwise "0-60 + 60-100" would become a single
+        // [0,100) span that partially overlaps the scored region and the
+        // decomposition flips from pipelineCoverage to classifierRecall.
+        //
         // 60s pipelineCoverage + 40s classifierRecall = 100s GT; 60/100 = 0.6 > 0.5.
-        let ws1 = [Self.score(start: 60, end: 100, confidence: 0.2)]
+        let ws1 = [Self.score(start: 70, end: 110, confidence: 0.2)]
         let gt1 = [
             NarlTimeRange(start: 0, end: 60),
-            NarlTimeRange(start: 60, end: 100),
+            NarlTimeRange(start: 70, end: 110),
         ]
         let trace1 = makeTrace(episodeDuration: 200, windowScores: ws1)
         let result1 = NarlCoverageMetricsCompute.compute(
@@ -201,10 +206,10 @@ struct NarlCoverageMetricsComputeTests {
         #expect(result1.metrics.pipelineCoverageFailureAsset == true)
 
         // 40s pipelineCoverage + 60s classifierRecall = 100s GT; 40/100 = 0.4 ≤ 0.5.
-        let ws2 = [Self.score(start: 40, end: 100, confidence: 0.2)]
+        let ws2 = [Self.score(start: 50, end: 110, confidence: 0.2)]
         let gt2 = [
             NarlTimeRange(start: 0, end: 40),
-            NarlTimeRange(start: 40, end: 100),
+            NarlTimeRange(start: 50, end: 110),
         ]
         let trace2 = makeTrace(episodeDuration: 200, windowScores: ws2)
         let result2 = NarlCoverageMetricsCompute.compute(
