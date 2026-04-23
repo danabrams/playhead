@@ -1300,7 +1300,8 @@ actor AnalysisCoordinator {
         sessionId: String,
         assetId: String,
         to newState: SessionState,
-        failureReason: String? = nil
+        failureReason: String? = nil,
+        terminalReason: String? = nil
     ) async throws {
         // Load current state.
         let currentState: SessionState
@@ -1338,7 +1339,15 @@ actor AnalysisCoordinator {
                 state: newState.rawValue,
                 failureReason: failureReason
             )
-            try await store.updateAssetState(id: assetId, state: newState.rawValue)
+            if let terminalReason {
+                try await store.updateAssetState(
+                    id: assetId,
+                    state: newState.rawValue,
+                    terminalReason: terminalReason
+                )
+            } else {
+                try await store.updateAssetState(id: assetId, state: newState.rawValue)
+            }
         } catch {
             throw AnalysisCoordinatorError.storeError(underlying: error)
         }
@@ -1351,7 +1360,13 @@ actor AnalysisCoordinator {
         // dogfood metric's numerator/denominator. Best-effort —
         // failures inside the observer are logged there and swallowed;
         // the analysis pipeline's correctness never depends on this.
-        if newState == .complete,
+        //
+        // playhead-gtt9.8: post-expansion, any terminal completion
+        // (`.complete`, `.completeFull`, `.completeFeatureOnly`,
+        // `.completeTranscriptPartial`) triggers the observer. The
+        // reducer downstream treats them all as "analysis session
+        // concluded" for the purposes of the false_ready_rate metric.
+        if newState.isTerminalCompletion,
            let observer = surfaceStatusObserver,
            let episodeId = activeEpisodeId
         {
@@ -1791,41 +1806,43 @@ actor AnalysisCoordinator {
             return
         }
 
-        // Coverage guard: refuse to mark `.complete` when the transcript
-        // covers less than `finalizeBackfillMinCoverageRatio` of the
-        // episode. This defends against upstream races (e.g. streaming
-        // decoder finishing before the engine has transcribed every
-        // shard) that would otherwise stamp `analysisState=complete` on
-        // a heavily partial result. When the guard fires we transition
-        // to `.failed` with a descriptive reason; the scheduler will
-        // re-queue the job on a future session.
+        // playhead-gtt9.8: classify the terminal state using the richer
+        // `classifyBackfillTerminal` helper rather than the old allow/
+        // block dichotomy. The new classifier distinguishes:
+        //   - `.completeFull` / `.completeFeatureOnly` /
+        //     `.completeTranscriptPartial` for partial-but-shippable
+        //     successes, and
+        //   - `.failedTranscript` / `.failedFeature` / `.cancelledBudget`
+        //     for the three failure shapes the reducer now reports.
+        // `.complete` (the legacy monolithic case) is never written on
+        // new sessions post-gtt9.8.
         let episodeDuration = currentEpisodeDuration()
-        let verdict = Self.finalizeBackfillVerdict(
+        let asset = try await store.fetchAsset(id: assetId)
+        let featureCoverage = asset?.featureCoverageEndTime
+        let verdict = Self.classifyBackfillTerminal(
             chunks: allChunks,
-            episodeDuration: episodeDuration
+            episodeDuration: episodeDuration,
+            featureCoverage: featureCoverage,
+            budgetCancelled: false,
+            transcriptFailed: false,
+            featureFailed: false
         )
-        switch verdict {
-        case .blockComplete(let coverageEnd, let duration, let ratio):
-            let reason = String(
-                format: "transcript coverage %.1f/%.1fs (ratio %.3f < %.3f)",
-                coverageEnd, duration, ratio, Self.finalizeBackfillMinCoverageRatio
-            )
+        if verdict.state.isTerminalFailure {
             logger.warning(
-                "Coverage guard BLOCKED .complete for asset \(assetId): \(reason) — transitioning to .failed for retry"
+                "finalizeBackfill -> \(verdict.state.rawValue) for asset \(assetId): \(verdict.reason)"
             )
-            try await transition(
-                sessionId: sessionId,
-                assetId: assetId,
-                to: .failed,
-                failureReason: reason
+        } else {
+            logger.info(
+                "finalizeBackfill -> \(verdict.state.rawValue) for asset \(assetId): \(verdict.reason)"
             )
-            return
-        case .allowComplete:
-            break
         }
-
-        try await transition(sessionId: sessionId, assetId: assetId, to: .complete)
-        logger.info("Analysis complete for asset \(assetId)")
+        try await transition(
+            sessionId: sessionId,
+            assetId: assetId,
+            to: verdict.state,
+            failureReason: verdict.state.isTerminalFailure ? verdict.reason : nil,
+            terminalReason: verdict.reason
+        )
     }
 
     /// Decision returned by ``finalizeBackfillVerdict(chunks:episodeDuration:)``.
@@ -1883,6 +1900,137 @@ actor AnalysisCoordinator {
             )
         }
         return .allowComplete
+    }
+
+    /// playhead-gtt9.8: richer terminal verdict for
+    /// ``classifyBackfillTerminal(chunks:episodeDuration:featureCoverage:budgetCancelled:transcriptFailed:featureFailed:)``.
+    /// The caller persists the `reason` into
+    /// `analysis_assets.terminalReason` and transitions the session to
+    /// the returned `state`. All six non-legacy terminals are
+    /// reachable; `.complete` (legacy) is never produced.
+    struct BackfillTerminalVerdict: Equatable {
+        /// One of the six new terminal `SessionState`s.
+        let state: SessionState
+        /// Short human-readable classifier diagnostic persisted into
+        /// `analysis_assets.terminalReason` for telemetry.
+        let reason: String
+    }
+
+    /// playhead-gtt9.8: pure classifier that picks the appropriate
+    /// terminal `SessionState` when backfill finishes. Extracted as a
+    /// static function so the decision matrix can be unit-tested
+    /// without instantiating the coordinator graph.
+    ///
+    /// Priority order (highest wins):
+    ///   1. `budgetCancelled == true` → `.cancelledBudget`
+    ///   2. `featureFailed == true` → `.failedFeature`
+    ///   3. `transcriptFailed == true` → `.failedTranscript`
+    ///   4. Feature-coverage short → `.failedFeature`
+    ///   5. Transcript coverage analysis on top of adequate feature
+    ///      coverage: `.completeFull`, `.completeFeatureOnly`, or
+    ///      `.completeTranscriptPartial`.
+    ///   6. Unknown episode duration (<= 0) → `.failedTranscript` as a
+    ///      fail-safe: we cannot prove coverage, so re-queue.
+    ///
+    /// - Parameter featureCoverage: absolute seconds of feature coverage
+    ///   (from `AnalysisAsset.featureCoverageEndTime`). `nil` or 0 is
+    ///   treated as "feature coverage never advanced"; the classifier
+    ///   maps that to `.failedFeature` unless duration is unknown.
+    static func classifyBackfillTerminal(
+        chunks: [TranscriptChunk],
+        episodeDuration: Double,
+        featureCoverage: Double?,
+        budgetCancelled: Bool,
+        transcriptFailed: Bool,
+        featureFailed: Bool
+    ) -> BackfillTerminalVerdict {
+        // Priority 1: budget cancellation short-circuits everything. It
+        // is never a quality signal — it is an operator/battery/thermal
+        // decision that stopped the pipeline early.
+        if budgetCancelled {
+            return BackfillTerminalVerdict(
+                state: .cancelledBudget,
+                reason: "cancelled by budget/thermal policy"
+            )
+        }
+
+        // Priority 2: feature pipeline fatal error wins over transcript
+        // fatal error — without features the transcript is useless.
+        if featureFailed {
+            return BackfillTerminalVerdict(
+                state: .failedFeature,
+                reason: "feature pipeline error"
+            )
+        }
+
+        // Priority 3: transcript pipeline fatal error.
+        if transcriptFailed {
+            return BackfillTerminalVerdict(
+                state: .failedTranscript,
+                reason: "transcript pipeline error"
+            )
+        }
+
+        let coverageEnd = chunks.map(\.endTime).max() ?? 0
+
+        // Priority 6 (moved before 4/5 because it gates the math):
+        // unknown duration fails safe.
+        guard episodeDuration > 0 else {
+            return BackfillTerminalVerdict(
+                state: .failedTranscript,
+                reason: String(
+                    format: "unknown episode duration (coverage=%.1fs)",
+                    coverageEnd
+                )
+            )
+        }
+
+        let transcriptRatio = coverageEnd / episodeDuration
+        let featureSeconds = featureCoverage ?? 0
+        let featureRatio = featureSeconds / episodeDuration
+
+        // Priority 4: feature-side shortfall. When the feature pipeline
+        // didn't cover enough of the episode, the session is feature-
+        // bounded and we route to .failedFeature even if the transcript
+        // looks fine. The harness interprets this as a feature miss.
+        if featureRatio + 1e-9 < finalizeBackfillMinCoverageRatio {
+            return BackfillTerminalVerdict(
+                state: .failedFeature,
+                reason: String(
+                    format: "feature coverage %.1f/%.1fs (ratio %.3f < %.3f)",
+                    featureSeconds, episodeDuration, featureRatio,
+                    finalizeBackfillMinCoverageRatio
+                )
+            )
+        }
+
+        // Priority 5: completion shape depends on transcript coverage.
+        if transcriptRatio + 1e-9 >= finalizeBackfillMinCoverageRatio {
+            return BackfillTerminalVerdict(
+                state: .completeFull,
+                reason: String(
+                    format: "full coverage: transcript %.3f, feature %.3f",
+                    transcriptRatio, featureRatio
+                )
+            )
+        }
+        if coverageEnd <= 0 {
+            return BackfillTerminalVerdict(
+                state: .completeFeatureOnly,
+                reason: String(
+                    format: "feature-only (feature %.3f, transcript 0)",
+                    featureRatio
+                )
+            )
+        }
+        return BackfillTerminalVerdict(
+            state: .completeTranscriptPartial,
+            reason: String(
+                format: "partial transcript %.1f/%.1fs (ratio %.3f < %.3f)",
+                coverageEnd, episodeDuration, transcriptRatio,
+                finalizeBackfillMinCoverageRatio
+            )
+        )
     }
 
     /// playhead-gtt9.1.1: resolver consulted by the coverage guards.
