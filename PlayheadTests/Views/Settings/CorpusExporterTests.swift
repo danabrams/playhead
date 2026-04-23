@@ -105,6 +105,11 @@ struct CorpusExporterTests {
             "featureCoverageEndTime",
             "fastTranscriptCoverageEndTime",
             "confirmedAdCoverageEndTime",
+            // playhead-gtt9.8: `terminalReason` is the richer-terminal
+            // diagnostic the classifier persisted into
+            // `analysis_assets.terminalReason`. Nullable on pre-gtt9.8
+            // rows and on sessions still in flight.
+            "terminalReason",
         ] {
             #expect(json.keys.contains(key), "\(key) must be present as a key")
             #expect(json[key] is NSNull, "\(key) must serialize as null for a minimal asset, not omitted or empty-string")
@@ -117,6 +122,28 @@ struct CorpusExporterTests {
         let data = try CorpusExporter.assetLine(asset, podcastId: "pod-abc-123")
         let json = try decodeJSONObject(from: data)
         #expect(json["podcastId"] as? String == "pod-abc-123")
+    }
+
+    @Test("asset record carries terminalReason when the classifier set one (gtt9.8)")
+    func assetRecordTerminalReasonPassthrough() throws {
+        let asset = AnalysisAsset(
+            id: "asset-term",
+            episodeId: "ep-term",
+            assetFingerprint: "fp-term",
+            weakFingerprint: nil,
+            sourceURL: "file:///tmp/term.m4a",
+            featureCoverageEndTime: 3575.0,
+            fastTranscriptCoverageEndTime: 3540.0,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "completeFull",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            terminalReason: "full coverage: transcript 0.981, feature 0.992"
+        )
+        let json = try decodeJSONObject(from: CorpusExporter.assetLine(asset))
+        #expect(json["terminalReason"] as? String
+                == "full coverage: transcript 0.981, feature 0.992")
+        #expect(json["analysisState"] as? String == "completeFull")
     }
 
     // MARK: - Decision record (DecodedSpan)
