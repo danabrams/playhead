@@ -1240,19 +1240,54 @@ actor AnalysisCoordinator {
 
     // MARK: - Stage: HotPathReady -> Backfill
 
+    /// playhead-gtt9.8: pure admission helper for the
+    /// `.hotPathReady` → `.backfill` edge. Used by
+    /// `runFromHotPathReady` to decide whether the coordinator can
+    /// drive backfill immediately or must park the session in
+    /// `.waitingForBackfill` until thermal pressure drops.
+    enum ThermalBackfillAdmission: Equatable, Sendable {
+        /// The coordinator may transition `.hotPathReady` → `.backfill`
+        /// now; thermal conditions are tolerable (≤ `.serious`).
+        case proceed
+        /// Thermal state is `.critical`; transition the session to
+        /// `.waitingForBackfill` and drop out of the pipeline until a
+        /// capability change resumes it.
+        case wait
+    }
+
+    /// Pure classifier: given a thermal state, should the coordinator
+    /// proceed into backfill or park the session in
+    /// `.waitingForBackfill`?
+    static func thermalBackfillAdmission(
+        thermalState: ThermalState
+    ) -> ThermalBackfillAdmission {
+        switch thermalState {
+        case .nominal, .fair, .serious:
+            return .proceed
+        case .critical:
+            return .wait
+        }
+    }
+
     private func runFromHotPathReady(sessionId: String, assetId: String) async throws {
         try Task.checkCancellation()
 
         // Hot path is ready: skip cues are available for playback.
         // Now move to backfill for final-pass ASR and metadata extraction.
         let capabilities = await capabilitiesService.currentSnapshot
-        if capabilities.thermalState == .critical {
-            logger.info("Critical thermal active, deferring backfill")
+        switch Self.thermalBackfillAdmission(thermalState: capabilities.thermalState) {
+        case .wait:
+            // playhead-gtt9.8: park in `.waitingForBackfill` rather than
+            // silently returning. The explicit state lets the UI and
+            // the NARL harness reason about "paused by thermal" vs
+            // "stuck at hotPathReady for unknown reasons".
+            logger.info("Critical thermal active, parking session \(sessionId) in waitingForBackfill")
+            try await transition(sessionId: sessionId, assetId: assetId, to: .waitingForBackfill)
             return
+        case .proceed:
+            try await transition(sessionId: sessionId, assetId: assetId, to: .backfill)
+            try await runFromBackfill(sessionId: sessionId, assetId: assetId)
         }
-
-        try await transition(sessionId: sessionId, assetId: assetId, to: .backfill)
-        try await runFromBackfill(sessionId: sessionId, assetId: assetId)
     }
 
     // MARK: - Stage: Backfill -> Complete
