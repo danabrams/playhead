@@ -69,6 +69,19 @@ struct AnalysisAsset: Sendable {
     /// compiles unchanged — `media` is the correct class for the
     /// downloaded podcast audio they represent.
     let artifactClass: ArtifactClass
+    /// playhead-gtt9.1.1: durable total-audio duration persisted at
+    /// spool time. `nil` on legacy rows predating the column and on
+    /// placeholder rows created before the pipeline has decoded audio
+    /// yet (`resolveAssetId`). ``AnalysisCoordinator/resolveEpisodeDuration``
+    /// treats `nil` or non-positive as "missing" and routes the
+    /// coverage guards to their fail-safe shortcuts.
+    ///
+    /// Rationale: `activeShards` (the only other source of episode
+    /// duration) is only populated during `spool` and is never
+    /// rehydrated on resume-from-persisted-`.backfill` paths. Without
+    /// this column the guards silently bypassed coverage checks on
+    /// any process relaunch. See `playhead-gtt9.1` investigation.
+    let episodeDurationSec: Double?
 
     init(
         id: String,
@@ -82,7 +95,8 @@ struct AnalysisAsset: Sendable {
         analysisState: String,
         analysisVersion: Int,
         capabilitySnapshot: String?,
-        artifactClass: ArtifactClass = .media
+        artifactClass: ArtifactClass = .media,
+        episodeDurationSec: Double? = nil
     ) {
         self.id = id
         self.episodeId = episodeId
@@ -96,6 +110,7 @@ struct AnalysisAsset: Sendable {
         self.analysisVersion = analysisVersion
         self.capabilitySnapshot = capabilitySnapshot
         self.artifactClass = artifactClass
+        self.episodeDurationSec = episodeDurationSec
     }
 }
 
@@ -919,6 +934,12 @@ actor AnalysisStore {
             try addEpisodeExecutionLeaseColumnsIfNeeded()
             try createWorkJournalTableIfNeeded()
             try seedSchedulerEpochIfNeeded()
+            // playhead-gtt9.1.1: persist episode duration on the
+            // `analysis_assets` row at spool time so the coverage guard
+            // has a durable denominator on resume-from-backfill paths
+            // where `activeShards` is never rehydrated. See
+            // `addEpisodeDurationColumnIfNeeded()` for rationale.
+            try addEpisodeDurationColumnIfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -1110,6 +1131,12 @@ actor AnalysisStore {
         if try tableExists("_meta") {
             try createWorkJournalTableIfNeeded()
             try seedSchedulerEpochIfNeeded()
+        }
+        // playhead-gtt9.1.1: mirror the `addEpisodeDurationColumnIfNeeded`
+        // call from `migrate()`. Guarded by `tableExists` because some
+        // seeded fixtures may not include `analysis_assets`.
+        if try tableExists("analysis_assets") {
+            try addEpisodeDurationColumnIfNeeded()
         }
     }
     #endif
@@ -1363,6 +1390,38 @@ actor AnalysisStore {
             table: "analysis_assets",
             column: "artifact_class",
             definition: "TEXT NOT NULL DEFAULT '\(ArtifactClass.media.rawValue)'"
+        )
+    }
+
+    /// playhead-gtt9.1.1: add `episodeDurationSec REAL` to
+    /// `analysis_assets`. Idempotent.
+    ///
+    /// The column captures the total audio duration (sum of shard
+    /// durations) computed during `spool`. Coverage-guard denominators
+    /// read from this column on resume-from-persisted-`.backfill` paths
+    /// where `activeShards` is never rehydrated. See
+    /// ``AnalysisCoordinator/resolveEpisodeDuration(activeShards:persistedDuration:)``
+    /// for how the value is consumed.
+    ///
+    /// Sentinel: legacy rows and placeholder rows (inserted before
+    /// audio decode) leave the column NULL. The resolver treats NULL
+    /// and non-positive values identically — "missing" — which routes
+    /// the guards to their fail-safe shortcuts.
+    ///
+    /// Placement: column is appended at the END of `analysis_assets`
+    /// (SQLite's only supported `ADD COLUMN` position). After
+    /// `addArtifactClassColumnIfNeeded` placed `artifact_class` at
+    /// index 12, `episodeDurationSec` now sits at index 13. `readAsset`
+    /// uses an explicit SELECT column list (not `SELECT *`) for the
+    /// new column so ordering is robust across migrations.
+    ///
+    /// Rollback: `ADD COLUMN` is additive-only. No destructive rollback
+    /// path.
+    private func addEpisodeDurationColumnIfNeeded() throws {
+        try addColumnIfNeeded(
+            table: "analysis_assets",
+            column: "episodeDurationSec",
+            definition: "REAL"
         )
     }
 
@@ -2541,12 +2600,18 @@ actor AnalysisStore {
         // playhead-h7r: new artifacts get an explicit `artifact_class` at
         // insert time. Legacy rows predating the column use the
         // `DEFAULT 'media'` sentinel from the migration.
+        // playhead-gtt9.1.1: `episodeDurationSec` is bound at insert
+        // time only if the caller pre-populated it; spool-time writes
+        // go through ``updateEpisodeDuration`` once the shard sum is
+        // known. Placeholder inserts from `resolveAssetId` pass nil
+        // and the column lands NULL.
         let sql = """
             INSERT INTO analysis_assets
             (id, episodeId, assetFingerprint, weakFingerprint, sourceURL,
              featureCoverageEndTime, fastTranscriptCoverageEndTime, confirmedAdCoverageEndTime,
-             analysisState, analysisVersion, capabilitySnapshot, artifact_class)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             analysisState, analysisVersion, capabilitySnapshot, artifact_class,
+             episodeDurationSec)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -2562,6 +2627,7 @@ actor AnalysisStore {
         bind(stmt, 10, asset.analysisVersion)
         bind(stmt, 11, asset.capabilitySnapshot)
         bind(stmt, 12, asset.artifactClass.rawValue)
+        bind(stmt, 13, asset.episodeDurationSec)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -2584,7 +2650,11 @@ actor AnalysisStore {
     }
 
     func fetchAsset(id: String) throws -> AnalysisAsset? {
-        let sql = "SELECT * FROM analysis_assets WHERE id = ?"
+        let sql = """
+            SELECT \(assetSelectColumns)
+            FROM analysis_assets
+            WHERE id = ?
+            """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, id)
@@ -2605,7 +2675,11 @@ actor AnalysisStore {
     /// add a paginated/streaming variant instead. Do not remove this `#if DEBUG`
     /// gate without first thinking through the scale implications.
     func fetchAllAssets() throws -> [AnalysisAsset] {
-        let sql = "SELECT * FROM analysis_assets ORDER BY createdAt DESC, rowid DESC"
+        let sql = """
+            SELECT \(assetSelectColumns)
+            FROM analysis_assets
+            ORDER BY createdAt DESC, rowid DESC
+            """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         var results: [AnalysisAsset] = []
@@ -2672,7 +2746,7 @@ actor AnalysisStore {
 
     func fetchAssetByEpisodeId(_ episodeId: String) throws -> AnalysisAsset? {
         let sql = """
-            SELECT *
+            SELECT \(assetSelectColumns)
             FROM analysis_assets
             WHERE episodeId = ?
             ORDER BY createdAt DESC, rowid DESC
@@ -2693,13 +2767,38 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    /// playhead-gtt9.1.1: explicit column list for every `SELECT` that
+    /// feeds ``readAsset``. We moved off `SELECT *` when
+    /// `episodeDurationSec` was appended because `SELECT *` returns
+    /// columns in CREATE TABLE order followed by ADD COLUMN order, so
+    /// index positions are fragile across future migrations. The order
+    /// here is the contract ``readAsset`` decodes against.
+    private static let assetSelectColumns: String = """
+        id, episodeId, assetFingerprint, weakFingerprint, sourceURL, \
+        featureCoverageEndTime, fastTranscriptCoverageEndTime, \
+        confirmedAdCoverageEndTime, analysisState, analysisVersion, \
+        capabilitySnapshot, artifact_class, episodeDurationSec
+        """
+
+    private var assetSelectColumns: String { Self.assetSelectColumns }
+
     private func readAsset(_ stmt: OpaquePointer?) -> AnalysisAsset {
-        // playhead-h7r: `SELECT * FROM analysis_assets` returns columns
-        // in CREATE TABLE order (0..10), followed by `createdAt` at 11
-        // (from the CREATE TABLE clause), followed by `artifact_class`
-        // at 12 (appended by `addArtifactClassColumnIfNeeded`). Legacy
-        // fixtures or pre-migration rows fall back to `.media` via
-        // ``ArtifactClass/fromPersistedRaw(_:)``.
+        // playhead-gtt9.1.1: decoded against the explicit
+        // ``assetSelectColumns`` ordering, not `SELECT *`. Indices
+        // correspond 1:1 with the columns listed there.
+        //   0: id
+        //   1: episodeId
+        //   2: assetFingerprint
+        //   3: weakFingerprint
+        //   4: sourceURL
+        //   5: featureCoverageEndTime
+        //   6: fastTranscriptCoverageEndTime
+        //   7: confirmedAdCoverageEndTime
+        //   8: analysisState
+        //   9: analysisVersion
+        //  10: capabilitySnapshot
+        //  11: artifact_class  (playhead-h7r)
+        //  12: episodeDurationSec  (playhead-gtt9.1.1)
         AnalysisAsset(
             id: text(stmt, 0),
             episodeId: text(stmt, 1),
@@ -2712,7 +2811,8 @@ actor AnalysisStore {
             analysisState: text(stmt, 8),
             analysisVersion: Int(sqlite3_column_int(stmt, 9)),
             capabilitySnapshot: optionalText(stmt, 10),
-            artifactClass: ArtifactClass.fromPersistedRaw(optionalText(stmt, 12))
+            artifactClass: ArtifactClass.fromPersistedRaw(optionalText(stmt, 11)),
+            episodeDurationSec: optionalDouble(stmt, 12)
         )
     }
 
@@ -2893,6 +2993,26 @@ actor AnalysisStore {
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, endTime)
+        bind(stmt, 2, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-gtt9.1.1: persist the total audio duration on the
+    /// `analysis_assets` row so that coverage-guard denominators
+    /// survive resume-from-persisted-`.backfill` paths where
+    /// `activeShards` is never rehydrated.
+    ///
+    /// The value is the sum of shard durations computed during spool
+    /// (see ``AnalysisCoordinator/runFromSpooling``). Idempotent —
+    /// repeated calls overwrite. Callers should only write positive
+    /// values; negative or zero durations are accepted verbatim but
+    /// treated as "missing" by
+    /// ``AnalysisCoordinator/resolveEpisodeDuration(activeShards:persistedDuration:)``.
+    func updateEpisodeDuration(id: String, episodeDurationSec: Double) throws {
+        let sql = "UPDATE analysis_assets SET episodeDurationSec = ? WHERE id = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, episodeDurationSec)
         bind(stmt, 2, id)
         try step(stmt, expecting: SQLITE_DONE)
     }
