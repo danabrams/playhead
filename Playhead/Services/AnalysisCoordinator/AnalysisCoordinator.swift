@@ -17,6 +17,17 @@ import OSLog
 
 /// The lifecycle states of an analysis session. Persisted as the `state`
 /// column in `analysis_sessions` and the `analysisState` on `analysis_assets`.
+///
+/// playhead-gtt9.8: expanded the monolithic `.complete` into three
+/// distinguishable completion terminals (`completeFull`,
+/// `completeFeatureOnly`, `completeTranscriptPartial`) plus richer
+/// failure terminals (`failedTranscript`, `failedFeature`,
+/// `cancelledBudget`) and a non-terminal `waitingForBackfill` that
+/// replaces the prior "stay in hotPathReady under thermal pressure"
+/// behavior. The new terminals let the harness compute
+/// `scoredCoverageRatio` directly from `analysisState` without having
+/// to reverse-engineer it from coverage watermarks. See
+/// `docs/narl/2026-04-23-expert-response.md` §1.
 enum SessionState: String, Sendable, CaseIterable {
     /// Audio identified, waiting for cached audio to become available.
     case queued
@@ -26,28 +37,104 @@ enum SessionState: String, Sendable, CaseIterable {
     case featuresReady
     /// Hot-path ad detection complete, skip cues available.
     case hotPathReady
+    /// playhead-gtt9.8: non-terminal holding state between the hot-path
+    /// and the backfill drain. Replaces the prior implicit "park on
+    /// hotPathReady under thermal pressure" behavior so the reducer can
+    /// tell a thermal-paused session apart from one that simply hasn't
+    /// advanced yet.
+    case waitingForBackfill
     /// Final-pass ASR and metadata extraction running.
     case backfill
-    /// All analysis work complete for this episode.
+    /// Deprecated monolithic completion (pre-gtt9.8). Kept only so
+    /// legacy persisted rows decode on migrate. `finalizeBackfill` no
+    /// longer writes this case — new sessions always resolve to one
+    /// of the three richer `complete*` terminals below.
     case complete
-    /// Analysis failed. Check `failureReason`. May be retryable.
+    /// playhead-gtt9.8: feature scoring covered the intended audio
+    /// range, decision windows were emitted over it, AND transcript
+    /// covered at or above the finalize threshold (i.e. `completeFull`
+    /// implies the coverage invariant passes).
+    case completeFull
+    /// playhead-gtt9.8: feature covered but transcript never advanced
+    /// beyond preview. Eligible for FM-shadow runs once transcript is
+    /// backfilled; not promotion-eligible for transcript-anchored
+    /// decisions.
+    case completeFeatureOnly
+    /// playhead-gtt9.8: transcript advanced but fell short of the
+    /// finalize coverage ratio. Scoring ran on the partial range; the
+    /// unscored tail is preserved in telemetry for retry.
+    case completeTranscriptPartial
+    /// Deprecated monolithic failure (pre-gtt9.8). Kept only so legacy
+    /// persisted rows decode on migrate. Stays as a catch-all for
+    /// unclassified failures routed from legacy paths.
     case failed
+    /// playhead-gtt9.8: transcript pipeline failed (SpeechAnalyzer
+    /// refusal, ASR timeout, decode error on transcript chunks).
+    case failedTranscript
+    /// playhead-gtt9.8: feature-extraction pipeline failed (audio
+    /// decode, feature-extractor crash).
+    case failedFeature
+    /// playhead-gtt9.8: session was halted because it exceeded the
+    /// budget for its analysis class (transcript-budget-exceeded,
+    /// app-backgrounded beyond the grace window, etc). Distinct from
+    /// `.failed` so the harness doesn't double-count as a detector
+    /// miss — see `docs/narl/2026-04-23-expert-response.md` §10.
+    case cancelledBudget
 
     /// Valid successor states from each state.
     var validTransitions: Set<SessionState> {
         switch self {
-        case .queued:         [.spooling, .failed]
-        case .spooling:       [.featuresReady, .failed]
-        case .featuresReady:  [.hotPathReady, .failed]
-        case .hotPathReady:   [.backfill, .complete, .failed]
-        case .backfill:       [.complete, .failed]
-        case .complete:       [.queued] // recovery: re-run if no data
-        case .failed:         [.queued] // retry
+        case .queued:
+            return [.spooling, .failed, .failedTranscript, .failedFeature, .cancelledBudget]
+        case .spooling:
+            return [.featuresReady, .failed, .failedFeature, .cancelledBudget]
+        case .featuresReady:
+            return [.hotPathReady, .failed, .failedFeature, .cancelledBudget]
+        case .hotPathReady:
+            return [.waitingForBackfill, .backfill, .failed, .failedTranscript, .failedFeature, .cancelledBudget]
+        case .waitingForBackfill:
+            return [.backfill, .cancelledBudget, .failed, .failedTranscript, .failedFeature]
+        case .backfill:
+            return [.completeFull, .completeFeatureOnly, .completeTranscriptPartial,
+                    .failedTranscript, .failedFeature, .failed, .cancelledBudget]
+        case .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial:
+            return [.queued] // recovery: re-run if no data
+        case .failed, .failedTranscript, .failedFeature, .cancelledBudget:
+            return [.queued] // retry
         }
     }
 
     func canTransition(to next: SessionState) -> Bool {
         validTransitions.contains(next)
+    }
+
+    /// playhead-gtt9.8: convenience classifier — the three new
+    /// completion terminals plus the legacy `.complete`. Used by the
+    /// reducer, invariant layer, and coverage-guard recovery sweep to
+    /// decide "is this session definitely done?" without enumerating
+    /// cases at every site.
+    var isTerminalCompletion: Bool {
+        switch self {
+        case .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial:
+            return true
+        case .queued, .spooling, .featuresReady, .hotPathReady,
+             .waitingForBackfill, .backfill,
+             .failed, .failedTranscript, .failedFeature, .cancelledBudget:
+            return false
+        }
+    }
+
+    /// playhead-gtt9.8: convenience classifier — any failure or
+    /// cancellation terminal.
+    var isTerminalFailure: Bool {
+        switch self {
+        case .failed, .failedTranscript, .failedFeature, .cancelledBudget:
+            return true
+        case .queued, .spooling, .featuresReady, .hotPathReady,
+             .waitingForBackfill, .backfill,
+             .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial:
+            return false
+        }
     }
 }
 
@@ -938,22 +1025,29 @@ actor AnalysisCoordinator {
                 try await runFromFeaturesReady(sessionId: sessionId, assetId: assetId)
             case .hotPathReady:
                 try await runFromHotPathReady(sessionId: sessionId, assetId: assetId)
+            case .waitingForBackfill:
+                // playhead-gtt9.8: resume parks the session at the same
+                // stage as `hotPathReady` did pre-gtt9.8. The coordinator
+                // transitions into backfill once thermal/budget signals
+                // allow; the entry point is the same drain loop.
+                try await runFromHotPathReady(sessionId: sessionId, assetId: assetId)
             case .backfill:
                 try await runFromBackfill(sessionId: sessionId, assetId: assetId)
-            case .complete:
-                // Verify the session actually has transcript data. A crash
-                // during backfill can leave the session as "complete" with
-                // no chunks. Restart from queued to re-decode audio (shards
-                // aren't in memory across app launches).
+            case .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial:
+                // playhead-gtt9.8: any terminal completion state verifies
+                // the session actually has transcript data. A crash
+                // during backfill can leave the session as "complete"
+                // with no chunks. Restart from queued to re-decode audio
+                // (shards aren't in memory across app launches).
                 let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
                 if chunks.isEmpty {
-                    logger.info("Session \(sessionId) marked complete but has 0 chunks — restarting from queued")
+                    logger.info("Session \(sessionId) marked \(resumeState.rawValue) but has 0 chunks — restarting from queued")
                     try await transition(sessionId: sessionId, assetId: assetId, to: .queued)
                     try await runFromQueued(sessionId: sessionId, assetId: assetId, episodeId: episodeId, audioURL: audioURL)
                 } else {
-                    logger.info("Session \(sessionId) already complete (\(chunks.count) chunks)")
+                    logger.info("Session \(sessionId) already \(resumeState.rawValue) (\(chunks.count) chunks)")
                 }
-            case .failed:
+            case .failed, .failedTranscript, .failedFeature, .cancelledBudget:
                 try await transition(sessionId: sessionId, assetId: assetId, to: .queued)
                 try await runFromQueued(sessionId: sessionId, assetId: assetId, episodeId: episodeId, audioURL: audioURL)
             }
@@ -1681,13 +1775,19 @@ actor AnalysisCoordinator {
             try await transition(sessionId: sessionId, assetId: assetId, to: .hotPathReady)
             try await transition(sessionId: sessionId, assetId: assetId, to: .backfill)
 
-        case .hotPathReady:
+        case .hotPathReady, .waitingForBackfill:
+            // playhead-gtt9.8: `.waitingForBackfill` is the explicit
+            // "thermal-paused between hot-path and backfill" state; it
+            // advances to `.backfill` the same way `.hotPathReady` does
+            // once the pipeline is allowed to drain.
             try await transition(sessionId: sessionId, assetId: assetId, to: .backfill)
 
         case .backfill:
             break
 
-        case .complete, .failed, .queued, .spooling:
+        case .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial,
+             .failed, .failedTranscript, .failedFeature, .cancelledBudget,
+             .queued, .spooling:
             return
         }
 

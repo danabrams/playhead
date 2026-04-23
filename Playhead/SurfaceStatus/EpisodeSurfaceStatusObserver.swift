@@ -211,11 +211,25 @@ actor EpisodeSurfaceStatusObserver {
             switch sessionState {
             case .queued:
                 persisted = .queued
-            case .spooling, .featuresReady, .hotPathReady, .backfill:
+            case .spooling, .featuresReady, .hotPathReady, .waitingForBackfill, .backfill:
+                // playhead-gtt9.8: `.waitingForBackfill` is a
+                // non-terminal hold while the coordinator waits for
+                // thermal/budget to allow the backfill drain; the
+                // reducer treats it as an in-progress session.
                 persisted = .running
-            case .complete:
+            case .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial:
+                // playhead-gtt9.8: the three richer terminals + the
+                // legacy `.complete` all map to `.done`. Commit 6 will
+                // split degraded-ready (feature-only / transcript-
+                // partial) from full-ready once the downstream reducer
+                // has a degraded bucket.
                 persisted = .done
-            case .failed:
+            case .failed, .failedTranscript, .failedFeature, .cancelledBudget:
+                // playhead-gtt9.8: the richer failure terminals all map
+                // to the reducer's `.failed` today. Distinct reason
+                // strings flow through `analysis_assets.terminalReason`
+                // (persisted independently) so the UI copy layer can
+                // disambiguate.
                 persisted = .failed
             }
         } else {

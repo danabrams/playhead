@@ -82,6 +82,25 @@ struct AnalysisAsset: Sendable {
     /// this column the guards silently bypassed coverage checks on
     /// any process relaunch. See `playhead-gtt9.1` investigation.
     let episodeDurationSec: Double?
+    /// playhead-gtt9.8: specific reason this asset landed in its
+    /// current terminal state. Persisted so the harness can compute
+    /// `scoredCoverageRatio` and distinguish "unscored because
+    /// transcript never advanced" from "unscored because the
+    /// classifier actually ran and disagreed" without reverse-
+    /// engineering it from coverage watermarks.
+    ///
+    /// Written by `AnalysisCoordinator.finalizeBackfill` when the
+    /// session transitions into one of the richer terminals
+    /// (`completeFull`, `completeFeatureOnly`,
+    /// `completeTranscriptPartial`, `failedTranscript`,
+    /// `failedFeature`, `cancelledBudget`). `nil` on all legacy rows
+    /// (pre-gtt9.8) and on sessions still in a non-terminal state.
+    ///
+    /// Example values: `"fullCoverage"`,
+    /// `"transcriptionBudgetExceeded"`, `"transcriptFailed"`,
+    /// `"featureFailed"`, `"budgetCancelled"`,
+    /// `"coverageBelowThreshold"`.
+    let terminalReason: String?
 
     init(
         id: String,
@@ -96,7 +115,8 @@ struct AnalysisAsset: Sendable {
         analysisVersion: Int,
         capabilitySnapshot: String?,
         artifactClass: ArtifactClass = .media,
-        episodeDurationSec: Double? = nil
+        episodeDurationSec: Double? = nil,
+        terminalReason: String? = nil
     ) {
         self.id = id
         self.episodeId = episodeId
@@ -111,6 +131,7 @@ struct AnalysisAsset: Sendable {
         self.capabilitySnapshot = capabilitySnapshot
         self.artifactClass = artifactClass
         self.episodeDurationSec = episodeDurationSec
+        self.terminalReason = terminalReason
     }
 }
 
@@ -635,7 +656,7 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 13
+    nonisolated private static let currentSchemaVersion = 14
 
     /// bd-m8k / Cycle 2 C4: Maximum number of recent full-rescan **recall**
     /// samples retained for the `stable_recall_flag` ring. Must match the
@@ -886,6 +907,8 @@ actor AnalysisStore {
             try migrateImplicitFeedbackV12IfNeeded()
             // playhead-narl.2: FM dual-run shadow capture storage.
             try migrateShadowFMResponsesV13IfNeeded()
+            // playhead-gtt9.8: terminalReason column on analysis_assets.
+            try migrateTerminalReasonV14IfNeeded()
             // ef2.5.1: ShowTraitProfile JSON on podcast_profiles.
             try addColumnIfNeeded(
                 table: "podcast_profiles",
@@ -1004,6 +1027,13 @@ actor AnalysisStore {
         // playhead-narl.2: shadow capture storage — must also be applied in the
         // ladder-only test seam so migration-ladder tests see the new table.
         try migrateShadowFMResponsesV13IfNeeded()
+        // playhead-gtt9.8: terminalReason column — the ladder-only seam
+        // must also apply the migration so schema-version tests lock the
+        // upgrade at v14. Guarded by tableExists because some seeded
+        // fixtures may omit analysis_assets.
+        if try tableExists("analysis_assets") {
+            try migrateTerminalReasonV14IfNeeded()
+        }
         // H1 fix: mirror the addColumnIfNeeded calls from migrate() that
         // follow the versioned ladder steps. Without these, the isolated-
         // ladder test seam cannot catch regressions in column additions.
@@ -2088,6 +2118,46 @@ actor AnalysisStore {
         try setSchemaVersion(13)
     }
 
+    /// playhead-gtt9.8: add `terminalReason TEXT` to `analysis_assets`.
+    /// Idempotent.
+    ///
+    /// The column records the specific reason an asset landed in its
+    /// current terminal state (e.g. `"fullCoverage"`,
+    /// `"transcriptionBudgetExceeded"`, `"transcriptFailed"`,
+    /// `"featureFailed"`, `"budgetCancelled"`,
+    /// `"coverageBelowThreshold"`). Written by
+    /// `AnalysisCoordinator.finalizeBackfill` at the same moment the
+    /// session transitions into one of the richer terminals introduced
+    /// by gtt9.8 (`completeFull`, `completeFeatureOnly`,
+    /// `completeTranscriptPartial`, `failedTranscript`,
+    /// `failedFeature`, `cancelledBudget`).
+    ///
+    /// Sentinel: legacy rows and any session still in a non-terminal
+    /// state leave the column NULL. The readAsset decoder treats NULL
+    /// as `nil`, which is the correct "no terminal reason yet" state.
+    ///
+    /// Placement: column is appended at the END of `analysis_assets`
+    /// (SQLite's only supported `ADD COLUMN` position). After
+    /// `addEpisodeDurationColumnIfNeeded` placed `episodeDurationSec`
+    /// at index 12, `terminalReason` now sits at index 13. `readAsset`
+    /// uses an explicit SELECT column list (not `SELECT *`) so ordering
+    /// is robust across migrations.
+    ///
+    /// Rollback: `ADD COLUMN` is additive-only. No destructive rollback
+    /// path. Existing INSERTs continue to work without supplying the
+    /// column because the column is NULL-able.
+    private func migrateTerminalReasonV14IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 14 else { return }
+
+        try addColumnIfNeeded(
+            table: "analysis_assets",
+            column: "terminalReason",
+            definition: "TEXT"
+        )
+
+        try setSchemaVersion(14)
+    }
+
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
     /// is missing (only possible on a corrupted store, since `migrate()` writes
     /// it on first run).
@@ -2744,6 +2814,37 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    /// playhead-gtt9.8: atomically update `analysisState` and
+    /// `terminalReason` for an asset. Callers use this exclusively at
+    /// terminal transitions; non-terminal transitions (queued →
+    /// spooling, etc.) continue to go through ``updateAssetState``.
+    ///
+    /// - Parameters:
+    ///   - id: asset primary key.
+    ///   - state: the new `analysisState` rawValue.
+    ///   - terminalReason: a short machine-readable reason string (see
+    ///     ``AnalysisAsset/terminalReason`` for canonical values). Pass
+    ///     `nil` explicitly to clear a stale reason (rare — happens only
+    ///     on the recovery-sweep path that resets a stranded session
+    ///     back to `.queued`).
+    func updateAssetState(
+        id: String,
+        state: String,
+        terminalReason: String?
+    ) throws {
+        let sql = """
+            UPDATE analysis_assets
+            SET analysisState = ?, terminalReason = ?
+            WHERE id = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, state)
+        bind(stmt, 2, terminalReason)
+        bind(stmt, 3, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
     func fetchAssetByEpisodeId(_ episodeId: String) throws -> AnalysisAsset? {
         let sql = """
             SELECT \(assetSelectColumns)
@@ -2773,11 +2874,14 @@ actor AnalysisStore {
     /// columns in CREATE TABLE order followed by ADD COLUMN order, so
     /// index positions are fragile across future migrations. The order
     /// here is the contract ``readAsset`` decodes against.
+    ///
+    /// playhead-gtt9.8: `terminalReason` appended at index 13.
     private static let assetSelectColumns: String = """
         id, episodeId, assetFingerprint, weakFingerprint, sourceURL, \
         featureCoverageEndTime, fastTranscriptCoverageEndTime, \
         confirmedAdCoverageEndTime, analysisState, analysisVersion, \
-        capabilitySnapshot, artifact_class, episodeDurationSec
+        capabilitySnapshot, artifact_class, episodeDurationSec, \
+        terminalReason
         """
 
     private var assetSelectColumns: String { Self.assetSelectColumns }
@@ -2799,6 +2903,7 @@ actor AnalysisStore {
         //  10: capabilitySnapshot
         //  11: artifact_class  (playhead-h7r)
         //  12: episodeDurationSec  (playhead-gtt9.1.1)
+        //  13: terminalReason  (playhead-gtt9.8)
         AnalysisAsset(
             id: text(stmt, 0),
             episodeId: text(stmt, 1),
@@ -2812,7 +2917,8 @@ actor AnalysisStore {
             analysisVersion: Int(sqlite3_column_int(stmt, 9)),
             capabilitySnapshot: optionalText(stmt, 10),
             artifactClass: ArtifactClass.fromPersistedRaw(optionalText(stmt, 11)),
-            episodeDurationSec: optionalDouble(stmt, 12)
+            episodeDurationSec: optionalDouble(stmt, 12),
+            terminalReason: optionalText(stmt, 13)
         )
     }
 
