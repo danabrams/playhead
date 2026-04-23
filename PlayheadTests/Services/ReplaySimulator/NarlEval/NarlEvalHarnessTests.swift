@@ -138,7 +138,9 @@ struct NarlEvalHarnessTests {
                         ),
                         lexicalInjectionAdds: pred.lexicalInjectionAdds,
                         priorShiftAdds: pred.priorShiftAdds,
-                        hasShadowCoverage: pred.hasShadowCoverage
+                        hasShadowCoverage: pred.hasShadowCoverage,
+                        coverageMetrics: .zero,
+                        fnDecomposition: []
                     )
                     episodeEntries.append(entry)
                     // Tally excluded episodes per-rollup so the report shows
@@ -162,6 +164,11 @@ struct NarlEvalHarnessTests {
                     predicted: pred.windows,
                     groundTruth: gtResult.adWindows
                 )
+                let coverage = NarlCoverageMetricsCompute.compute(
+                    trace: trace,
+                    predicted: pred.windows,
+                    groundTruth: gtResult.adWindows
+                )
 
                 let entry = NarlReportEpisodeEntry(
                     episodeId: trace.episodeId,
@@ -176,7 +183,9 @@ struct NarlEvalHarnessTests {
                     secondLevel: secondLevel,
                     lexicalInjectionAdds: pred.lexicalInjectionAdds,
                     priorShiftAdds: pred.priorShiftAdds,
-                    hasShadowCoverage: pred.hasShadowCoverage
+                    hasShadowCoverage: pred.hasShadowCoverage,
+                    coverageMetrics: coverage.metrics,
+                    fnDecomposition: coverage.fnDecomposition
                 )
                 episodeEntries.append(entry)
 
@@ -210,6 +219,8 @@ struct NarlEvalHarnessTests {
                 let lexAdds = bundles.map(\.entry.lexicalInjectionAdds).reduce(0, +)
                 let prAdds = bundles.map(\.entry.priorShiftAdds).reduce(0, +)
                 let shadowCount = bundles.filter { $0.entry.hasShadowCoverage }.count
+                let coverageAgg = Self.aggregateCoverage(bundles.map(\.entry.coverageMetrics))
+                let failureAssetCount = bundles.filter { $0.entry.coverageMetrics.pipelineCoverageFailureAsset }.count
                 return NarlReportRollup(
                     show: show,
                     config: config,
@@ -219,7 +230,9 @@ struct NarlEvalHarnessTests {
                     secondLevel: secMetrics,
                     totalLexicalInjectionAdds: lexAdds,
                     totalPriorShiftAdds: prAdds,
-                    totalEpisodesWithShadowCoverage: shadowCount
+                    totalEpisodesWithShadowCoverage: shadowCount,
+                    coverageMetrics: coverageAgg,
+                    pipelineCoverageFailureAssetCount: failureAssetCount
                 )
             }
 
@@ -246,7 +259,9 @@ struct NarlEvalHarnessTests {
                 ),
                 totalLexicalInjectionAdds: 0,
                 totalPriorShiftAdds: 0,
-                totalEpisodesWithShadowCoverage: 0
+                totalEpisodesWithShadowCoverage: 0,
+                coverageMetrics: .zero,
+                pipelineCoverageFailureAssetCount: 0
             )
         }
         let allRollups = (rollups + excludedOnlyRollups).sorted { a, b in
@@ -460,6 +475,35 @@ struct NarlEvalHarnessTests {
     /// `fmSchedulingEnabled` code path.
     static func hasShadowCoverage(trace: FrozenTrace) -> Bool {
         trace.evidenceCatalog.contains { $0.source.hasPrefix("shadow:") }
+    }
+
+    /// gtt9.6: aggregate per-episode `NarlCoverageMetrics` into a single
+    /// rollup value. Ratios are averaged (simple mean across episodes);
+    /// FN-second counts are summed; the `pipelineCoverageFailureAsset` flag
+    /// is OR-fold (true iff any episode in the rollup failed). Empty input
+    /// returns `.zero`.
+    static func aggregateCoverage(_ items: [NarlCoverageMetrics]) -> NarlCoverageMetrics {
+        guard !items.isEmpty else { return .zero }
+        let n = Double(items.count)
+        func mean(_ key: KeyPath<NarlCoverageMetrics, Double>) -> Double {
+            items.map { $0[keyPath: key] }.reduce(0, +) / n
+        }
+        func sum(_ key: KeyPath<NarlCoverageMetrics, Double>) -> Double {
+            items.map { $0[keyPath: key] }.reduce(0, +)
+        }
+        return NarlCoverageMetrics(
+            scoredCoverageRatio: mean(\.scoredCoverageRatio),
+            transcriptCoverageRatio: mean(\.transcriptCoverageRatio),
+            candidateRecall: mean(\.candidateRecall),
+            autoSkipPrecision: mean(\.autoSkipPrecision),
+            autoSkipRecall: mean(\.autoSkipRecall),
+            segmentIoU: mean(\.segmentIoU),
+            unscoredFNRate: mean(\.unscoredFNRate),
+            pipelineCoverageFailureAsset: items.contains { $0.pipelineCoverageFailureAsset },
+            pipelineCoverageFNSeconds: sum(\.pipelineCoverageFNSeconds),
+            classifierRecallFNSeconds: sum(\.classifierRecallFNSeconds),
+            promotionRecallFNSeconds: sum(\.promotionRecallFNSeconds)
+        )
     }
 
     /// Lazy-loaded sidecar `{ podcastId: show-label }` map. Returns `nil` if

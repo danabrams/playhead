@@ -27,6 +27,12 @@ struct NarlReportRollup: Sendable, Codable {
     let totalLexicalInjectionAdds: Int
     let totalPriorShiftAdds: Int
     let totalEpisodesWithShadowCoverage: Int
+    /// gtt9.6: mean-per-episode coverage metrics (ratios are averaged,
+    /// FN-second counts are summed across episodes).
+    let coverageMetrics: NarlCoverageMetrics
+    /// gtt9.6: episodes in this rollup whose `pipelineCoverageFailureAsset`
+    /// flag fired.
+    let pipelineCoverageFailureAssetCount: Int
 }
 
 /// Per-episode entry in the report (one row per trace × config).
@@ -44,6 +50,44 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
     let lexicalInjectionAdds: Int
     let priorShiftAdds: Int
     let hasShadowCoverage: Bool
+    /// gtt9.6: per-episode coverage + FN-rate metrics.
+    let coverageMetrics: NarlCoverageMetrics
+    /// gtt9.6: per-GT-span FN decomposition. Excluded episodes carry `[]`.
+    let fnDecomposition: [NarlFNDecomp]
+
+    init(
+        episodeId: String,
+        podcastId: String,
+        show: String,
+        config: String,
+        isExcluded: Bool,
+        exclusionReason: String?,
+        groundTruthWindowCount: Int,
+        predictedWindowCount: Int,
+        windowMetrics: [NarlWindowMetricsAtThreshold],
+        secondLevel: NarlSecondLevelMetrics,
+        lexicalInjectionAdds: Int,
+        priorShiftAdds: Int,
+        hasShadowCoverage: Bool,
+        coverageMetrics: NarlCoverageMetrics = .zero,
+        fnDecomposition: [NarlFNDecomp] = []
+    ) {
+        self.episodeId = episodeId
+        self.podcastId = podcastId
+        self.show = show
+        self.config = config
+        self.isExcluded = isExcluded
+        self.exclusionReason = exclusionReason
+        self.groundTruthWindowCount = groundTruthWindowCount
+        self.predictedWindowCount = predictedWindowCount
+        self.windowMetrics = windowMetrics
+        self.secondLevel = secondLevel
+        self.lexicalInjectionAdds = lexicalInjectionAdds
+        self.priorShiftAdds = priorShiftAdds
+        self.hasShadowCoverage = hasShadowCoverage
+        self.coverageMetrics = coverageMetrics
+        self.fnDecomposition = fnDecomposition
+    }
 }
 
 struct NarlEvalReport: Sendable, Codable {
@@ -112,14 +156,36 @@ enum NarlEvalRenderer {
         let excluded = report.episodes.filter { $0.isExcluded }
 
         out += "## Per-episode\n\n"
-        out += "| Episode | Podcast | Config | GT | Pred | F1@0.3 | F1@0.5 | F1@0.7 | Sec-F1 |\n"
-        out += "|---|---|---|---|---|---|---|---|---|\n"
+        out += "| Episode | Podcast | Config | GT | Pred | F1@0.3 | F1@0.5 | F1@0.7 | Sec-F1 | PipelineFail |\n"
+        out += "|---|---|---|---|---|---|---|---|---|---|\n"
         for e in included {
             let f13 = e.windowMetrics.first(where: { abs($0.threshold - 0.3) < 1e-6 })?.f1 ?? 0
             let f15 = e.windowMetrics.first(where: { abs($0.threshold - 0.5) < 1e-6 })?.f1 ?? 0
             let f17 = e.windowMetrics.first(where: { abs($0.threshold - 0.7) < 1e-6 })?.f1 ?? 0
+            let failMarker = e.coverageMetrics.pipelineCoverageFailureAsset ? "WARN pipelineCoverageFailureAsset" : ""
             out += "| \(e.episodeId) | \(e.podcastId) | \(e.config) | \(e.groundTruthWindowCount) | \(e.predictedWindowCount) "
-            out += "| \(fmt(f13)) | \(fmt(f15)) | \(fmt(f17)) | \(fmt(e.secondLevel.f1)) |\n"
+            out += "| \(fmt(f13)) | \(fmt(f15)) | \(fmt(f17)) | \(fmt(e.secondLevel.f1)) | \(failMarker) |\n"
+        }
+        out += "\n"
+
+        // gtt9.6: coverage + FN decomposition per-rollup.
+        out += "## Coverage + FN decomposition\n\n"
+        out += "Transcript coverage is a lower bound — counted only from "
+        out += "`lexical` / `fm` / `catalog` evidence sources — until gtt9.8 "
+        out += "ships the coverage contract.\n\n"
+        out += "| Show | Config | ScoredCov | TranscriptCov | UnscoredFN | "
+        out += "PipelineFN (s) | ClassifierFN (s) | PromotionFN (s) | PipelineFailAssets |\n"
+        out += "|---|---|---|---|---|---|---|---|---|\n"
+        for r in report.rollups {
+            let cm = r.coverageMetrics
+            out += "| \(r.show) | \(r.config) "
+            out += "| \(fmt(cm.scoredCoverageRatio)) "
+            out += "| \(fmt(cm.transcriptCoverageRatio)) "
+            out += "| \(fmt(cm.unscoredFNRate)) "
+            out += "| \(fmt(cm.pipelineCoverageFNSeconds)) "
+            out += "| \(fmt(cm.classifierRecallFNSeconds)) "
+            out += "| \(fmt(cm.promotionRecallFNSeconds)) "
+            out += "| \(r.pipelineCoverageFailureAssetCount) |\n"
         }
         out += "\n"
 
@@ -234,6 +300,30 @@ enum NarlTrendLog {
                 thresholdTau: nil,
                 value: r.secondLevel.recall
             ))
+            // gtt9.6 coverage + FN-decomposition metrics.
+            let coverageRows: [(String, Double)] = [
+                ("scored_coverage_ratio", r.coverageMetrics.scoredCoverageRatio),
+                ("transcript_coverage_ratio", r.coverageMetrics.transcriptCoverageRatio),
+                ("candidate_recall", r.coverageMetrics.candidateRecall),
+                ("auto_skip_precision", r.coverageMetrics.autoSkipPrecision),
+                ("auto_skip_recall", r.coverageMetrics.autoSkipRecall),
+                ("segment_iou", r.coverageMetrics.segmentIoU),
+                ("unscored_fn_rate", r.coverageMetrics.unscoredFNRate),
+                ("pipeline_coverage_failure_count",
+                 Double(r.pipelineCoverageFailureAssetCount)),
+            ]
+            for (name, value) in coverageRows {
+                out.append(NarlTrendRow(
+                    schemaVersion: report.schemaVersion,
+                    runId: report.runId,
+                    generatedAt: report.generatedAt,
+                    show: r.show,
+                    config: r.config,
+                    metric: name,
+                    thresholdTau: nil,
+                    value: value
+                ))
+            }
         }
         return out
     }
