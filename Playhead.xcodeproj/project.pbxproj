@@ -438,6 +438,7 @@
 		C65FB307E9424E35D34E11CC /* NetworkIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8F5ECED7539FBDB8EAD9758 /* NetworkIdentity.swift */; };
 		C75EEB27699DAF6D27926AB4 /* SpanHypothesisConfigTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED88574B2065F9F2E939744C /* SpanHypothesisConfigTests.swift */; };
 		C82F916CC70CB3C03F0E32CC /* HapticManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B7A6144759094E89E17180B /* HapticManager.swift */; };
+		C83AD452C51CD1CC4EAE5109 /* ClassifyBackfillTerminalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72B9A62B3F9B6ECD200BFE /* ClassifyBackfillTerminalTests.swift */; };
 		C8AB33C68AE7CADB02F87288 /* TranscriptEngineService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F17E52122C9989CED456D6BB /* TranscriptEngineService.swift */; };
 		C8DFF1453765A345FF297D0E /* MusicBedClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D35489638B801FE56E26574 /* MusicBedClassifierTests.swift */; };
 		C96DE47905851765B60F1472 /* CauseTaxonomy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51674850DA5E787E37D283B4 /* CauseTaxonomy.swift */; };
@@ -931,6 +932,7 @@
 		A81DBA69B57D2A21F6864C4A /* ShadowCaptureCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShadowCaptureCoordinator.swift; sourceTree = "<group>"; };
 		A88E08E234A7B69576A8649A /* FrozenTrace-DoaC-ep2.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "FrozenTrace-DoaC-ep2.json"; sourceTree = "<group>"; };
 		A9A77707822074B67EFD770B /* SkipOrchestratorPreloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkipOrchestratorPreloadTests.swift; sourceTree = "<group>"; };
+		AA72B9A62B3F9B6ECD200BFE /* ClassifyBackfillTerminalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassifyBackfillTerminalTests.swift; sourceTree = "<group>"; };
 		AACB30863437C8FB459C4764 /* CapabilitySnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapabilitySnapshot.swift; sourceTree = "<group>"; };
 		AAF7D1F6FF66375B129F988D /* FixtureManifestIntegrityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureManifestIntegrityTests.swift; sourceTree = "<group>"; };
 		AC5B77F81546B6507DE443D7 /* Typography.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Typography.swift; sourceTree = "<group>"; };
@@ -2204,6 +2206,7 @@
 			children = (
 				DFC796B09661BDE128DCFE42 /* CauseAttributionPolicyTests.swift */,
 				4FAD6B891B64891321FB6415 /* CauseTaxonomyTests.swift */,
+				AA72B9A62B3F9B6ECD200BFE /* ClassifyBackfillTerminalTests.swift */,
 				CD9A53AE05E9DD9C04755D5B /* CoverageGuardRecoveryTests.swift */,
 				9AF2121B8F286635F2BB8BA9 /* EpisodeDurationPersistenceTests.swift */,
 				03491DAB358298D3A2BAE642 /* LanePreemptionCoordinatorTests.swift */,
@@ -2766,6 +2769,7 @@
 				2E11802F4762DC47B3E1CF98 /* CauseAttributionPolicyTests.swift in Sources */,
 				3BCCFC74B3BDA430FBC0718A /* CauseTaxonomyTests.swift in Sources */,
 				38B04B1A1C8E31637D114B30 /* ChapterEvidenceTests.swift in Sources */,
+				C83AD452C51CD1CC4EAE5109 /* ClassifyBackfillTerminalTests.swift in Sources */,
 				EB1DC4738CAB20275BB19C9A /* CommercialEvidenceResolverTests.swift in Sources */,
 				5363F17B4EB5EDB5ADB55993 /* CompiledSponsorLexiconTests.swift in Sources */,
 				9AD17738C4B034C7964D3AB2 /* CompositeFingerprintTests.swift in Sources */,
