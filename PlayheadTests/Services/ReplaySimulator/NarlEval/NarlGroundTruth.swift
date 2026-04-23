@@ -186,7 +186,7 @@ func narlCorrectionKind(fromSource raw: String) -> NarlCorrectionKind {
 // MARK: - Time range
 
 /// A closed-open [start, end) time interval in episode-seconds.
-struct NarlTimeRange: Sendable, Equatable, Hashable {
+struct NarlTimeRange: Sendable, Codable, Equatable, Hashable {
     let start: Double
     let end: Double
 

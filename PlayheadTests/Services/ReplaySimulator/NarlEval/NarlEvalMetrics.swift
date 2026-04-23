@@ -1,12 +1,16 @@
 // NarlEvalMetrics.swift
 // playhead-narl.1: Window-level IoU + second-level metrics (design §A.5).
+// playhead-gtt9.6: Coverage + FN-decomposition metrics (expert-response §10).
 //
-// Two metric families per (show, config):
+// Metric families per (show, config):
 //   - Window-level: for τ ∈ {0.3, 0.5, 0.7}, a predicted window is TP if it
 //     matches some ground-truth window with IoU ≥ τ. Precision = TP / predicted,
 //     recall = TP / gt, F1 = harmonic mean. Also mean IoU over matched pairs.
 //   - Second-level: project all windows onto the second-resolution timeline
 //     (using 1-second bins), count correctly-classified ad-seconds.
+//   - Coverage: scored/transcript coverage ratios + auto-skip precision/recall,
+//     plus a per-GT-span FN decomposition that distinguishes pipeline coverage
+//     failures from classifier / promotion recall failures.
 
 import Foundation
 @testable import Playhead
@@ -154,5 +158,108 @@ enum NarlSecondLevel {
             recall: recall,
             f1: f1
         )
+    }
+}
+
+// MARK: - Coverage + FN decomposition (gtt9.6, expert-response §10)
+
+/// Kind of ground-truth false-negative span, attributing the miss to the
+/// pipeline stage that broke. Ordered by causal precedence (a
+/// `pipelineCoverage` miss cannot simultaneously be a `classifierRecall`
+/// miss — fix coverage first).
+enum NarlFNDecompKind: String, Sendable, Codable, Equatable {
+    /// GT span overlaps zero scored windows — the detector never analyzed
+    /// this region. Fixing the classifier can't recover it; fix coverage.
+    case pipelineCoverage
+    /// GT span was scored but no scored window in the overlap crossed the
+    /// candidate confidence threshold. Classifier recall failure.
+    case classifierRecall
+    /// GT span had candidate windows but none were promoted to auto-skip.
+    /// Promotion / policy failure (see gtt9.2 reject reasons).
+    case promotionRecall
+}
+
+/// Per-GT-span FN decomposition row, emitted when a GT span ended up
+/// uncovered by the predicted auto-skip set.
+struct NarlFNDecomp: Sendable, Codable, Equatable {
+    let span: NarlTimeRange
+    let kind: NarlFNDecompKind
+    let reason: String
+}
+
+/// Coverage + FN-rate metrics for one episode. Rollups carry aggregates of
+/// the same fields. See docs/narl/2026-04-23-expert-response.md §10.
+struct NarlCoverageMetrics: Sendable, Codable, Equatable {
+    /// Fraction of episode seconds with at least one emitted scored window.
+    let scoredCoverageRatio: Double
+    /// Fraction of episode seconds backed by transcript-dependent evidence
+    /// (lexical / fm / catalog sources only — this is a lower bound until
+    /// gtt9.8 ships the coverage contract).
+    let transcriptCoverageRatio: Double
+    /// Fraction of GT ad seconds overlapping at least one candidate-threshold
+    /// scored window. 0 when GT is empty.
+    let candidateRecall: Double
+    /// Fraction of predicted auto-skip seconds that are GT ad seconds.
+    let autoSkipPrecision: Double
+    /// Fraction of GT ad seconds covered by predicted auto-skip seconds.
+    let autoSkipRecall: Double
+    /// Set-based IoU of merged predicted auto-skip ranges vs. GT ranges.
+    let segmentIoU: Double
+    /// GT seconds attributable to pipelineCoverage FNs, as fraction of total
+    /// GT seconds. Not a classifier error — the detector never ran there.
+    let unscoredFNRate: Double
+    /// True when `unscoredFNRate > 0.5` — this asset's dominant failure is
+    /// coverage, so promoting classifier tuning decisions on it is misleading.
+    let pipelineCoverageFailureAsset: Bool
+    /// GT seconds in pipelineCoverage FNs.
+    let pipelineCoverageFNSeconds: Double
+    /// GT seconds in classifierRecall FNs.
+    let classifierRecallFNSeconds: Double
+    /// GT seconds in promotionRecall FNs.
+    let promotionRecallFNSeconds: Double
+
+    static let zero = NarlCoverageMetrics(
+        scoredCoverageRatio: 0,
+        transcriptCoverageRatio: 0,
+        candidateRecall: 0,
+        autoSkipPrecision: 0,
+        autoSkipRecall: 0,
+        segmentIoU: 0,
+        unscoredFNRate: 0,
+        pipelineCoverageFailureAsset: false,
+        pipelineCoverageFNSeconds: 0,
+        classifierRecallFNSeconds: 0,
+        promotionRecallFNSeconds: 0
+    )
+}
+
+enum NarlCoverageMetricsCompute {
+
+    /// Default candidate threshold on fusedSkipConfidence. Matches
+    /// `hotPathCandidate` gate in production (see expert-response §10).
+    static let defaultCandidateThreshold: Double = 0.40
+
+    /// Asset-level coverage-failure threshold: when more than half of GT
+    /// seconds are pipelineCoverage FNs, the asset is fundamentally
+    /// uncovered and classifier metrics on it are noise.
+    static let pipelineCoverageFailureAssetThreshold: Double = 0.5
+
+    /// Transcript-dependent evidence sources. `classifier`, `metadata`,
+    /// `acoustic` deliberately excluded — they don't require transcript
+    /// to fire. Narrower than the production coverage contract (gtt9.8).
+    static let transcriptEvidenceSources: Set<String> = ["lexical", "fm", "catalog"]
+
+    static func compute(
+        trace: FrozenTrace,
+        predicted: [NarlTimeRange],
+        groundTruth: [NarlTimeRange],
+        candidateThreshold: Double = NarlCoverageMetricsCompute.defaultCandidateThreshold
+    ) -> (metrics: NarlCoverageMetrics, fnDecomposition: [NarlFNDecomp]) {
+        // STUB: real implementation to follow test-by-test.
+        _ = candidateThreshold
+        _ = predicted
+        _ = groundTruth
+        _ = trace
+        return (NarlCoverageMetrics.zero, [])
     }
 }
