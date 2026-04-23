@@ -93,9 +93,9 @@ struct NarlApprovalIntegrationTests {
         // an empty / truncated artifact trips the test. `insufficientData`
         // is the expected dominant state today pre-narl.2 shadow coverage.
         let jsonData = try Data(contentsOf: jsonURL)
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let decoded = try decoder.decode(NarlApprovalReport.self, from: jsonData)
+        let roundTripDecoder = JSONDecoder()
+        roundTripDecoder.dateDecodingStrategy = .iso8601
+        let decoded = try roundTripDecoder.decode(NarlApprovalReport.self, from: jsonData)
         try decoded.requireSchema()
         #expect(decoded.recommendations.count == recs.count,
                 "decoded recommendation count should match source")

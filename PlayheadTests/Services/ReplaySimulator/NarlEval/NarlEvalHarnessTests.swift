@@ -34,6 +34,55 @@ struct NarlEvalHarnessTests {
     /// derived-data layouts.
     static let fixturesRelpath = "PlayheadTests/Fixtures/NarlEval"
 
+    @Test("hasShadowCoverage flips when trace carries shadow: evidence entries")
+    func hasShadowCoverageDetectsShadowEvidence() {
+        let withoutShadow = Self.makeTrace(evidence: [
+            FrozenTrace.FrozenEvidenceEntry(
+                source: "transcript",
+                weight: 0.8,
+                windowStart: 0,
+                windowEnd: 30
+            )
+        ])
+        #expect(Self.hasShadowCoverage(trace: withoutShadow) == false)
+
+        let withShadow = Self.makeTrace(evidence: [
+            FrozenTrace.FrozenEvidenceEntry(
+                source: "transcript",
+                weight: 0.8,
+                windowStart: 0,
+                windowEnd: 30
+            ),
+            FrozenTrace.FrozenEvidenceEntry(
+                source: "shadow:allEnabledShadow",
+                weight: 1.0,
+                windowStart: 30,
+                windowEnd: 60
+            )
+        ])
+        #expect(Self.hasShadowCoverage(trace: withShadow) == true)
+    }
+
+    /// Minimal FrozenTrace factory for unit-level helper tests.
+    private static func makeTrace(
+        evidence: [FrozenTrace.FrozenEvidenceEntry]
+    ) -> FrozenTrace {
+        FrozenTrace(
+            episodeId: "ep-test",
+            podcastId: "test",
+            episodeDuration: 300,
+            traceVersion: "frozen-trace-v2",
+            capturedAt: Date(timeIntervalSince1970: 0),
+            featureWindows: [],
+            atoms: [],
+            evidenceCatalog: evidence,
+            corrections: [],
+            decisionEvents: [],
+            baselineReplaySpanDecisions: [],
+            holdoutDesignation: .training
+        )
+    }
+
     @Test("Harness runs both configs and writes a report")
     func runHarness() throws {
         let traces = try Self.loadAllFixtureTraces()
@@ -57,6 +106,7 @@ struct NarlEvalHarnessTests {
         for (fixtureIndex, trace) in traces.enumerated() {
             let gtResult = NarlGroundTruth.build(for: trace)
             let show = Self.showName(for: trace)
+            let traceHasShadowCoverage = Self.hasShadowCoverage(trace: trace)
             let configs: [(name: String, config: MetadataActivationConfig)] = [
                 ("default", .default),
                 ("allEnabled", .allEnabled),
@@ -66,7 +116,7 @@ struct NarlEvalHarnessTests {
                 let pred = NarlReplayPredictor.predict(
                     trace: trace,
                     config: configValue,
-                    hasShadowCoverage: false  // Phase 1: no shadow data until narl.2
+                    hasShadowCoverage: traceHasShadowCoverage
                 )
 
                 if gtResult.isExcluded {
@@ -401,6 +451,15 @@ struct NarlEvalHarnessTests {
             return "Conan"
         }
         return trace.podcastId.isEmpty ? "unknown" : trace.podcastId
+    }
+
+    /// True when the trace carries any evidence rows sourced from the
+    /// narl.2 shadow capture (`shadow-decisions.jsonl` → evidence entries
+    /// with `source="shadow:<variant>"` per the corpus builder at
+    /// `NarlEvalCorpusBuilderTests.swift:451`). Gates the predictor's
+    /// `fmSchedulingEnabled` code path.
+    static func hasShadowCoverage(trace: FrozenTrace) -> Bool {
+        trace.evidenceCatalog.contains { $0.source.hasPrefix("shadow:") }
     }
 
     /// Lazy-loaded sidecar `{ podcastId: show-label }` map. Returns `nil` if
