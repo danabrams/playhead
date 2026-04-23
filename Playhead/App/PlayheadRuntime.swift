@@ -490,6 +490,22 @@ final class PlayheadRuntime {
             episodeIdHasher: surfaceStatusHasher
         )
 
+        // playhead-gtt9.8: per-asset lifecycle logger. Production
+        // builds write to `Documents/asset-lifecycle-log.jsonl`;
+        // release builds log too — this is a small telemetry signal
+        // (~one line per transition, rotated at 10 MB) that the NARL
+        // harness reads back to reconstruct per-asset timelines.
+        // Any FileManager failure (e.g. read-only Documents in test)
+        // falls back to the no-op logger.
+        let lifecycleLogger: AssetLifecycleLoggerProtocol
+        do {
+            lifecycleLogger = try AssetLifecycleLogger()
+        } catch {
+            Logger(subsystem: "com.playhead", category: "Runtime")
+                .warning("AssetLifecycleLogger init failed — logging disabled: \(error.localizedDescription, privacy: .public)")
+            lifecycleLogger = NoOpAssetLifecycleLogger()
+        }
+
         self.analysisCoordinator = AnalysisCoordinator(
             store: analysisStore,
             audioService: audioService,
@@ -499,7 +515,8 @@ final class PlayheadRuntime {
             adDetectionService: adDetectionService,
             skipOrchestrator: skipOrchestrator,
             downloadManager: downloadManager,
-            surfaceStatusObserver: surfaceStatusObserver
+            surfaceStatusObserver: surfaceStatusObserver,
+            lifecycleLogger: lifecycleLogger
         )
         self.backgroundProcessingService = BackgroundProcessingService(
             coordinator: analysisCoordinator,

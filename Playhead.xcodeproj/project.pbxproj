@@ -439,6 +439,7 @@
 		C61D43644B0878C9F7390CD2 /* PodcastPlannerStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E53E462BB41FC1B38516C63B /* PodcastPlannerStateTests.swift */; };
 		C65FB307E9424E35D34E11CC /* NetworkIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8F5ECED7539FBDB8EAD9758 /* NetworkIdentity.swift */; };
 		C75EEB27699DAF6D27926AB4 /* SpanHypothesisConfigTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED88574B2065F9F2E939744C /* SpanHypothesisConfigTests.swift */; };
+		C774D129D19F6D2F21E54F2D /* AssetLifecycleLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39B638B45D4506F1DBC5DF11 /* AssetLifecycleLogger.swift */; };
 		C82F916CC70CB3C03F0E32CC /* HapticManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B7A6144759094E89E17180B /* HapticManager.swift */; };
 		C83AD452C51CD1CC4EAE5109 /* ClassifyBackfillTerminalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA72B9A62B3F9B6ECD200BFE /* ClassifyBackfillTerminalTests.swift */; };
 		C8AB33C68AE7CADB02F87288 /* TranscriptEngineService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F17E52122C9989CED456D6BB /* TranscriptEngineService.swift */; };
@@ -697,6 +698,7 @@
 		38C18369630E70E46DF0EEED /* MetadataActivationConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataActivationConfig.swift; sourceTree = "<group>"; };
 		38E0CFFDA6C482D8221FC32E /* AnalysisCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisCoordinator.swift; sourceTree = "<group>"; };
 		390D048FDC5E42F4522C110C /* TimelineRailViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineRailViewTests.swift; sourceTree = "<group>"; };
+		39B638B45D4506F1DBC5DF11 /* AssetLifecycleLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssetLifecycleLogger.swift; sourceTree = "<group>"; };
 		39EDB3ADD05EFFBC1053A447 /* Phase6ComprehensiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Phase6ComprehensiveTests.swift; sourceTree = "<group>"; };
 		3A3A76FEB631CAFBC3E05F49 /* QualityProfileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QualityProfileTests.swift; sourceTree = "<group>"; };
 		3A73715EA79DA3F511F9CC98 /* fixture-01-30min-clean-speech.wav */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; path = "fixture-01-30min-clean-speech.wav"; sourceTree = "<group>"; };
@@ -1313,6 +1315,7 @@
 			isa = PBXGroup;
 			children = (
 				38E0CFFDA6C482D8221FC32E /* AnalysisCoordinator.swift */,
+				39B638B45D4506F1DBC5DF11 /* AssetLifecycleLogger.swift */,
 				8FF386614C954C71D052A28C /* BackgroundProcessingService.swift */,
 				B436D8305E9154092FE3B260 /* CauseAttributionPolicy.swift */,
 				51674850DA5E787E37D283B4 /* CauseTaxonomy.swift */,
@@ -2505,6 +2508,7 @@
 				54B61DD6DF920A2A89C00ED6 /* AnalysisUnavailableReason.swift in Sources */,
 				36D8B9861065F1E9137F0BEE /* AnalysisWorkScheduler.swift in Sources */,
 				61E29A6594FA0F8AD78528B0 /* AssetCache.swift in Sources */,
+				C774D129D19F6D2F21E54F2D /* AssetLifecycleLogger.swift in Sources */,
 				CAC8438BC065F1782864E92F /* AssetProvider.swift in Sources */,
 				EDF82EE551BCD4C20D154D23 /* AsymmetricSnapScorer.swift in Sources */,
 				48C02413E0BF6E2AFBECA9A1 /* AtomEvidence.swift in Sources */,

@@ -210,6 +210,11 @@ actor AnalysisCoordinator {
     /// directly (without the observer) keep working unchanged.
     private let surfaceStatusObserver: EpisodeSurfaceStatusObserver?
 
+    /// playhead-gtt9.8: per-asset JSONL lifecycle logger. Every
+    /// `transition(...)` call records one line. Defaults to a no-op so
+    /// existing tests that do not pass a logger keep working.
+    private let lifecycleLogger: AssetLifecycleLoggerProtocol
+
     // MARK: - Active Session State
 
     /// The currently active session, if any.
@@ -295,7 +300,8 @@ actor AnalysisCoordinator {
         adDetectionService: AdDetectionService,
         skipOrchestrator: SkipOrchestrator,
         downloadManager: DownloadManager? = nil,
-        surfaceStatusObserver: EpisodeSurfaceStatusObserver? = nil
+        surfaceStatusObserver: EpisodeSurfaceStatusObserver? = nil,
+        lifecycleLogger: AssetLifecycleLoggerProtocol = NoOpAssetLifecycleLogger()
     ) {
         self.store = store
         self.audioService = audioService
@@ -306,6 +312,7 @@ actor AnalysisCoordinator {
         self.skipOrchestrator = skipOrchestrator
         self.downloadManager = downloadManager
         self.surfaceStatusObserver = surfaceStatusObserver
+        self.lifecycleLogger = lifecycleLogger
     }
 
     // MARK: - Lifecycle
@@ -1353,6 +1360,29 @@ actor AnalysisCoordinator {
         }
 
         logger.info("Session \(sessionId): \(currentState.rawValue) -> \(newState.rawValue)")
+
+        // playhead-gtt9.8: record one JSONL entry per transition so the
+        // NARL harness can reconstruct per-asset timelines without
+        // re-querying SQLite. Best-effort (the actor-serialized logger
+        // swallows its own errors); the pipeline never fails on a log
+        // write.
+        let nowTimestamp = Date().timeIntervalSince1970
+        let assetForLog = (try? await store.fetchAsset(id: assetId))
+        let transcriptChunksForLog = (try? await store.fetchTranscriptChunks(assetId: assetId)) ?? []
+        let transcriptCoverageEnd = transcriptChunksForLog.map(\.endTime).max()
+        let entry = AssetLifecycleLogEntry(
+            schemaVersion: AssetLifecycleLogEntry.currentSchemaVersion,
+            analysisAssetID: assetId,
+            sessionID: sessionId,
+            timestamp: nowTimestamp,
+            fromState: currentState.rawValue,
+            toState: newState.rawValue,
+            terminalReason: terminalReason,
+            episodeDurationSec: currentEpisodeDuration(),
+            featureCoverageEndSec: assetForLog?.featureCoverageEndTime,
+            transcriptCoverageEndSec: transcriptCoverageEnd
+        )
+        await lifecycleLogger.record(entry)
 
         // playhead-o45p: on the analysis-completion edge, route the
         // episode through the surface-status observer so `ready_entered`
