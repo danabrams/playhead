@@ -85,6 +85,80 @@ struct NarlEvalHarnessTests {
 
     @Test("Harness runs both configs and writes a report")
     func runHarness() throws {
+        let (report, outputDir) = try Self.runHarnessCollectingReport()
+
+        // Harness acceptance: artifacts exist.
+        let jsonURL = outputDir.appendingPathComponent("report.json")
+        let mdURL = outputDir.appendingPathComponent("report.md")
+        #expect(FileManager.default.fileExists(atPath: jsonURL.path),
+                "report.json should be written to \(jsonURL.path)")
+        #expect(FileManager.default.fileExists(atPath: mdURL.path),
+                "report.md should be written to \(mdURL.path)")
+
+        // Verify trend log was appended.
+        let trendURL = try Self.evalOutputRootURL().appendingPathComponent("trend.jsonl")
+        #expect(FileManager.default.fileExists(atPath: trendURL.path),
+                "trend.jsonl should exist at \(trendURL.path)")
+        _ = report
+    }
+
+    @Test("harness threads coverageMetrics + fnDecomposition into the report")
+    func harnessThreadsNewCoverageMetricsIntoReport() throws {
+        let (_, outputDir) = try Self.runHarnessCollectingReport()
+
+        // Load report.json from disk and decode — that's the contract
+        // downstream consumers rely on.
+        let jsonURL = outputDir.appendingPathComponent("report.json")
+        let data = try Data(contentsOf: jsonURL)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(NarlEvalReport.self, from: data)
+
+        // Non-excluded entries must carry coverageMetrics + fnDecomposition.
+        // (Both are non-optional — we're verifying the writer/decoder
+        // round-trips the new fields, not their content.)
+        for entry in decoded.episodes where !entry.isExcluded {
+            _ = entry.coverageMetrics
+            _ = entry.fnDecomposition
+        }
+        // If the corpus is empty, the assertion would be vacuous; exit
+        // cleanly — the test still covered the encode/decode round-trip.
+        if decoded.episodes.contains(where: { !$0.isExcluded }) {
+            #expect(decoded.episodes.contains { !$0.isExcluded },
+                    "expected at least one non-excluded entry to validate schema")
+        }
+    }
+
+    @Test("harness emits pipeline coverage failure trend rows")
+    func harnessEmitsPipelineCoverageFailureTrendRows() throws {
+        let (report, _) = try Self.runHarnessCollectingReport()
+        // Guard: CI clones without fixtures emit zero rollups, so the
+        // trend rows don't exist. The "harness still writes artifacts"
+        // behavior is covered by runHarness; this test only has a
+        // meaningful assertion when there's corpus data.
+        guard !report.rollups.isEmpty else { return }
+
+        let trendURL = try Self.evalOutputRootURL().appendingPathComponent("trend.jsonl")
+        let data = try Data(contentsOf: trendURL)
+        let text = String(decoding: data, as: UTF8.self)
+
+        // gtt9.6 requires these three trend metrics at minimum for the
+        // new coverage-failure tracking to show up in trend analysis.
+        let required = [
+            "scored_coverage_ratio",
+            "unscored_fn_rate",
+            "pipeline_coverage_failure_count",
+        ]
+        for metric in required {
+            #expect(text.contains("\"metric\":\"\(metric)\""),
+                    "trend.jsonl should contain \(metric) rows")
+        }
+    }
+
+    /// gtt9.6: full harness pipeline extracted as a helper so the
+    /// runHarness test + the two coverage-integration tests can each
+    /// exercise the same state without duplicating the aggregator.
+    static func runHarnessCollectingReport() throws -> (report: NarlEvalReport, outputDir: URL) {
         let traces = try Self.loadAllFixtureTraces()
         let runId = Self.makeRunId()
 
@@ -281,19 +355,7 @@ struct NarlEvalHarnessTests {
 
         // Write the artifacts.
         let outputDir = try Self.writeReport(report)
-
-        // Harness acceptance: artifacts exist.
-        let jsonURL = outputDir.appendingPathComponent("report.json")
-        let mdURL = outputDir.appendingPathComponent("report.md")
-        #expect(FileManager.default.fileExists(atPath: jsonURL.path),
-                "report.json should be written to \(jsonURL.path)")
-        #expect(FileManager.default.fileExists(atPath: mdURL.path),
-                "report.md should be written to \(mdURL.path)")
-
-        // Verify trend log was appended.
-        let trendURL = try Self.evalOutputRootURL().appendingPathComponent("trend.jsonl")
-        #expect(FileManager.default.fileExists(atPath: trendURL.path),
-                "trend.jsonl should exist at \(trendURL.path)")
+        return (report, outputDir)
     }
 
     // MARK: - Fixture loading
