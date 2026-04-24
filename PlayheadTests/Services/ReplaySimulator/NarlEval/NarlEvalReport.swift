@@ -595,6 +595,37 @@ struct NarlReportTerminalReasonRollup: Sendable, Codable, Equatable {
 
 // MARK: - Pipeline-coverage bucketing (gtt9.15)
 
+/// Tunable knobs for `NarlPipelineCoverageBucket.classify(_:thresholds:)`.
+///
+/// Introduced by playhead-ahez to give harness thresholds a named home
+/// rather than a bare static constant. A second coverage-related
+/// threshold is expected shortly (e.g. a different bucket boundary or
+/// a custom-eval run); routing both through one struct means the
+/// plumbing already exists when that second field arrives — no churn
+/// in the classifier's public signature at that point.
+///
+/// Intentionally minimal: only `scoringLimitedCoverageFloor` today
+/// (promoted from the previous `scoringLimitedRatioThreshold` static
+/// constant). Do not preemptively add fields — the whole point of the
+/// struct is to have a canonical place for them when real callers
+/// need them.
+///
+/// Not Codable: this is an in-memory config type, not a field on any
+/// persisted report schema. The report's existing wire format is
+/// unaffected.
+struct NarlPipelineCoverageThresholds: Sendable, Equatable {
+    /// Coverage-end ratio at which we treat the pipeline as having run
+    /// to completion. The 0.95 floor mirrors the gtt9.15 spec — leaves
+    /// a margin for the few seconds of trailing silence that production
+    /// commonly truncates from the analysis window.
+    let scoringLimitedCoverageFloor: Double
+
+    /// Production defaults — current behavior at gtt9.15 land.
+    static let `default` = NarlPipelineCoverageThresholds(
+        scoringLimitedCoverageFloor: 0.95
+    )
+}
+
 /// Coarser 3-bucket classifier on top of the gtt9.8 lifecycle fields.
 /// Whereas `NarlTerminalReasonBucket` keys on the canonical 6 SessionState
 /// rawValues (useful but operator-noisy), this bucket answers a single
@@ -606,9 +637,10 @@ struct NarlReportTerminalReasonRollup: Sendable, Codable, Equatable {
 /// Concretely:
 ///   - `.scoringLimited` — the pipeline ran transcript coverage to
 ///     completion (terminalReason mentions "full coverage" OR
-///     fastTranscriptCoverageEndTime ≥ durationSec * 0.95). Any FN on
-///     this asset is a classifier / promotion / fusion problem, NOT a
-///     coverage problem.
+///     fastTranscriptCoverageEndTime ≥ durationSec *
+///     `thresholds.scoringLimitedCoverageFloor`; production default
+///     0.95). Any FN on this asset is a classifier / promotion / fusion
+///     problem, NOT a coverage problem.
 ///   - `.pipelineCoverageLimited` — the pipeline stopped before the
 ///     episode end (transcript-coverage-end < threshold) OR
 ///     terminalReason indicates a coverage failure. Misses on this
@@ -627,12 +659,6 @@ enum NarlPipelineCoverageBucket: String, Sendable, Codable, CaseIterable {
     case scoringLimited = "scoring-limited"
     case pipelineCoverageLimited = "pipeline-coverage-limited"
     case unknown
-
-    /// Coverage-end ratio at which we treat the pipeline as having run
-    /// to completion. The 0.95 floor mirrors the gtt9.15 spec — leaves
-    /// a margin for the few seconds of trailing silence that production
-    /// commonly truncates from the analysis window.
-    static let scoringLimitedRatioThreshold: Double = 0.95
 
     /// Substrings in `terminalReason` that signal a pipeline coverage
     /// failure. Matched case-sensitively to mirror the production
@@ -654,10 +680,18 @@ enum NarlPipelineCoverageBucket: String, Sendable, Codable, CaseIterable {
     ///   1. terminalReason contains "full coverage"           → scoring
     ///   2. terminalReason contains a coverage-failure needle → pipeline
     ///   3. ratio = fastTranscriptCoverageEndTime / durationSec
-    ///        a. ratio ≥ 0.95                                 → scoring
+    ///        a. ratio ≥ thresholds.scoringLimitedCoverageFloor → scoring
     ///        b. 0 < ratio                                    → pipeline
     ///   4. otherwise (no usable signal)                      → unknown
-    static func classify(_ trace: FrozenTrace) -> NarlPipelineCoverageBucket {
+    ///
+    /// `thresholds` defaults to `.default` (production: 0.95 floor) so
+    /// existing call-sites are source-compatible. Pass a custom
+    /// `NarlPipelineCoverageThresholds` to rebucket for a what-if
+    /// eval (playhead-ahez).
+    static func classify(
+        _ trace: FrozenTrace,
+        thresholds: NarlPipelineCoverageThresholds = .default
+    ) -> NarlPipelineCoverageBucket {
         if let reason = trace.terminalReason {
             if reason.contains(fullCoverageReasonNeedle) {
                 return .scoringLimited
@@ -678,7 +712,7 @@ enum NarlPipelineCoverageBucket: String, Sendable, Codable, CaseIterable {
             return .unknown
         }
         let ratio = coverageEnd / duration
-        if ratio >= scoringLimitedRatioThreshold {
+        if ratio >= thresholds.scoringLimitedCoverageFloor {
             return .scoringLimited
         }
         return .pipelineCoverageLimited
@@ -687,14 +721,21 @@ enum NarlPipelineCoverageBucket: String, Sendable, Codable, CaseIterable {
     /// Tally traces into the canonical 3-bucket ordering. Always
     /// returns 3 entries (zero-count buckets included) so report
     /// consumers can rely on a stable shape.
-    static func countsPerBucket(traces: [FrozenTrace]) -> [NarlPipelineCoverageBucketRollup] {
+    ///
+    /// `thresholds` defaults to `.default`; pass a custom value to
+    /// re-bucket a fixture corpus under alternate harness settings
+    /// without touching the classifier at each call-site.
+    static func countsPerBucket(
+        traces: [FrozenTrace],
+        thresholds: NarlPipelineCoverageThresholds = .default
+    ) -> [NarlPipelineCoverageBucketRollup] {
         var counts: [NarlPipelineCoverageBucket: Int] = [
             .scoringLimited: 0,
             .pipelineCoverageLimited: 0,
             .unknown: 0,
         ]
         for trace in traces {
-            counts[classify(trace), default: 0] += 1
+            counts[classify(trace, thresholds: thresholds), default: 0] += 1
         }
         // Canonical order: scoring → pipeline → unknown. The case order
         // in `allCases` matches this ordering, but spell it out
