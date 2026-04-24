@@ -2743,6 +2743,30 @@ actor AdDetectionService {
         for result in classifierResults {
             let timestamp = Date().timeIntervalSince1970
             let passed = result.adProbability >= config.candidateThreshold
+            // A classifier-only window clearing the autoSkip threshold is
+            // skip-worthy on its own merit. Surfacing it as "autoSkipEligible"
+            // (rather than generic "hotPathCandidate") makes the signal
+            // visible to downstream consumers — including the NARL corpus
+            // builder, whose isAdUnderDefault heuristic matches on
+            // "autoskip"/"markonly"/"skip" in the logged action.
+            //
+            // Regression: 2026-04-23 dogfood capture asset
+            // 71F0C2AE-7260-4D1E-B41A-BCFD5103A641 @ [7006..7008],
+            // classifier 0.8154, surfaced as "hotPathCandidate" → invisible
+            // to the harness → GT=3, Pred=0, Sec-F1=0.
+            let promotesToAutoSkip = result.adProbability >= config.autoSkipConfidenceThreshold
+            let action: String
+            let thresholdCrossed: Double
+            if promotesToAutoSkip {
+                action = "autoSkipEligible"
+                thresholdCrossed = config.autoSkipConfidenceThreshold
+            } else if passed {
+                action = "hotPathCandidate"
+                thresholdCrossed = config.candidateThreshold
+            } else {
+                action = "hotPathBelowThreshold"
+                thresholdCrossed = config.candidateThreshold
+            }
             let clampedScore = max(0.0, min(1.0, result.adProbability))
             let cappedWeight = min(clampedScore * classifierCap, classifierCap)
             let classifierEntry = EvidenceLedgerEntry(
@@ -2773,10 +2797,10 @@ actor AdDetectionService {
                     breakdown: breakdown
                 ),
                 finalDecision: .init(
-                    action: passed ? "hotPathCandidate" : "hotPathBelowThreshold",
+                    action: action,
                     gate: "eligible",
                     skipConfidence: result.adProbability,
-                    thresholdCrossed: config.candidateThreshold
+                    thresholdCrossed: thresholdCrossed
                 )
             )
             await decisionLogger.record(logEntry)
