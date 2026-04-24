@@ -650,6 +650,19 @@ struct ReplaySpanDecision: Sendable, Codable, Equatable {
 ///     at capture time. Older fixtures (2026-04-22 / 2026-04-23) decode
 ///     with all five fields nil. No schema-version bump: the shape is
 ///     strictly additive and all fields are optional.
+///   - `frozen-trace-v2` (gtt9.21 follow-up, 2026-04-24): adds capture
+///     provenance — `detectorVersion` (mirror of
+///     `AdDetectionConfig.detectorVersion` at session-start time) and
+///     `buildCommitSHA` (short git SHA of the binary that produced the
+///     DecisionLog, sourced from `BuildInfo.commitSHA`). Older fixtures
+///     decode both as **empty string** (not nil) — the tradeoff: two
+///     fewer optional unwraps in every consumer call site, in exchange
+///     for a string sentinel `""` that means "absent". Empty string is
+///     fine here because the fields are categorical labels, not
+///     continuous values; no consumer needs to distinguish "missing"
+///     from "explicitly empty" (an explicitly empty SHA would be a bug
+///     in the producer, not legitimate data). See
+///     `FrozenTraceProvenanceTests` for the back-compat contract.
 struct FrozenTrace: Sendable, Codable {
     static let currentTraceVersion = "frozen-trace-v2"
 
@@ -713,6 +726,20 @@ struct FrozenTrace: Sendable, Codable {
     /// row. Nil when absent.
     let featureCoverageEndTime: Double?
 
+    // MARK: - Capture provenance (gtt9.21)
+
+    /// Detector version recorded by the device when this fixture was
+    /// captured (mirrors `AdDetectionConfig.detectorVersion` at session-
+    /// start time). Empty string when the capture predates gtt9.21
+    /// (back-compat sentinel for "absent").
+    let detectorVersion: String
+    /// Short git SHA of the binary that produced the DecisionLog this
+    /// fixture was built from (mirrors `BuildInfo.commitSHA` at capture
+    /// time). Empty string when the capture predates gtt9.21 — a
+    /// non-empty value is `"unknown"` (the runtime fallback when the
+    /// build phase couldn't resolve a SHA), never an empty string.
+    let buildCommitSHA: String
+
     init(
         episodeId: String,
         podcastId: String,
@@ -732,7 +759,9 @@ struct FrozenTrace: Sendable, Codable {
         analysisState: String? = nil,
         terminalReason: String? = nil,
         fastTranscriptCoverageEndTime: Double? = nil,
-        featureCoverageEndTime: Double? = nil
+        featureCoverageEndTime: Double? = nil,
+        detectorVersion: String = "",
+        buildCommitSHA: String = ""
     ) {
         self.episodeId = episodeId
         self.podcastId = podcastId
@@ -753,6 +782,8 @@ struct FrozenTrace: Sendable, Codable {
         self.terminalReason = terminalReason
         self.fastTranscriptCoverageEndTime = fastTranscriptCoverageEndTime
         self.featureCoverageEndTime = featureCoverageEndTime
+        self.detectorVersion = detectorVersion
+        self.buildCommitSHA = buildCommitSHA
     }
 
     // MARK: - Codable (manual to keep new fields optional)
@@ -777,6 +808,9 @@ struct FrozenTrace: Sendable, Codable {
         case terminalReason
         case fastTranscriptCoverageEndTime
         case featureCoverageEndTime
+        // gtt9.21: capture provenance.
+        case detectorVersion
+        case buildCommitSHA
     }
 
     init(from decoder: Decoder) throws {
@@ -800,7 +834,12 @@ struct FrozenTrace: Sendable, Codable {
             analysisState: try c.decodeIfPresent(String.self, forKey: .analysisState),
             terminalReason: try c.decodeIfPresent(String.self, forKey: .terminalReason),
             fastTranscriptCoverageEndTime: try c.decodeIfPresent(Double.self, forKey: .fastTranscriptCoverageEndTime),
-            featureCoverageEndTime: try c.decodeIfPresent(Double.self, forKey: .featureCoverageEndTime)
+            featureCoverageEndTime: try c.decodeIfPresent(Double.self, forKey: .featureCoverageEndTime),
+            // gtt9.21: empty string is the legitimate "absent" sentinel
+            // for back-compat. See the schema-history note above for
+            // why we picked empty-string over Optional<String>.
+            detectorVersion: try c.decodeIfPresent(String.self, forKey: .detectorVersion) ?? "",
+            buildCommitSHA: try c.decodeIfPresent(String.self, forKey: .buildCommitSHA) ?? ""
         )
     }
 
@@ -825,6 +864,13 @@ struct FrozenTrace: Sendable, Codable {
         try c.encodeIfPresent(terminalReason, forKey: .terminalReason)
         try c.encodeIfPresent(fastTranscriptCoverageEndTime, forKey: .fastTranscriptCoverageEndTime)
         try c.encodeIfPresent(featureCoverageEndTime, forKey: .featureCoverageEndTime)
+        // gtt9.21: always emit the keys (even when empty) so a freshly
+        // captured fixture's wire format is unambiguously self-
+        // describing. A test that round-trips an empty fixture would
+        // otherwise drop the keys silently and look identical to a pre-
+        // gtt9.21 capture.
+        try c.encode(detectorVersion, forKey: .detectorVersion)
+        try c.encode(buildCommitSHA, forKey: .buildCommitSHA)
     }
 
     /// Return a copy with a different holdout designation.
@@ -849,7 +895,9 @@ struct FrozenTrace: Sendable, Codable {
             analysisState: analysisState,
             terminalReason: terminalReason,
             fastTranscriptCoverageEndTime: fastTranscriptCoverageEndTime,
-            featureCoverageEndTime: featureCoverageEndTime
+            featureCoverageEndTime: featureCoverageEndTime,
+            detectorVersion: detectorVersion,
+            buildCommitSHA: buildCommitSHA
         )
     }
 

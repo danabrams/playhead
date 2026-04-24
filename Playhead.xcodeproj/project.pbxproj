@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		01872A640A89F4BE1C6C44C8 /* FineFeatureBandCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1ED0C092F615C536018D5062 /* FineFeatureBandCache.swift */; };
 		022D1B1B11A2E948519840B7 /* DownloadNextViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF045B17B4F22BA08A3F4582 /* DownloadNextViewTests.swift */; };
+		0262A58495D57BEAC6138C0D /* BuildInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69F4DFB4E81926A74E29FEA9 /* BuildInfo.swift */; };
 		02E2A22E2E04656F2C5873AF /* SkipOrchestratorCharacterizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D5AD9832BF8E7D27E23DBA6 /* SkipOrchestratorCharacterizationTests.swift */; };
 		030124646597FA272A69D7EC /* EpisodeRowReadinessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 893D79F29684D60E65402239 /* EpisodeRowReadinessTests.swift */; };
 		039425FDBD82FE53E683604E /* SwiftDataDiagnosticsOptInSinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0D09E1FC876E7B3471B137 /* SwiftDataDiagnosticsOptInSinkTests.swift */; };
@@ -526,6 +527,7 @@
 		D719853F6A7C9402E2E8918E /* SurfaceReasonCopyTemplates.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43FD7F0AB6128C65768F9D04 /* SurfaceReasonCopyTemplates.swift */; };
 		D7EF1061713CEFE6C0466007 /* LanePreemptionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBBD0C0C3B13A2B4530DE525 /* LanePreemptionCoordinator.swift */; };
 		D802325D82C83EF76D60152A /* DownloadManagerPreAnalysisTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89D64836B471876510AFF066 /* DownloadManagerPreAnalysisTests.swift */; };
+		D83AE91488D3C6A2D955A906 /* FrozenTraceProvenanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492E86A244B99E97037D436E /* FrozenTraceProvenanceTests.swift */; };
 		D8E613D9075C969F44F5C0B6 /* SkipCueMaterializer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53C7C37260B0D9DCCB731EDD /* SkipCueMaterializer.swift */; };
 		DA5CBC8E533620B7280A9BB9 /* BackgroundFeedRefreshServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D53934B5B81337A0C181B77 /* BackgroundFeedRefreshServiceTests.swift */; };
 		DB0D1807B461853C27E2F8C9 /* BackfillEvidenceFusion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A65337CCC0AA10C7696E87A /* BackfillEvidenceFusion.swift */; };
@@ -804,6 +806,7 @@
 		479DAA1BAAE2A3EFCEB19717 /* SurfaceStatusReadyTransitionEmitterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceStatusReadyTransitionEmitterTests.swift; sourceTree = "<group>"; };
 		47EE64C2FAFD63DB3959EBAD /* CapabilitiesService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapabilitiesService.swift; sourceTree = "<group>"; };
 		490BF1CC2F40790D7560FA8D /* AdCopyFingerprintMatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdCopyFingerprintMatcher.swift; sourceTree = "<group>"; };
+		492E86A244B99E97037D436E /* FrozenTraceProvenanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrozenTraceProvenanceTests.swift; sourceTree = "<group>"; };
 		493ACFEAC67E6F82FE072FF2 /* fixtures-manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "fixtures-manifest.json"; sourceTree = "<group>"; };
 		4991A37611CA9D7AF18B2F74 /* NowPlayingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingView.swift; sourceTree = "<group>"; };
 		4A1C0E196ADF3360ABFF128E /* DurationPriorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DurationPriorTests.swift; sourceTree = "<group>"; };
@@ -877,6 +880,7 @@
 		677DB61B7256EB19B3A6AF76 /* OwnershipGraphTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OwnershipGraphTests.swift; sourceTree = "<group>"; };
 		68D37D3F12BD71FCB9DFED76 /* RecentFeedSponsorAtlas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentFeedSponsorAtlas.swift; sourceTree = "<group>"; };
 		68EBE4CBDEA6709A32BFFC8E /* SpanFinalizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpanFinalizer.swift; sourceTree = "<group>"; };
+		69F4DFB4E81926A74E29FEA9 /* BuildInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildInfo.swift; sourceTree = "<group>"; };
 		69F6E321702BE4389A710AD1 /* ActivitySnapshotProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivitySnapshotProvider.swift; sourceTree = "<group>"; };
 		6A890EAEDC77D650C466B01E /* SwiftDataStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftDataStore.swift; sourceTree = "<group>"; };
 		6AE11A07191B8ECD0A219164 /* EpisodeIdHasher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EpisodeIdHasher.swift; sourceTree = "<group>"; };
@@ -1282,6 +1286,7 @@
 		082EF44AC58C6B6C8D8006AF /* Support */ = {
 			isa = PBXGroup;
 			children = (
+				69F4DFB4E81926A74E29FEA9 /* BuildInfo.swift */,
 				8D88AFE1E7856E852263579E /* Info.plist */,
 				1ADB61C06D2AA996C3FE5356 /* Diagnostics */,
 			);
@@ -1435,6 +1440,7 @@
 			isa = PBXGroup;
 			children = (
 				6D9C6511B5CC01D7FF96C232 /* CounterfactualEvaluatorTests.swift */,
+				492E86A244B99E97037D436E /* FrozenTraceProvenanceTests.swift */,
 				85361C153508BAB634696458 /* ReplayMetrics.swift */,
 				18BF6369CE463DC96A44E6B6 /* ReplayMetricsComputation.swift */,
 				706B2C65A529A7841685AB7E /* ReplaySimulatorTests.swift */,
@@ -2536,6 +2542,7 @@
 			buildPhases = (
 				4290CE74F64894A65828968C /* Sources */,
 				49BF0465877766451E375F07 /* Resources */,
+				69E832A17746D20516B73647 /* Stamp build commit SHA */,
 			);
 			buildRules = (
 			);
@@ -2647,6 +2654,27 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		69E832A17746D20516B73647 /* Stamp build commit SHA */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Stamp build commit SHA";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -euo pipefail\nPROVENANCE_PLIST=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/BuildProvenance.plist\"\n# Resolve a short SHA from the source tree. ${SRCROOT} is the\n# repo root for xcodegen-generated projects. `git -C \"$SRCROOT\"`\n# avoids the wrong worktree when xcodebuild runs from a sibling\n# path. Fall back to \"unknown\" so the plist is never empty.\nSHA=\"$(git -C \"${SRCROOT}\" rev-parse --short HEAD 2>/dev/null || echo unknown)\"\nif [ -z \"$SHA\" ]; then SHA=\"unknown\"; fi\n# Always write a fresh plist (idempotent). PlistBuddy can't\n# create files, so emit literal XML and let it parse.\n/bin/cat > \"$PROVENANCE_PLIST\" <<EOF\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n    <key>BuildCommitSHA</key>\n    <string>$SHA</string>\n</dict>\n</plist>\nEOF\necho \"stamped BuildCommitSHA=$SHA into $PROVENANCE_PLIST\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		4290CE74F64894A65828968C /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -2714,6 +2742,7 @@
 				23FB447679E198CDA3CDDE11 /* BrowseViewModel.swift in Sources */,
 				4906CFD3426F085C053D86B3 /* BudgetAllocationPolicy.swift in Sources */,
 				BE6CFABEAE45E872F7629A46 /* BudgetCoordinator.swift in Sources */,
+				0262A58495D57BEAC6138C0D /* BuildInfo.swift in Sources */,
 				E96B56FB675640EA2BA49F20 /* CandidateWindowSelector.swift in Sources */,
 				139B5422E4655DF7DDE5F53B /* Capabilities.swift in Sources */,
 				DC0F2AB351019294781DEA6F /* CapabilitiesService.swift in Sources */,
@@ -3073,6 +3102,7 @@
 				B7BDCDADA80F701FD39F7932 /* FoundationModelExtractorTests.swift in Sources */,
 				D48BCAAACA4D3CC565B75D07 /* FoundationModelShadowBenchmarkTests.swift in Sources */,
 				AFE5E5146D57A1ECFC256357 /* FoundationModelsFeedbackStoreTests.swift in Sources */,
+				D83AE91488D3C6A2D955A906 /* FrozenTraceProvenanceTests.swift in Sources */,
 				D593252C2FAA1D027B582435 /* FusionBudgetClampTests.swift in Sources */,
 				944175A8B1B7BB60E09F8752 /* ImplicitFeedbackStoreTests.swift in Sources */,
 				89935D515B979DFEB5E6AC8C /* InstallIdentityTests.swift in Sources */,

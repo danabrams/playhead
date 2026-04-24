@@ -153,6 +153,16 @@ struct NarlEvalCorpusBuilderTests {
         let id: String
         let episodeId: String
         let podcastId: String?
+        /// gtt9.21: capture provenance — detector binary's
+        /// `AdDetectionConfig.detectorVersion` at session-start time.
+        /// Empty string when the corpus-export row predates gtt9.21
+        /// (the JSONL key `detectorVersion` is absent / null).
+        let detectorVersion: String
+        /// gtt9.21: capture provenance — short git SHA of the binary
+        /// that produced the DecisionLog. Empty string for pre-gtt9.21
+        /// captures (back-compat sentinel — see FrozenTrace's schema-
+        /// history note).
+        let buildCommitSHA: String
     }
 
     struct BuilderDecision {
@@ -195,7 +205,22 @@ struct NarlEvalCorpusBuilderTests {
                 seen.insert(id)
                 let episodeId = (obj["episodeId"] as? String) ?? id
                 let podcastId = obj["podcastId"] as? String
-                out.append(BuilderAsset(id: id, episodeId: episodeId, podcastId: podcastId))
+                // gtt9.21: capture-provenance keys land on each asset
+                // row when emitted by post-gtt9.21 binaries; pre-gtt9.21
+                // exports lack them. Coerce missing-or-null to empty
+                // string so the FrozenTrace round-trip stays well-typed
+                // and consumers that group by (detectorVersion,
+                // buildCommitSHA) see a single explicit "" cohort
+                // rather than two distinct nils.
+                let detectorVersion = (obj["detectorVersion"] as? String) ?? ""
+                let buildCommitSHA = (obj["buildCommitSHA"] as? String) ?? ""
+                out.append(BuilderAsset(
+                    id: id,
+                    episodeId: episodeId,
+                    podcastId: podcastId,
+                    detectorVersion: detectorVersion,
+                    buildCommitSHA: buildCommitSHA
+                ))
             }
         }
         return out
@@ -608,7 +633,13 @@ struct NarlEvalCorpusBuilderTests {
             analysisState: lifecycle?.analysisState,
             terminalReason: lifecycle?.terminalReason,
             fastTranscriptCoverageEndTime: lifecycle?.transcriptCoverageEndSec,
-            featureCoverageEndTime: lifecycle?.featureCoverageEndSec
+            featureCoverageEndTime: lifecycle?.featureCoverageEndSec,
+            // gtt9.21: thread capture provenance from the asset row
+            // (see `parseAssets`). Pre-gtt9.21 exports propagate empty
+            // strings here — FrozenTrace's encoder still emits the
+            // keys explicitly so the wire shape is unambiguous.
+            detectorVersion: asset.detectorVersion,
+            buildCommitSHA: asset.buildCommitSHA
         )
     }
 
