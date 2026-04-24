@@ -1228,7 +1228,7 @@
       "classificationTrust" : 1,
       "fusedSkipConfidence" : 1,
       "hasMetadataEvidence" : true,
-      "isAdUnderDefault" : false,
+      "isAdUnderDefault" : true,
       "windowEnd" : 29.82,
       "windowStart" : 0
     },
@@ -1236,7 +1236,7 @@
       "classificationTrust" : 1,
       "fusedSkipConfidence" : 1,
       "hasMetadataEvidence" : true,
-      "isAdUnderDefault" : false,
+      "isAdUnderDefault" : true,
       "windowEnd" : 5690.52,
       "windowStart" : 5670.6
     }

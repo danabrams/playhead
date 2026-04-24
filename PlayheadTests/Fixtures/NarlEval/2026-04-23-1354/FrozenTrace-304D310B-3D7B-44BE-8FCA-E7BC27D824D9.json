@@ -649,7 +649,7 @@
       "classificationTrust" : 1,
       "fusedSkipConfidence" : 1,
       "hasMetadataEvidence" : true,
-      "isAdUnderDefault" : false,
+      "isAdUnderDefault" : true,
       "windowEnd" : 1406.22,
       "windowStart" : 1350.48
     }
