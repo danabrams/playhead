@@ -291,6 +291,78 @@ struct NarlEvalHarnessTests {
         }
     }
 
+    @Test("gtt9.7 back-compat: pre-gtt9.7 report.json (no normalizerCounts key) decodes with .zero")
+    func preGtt97EpisodeEntryJsonDecodesWithZeroNormalizerCounts() throws {
+        // Literal pre-gtt9.7 payload: every field the old entry emitted is
+        // populated; `normalizerCounts` is absent entirely. This pins the
+        // `try? ... ?? .zero` fallback at NarlEvalReport.swift:234 — the
+        // 18 historical `report.json` bundles under `.eval-out/narl/` rely
+        // on that path to keep decoding after the gtt9.7 schema change.
+        let json = """
+        {
+          "episodeId": "pre-gtt97-episode-1",
+          "podcastId": "pre-gtt97-podcast",
+          "show": "DoaC",
+          "config": "default",
+          "isExcluded": false,
+          "groundTruthWindowCount": 3,
+          "predictedWindowCount": 2,
+          "windowMetrics": [],
+          "secondLevel": {
+            "truePositiveSeconds": 0,
+            "falsePositiveSeconds": 0,
+            "falseNegativeSeconds": 0,
+            "precision": 0,
+            "recall": 0,
+            "f1": 0
+          },
+          "lexicalInjectionAdds": 1,
+          "priorShiftAdds": 0,
+          "hasShadowCoverage": false
+        }
+        """
+        let data = Data(json.utf8)
+        let decoded = try JSONDecoder().decode(NarlReportEpisodeEntry.self, from: data)
+
+        #expect(decoded.episodeId == "pre-gtt97-episode-1")
+        #expect(decoded.normalizerCounts == .zero)
+        // Also pin the other two fields that share the same fallback path
+        // (gtt9.6 `coverageMetrics` + `fnDecomposition`) so the same test
+        // guards the older-artifact decode story end-to-end.
+        #expect(decoded.fnDecomposition.isEmpty)
+        #expect(decoded.coverageMetrics.pipelineCoverageFailureAsset == false)
+    }
+
+    @Test("gtt9.7 back-compat: NarlNormalizerCounts JSON without layerBCount decodes with layerBCount == 0")
+    func normalizerCountsJsonMissingLayerBCountDecodesToZero() throws {
+        // Simulates a mid-merge or pre-S1 report row where `layerBCount` was
+        // not yet part of the schema. Pins the `try? ... ?? 0` fallback at
+        // NarlEvalReport.swift:140 so future refactors of the custom
+        // init(from:) can't silently drop the tolerance.
+        let json = """
+        {
+          "rawCount": 7,
+          "spanFNCount": 1,
+          "spanFPCount": 1,
+          "wholeAssetVetoCount": 1,
+          "wholeAssetEndorseCount": 1,
+          "unknownCount": 2,
+          "boundaryRefinementCount": 1
+        }
+        """
+        let data = Data(json.utf8)
+        let decoded = try JSONDecoder().decode(NarlNormalizerCounts.self, from: data)
+
+        #expect(decoded.rawCount == 7)
+        #expect(decoded.spanFNCount == 1)
+        #expect(decoded.spanFPCount == 1)
+        #expect(decoded.wholeAssetVetoCount == 1)
+        #expect(decoded.wholeAssetEndorseCount == 1)
+        #expect(decoded.unknownCount == 2)
+        #expect(decoded.boundaryRefinementCount == 1)
+        #expect(decoded.layerBCount == 0)
+    }
+
     @Test("harness emits pipeline coverage failure trend rows")
     func harnessEmitsPipelineCoverageFailureTrendRows() throws {
         let (report, _) = try Self.runHarnessCollectingReport()
