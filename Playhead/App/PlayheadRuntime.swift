@@ -808,6 +808,11 @@ final class PlayheadRuntime {
         guard !isPreviewRuntime else { return }
 
         backgroundProcessingService.registerBackgroundTasks()
+        // playhead-fv2q: register the periodic BGAppRefreshTask identifier
+        // before launch completes. The real service instance is built and
+        // attached later by `PlayheadApp.task` once the `ModelContainer`
+        // is available; see `BackgroundFeedRefreshService.attachSharedService`.
+        BackgroundFeedRefreshService.registerTaskHandler()
 
         Task { [downloadManager] in
             do {

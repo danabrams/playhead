@@ -113,9 +113,15 @@ final class StubAnalysisStore: @unchecked Sendable {
 final class StubBackgroundTask: BackgroundProcessingTaskProtocol, @unchecked Sendable {
     var completedSuccess: Bool?
     var expirationHandler: (() -> Void)?
+    /// Total count of `setTaskCompleted(success:)` calls. iOS terminates
+    /// on a second call, so the idempotence guard in
+    /// `BackgroundFeedRefreshService.completeTaskOnce` asserts this
+    /// stays at exactly 1 across an expired-then-finished handler fire.
+    private(set) var setTaskCompletedCallCount: Int = 0
 
     func setTaskCompleted(success: Bool) {
         completedSuccess = success
+        setTaskCompletedCallCount += 1
     }
 
     /// Simulate iOS firing the expiration handler.

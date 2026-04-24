@@ -46,6 +46,7 @@ targets:
           - com.playhead.app.analysis.backfill
           - com.playhead.app.analysis.continued
           - com.playhead.app.preanalysis.recovery
+          - com.playhead.app.feed-refresh
     scheme:
       testTargets:
         - name: PlayheadTests
