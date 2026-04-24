@@ -183,6 +183,147 @@ struct ShadowDecisionsExporterTests {
         }
     }
 
+    // MARK: - 5b. Top-level isAd / shadowConfidence (gtt9.4.4)
+    //
+    // The shadow row's opaque `fmResponseBase64` blob hides the classifier's
+    // decision behind a base64-encoded `ShadowFMPayload`. Without a top-level
+    // boolean, the NARL corpus builder reads `obj["isAd"] as? Bool` → nil for
+    // every row and folds them all as weight=0 (see gtt9.4.5 and the
+    // 2026-04-24 spike doc). These tests pin the write-side fix: the exporter
+    // must decode the blob and surface `isAd` (Bool) and `shadowConfidence`
+    // (Float in [0, 1]) at the JSON root.
+
+    @Test("serialize emits top-level isAd=true and shadowConfidence>0 for an ad-bearing refinement")
+    func serializeEmitsIsAdTrueAndConfidenceForAdSpan() throws {
+        let response = RefinementWindowSchema(spans: [
+            SpanRefinementSchema(
+                commercialIntent: .paid,
+                ownership: .thirdParty,
+                firstLineRef: 0,
+                lastLineRef: 4,
+                certainty: .strong,
+                boundaryPrecision: .precise,
+                evidenceAnchors: []
+            )
+        ])
+        let payload = ShadowFMPayload(
+            payloadSchemaVersion: shadowFMPayloadSchemaVersion,
+            promptText: "host says: brought to you by hims dot com",
+            refinementResponse: response,
+            errorTag: nil
+        )
+        let row = makeRow(asset: "asset-ad", start: 0, end: 30,
+                          payload: payload)
+
+        let line = try ShadowDecisionsExporter.serialize(row)
+        let obj = try JSONSerialization.jsonObject(with: line) as? [String: Any]
+        #expect(obj?["isAd"] as? Bool == true)
+        let conf = (obj?["shadowConfidence"] as? NSNumber)?.doubleValue
+        #expect(conf != nil)
+        #expect((conf ?? 0) > 0.5,
+                "strong-certainty paid span should produce a high shadowConfidence; got \(conf ?? -1)")
+        #expect((conf ?? 0) <= 1.0)
+    }
+
+    @Test("serialize emits top-level isAd=false and shadowConfidence=0 for an organic-only refinement")
+    func serializeEmitsIsAdFalseForOrganicSpan() throws {
+        let response = RefinementWindowSchema(spans: [
+            SpanRefinementSchema(
+                commercialIntent: .organic,
+                ownership: .show,
+                firstLineRef: 0,
+                lastLineRef: 4,
+                certainty: .moderate,
+                boundaryPrecision: .usable,
+                evidenceAnchors: []
+            )
+        ])
+        let payload = ShadowFMPayload(
+            payloadSchemaVersion: shadowFMPayloadSchemaVersion,
+            promptText: "host monologue, no commerce",
+            refinementResponse: response,
+            errorTag: nil
+        )
+        let row = makeRow(asset: "asset-organic", start: 0, end: 30, payload: payload)
+
+        let line = try ShadowDecisionsExporter.serialize(row)
+        let obj = try JSONSerialization.jsonObject(with: line) as? [String: Any]
+        #expect(obj?["isAd"] as? Bool == false)
+        let conf = (obj?["shadowConfidence"] as? NSNumber)?.doubleValue ?? -1
+        #expect(conf == 0.0)
+    }
+
+    @Test("serialize emits top-level isAd=false and shadowConfidence=0 for a refinement with empty spans")
+    func serializeEmitsIsAdFalseForEmptySpans() throws {
+        let response = RefinementWindowSchema(spans: [])
+        let payload = ShadowFMPayload(
+            payloadSchemaVersion: shadowFMPayloadSchemaVersion,
+            promptText: "no spans returned",
+            refinementResponse: response,
+            errorTag: nil
+        )
+        let row = makeRow(asset: "asset-empty", start: 0, end: 30, payload: payload)
+
+        let line = try ShadowDecisionsExporter.serialize(row)
+        let obj = try JSONSerialization.jsonObject(with: line) as? [String: Any]
+        #expect(obj?["isAd"] as? Bool == false)
+        let conf = (obj?["shadowConfidence"] as? NSNumber)?.doubleValue ?? -1
+        #expect(conf == 0.0)
+    }
+
+    @Test("serialize keeps fmResponseBase64 for back-compat alongside the new top-level fields")
+    func serializeRetainsBase64ForBackCompat() async throws {
+        let response = RefinementWindowSchema(spans: [
+            SpanRefinementSchema(
+                commercialIntent: .paid,
+                ownership: .thirdParty,
+                firstLineRef: 0, lastLineRef: 2,
+                certainty: .moderate,
+                boundaryPrecision: .usable,
+                evidenceAnchors: []
+            )
+        ])
+        let payload = ShadowFMPayload(
+            payloadSchemaVersion: shadowFMPayloadSchemaVersion,
+            promptText: "x",
+            refinementResponse: response,
+            errorTag: nil
+        )
+        let row = makeRow(asset: "asset-bc", start: 0, end: 30, payload: payload)
+
+        let line = try ShadowDecisionsExporter.serialize(row)
+        let obj = try JSONSerialization.jsonObject(with: line) as? [String: Any]
+        #expect(obj?["fmResponseBase64"] as? String != nil,
+                "back-compat: opaque blob must remain in the wire format")
+        // Round-trip the row through parseAll so old consumers that only
+        // know about fmResponseBase64 keep working.
+        let docsDir = try makeTempDir(prefix: "Shadow-Export-BackCompat")
+        defer { try? FileManager.default.removeItem(at: docsDir) }
+        let store = try await makeTestStore()
+        try await store.upsertShadowFMResponse(row)
+        let result = try await ShadowDecisionsExporter.export(
+            source: store, documentsURL: docsDir
+        )
+        let parsed = try ShadowDecisionsExporter.parseAll(fileURL: result.fileURL)
+        #expect(parsed == [row])
+    }
+
+    @Test("serialize emits isAd=false / shadowConfidence=0 when refinementResponse is nil (FM error path)")
+    func serializeEmitsZeroForNilRefinementResponse() throws {
+        let payload = ShadowFMPayload(
+            payloadSchemaVersion: shadowFMPayloadSchemaVersion,
+            promptText: "x",
+            refinementResponse: nil,
+            errorTag: "refusal"
+        )
+        let row = makeRow(asset: "asset-err", start: 0, end: 30, payload: payload)
+        let line = try ShadowDecisionsExporter.serialize(row)
+        let obj = try JSONSerialization.jsonObject(with: line) as? [String: Any]
+        #expect(obj?["isAd"] as? Bool == false)
+        let conf = (obj?["shadowConfidence"] as? NSNumber)?.doubleValue ?? -1
+        #expect(conf == 0.0)
+    }
+
     // MARK: - 6. Kill-switch does not suppress export file itself
 
     @Test("Empty-but-present shadow-decisions.jsonl is distinguishable from a missing file")
@@ -208,6 +349,32 @@ struct ShadowDecisionsExporterTests {
             assetId: asset, windowStart: start, windowEnd: end,
             configVariant: .allEnabledShadow,
             fmResponse: Data([0xAB]),
+            capturedAt: 1_700_000_000,
+            capturedBy: .laneA,
+            fmModelVersion: "fm-test"
+        )
+    }
+
+    /// Variant that wires a `ShadowFMPayload` into the row's `fmResponse`
+    /// blob. Used by the gtt9.4.4 tests that exercise the exporter's
+    /// blob-decoding path.
+    private func makeRow(
+        asset: String,
+        start: TimeInterval,
+        end: TimeInterval,
+        payload: ShadowFMPayload
+    ) -> ShadowFMResponse {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        // Test-only force-try: encoding a Codable value with finite
+        // numbers and plain Strings is total here. A failure would be a
+        // Foundation regression worth crashing the suite on.
+        // swiftlint:disable:next force_try
+        let bytes = try! encoder.encode(payload)
+        return ShadowFMResponse(
+            assetId: asset, windowStart: start, windowEnd: end,
+            configVariant: .allEnabledShadow,
+            fmResponse: bytes,
             capturedAt: 1_700_000_000,
             capturedBy: .laneA,
             fmModelVersion: "fm-test"
