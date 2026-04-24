@@ -43,6 +43,7 @@ struct SegmentAggregatorTests {
         promotionThreshold: 0.40,
         highConfidenceThreshold: 0.60,
         nNearbyWindowsForStart: 2,
+        nearbyWindowSecondsForStart: 90.0,
         belowContinuationSecondsToEnd: 3.0,
         maxInternalGapSeconds: 5.0,
         minAdDurationSeconds: 30.0
@@ -64,6 +65,29 @@ struct SegmentAggregatorTests {
     }
 
     // MARK: - 1. start-by-N-nearby
+
+    @Test("two candidate windows 60 s apart still qualify as 'nearby' for start (ad-scale corroboration)")
+    func startByNNearbySpanningAdScale() {
+        // Two candidate-strength windows 60 s apart, with the intervening
+        // region holding continuation-grade (>= 0.28) evidence. This is
+        // the DF5C1832-shape reduced to its minimum: the N-nearby start
+        // criterion uses `nearbyWindowSecondsForStart` (default 90 s =
+        // typicalAdDuration.upperBound), not `maxInternalGapSeconds`.
+        var windows: [SegmentAggregator.WindowScore] = []
+        windows.append(.init(startTime: 0.0, endTime: 1.0, score: 0.40))
+        // 58 × 1 s @ 0.30 between the spikes (all ≥ 0.28 continuation)
+        windows.append(contentsOf: oneSecondWindows(
+            startingAt: 1.0,
+            scores: Array(repeating: 0.30, count: 58)
+        ))
+        windows.append(.init(startTime: 59.0, endTime: 60.0, score: 0.40))
+        let segments = SegmentAggregator.aggregate(
+            windows: windows,
+            config: Self.defaultConfig
+        )
+        #expect(segments.count == 1,
+                "two candidate windows 60 s apart within a continuation-grade run must start ONE segment")
+    }
 
     @Test("two consecutive candidate-threshold windows open a segment")
     func startByNNearbyConsecutive() {
