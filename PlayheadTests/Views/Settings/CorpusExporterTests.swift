@@ -124,6 +124,38 @@ struct CorpusExporterTests {
         #expect(json["podcastId"] as? String == "pod-abc-123")
     }
 
+    @Test("asset record carries detectorVersion + buildCommitSHA capture provenance (gtt9.21)")
+    func assetRecordCaptureProvenancePassthrough() throws {
+        let asset = makeTestAsset(id: "asset-prov")
+        let data = try CorpusExporter.assetLine(
+            asset,
+            podcastId: nil,
+            detectorVersion: "detection-v9",
+            buildCommitSHA: "abc1234"
+        )
+        let json = try decodeJSONObject(from: data)
+        #expect(json["detectorVersion"] as? String == "detection-v9",
+                "detectorVersion must be persisted on each asset row so the harness can attribute fixtures to a specific detector build")
+        #expect(json["buildCommitSHA"] as? String == "abc1234",
+                "buildCommitSHA must be persisted on each asset row so the harness can attribute fixtures to a specific binary")
+    }
+
+    @Test("asset record default-stamps BuildInfo.commitSHA when caller omits it (gtt9.21)")
+    func assetRecordDefaultsToBuildInfoCommitSHA() throws {
+        let asset = makeTestAsset(id: "asset-prov-default")
+        // No detectorVersion / buildCommitSHA passed → exporter should
+        // stamp the runtime defaults so live device captures never emit a
+        // missing-provenance asset row by accident.
+        let data = try CorpusExporter.assetLine(asset)
+        let json = try decodeJSONObject(from: data)
+        let stampedSHA = json["buildCommitSHA"] as? String
+        #expect(stampedSHA == BuildInfo.commitSHA,
+                "When the caller does not pass buildCommitSHA, exporter must stamp BuildInfo.commitSHA")
+        let stampedVersion = json["detectorVersion"] as? String
+        #expect(stampedVersion == AdDetectionConfig.default.detectorVersion,
+                "When the caller does not pass detectorVersion, exporter must stamp AdDetectionConfig.default.detectorVersion")
+    }
+
     @Test("asset record carries terminalReason when the classifier set one (gtt9.8)")
     func assetRecordTerminalReasonPassthrough() throws {
         let asset = AnalysisAsset(
