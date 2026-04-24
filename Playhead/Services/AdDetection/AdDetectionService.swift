@@ -45,6 +45,26 @@ struct AdDetectionConfig: Sendable {
     /// ef2.6.3: raised from 0.75 to 0.80 per product-approved band spec.
     let autoSkipConfidenceThreshold: Double
 
+    /// playhead-gtt9.11: Segment-level UI-candidate threshold. A segment-
+    /// aggregated score at or above this value qualifies as a "possible ad"
+    /// marker in the UI; below it the segment is telemetry-only. Distinct
+    /// from `candidateThreshold` (which is the per-window classifier floor)
+    /// and `markOnlyThreshold` (which is the span-level skipConfidence band
+    /// for ef2.6.3 gray markers). Default 0.40 matches
+    /// `SegmentAggregator.promotionThreshold` so aggregator promotion and
+    /// UI-candidate persistence agree.
+    let segmentUICandidateThreshold: Double
+
+    /// playhead-gtt9.11: Segment-level auto-skip threshold. A segment at or
+    /// above this value is eligible for auto-skip PROVIDED the safety-signal
+    /// conjunction also fires (see `AutoSkipPrecisionGate`). Intentionally
+    /// stricter than `segmentUICandidateThreshold` — "possible ad" markers
+    /// should appear at lower confidence than actual auto-skips. Default
+    /// 0.55 sits midway between the 0.40 aggregator promotion floor and the
+    /// 0.60 single-window high-confidence seed. Not calibrated on real data;
+    /// gtt9.3 owns calibration.
+    let segmentAutoSkipThreshold: Double
+
     /// ef2.6.3: Derive ConfidenceBandThresholds from config fields for band classification.
     /// Requires candidate < markOnly < confirmation < autoSkip (asserted in debug).
     var bandThresholds: ConfidenceBandThresholds {
@@ -66,7 +86,9 @@ struct AdDetectionConfig: Sendable {
         fmScanBudgetSeconds: TimeInterval = 300,
         fmConsensusThreshold: Int = 2,
         markOnlyThreshold: Double = 0.60,
-        autoSkipConfidenceThreshold: Double = 0.80
+        autoSkipConfidenceThreshold: Double = 0.80,
+        segmentUICandidateThreshold: Double = 0.40,
+        segmentAutoSkipThreshold: Double = 0.55
     ) {
         self.candidateThreshold = candidateThreshold
         self.confirmationThreshold = confirmationThreshold
@@ -78,6 +100,8 @@ struct AdDetectionConfig: Sendable {
         self.fmConsensusThreshold = fmConsensusThreshold
         self.markOnlyThreshold = markOnlyThreshold
         self.autoSkipConfidenceThreshold = autoSkipConfidenceThreshold
+        self.segmentUICandidateThreshold = segmentUICandidateThreshold
+        self.segmentAutoSkipThreshold = segmentAutoSkipThreshold
     }
 
     static let `default` = AdDetectionConfig(
@@ -90,7 +114,9 @@ struct AdDetectionConfig: Sendable {
         fmScanBudgetSeconds: 300,
         fmConsensusThreshold: 2,
         markOnlyThreshold: 0.60,
-        autoSkipConfidenceThreshold: 0.80
+        autoSkipConfidenceThreshold: 0.80,
+        segmentUICandidateThreshold: 0.40,
+        segmentAutoSkipThreshold: 0.55
     )
 }
 
@@ -924,6 +950,26 @@ actor AdDetectionService {
                 for: result,
                 analysisAssetId: analysisAssetId
             )
+            // playhead-gtt9.11: consult the precision gate before persistence.
+            // Lexical categories come from the seeding candidate so sponsor/
+            // promoCode/urlCTA/purchaseLanguage hits fire the
+            // strongLexicalAdPhrase safety signal. When the result didn't
+            // originate from a lexical candidate (e.g. hypothesis-driven),
+            // the categories set is empty and the gate falls back to
+            // acoustic/slot/user-correction signals alone.
+            let lexicalCategories: Set<LexicalPatternCategory>
+            if let seedingCandidate = candidatesByID[result.candidateId] {
+                lexicalCategories = seedingCandidate.categories
+            } else {
+                lexicalCategories = []
+            }
+            let gateLabel = await precisionGateLabel(
+                analysisAssetId: analysisAssetId,
+                startTime: expanded.startTime,
+                endTime: expanded.endTime,
+                segmentScore: result.adProbability,
+                lexicalCategories: lexicalCategories
+            )
             adWindows.append(buildAdWindow(
                 from: result,
                 boundaryState: .acousticRefined,
@@ -931,7 +977,8 @@ actor AdDetectionService {
                 evidenceText: candidatesByID[result.candidateId]?.evidenceText,
                 evidenceStartTime: candidatesByID[result.candidateId]?.evidenceStartTime,
                 expandedStartTime: expanded.startTime,
-                expandedEndTime: expanded.endTime
+                expandedEndTime: expanded.endTime,
+                eligibilityGate: gateLabel
             ))
         }
 
@@ -956,7 +1003,8 @@ actor AdDetectionService {
             tier1Results: tier1Results,
             tier2Results: classifierResults,
             singleWindowAdWindows: adWindows,
-            analysisAssetId: analysisAssetId
+            analysisAssetId: analysisAssetId,
+            lexicalCandidates: candidates
         )
 
         guard !adWindows.isEmpty || !aggregatorWindows.isEmpty else {
@@ -3218,7 +3266,8 @@ actor AdDetectionService {
         tier1Results: [ClassifierResult],
         tier2Results: [ClassifierResult],
         singleWindowAdWindows: [AdWindow],
-        analysisAssetId: String
+        analysisAssetId: String,
+        lexicalCandidates: [LexicalCandidate] = []
     ) async throws -> [AdWindow] {
         // Merge tier 1 + tier 2 into a single sorted WindowScore stream.
         // SegmentAggregator requires ASC by startTime.
@@ -3324,26 +3373,53 @@ actor AdDetectionService {
         // Build AdWindows for surviving segments. boundaryState uses the
         // dedicated `.segmentAggregated` marker so downstream observability
         // can tell aggregator windows from lexical / acoustic-refined ones.
-        let newWindows = surviving.map { segment in
-            AdWindow(
-                id: UUID().uuidString,
+        //
+        // playhead-gtt9.11: each aggregator segment passes through the
+        // precision gate before persistence. The gate determines
+        // eligibilityGate = "autoSkip" | "markOnly" based on score,
+        // duration, and the safety-signal conjunction. Lexical categories
+        // for the gate are the union across lexical candidates that
+        // overlap the segment span (Tier 1-only segments carry an empty
+        // set — this is honest: no lexical evidence exists).
+        var newWindows: [AdWindow] = []
+        for segment in surviving {
+            let overlappingCategories = lexicalCandidates
+                .filter { lc in
+                    // Half-open overlap on [start, end).
+                    lc.endTime > segment.startTime && lc.startTime < segment.endTime
+                }
+                .reduce(into: Set<LexicalPatternCategory>()) { acc, lc in
+                    acc.formUnion(lc.categories)
+                }
+            let gateLabel = await precisionGateLabel(
                 analysisAssetId: analysisAssetId,
                 startTime: segment.startTime,
                 endTime: segment.endTime,
-                confidence: segment.segmentScore,
-                boundaryState: AdBoundaryState.segmentAggregated.rawValue,
-                decisionState: AdDecisionState.candidate.rawValue,
-                detectorVersion: config.detectorVersion,
-                advertiser: nil,
-                product: nil,
-                adDescription: nil,
-                evidenceText: nil,
-                evidenceStartTime: nil,
-                metadataSource: "none",
-                metadataConfidence: nil,
-                metadataPromptVersion: nil,
-                wasSkipped: false,
-                userDismissedBanner: false
+                segmentScore: segment.segmentScore,
+                lexicalCategories: overlappingCategories
+            )
+            newWindows.append(
+                AdWindow(
+                    id: UUID().uuidString,
+                    analysisAssetId: analysisAssetId,
+                    startTime: segment.startTime,
+                    endTime: segment.endTime,
+                    confidence: segment.segmentScore,
+                    boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+                    decisionState: AdDecisionState.candidate.rawValue,
+                    detectorVersion: config.detectorVersion,
+                    advertiser: nil,
+                    product: nil,
+                    adDescription: nil,
+                    evidenceText: nil,
+                    evidenceStartTime: nil,
+                    metadataSource: "none",
+                    metadataConfidence: nil,
+                    metadataPromptVersion: nil,
+                    wasSkipped: false,
+                    userDismissedBanner: false,
+                    eligibilityGate: gateLabel
+                )
             )
         }
         logger.info("Hot path: aggregator produced \(newWindows.count) windows (of \(promotedSegments.count) promoted segments, \(promotedSegments.count - surviving.count) deduped against single-window path)")
@@ -3365,6 +3441,10 @@ actor AdDetectionService {
     ///     result's own `startTime` is used. playhead-gtt9.4.1.
     ///   - expandedEndTime: Optional override for the persisted end time. Same
     ///     contract as `expandedStartTime`.
+    ///   - eligibilityGate: playhead-gtt9.11 precision-gate stamp. "autoSkip"
+    ///     admits the window to `SkipOrchestrator.receiveAdWindows` auto-skip
+    ///     path; "markOnly" keeps it visible as a UI marker but blocks
+    ///     auto-skip. Nil preserves legacy behavior (no stamp).
     private func buildAdWindow(
         from result: ClassifierResult,
         boundaryState: AdBoundaryState,
@@ -3372,7 +3452,8 @@ actor AdDetectionService {
         evidenceText: String?,
         evidenceStartTime: Double?,
         expandedStartTime: Double? = nil,
-        expandedEndTime: Double? = nil
+        expandedEndTime: Double? = nil,
+        eligibilityGate: String? = nil
     ) -> AdWindow {
         AdWindow(
             id: UUID().uuidString,
@@ -3392,8 +3473,95 @@ actor AdDetectionService {
             metadataConfidence: nil,
             metadataPromptVersion: nil,
             wasSkipped: false,
-            userDismissedBanner: false
+            userDismissedBanner: false,
+            eligibilityGate: eligibilityGate
         )
+    }
+
+    // MARK: - Precision-gate wiring (playhead-gtt9.11)
+
+    /// playhead-gtt9.11: consult the `AutoSkipPrecisionGate` for a
+    /// prospective hot-path AdWindow. Returns the string label to stamp on
+    /// `AdWindow.eligibilityGate` ("autoSkip" when the gate admits the
+    /// window to auto-skip, "markOnly" when the gate demotes it to UI-only,
+    /// nil when the gate says detection-only — in which case callers should
+    /// NOT persist a window).
+    ///
+    /// Inputs fetched here (not passed in) are those the call sites don't
+    /// already carry. Keeping the fetch inside this helper avoids threading
+    /// the full input surface through every AdWindow construction site.
+    ///
+    /// - Parameter analysisAssetId: asset for feature-window + correction-
+    ///   store queries.
+    /// - Parameter startTime: window start time in episode audio seconds.
+    /// - Parameter endTime: window end time in episode audio seconds.
+    /// - Parameter segmentScore: the confidence value that drives the gate's
+    ///   threshold comparison (classifier `adProbability` for single-window,
+    ///   `segmentScore` for aggregator).
+    /// - Parameter lexicalCategories: union of lexical-pattern categories
+    ///   associated with any evidence seeding this window. Aggregator path
+    ///   passes an empty set when Tier 1 alone drove the segment (no
+    ///   lexical evidence exists in that case — this is honest signal
+    ///   absence, not a stub). Single-window path passes
+    ///   `LexicalCandidate.categories` from the seeding candidate.
+    /// - Returns: `"autoSkip"`, `"markOnly"`, or `nil`.
+    private func precisionGateLabel(
+        analysisAssetId: String,
+        startTime: Double,
+        endTime: Double,
+        segmentScore: Double,
+        lexicalCategories: Set<LexicalPatternCategory>
+    ) async -> String? {
+        let overlappingFeatureWindows: [FeatureWindow]
+        do {
+            overlappingFeatureWindows = try await store.fetchFeatureWindows(
+                assetId: analysisAssetId,
+                from: startTime,
+                to: endTime
+            )
+        } catch {
+            logger.warning("precisionGateLabel: fetchFeatureWindows failed (continuing with empty features): \(error.localizedDescription)")
+            overlappingFeatureWindows = []
+        }
+
+        // TODO(gtt9.11): correctionStore is optional and only present once
+        // PlayheadRuntime installs it post-init. Absence → factor 1.0, which
+        // disables the userConfirmedLocalPattern safety signal for this
+        // window. This is honest: without a correction store we genuinely
+        // have no user-confirmation evidence.
+        let boost: Double
+        if let correctionStore {
+            boost = await correctionStore.correctionBoostFactor(for: analysisAssetId)
+        } else {
+            boost = 1.0
+        }
+
+        let gateConfig = AutoSkipPrecisionGateConfig(
+            uiCandidateThreshold: config.segmentUICandidateThreshold,
+            autoSkipThreshold: config.segmentAutoSkipThreshold,
+            typicalAdDuration: GlobalPriorDefaults.standard.typicalAdDuration,
+            minMusicBedCoverage: AutoSkipPrecisionGateConfig.default.minMusicBedCoverage,
+            slotFraction: AutoSkipPrecisionGateConfig.default.slotFraction
+        )
+
+        let input = AutoSkipPrecisionGateInput(
+            segmentStartTime: startTime,
+            segmentEndTime: endTime,
+            segmentScore: segmentScore,
+            episodeDuration: episodeDuration,
+            overlappingFeatureWindows: overlappingFeatureWindows,
+            lexicalCategories: lexicalCategories,
+            userCorrectionBoostFactor: boost
+        )
+
+        switch AutoSkipPrecisionGate.classify(input: input, config: gateConfig) {
+        case .detectionOnly:
+            return nil
+        case .uiCandidate:
+            return "markOnly"
+        case .autoSkipEligible:
+            return "autoSkip"
+        }
     }
 
     /// playhead-gtt9.4.1: compute the expanded persisted window extents for a
