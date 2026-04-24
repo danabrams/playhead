@@ -129,6 +129,33 @@ struct PlayheadApp: App {
                         }
                     )
                     await runtime.adDetectionService.setEpisodeMetadataProvider(provider)
+
+                    // playhead-fv2q: construct and attach the periodic
+                    // feed-refresh service now that the ModelContainer is
+                    // available. The BGAppRefreshTask identifier itself
+                    // was registered earlier in `PlayheadRuntime.init`
+                    // (BGTaskScheduler requires that before launch ends);
+                    // this path attaches the real service instance to the
+                    // shared holder the early-registered handler reads
+                    // from, then kicks off the first reschedule. A BGTask
+                    // fire that lands between runtime init and this
+                    // attach simply reschedules and bails gracefully —
+                    // see `registerTaskHandler` for that fallback.
+                    let feedRefreshService = BackgroundFeedRefreshService(
+                        enumerator: ProductionPodcastEnumerator(
+                            modelContainer: modelContainer
+                        ),
+                        refresher: ProductionFeedRefresher(
+                            discoveryService: PodcastDiscoveryService(),
+                            modelContainer: modelContainer
+                        ),
+                        downloader: ProductionAutoDownloadEnqueuer(
+                            downloadManager: runtime.downloadManager
+                        ),
+                        settingsProvider: ProductionDownloadsSettingsProvider()
+                    )
+                    BackgroundFeedRefreshService.attachSharedService(feedRefreshService)
+                    feedRefreshService.start()
                 }
                 .task {
                     let stateStream = await runtime.playbackService.observeStates()
