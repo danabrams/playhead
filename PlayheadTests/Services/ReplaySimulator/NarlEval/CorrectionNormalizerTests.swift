@@ -259,6 +259,44 @@ struct CorrectionNormalizerMergeTests {
         let norm = CorrectionNormalizer.normalize(corrections)
         #expect(norm.spanFN.count == 2)
     }
+
+    // MARK: - Boundary + shape pins (S2, S4, S5 from 2026-04-23 review)
+
+    @Test("S2: Gap exactly 5.0 s between same-kind spans merges (≤ boundary pin)")
+    func gapExactlyFiveSecondsMerges() {
+        // [100, 150] and [155, 200] — gap is exactly 5.0s.
+        let corrections = [
+            fc(scope: "exactTimeSpan:asset-1:100.000:150.000", correctionType: "falseNegative"),
+            fc(scope: "exactTimeSpan:asset-1:155.000:200.000", correctionType: "falseNegative")
+        ]
+        let norm = CorrectionNormalizer.normalize(corrections)
+        #expect(norm.spanFN.count == 1)
+        #expect(norm.spanFN.first?.range == NarlTimeRange(start: 100, end: 200))
+    }
+
+    @Test("S4: Out-of-order input (later-start span first) still merges correctly")
+    func outOfOrderInputMerges() {
+        // Note reversed order on input — [153, 200] comes first, [100, 150] second.
+        let corrections = [
+            fc(scope: "exactTimeSpan:asset-1:153.000:200.000", correctionType: "falseNegative"),
+            fc(scope: "exactTimeSpan:asset-1:100.000:150.000", correctionType: "falseNegative")
+        ]
+        let norm = CorrectionNormalizer.normalize(corrections)
+        #expect(norm.spanFN.count == 1)
+        #expect(norm.spanFN.first?.range == NarlTimeRange(start: 100, end: 200))
+    }
+
+    @Test("S5: Containment — one span fully inside another — merges to the outer range")
+    func containmentMergesToOuter() {
+        // [100, 200] contains [130, 170].
+        let corrections = [
+            fc(scope: "exactTimeSpan:asset-1:100.000:200.000", correctionType: "falseNegative"),
+            fc(scope: "exactTimeSpan:asset-1:130.000:170.000", correctionType: "falseNegative")
+        ]
+        let norm = CorrectionNormalizer.normalize(corrections)
+        #expect(norm.spanFN.count == 1)
+        #expect(norm.spanFN.first?.range == NarlTimeRange(start: 100, end: 200))
+    }
 }
 
 @Suite("CorrectionNormalizer – deduplication")
@@ -317,6 +355,28 @@ struct CorrectionNormalizerDedupTests {
         ]
         let norm = CorrectionNormalizer.normalize(corrections)
         #expect(norm.wholeAssetCorrections.count == 1)
+    }
+
+    @Test("S3: Whole-asset veto and endorse on the same assetId do NOT dedupe each other")
+    func wholeAssetVetoAndEndorseStaySeparate() {
+        let corrections = [
+            FrozenTrace.FrozenCorrection(
+                source: "manualVeto",
+                scope: "exactSpan:asset-1:0:9223372036854775807",
+                createdAt: 1_000,
+                correctionType: "falsePositive"  // → veto
+            ),
+            FrozenTrace.FrozenCorrection(
+                source: "falseNegative",
+                scope: "exactSpan:asset-1:0:9223372036854775807",
+                createdAt: 2_000,
+                correctionType: "falseNegative"  // → endorse
+            )
+        ]
+        let norm = CorrectionNormalizer.normalize(corrections)
+        #expect(norm.wholeAssetCorrections.count == 2)
+        #expect(norm.wholeAssetCorrections.contains { $0.kind == .veto })
+        #expect(norm.wholeAssetCorrections.contains { $0.kind == .endorse })
     }
 }
 
