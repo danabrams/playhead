@@ -119,12 +119,37 @@ struct EpisodeListViewPullToRefreshTests {
             "Errors must not prevent the invocation from being counted")
     }
 
-    @Test("PodcastDiscoveryService conforms to EpisodeRefreshing so production wiring works")
-    func discoveryServiceConforms() async throws {
-        let service = PodcastDiscoveryService()
-        let refresher: any EpisodeRefreshing = service
-        #expect(refresher is PodcastDiscoveryService,
-            "PodcastDiscoveryService must conform to EpisodeRefreshing")
+    @Test("Repeated helper calls each dispatch — the helper does not dedupe")
+    func helperDoesNotDedupeRepeatedCalls() async throws {
+        // Contract: `performEpisodeRefresh` is a thin dispatch seam; it
+        // intentionally does NOT own dedup logic. SwiftUI's `.refreshable`
+        // modifier debounces overlapping pulls at the UI layer, so the
+        // helper is called at most once per user gesture in practice.
+        // Pinning the non-dedup behaviour here prevents a future change
+        // from silently adding a call-count check inside the helper —
+        // which would break LibraryView's parallel-refresh pattern if
+        // that helper were ever merged with this one.
+        //
+        // We drive the calls serially rather than via `async let`
+        // because `Podcast` / `ModelContext` are non-Sendable @MainActor
+        // types; the dedup contract being verified is "consecutive
+        // calls both fire", which is orthogonal to concurrency.
+        let container = try makeContainer()
+        let context = container.mainContext
+        let podcast = makePodcast(in: context)
+
+        let refresher = RecordingEpisodeRefresher()
+
+        for _ in 0 ..< 2 {
+            await performEpisodeRefresh(
+                refresher: refresher,
+                podcast: podcast,
+                modelContext: context
+            )
+        }
+
+        #expect(refresher.invocations.count == 2,
+            "Each helper call must dispatch — dedup belongs to SwiftUI, not the helper")
     }
 
     // MARK: - Source canary: .refreshable wiring stays present
