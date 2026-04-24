@@ -637,31 +637,114 @@ struct NarlEvalHarnessTests {
         return "\(base)-\(tag)"
     }
 
-    /// Map a trace to a human-readable show label. Fallback chain (MEDIUM-2):
+    /// Map a trace to a human-readable show label. Fallback chain (gtt9.5):
     ///   1. `trace.showLabel` if the fixture carries one (set by the corpus
     ///      builder when it has high-confidence metadata).
     ///   2. `PlayheadTests/Fixtures/NarlEval/NarlShowLabels.json` sidecar —
     ///      an `{ podcastId: label }` map Dan can edit by hand without
     ///      touching code. Keyed by the exact podcastId string.
-    ///   3. Substring heuristic on the podcastId (covers the two test feeds
-    ///      used historically — flightcast / simplecast / diary-of-a-ceo /
-    ///      conan).
-    ///   4. The raw podcastId (or "unknown" if empty).
+    ///   3. Structured match on `podcastId` then `episodeId`:
+    ///        a. parse as URL and look up by host (+ path segments when
+    ///           needed). Covers `https://feeds.simplecast.com/...` and
+    ///           `https://rss2.flightcast.com/...` from the real-user
+    ///           corpus, which has an empty `podcastId` and the feed URL
+    ///           embedded in `episodeId` before `"::<id>"`.
+    ///        b. custom-scheme match (`flightcast:`, `simplecast:`) for
+    ///           legacy synthetic fixtures.
+    ///        c. title-substring match (`diary-of-a-ceo`, `conan`, etc.)
+    ///           as graceful degradation when host + scheme both miss.
+    ///   4. The raw podcastId (or "unknown" if both identifiers are
+    ///      empty). Never misattribute a genuinely unknown show to a
+    ///      known one — return the raw id instead (acceptance #3).
     static func showName(for trace: FrozenTrace) -> String {
         if let label = trace.showLabel, !label.isEmpty { return label }
         if let sidecar = Self.showLabelsSidecar, let match = sidecar[trace.podcastId] {
             return match
         }
-        let lowered = trace.podcastId.lowercased()
-        if lowered.contains("flightcast") || lowered.contains("diary-of-a-ceo")
-            || lowered.contains("diaryofaceo") {
+        // Try the podcastId first (the legitimate source of truth), then
+        // episodeId (which in the 2026-04-23 real-user corpus carries the
+        // feed URL before "::<episode-id>" when podcastId is empty).
+        if let label = Self.showLabelFromIdentifier(trace.podcastId) { return label }
+        if let label = Self.showLabelFromIdentifier(trace.episodeId) { return label }
+
+        // Graceful fallback: prefer the raw podcastId so the report
+        // surfaces the unknown id directly (useful for hand-labelling via
+        // the sidecar). If both identifiers are empty, bucket as
+        // "unknown" rather than misattributing to a known show.
+        if !trace.podcastId.isEmpty { return trace.podcastId }
+        if !trace.episodeId.isEmpty { return trace.episodeId }
+        return "unknown"
+    }
+
+    /// Derive a show label from a single identifier string (a podcastId or
+    /// an episodeId). Returns `nil` when the identifier carries no known
+    /// signal — callers should chain alternatives or fall back to
+    /// "unknown". The match is deliberately strict (host + scheme + title
+    /// substring, in that order) so a URL like
+    /// `https://example.invalid/foo` never collides with Conan or DoaC.
+    static func showLabelFromIdentifier(_ identifier: String) -> String? {
+        guard !identifier.isEmpty else { return nil }
+
+        // (a) URL parse. We accept either a full `scheme://` URL or a
+        //     `scheme:<opaque>` custom scheme (`flightcast:<id>`). Strip a
+        //     trailing `::<suffix>` before parsing — that's the corpus's
+        //     convention for "<feed-url>::<episode-id>".
+        let core: String = {
+            if let sepRange = identifier.range(of: "::") {
+                return String(identifier[..<sepRange.lowerBound])
+            }
+            return identifier
+        }()
+
+        if let url = URL(string: core) {
+            if let host = url.host?.lowercased() {
+                if let label = Self.showLabelForHost(host) { return label }
+            } else if let scheme = url.scheme?.lowercased() {
+                // Custom `flightcast:<id>` / `simplecast:<id>` forms have
+                // no host — match the scheme directly.
+                if let label = Self.showLabelForScheme(scheme) { return label }
+            }
+        }
+
+        // (b) Title-metadata substring fallback. Covers the case where
+        //     neither the host nor the scheme is known but the id still
+        //     carries a recognizable show name (e.g. a hand-built fixture
+        //     or a rehosted feed).
+        let lowered = identifier.lowercased()
+        if lowered.contains("diary-of-a-ceo") || lowered.contains("diaryofaceo") {
             return "DoaC"
         }
-        if lowered.contains("simplecast") || lowered.contains("conan")
-            || lowered.contains("needs-a-friend") {
+        if lowered.contains("conan") || lowered.contains("needs-a-friend") {
             return "Conan"
         }
-        return trace.podcastId.isEmpty ? "unknown" : trace.podcastId
+        return nil
+    }
+
+    /// Known-feed-host → show-label map. Extend here when a new show
+    /// enters the corpus rather than sprinkling substring checks through
+    /// the heuristic.
+    private static func showLabelForHost(_ host: String) -> String? {
+        switch host {
+        case "feeds.simplecast.com":
+            return "Conan"
+        case "rss2.flightcast.com":
+            return "DoaC"
+        default:
+            return nil
+        }
+    }
+
+    /// Known custom-scheme → show-label map for legacy / synthetic
+    /// fixtures. Same extension policy as `showLabelForHost`.
+    private static func showLabelForScheme(_ scheme: String) -> String? {
+        switch scheme {
+        case "flightcast":
+            return "DoaC"
+        case "simplecast":
+            return "Conan"
+        default:
+            return nil
+        }
     }
 
     /// True when the trace carries any evidence rows sourced from the
