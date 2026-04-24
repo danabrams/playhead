@@ -2,6 +2,7 @@
 // Regression rails for the shared boundary refinement helper that now delegates
 // snapping decisions to TimeBoundaryResolver.
 
+import Foundation
 import Testing
 
 @testable import Playhead
