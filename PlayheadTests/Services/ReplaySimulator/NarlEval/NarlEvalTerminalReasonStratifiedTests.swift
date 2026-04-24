@@ -146,10 +146,12 @@ struct NarlEvalTerminalReasonStratifiedTests {
                 Self.makeEntry(episodeId: trace.episodeId, config: cfg, gtCount: 1, predCount: trace.episodeId == "hit" ? 1 : 0)
             }
         }
-        // Pipeline map: episodeId → (pred, gt) windows for the bucket aggregator.
-        let pipelines: [String: (pred: [NarlTimeRange], gt: [NarlTimeRange])] = [
-            "hit|default":  (pred: [perfect], gt: [perfect]),
-            "miss|default": (pred: [],        gt: [perfect]),
+        // Pipeline map: episodeId → [(pred, gt)] windows for the bucket
+        // aggregator. List shape handles duplicate episodeIds in the
+        // fixture tree (same asset captured on multiple days).
+        let pipelines: [String: [(pred: [NarlTimeRange], gt: [NarlTimeRange])]] = [
+            "hit|default":  [(pred: [perfect], gt: [perfect])],
+            "miss|default": [(pred: [],        gt: [perfect])],
         ]
 
         let rollups = NarlReportTerminalReasonRollup.stratify(
@@ -335,10 +337,11 @@ struct NarlEvalTerminalReasonStratifiedTests {
     private static func pipelinesByEpisodeId(
         for traces: [FrozenTrace],
         entries: [NarlReportEpisodeEntry]
-    ) -> [String: (pred: [NarlTimeRange], gt: [NarlTimeRange])] {
-        var out: [String: (pred: [NarlTimeRange], gt: [NarlTimeRange])] = [:]
+    ) -> [String: [(pred: [NarlTimeRange], gt: [NarlTimeRange])]] {
+        var out: [String: [(pred: [NarlTimeRange], gt: [NarlTimeRange])]] = [:]
         for entry in entries {
-            out["\(entry.episodeId)|\(entry.config)"] = (pred: [], gt: [])
+            out["\(entry.episodeId)|\(entry.config)", default: []]
+                .append((pred: [], gt: []))
         }
         return out
     }
