@@ -356,18 +356,23 @@ struct DecisionLoggerPipelineTests {
         }
     }
 
-    private func makeService(store: AnalysisStore) -> AdDetectionService {
+    private func makeService(
+        store: AnalysisStore,
+        classifier: ClassifierService = RuleBasedClassifier(),
+        autoSkipConfidenceThreshold: Double = 0.80
+    ) -> AdDetectionService {
         let config = AdDetectionConfig(
             candidateThreshold: 0.40,
             confirmationThreshold: 0.70,
             suppressionThreshold: 0.25,
             hotPathLookahead: 90.0,
             detectorVersion: "test-decision-logger-v1",
-            fmBackfillMode: .off
+            fmBackfillMode: .off,
+            autoSkipConfidenceThreshold: autoSkipConfidenceThreshold
         )
         return AdDetectionService(
             store: store,
-            classifier: RuleBasedClassifier(),
+            classifier: classifier,
             metadataExtractor: FallbackExtractor(),
             config: config
         )
@@ -460,8 +465,128 @@ struct DecisionLoggerPipelineTests {
             #expect(entry.evidence.count == 1)
             #expect(entry.evidence.first?.detail.kind == "classifier")
             #expect(entry.finalDecision.action == "hotPathCandidate"
-                    || entry.finalDecision.action == "hotPathBelowThreshold")
+                    || entry.finalDecision.action == "hotPathBelowThreshold"
+                    || entry.finalDecision.action == "autoSkipEligible")
         }
+    }
+
+    // MARK: - Classifier-Only High-Confidence Promotion
+    //
+    // Regression for the 2026-04-23 dogfood capture
+    // (asset 71F0C2AE-7260-4D1E-B41A-BCFD5103A641 @ [7006..7008]):
+    // a classifier-only window with adProbability above the autoSkip
+    // threshold was logged as "hotPathCandidate" and was therefore
+    // invisible to the NARL corpus builder's isAdUnderDefault heuristic
+    // (which only treats "autoskip"/"markonly"/"skip" actions as ads).
+    // Real-world effect: GT=3, Pred=0, Sec-F1=0 despite the classifier
+    // confidently firing on the ad.
+    //
+    // Fix contract: when adProbability >= autoSkipConfidenceThreshold,
+    // the decision-log action must be "autoSkipEligible" so downstream
+    // consumers (including the NARL harness) see a skip-worthy signal.
+
+    @Test("High-confidence classifier-only window is logged as autoSkipEligible, not hotPathCandidate")
+    func hotPathPromotesHighConfidenceClassifierOnlyResult() async throws {
+        let analysisStore = try await makeTestStore()
+        let assetId = "asset-hotpath-high-conf"
+        try await analysisStore.insertAsset(makeAsset(id: assetId))
+
+        let spy = SpyDecisionLogger()
+        // 0.8154 mirrors the production capture at [7006..7008].
+        let classifier = StubHighConfidenceClassifier(adProbability: 0.8154)
+        let service = makeService(
+            store: analysisStore,
+            classifier: classifier,
+            autoSkipConfidenceThreshold: 0.80
+        )
+        await service.setDecisionLogger(spy)
+
+        _ = try await service.runHotPath(
+            chunks: makeAdChunks(assetId: assetId),
+            analysisAssetId: assetId,
+            episodeDuration: 90.0
+        )
+
+        let entries = await spy.entries
+        #expect(!entries.isEmpty,
+                "Expected at least one hot-path DecisionLogEntry")
+        // At least one entry must be promoted to autoSkipEligible because
+        // the stub classifier returns 0.8154 >= autoSkipConfidenceThreshold (0.80).
+        let promoted = entries.filter { $0.finalDecision.action == "autoSkipEligible" }
+        let actions = entries.map { $0.finalDecision.action }
+        #expect(!promoted.isEmpty,
+                "Expected at least one entry with action == autoSkipEligible; got \(actions)")
+    }
+
+    @Test("Sub-autoSkip classifier-only result stays as hotPathCandidate")
+    func hotPathDoesNotPromoteSubAutoSkipClassifierResult() async throws {
+        let analysisStore = try await makeTestStore()
+        let assetId = "asset-hotpath-sub-threshold"
+        try await analysisStore.insertAsset(makeAsset(id: assetId))
+
+        let spy = SpyDecisionLogger()
+        // 0.6480 mirrors the second production candidate at [7006..7008]:
+        // above candidateThreshold (0.40) but below autoSkip (0.80).
+        let classifier = StubHighConfidenceClassifier(adProbability: 0.6480)
+        let service = makeService(
+            store: analysisStore,
+            classifier: classifier,
+            autoSkipConfidenceThreshold: 0.80
+        )
+        await service.setDecisionLogger(spy)
+
+        _ = try await service.runHotPath(
+            chunks: makeAdChunks(assetId: assetId),
+            analysisAssetId: assetId,
+            episodeDuration: 90.0
+        )
+
+        let entries = await spy.entries
+        #expect(!entries.isEmpty,
+                "Expected at least one hot-path DecisionLogEntry")
+        // No entry should be promoted to autoSkipEligible because 0.6480 < 0.80.
+        let promoted = entries.filter { $0.finalDecision.action == "autoSkipEligible" }
+        let actions = entries.map { $0.finalDecision.action }
+        #expect(promoted.isEmpty,
+                "Entries below autoSkipConfidenceThreshold must NOT be promoted; got \(actions)")
+    }
+}
+
+// MARK: - Test Doubles
+
+/// Returns a fixed adProbability for every candidate, with no other evidence
+/// (lexical/acoustic/prior scores all zero). Used to isolate the hot-path
+/// promotion contract from any heuristic scoring behavior of
+/// RuleBasedClassifier.
+private final class StubHighConfidenceClassifier: @unchecked Sendable, ClassifierService {
+    private let adProbability: Double
+
+    init(adProbability: Double) {
+        self.adProbability = adProbability
+    }
+
+    func classify(inputs: [ClassifierInput], priors: ShowPriors) -> [ClassifierResult] {
+        inputs.map { classify(input: $0, priors: priors) }
+    }
+
+    func classify(input: ClassifierInput, priors: ShowPriors) -> ClassifierResult {
+        ClassifierResult(
+            candidateId: input.candidate.id,
+            analysisAssetId: input.candidate.analysisAssetId,
+            startTime: input.candidate.startTime,
+            endTime: input.candidate.endTime,
+            adProbability: adProbability,
+            startAdjustment: 0,
+            endAdjustment: 0,
+            signalBreakdown: SignalBreakdown(
+                lexicalScore: 0,
+                rmsDropScore: 0,
+                spectralChangeScore: 0,
+                musicScore: 0,
+                speakerChangeScore: 0,
+                priorScore: 0
+            )
+        )
     }
 }
 
