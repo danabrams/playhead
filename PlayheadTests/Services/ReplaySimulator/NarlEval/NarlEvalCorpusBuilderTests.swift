@@ -382,9 +382,9 @@ struct NarlEvalCorpusBuilderTests {
         // One pass: group rows by assetID, track best candidate per asset.
         // Priority: a row with non-null terminalReason wins; among terminal
         // rows the latest timestamp wins; absent a terminal row, the latest
-        // timestamp overall wins.
+        // timestamp overall wins. `terminalReason != nil` on the stored
+        // summary is the single source of truth — no side-channel needed.
         var best: [String: BuilderLifecycleSummary] = [:]
-        var bestHasTerminal: [String: Bool] = [:]
 
         try Self.forEachJSONL(url: url) { obj in
             guard let assetID = obj["analysisAssetID"] as? String,
@@ -411,28 +411,26 @@ struct NarlEvalCorpusBuilderTests {
                 featureCoverageEndSec: featureEnd,
                 timestamp: timestamp
             )
-            let hasTerminal = (terminalReason != nil)
-            let prior = best[assetID]
-            let priorHasTerminal = bestHasTerminal[assetID] ?? false
 
-            if prior == nil {
+            guard let prior = best[assetID] else {
                 best[assetID] = candidate
-                bestHasTerminal[assetID] = hasTerminal
                 return
             }
-            // Terminal rows always beat non-terminal rows.
-            if hasTerminal && !priorHasTerminal {
+            let candidateIsTerminal = (candidate.terminalReason != nil)
+            let priorIsTerminal = (prior.terminalReason != nil)
+
+            switch (candidateIsTerminal, priorIsTerminal) {
+            case (true, false):
+                // Terminal rows always beat non-terminal rows.
                 best[assetID] = candidate
-                bestHasTerminal[assetID] = true
+            case (false, true):
+                // Non-terminal never displaces terminal.
                 return
-            }
-            if !hasTerminal && priorHasTerminal {
-                return
-            }
-            // Same terminal class → later timestamp wins.
-            if let prior, candidate.timestamp > prior.timestamp {
-                best[assetID] = candidate
-                bestHasTerminal[assetID] = hasTerminal
+            default:
+                // Same terminal class → later timestamp wins.
+                if candidate.timestamp > prior.timestamp {
+                    best[assetID] = candidate
+                }
             }
         }
         return best
