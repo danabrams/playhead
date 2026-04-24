@@ -120,6 +120,36 @@ struct NarlPipelineCoverageBucketTests {
         #expect(NarlPipelineCoverageBucket.classify(trace) == .unknown)
     }
 
+    // MARK: - Threshold configurability (playhead-ahez)
+
+    /// ahez: promoting the 0.95 literal into a config struct means a
+    /// caller can dial the "scoring-limited" floor up or down. This test
+    /// pins the plumbing: a trace whose coverage ratio is 0.92 — strictly
+    /// between the custom 0.90 floor and the default 0.95 floor — must
+    /// classify differently under each. If we asserted only one side the
+    /// test would tautologically pass when the default was wired through.
+    @Test("classify honors a custom scoringLimitedCoverageFloor and differs from the default")
+    func classifyHonorsCustomThresholds() {
+        // Ratio = 920/1000 = 0.92. Between the custom floor (0.90) and
+        // the default floor (0.95), so the two classifications must
+        // disagree — exactly the plumbing proof this test is for.
+        let trace = Self.makeTrace(
+            durationSec: 1000,
+            fastTranscriptCoverageEndTime: 920,
+            terminalReason: nil,
+            analysisState: "backfill"
+        )
+
+        let lenient = NarlPipelineCoverageThresholds(scoringLimitedCoverageFloor: 0.90)
+        #expect(NarlPipelineCoverageBucket.classify(trace, thresholds: lenient) == .scoringLimited,
+                "0.92 ratio meets the custom 0.90 floor → scoring-limited")
+
+        #expect(NarlPipelineCoverageBucket.classify(trace) == .pipelineCoverageLimited,
+                "0.92 ratio falls below the default 0.95 floor → pipeline-limited")
+        #expect(NarlPipelineCoverageBucket.classify(trace, thresholds: .default) == .pipelineCoverageLimited,
+                "explicit .default must match the implicit-default call-site")
+    }
+
     // MARK: - Rollup aggregator
 
     @Test("countsPerBucket tallies traces into the three bucket counts")
