@@ -178,6 +178,22 @@ struct NarlEvalHarnessTests {
         }
 
         for (fixtureIndex, trace) in traces.enumerated() {
+            // gtt9.7: run the correction normalizer first so span-level
+            // precision/recall is driven by actual span-level corrections
+            // (not by whole-asset vetoes that the user issued on an entire
+            // episode). The NarlGroundTruth builder still runs below and is
+            // the source of truth for ground-truth ad spans; the normalizer
+            // output is used for logging and to route wholeAsset vetoes
+            // independently of span counts. See docs/narl/2026-04-23-expert-
+            // report.md §11 for why raw correction rows aren't trustworthy.
+            let normalizedCorrections = CorrectionNormalizer.normalize(trace.corrections)
+            Self.logCorrectionNormalization(
+                trace: trace,
+                before: trace.corrections,
+                after: normalizedCorrections
+            )
+            _ = normalizedCorrections  // consumed in logs; harness still uses NarlGroundTruth below
+
             let gtResult = NarlGroundTruth.build(for: trace)
             let show = Self.showName(for: trace)
             let traceHasShadowCoverage = Self.hasShadowCoverage(trace: trace)
@@ -566,6 +582,32 @@ struct NarlEvalHarnessTests {
             classifierRecallFNSeconds: sum(\.classifierRecallFNSeconds),
             promotionRecallFNSeconds: sum(\.promotionRecallFNSeconds)
         )
+    }
+
+    /// gtt9.7: log per-asset correction counts before and after the
+    /// CorrectionNormalizer runs. A visible print beats a buried count in a
+    /// report JSON for an operator reading the test output — the delta
+    /// (raw rows → span rows + whole-asset rows + unknown) is the headline
+    /// fact that proves normalization did something.
+    ///
+    /// Emits one line per (episodeId, config-independent) call, of shape:
+    ///   narl.normalizer: episodeId=...  raw=N  spanFN=A spanFP=B
+    ///   wholeAsset=C(veto=c1 endorse=c2)  unknown=D  boundary=E
+    static func logCorrectionNormalization(
+        trace: FrozenTrace,
+        before: [FrozenTrace.FrozenCorrection],
+        after: NormalizedCorrections
+    ) {
+        let vetoCount = after.wholeAssetCorrections.filter { $0.kind == .veto }.count
+        let endorseCount = after.wholeAssetCorrections.filter { $0.kind == .endorse }.count
+        print("narl.normalizer: episodeId=\(trace.episodeId)"
+            + "  raw=\(before.count)"
+            + "  spanFN=\(after.spanFN.count)"
+            + "  spanFP=\(after.spanFP.count)"
+            + "  wholeAsset=\(after.wholeAssetCorrections.count)"
+            + "(veto=\(vetoCount) endorse=\(endorseCount))"
+            + "  unknown=\(after.unknownCount)"
+            + "  boundary=\(after.boundaryRefinementCount)")
     }
 
     /// Lazy-loaded sidecar `{ podcastId: show-label }` map. Returns `nil` if
