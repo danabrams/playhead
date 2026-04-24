@@ -603,17 +603,27 @@ actor AdDetectionService {
         let candidatesByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
 
         // Filter by candidate threshold and build AdWindows.
-        let adWindows = classifierResults
-            .filter { $0.adProbability >= config.candidateThreshold }
-            .map { result in
-                buildAdWindow(
-                    from: result,
-                    boundaryState: .acousticRefined,
-                    decisionState: .candidate,
-                    evidenceText: candidatesByID[result.candidateId]?.evidenceText,
-                    evidenceStartTime: candidatesByID[result.candidateId]?.evidenceStartTime
-                )
-            }
+        // playhead-gtt9.4.1: For high-confidence, narrow classifier hits we
+        // expand the persisted window extents outward to nearby acoustic breaks.
+        // This does NOT re-score or change adProbability — it only widens the
+        // persisted span so Sec-F1 reflects the true ad coverage.
+        var adWindows: [AdWindow] = []
+        let passingResults = classifierResults.filter { $0.adProbability >= config.candidateThreshold }
+        for result in passingResults {
+            let expanded = await expandedBounds(
+                for: result,
+                analysisAssetId: analysisAssetId
+            )
+            adWindows.append(buildAdWindow(
+                from: result,
+                boundaryState: .acousticRefined,
+                decisionState: .candidate,
+                evidenceText: candidatesByID[result.candidateId]?.evidenceText,
+                evidenceStartTime: candidatesByID[result.candidateId]?.evidenceStartTime,
+                expandedStartTime: expanded.startTime,
+                expandedEndTime: expanded.endTime
+            ))
+        }
 
         // playhead-8em9 (narL): log per-candidate hot-path decisions. The
         // hot path is pre-fusion: the only evidence we have here is the
@@ -2855,18 +2865,28 @@ actor AdDetectionService {
 
     // MARK: - AdWindow Construction (hot path)
 
+    /// Build an `AdWindow` from a classifier result.
+    ///
+    /// - Parameters:
+    ///   - expandedStartTime: Optional override for the persisted start time
+    ///     produced by `PostClassifyBoundaryExpansion`. When nil, the classifier
+    ///     result's own `startTime` is used. playhead-gtt9.4.1.
+    ///   - expandedEndTime: Optional override for the persisted end time. Same
+    ///     contract as `expandedStartTime`.
     private func buildAdWindow(
         from result: ClassifierResult,
         boundaryState: AdBoundaryState,
         decisionState: AdDecisionState,
         evidenceText: String?,
-        evidenceStartTime: Double?
+        evidenceStartTime: Double?,
+        expandedStartTime: Double? = nil,
+        expandedEndTime: Double? = nil
     ) -> AdWindow {
         AdWindow(
             id: UUID().uuidString,
             analysisAssetId: result.analysisAssetId,
-            startTime: result.startTime,
-            endTime: result.endTime,
+            startTime: expandedStartTime ?? result.startTime,
+            endTime: expandedEndTime ?? result.endTime,
             confidence: result.adProbability,
             boundaryState: boundaryState.rawValue,
             decisionState: decisionState.rawValue,
@@ -2881,6 +2901,56 @@ actor AdDetectionService {
             metadataPromptVersion: nil,
             wasSkipped: false,
             userDismissedBanner: false
+        )
+    }
+
+    /// playhead-gtt9.4.1: compute the expanded persisted window extents for a
+    /// classifier result. Fetches a wider-radius feature-window slice than the
+    /// classifier used (±60 s via `BoundaryExpander.ExpansionConfig.neutral`)
+    /// and delegates to `PostClassifyBoundaryExpansion.expand`.
+    ///
+    /// No-ops (returns the result's own extents) when the expansion
+    /// preconditions inside the helper do not hold — keeps the extra DB fetch
+    /// to high-confidence candidates via an up-front guard.
+    private func expandedBounds(
+        for result: ClassifierResult,
+        analysisAssetId: String
+    ) async -> (startTime: Double, endTime: Double) {
+        // Up-front guard: only pay the extra feature-window fetch cost for
+        // candidates that might actually expand (confidence ≥ autoSkip).
+        guard result.adProbability >= config.autoSkipConfidenceThreshold else {
+            return (result.startTime, result.endTime)
+        }
+
+        let typicalAdDuration = GlobalPriorDefaults.standard.typicalAdDuration
+        let shortCandidateThreshold = typicalAdDuration.lowerBound / 2.0
+        guard (result.endTime - result.startTime) < shortCandidateThreshold else {
+            return (result.startTime, result.endTime)
+        }
+
+        let expansionConfig = BoundaryExpander.ExpansionConfig.neutral
+        let expandedFrom = max(0, result.startTime - expansionConfig.acousticBackwardSearchRadius)
+        let expandedTo = result.endTime + expansionConfig.acousticForwardSearchRadius
+
+        let featureWindows: [FeatureWindow]
+        do {
+            featureWindows = try await store.fetchFeatureWindows(
+                assetId: analysisAssetId,
+                from: expandedFrom,
+                to: expandedTo
+            )
+        } catch {
+            logger.warning("PostClassifyBoundaryExpansion: feature fetch failed, keeping original extents: \(error.localizedDescription)")
+            return (result.startTime, result.endTime)
+        }
+
+        return PostClassifyBoundaryExpansion.expand(
+            startTime: result.startTime,
+            endTime: result.endTime,
+            adProbability: result.adProbability,
+            featureWindows: featureWindows,
+            autoSkipConfidenceThreshold: config.autoSkipConfidenceThreshold,
+            typicalAdDuration: typicalAdDuration
         )
     }
 
@@ -3047,3 +3117,146 @@ actor AdDetectionService {
 // MARK: - AdDetectionProviding Conformance
 
 extension AdDetectionService: AdDetectionProviding {}
+
+// MARK: - PostClassifyBoundaryExpansion (playhead-gtt9.4.1)
+
+/// Stateless helper that widens an AdWindow's persisted [startTime, endTime]
+/// when the classifier produced a high-confidence hit on a narrow
+/// LexicalCandidate (2-s window) inside a wider ad envelope.
+///
+/// Context (2026-04-24 Conan 71F0C2AE regression):
+/// the classifier only scores on LexicalCandidate windows (2 s wide), so a
+/// GT ad span of 30 s that matches only a single lexical hit gets persisted
+/// as a 2-s AdWindow against the 30-s truth — Sec-F1 caps around 0.04.
+///
+/// Surface fix: when the classifier clears `autoSkipConfidenceThreshold`
+/// (0.80 by default) on a candidate whose duration is shorter than
+/// `typicalAdDuration.lowerBound / 2` (15 s by default), look for acoustic
+/// breaks within `BoundaryExpander.ExpansionConfig.neutral` radii and expand
+/// the persisted extents outward to them. Fallback to a `typicalAdDuration`-
+/// wide extent centered on the candidate midpoint when no breaks are found.
+///
+/// Does NOT:
+/// - rescore the expanded span
+/// - change the `adProbability` attached to the AdWindow
+/// - modify the classifier candidate's own boundaries (that's a different
+///   layer — `BoundaryRefiner`)
+/// - touch the evidence ledger
+///
+/// Downstream window reconciliation (`reconcileHotPathWindows`) already merges
+/// overlapping windows, so independent expansion of adjacent high-confidence
+/// candidates is safe — overlaps collapse at persistence time.
+enum PostClassifyBoundaryExpansion {
+
+    /// Expand the persisted window extents for a high-confidence, narrow
+    /// classifier hit. Returns the original extents unchanged when the
+    /// expansion preconditions do not hold.
+    ///
+    /// - Parameters:
+    ///   - startTime: Classifier result start time (seconds).
+    ///   - endTime: Classifier result end time (seconds).
+    ///   - adProbability: Classifier ad probability.
+    ///   - featureWindows: Acoustic feature windows in the vicinity of the
+    ///     classifier hit. Expansion searches for AcousticBreaks within these.
+    ///   - autoSkipConfidenceThreshold: Confidence threshold above which a
+    ///     candidate is eligible for expansion (default 0.80 per
+    ///     `AdDetectionConfig.autoSkipConfidenceThreshold`).
+    ///   - typicalAdDuration: Prior on ad duration in seconds. Used twice:
+    ///     (1) gate: expand only when candidate duration < lowerBound / 2.
+    ///     (2) fallback extent when no acoustic break is found on a side.
+    /// - Returns: Expanded `(startTime, endTime)` tuple. Returns the original
+    ///   bounds unchanged when the confidence gate, duration gate, or
+    ///   (bounded) non-inversion safety checks would be violated.
+    static func expand(
+        startTime: Double,
+        endTime: Double,
+        adProbability: Double,
+        featureWindows: [FeatureWindow],
+        autoSkipConfidenceThreshold: Double,
+        typicalAdDuration: ClosedRange<TimeInterval>
+    ) -> (startTime: Double, endTime: Double) {
+        // Confidence gate: only expand when the classifier is confident enough
+        // that a false positive is unlikely. At 0.80 (default) + the broad
+        // feature-window scan, a spurious expansion onto a silent show-intro
+        // gap is ~order-of-magnitude rarer than the narrow-hit problem we are
+        // fixing.
+        guard adProbability >= autoSkipConfidenceThreshold else {
+            return (startTime, endTime)
+        }
+
+        let duration = endTime - startTime
+
+        // Duration gate: only expand when the candidate is materially shorter
+        // than a typical ad. `typicalAdDuration.lowerBound / 2` is the most
+        // conservative interpretation of "shorter than half a typical ad"
+        // (default 30/2 = 15 s). Candidates already wider than 15 s are left
+        // alone — they plausibly cover most of the real span already.
+        let shortCandidateThreshold = typicalAdDuration.lowerBound / 2.0
+        guard duration < shortCandidateThreshold else {
+            return (startTime, endTime)
+        }
+
+        // Non-finite / degenerate durations short-circuit to no-op.
+        guard duration.isFinite, duration >= 0 else {
+            return (startTime, endTime)
+        }
+
+        let expansionConfig = BoundaryExpander.ExpansionConfig.neutral
+        let backwardRadius = expansionConfig.acousticBackwardSearchRadius
+        let forwardRadius = expansionConfig.acousticForwardSearchRadius
+
+        // Narrow the feature-window input to the search envelope to keep
+        // AcousticBreakDetector work bounded when callers pass a larger window.
+        let searchStart = startTime - backwardRadius
+        let searchEnd = endTime + forwardRadius
+        let nearbyWindows = featureWindows.filter { fw in
+            fw.endTime >= searchStart && fw.startTime <= searchEnd
+        }
+
+        let breaks = AcousticBreakDetector.detectBreaks(in: nearbyWindows)
+
+        // Leading break: the nearest AcousticBreak at or before `startTime`
+        // within `backwardRadius`. We anchor on `startTime` (not the center)
+        // because the lexical hit typically sits at or near the leading edge
+        // of the ad (greeting / sponsor name / jingle are the lexical patterns
+        // that seed the candidate). Picking at-or-before avoids pulling the
+        // start forward into the ad body.
+        let leadingBreak = breaks
+            .filter { $0.time <= startTime && $0.time >= startTime - backwardRadius }
+            .max(by: { $0.time < $1.time }) // nearest to startTime
+
+        // Trailing break: the nearest AcousticBreak at or after `endTime`
+        // within `forwardRadius`, for symmetric reasons.
+        let trailingBreak = breaks
+            .filter { $0.time >= endTime && $0.time <= endTime + forwardRadius }
+            .min(by: { $0.time < $1.time }) // nearest to endTime
+
+        // Per-side fallback: `typicalAdDuration.lowerBound / 2` (15 s by
+        // default) — just enough to cover the characteristic ad half-width.
+        // Using lowerBound keeps the fallback conservative; using upperBound
+        // or midpoint would over-expand when AcousticBreakDetector is silent
+        // because features are noisy.
+        let perSideFallbackWidth = typicalAdDuration.lowerBound / 2.0
+
+        let expandedStart: Double
+        if let leading = leadingBreak {
+            expandedStart = leading.time
+        } else {
+            expandedStart = startTime - perSideFallbackWidth
+        }
+
+        let expandedEnd: Double
+        if let trailing = trailingBreak {
+            expandedEnd = trailing.time
+        } else {
+            expandedEnd = endTime + perSideFallbackWidth
+        }
+
+        // Safety: never narrow the persisted window, never invert it, never
+        // produce a negative start time.
+        let finalStart = max(0, min(expandedStart, startTime))
+        let finalEnd = max(expandedEnd, endTime)
+
+        return (finalStart, finalEnd)
+    }
+}
