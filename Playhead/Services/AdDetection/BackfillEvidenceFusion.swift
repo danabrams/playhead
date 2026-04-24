@@ -217,10 +217,17 @@ struct BackfillEvidenceFusion: Sendable {
             ledger.append(capped)
         }
 
-        // Acoustic entries: always included
+        // Acoustic entries: always included. 2026-04-23 Finding 4:
+        // this list now also carries `.musicBed`-sourced entries from
+        // `AdDetectionService.buildMusicBedLedgerEntries`. Preserve
+        // `entry.source` so `.musicBed` keeps its distinct kind
+        // instead of being flattened to `.acoustic` — that's what
+        // lets the quorum gate's `distinctKinds.count` increment.
+        // Both `.acoustic` and `.musicBed` share the acoustic family
+        // weight budget (`config.acousticCap`), so the cap is the same.
         for entry in acousticEntries {
             let capped = EvidenceLedgerEntry(
-                source: .acoustic,
+                source: entry.source,
                 weight: min(entry.weight, config.acousticCap),
                 detail: entry.detail
             )
@@ -433,7 +440,7 @@ struct DecisionMapper: Sendable {
         // adProbability is zero). Any other in-audio source — or a
         // classifier entry with a non-zero weight — counts as corroboration.
         let inAudioCorroboratingSources: Set<EvidenceSourceType> = [
-            .lexical, .acoustic, .catalog, .fingerprint, .fm
+            .lexical, .acoustic, .musicBed, .catalog, .fingerprint, .fm
         ]
         let hasInAudioCorroboration = ledger.contains { entry in
             if inAudioCorroboratingSources.contains(entry.source) {
@@ -474,7 +481,7 @@ struct DecisionMapper: Sendable {
     /// Needs external corroboration from any non-FM source: classifier, lexical, catalog, or acoustic.
     /// Classifier is included because it is an independent, non-FM signal that provides corroboration.
     private func quorumGateForFMAcoustic() -> SkipEligibilityGate {
-        let externalSources: Set<EvidenceSourceType> = [.classifier, .lexical, .catalog, .acoustic, .fingerprint]
+        let externalSources: Set<EvidenceSourceType> = [.classifier, .lexical, .catalog, .acoustic, .musicBed, .fingerprint]
         let hasExternalCorroboration = ledger.contains { externalSources.contains($0.source) }
         return hasExternalCorroboration ? .eligible : .blockedByEvidenceQuorum
     }

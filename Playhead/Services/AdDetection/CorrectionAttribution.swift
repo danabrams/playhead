@@ -157,6 +157,7 @@ enum CausalInference {
         case .fm:          return .foundationModel
         case .lexical:     return .lexical
         case .acoustic:    return .acoustic
+        case .musicBed:    return .acoustic  // music-bed coverage is an acoustic-family signal
         case .catalog:     return .lexical  // catalog entries are lexical matches
         case .classifier:  return .foundationModel  // legacy classifier ≈ FM
         case .fingerprint: return .fingerprint

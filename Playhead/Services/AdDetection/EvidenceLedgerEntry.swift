@@ -69,6 +69,12 @@ enum EvidenceLedgerDetail: Sendable {
         sourceField: MetadataCueSourceField,
         dominantCueType: MetadataCueType
     )
+    /// Music-bed coverage across the span's windows. `presenceFraction`
+    /// is the ratio of windows whose `MusicBedLevel != .none`;
+    /// `foregroundCount` is how many of those windows were tagged
+    /// `.foreground` (jingles/stingers) vs. `.background` (production
+    /// beds under voice). Emitted by `MusicBedLedgerEvaluator`.
+    case musicBed(presenceFraction: Double, foregroundCount: Int)
 }
 
 // MARK: - EvidenceLedgerEntry
