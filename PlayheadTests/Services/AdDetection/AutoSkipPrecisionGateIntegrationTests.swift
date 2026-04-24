@@ -218,8 +218,9 @@ struct AutoSkipPrecisionGateIntegrationTests {
 
     @Test("segmentScore in [uiCandidateThreshold, autoSkipThreshold) persists as eligibilityGate=markOnly (below autoSkipThreshold)")
     func segmentBelowAutoSkipButAboveUIStaysMarkOnly() async throws {
-        // Use the DF5C1832-style N=2-nearby start pattern with a weighted-
-        // mean landing near 0.45 (above 0.40 UI, below 0.55 autoSkip).
+        // Use the DF5C1832-style N=2-nearby start pattern, sized so that
+        // end-of-stream flush is the closer. Episode duration matches the
+        // pattern length (180 s) so no trailing 0.10 slot drags the mean.
         //
         //   slot 0..30    baseline 0.33 (> 0.28 continuation, < 0.35 cand.)
         //   slot 30..60   spike 0.595   (> 0.35 candidate, < 0.60 hiConf)
@@ -229,27 +230,25 @@ struct AutoSkipPrecisionGateIntegrationTests {
         //   slot 150..180 baseline 0.33
         //   mean = (0.33*4 + 0.595*2) / 6 = 2.51 / 6 = 0.4183  ← < 0.55
         //
-        // Also chosen to not hit any safety signal (mid-episode, no music,
-        // no lexical, no user correction) — we're measuring the threshold
-        // gate path, not the safety-signal path.
+        // Segment center = 90 s in a 180 s episode → 50% (mid-roll, no slot
+        // prior). No music grid, no lexical chunks, no user correction →
+        // zero safety signals — but score < 0.55 autoSkipThreshold demotes
+        // it via the .belowAutoSkipThreshold branch regardless.
         let store = try await makeTestStore()
         let assetId = "asset-gtt9.11-below-autoskip-threshold"
         try await store.insertAsset(makeAsset(id: assetId))
-        let duration: Double = 3600
+        let duration: Double = 180
         try await insertFeatureGrid(store: store, assetId: assetId, duration: duration)
 
-        // Offset segment into mid-episode (center ~1710) to avoid slot prior.
-        let offset: Double = 1620
-        var scores = [Double: Double]()
-        for t in stride(from: 0.0, to: duration, by: 30.0) { scores[t] = 0.10 }
-        scores[offset + 0] = 0.33
-        scores[offset + 30] = 0.595
-        scores[offset + 60] = 0.33
-        scores[offset + 90] = 0.33
-        scores[offset + 120] = 0.595
-        scores[offset + 150] = 0.33
-
-        let classifier = SlotScoringClassifier(scoresByStartTime: scores, defaultScore: 0.10)
+        let scores: [Double: Double] = [
+            0.0:   0.33,
+            30.0:  0.595,
+            60.0:  0.33,
+            90.0:  0.33,
+            120.0: 0.595,
+            150.0: 0.33
+        ]
+        let classifier = SlotScoringClassifier(scoresByStartTime: scores, defaultScore: 0.33)
         let service = makeService(store: store, classifier: classifier)
 
         _ = try await service.runHotPath(

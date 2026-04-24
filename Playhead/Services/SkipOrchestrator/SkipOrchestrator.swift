@@ -428,6 +428,19 @@ actor SkipOrchestrator {
                 continue
             }
 
+            // playhead-gtt9.11: precision gate. A window stamped
+            // `eligibilityGate = "markOnly"` is visible in the UI as a
+            // possible-ad marker but must never be promoted into the auto-
+            // skip path. Mirror the blocked-gate check in
+            // `receiveAdDecisionResults` so both entry points honor the
+            // precision contract.
+            if adWindow.eligibilityGate == "markOnly" {
+                logger.debug(
+                    "AdWindow \(adWindow.id, privacy: .public) eligibilityGate=markOnly — not adding to active windows"
+                )
+                continue
+            }
+
             let incomingState = SkipDecisionState(rawValue: adWindow.decisionState) ?? .candidate
 
             // Build or update the managed window.

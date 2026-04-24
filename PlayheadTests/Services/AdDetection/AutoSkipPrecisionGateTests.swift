@@ -276,6 +276,45 @@ struct AutoSkipPrecisionGateTests {
             minCoverage: 0.20) == false)
     }
 
+    // MARK: - Boundary / edge-case tests (I2, I4)
+
+    /// I2: zero-duration input must not crash and must classify as
+    /// `uiCandidate(.durationImplausible)` when the score clears the
+    /// auto-skip threshold (score gate passes but duration check rejects).
+    /// We use start == end to enforce duration == 0.
+    @Test("zero-duration window does not crash; classifies as durationImplausible when score clears autoSkipThreshold")
+    func zeroDurationWindowClassification() {
+        let input = makeInput(
+            segmentStartTime: 100,
+            segmentEndTime: 100,
+            segmentScore: 0.70,
+            lexicalCategories: [.sponsor]
+        )
+        let result = AutoSkipPrecisionGate.classify(input: input)
+        #expect(result == .uiCandidate(reason: .durationImplausible),
+                "zero-duration window should be demoted to durationImplausible; got \(result)")
+    }
+
+    /// I4: exact boundary — `segmentScore == autoSkipThreshold` (0.55) must
+    /// be ≥, not >, so the window IS eligible for auto-skip when other
+    /// gates pass. Regression guard against threshold comparison drift.
+    @Test("segmentScore == autoSkipThreshold (0.55) is ≥-inclusive and eligible when other gates pass")
+    func autoSkipThresholdBoundaryInclusive() {
+        // Pre-roll slot to guarantee a safety signal fires; duration in [30, 90].
+        let input = makeInput(
+            segmentStartTime: 0,
+            segmentEndTime: 60,
+            segmentScore: 0.55,
+            episodeDuration: 3600,
+            lexicalCategories: []
+        )
+        let result = AutoSkipPrecisionGate.classify(input: input)
+        guard case .autoSkipEligible = result else {
+            Issue.record("exactly 0.55 must admit auto-skip (≥, not >); got \(result)")
+            return
+        }
+    }
+
     @Test("collectSafetySignals returns all firing signals simultaneously")
     func collectSafetySignalsComposite() {
         let features: [FeatureWindow] = stride(from: 0.0, to: 60.0, by: 2.0).map { t in
