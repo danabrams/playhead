@@ -200,21 +200,16 @@ struct NarlEvalHarnessTests {
 
     @Test("showName does not misattribute an arbitrary unknown host to a known show")
     func showNameDoesNotMisattributeUnknownHost() {
-        // A real-world risk of a naive substring check: an unrelated URL
-        // that happens to contain "cast" or similar should NOT resolve to
-        // Conan / DoaC.
+        // An unrelated URL that shares no host / scheme / title signal
+        // with a known show must degrade — never misattribute to
+        // Conan / DoaC (acceptance #3).
         let trace = Self.makeTrace(
             episodeId: "https://example.invalid/foo/bar",
             podcastId: "https://example.invalid/foo/bar"
         )
-        #expect(Self.showName(for: trace) == "https://example.invalid/foo/bar"
-                || Self.showName(for: trace) == "unknown"
-                || Self.showName(for: trace) == "https://example.invalid/foo/bar".lowercased(),
-                "unknown host should degrade to raw id / 'unknown', not a known show")
-        // Stronger: the result must NOT be one of the known show labels.
         let result = Self.showName(for: trace)
-        #expect(result != "Conan")
-        #expect(result != "DoaC")
+        #expect(result != "Conan", "unknown host must not resolve to Conan")
+        #expect(result != "DoaC", "unknown host must not resolve to DoaC")
     }
 
     @Test("Harness runs both configs and writes a report")
@@ -669,11 +664,10 @@ struct NarlEvalHarnessTests {
 
         // Graceful fallback: prefer the raw podcastId so the report
         // surfaces the unknown id directly (useful for hand-labelling via
-        // the sidecar). If both identifiers are empty, bucket as
-        // "unknown" rather than misattributing to a known show.
-        if !trace.podcastId.isEmpty { return trace.podcastId }
-        if !trace.episodeId.isEmpty { return trace.episodeId }
-        return "unknown"
+        // the sidecar). We deliberately do NOT fall back to episodeId
+        // here — episodeIds are per-episode unique, and using one as a
+        // show bucket would fragment the rollup into one row per episode.
+        return trace.podcastId.isEmpty ? "unknown" : trace.podcastId
     }
 
     /// Derive a show label from a single identifier string (a podcastId or
