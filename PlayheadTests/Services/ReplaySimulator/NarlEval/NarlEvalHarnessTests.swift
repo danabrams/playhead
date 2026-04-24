@@ -665,7 +665,15 @@ struct NarlEvalHarnessTests {
                         hasShadowCoverage: pred.hasShadowCoverage,
                         coverageMetrics: .zero,
                         fnDecomposition: [],
-                        normalizerCounts: normalizerCounts
+                        normalizerCounts: normalizerCounts,
+                        // gtt9.21: thread capture provenance from the
+                        // FrozenTrace into the report entry so the
+                        // markdown's "Capture provenance" section is
+                        // populated even when an episode is excluded
+                        // by ground-truth veto. Empty strings here
+                        // mean a pre-gtt9.21 fixture (back-compat).
+                        detectorVersion: trace.detectorVersion,
+                        buildCommitSHA: trace.buildCommitSHA
                     )
                     episodeEntries.append(entry)
                     // Tally excluded episodes per-rollup so the report shows
@@ -718,7 +726,14 @@ struct NarlEvalHarnessTests {
                     hasShadowCoverage: pred.hasShadowCoverage,
                     coverageMetrics: adjustedCoverage,
                     fnDecomposition: coverage.fnDecomposition,
-                    normalizerCounts: normalizerCounts
+                    normalizerCounts: normalizerCounts,
+                    // gtt9.21: thread capture provenance from the
+                    // FrozenTrace into the report entry so the
+                    // markdown's "Capture provenance" section is
+                    // populated. Empty strings here mean a
+                    // pre-gtt9.21 fixture (back-compat).
+                    detectorVersion: trace.detectorVersion,
+                    buildCommitSHA: trace.buildCommitSHA
                 )
                 episodeEntries.append(entry)
 

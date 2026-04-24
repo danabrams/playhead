@@ -82,13 +82,17 @@ final class FrozenTraceProvenanceTests: XCTestCase {
     func testOldFixtureWithoutProvenanceFieldsDecodesAsEmptyString() throws {
         // An older fixture missing both new fields. The harness's tolerance
         // contract: missing → empty string. (See ADR comment on FrozenTrace.)
+        // Note: `capturedAt` is encoded as a Double (epoch seconds)
+        // by JSONEncoder's default strategy — match that here so the
+        // legacy fixture decodes through the same code path our real
+        // fixtures use.
         let legacyJSON = """
         {
           "episodeId": "legacy-ep",
           "podcastId": "legacy-pod",
           "episodeDuration": 600.0,
           "traceVersion": "frozen-trace-v2",
-          "capturedAt": "2026-04-22T14:10:00Z",
+          "capturedAt": 1714402200.0,
           "featureWindows": [],
           "atoms": [],
           "evidenceCatalog": [],

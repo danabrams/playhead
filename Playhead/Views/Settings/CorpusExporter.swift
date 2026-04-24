@@ -119,7 +119,20 @@ enum CorpusExporter {
     /// `podcastId` is looked up by the caller via `CorpusExportSource.fetchPodcastId(forEpisodeId:)`
     /// and threaded in here so show-level grouping works downstream (playhead-narl.1 HIGH-3).
     /// Emitted as explicit null when the lookup returns nil.
-    static func assetLine(_ asset: AnalysisAsset, podcastId: String? = nil) throws -> Data {
+    ///
+    /// `detectorVersion` and `buildCommitSHA` (playhead-gtt9.21) stamp
+    /// the device binary's identity onto each asset row so downstream
+    /// FrozenTrace fixtures carry capture provenance. Defaults read
+    /// from `AdDetectionConfig.default.detectorVersion` and
+    /// `BuildInfo.commitSHA`. Tests that need to assert exact JSON
+    /// shape pass explicit values; production callers (the debug
+    /// menu's CorpusExporter.export path) rely on the defaults.
+    static func assetLine(
+        _ asset: AnalysisAsset,
+        podcastId: String? = nil,
+        detectorVersion: String = AdDetectionConfig.default.detectorVersion,
+        buildCommitSHA: String = BuildInfo.commitSHA
+    ) throws -> Data {
         let obj: [String: Any] = [
             "type": "asset",
             "schemaVersion": schemaVersion,
@@ -136,6 +149,13 @@ enum CorpusExporter {
             "fastTranscriptCoverageEndTime": asset.fastTranscriptCoverageEndTime as Any? ?? NSNull(),
             "confirmedAdCoverageEndTime": asset.confirmedAdCoverageEndTime as Any? ?? NSNull(),
             "terminalReason": asset.terminalReason as Any? ?? NSNull(),
+            // gtt9.21: provenance — empty string is NOT used here (we
+            // always have a real value from AdDetectionConfig.default
+            // and BuildInfo.commitSHA's "unknown" fallback). The
+            // FrozenTrace builder coerces a missing JSONL key to "" on
+            // the read side so old corpus exports still decode.
+            "detectorVersion": detectorVersion,
+            "buildCommitSHA": buildCommitSHA,
         ]
         return try jsonLineData(from: obj)
     }

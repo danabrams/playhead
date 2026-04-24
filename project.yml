@@ -24,6 +24,50 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.playhead.app
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_EMIT_LOC_STRINGS: YES
+    # playhead-gtt9.21: stamp the short git SHA into a dedicated
+    # `BuildProvenance.plist` in the app bundle so `BuildInfo.commitSHA`
+    # (and downstream FrozenTrace provenance) reflects the binary's
+    # commit. Falls back to "unknown" when run outside a git context
+    # (CI w/o checkout, archive replays). See `BuildInfo.swift`.
+    #
+    # WHY a SEPARATE plist (not Info.plist):
+    # `ProcessInfoPlistFile` runs DURING the Resources phase and
+    # rewrites the deployed `Info.plist` from `${PRODUCT_SETTINGS_PATH}`
+    # (the source-tree plist). Any earlier script-phase edits to
+    # `${TARGET_BUILD_DIR}/${INFOPLIST_PATH}` get clobbered. Putting
+    # the SHA in its own plist sidesteps that race entirely.
+    #
+    # WHY `postBuildScripts` (NOT `postCompileScripts`):
+    # We must run AFTER Resources (so the bundle dir exists) but
+    # BEFORE CodeSign (so the bundle's signature seals our plist
+    # too). xcodegen's `postBuildScripts` lands in exactly that
+    # window for an app target.
+    postBuildScripts:
+      - name: Stamp build commit SHA
+        # Write a small `BuildProvenance.plist` into the built .app.
+        # The source tree stays clean — only the build dir changes.
+        script: |
+          set -euo pipefail
+          PROVENANCE_PLIST="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/BuildProvenance.plist"
+          # Resolve a short SHA from the source tree. ${SRCROOT} is the
+          # repo root for xcodegen-generated projects. `git -C "$SRCROOT"`
+          # avoids the wrong worktree when xcodebuild runs from a sibling
+          # path. Fall back to "unknown" so the plist is never empty.
+          SHA="$(git -C "${SRCROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+          if [ -z "$SHA" ]; then SHA="unknown"; fi
+          # Always write a fresh plist (idempotent). PlistBuddy can't
+          # create files, so emit literal XML and let it parse.
+          /bin/cat > "$PROVENANCE_PLIST" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>BuildCommitSHA</key>
+              <string>$SHA</string>
+          </dict>
+          </plist>
+          EOF
+          echo "stamped BuildCommitSHA=$SHA into $PROVENANCE_PLIST"
     info:
       path: Playhead/Support/Info.plist
       properties:

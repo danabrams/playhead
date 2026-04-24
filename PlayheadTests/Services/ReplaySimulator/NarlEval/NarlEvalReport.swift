@@ -165,6 +165,14 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
     /// the existing NarlGroundTruth pipeline; the normalizer's output is
     /// carried alongside so the delta is visible in the persisted report.
     let normalizerCounts: NarlNormalizerCounts
+    /// gtt9.21: detector-version stamp from the FrozenTrace this entry
+    /// summarizes. Empty string for pre-gtt9.21 captures. Carried per-
+    /// episode (not just per-rollup) because a real-data eval can pull
+    /// from a mid-rollout fleet where one show's episodes were captured
+    /// across multiple binaries.
+    let detectorVersion: String
+    /// gtt9.21: build-commit-SHA stamp from the FrozenTrace.
+    let buildCommitSHA: String
 
     init(
         episodeId: String,
@@ -182,7 +190,9 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
         hasShadowCoverage: Bool,
         coverageMetrics: NarlCoverageMetrics = .zero,
         fnDecomposition: [NarlFNDecomp] = [],
-        normalizerCounts: NarlNormalizerCounts = .zero
+        normalizerCounts: NarlNormalizerCounts = .zero,
+        detectorVersion: String = "",
+        buildCommitSHA: String = ""
     ) {
         self.episodeId = episodeId
         self.podcastId = podcastId
@@ -200,6 +210,8 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
         self.coverageMetrics = coverageMetrics
         self.fnDecomposition = fnDecomposition
         self.normalizerCounts = normalizerCounts
+        self.detectorVersion = detectorVersion
+        self.buildCommitSHA = buildCommitSHA
     }
 
     /// Codable default handling: older `report.json` artifacts written before
@@ -212,6 +224,7 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
         case lexicalInjectionAdds, priorShiftAdds, hasShadowCoverage
         case coverageMetrics, fnDecomposition
         case normalizerCounts
+        case detectorVersion, buildCommitSHA
     }
 
     init(from decoder: Decoder) throws {
@@ -232,6 +245,8 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
         self.coverageMetrics = (try? c.decode(NarlCoverageMetrics.self, forKey: .coverageMetrics)) ?? .zero
         self.fnDecomposition = (try? c.decode([NarlFNDecomp].self, forKey: .fnDecomposition)) ?? []
         self.normalizerCounts = (try? c.decode(NarlNormalizerCounts.self, forKey: .normalizerCounts)) ?? .zero
+        self.detectorVersion = (try? c.decode(String.self, forKey: .detectorVersion)) ?? ""
+        self.buildCommitSHA = (try? c.decode(String.self, forKey: .buildCommitSHA)) ?? ""
     }
 }
 
@@ -785,6 +800,43 @@ enum NarlEvalRenderer {
         out += "# narl counterfactual eval — run \(report.runId)\n\n"
         out += "Generated: \(isoFormatter().string(from: report.generatedAt))\n"
         out += "Schema: v\(report.schemaVersion)\n\n"
+
+        // gtt9.21: capture provenance — list every distinct
+        // (detectorVersion, buildCommitSHA) pair across the corpus
+        // along with how many episodes each pair contributed. Mixed-
+        // binary corpora are common (a real-data eval can pull from
+        // a fleet that's mid-rollout); without this section a per-show
+        // F1 swing has no way to be attributed to a specific binary.
+        // Per-episode columns elsewhere can stratify further if a
+        // single show's metrics are split across multiple SHAs.
+        let provenanceCounts = report.episodes.reduce(
+            into: [String: Int]()
+        ) { acc, episode in
+            // Empty-string sentinels (pre-gtt9.21 fixtures) collapse
+            // to the explicit "(absent)" label so they're not
+            // confused with "(empty)" — both render readably in the
+            // markdown table.
+            let dv = episode.detectorVersion.isEmpty ? "(absent)" : episode.detectorVersion
+            let sha = episode.buildCommitSHA.isEmpty ? "(absent)" : episode.buildCommitSHA
+            acc["\(dv)|\(sha)", default: 0] += 1
+        }
+        out += "## Capture provenance\n\n"
+        if provenanceCounts.isEmpty {
+            // No episodes ⇒ no provenance to render. Print the section
+            // anyway so the header word "detectorVersion" appears at
+            // least once in the report (acceptance contract).
+            out += "_No episodes; detectorVersion / buildCommitSHA unavailable._\n\n"
+        } else {
+            out += "| detectorVersion | buildCommitSHA | Episodes |\n"
+            out += "|---|---|---|\n"
+            for (key, count) in provenanceCounts.sorted(by: { $0.key < $1.key }) {
+                let parts = key.split(separator: "|", maxSplits: 1).map(String.init)
+                let dv = parts.count > 0 ? parts[0] : ""
+                let sha = parts.count > 1 ? parts[1] : ""
+                out += "| \(dv) | \(sha) | \(count) |\n"
+            }
+            out += "\n"
+        }
 
         if !report.notes.isEmpty {
             out += "## Notes\n\n"
