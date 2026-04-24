@@ -45,6 +45,26 @@ struct AdDetectionConfig: Sendable {
     /// ef2.6.3: raised from 0.75 to 0.80 per product-approved band spec.
     let autoSkipConfidenceThreshold: Double
 
+    /// playhead-gtt9.11: Segment-level UI-candidate threshold. A segment-
+    /// aggregated score at or above this value qualifies as a "possible ad"
+    /// marker in the UI; below it the segment is telemetry-only. Distinct
+    /// from `candidateThreshold` (which is the per-window classifier floor)
+    /// and `markOnlyThreshold` (which is the span-level skipConfidence band
+    /// for ef2.6.3 gray markers). Default 0.40 matches
+    /// `SegmentAggregator.promotionThreshold` so aggregator promotion and
+    /// UI-candidate persistence agree.
+    let segmentUICandidateThreshold: Double
+
+    /// playhead-gtt9.11: Segment-level auto-skip threshold. A segment at or
+    /// above this value is eligible for auto-skip PROVIDED the safety-signal
+    /// conjunction also fires (see `AutoSkipPrecisionGate`). Intentionally
+    /// stricter than `segmentUICandidateThreshold` — "possible ad" markers
+    /// should appear at lower confidence than actual auto-skips. Default
+    /// 0.55 sits midway between the 0.40 aggregator promotion floor and the
+    /// 0.60 single-window high-confidence seed. Not calibrated on real data;
+    /// gtt9.3 owns calibration.
+    let segmentAutoSkipThreshold: Double
+
     /// ef2.6.3: Derive ConfidenceBandThresholds from config fields for band classification.
     /// Requires candidate < markOnly < confirmation < autoSkip (asserted in debug).
     var bandThresholds: ConfidenceBandThresholds {
@@ -66,7 +86,9 @@ struct AdDetectionConfig: Sendable {
         fmScanBudgetSeconds: TimeInterval = 300,
         fmConsensusThreshold: Int = 2,
         markOnlyThreshold: Double = 0.60,
-        autoSkipConfidenceThreshold: Double = 0.80
+        autoSkipConfidenceThreshold: Double = 0.80,
+        segmentUICandidateThreshold: Double = 0.40,
+        segmentAutoSkipThreshold: Double = 0.55
     ) {
         self.candidateThreshold = candidateThreshold
         self.confirmationThreshold = confirmationThreshold
@@ -78,6 +100,8 @@ struct AdDetectionConfig: Sendable {
         self.fmConsensusThreshold = fmConsensusThreshold
         self.markOnlyThreshold = markOnlyThreshold
         self.autoSkipConfidenceThreshold = autoSkipConfidenceThreshold
+        self.segmentUICandidateThreshold = segmentUICandidateThreshold
+        self.segmentAutoSkipThreshold = segmentAutoSkipThreshold
     }
 
     static let `default` = AdDetectionConfig(
@@ -90,7 +114,9 @@ struct AdDetectionConfig: Sendable {
         fmScanBudgetSeconds: 300,
         fmConsensusThreshold: 2,
         markOnlyThreshold: 0.60,
-        autoSkipConfidenceThreshold: 0.80
+        autoSkipConfidenceThreshold: 0.80,
+        segmentUICandidateThreshold: 0.40,
+        segmentAutoSkipThreshold: 0.55
     )
 }
 
