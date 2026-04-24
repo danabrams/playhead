@@ -205,14 +205,30 @@ final class PlayheadRuntime {
             try? FileManager.default.removeItem(at: AnalysisStore.defaultDirectory())
             if let store = try? AnalysisStore() {
                 resolvedStore = store
-            } else {
-                // Fallback to temp directory — analysis won't persist across launches
-                let tmpDir = FileManager.default.temporaryDirectory
+            } else if let tmpStore = try? AnalysisStore(
+                directory: FileManager.default.temporaryDirectory
                     .appendingPathComponent("PlayheadAnalysis-\(ProcessInfo.processInfo.globallyUniqueString)", isDirectory: true)
-                // If even temp directory fails, the device is in severe trouble.
-                // Use force-try as last resort — the app cannot function without any store.
-                resolvedStore = try! AnalysisStore(directory: tmpDir)
+            ) {
+                // Temp-dir fallback — analysis won't persist across launches.
+                resolvedStore = tmpStore
                 storeError = "Analysis database could not be opened. Ad detection may not persist across launches."
+            } else {
+                // Last-resort in-memory store: no file is written, so this
+                // path survives Data Protection and disk failures that
+                // brick both the Documents and tmp opens. The previous
+                // implementation used `try!` here, which crashed the
+                // process on background launches when the device was
+                // locked (Data Protection `.complete` made the SQLite
+                // file unreadable). Crashing the app before any work
+                // runs is strictly worse than running one in-memory
+                // session: the next launch that happens with the device
+                // unlocked will drop back to the default path cleanly.
+                // `:memory:` is a pure RAM open — it does not touch disk
+                // or Data Protection, so it cannot hit the failure mode
+                // that brought us here. If even this fails the device is
+                // in deep trouble and there is no useful work to do.
+                resolvedStore = try! AnalysisStore(path: ":memory:")
+                storeError = "Analysis database could not be opened. Using in-memory store for this launch."
             }
         }
         self.analysisStore = resolvedStore
