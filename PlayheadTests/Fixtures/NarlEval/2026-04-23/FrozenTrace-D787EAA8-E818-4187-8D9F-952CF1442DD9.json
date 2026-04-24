@@ -1,0 +1,38 @@
+{
+  "atoms" : [
+
+  ],
+  "baselineReplaySpanDecisions" : [
+
+  ],
+  "capturedAt" : "2026-04-23T21:44:06Z",
+  "corrections" : [
+    {
+      "createdAt" : 1776804856.3635612,
+      "scope" : "exactSpan:D787EAA8-E818-4187-8D9F-952CF1442DD9:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776805225.80935,
+      "scope" : "exactSpan:D787EAA8-E818-4187-8D9F-952CF1442DD9:0:9223372036854775807",
+      "source" : "falseNegative"
+    }
+  ],
+  "decisionEvents" : [
+
+  ],
+  "episodeDuration" : 3600,
+  "episodeId" : "https:\/\/rss2.flightcast.com\/xmsftuzjjykcmqwolaqn6mdn::flightcast:01KMZRVEW8TBWD8QTDH5GJQWE6",
+  "evidenceCatalog" : [
+
+  ],
+  "featureWindows" : [
+
+  ],
+  "holdoutDesignation" : "training",
+  "podcastId" : "",
+  "traceVersion" : "frozen-trace-v2",
+  "windowScores" : [
+
+  ]
+}

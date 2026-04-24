@@ -1,0 +1,176 @@
+{
+  "atoms" : [
+
+  ],
+  "baselineReplaySpanDecisions" : [
+    {
+      "confidence" : 0.22,
+      "endTime" : 2368.74,
+      "isAd" : true,
+      "sourceTag" : "baseline",
+      "startTime" : 2360.7
+    }
+  ],
+  "capturedAt" : "2026-04-23T21:44:06Z",
+  "corrections" : [
+    {
+      "createdAt" : 1776684491.734333,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falsePositive",
+      "createdAt" : 1776684559.562292,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "manualVeto"
+    },
+    {
+      "createdAt" : 1776684559.566784,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "manualVeto"
+    },
+    {
+      "createdAt" : 1776788752.736778,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776788766.059576,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776788774.623712,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776788781.5099978,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falsePositive",
+      "createdAt" : 1776788804.276056,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "manualVeto"
+    },
+    {
+      "correctionType" : "falsePositive",
+      "createdAt" : 1776788830.7762861,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "manualVeto"
+    },
+    {
+      "correctionType" : "falsePositive",
+      "createdAt" : 1776788866.827069,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "manualVeto"
+    },
+    {
+      "createdAt" : 1776788866.84333,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "manualVeto"
+    },
+    {
+      "createdAt" : 1776788866.843384,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "manualVeto"
+    },
+    {
+      "createdAt" : 1776788866.8434181,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "manualVeto"
+    },
+    {
+      "createdAt" : 1776788866.843997,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "manualVeto"
+    },
+    {
+      "createdAt" : 1776788892.3173099,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776788928.256418,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776788956.44519,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776793005.550812,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776793014.8343859,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776800581.6155,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falsePositive",
+      "createdAt" : 1776800588.200996,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "manualVeto"
+    },
+    {
+      "createdAt" : 1776800588.202177,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "manualVeto"
+    },
+    {
+      "correctionType" : "falsePositive",
+      "createdAt" : 1776800613.577423,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "manualVeto"
+    },
+    {
+      "correctionType" : "falsePositive",
+      "createdAt" : 1776800679.187671,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "manualVeto"
+    },
+    {
+      "createdAt" : 1776800679.1901,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "manualVeto"
+    },
+    {
+      "createdAt" : 1776800728.3629541,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776800755.948868,
+      "scope" : "exactSpan:C25A058C-778B-44A8-9145-D83AA7AF297E:0:9223372036854775807",
+      "source" : "falseNegative"
+    }
+  ],
+  "decisionEvents" : [
+
+  ],
+  "episodeDuration" : 2368.74,
+  "episodeId" : "https:\/\/rss2.flightcast.com\/xmsftuzjjykcmqwolaqn6mdn::flightcast:01KP1XGY1N8WW1CWHYZVW5VFWH",
+  "evidenceCatalog" : [
+
+  ],
+  "featureWindows" : [
+
+  ],
+  "holdoutDesignation" : "training",
+  "podcastId" : "",
+  "traceVersion" : "frozen-trace-v2",
+  "windowScores" : [
+
+  ]
+}

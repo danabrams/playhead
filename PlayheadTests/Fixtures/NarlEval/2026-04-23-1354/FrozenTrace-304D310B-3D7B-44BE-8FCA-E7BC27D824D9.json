@@ -1,0 +1,657 @@
+{
+  "atoms" : [
+
+  ],
+  "baselineReplaySpanDecisions" : [
+    {
+      "confidence" : 1,
+      "endTime" : 62.04,
+      "isAd" : true,
+      "sourceTag" : "baseline",
+      "startTime" : 47.4
+    },
+    {
+      "confidence" : 1,
+      "endTime" : 1350.48,
+      "isAd" : true,
+      "sourceTag" : "baseline",
+      "startTime" : 1335.54
+    },
+    {
+      "confidence" : 1,
+      "endTime" : 1406.22,
+      "isAd" : true,
+      "sourceTag" : "baseline",
+      "startTime" : 1350.48
+    }
+  ],
+  "capturedAt" : "2026-04-23T17:59:22Z",
+  "corrections" : [
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776816851.637048,
+      "scope" : "exactTimeSpan:304D310B-3D7B-44BE-8FCA-E7BC27D824D9:2.000:8.000",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776816888.265051,
+      "scope" : "exactTimeSpan:304D310B-3D7B-44BE-8FCA-E7BC27D824D9:10.680:62.040",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776817006.753864,
+      "scope" : "exactTimeSpan:304D310B-3D7B-44BE-8FCA-E7BC27D824D9:1283.820:1346.580",
+      "source" : "falseNegative"
+    }
+  ],
+  "decisionEvents" : [
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3417073808984091,
+      "skipConfidence" : 0.3417073808984091,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-4.44"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3417073808984091,
+      "skipConfidence" : 0.3417073808984091,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-4.44"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.35452013388566345,
+      "skipConfidence" : 0.35452013388566345,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-54.42"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3417073808984091,
+      "skipConfidence" : 0.3417073808984091,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-4.44"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.35452013388566345,
+      "skipConfidence" : 0.35452013388566345,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-54.42"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3417073808984091,
+      "skipConfidence" : 0.3417073808984091,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-4.44"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.35452013388566345,
+      "skipConfidence" : 0.35452013388566345,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-54.42"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3417073808984091,
+      "skipConfidence" : 0.3417073808984091,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-4.44"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.35452013388566345,
+      "skipConfidence" : 0.35452013388566345,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-54.42"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3798294055105998,
+      "skipConfidence" : 0.3798294055105998,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-1289.16"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3798294055105998,
+      "skipConfidence" : 0.3798294055105998,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-1289.16"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3798294055105998,
+      "skipConfidence" : 0.3798294055105998,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-1289.16"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.6308741498239221,
+      "skipConfidence" : 0.6308741498239221,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-1339.26"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3798294055105998,
+      "skipConfidence" : 0.3798294055105998,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-1289.16"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.7234607633145265,
+      "skipConfidence" : 0.7234607633145265,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-1339.26"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3798294055105998,
+      "skipConfidence" : 0.3798294055105998,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-1289.16"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.819553199663533,
+      "skipConfidence" : 0.819553199663533,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-1339.26"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "autoSkipEligible",
+      "proposalConfidence" : 1,
+      "skipConfidence" : 1,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-47.4"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "autoSkipEligible",
+      "proposalConfidence" : 1,
+      "skipConfidence" : 1,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-1335.54"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "detectOnly",
+      "proposalConfidence" : 1,
+      "skipConfidence" : 1,
+      "windowId" : "304D310B-3D7B-44BE-8FCA-E7BC27D824D9-1350.48"
+    }
+  ],
+  "episodeDuration" : 1406.22,
+  "episodeId" : "https:\/\/rss2.flightcast.com\/xmsftuzjjykcmqwolaqn6mdn::flightcast:01KK9JS2Z0S02SWZEZ0SQ5TQZX",
+  "evidenceCatalog" : [
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.10251221426952271,
+      "windowEnd" : 5.144,
+      "windowStart" : 4.44
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.10251221426952271,
+      "windowEnd" : 5.144,
+      "windowStart" : 4.44
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.10635604016569904,
+      "windowEnd" : 55.365,
+      "windowStart" : 54.42
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.10251221426952271,
+      "windowEnd" : 5.144,
+      "windowStart" : 4.44
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.10635604016569904,
+      "windowEnd" : 55.365,
+      "windowStart" : 54.42
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.10251221426952271,
+      "windowEnd" : 5.144,
+      "windowStart" : 4.44
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.10635604016569904,
+      "windowEnd" : 55.365,
+      "windowStart" : 54.42
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.10251221426952271,
+      "windowEnd" : 5.144,
+      "windowStart" : 4.44
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.10635604016569904,
+      "windowEnd" : 55.365,
+      "windowStart" : 54.42
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.11394882165317993,
+      "windowEnd" : 1289.8200000000002,
+      "windowStart" : 1289.16
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.11394882165317993,
+      "windowEnd" : 1289.8200000000002,
+      "windowStart" : 1289.16
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.11394882165317993,
+      "windowEnd" : 1289.8200000000002,
+      "windowStart" : 1289.16
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.1892622449471766,
+      "windowEnd" : 1345.2222222222222,
+      "windowStart" : 1339.26
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.11394882165317993,
+      "windowEnd" : 1289.8200000000002,
+      "windowStart" : 1289.16
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.21703822899435793,
+      "windowEnd" : 1374.12,
+      "windowStart" : 1339.26
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.11394882165317993,
+      "windowEnd" : 1289.8200000000002,
+      "windowStart" : 1289.16
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.2458659598990599,
+      "windowEnd" : 1405.0436363636363,
+      "windowStart" : 1339.26
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.10635604016569904,
+      "windowEnd" : 62.04,
+      "windowStart" : 47.4
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "lexical",
+      "weight" : 0.0443579766536965,
+      "windowEnd" : 62.04,
+      "windowStart" : 47.4
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "acoustic",
+      "weight" : 0.1,
+      "windowEnd" : 62.04,
+      "windowStart" : 47.4
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "catalog",
+      "weight" : 0.04000000000000001,
+      "windowEnd" : 62.04,
+      "windowStart" : 47.4
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "metadata",
+      "weight" : 0.15,
+      "windowEnd" : 62.04,
+      "windowStart" : 47.4
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "metadata",
+      "weight" : 0.12800000190734864,
+      "windowEnd" : 62.04,
+      "windowStart" : 47.4
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.2458659598990599,
+      "windowEnd" : 1350.48,
+      "windowStart" : 1335.54
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "fm",
+      "weight" : 0.2,
+      "windowEnd" : 1350.48,
+      "windowStart" : 1335.54
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "fm",
+      "weight" : 0.30000000000000004,
+      "windowEnd" : 1350.48,
+      "windowStart" : 1335.54
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "fm",
+      "weight" : 0.2,
+      "windowEnd" : 1350.48,
+      "windowStart" : 1335.54
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "fm",
+      "weight" : 0.30000000000000004,
+      "windowEnd" : 1350.48,
+      "windowStart" : 1335.54
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "lexical",
+      "weight" : 0.12366412213740459,
+      "windowEnd" : 1350.48,
+      "windowStart" : 1335.54
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "acoustic",
+      "weight" : 0.1,
+      "windowEnd" : 1350.48,
+      "windowStart" : 1335.54
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "catalog",
+      "weight" : 0.03000000000000001,
+      "windowEnd" : 1350.48,
+      "windowStart" : 1335.54
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "metadata",
+      "weight" : 0.15,
+      "windowEnd" : 1350.48,
+      "windowStart" : 1335.54
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "metadata",
+      "weight" : 0.12800000190734864,
+      "windowEnd" : 1350.48,
+      "windowStart" : 1335.54
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.2458659598990599,
+      "windowEnd" : 1406.22,
+      "windowStart" : 1350.48
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "fm",
+      "weight" : 0.2,
+      "windowEnd" : 1406.22,
+      "windowStart" : 1350.48
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "fm",
+      "weight" : 0.30000000000000004,
+      "windowEnd" : 1406.22,
+      "windowStart" : 1350.48
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "fm",
+      "weight" : 0.2,
+      "windowEnd" : 1406.22,
+      "windowStart" : 1350.48
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "fm",
+      "weight" : 0.30000000000000004,
+      "windowEnd" : 1406.22,
+      "windowStart" : 1350.48
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "lexical",
+      "weight" : 0.12366412213740459,
+      "windowEnd" : 1406.22,
+      "windowStart" : 1350.48
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "catalog",
+      "weight" : 0.02000000000000001,
+      "windowEnd" : 1406.22,
+      "windowStart" : 1350.48
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "metadata",
+      "weight" : 0.15,
+      "windowEnd" : 1406.22,
+      "windowStart" : 1350.48
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "metadata",
+      "weight" : 0.12800000190734864,
+      "windowEnd" : 1406.22,
+      "windowStart" : 1350.48
+    }
+  ],
+  "featureWindows" : [
+
+  ],
+  "holdoutDesignation" : "training",
+  "podcastId" : "",
+  "traceVersion" : "frozen-trace-v2",
+  "windowScores" : [
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3417073808984091,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 5.144,
+      "windowStart" : 4.44
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3417073808984091,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 5.144,
+      "windowStart" : 4.44
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.35452013388566345,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 55.365,
+      "windowStart" : 54.42
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3417073808984091,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 5.144,
+      "windowStart" : 4.44
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.35452013388566345,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 55.365,
+      "windowStart" : 54.42
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3417073808984091,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 5.144,
+      "windowStart" : 4.44
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.35452013388566345,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 55.365,
+      "windowStart" : 54.42
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3417073808984091,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 5.144,
+      "windowStart" : 4.44
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.35452013388566345,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 55.365,
+      "windowStart" : 54.42
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3798294055105998,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1289.8200000000002,
+      "windowStart" : 1289.16
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3798294055105998,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1289.8200000000002,
+      "windowStart" : 1289.16
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3798294055105998,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1289.8200000000002,
+      "windowStart" : 1289.16
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.6308741498239221,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1345.2222222222222,
+      "windowStart" : 1339.26
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3798294055105998,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1289.8200000000002,
+      "windowStart" : 1289.16
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.7234607633145265,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1374.12,
+      "windowStart" : 1339.26
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3798294055105998,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1289.8200000000002,
+      "windowStart" : 1289.16
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.819553199663533,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1405.0436363636363,
+      "windowStart" : 1339.26
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 1,
+      "hasMetadataEvidence" : true,
+      "isAdUnderDefault" : true,
+      "windowEnd" : 62.04,
+      "windowStart" : 47.4
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 1,
+      "hasMetadataEvidence" : true,
+      "isAdUnderDefault" : true,
+      "windowEnd" : 1350.48,
+      "windowStart" : 1335.54
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 1,
+      "hasMetadataEvidence" : true,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1406.22,
+      "windowStart" : 1350.48
+    }
+  ]
+}

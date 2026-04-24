@@ -1,0 +1,136 @@
+{
+  "atoms" : [
+
+  ],
+  "baselineReplaySpanDecisions" : [
+
+  ],
+  "capturedAt" : "2026-04-24T03:33:48Z",
+  "corrections" : [
+
+  ],
+  "decisionEvents" : [
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.29105362229470505,
+      "skipConfidence" : 0.29105362229470505,
+      "windowId" : "54B196C8-8336-4462-B7E5-2D68BFE798AD-42.729473684210525"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.29105362229470505,
+      "skipConfidence" : 0.29105362229470505,
+      "windowId" : "54B196C8-8336-4462-B7E5-2D68BFE798AD-42.729473684210525"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.6485115609930471,
+      "skipConfidence" : 0.6485115609930471,
+      "windowId" : "54B196C8-8336-4462-B7E5-2D68BFE798AD-73.56"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.29105362229470505,
+      "skipConfidence" : 0.29105362229470505,
+      "windowId" : "54B196C8-8336-4462-B7E5-2D68BFE798AD-42.729473684210525"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.7444004706393548,
+      "skipConfidence" : 0.7444004706393548,
+      "windowId" : "54B196C8-8336-4462-B7E5-2D68BFE798AD-73.56"
+    }
+  ],
+  "episodeDuration" : 96.42,
+  "episodeId" : "https:\/\/feeds.simplecast.com\/dHoohVNH::c5a8325c-b15a-400c-9de2-50ea17549940",
+  "evidenceCatalog" : [
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.08731608668841151,
+      "windowEnd" : 43.26,
+      "windowStart" : 42.729473684210525
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.08731608668841151,
+      "windowEnd" : 43.26,
+      "windowStart" : 42.729473684210525
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.19455346829791412,
+      "windowEnd" : 75.24,
+      "windowStart" : 73.56
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.08731608668841151,
+      "windowEnd" : 43.26,
+      "windowStart" : 42.729473684210525
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.22332014119180643,
+      "windowEnd" : 96.42,
+      "windowStart" : 73.56
+    }
+  ],
+  "featureWindows" : [
+
+  ],
+  "holdoutDesignation" : "training",
+  "podcastId" : "",
+  "traceVersion" : "frozen-trace-v2",
+  "windowScores" : [
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.29105362229470505,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 43.26,
+      "windowStart" : 42.729473684210525
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.29105362229470505,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 43.26,
+      "windowStart" : 42.729473684210525
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.6485115609930471,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 75.24,
+      "windowStart" : 73.56
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.29105362229470505,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 43.26,
+      "windowStart" : 42.729473684210525
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.7444004706393548,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 96.42,
+      "windowStart" : 73.56
+    }
+  ]
+}

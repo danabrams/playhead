@@ -1,0 +1,38 @@
+{
+  "atoms" : [
+
+  ],
+  "baselineReplaySpanDecisions" : [
+
+  ],
+  "capturedAt" : "2026-04-24T03:33:48Z",
+  "corrections" : [
+    {
+      "createdAt" : 1776810788.808961,
+      "scope" : "exactSpan:9007CDD0-930D-494A-A92E-2E4EF93E2784:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776810806.955452,
+      "scope" : "exactSpan:9007CDD0-930D-494A-A92E-2E4EF93E2784:0:9223372036854775807",
+      "source" : "falseNegative"
+    }
+  ],
+  "decisionEvents" : [
+
+  ],
+  "episodeDuration" : 3600,
+  "episodeId" : "https:\/\/feeds.simplecast.com\/dHoohVNH::cbb4cd61-cfc9-44da-b2c1-c42f515f74c1",
+  "evidenceCatalog" : [
+
+  ],
+  "featureWindows" : [
+
+  ],
+  "holdoutDesignation" : "training",
+  "podcastId" : "",
+  "traceVersion" : "frozen-trace-v2",
+  "windowScores" : [
+
+  ]
+}

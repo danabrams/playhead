@@ -1,0 +1,463 @@
+{
+  "analysisState" : "backfill",
+  "atoms" : [
+
+  ],
+  "baselineReplaySpanDecisions" : [
+    {
+      "confidence" : 0.7463012568469342,
+      "endTime" : 35.16,
+      "isAd" : true,
+      "sourceTag" : "baseline",
+      "startTime" : 27
+    }
+  ],
+  "capturedAt" : "2026-04-24T03:33:48Z",
+  "corrections" : [
+
+  ],
+  "decisionEvents" : [
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.35180194517411667,
+      "skipConfidence" : 0.35180194517411667,
+      "windowId" : "34C7E7CF-931F-49EE-B51B-49D3080F1FFB-27.0"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.7463012568469342,
+      "skipConfidence" : 0.7463012568469342,
+      "windowId" : "34C7E7CF-931F-49EE-B51B-49D3080F1FFB-27.0"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.7463012568469342,
+      "skipConfidence" : 0.7463012568469342,
+      "windowId" : "34C7E7CF-931F-49EE-B51B-49D3080F1FFB-27.0"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.7463012568469342,
+      "skipConfidence" : 0.7463012568469342,
+      "windowId" : "34C7E7CF-931F-49EE-B51B-49D3080F1FFB-27.0"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.7463012568469342,
+      "skipConfidence" : 0.7463012568469342,
+      "windowId" : "34C7E7CF-931F-49EE-B51B-49D3080F1FFB-27.0"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.5340538910895174,
+      "skipConfidence" : 0.5340538910895174,
+      "windowId" : "34C7E7CF-931F-49EE-B51B-49D3080F1FFB-1175.7224999999999"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.5340538910895174,
+      "skipConfidence" : 0.5340538910895174,
+      "windowId" : "34C7E7CF-931F-49EE-B51B-49D3080F1FFB-1175.7224999999999"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.5340538910895174,
+      "skipConfidence" : 0.5340538910895174,
+      "windowId" : "34C7E7CF-931F-49EE-B51B-49D3080F1FFB-1175.7224999999999"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.5340538910895174,
+      "skipConfidence" : 0.5340538910895174,
+      "windowId" : "34C7E7CF-931F-49EE-B51B-49D3080F1FFB-1175.7224999999999"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.4553226501896512,
+      "skipConfidence" : 0.4553226501896512,
+      "windowId" : "34C7E7CF-931F-49EE-B51B-49D3080F1FFB-1534.98"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "detectOnly",
+      "proposalConfidence" : 0.6140736673711324,
+      "skipConfidence" : 0.6140736673711324,
+      "windowId" : "34C7E7CF-931F-49EE-B51B-49D3080F1FFB-27.0"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "detectOnly",
+      "proposalConfidence" : 0.6140736673711324,
+      "skipConfidence" : 0.6140736673711324,
+      "windowId" : "34C7E7CF-931F-49EE-B51B-49D3080F1FFB-27.0"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "detectOnly",
+      "proposalConfidence" : 0.6140736673711324,
+      "skipConfidence" : 0.6140736673711324,
+      "windowId" : "34C7E7CF-931F-49EE-B51B-49D3080F1FFB-27.0"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "detectOnly",
+      "proposalConfidence" : 0.6140736673711324,
+      "skipConfidence" : 0.6140736673711324,
+      "windowId" : "34C7E7CF-931F-49EE-B51B-49D3080F1FFB-27.0"
+    }
+  ],
+  "durationSec" : 900,
+  "episodeDuration" : 1550.632,
+  "episodeId" : "https:\/\/rss2.flightcast.com\/xmsftuzjjykcmqwolaqn6mdn::flightcast:01KMZQ0MK110R3J02HRVCZYST0",
+  "evidenceCatalog" : [
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.105540583552235,
+      "windowEnd" : 27.6,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.22389037705408024,
+      "windowEnd" : 58.752857142857145,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.22389037705408024,
+      "windowEnd" : 58.752857142857145,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.22389037705408024,
+      "windowEnd" : 58.752857142857145,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.22389037705408024,
+      "windowEnd" : 58.752857142857145,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.1602161673268552,
+      "windowEnd" : 1176.5024999999998,
+      "windowStart" : 1175.7224999999999
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.1602161673268552,
+      "windowEnd" : 1176.5024999999998,
+      "windowStart" : 1175.7224999999999
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.1602161673268552,
+      "windowEnd" : 1176.5024999999998,
+      "windowStart" : 1175.7224999999999
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.1602161673268552,
+      "windowEnd" : 1176.5024999999998,
+      "windowStart" : 1175.7224999999999
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.13659679505689534,
+      "windowEnd" : 1550.632,
+      "windowStart" : 1534.98
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.22389037705408024,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "lexical",
+      "weight" : 0.09218328840970352,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "catalog",
+      "weight" : 0.02000000000000001,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "metadata",
+      "weight" : 0.15,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "metadata",
+      "weight" : 0.12800000190734864,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.22389037705408024,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "lexical",
+      "weight" : 0.09218328840970352,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "catalog",
+      "weight" : 0.02000000000000001,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "metadata",
+      "weight" : 0.15,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "metadata",
+      "weight" : 0.12800000190734864,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.22389037705408024,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "lexical",
+      "weight" : 0.09218328840970352,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "catalog",
+      "weight" : 0.02000000000000001,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "metadata",
+      "weight" : 0.15,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "metadata",
+      "weight" : 0.12800000190734864,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.22389037705408024,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "lexical",
+      "weight" : 0.09218328840970352,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "catalog",
+      "weight" : 0.02000000000000001,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "metadata",
+      "weight" : 0.15,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "metadata",
+      "weight" : 0.12800000190734864,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 0,
+      "windowEnd" : 30,
+      "windowStart" : 0
+    }
+  ],
+  "fastTranscriptCoverageEndTime" : 840,
+  "featureCoverageEndTime" : 726,
+  "featureWindows" : [
+
+  ],
+  "holdoutDesignation" : "training",
+  "podcastId" : "",
+  "traceVersion" : "frozen-trace-v2",
+  "windowScores" : [
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.35180194517411667,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 27.6,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.7463012568469342,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 58.752857142857145,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.7463012568469342,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 58.752857142857145,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.7463012568469342,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 58.752857142857145,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.7463012568469342,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 58.752857142857145,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.5340538910895174,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1176.5024999999998,
+      "windowStart" : 1175.7224999999999
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.5340538910895174,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1176.5024999999998,
+      "windowStart" : 1175.7224999999999
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.5340538910895174,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1176.5024999999998,
+      "windowStart" : 1175.7224999999999
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.5340538910895174,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1176.5024999999998,
+      "windowStart" : 1175.7224999999999
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.4553226501896512,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1550.632,
+      "windowStart" : 1534.98
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.6140736673711324,
+      "hasMetadataEvidence" : true,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.6140736673711324,
+      "hasMetadataEvidence" : true,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.6140736673711324,
+      "hasMetadataEvidence" : true,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.6140736673711324,
+      "hasMetadataEvidence" : true,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 35.16,
+      "windowStart" : 27
+    }
+  ]
+}

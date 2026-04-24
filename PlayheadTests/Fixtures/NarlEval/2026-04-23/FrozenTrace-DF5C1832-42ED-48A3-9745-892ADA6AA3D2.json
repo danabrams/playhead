@@ -1,0 +1,651 @@
+{
+  "atoms" : [
+
+  ],
+  "baselineReplaySpanDecisions" : [
+    {
+      "confidence" : 1,
+      "endTime" : 1619.28,
+      "isAd" : true,
+      "sourceTag" : "baseline",
+      "startTime" : 1609.62
+    }
+  ],
+  "capturedAt" : "2026-04-23T21:44:06Z",
+  "corrections" : [
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776816112.469805,
+      "scope" : "exactTimeSpan:DF5C1832-42ED-48A3-9745-892ADA6AA3D2:3.000:42.600",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776816142.087144,
+      "scope" : "exactTimeSpan:DF5C1832-42ED-48A3-9745-892ADA6AA3D2:45.120:87.300",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776816461.2119389,
+      "scope" : "exactTimeSpan:DF5C1832-42ED-48A3-9745-892ADA6AA3D2:1380.360:1547.760",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776816550.390369,
+      "scope" : "exactTimeSpan:DF5C1832-42ED-48A3-9745-892ADA6AA3D2:1550.040:1621.260",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776816615.406714,
+      "scope" : "exactTimeSpan:DF5C1832-42ED-48A3-9745-892ADA6AA3D2:1624.320:1688.580",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776816654.844533,
+      "scope" : "exactTimeSpan:DF5C1832-42ED-48A3-9745-892ADA6AA3D2:4292.160:4322.822",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776816687.6782079,
+      "scope" : "exactTimeSpan:DF5C1832-42ED-48A3-9745-892ADA6AA3D2:4233.000:4292.100",
+      "source" : "falseNegative"
+    }
+  ],
+  "decisionEvents" : [
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3798294055105998,
+      "skipConfidence" : 0.3798294055105998,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-84.18"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3798294055105998,
+      "skipConfidence" : 0.3798294055105998,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-84.18"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3798294055105998,
+      "skipConfidence" : 0.3798294055105998,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-84.18"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3798294055105998,
+      "skipConfidence" : 0.3798294055105998,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-84.18"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3798294055105998,
+      "skipConfidence" : 0.3798294055105998,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-84.18"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3798294055105998,
+      "skipConfidence" : 0.3798294055105998,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-84.18"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.4509030500330165,
+      "skipConfidence" : 0.4509030500330165,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-1612.0427272727272"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.4509030500330165,
+      "skipConfidence" : 0.4509030500330165,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-1612.0427272727272"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.4509030500330165,
+      "skipConfidence" : 0.4509030500330165,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-1612.0427272727272"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.45626831448076494,
+      "skipConfidence" : 0.45626831448076494,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-1675.8"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.4509030500330165,
+      "skipConfidence" : 0.4509030500330165,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-1612.0427272727272"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.45626831448076494,
+      "skipConfidence" : 0.45626831448076494,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-1675.8"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.4509030500330165,
+      "skipConfidence" : 0.4509030500330165,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-1612.0427272727272"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.45626831448076494,
+      "skipConfidence" : 0.45626831448076494,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-1675.8"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.4509030500330165,
+      "skipConfidence" : 0.4509030500330165,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-1612.0427272727272"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathCandidate",
+      "proposalConfidence" : 0.45626831448076494,
+      "skipConfidence" : 0.45626831448076494,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-1675.8"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.29105362229470505,
+      "skipConfidence" : 0.29105362229470505,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-4217.34"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.29105362229470505,
+      "skipConfidence" : 0.29105362229470505,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-4217.34"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.29105362229470505,
+      "skipConfidence" : 0.29105362229470505,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-4217.34"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3798294055105998,
+      "skipConfidence" : 0.3798294055105998,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-4261.38"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.29105362229470505,
+      "skipConfidence" : 0.29105362229470505,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-4217.34"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3798294055105998,
+      "skipConfidence" : 0.3798294055105998,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-4261.38"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.29105362229470505,
+      "skipConfidence" : 0.29105362229470505,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-4217.34"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "hotPathBelowThreshold",
+      "proposalConfidence" : 0.3798294055105998,
+      "skipConfidence" : 0.3798294055105998,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-4261.38"
+    },
+    {
+      "eligibilityGate" : "eligible",
+      "policyAction" : "autoSkipEligible",
+      "proposalConfidence" : 1,
+      "skipConfidence" : 1,
+      "windowId" : "DF5C1832-42ED-48A3-9745-892ADA6AA3D2-1609.62"
+    }
+  ],
+  "episodeDuration" : 4262.28,
+  "episodeId" : "https:\/\/feeds.simplecast.com\/dHoohVNH::e3480086-aae9-46c0-ac34-67ec010bc50a",
+  "evidenceCatalog" : [
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.11394882165317993,
+      "windowEnd" : 85.14,
+      "windowStart" : 84.18
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.11394882165317993,
+      "windowEnd" : 85.14,
+      "windowStart" : 84.18
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.11394882165317993,
+      "windowEnd" : 85.14,
+      "windowStart" : 84.18
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.11394882165317993,
+      "windowEnd" : 85.14,
+      "windowStart" : 84.18
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.11394882165317993,
+      "windowEnd" : 85.14,
+      "windowStart" : 84.18
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.11394882165317993,
+      "windowEnd" : 85.14,
+      "windowStart" : 84.18
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.13527091500990496,
+      "windowEnd" : 1613.1654545454546,
+      "windowStart" : 1612.0427272727272
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.13527091500990496,
+      "windowEnd" : 1613.1654545454546,
+      "windowStart" : 1612.0427272727272
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.13527091500990496,
+      "windowEnd" : 1613.1654545454546,
+      "windowStart" : 1612.0427272727272
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.13688049434422947,
+      "windowEnd" : 1676.7333333333333,
+      "windowStart" : 1675.8
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.13527091500990496,
+      "windowEnd" : 1613.1654545454546,
+      "windowStart" : 1612.0427272727272
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.13688049434422947,
+      "windowEnd" : 1676.7333333333333,
+      "windowStart" : 1675.8
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.13527091500990496,
+      "windowEnd" : 1613.1654545454546,
+      "windowStart" : 1612.0427272727272
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.13688049434422947,
+      "windowEnd" : 1676.7333333333333,
+      "windowStart" : 1675.8
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.13527091500990496,
+      "windowEnd" : 1613.1654545454546,
+      "windowStart" : 1612.0427272727272
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.13688049434422947,
+      "windowEnd" : 1676.7333333333333,
+      "windowStart" : 1675.8
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.08731608668841151,
+      "windowEnd" : 4218.84,
+      "windowStart" : 4217.34
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.08731608668841151,
+      "windowEnd" : 4218.84,
+      "windowStart" : 4217.34
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.08731608668841151,
+      "windowEnd" : 4218.84,
+      "windowStart" : 4217.34
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.11394882165317993,
+      "windowEnd" : 4262.28,
+      "windowStart" : 4261.38
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.08731608668841151,
+      "windowEnd" : 4218.84,
+      "windowStart" : 4217.34
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.11394882165317993,
+      "windowEnd" : 4262.28,
+      "windowStart" : 4261.38
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.08731608668841151,
+      "windowEnd" : 4218.84,
+      "windowStart" : 4217.34
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.11394882165317993,
+      "windowEnd" : 4262.28,
+      "windowStart" : 4261.38
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "classifier",
+      "weight" : 0.13527091500990496,
+      "windowEnd" : 1619.28,
+      "windowStart" : 1609.62
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "lexical",
+      "weight" : 0.06885245901639343,
+      "windowEnd" : 1619.28,
+      "windowStart" : 1609.62
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "catalog",
+      "weight" : 0.02000000000000001,
+      "windowEnd" : 1619.28,
+      "windowStart" : 1609.62
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "metadata",
+      "weight" : 0.15,
+      "windowEnd" : 1619.28,
+      "windowStart" : 1609.62
+    },
+    {
+      "classificationTrust" : 1,
+      "source" : "metadata",
+      "weight" : 0.12800000190734864,
+      "windowEnd" : 1619.28,
+      "windowStart" : 1609.62
+    }
+  ],
+  "featureWindows" : [
+
+  ],
+  "holdoutDesignation" : "training",
+  "podcastId" : "",
+  "traceVersion" : "frozen-trace-v2",
+  "windowScores" : [
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3798294055105998,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 85.14,
+      "windowStart" : 84.18
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3798294055105998,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 85.14,
+      "windowStart" : 84.18
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3798294055105998,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 85.14,
+      "windowStart" : 84.18
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3798294055105998,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 85.14,
+      "windowStart" : 84.18
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3798294055105998,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 85.14,
+      "windowStart" : 84.18
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3798294055105998,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 85.14,
+      "windowStart" : 84.18
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.4509030500330165,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1613.1654545454546,
+      "windowStart" : 1612.0427272727272
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.4509030500330165,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1613.1654545454546,
+      "windowStart" : 1612.0427272727272
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.4509030500330165,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1613.1654545454546,
+      "windowStart" : 1612.0427272727272
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.45626831448076494,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1676.7333333333333,
+      "windowStart" : 1675.8
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.4509030500330165,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1613.1654545454546,
+      "windowStart" : 1612.0427272727272
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.45626831448076494,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1676.7333333333333,
+      "windowStart" : 1675.8
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.4509030500330165,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1613.1654545454546,
+      "windowStart" : 1612.0427272727272
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.45626831448076494,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1676.7333333333333,
+      "windowStart" : 1675.8
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.4509030500330165,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1613.1654545454546,
+      "windowStart" : 1612.0427272727272
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.45626831448076494,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 1676.7333333333333,
+      "windowStart" : 1675.8
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.29105362229470505,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 4218.84,
+      "windowStart" : 4217.34
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.29105362229470505,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 4218.84,
+      "windowStart" : 4217.34
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.29105362229470505,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 4218.84,
+      "windowStart" : 4217.34
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3798294055105998,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 4262.28,
+      "windowStart" : 4261.38
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.29105362229470505,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 4218.84,
+      "windowStart" : 4217.34
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3798294055105998,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 4262.28,
+      "windowStart" : 4261.38
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.29105362229470505,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 4218.84,
+      "windowStart" : 4217.34
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 0.3798294055105998,
+      "hasMetadataEvidence" : false,
+      "isAdUnderDefault" : false,
+      "windowEnd" : 4262.28,
+      "windowStart" : 4261.38
+    },
+    {
+      "classificationTrust" : 1,
+      "fusedSkipConfidence" : 1,
+      "hasMetadataEvidence" : true,
+      "isAdUnderDefault" : true,
+      "windowEnd" : 1619.28,
+      "windowStart" : 1609.62
+    }
+  ]
+}
