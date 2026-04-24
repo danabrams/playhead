@@ -336,6 +336,19 @@ actor AdDetectionService {
     /// Episode duration for position-based scoring.
     private var episodeDuration: Double = 0
 
+    // playhead-gtt9.16: Last snapshot of the `AcousticFeaturePipeline` funnel.
+    // Captured at the end of each `runBackfill` invocation so that tests (and
+    // future telemetry surfaces) can inspect which features were computed /
+    // produced signal / passed gate / were included in fusion. Initialized to
+    // an empty funnel so a service with no backfill runs yet reports zeros
+    // rather than surfacing stale data.
+    private var lastAcousticFunnel = AcousticFeatureFunnel()
+    /// playhead-gtt9.16: Per-window fusion output from the most recent
+    /// `AcousticFeaturePipeline.run`. Test-observable so the back-compat
+    /// contract (zero signal → zero combined mass) can be asserted without
+    /// round-tripping through the full decision pipeline.
+    private var lastAcousticPipelineFusion: [AcousticFeatureFusion.WindowFusion] = []
+
     // MARK: - Init
 
     init(
@@ -415,6 +428,24 @@ actor AdDetectionService {
     /// the `setUserCorrectionStore` pattern.
     func setEpisodeMetadataProvider(_ provider: EpisodeMetadataProvider) {
         self.episodeMetadataProvider = provider
+    }
+
+    // MARK: - playhead-gtt9.16: AcousticFeaturePipeline accessors
+
+    /// Test seam: return the funnel snapshot captured during the most recent
+    /// `runBackfill` invocation. Production callers read the same state via
+    /// log lines emitted at the end of backfill (`logger.info("Backfill
+    /// acoustic-pipeline funnel: ...")`), but tests need direct access to
+    /// the structured counters.
+    func acousticFunnelForTesting() -> AcousticFeatureFunnel {
+        lastAcousticFunnel
+    }
+
+    /// Test seam: return the per-window fusion output from the most recent
+    /// `AcousticFeaturePipeline.run`. Empty until the first backfill
+    /// completes.
+    func lastAcousticPipelineFusionForTesting() -> [AcousticFeatureFusion.WindowFusion] {
+        lastAcousticPipelineFusion
     }
 
     // MARK: - User Correction Persistence
@@ -1193,6 +1224,23 @@ actor AdDetectionService {
             featureWindows = []
         }
 
+        // playhead-gtt9.16: Run the acoustic feature pipeline over the whole
+        // episode once. Each feature has its own rolling-baseline state, so
+        // we deliberately run over ALL windows rather than per-span slices.
+        // Per-span ledger assembly below filters the resulting WindowFusion
+        // entries to the relevant overlap.
+        //
+        // Empty windows → empty pipeline result, which the ledger helper
+        // treats as "nothing to contribute" (no new .acoustic entries emitted).
+        let acousticPipelineResult: AcousticFeaturePipeline.Result = featureWindows.isEmpty
+            ? AcousticFeaturePipeline.Result(fusion: [], funnel: AcousticFeatureFunnel(), perFeatureScores: [:])
+            : AcousticFeaturePipeline.run(windows: featureWindows)
+        // Cache for telemetry + test inspection. Logged once at end of
+        // `runBackfill` so a single line per episode summarises the funnel
+        // rather than spamming per-span.
+        self.lastAcousticFunnel = acousticPipelineResult.funnel
+        self.lastAcousticPipelineFusion = acousticPipelineResult.fusion
+
         let regionInput = RegionShadowPhase.Input(
             analysisAssetId: analysisAssetId,
             chunks: chunks,
@@ -1335,6 +1383,7 @@ actor AdDetectionService {
                 catalogEntries: evidenceCatalog.entries,
                 semanticScanResults: semanticScanResults,
                 metadataEntries: metadataEntries,
+                acousticPipelineFusion: acousticPipelineResult.fusion,
                 fusionConfig: fusionConfig
             )
 
@@ -1538,6 +1587,15 @@ actor AdDetectionService {
         }
 
         logger.info("Backfill complete: spans=\(decodedSpans.count) fusion_windows=\(fusionWindows.count) decision_events=\(decisionEvents.count)")
+
+        // playhead-gtt9.16: one-line acoustic-pipeline funnel summary per
+        // episode. Emits the per-stage totals so gtt9.3 calibration can see
+        // which features are producing signal and passing the fusion gate
+        // without scraping per-window logs.
+        let funnel = acousticPipelineResult.funnel
+        logger.info(
+            "Backfill acoustic-pipeline funnel: computed=\(funnel.total(.computed)) producedSignal=\(funnel.total(.producedSignal)) passedGate=\(funnel.total(.passedGate)) includedInFusion=\(funnel.total(.includedInFusion))"
+        )
     }
 
     // MARK: - Fusion Evidence Construction (playhead-4my.6.4)
@@ -1559,6 +1617,7 @@ actor AdDetectionService {
         catalogEntries: [EvidenceEntry],
         semanticScanResults: [SemanticScanResult],
         metadataEntries: [EvidenceLedgerEntry] = [],
+        acousticPipelineFusion: [AcousticFeatureFusion.WindowFusion] = [],
         fusionConfig: FusionWeightConfig
     ) -> [EvidenceLedgerEntry] {
         // Classifier entry: find the best-matching ClassifierResult for this span.
@@ -1603,7 +1662,17 @@ actor AdDetectionService {
         // iterates over acousticEntries and preserves each entry's
         // `source`, so a `.musicBed`-sourced entry flows through with
         // the correct kind and increments distinctKinds.count.
-        let combinedAcousticEntries = acousticEntries + musicBedEntries
+        //
+        // playhead-gtt9.16: also add aggregated `.acoustic` entries from
+        // the acoustic feature pipeline output. When the pipeline produced
+        // zero combined mass over the span (features all returned 0), the
+        // helper returns empty, preserving pre-wire back-compat.
+        let pipelineAcousticEntries = buildAcousticPipelineLedgerEntries(
+            span: span,
+            pipelineFusion: acousticPipelineFusion,
+            fusionConfig: fusionConfig
+        )
+        let combinedAcousticEntries = acousticEntries + musicBedEntries + pipelineAcousticEntries
 
         // Catalog entries: from EvidenceEntry items overlapping the span.
         let catalogLedgerEntries = buildCatalogLedgerEntries(
@@ -1790,6 +1859,46 @@ actor AdDetectionService {
             source: .acoustic,
             weight: weight,
             detail: .acoustic(breakStrength: breakStrength)
+        )]
+    }
+
+    /// playhead-gtt9.16: build a single aggregated `.acoustic` ledger entry
+    /// from the `AcousticFeaturePipeline` output that overlaps this span.
+    ///
+    /// The pipeline's per-window `combinedScore` is a weighted blend of the
+    /// eight acoustic features with `AcousticFeatureFusion.Weights.defaultPriors`.
+    /// We take the maximum across windows overlapping the span, multiply by
+    /// `fusionConfig.acousticCap`, and return a single entry. Returns an
+    /// empty array when:
+    ///   * `pipelineFusion` is empty (no windows in the episode), or
+    ///   * the maximum combined score across overlapping windows is zero
+    ///     (all features returned zero — back-compat: no behaviour change
+    ///     vs. pre-wiring).
+    ///
+    /// The entry uses `source: .acoustic` and encodes the combined score as
+    /// `breakStrength` in the `.acoustic(...)` detail. Downstream
+    /// `BackfillEvidenceFusion` caps each entry at `config.acousticCap`
+    /// separately, so the pipeline contribution is additive to the existing
+    /// RMS-drop `.acoustic` entry but each entry respects the same family
+    /// budget. This matches gtt9.12's design (features are new evidence,
+    /// not a replacement for the RMS-drop path).
+    private func buildAcousticPipelineLedgerEntries(
+        span: DecodedSpan,
+        pipelineFusion: [AcousticFeatureFusion.WindowFusion],
+        fusionConfig: FusionWeightConfig
+    ) -> [EvidenceLedgerEntry] {
+        guard !pipelineFusion.isEmpty else { return [] }
+        let overlapping = pipelineFusion.filter { fusion in
+            fusion.windowStart < span.endTime && fusion.windowEnd > span.startTime
+        }
+        guard !overlapping.isEmpty else { return [] }
+        let maxCombined = overlapping.map(\.combinedScore).max() ?? 0
+        guard maxCombined > 0 else { return [] }
+        let weight = min(maxCombined * fusionConfig.acousticCap, fusionConfig.acousticCap)
+        return [EvidenceLedgerEntry(
+            source: .acoustic,
+            weight: weight,
+            detail: .acoustic(breakStrength: maxCombined)
         )]
     }
 
