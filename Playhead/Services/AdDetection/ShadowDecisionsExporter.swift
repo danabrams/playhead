@@ -107,7 +107,7 @@ enum ShadowDecisionsExporter {
     ///     `commercialIntent` (paid / owned / affiliate). Organic and
     ///     unknown intents are treated as non-ad — matching the live
     ///     classifier's promotion logic.
-    ///   - `shadowConfidence` (Float in [0, 1]): the maximum certainty band
+    ///   - `shadowConfidence` (Double in [0, 1]): the maximum certainty band
     ///     across ad-bearing spans, mapped weak=0.33, moderate=0.66,
     ///     strong=1.00 (mirrors the AdDetectionService FM weighting in
     ///     `AdDetectionService.swift:1962-1968`). 0.0 when `isAd=false`.
