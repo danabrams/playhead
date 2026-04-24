@@ -175,15 +175,83 @@ struct CorrectionNormalizerClassificationTests {
         #expect(norm.unknownCount == 0)
     }
 
-    @Test("Malformed scope (garbage) counts as unknown")
-    func malformedScopeIsUnknown() {
+    @Test("Truly malformed scope (garbage prefix) counts as unknown")
+    func garbagePrefixScopeIsUnknown() {
+        // Scope doesn't match any recognized prefix — this is the malformed
+        // case (unlike Layer B scopes below, which are production-valid).
+        let corrections = [
+            fc(source: "falseNegative",
+               scope: "notARealScope:blah:blah",
+               correctionType: "falseNegative")
+        ]
+        let norm = CorrectionNormalizer.normalize(corrections)
+        #expect(norm.unknownCount == 1)
+        #expect(norm.layerBCount == 0)
+    }
+
+    // MARK: - Layer B scopes (S1: these are production-valid, not malformed)
+
+    @Test("sponsorOnShow routes to layerBCount, not unknownCount")
+    func sponsorOnShowIsLayerB() {
         let corrections = [
             fc(source: "falseNegative",
                scope: "sponsorOnShow:p1:acme",
                correctionType: "falseNegative")
         ]
         let norm = CorrectionNormalizer.normalize(corrections)
-        #expect(norm.unknownCount == 1)
+        #expect(norm.layerBCount == 1)
+        #expect(norm.unknownCount == 0)
+        #expect(norm.spanFN.isEmpty)
+        #expect(norm.spanFP.isEmpty)
+        #expect(norm.wholeAssetCorrections.isEmpty)
+    }
+
+    @Test("phraseOnShow routes to layerBCount")
+    func phraseOnShowIsLayerB() {
+        let corrections = [
+            fc(source: "manualVeto",
+               scope: "phraseOnShow:p1:my-phrase",
+               correctionType: "falsePositive")
+        ]
+        let norm = CorrectionNormalizer.normalize(corrections)
+        #expect(norm.layerBCount == 1)
+        #expect(norm.unknownCount == 0)
+    }
+
+    @Test("campaignOnShow routes to layerBCount")
+    func campaignOnShowIsLayerB() {
+        let corrections = [
+            fc(source: "manualVeto",
+               scope: "campaignOnShow:p1:camp-2025",
+               correctionType: "falsePositive")
+        ]
+        let norm = CorrectionNormalizer.normalize(corrections)
+        #expect(norm.layerBCount == 1)
+        #expect(norm.unknownCount == 0)
+    }
+
+    @Test("domainOwnershipOnShow routes to layerBCount")
+    func domainOwnershipOnShowIsLayerB() {
+        let corrections = [
+            fc(source: "manualVeto",
+               scope: "domainOwnershipOnShow:p1:nytimes.com",
+               correctionType: "falsePositive")
+        ]
+        let norm = CorrectionNormalizer.normalize(corrections)
+        #expect(norm.layerBCount == 1)
+        #expect(norm.unknownCount == 0)
+    }
+
+    @Test("jingleOnShow routes to layerBCount")
+    func jingleOnShowIsLayerB() {
+        let corrections = [
+            fc(source: "manualVeto",
+               scope: "jingleOnShow:p1:jingle-abc",
+               correctionType: "falsePositive")
+        ]
+        let norm = CorrectionNormalizer.normalize(corrections)
+        #expect(norm.layerBCount == 1)
+        #expect(norm.unknownCount == 0)
     }
 }
 

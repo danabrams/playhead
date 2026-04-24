@@ -50,9 +50,19 @@ struct NarlReportRollup: Sendable, Codable {
 ///   - `wholeAssetEndorseCount` — whole-asset endorsements after dedup.
 ///   - `unknownCount`        — rows the normalizer couldn't place (ordinal
 ///                             exactSpans, unrecognized source+type combos,
-///                             malformed scopes). Excluded from span metrics.
+///                             malformed scope prefixes). Excluded from
+///                             span metrics. Does NOT include Layer B rows.
 ///   - `boundaryRefinementCount` — rows with correctionType in
 ///                             {startTooEarly/Late, endTooEarly/Late}.
+///   - `layerBCount`         — production-valid show-level scopes
+///                             (`sponsorOnShow`/`phraseOnShow`/
+///                             `campaignOnShow`/`domainOwnershipOnShow`/
+///                             `jingleOnShow`) that the harness does not
+///                             yet evaluate against. Tracked separately
+///                             from `unknownCount` so an operator can
+///                             distinguish "5 valid corrections we don't
+///                             yet score" from "5 corrections we failed
+///                             to parse". See review S1 (2026-04-23).
 struct NarlNormalizerCounts: Sendable, Codable, Equatable {
     let rawCount: Int
     let spanFNCount: Int
@@ -61,6 +71,7 @@ struct NarlNormalizerCounts: Sendable, Codable, Equatable {
     let wholeAssetEndorseCount: Int
     let unknownCount: Int
     let boundaryRefinementCount: Int
+    let layerBCount: Int
 
     static let zero = NarlNormalizerCounts(
         rawCount: 0,
@@ -69,7 +80,8 @@ struct NarlNormalizerCounts: Sendable, Codable, Equatable {
         wholeAssetVetoCount: 0,
         wholeAssetEndorseCount: 0,
         unknownCount: 0,
-        boundaryRefinementCount: 0
+        boundaryRefinementCount: 0,
+        layerBCount: 0
     )
 
     /// Build from a `NormalizedCorrections` result + the raw-row count used
@@ -85,6 +97,7 @@ struct NarlNormalizerCounts: Sendable, Codable, Equatable {
             .filter { $0.kind == .endorse }.count
         self.unknownCount = normalized.unknownCount
         self.boundaryRefinementCount = normalized.boundaryRefinementCount
+        self.layerBCount = normalized.layerBCount
     }
 
     init(
@@ -94,7 +107,8 @@ struct NarlNormalizerCounts: Sendable, Codable, Equatable {
         wholeAssetVetoCount: Int,
         wholeAssetEndorseCount: Int,
         unknownCount: Int,
-        boundaryRefinementCount: Int
+        boundaryRefinementCount: Int,
+        layerBCount: Int
     ) {
         self.rawCount = rawCount
         self.spanFNCount = spanFNCount
@@ -103,6 +117,27 @@ struct NarlNormalizerCounts: Sendable, Codable, Equatable {
         self.wholeAssetEndorseCount = wholeAssetEndorseCount
         self.unknownCount = unknownCount
         self.boundaryRefinementCount = boundaryRefinementCount
+        self.layerBCount = layerBCount
+    }
+
+    /// Codable with a default-fallback on `layerBCount` so pre-S1 report
+    /// artifacts (gtt9.7 initial land) still decode.
+    enum CodingKeys: String, CodingKey {
+        case rawCount, spanFNCount, spanFPCount
+        case wholeAssetVetoCount, wholeAssetEndorseCount
+        case unknownCount, boundaryRefinementCount, layerBCount
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.rawCount = try c.decode(Int.self, forKey: .rawCount)
+        self.spanFNCount = try c.decode(Int.self, forKey: .spanFNCount)
+        self.spanFPCount = try c.decode(Int.self, forKey: .spanFPCount)
+        self.wholeAssetVetoCount = try c.decode(Int.self, forKey: .wholeAssetVetoCount)
+        self.wholeAssetEndorseCount = try c.decode(Int.self, forKey: .wholeAssetEndorseCount)
+        self.unknownCount = try c.decode(Int.self, forKey: .unknownCount)
+        self.boundaryRefinementCount = try c.decode(Int.self, forKey: .boundaryRefinementCount)
+        self.layerBCount = (try? c.decode(Int.self, forKey: .layerBCount)) ?? 0
     }
 }
 

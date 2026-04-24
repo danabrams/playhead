@@ -80,20 +80,31 @@ struct NormalizedCorrections: Sendable, Equatable {
     let spanFP: [NormalizedSpanCorrection]
     /// Rows we could not confidently place in any bucket (ordinal spans
     /// without atom resolution, unrecognized source+type combinations,
-    /// malformed scopes). Excluded from span-level precision/recall.
+    /// malformed scopes, or truly unhandled scope prefixes). Excluded from
+    /// span-level precision/recall. Distinct from `layerBCount` — see
+    /// `CorrectionNormalizer.classify(_:)` for the split.
     let unknownCount: Int
     /// Boundary-refinement rows (`startTooEarly/Late`, `endTooEarly/Late`).
     /// Deliberately separate from `unknown` because they're recognized but
     /// describe sub-second drift on already-detected spans — they should
     /// not move span-level counts.
     let boundaryRefinementCount: Int
+    /// Layer B scopes (`sponsorOnShow`, `phraseOnShow`, `campaignOnShow`,
+    /// `domainOwnershipOnShow`, `jingleOnShow`). These are production-valid
+    /// show-level corrections the user issued against a whole podcast, not
+    /// malformed data — but the harness's per-episode span-level metrics
+    /// have no receiver for them. They're counted here so an operator
+    /// reading the report can distinguish "5 corrections we don't yet
+    /// evaluate against" from "5 corrections we failed to parse".
+    let layerBCount: Int
 
     static let empty = NormalizedCorrections(
         wholeAssetCorrections: [],
         spanFN: [],
         spanFP: [],
         unknownCount: 0,
-        boundaryRefinementCount: 0
+        boundaryRefinementCount: 0,
+        layerBCount: 0
     )
 
     /// Total corrections actually placed in a span bucket (for logging
@@ -124,6 +135,7 @@ enum CorrectionNormalizer {
         var rawFP: [(assetId: String, range: NarlTimeRange)] = []
         var unknown = 0
         var boundary = 0
+        var layerB = 0
 
         for correction in corrections {
             switch classify(correction) {
@@ -137,6 +149,8 @@ enum CorrectionNormalizer {
                 rawFP.append((assetId, range))
             case .boundary:
                 boundary += 1
+            case .layerB:
+                layerB += 1
             case .unknown:
                 unknown += 1
             }
@@ -166,7 +180,8 @@ enum CorrectionNormalizer {
             spanFN: mergedFN,
             spanFP: mergedFP,
             unknownCount: unknown,
-            boundaryRefinementCount: boundary
+            boundaryRefinementCount: boundary,
+            layerBCount: layerB
         )
     }
 
@@ -177,8 +192,25 @@ enum CorrectionNormalizer {
         case spanFN(assetId: String, range: NarlTimeRange)
         case spanFP(assetId: String, range: NarlTimeRange)
         case boundary
+        /// Layer B show-level scope (sponsorOnShow, phraseOnShow,
+        /// campaignOnShow, domainOwnershipOnShow, jingleOnShow). Recognized
+        /// production scopes, but deferred — the harness does not yet
+        /// evaluate against show-level corrections.
+        case layerB
         case unknown
     }
+
+    /// Prefixes that identify Layer B (show-level) correction scopes. These
+    /// are production-valid per `CorrectionScope.swift`; we recognize them
+    /// in the normalizer so they aren't lumped in with malformed scopes in
+    /// `unknownCount`. Kept as a static set so the classify path stays O(1).
+    private static let layerBScopePrefixes: Set<String> = [
+        "sponsorOnShow:",
+        "phraseOnShow:",
+        "campaignOnShow:",
+        "domainOwnershipOnShow:",
+        "jingleOnShow:",
+    ]
 
     /// Classify a single correction using only the shape of its scope and
     /// its correctionType/source fields.
@@ -229,7 +261,15 @@ enum CorrectionNormalizer {
             // reporting purposes.
             return .unknown
 
-        case .unhandled:
+        case .unhandled(let raw):
+            // Layer B scopes are production-valid show-level corrections
+            // that `NarlCorrectionScope.parse` returns as `.unhandled`
+            // (because the harness doesn't evaluate against them). Tease
+            // them out of `unknown` so the report distinguishes them from
+            // malformed rows.
+            if Self.layerBScopePrefixes.contains(where: { raw.hasPrefix($0) }) {
+                return .layerB
+            }
             return .unknown
         }
     }

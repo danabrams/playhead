@@ -761,7 +761,7 @@ struct NarlEvalHarnessTests {
     ///
     /// Emits one line per (episodeId, config-independent) call, of shape:
     ///   narl.normalizer: episodeId=...  raw=N  spanFN=A spanFP=B
-    ///   wholeAsset=C(veto=c1 endorse=c2)  unknown=D  boundary=E
+    ///   wholeAsset=C(veto=c1 endorse=c2)  layerB=L  unknown=D  boundary=E
     static func logCorrectionNormalization(
         trace: FrozenTrace,
         before: [FrozenTrace.FrozenCorrection],
@@ -775,6 +775,7 @@ struct NarlEvalHarnessTests {
             + "  spanFP=\(after.spanFP.count)"
             + "  wholeAsset=\(after.wholeAssetCorrections.count)"
             + "(veto=\(vetoCount) endorse=\(endorseCount))"
+            + "  layerB=\(after.layerBCount)"
             + "  unknown=\(after.unknownCount)"
             + "  boundary=\(after.boundaryRefinementCount)")
     }
