@@ -5,6 +5,22 @@
 import SwiftUI
 import SwiftData
 
+// MARK: - EpisodeRefreshing
+
+/// Narrow seam over the feed-refresh behaviour the per-show list needs
+/// for pull-to-refresh (playhead-riu8). Keeps the SwiftUI layer free
+/// of URLSession / provider mocking when tests exercise the refresh
+/// path — prod wires in `PodcastDiscoveryService`; tests inject a
+/// recording double. Mirrors the `HapticPlaying` seam pattern already
+/// used by this view.
+protocol EpisodeRefreshing: Sendable {
+    @MainActor
+    func refreshEpisodes(
+        for podcast: Podcast,
+        in context: ModelContext
+    ) async throws -> [Episode]
+}
+
 // MARK: - EpisodeListView
 
 struct EpisodeListView: View {
@@ -14,6 +30,11 @@ struct EpisodeListView: View {
     /// Injected haptic player — defaults to `SystemHapticPlayer` in
     /// production, tests swap in a `RecordingHapticPlayer`.
     var hapticPlayer: any HapticPlaying = SystemHapticPlayer()
+
+    /// Injected feed refresher — defaults to a shared
+    /// `PodcastDiscoveryService` in production, tests swap in a
+    /// recording double. Drives the pull-to-refresh closure below.
+    var episodeRefresher: any EpisodeRefreshing = PodcastDiscoveryService()
 
     @Query private var episodes: [Episode]
 
@@ -39,9 +60,14 @@ struct EpisodeListView: View {
     /// tooltip is removed from the view hierarchy.
     @State private var showsFirstCheckmarkTooltip: Bool = false
 
-    init(podcast: Podcast, hapticPlayer: any HapticPlaying = SystemHapticPlayer()) {
+    init(
+        podcast: Podcast,
+        hapticPlayer: any HapticPlaying = SystemHapticPlayer(),
+        episodeRefresher: any EpisodeRefreshing = PodcastDiscoveryService()
+    ) {
         self.podcast = podcast
         self.hapticPlayer = hapticPlayer
+        self.episodeRefresher = episodeRefresher
         let podcastID = podcast.persistentModelID
         _episodes = Query(
             filter: #Predicate<Episode> { episode in
@@ -242,6 +268,13 @@ private extension EpisodeListView {
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
+        .refreshable {
+            await performEpisodeRefresh(
+                refresher: episodeRefresher,
+                podcast: podcast,
+                modelContext: modelContext
+            )
+        }
     }
 
     // MARK: - Actions
@@ -470,6 +503,30 @@ func libraryRowStatusLineInputs(episode: Episode) -> LibraryRowStatusLineInputs?
         coverage: episode.coverageSummary,
         anchor: episode.playbackAnchor
     )
+}
+
+// MARK: - Pull-to-Refresh Helper (playhead-riu8)
+
+/// Dispatches one feed-refresh for the supplied podcast via the
+/// injected `EpisodeRefreshing` seam and silently tolerates errors.
+/// Silent partial-refresh mirrors `LibraryView.refreshAllFeeds` — the
+/// user's intent is "show me anything new", not "fail loudly on a
+/// flaky network".
+///
+/// Exposed at file scope (rather than nested in the view) so tests can
+/// exercise the call-once invariant and error-swallowing without
+/// standing up the SwiftUI `@Query` / `@Environment` machinery.
+@MainActor
+func performEpisodeRefresh(
+    refresher: any EpisodeRefreshing,
+    podcast: Podcast,
+    modelContext: ModelContext
+) async {
+    do {
+        _ = try await refresher.refreshEpisodes(for: podcast, in: modelContext)
+    } catch {
+        // Silent — partial refresh is better than none (mirrors LibraryView).
+    }
 }
 
 // MARK: - Preview

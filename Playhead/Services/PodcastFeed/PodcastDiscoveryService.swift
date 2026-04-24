@@ -354,6 +354,14 @@ actor PodcastDiscoveryService {
     }
 }
 
+// MARK: - EpisodeRefreshing Conformance (playhead-riu8)
+
+/// Conformance to the per-show pull-to-refresh seam used by
+/// `EpisodeListView`. The method itself already lives on this actor
+/// and is `@MainActor`-isolated; the protocol just re-exposes it so
+/// tests can substitute a recording double.
+extension PodcastDiscoveryService: EpisodeRefreshing {}
+
 // MARK: - Cache Types
 
 private struct CachedSearchResult {
