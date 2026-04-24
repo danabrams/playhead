@@ -83,6 +83,140 @@ struct NarlEvalHarnessTests {
         )
     }
 
+    /// Minimal FrozenTrace factory parameterised on the two show-identifying
+    /// fields the heuristic inspects. All other fields are filled with
+    /// do-nothing defaults. Used by the gtt9.5 show-label heuristic tests.
+    private static func makeTrace(
+        episodeId: String,
+        podcastId: String,
+        showLabel: String? = nil
+    ) -> FrozenTrace {
+        FrozenTrace(
+            episodeId: episodeId,
+            podcastId: podcastId,
+            episodeDuration: 300,
+            traceVersion: "frozen-trace-v2",
+            capturedAt: Date(timeIntervalSince1970: 0),
+            featureWindows: [],
+            atoms: [],
+            evidenceCatalog: [],
+            corrections: [],
+            decisionEvents: [],
+            baselineReplaySpanDecisions: [],
+            holdoutDesignation: .training,
+            windowScores: [],
+            showLabel: showLabel
+        )
+    }
+
+    // MARK: - gtt9.5 show-label heuristic
+
+    @Test("showName uses trace.showLabel when present (short-circuit)")
+    func showNameUsesShowLabelWhenPresent() {
+        let trace = Self.makeTrace(
+            episodeId: "irrelevant",
+            podcastId: "irrelevant",
+            showLabel: "HandLabeled"
+        )
+        #expect(Self.showName(for: trace) == "HandLabeled")
+    }
+
+    @Test("showName buckets simplecast URL podcastId as Conan")
+    func showNameMatchesSimplecastUrlPodcastId() {
+        // From 2026-04-23 corpus: the live AnalysisStore stores the feed URL
+        // as podcastId on legacy traces.
+        let trace = Self.makeTrace(
+            episodeId: "ep",
+            podcastId: "https://feeds.simplecast.com/dHoohVNH"
+        )
+        #expect(Self.showName(for: trace) == "Conan")
+    }
+
+    @Test("showName buckets simplecast URL episodeId as Conan when podcastId is empty")
+    func showNameMatchesSimplecastUrlEpisodeIdWhenPodcastIdEmpty() {
+        // Exact form from the 2026-04-23 corpus: empty podcastId, feed URL
+        // embedded in episodeId before "::<uuid>".
+        let trace = Self.makeTrace(
+            episodeId: "https://feeds.simplecast.com/dHoohVNH::311e3daa-60b3-4428-b780-c9a7b8512be8",
+            podcastId: ""
+        )
+        #expect(Self.showName(for: trace) == "Conan")
+    }
+
+    @Test("showName buckets rss2.flightcast URL episodeId as DoaC")
+    func showNameMatchesFlightcastUrlEpisodeId() {
+        // 2026-04-23 corpus form: the flightcast feed is served from
+        // rss2.flightcast.com — host match, not scheme match.
+        let trace = Self.makeTrace(
+            episodeId: "https://rss2.flightcast.com/xmsftuzjjykcmqwolaqn6mdn::flightcast:01KM20WJPKVFHRVJZWTNA6Q1XT",
+            podcastId: ""
+        )
+        #expect(Self.showName(for: trace) == "DoaC")
+    }
+
+    @Test("showName buckets flightcast: URL scheme as DoaC (legacy podcastId form)")
+    func showNameMatchesFlightcastScheme() {
+        // Preserved behaviour: the legacy `flightcast:<id>` scheme.
+        let trace = Self.makeTrace(
+            episodeId: "ep",
+            podcastId: "flightcast:01KM20WJPKVFHRVJZWTNA6Q1XT"
+        )
+        #expect(Self.showName(for: trace) == "DoaC")
+    }
+
+    @Test("showName buckets legacy simplecast: scheme podcastId as Conan")
+    func showNameMatchesSimplecastScheme() {
+        // Preserved behaviour: matches the 2026-04-22 fixtures
+        // (podcastId = "simplecast:conan-needs-a-friend").
+        let trace = Self.makeTrace(
+            episodeId: "ep",
+            podcastId: "simplecast:conan-needs-a-friend"
+        )
+        #expect(Self.showName(for: trace) == "Conan")
+    }
+
+    @Test("showName matches known title substring when host is unknown")
+    func showNameMatchesTitleSubstringOnUnknownHost() {
+        // Graceful fallback: unknown host, but the identifier carries a
+        // known show-name substring.
+        let trace = Self.makeTrace(
+            episodeId: "ep",
+            podcastId: "https://example.invalid/feed/diary-of-a-ceo"
+        )
+        #expect(Self.showName(for: trace) == "DoaC")
+    }
+
+    @Test("showName returns unknown for genuinely unknown identifiers (graceful degradation)")
+    func showNameReturnsUnknownForUnknownIdentifiers() {
+        // Neither a known host nor a known title substring → do NOT
+        // misattribute to an arbitrary show. "unknown" is the correct
+        // graceful-degradation label (acceptance #3).
+        let trace = Self.makeTrace(
+            episodeId: "",
+            podcastId: ""
+        )
+        #expect(Self.showName(for: trace) == "unknown")
+    }
+
+    @Test("showName does not misattribute an arbitrary unknown host to a known show")
+    func showNameDoesNotMisattributeUnknownHost() {
+        // A real-world risk of a naive substring check: an unrelated URL
+        // that happens to contain "cast" or similar should NOT resolve to
+        // Conan / DoaC.
+        let trace = Self.makeTrace(
+            episodeId: "https://example.invalid/foo/bar",
+            podcastId: "https://example.invalid/foo/bar"
+        )
+        #expect(Self.showName(for: trace) == "https://example.invalid/foo/bar"
+                || Self.showName(for: trace) == "unknown"
+                || Self.showName(for: trace) == "https://example.invalid/foo/bar".lowercased(),
+                "unknown host should degrade to raw id / 'unknown', not a known show")
+        // Stronger: the result must NOT be one of the known show labels.
+        let result = Self.showName(for: trace)
+        #expect(result != "Conan")
+        #expect(result != "DoaC")
+    }
+
     @Test("Harness runs both configs and writes a report")
     func runHarness() throws {
         let (report, outputDir) = try Self.runHarnessCollectingReport()
