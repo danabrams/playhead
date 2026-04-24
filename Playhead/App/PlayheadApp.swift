@@ -196,6 +196,20 @@ struct PlayheadApp: App {
         }
         .modelContainer(modelContainer)
         .onChange(of: scenePhase) { oldPhase, newPhase in
+            // playhead-gtt9.14: forward scene-phase transitions into the
+            // scheduler so its admission filter distinguishes foreground
+            // (user engaged with the app) from background (BPS owns the
+            // wake window). `.inactive` folds into `.foreground` because
+            // the user is still holding the device and a `.active` ↔
+            // `.inactive` flicker during a system sheet must not strand
+            // deferred work. Only a true `.background` transition flips
+            // the scheduler's gate.
+            let mappedPhase: AnalysisWorkScheduler.SchedulerScenePhase =
+                (newPhase == .background) ? .background : .foreground
+            Task {
+                await runtime.analysisWorkScheduler.updateScenePhase(mappedPhase)
+            }
+
             switch newPhase {
             case .background:
                 Self.logger.info("Scene phase: background — persisting playback position")

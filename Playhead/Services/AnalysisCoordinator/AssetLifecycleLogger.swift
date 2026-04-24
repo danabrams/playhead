@@ -18,7 +18,7 @@
 // harness and the counterfactual eval tooling can reconstruct
 // per-asset lifecycle timelines without querying the SQLite store.
 //
-// Schema version: 1 (initial).
+// Schema version: 2 (playhead-gtt9.14 adds optional scheduler-state fields).
 
 import Foundation
 import OSLog
@@ -29,6 +29,56 @@ protocol AssetLifecycleLoggerProtocol: Sendable {
     /// Append a single lifecycle record. Must not block the caller
     /// beyond the actor hop; file I/O is serialized inside the actor.
     func record(_ entry: AssetLifecycleLogEntry) async
+}
+
+// MARK: - SchedulerStateSnapshotProviding (playhead-gtt9.14)
+
+/// Read-only snapshot surface the `AnalysisCoordinator` consults so the
+/// lifecycle log can record the scheduler's (scenePhase,
+/// playbackContext, qualityProfile) triple at every state transition.
+///
+/// The return type intentionally uses string encodings that match the
+/// `AssetLifecycleLogEntry` JSON fields directly — the protocol can
+/// live in any actor context (the runtime-level implementation hops
+/// onto the scheduler actor, the test implementation is plain
+/// `@unchecked Sendable`) without leaking scheduler-internal types.
+///
+/// A `nil` return means "no snapshot available" and the coordinator
+/// records v2 entries with the fields left as nil, which is the
+/// backwards-compatible no-op path.
+protocol SchedulerStateSnapshotProviding: Sendable {
+    /// Snapshot of the scheduler's admission inputs. All fields are
+    /// optional so a provider can report partial state; the logger
+    /// stores what it has and records nil for the rest.
+    func schedulerStateSnapshot() async -> SchedulerStateSnapshot
+}
+
+/// Transport type for `SchedulerStateSnapshotProviding`. The three
+/// fields mirror the v2 JSON keys on `AssetLifecycleLogEntry`.
+struct SchedulerStateSnapshot: Sendable, Equatable {
+    let scenePhase: String?
+    let playbackContext: String?
+    let qualityProfile: String?
+
+    static let empty = SchedulerStateSnapshot(
+        scenePhase: nil,
+        playbackContext: nil,
+        qualityProfile: nil
+    )
+}
+
+/// Adapter that forwards `schedulerStateSnapshot()` calls into an
+/// `AnalysisWorkScheduler`. Lives in the logger file to keep the
+/// snapshot transport + its canonical producer in one compilation
+/// unit; the scheduler itself remains free of
+/// `SchedulerStateSnapshotProviding` conformance so tests that don't
+/// need the adapter are unaffected.
+struct AnalysisWorkSchedulerStateSnapshotAdapter: SchedulerStateSnapshotProviding {
+    let scheduler: AnalysisWorkScheduler
+
+    func schedulerStateSnapshot() async -> SchedulerStateSnapshot {
+        await scheduler.currentSchedulerStateSnapshot()
+    }
 }
 
 /// No-op logger for release builds, tests that don't exercise logging,
@@ -47,6 +97,10 @@ struct NoOpAssetLifecycleLogger: AssetLifecycleLoggerProtocol {
 /// seconds; `timestamp` is Unix epoch seconds.
 struct AssetLifecycleLogEntry: Codable, Equatable, Sendable {
     /// Schema version. Increment on breaking changes.
+    /// - v1 (gtt9.8): initial shape.
+    /// - v2 (gtt9.14): adds `schedulerScenePhase`, `schedulerPlaybackContext`,
+    ///   `schedulerQualityProfile`. All optional — legacy v1 JSON decodes
+    ///   cleanly with the new fields defaulting to `nil`.
     let schemaVersion: Int
     /// `AnalysisAsset.id` the transition applies to.
     let analysisAssetID: String
@@ -71,7 +125,56 @@ struct AssetLifecycleLogEntry: Codable, Equatable, Sendable {
     /// chunks have been written yet.
     let transcriptCoverageEndSec: Double?
 
-    static let currentSchemaVersion: Int = 1
+    /// playhead-gtt9.14: scheduler scene-phase projection at the
+    /// moment of transition. `"foreground"` or `"background"`. Nil when
+    /// no scheduler state was captured (e.g. tests, pre-v2 readers
+    /// re-encoding a v1 row).
+    let schedulerScenePhase: String?
+    /// playhead-gtt9.14: transport-level playback context at the moment
+    /// of transition. `"playing"`, `"paused"`, or `"idle"`. Nil when not
+    /// captured.
+    let schedulerPlaybackContext: String?
+    /// playhead-gtt9.14: `QualityProfile.rawValue` applied by the
+    /// admission gate at the moment of transition. Nil when not
+    /// captured. Useful for post-ship bucketing of stranded-asset
+    /// traces by thermal state.
+    let schedulerQualityProfile: String?
+
+    static let currentSchemaVersion: Int = 2
+
+    /// Convenience init: captures all v2 fields. Defaulting the v2 fields
+    /// to `nil` preserves call-site compatibility with existing v1 test
+    /// factories and the `AnalysisCoordinator` transition path before
+    /// scheduler snapshots are plumbed end-to-end.
+    init(
+        schemaVersion: Int,
+        analysisAssetID: String,
+        sessionID: String,
+        timestamp: Double,
+        fromState: String,
+        toState: String,
+        terminalReason: String?,
+        episodeDurationSec: Double,
+        featureCoverageEndSec: Double?,
+        transcriptCoverageEndSec: Double?,
+        schedulerScenePhase: String? = nil,
+        schedulerPlaybackContext: String? = nil,
+        schedulerQualityProfile: String? = nil
+    ) {
+        self.schemaVersion = schemaVersion
+        self.analysisAssetID = analysisAssetID
+        self.sessionID = sessionID
+        self.timestamp = timestamp
+        self.fromState = fromState
+        self.toState = toState
+        self.terminalReason = terminalReason
+        self.episodeDurationSec = episodeDurationSec
+        self.featureCoverageEndSec = featureCoverageEndSec
+        self.transcriptCoverageEndSec = transcriptCoverageEndSec
+        self.schedulerScenePhase = schedulerScenePhase
+        self.schedulerPlaybackContext = schedulerPlaybackContext
+        self.schedulerQualityProfile = schedulerQualityProfile
+    }
 }
 
 // MARK: - AssetLifecycleLogger
