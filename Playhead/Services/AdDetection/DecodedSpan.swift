@@ -50,7 +50,7 @@ enum DecoderConstants {
 /// Used for JSON encoding/decoding of anchorProvenance in the `decoded_spans` table.
 extension AnchorRef: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, regionId, consensusStrength, entry, breakStrength, correctionId, reportedTime
+        case type, regionId, consensusStrength, entry, breakStrength, correctionId, reportedTime, score
     }
 
     init(from decoder: Decoder) throws {
@@ -72,6 +72,10 @@ extension AnchorRef: Codable {
             let correctionId = try container.decode(String.self, forKey: .correctionId)
             let reportedTime = try container.decode(Double.self, forKey: .reportedTime)
             self = .userCorrection(correctionId: correctionId, reportedTime: reportedTime)
+        case "classifierSeed":
+            let regionId = try container.decode(String.self, forKey: .regionId)
+            let score = try container.decode(Double.self, forKey: .score)
+            self = .classifierSeed(regionId: regionId, score: score)
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown AnchorRef type: \(type)")
         }
@@ -95,6 +99,10 @@ extension AnchorRef: Codable {
             try container.encode("userCorrection", forKey: .type)
             try container.encode(correctionId, forKey: .correctionId)
             try container.encode(reportedTime, forKey: .reportedTime)
+        case .classifierSeed(let regionId, let score):
+            try container.encode("classifierSeed", forKey: .type)
+            try container.encode(regionId, forKey: .regionId)
+            try container.encode(score, forKey: .score)
         }
     }
 }

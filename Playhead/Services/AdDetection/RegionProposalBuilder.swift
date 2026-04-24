@@ -8,6 +8,14 @@ struct ProposedRegionOrigins: OptionSet, Sendable {
     static let sponsor = ProposedRegionOrigins(rawValue: 1 << 2)
     static let fingerprint = ProposedRegionOrigins(rawValue: 1 << 3)
     static let foundationModel = ProposedRegionOrigins(rawValue: 1 << 4)
+    /// A high-confidence sequence classifier firing seeded this region.
+    ///
+    /// Added so that a classifier-only window with no co-occurring
+    /// lexical / acoustic / sponsor / fingerprint / FM signal still flows
+    /// into `AtomEvidenceProjector` and downstream fusion. Prior to this,
+    /// such windows never reached `BackfillEvidenceFusion` — see
+    /// `makeClassifierProposals` for the seeding contract.
+    static let classifier = ProposedRegionOrigins(rawValue: 1 << 5)
 }
 
 enum FMConsensusStrength: Double, Sendable, Comparable {
@@ -47,8 +55,52 @@ struct ProposedRegion: Sendable {
     /// count) should `Set`-dedupe with `flatMap(\.acousticBreaks)`.
     let acousticBreaks: [AcousticBreak]
     let foundationModelSpans: [RefinedAdSpan]
+    /// Classifier results that seeded or merged into this region.
+    ///
+    /// Mirrors the other source-provenance fields: when a
+    /// high-confidence `ClassifierResult` seeded the region via
+    /// `makeClassifierProposals`, it is preserved here so that
+    /// downstream consumers (`AtomEvidenceProjector`, evidence-ledger
+    /// construction) can read classifier provenance off the region.
+    let classifierResults: [ClassifierResult]
     let resolvedEvidenceAnchors: [ResolvedEvidenceAnchor]
     let fmEvidence: ProposedRegionFMEvidence?
+
+    init(
+        analysisAssetId: String,
+        transcriptVersion: String,
+        firstAtomOrdinal: Int,
+        lastAtomOrdinal: Int,
+        startTime: Double,
+        endTime: Double,
+        origins: ProposedRegionOrigins,
+        fmConsensusStrength: FMConsensusStrength,
+        lexicalCandidates: [LexicalCandidate],
+        sponsorMatches: [SponsorMatch],
+        fingerprintMatches: [FingerprintMatch],
+        acousticBreaks: [AcousticBreak],
+        foundationModelSpans: [RefinedAdSpan],
+        classifierResults: [ClassifierResult] = [],
+        resolvedEvidenceAnchors: [ResolvedEvidenceAnchor],
+        fmEvidence: ProposedRegionFMEvidence?
+    ) {
+        self.analysisAssetId = analysisAssetId
+        self.transcriptVersion = transcriptVersion
+        self.firstAtomOrdinal = firstAtomOrdinal
+        self.lastAtomOrdinal = lastAtomOrdinal
+        self.startTime = startTime
+        self.endTime = endTime
+        self.origins = origins
+        self.fmConsensusStrength = fmConsensusStrength
+        self.lexicalCandidates = lexicalCandidates
+        self.sponsorMatches = sponsorMatches
+        self.fingerprintMatches = fingerprintMatches
+        self.acousticBreaks = acousticBreaks
+        self.foundationModelSpans = foundationModelSpans
+        self.classifierResults = classifierResults
+        self.resolvedEvidenceAnchors = resolvedEvidenceAnchors
+        self.fmEvidence = fmEvidence
+    }
 }
 
 struct ProposedRegionFMEvidence: Sendable {
@@ -69,6 +121,34 @@ struct RegionProposalInput: Sendable {
     let sponsorMatches: [SponsorMatch]
     let fingerprintMatches: [FingerprintMatch]
     let fmWindows: [FMRefinementWindowOutput]
+    /// High-confidence classifier results that seed classifier-origin regions.
+    ///
+    /// Added to close the architectural gap where a classifier-only window
+    /// never seeded a `ProposedRegion` and therefore never reached
+    /// `AtomEvidenceProjector` / `MinimalContiguousSpanDecoder` /
+    /// `BackfillEvidenceFusion`. Only results whose
+    /// `adProbability >= RegionProposalBuilder.Config.classifierProposalThreshold`
+    /// produce a region; sub-threshold results are dropped silently.
+    /// Defaults to `[]` so existing callers compile unchanged.
+    let classifierResults: [ClassifierResult]
+
+    init(
+        atoms: [TranscriptAtom],
+        lexicalCandidates: [LexicalCandidate],
+        acousticBreaks: [AcousticBreak],
+        sponsorMatches: [SponsorMatch],
+        fingerprintMatches: [FingerprintMatch],
+        fmWindows: [FMRefinementWindowOutput],
+        classifierResults: [ClassifierResult] = []
+    ) {
+        self.atoms = atoms
+        self.lexicalCandidates = lexicalCandidates
+        self.acousticBreaks = acousticBreaks
+        self.sponsorMatches = sponsorMatches
+        self.fingerprintMatches = fingerprintMatches
+        self.fmWindows = fmWindows
+        self.classifierResults = classifierResults
+    }
 }
 
 enum RegionProposalBuilder {
@@ -77,11 +157,19 @@ enum RegionProposalBuilder {
         let fmIoUThreshold: Double
         let minimumWindowCenterSeparation: Double
         let acousticBreakAssociationTolerance: Double
+        /// Minimum `ClassifierResult.adProbability` required to seed a
+        /// classifier-origin proposed region. Set to mirror
+        /// `AdDetectionConfig.confirmationThreshold` (0.70) so that only
+        /// high-signal classifier firings seed regions — avoids the noise
+        /// of the 0.40 candidate threshold while still catching real
+        /// classifier-only ads (e.g. the narl-findings 0.8154 case).
+        let classifierProposalThreshold: Double
 
         static let `default` = Config(
             fmIoUThreshold: 0.4,
             minimumWindowCenterSeparation: 0.5,
-            acousticBreakAssociationTolerance: 1.0
+            acousticBreakAssociationTolerance: 1.0,
+            classifierProposalThreshold: 0.70
         )
     }
 
@@ -113,6 +201,11 @@ enum RegionProposalBuilder {
         proposals.append(contentsOf: makeSponsorProposals(input.sponsorMatches, atomsByOrdinal: atomsByOrdinal))
         proposals.append(contentsOf: makeFingerprintProposals(input.fingerprintMatches, atomsByOrdinal: atomsByOrdinal))
         proposals.append(contentsOf: makeAcousticProposals(input.acousticBreaks, atomsByOrdinal: atomsByOrdinal))
+        proposals.append(contentsOf: makeClassifierProposals(
+            input.classifierResults,
+            atoms: sortedAtoms,
+            config: config
+        ))
         proposals.sort { lhs, rhs in
             if lhs.range.firstAtomOrdinal == rhs.range.firstAtomOrdinal {
                 return lhs.range.lastAtomOrdinal < rhs.range.lastAtomOrdinal
@@ -160,6 +253,7 @@ enum RegionProposalBuilder {
                 fingerprintMatches: proposal.fingerprintMatches,
                 acousticBreaks: mergedBreaks,
                 foundationModelSpans: proposal.foundationModelSpans,
+                classifierResults: proposal.classifierResults,
                 resolvedEvidenceAnchors: proposal.resolvedEvidenceAnchors,
                 fmEvidence: aggregateFMEvidence(from: proposal)
             )
@@ -264,6 +358,46 @@ enum RegionProposalBuilder {
                 range: range,
                 origins: .acoustic,
                 acousticBreaks: [breakPoint]
+            )
+        }
+    }
+
+    /// Seed a classifier-origin proposal for each `ClassifierResult` whose
+    /// `adProbability` clears `config.classifierProposalThreshold`.
+    ///
+    /// The resulting `SourceProposal` covers the atom range overlapping
+    /// `[result.startTime, result.endTime)`. Results with no overlapping
+    /// atoms (e.g. start/end beyond the transcript) are dropped silently,
+    /// matching the `makeLexicalProposals` contract.
+    ///
+    /// This closes the architectural gap where a classifier-only ad window
+    /// with no co-occurring lexical / acoustic / sponsor / fingerprint / FM
+    /// signal never seeded a region and therefore never reached
+    /// `BackfillEvidenceFusion`. With a classifier-origin region in the
+    /// proposal list, `AtomEvidenceProjector` can anchor its atoms via the
+    /// classifier-seed path, `MinimalContiguousSpanDecoder` emits a span,
+    /// and the fusion gate (`metadataCorroborationGate` for non-FM
+    /// provenance) runs to completion.
+    private static func makeClassifierProposals(
+        _ results: [ClassifierResult],
+        atoms: [TranscriptAtom],
+        config: Config
+    ) -> [SourceProposal] {
+        results.compactMap { result in
+            guard result.adProbability >= config.classifierProposalThreshold else {
+                return nil
+            }
+            guard let range = canonicalRange(
+                startTime: result.startTime,
+                endTime: result.endTime,
+                atoms: atoms
+            ) else {
+                return nil
+            }
+            return SourceProposal(
+                range: range,
+                origins: .classifier,
+                classifierResults: [result]
             )
         }
     }
@@ -402,7 +536,8 @@ enum RegionProposalBuilder {
             ),
             fmConsensusStrength: max(existing.fmConsensusStrength, incoming.fmConsensusStrength),
             fmClusterID: existing.fmClusterID ?? incoming.fmClusterID,
-            acousticBreaks: dedupAcousticBreaks(existing.acousticBreaks + incoming.acousticBreaks)
+            acousticBreaks: dedupAcousticBreaks(existing.acousticBreaks + incoming.acousticBreaks),
+            classifierResults: existing.classifierResults + incoming.classifierResults
         )
     }
 
@@ -629,6 +764,12 @@ private struct SourceProposal: Sendable {
     /// a standalone acoustic proposal via `makeAcousticProposals`. Concatenated
     /// across merges so the final `ProposedRegion` can surface them downstream.
     var acousticBreaks: [AcousticBreak] = []
+    /// Classifier results carried along for provenance — set when a
+    /// classifier result at or above the threshold seeds a proposal via
+    /// `makeClassifierProposals`. Concatenated across merges so the final
+    /// `ProposedRegion.classifierResults` reflects every classifier firing
+    /// that contributed to the merged region.
+    var classifierResults: [ClassifierResult] = []
 }
 
 private struct FMObservation: Sendable {

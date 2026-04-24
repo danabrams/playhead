@@ -816,7 +816,8 @@ actor AdDetectionService {
             episodeDuration: episodeDuration,
             priors: showPriors,
             podcastProfile: currentPodcastProfile,
-            fmWindows: fmRefinementWindows
+            fmWindows: fmRefinementWindows,
+            classifierResults: classifierResults
         )
         let regionBundles: [RegionFeatureBundle]
         do {

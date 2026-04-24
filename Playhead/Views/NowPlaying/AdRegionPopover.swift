@@ -142,6 +142,7 @@ struct AdRegionPopover: View {
         case .evidenceCatalog: return "text.magnifyingglass"
         case .fmAcousticCorroborated: return "waveform.badge.magnifyingglass"
         case .userCorrection: return "hand.tap"
+        case .classifierSeed: return "waveform.path.ecg"
         }
     }
 
@@ -168,6 +169,9 @@ struct AdRegionPopover: View {
             return "FM + acoustic break (\(pct)% break strength)"
         case .userCorrection:
             return "User-reported ad"
+        case .classifierSeed(_, let score):
+            let pct = Int((score * 100).rounded())
+            return "Sequence classifier (\(pct)% ad probability)"
         }
     }
 }

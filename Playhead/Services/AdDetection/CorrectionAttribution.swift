@@ -172,6 +172,8 @@ enum CausalInference {
         var evidenceCatalogCount = 0
         var acousticCount = 0
 
+        var classifierCount = 0
+
         for ref in provenance {
             switch ref {
             case .fmConsensus:
@@ -185,13 +187,21 @@ enum CausalInference {
                 // User corrections are attribution-neutral — they indicate the
                 // user flagged a region, not a specific pipeline source.
                 break
+            case .classifierSeed:
+                classifierCount += 1
             }
         }
 
         // Prefer evidence catalog (lexical) if present, then FM, then acoustic.
+        // Classifier-seeded spans attribute to `.foundationModel` — this
+        // mirrors `mapSourceType`'s treatment of the `.classifier` ledger
+        // source (\"legacy classifier ≈ FM\") because `CausalSource` has no
+        // distinct `.classifier` case. Decision-log breakdown still surfaces
+        // the classifier contribution separately from the ledger.
         if evidenceCatalogCount > 0 { return .lexical }
         if fmCount > 0 { return .foundationModel }
         if acousticCount > 0 { return .acoustic }
+        if classifierCount > 0 { return .foundationModel }
 
         // No provenance at all — default to FM as the most common source.
         return .foundationModel

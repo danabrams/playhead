@@ -26,6 +26,13 @@ enum AnchorRef: Sendable {
     /// User-reported false negative: user tapped "missed ad here" at a specific time.
     /// Creates an episode-local synthetic anchor so the correction takes effect immediately.
     case userCorrection(correctionId: String, reportedTime: Double)
+    /// Classifier-seeded anchor: a high-confidence `ClassifierResult` covered
+    /// this atom. Used so that a classifier-only window (no lexical / acoustic
+    /// / sponsor / fingerprint / FM signal) still flows into
+    /// `MinimalContiguousSpanDecoder` and `BackfillEvidenceFusion`. The
+    /// fusion `metadataCorroborationGate` treats this as an in-audio signal
+    /// (ledger surfaces a `.classifier` entry separately with the score).
+    case classifierSeed(regionId: String, score: Double)
 }
 
 extension AnchorRef: Equatable {
@@ -39,6 +46,8 @@ extension AnchorRef: Equatable {
             return lid == rid && ls == rs
         case (.userCorrection(let lid, let lt), .userCorrection(let rid, let rt)):
             return lid == rid && lt == rt
+        case (.classifierSeed(let lid, let ls), .classifierSeed(let rid, let rs)):
+            return lid == rid && ls == rs
         default:
             return false
         }

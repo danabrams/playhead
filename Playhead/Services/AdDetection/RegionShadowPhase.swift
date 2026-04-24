@@ -67,6 +67,11 @@ enum RegionShadowPhase {
         /// Phase 9 (playhead-4my.9.1): podcast identifier for fingerprint
         /// store queries. Required when fingerprintStore is non-nil.
         let podcastId: String?
+        /// High-confidence classifier results, threaded through so that
+        /// `RegionProposalBuilder.makeClassifierProposals` can seed
+        /// classifier-origin proposals. When empty (legacy callers), no
+        /// classifier-origin regions are seeded.
+        let classifierResults: [ClassifierResult]
 
         init(
             analysisAssetId: String,
@@ -78,7 +83,8 @@ enum RegionShadowPhase {
             podcastProfile: PodcastProfile? = nil,
             fmWindows: [FMRefinementWindowOutput] = [],
             fingerprintStore: AdCopyFingerprintStore? = nil,
-            podcastId: String? = nil
+            podcastId: String? = nil,
+            classifierResults: [ClassifierResult] = []
         ) {
             self.analysisAssetId = analysisAssetId
             self.chunks = chunks
@@ -90,6 +96,7 @@ enum RegionShadowPhase {
             self.fmWindows = fmWindows
             self.fingerprintStore = fingerprintStore
             self.podcastId = podcastId
+            self.classifierResults = classifierResults
         }
     }
 
@@ -148,7 +155,8 @@ enum RegionShadowPhase {
             // `RunResult.fmRefinementWindows` → `AdDetectionService` →
             // `RegionShadowPhase.Input.fmWindows`. Empty when shadow FM
             // was not run (off mode, no factory, or zero spans).
-            fmWindows: input.fmWindows
+            fmWindows: input.fmWindows,
+            classifierResults: input.classifierResults
         )
 
         let proposals = RegionProposalBuilder.build(proposalInput)
