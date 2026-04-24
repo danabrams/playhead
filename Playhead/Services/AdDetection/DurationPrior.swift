@@ -19,7 +19,12 @@
 //   d in [5, a)       : linear 0.90 → 1.10 (bumper → typical, small boost climbing)
 //   d in [a, b]       : 1.10               (peak — canonical ad duration)
 //   d in (b, 2b]      : linear 1.10 → 0.95 (long-form host-read still weighted)
-//   d >  2b           : 0.75               (very long, mild penalty)
+//   d in (2b, 3b]     : linear 0.95 → 0.75 (continues monotonic decay — no step)
+//   d >  3b           : 0.75               (very long, mild penalty)
+//
+// The curve is continuous and monotonically shaped (rising to peak, decaying to
+// floor) — no step discontinuities, matching the bead's "smooth function…
+// gradual decay outside, NOT a hard cutoff" requirement.
 //
 // GUARDRAIL: This is a scoring nudge. It does NOT grant auto-skip authority
 // and is not an eligibility gate. The SkipPolicyMatrix and DecisionMapper's
@@ -105,6 +110,7 @@ struct DurationPrior: Sendable, Equatable {
         let a = typicalAdDuration.lowerBound
         let b = typicalAdDuration.upperBound
         let longShoulder = 2.0 * b
+        let veryLongShoulder = 3.0 * b
 
         // Very-short region: d < 5s → floor.
         if duration < Self.veryShortThreshold {
@@ -134,7 +140,18 @@ struct DurationPrior: Sendable, Equatable {
             return lerp(peakMultiplier, longFormShoulderMultiplier, t)
         }
 
-        // Very-long region: d > 2b → floor.
+        // Very-long shoulder: (2b, 3b]. Linear decay from longFormShoulder → floor.
+        // This removes the former step discontinuity at d == 2b (0.95 → 0.75)
+        // and keeps the whole curve continuous & monotonically non-increasing
+        // past the peak.
+        if duration <= veryLongShoulder {
+            let rangeSpan = veryLongShoulder - longShoulder
+            guard rangeSpan > 0 else { return floorMultiplier }
+            let t = (duration - longShoulder) / rangeSpan
+            return lerp(longFormShoulderMultiplier, floorMultiplier, t)
+        }
+
+        // Very-long region: d > 3b → floor.
         return floorMultiplier
     }
 

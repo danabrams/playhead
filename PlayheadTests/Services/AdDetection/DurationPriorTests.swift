@@ -77,6 +77,43 @@ struct DurationPriorTests {
         #expect(at180 == prior.longFormShoulderMultiplier)
     }
 
+    @Test("Very-long shoulder decays smoothly from 2× to 3× upper bound (no step at 2b)")
+    func veryLongShoulderDecaysSmoothly() {
+        let prior = DurationPrior(typicalAdDuration: 30...90)
+        // 2b = 180, 3b = 270.
+        let at180 = prior.multiplier(forDuration: 180)    // longFormShoulder
+        let at181 = prior.multiplier(forDuration: 181)    // just past 2b — must be continuous
+        let at220 = prior.multiplier(forDuration: 220)
+        let at270 = prior.multiplier(forDuration: 270)    // veryLongShoulder == floor
+        let at271 = prior.multiplier(forDuration: 271)    // beyond 3b → floor
+
+        // Continuous at d == 2b: the jump from (2b, 3b] must start near
+        // longFormShoulderMultiplier, not snap down to floor.
+        #expect(abs(at181 - at180) < 0.05,
+                "Curve must be continuous at d = 2b (no step from \(at180) to \(at181))")
+        // Monotonic non-increasing decay 180 → 270.
+        #expect(at180 >= at220)
+        #expect(at220 >= at270)
+        // At d == 3b, multiplier reaches floor (end of continuous decay).
+        #expect(at270 == prior.floorMultiplier)
+        // Past 3b holds at floor.
+        #expect(at271 == prior.floorMultiplier)
+    }
+
+    @Test("Curve is monotonically non-increasing past the peak (no internal bumps)")
+    func curveMonotonicPastPeak() {
+        let prior = DurationPrior(typicalAdDuration: 30...90)
+        // Sample densely from just past the peak out past 3b to catch any
+        // internal discontinuity or non-monotonic kink.
+        let samples = stride(from: 90.0, through: 300.0, by: 1.0).map {
+            prior.multiplier(forDuration: $0)
+        }
+        for i in 1..<samples.count {
+            #expect(samples[i] <= samples[i - 1] + 1e-9,
+                    "Non-monotonic at index \(i): \(samples[i - 1]) → \(samples[i])")
+        }
+    }
+
     // MARK: - Long-form host-read (bead contract)
 
     @Test("~100s host-read ad still receives a multiplier >= 1.0")
