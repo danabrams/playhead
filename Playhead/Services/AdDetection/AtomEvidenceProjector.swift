@@ -96,6 +96,14 @@ actor AtomEvidenceProjector {
             $0.region.origins.contains(.acoustic)
         }
 
+        // Classifier-origin regions: a high-confidence classifier firing
+        // seeded this region with no other evidence in this pass. Anchored
+        // via Path 4 below so that a classifier-only window flows into
+        // MinimalContiguousSpanDecoder and BackfillEvidenceFusion.
+        let classifierRegions = regions.filter {
+            $0.region.origins.contains(.classifier)
+        }
+
         // Collect all acoustic breaks from acoustic regions for Use C proximity checks.
         // Dedupe by (time) so we don't double-count breaks that appear on multiple regions.
         var seenBreakTimes = Set<Double>()
@@ -156,6 +164,25 @@ actor AtomEvidenceProjector {
             }
         }
 
+        // Which atom ordinals are covered by classifier-origin regions?
+        // Store the per-ordinal anchor seed (regionId, best score) so Path 4
+        // below can emit a single `classifierSeed` AnchorRef per atom.
+        var classifierSeedAtoms: [Int: (regionId: String, score: Double)] = [:]
+        for bundle in classifierRegions {
+            let r = bundle.region
+            let regionId = Self.stableRegionId(bundle: bundle)
+            // Report the best (highest) classifier adProbability for the
+            // region so the UI / downstream consumers see the peak signal
+            // rather than the min. Empty classifierResults shouldn't occur
+            // for a classifier-origin region, but guard defensively.
+            let score = r.classifierResults.map(\.adProbability).max() ?? 0.0
+            for ordinal in r.firstAtomOrdinal ... r.lastAtomOrdinal {
+                if classifierSeedAtoms[ordinal] == nil {
+                    classifierSeedAtoms[ordinal] = (regionId, score)
+                }
+            }
+        }
+
         // Which atom ordinals have evidence catalog hits?
         var evidenceByOrdinal: [Int: [EvidenceEntry]] = [:]
         for entry in anchoringEntries {
@@ -206,6 +233,21 @@ actor AtomEvidenceProjector {
                         breakStrength: nearestBreak.breakStrength
                     ))
                 }
+            }
+
+            // Path 4: Classifier seed — a classifier-origin region covered
+            // this atom with a high-confidence firing. Seeds the atom so
+            // `MinimalContiguousSpanDecoder` emits a span and
+            // `BackfillEvidenceFusion.metadataCorroborationGate` can
+            // adjudicate (non-FM provenance path). Added unconditionally
+            // when a classifier region covers the atom: a classifier
+            // firing is itself a valid anchor, and if higher-precedence
+            // paths also fired we accumulate the provenance.
+            if let seed = classifierSeedAtoms[ordinal] {
+                anchorProvenance.append(.classifierSeed(
+                    regionId: seed.regionId,
+                    score: seed.score
+                ))
             }
 
             let isAnchored = !anchorProvenance.isEmpty && correctionMask != .userVetoed

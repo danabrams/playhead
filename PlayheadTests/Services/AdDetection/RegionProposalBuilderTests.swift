@@ -583,6 +583,118 @@ struct RegionProposalBuilderTests {
         #expect(times == Set([2.25, 2.75]))
     }
 
+    // MARK: - Classifier proposal seeding (playhead-ad-detection / architectural gap)
+    //
+    // Prior to this fix, `RegionProposalBuilder` accepted inputs from
+    // lexical / acoustic / sponsor / fingerprint / FM sources but not from
+    // the classifier. As a result, a high-confidence classifier-only window
+    // (e.g. adProbability 0.8154 on a Conan ad segment) never seeded a
+    // proposed region, `AtomEvidenceProjector` never anchored its atoms,
+    // `MinimalContiguousSpanDecoder` emitted no `DecodedSpan`, and
+    // `BackfillEvidenceFusion` never adjudicated the window with multi-kind
+    // evidence. The quorum gate in `BackfillEvidenceFusion.computeGate()`
+    // is not the blocker for these windows — they never reach fusion at all.
+    //
+    // Contract: a classifier result whose `adProbability >= <threshold>`
+    // (default `RegionProposalBuilder.Config.classifierProposalThreshold`,
+    // = `AdDetectionConfig.confirmationThreshold` of 0.70) MUST produce a
+    // proposed region covering the result's `[startTime, endTime]` range
+    // with `.classifier` in `ProposedRegionOrigins`.
+    @Test("high-confidence classifier result seeds a proposed region with .classifier origin")
+    func highConfidenceClassifierSeedsProposedRegion() {
+        let atoms = makeAtoms(count: 10)
+        // Mirror the concrete narl-findings case: adProbability 0.8154 on a
+        // [t0, t1] time range with no other evidence sources firing.
+        let input = RegionProposalInput(
+            atoms: atoms,
+            lexicalCandidates: [],
+            acousticBreaks: [],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            fmWindows: [],
+            classifierResults: [
+                makeClassifierResult(
+                    startTime: 3.0,
+                    endTime: 7.0,
+                    adProbability: 0.8154
+                )
+            ]
+        )
+
+        let regions = RegionProposalBuilder.build(input)
+
+        #expect(regions.count == 1)
+        let region = regions[0]
+        // Canonical atom range spans the atoms overlapping [3.0, 7.0) — i.e.
+        // atoms 3, 4, 5, 6 (each atom is 1 second wide in this fixture).
+        #expect(region.firstAtomOrdinal == 3)
+        #expect(region.lastAtomOrdinal == 6)
+        #expect(region.startTime == 3.0)
+        #expect(region.endTime == 7.0)
+        #expect(region.origins.contains(.classifier))
+        // Provenance: the seeding ClassifierResult must be carried on the region.
+        #expect(region.classifierResults.count == 1)
+        #expect(region.classifierResults[0].adProbability == 0.8154)
+    }
+
+    @Test("classifier result below threshold does not seed a proposed region")
+    func belowThresholdClassifierDoesNotSeed() {
+        let atoms = makeAtoms(count: 10)
+        // 0.65 < default classifierProposalThreshold (0.70) — no region.
+        let input = RegionProposalInput(
+            atoms: atoms,
+            lexicalCandidates: [],
+            acousticBreaks: [],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            fmWindows: [],
+            classifierResults: [
+                makeClassifierResult(
+                    startTime: 3.0,
+                    endTime: 7.0,
+                    adProbability: 0.65
+                )
+            ]
+        )
+
+        let regions = RegionProposalBuilder.build(input)
+
+        #expect(regions.isEmpty)
+    }
+
+    @Test("classifier proposal merges with overlapping lexical proposal")
+    func classifierProposalMergesWithOverlappingLexical() {
+        let atoms = makeAtoms(count: 10)
+        let input = RegionProposalInput(
+            atoms: atoms,
+            lexicalCandidates: [
+                makeLexicalCandidate(startTime: 3.0, endTime: 5.0)
+            ],
+            acousticBreaks: [],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            fmWindows: [],
+            classifierResults: [
+                makeClassifierResult(
+                    startTime: 3.0,
+                    endTime: 7.0,
+                    adProbability: 0.85
+                )
+            ]
+        )
+
+        let regions = RegionProposalBuilder.build(input)
+
+        #expect(regions.count == 1)
+        let region = regions[0]
+        // Merged range spans the union of both inputs (atoms 3..6).
+        #expect(region.firstAtomOrdinal == 3)
+        #expect(region.lastAtomOrdinal == 6)
+        #expect(region.origins.contains(.lexical))
+        #expect(region.origins.contains(.classifier))
+        #expect(region.classifierResults.count == 1)
+    }
+
     @Test("acoustic break near a lexical region edge still fires the decoration path")
     func acousticBreakNearLexicalEdgeFiresDecorationPath() {
         // Lex region spans atoms 11..15 (startTime 11, endTime 16).
@@ -754,5 +866,30 @@ private func makeFMWindow(
         lineRefs: lineRefs,
         spans: spans,
         latencyMillis: 12
+    )
+}
+
+private func makeClassifierResult(
+    startTime: Double,
+    endTime: Double,
+    adProbability: Double,
+    candidateId: String = UUID().uuidString
+) -> ClassifierResult {
+    ClassifierResult(
+        candidateId: candidateId,
+        analysisAssetId: "asset-1",
+        startTime: startTime,
+        endTime: endTime,
+        adProbability: adProbability,
+        startAdjustment: 0,
+        endAdjustment: 0,
+        signalBreakdown: SignalBreakdown(
+            lexicalScore: 0,
+            rmsDropScore: 0,
+            spectralChangeScore: 0,
+            musicScore: 0,
+            speakerChangeScore: 0,
+            priorScore: 0
+        )
     )
 }
