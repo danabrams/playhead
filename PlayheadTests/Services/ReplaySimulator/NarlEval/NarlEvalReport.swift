@@ -358,6 +358,24 @@ enum NarlTerminalReasonBucket: String, Sendable, Codable, CaseIterable {
         guard let state = trace.analysisState else { return .unknown }
         return NarlTerminalReasonBucket(rawValue: state) ?? .unknown
     }
+
+    /// Lifecycle-ordered sort index for report rendering. Buckets read
+    /// naturally in pipeline-exit-severity order: fully-successful
+    /// outcomes first, partial outcomes next, failures last, unknown
+    /// as the catch-all tail. Alphabetical rawValue ordering would
+    /// interleave "cancelledBudget" ahead of "completeFull" — visually
+    /// wrong for a stratified dashboard.
+    var sortOrder: Int {
+        switch self {
+        case .completeFull: return 0
+        case .completeFeatureOnly: return 1
+        case .completeTranscriptPartial: return 2
+        case .cancelledBudget: return 3
+        case .failedTranscript: return 4
+        case .failedFeature: return 5
+        case .unknown: return 6
+        }
+    }
 }
 
 /// A (bucket × config) rollup. Shape mirrors `NarlReportRollup` but
@@ -499,8 +517,7 @@ struct NarlReportTerminalReasonRollup: Sendable, Codable, Equatable {
         }
 
         let rollups: [NarlReportTerminalReasonRollup] = buckets
-            .sorted { $0.key < $1.key }
-            .compactMap { key, agg in
+            .compactMap { key, agg -> NarlReportTerminalReasonRollup? in
                 // Elide buckets with zero episodes AND zero excluded — they
                 // carry no information. A bucket with only excluded entries
                 // still surfaces the excluded count (parity with the show-
@@ -538,6 +555,18 @@ struct NarlReportTerminalReasonRollup: Sendable, Codable, Equatable {
                     autoSkipPrecision: autoSkipPrec,
                     autoSkipRecall: autoSkipRec
                 )
+            }
+            // Lifecycle-ordered rendering: primary key is the bucket's
+            // sortOrder (completeFull → … → unknown), secondary key is
+            // the config name for stability across runs. Previously the
+            // sort was alphabetical on "<rawValue>|<config>", which put
+            // cancelledBudget ahead of completeFull — visually wrong
+            // for a stratified dashboard read.
+            .sorted { lhs, rhs in
+                if lhs.bucket.sortOrder != rhs.bucket.sortOrder {
+                    return lhs.bucket.sortOrder < rhs.bucket.sortOrder
+                }
+                return lhs.config < rhs.config
             }
 
         return rollups

@@ -272,6 +272,87 @@ struct NarlEvalTerminalReasonStratifiedTests {
                 "empty-bucket recall must be 0.0, not NaN; got \(row.autoSkipRecall)")
     }
 
+    // MARK: - Sort order
+
+    @Test("stratify emits rollups in lifecycle-order (completeFull → … → unknown)")
+    func stratifyEmitsLifecycleOrderedBuckets() {
+        // Seed one trace per canonical bucket + one nil for unknown. Use a
+        // single config so the sort order reduces to just the bucket axis.
+        let analysisStates: [String?] = [
+            "completeFull",
+            "completeFeatureOnly",
+            "completeTranscriptPartial",
+            "cancelledBudget",
+            "failedTranscript",
+            "failedFeature",
+            nil, // → .unknown
+        ]
+        let traces = analysisStates.enumerated().map { (i, state) in
+            Self.makeTrace(episodeId: "ep-\(i)", analysisState: state)
+        }
+        let entries = traces.map { t in
+            Self.makeEntry(episodeId: t.episodeId, config: "default", gtCount: 0, predCount: 0)
+        }
+
+        let rollups = NarlReportTerminalReasonRollup.stratify(
+            traces: traces,
+            entries: entries,
+            pipelinesByEpisodeId: Self.pipelinesByEpisodeId(for: traces, entries: entries)
+        )
+
+        #expect(rollups.count == 7,
+                "one rollup per canonical bucket + unknown; got \(rollups.count)")
+
+        // Lifecycle order per the 2026-04-24 UX spec: success first,
+        // partial next, failures last, unknown as the tail.
+        let expected: [NarlTerminalReasonBucket] = [
+            .completeFull,
+            .completeFeatureOnly,
+            .completeTranscriptPartial,
+            .cancelledBudget,
+            .failedTranscript,
+            .failedFeature,
+            .unknown,
+        ]
+        #expect(rollups.map(\.bucket) == expected,
+                "rollups must be lifecycle-ordered; got \(rollups.map(\.bucket))")
+    }
+
+    @Test("stratify orders config secondarily within a bucket")
+    func stratifyOrdersConfigWithinBucket() {
+        // Single bucket (completeFull) × two configs. Primary sort key is
+        // bucket.sortOrder (same for both), so secondary key — config
+        // name — must produce the alphabetical sequence.
+        let traces = [Self.makeTrace(episodeId: "ep-1", analysisState: "completeFull")]
+        let entries = ["default", "allEnabled"].map { cfg in
+            Self.makeEntry(episodeId: "ep-1", config: cfg, gtCount: 0, predCount: 0)
+        }
+
+        let rollups = NarlReportTerminalReasonRollup.stratify(
+            traces: traces,
+            entries: entries,
+            pipelinesByEpisodeId: Self.pipelinesByEpisodeId(for: traces, entries: entries)
+        )
+
+        #expect(rollups.count == 2)
+        #expect(rollups.map(\.config) == ["allEnabled", "default"],
+                "within a bucket, configs must sort alphabetically for stability; got \(rollups.map(\.config))")
+    }
+
+    @Test("NarlTerminalReasonBucket.sortOrder matches lifecycle spec exactly")
+    func sortOrderMatchesLifecycleSpec() {
+        // Direct unit-pin of the enum's sortOrder — guards against an
+        // accidental re-order of the switch arms that would compile fine
+        // but silently scramble the report layout.
+        #expect(NarlTerminalReasonBucket.completeFull.sortOrder == 0)
+        #expect(NarlTerminalReasonBucket.completeFeatureOnly.sortOrder == 1)
+        #expect(NarlTerminalReasonBucket.completeTranscriptPartial.sortOrder == 2)
+        #expect(NarlTerminalReasonBucket.cancelledBudget.sortOrder == 3)
+        #expect(NarlTerminalReasonBucket.failedTranscript.sortOrder == 4)
+        #expect(NarlTerminalReasonBucket.failedFeature.sortOrder == 5)
+        #expect(NarlTerminalReasonBucket.unknown.sortOrder == 6)
+    }
+
     // MARK: - Report schema — Codable back-compat
 
     @Test("NarlEvalReport.terminalReasonBuckets round-trips through encode/decode")
