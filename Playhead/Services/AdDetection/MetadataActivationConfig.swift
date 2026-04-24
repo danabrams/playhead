@@ -38,10 +38,13 @@ struct MetadataActivationConfig: Sendable, Equatable {
     let classifierPriorShiftMinTrust: Float
 
     /// The shifted sigmoid midpoint for metadata-warmed episodes.
-    /// Default: 0.22 (vs baseline 0.25).
+    /// Default: 0.33 (vs baseline 0.37). Retuned 2026-04-23 (playhead-gtt9.3)
+    /// so the band `(shifted, baseline]` sits inside the real-data
+    /// confidence mode [0.30, 0.40) rather than the empty zone (0.22, 0.25].
     let classifierShiftedMidpoint: Double
 
-    /// The baseline sigmoid midpoint (no metadata).
+    /// The baseline sigmoid midpoint (no metadata). Default: 0.37 —
+    /// see `classifierShiftedMidpoint` for retune context.
     let classifierBaselineMidpoint: Double
 
     // MARK: - FM Scheduling
@@ -67,8 +70,8 @@ struct MetadataActivationConfig: Sendable, Equatable {
         lexicalInjectionDiscount: 0.75,
         classifierPriorShiftEnabled: false,
         classifierPriorShiftMinTrust: 0.08,
-        classifierShiftedMidpoint: 0.22,
-        classifierBaselineMidpoint: 0.25,
+        classifierShiftedMidpoint: 0.33,
+        classifierBaselineMidpoint: 0.37,
         fmSchedulingEnabled: false,
         fmSchedulingMinTrust: 0.0,
         counterfactualGateOpen: false
@@ -81,8 +84,8 @@ struct MetadataActivationConfig: Sendable, Equatable {
         lexicalInjectionDiscount: 0.75,
         classifierPriorShiftEnabled: true,
         classifierPriorShiftMinTrust: 0.08,
-        classifierShiftedMidpoint: 0.22,
-        classifierBaselineMidpoint: 0.25,
+        classifierShiftedMidpoint: 0.33,
+        classifierBaselineMidpoint: 0.37,
         fmSchedulingEnabled: true,
         fmSchedulingMinTrust: 0.0,
         counterfactualGateOpen: true
