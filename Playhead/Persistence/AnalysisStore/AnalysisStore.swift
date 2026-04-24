@@ -6547,8 +6547,12 @@ actor AnalysisStore {
             if provenanceJSON.isEmpty || provenanceJSON == "[]" {
                 provenance = []
             } else if let data = provenanceJSON.data(using: .utf8),
-                      let decoded = try? decoder.decode([AnchorRef].self, from: data) {
-                provenance = decoded
+                      let wrapped = try? decoder.decode([LossyAnchorRef].self, from: data) {
+                // Per-element tolerant decode: if a future build ships a new
+                // AnchorRef case and the user rolls back, the unknown entries
+                // are dropped individually rather than the whole span losing
+                // all anchors.
+                provenance = wrapped.compactMap(\.value)
             } else {
                 logger.warning("fetchDecodedSpans: failed to decode anchorProvenanceJSON for span \(id, privacy: .public) asset \(aid, privacy: .public)")
                 provenance = []

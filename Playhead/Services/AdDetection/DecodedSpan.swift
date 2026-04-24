@@ -107,6 +107,17 @@ extension AnchorRef: Codable {
     }
 }
 
+/// Per-element tolerant wrapper around `AnchorRef` used when decoding arrays
+/// from persistence: if an older binary reads a newer-written span that carries
+/// an unknown `type` string, that element becomes `nil` instead of throwing
+/// the whole array decode. Callers `compactMap(\.value)` to discard unknowns.
+struct LossyAnchorRef: Decodable {
+    let value: AnchorRef?
+    init(from decoder: Decoder) throws {
+        self.value = try? AnchorRef(from: decoder)
+    }
+}
+
 extension EvidenceEntry: Codable {
     private enum CodingKeys: String, CodingKey {
         case evidenceRef, category, matchedText, normalizedText, atomOrdinal, count, firstTime, lastTime, startTime, endTime

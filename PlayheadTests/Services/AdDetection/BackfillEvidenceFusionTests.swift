@@ -522,22 +522,22 @@ struct BackfillEvidenceFusionTests {
         #expect(result.eligibilityGate != .blockedByEvidenceQuorum)
     }
 
-    @Test("Classifier-seeded span produces a ledger with 2+ distinct evidence kinds and runs fusion to completion")
+    @Test("Classifier-seeded span with co-seeded lexical produces multi-kind ledger and eligible gate")
     func classifierSeededSpanFusionProducesMultiKindLedger() {
         // Integration-shape: exercises the path unblocked by the classifier
-        // seeding fix — a classifier-only window with no co-occurring
-        // lexical/acoustic/sponsor/fingerprint/FM signal reaches
-        // BackfillEvidenceFusion, produces a ledger with a classifier entry
-        // (from the always-on path in buildLedger) AND at least one other
-        // in-audio entry (lexical, acoustic, catalog, or fingerprint), and
-        // the DecisionMapper returns a non-blocked gate.
+        // seeding fix. In production, classifier inputs are derived from
+        // lexical candidates (`classifyCandidates` takes `[LexicalCandidate]`),
+        // so a classifier-seeded region always co-occurs with a lexical
+        // proposal that merges into the same region — the fusion ledger
+        // therefore naturally has both a `.classifier` entry (from the
+        // always-on path in `buildLedger`) AND a co-seeded lexical entry.
+        // This test pins that downstream shape and asserts the gate
+        // returns `.eligible` once the span reaches fusion.
         //
-        // Why this matters: prior to the fix, a classifier-only region
+        // Why this matters: prior to the fix, a classifier-seeded region
         // never seeded a ProposedRegion → AtomEvidenceProjector never
         // anchored → MinimalContiguousSpanDecoder emitted no DecodedSpan
-        // → this fusion call never happened at all. This test is the
-        // narrow downstream assertion that once the span reaches fusion,
-        // the gate logic gives a sensible answer.
+        // → this fusion call never happened at all.
         let span = makeSpan(anchorProvenance: [
             .classifierSeed(regionId: "r-classifier", score: 0.8154)
         ])
