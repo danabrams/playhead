@@ -529,6 +529,47 @@ actor AdDetectionService {
                 source: .falseNegative
             )
         }
+
+        // playhead-gtt9.17: catalog ingress on user-confirmed ad. A user
+        // marking a span as ad is the strongest possible label — higher
+        // confidence than an autoSkipEligible fusion decision. Fingerprint
+        // the user-marked span's overlapping feature windows and insert so
+        // subsequent episodes of the same show match on this creative.
+        //
+        // Absent feature windows (e.g. a podcast whose audio never ran
+        // through feature extraction) yields an empty slice → zero
+        // fingerprint → skipped by `AdCatalogStore.insert` guard. Silent
+        // on any SQLite failure; a correction-path catalog miss is
+        // strictly a missed precision opportunity, not a correctness bug.
+        if let adCatalogStore {
+            let featureWindows: [FeatureWindow]
+            do {
+                featureWindows = try await store.fetchFeatureWindows(
+                    assetId: analysisAssetId,
+                    from: startTime,
+                    to: endTime
+                )
+            } catch {
+                logger.warning("recordUserMarkedAd: fetchFeatureWindows failed (skipping catalog insert): \(error.localizedDescription, privacy: .public)")
+                return
+            }
+            let fingerprint = AcousticFingerprint.fromFeatureWindows(featureWindows)
+            guard !fingerprint.isZero else { return }
+            do {
+                _ = try await adCatalogStore.insert(
+                    showId: podcastId,
+                    episodePosition: .unknown,
+                    durationSec: max(0, endTime - startTime),
+                    acousticFingerprint: fingerprint,
+                    transcriptSnippet: nil,
+                    sponsorTokens: nil,
+                    originalConfidence: 1.0
+                )
+                logger.debug("recordUserMarkedAd: inserted catalog entry for user-marked ad on asset \(analysisAssetId, privacy: .public)")
+            } catch {
+                logger.warning("recordUserMarkedAd: catalog insert failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     // MARK: - Profile Update

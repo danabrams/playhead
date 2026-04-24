@@ -6,17 +6,24 @@
 // hash each window and query the catalog for known ad fingerprints. A hit
 // (or near-hit) is extremely strong evidence — a classic matched-filter.
 //
-// State today: gtt9.13 is running in parallel but has not yet pushed the
-// shared fingerprint / catalog types. This file:
+// State today: gtt9.13's types exist. playhead-gtt9.17 wired catalog
+// ingress + egress into `AdDetectionService.runBackfill` directly (per-span
+// fingerprint + match query → `.catalog` evidence ledger entry). Doing the
+// same work inside this feature would duplicate the query and require
+// either making `AcousticFeaturePipeline.run` async or pre-computing the
+// per-window matches outside the pipeline. Neither is worth it for the
+// MVP — the span-level egress in gtt9.17 covers the same detection
+// surface.
 //
-//   * Keeps the feature wired into the funnel (so callers can still iterate
-//     over all 8 features) — every window records `.computed` with zero
-//     score and `producedSignal = false`.
-//   * Carries a single TODO so it's trivial to flip on after the merge.
+// This file remains a funnel-complete no-op:
 //
-// NO cross-branch file creation: per gtt9.12's coordination directive we do
-// NOT create `AdCatalogStore.swift` or `AcousticFingerprint.swift` here;
-// those belong to gtt9.13.
+//   * Every window records `.computed` with zero score and
+//     `producedSignal = false`.
+//   * Downstream fusion uses the `.catalog` source from gtt9.17 rather
+//     than a `.acoustic` entry from this feature.
+//
+// If a future signal wants PER-WINDOW catalog evidence (e.g. sliding
+// matched-filter), resurrect the TODO below and make the pipeline async.
 
 import Foundation
 
