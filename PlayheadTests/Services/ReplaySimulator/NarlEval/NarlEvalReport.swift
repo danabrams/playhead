@@ -381,11 +381,16 @@ struct NarlReportTerminalReasonRollup: Sendable, Codable, Equatable {
     let windowMetrics: [NarlWindowMetricsAtThreshold]
     /// Second-level (Sec-F1) metrics, same corpus-level pool.
     let secondLevel: NarlSecondLevelMetrics
-    /// Mean AutoSkip precision across non-excluded episodes in the
-    /// bucket. NaN when bucket is empty. The headline user-facing
-    /// number per the 2026-04-24 findings §5.
+    /// Corpus-pooled AutoSkip precision across non-excluded episodes
+    /// in the bucket: sum(TP seconds) / sum(TP + FP seconds). 0.0 when
+    /// the bucket has no predicted auto-skip seconds. The headline
+    /// user-facing number per the 2026-04-24 findings §5. (Previously
+    /// a per-episode mean; pooled to match the show-rollup convention
+    /// where small-bucket means diverge materially from the true
+    /// corpus number.)
     let autoSkipPrecision: Double
-    /// Mean AutoSkip recall across non-excluded episodes.
+    /// Corpus-pooled AutoSkip recall: sum(TP seconds) / sum(TP + FN
+    /// seconds). 0.0 when the bucket has no GT seconds.
     let autoSkipRecall: Double
 
     /// Stratify a set of episode entries by bucket × config, producing
@@ -441,8 +446,17 @@ struct NarlReportTerminalReasonRollup: Sendable, Codable, Equatable {
             var excludedEpisodeCount: Int = 0
             var allPred: [NarlTimeRange] = []
             var allGt: [NarlTimeRange] = []
-            var autoSkipPrecSum: Double = 0
-            var autoSkipRecSum: Double = 0
+            // Corpus-pooled AutoSkip counters (seconds-granularity).
+            // TP = predicted auto-skip seconds that overlap GT.
+            // FP = predicted auto-skip seconds outside GT.
+            // FN = GT seconds not covered by predicted auto-skip.
+            // Accumulated per-episode (no cross-episode merge) so the
+            // rollup pools sums the same way the show-rollup pools
+            // allPred/allGt in NarlEvalHarnessTests — precision/recall
+            // divide the sums rather than averaging per-episode rates.
+            var autoSkipTpSec: Double = 0
+            var autoSkipFpSec: Double = 0
+            var autoSkipFnSec: Double = 0
         }
 
         // Track which (episodeId, config) pairs we've already consumed
@@ -467,10 +481,19 @@ struct NarlReportTerminalReasonRollup: Sendable, Codable, Equatable {
                     let pipe = pipes[cursor]
                     agg.allPred.append(contentsOf: pipe.pred)
                     agg.allGt.append(contentsOf: pipe.gt)
+                    // Per-episode seconds-granularity TP / FP / FN for
+                    // AutoSkip. Summing these across episodes and
+                    // dividing at emit time corpus-pools precision /
+                    // recall instead of mean-of-ratios — matches the
+                    // show-rollup's allPred/allGt pooling convention.
+                    let predTotal = NarlCoverageMetricsCompute.unionLength(pipe.pred)
+                    let gtTotal = NarlCoverageMetricsCompute.unionLength(pipe.gt)
+                    let tpSec = NarlCoverageMetricsCompute.overlapLength(pipe.pred, pipe.gt)
+                    agg.autoSkipTpSec += tpSec
+                    agg.autoSkipFpSec += max(0, predTotal - tpSec)
+                    agg.autoSkipFnSec += max(0, gtTotal - tpSec)
                     pipelineCursors[pipeKey] = cursor + 1
                 }
-                agg.autoSkipPrecSum += entry.coverageMetrics.autoSkipPrecision
-                agg.autoSkipRecSum += entry.coverageMetrics.autoSkipRecall
             }
             buckets[key] = agg
         }
@@ -496,9 +519,15 @@ struct NarlReportTerminalReasonRollup: Sendable, Codable, Equatable {
                 let secMetrics = NarlSecondLevel.compute(
                     predicted: agg.allPred, groundTruth: agg.allGt
                 )
-                let n = Double(agg.episodeCount)
-                let autoSkipPrec = n > 0 ? agg.autoSkipPrecSum / n : .nan
-                let autoSkipRec = n > 0 ? agg.autoSkipRecSum / n : .nan
+                // Corpus-pool AutoSkip precision/recall: divide the
+                // summed TP/FP/FN seconds rather than averaging per-
+                // episode rates. Zero-guard falls back to 0.0 — matches
+                // NarlCoverageMetricsCompute.compute's convention at the
+                // per-episode level (empty-denominator → 0, not NaN).
+                let precDenom = agg.autoSkipTpSec + agg.autoSkipFpSec
+                let recDenom = agg.autoSkipTpSec + agg.autoSkipFnSec
+                let autoSkipPrec = precDenom > 0 ? agg.autoSkipTpSec / precDenom : 0.0
+                let autoSkipRec = recDenom > 0 ? agg.autoSkipTpSec / recDenom : 0.0
                 return NarlReportTerminalReasonRollup(
                     bucket: bucket,
                     config: parts[1],

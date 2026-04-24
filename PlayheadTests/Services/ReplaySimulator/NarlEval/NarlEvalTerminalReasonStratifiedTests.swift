@@ -172,6 +172,106 @@ struct NarlEvalTerminalReasonStratifiedTests {
                 "corpus-pool F1@0.5 for 1 TP / 0 FP / 1 FN should be ~0.667, got \(wf1)")
     }
 
+    @Test("AutoSkip Prec/Recall is corpus-pooled, not per-episode mean")
+    func aggregatorCorpusPoolsAutoSkipPrecisionAndRecall() {
+        // Bucket with two completeFull episodes, deliberately sized so
+        // mean-of-ratios (the old behaviour) diverges materially from
+        // the pooled corpus number:
+        //
+        //   ep-A: pred=[0,100],  gt=[0,100]   → TP=100, FP=0,   precision=1.0
+        //   ep-B: pred=[0,1000], gt=[0,100]   → TP=100, FP=900, precision=0.1
+        //
+        //   per-episode mean precision = (1.0 + 0.1) / 2           = 0.55
+        //   corpus-pool   precision    = (100+100) / (100+1000)    = 200/1100 ≈ 0.1818
+        //
+        // The divergence (0.55 vs 0.1818) is what proves the switch
+        // from mean → pooled actually stuck.
+        let traces = [
+            Self.makeTrace(episodeId: "ep-A", analysisState: "completeFull"),
+            Self.makeTrace(episodeId: "ep-B", analysisState: "completeFull"),
+        ]
+        let entries = traces.map { t in
+            Self.makeEntry(episodeId: t.episodeId, config: "default", gtCount: 1, predCount: 1)
+        }
+        let pipelines: [String: [(pred: [NarlTimeRange], gt: [NarlTimeRange])]] = [
+            "ep-A|default": [(pred: [NarlTimeRange(start: 0, end: 100)],
+                              gt:   [NarlTimeRange(start: 0, end: 100)])],
+            "ep-B|default": [(pred: [NarlTimeRange(start: 0, end: 1000)],
+                              gt:   [NarlTimeRange(start: 0, end: 100)])],
+        ]
+
+        let rollups = NarlReportTerminalReasonRollup.stratify(
+            traces: traces,
+            entries: entries,
+            pipelinesByEpisodeId: pipelines
+        )
+
+        let row = try! #require(
+            rollups.first(where: { $0.bucket == .completeFull && $0.config == "default" })
+        )
+        #expect(row.episodeCount == 2)
+
+        // Corpus pool: TP=100+100=200, FP=0+900=900, FN=0+0=0.
+        //   precision = 200 / (200 + 900) = 200/1100 ≈ 0.181818…
+        //   recall    = 200 / (200 + 0)   = 1.0
+        #expect(abs(row.autoSkipPrecision - (200.0 / 1100.0)) < 1e-9,
+                "AutoSkip precision must be corpus-pooled (200/1100 ≈ 0.1818); got \(row.autoSkipPrecision)")
+        #expect(abs(row.autoSkipRecall - 1.0) < 1e-9,
+                "AutoSkip recall must be corpus-pooled (200/200 = 1.0); got \(row.autoSkipRecall)")
+
+        // Prove the divergence: a per-episode mean would be 0.55, which
+        // we must NOT see. This pins the behavioural change so a
+        // regression to mean-of-ratios would fail loudly.
+        let perEpisodeMean = (1.0 + 0.1) / 2.0
+        #expect(abs(row.autoSkipPrecision - perEpisodeMean) > 0.3,
+                "AutoSkip precision must diverge from mean-of-ratios (0.55); got \(row.autoSkipPrecision)")
+    }
+
+    @Test("AutoSkip Prec/Recall zero-guard falls back to 0.0 (not NaN) on empty bucket denominators")
+    func aggregatorAutoSkipZeroGuardsToZero() {
+        // Excluded-only bucket: episodeCount = 0 but excludedEpisodeCount > 0,
+        // so the bucket row is emitted (parity with show-rollup) yet has no
+        // predicted / GT seconds to divide. Both numerator and denominator
+        // should resolve to 0.0, not NaN — matches NarlCoverageMetricsCompute
+        // at the per-episode level.
+        let traces = [Self.makeTrace(episodeId: "ex", analysisState: "completeFull")]
+        let entries = [
+            NarlReportEpisodeEntry(
+                episodeId: "ex",
+                podcastId: "test",
+                show: "testShow",
+                config: "default",
+                isExcluded: true,
+                exclusionReason: "coverage-veto",
+                groundTruthWindowCount: 0,
+                predictedWindowCount: 0,
+                windowMetrics: [],
+                secondLevel: NarlSecondLevelMetrics(
+                    truePositiveSeconds: 0, falsePositiveSeconds: 0, falseNegativeSeconds: 0,
+                    precision: 0, recall: 0, f1: 0),
+                lexicalInjectionAdds: 0,
+                priorShiftAdds: 0,
+                hasShadowCoverage: false
+            )
+        ]
+
+        let rollups = NarlReportTerminalReasonRollup.stratify(
+            traces: traces,
+            entries: entries,
+            pipelinesByEpisodeId: [:]
+        )
+
+        let row = try! #require(
+            rollups.first(where: { $0.bucket == .completeFull && $0.config == "default" })
+        )
+        #expect(row.excludedEpisodeCount == 1)
+        #expect(row.episodeCount == 0)
+        #expect(row.autoSkipPrecision == 0.0,
+                "empty-bucket precision must be 0.0, not NaN; got \(row.autoSkipPrecision)")
+        #expect(row.autoSkipRecall == 0.0,
+                "empty-bucket recall must be 0.0, not NaN; got \(row.autoSkipRecall)")
+    }
+
     // MARK: - Report schema — Codable back-compat
 
     @Test("NarlEvalReport.terminalReasonBuckets round-trips through encode/decode")
