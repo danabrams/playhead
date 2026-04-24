@@ -49,14 +49,18 @@ targets:
         script: |
           set -euo pipefail
           PROVENANCE_PLIST="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/BuildProvenance.plist"
-          # Resolve a short SHA from the source tree. ${SRCROOT} is the
-          # repo root for xcodegen-generated projects. `git -C "$SRCROOT"`
-          # avoids the wrong worktree when xcodebuild runs from a sibling
-          # path. Fall back to "unknown" so the plist is never empty.
           SHA="$(git -C "${SRCROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
           if [ -z "$SHA" ]; then SHA="unknown"; fi
-          # Always write a fresh plist (idempotent). PlistBuddy can't
-          # create files, so emit literal XML and let it parse.
+          # Skip rewrite when the existing plist already carries this SHA,
+          # otherwise every build bumps the file mtime and CodeSign re-signs
+          # the entire bundle for no reason.
+          if [ -f "$PROVENANCE_PLIST" ]; then
+            EXISTING="$(/usr/libexec/PlistBuddy -c 'Print :BuildCommitSHA' "$PROVENANCE_PLIST" 2>/dev/null || echo "")"
+            if [ "$EXISTING" = "$SHA" ]; then
+              echo "BuildCommitSHA unchanged ($SHA); skipping rewrite"
+              exit 0
+            fi
+          fi
           /bin/cat > "$PROVENANCE_PLIST" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
