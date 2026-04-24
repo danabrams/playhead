@@ -560,6 +560,320 @@ struct DecisionLoggerPipelineTests {
         #expect(promoted.isEmpty,
                 "Entries below autoSkipConfidenceThreshold must NOT be promoted; got \(actions)")
     }
+
+    // MARK: - Hot-path decision-log boundary expansion (playhead-gtt9.20)
+    //
+    // Regression target: 2026-04-23 Conan capture asset
+    // 71F0C2AE-7260-4D1E-B41A-BCFD5103A641. A narrow 2-s classifier hit at
+    // [7006, 7008] with score 0.8154 passes the autoSkip threshold (0.80),
+    // is persisted as an AdWindow with gtt9.4.1 post-classify boundary
+    // expansion pulling the window to roughly [7007, 7037] via nearby
+    // acoustic breaks. BUT the DecisionLogEntry emitted in lock-step from
+    // `emitHotPathDecisionLogs` still logged the RAW classifier slot
+    // [7006, 7008]. The NARL harness keys predictions off the decision
+    // log's `windowBounds`, so the 2-s bounds vs the 30-s GT span give
+    // IoU=0.064 — counted as an FN, despite the detector being right.
+    //
+    // Fix contract (gtt9.20): when a hot-path candidate's adProbability
+    // clears autoSkipConfidenceThreshold, the DecisionLogEntry's
+    // `windowBounds` must carry the SAME expanded bounds as the persisted
+    // AdWindow (i.e. `PostClassifyBoundaryExpansion.expand(...)` output).
+    // Below-threshold and above-candidate-below-autoSkip entries keep the
+    // raw classifier slot.
+
+    @Test("autoSkipEligible hot-path entry carries boundary-expanded windowBounds")
+    func hotPathAutoSkipEntryCarriesExpandedBounds() async throws {
+        let analysisStore = try await makeTestStore()
+        let assetId = "asset-gtt9.20-expanded"
+        try await analysisStore.insertAsset(makeAsset(id: assetId))
+
+        // Install an acoustic envelope around the narrow 2-s classifier hit.
+        // The envelope window is [7007, 7037] — mirrors the Conan regression
+        // fixture. `PostClassifyBoundaryExpansion` should anchor the expanded
+        // window to leading/trailing breaks at the envelope boundaries.
+        try await analysisStore.insertFeatureWindows(
+            Self.envelopeFeatureWindows(
+                assetId: assetId,
+                envelopeStart: 7007.0,
+                envelopeEnd: 7037.0
+            )
+        )
+
+        let spy = SpyDecisionLogger()
+        // Classifier returns 0.82 (above autoSkip 0.80) with a forced narrow
+        // [7006, 7008] slot — ignoring candidate bounds — so the assertion
+        // is decoupled from LexicalScanner merge-gap heuristics.
+        let classifier = StubNarrowSlotClassifier(
+            adProbability: 0.82,
+            startTime: 7006.0,
+            endTime: 7008.0
+        )
+        let service = makeService(
+            store: analysisStore,
+            classifier: classifier,
+            autoSkipConfidenceThreshold: 0.80
+        )
+        await service.setDecisionLogger(spy)
+
+        // Use chunks that seed a LexicalCandidate near the target region so the
+        // hot path actually runs classification. The stub classifier overrides
+        // start/end back to [7006, 7008] regardless of candidate bounds.
+        _ = try await service.runHotPath(
+            chunks: Self.narrowAdChunks(assetId: assetId, centeredAt: 7007.0),
+            analysisAssetId: assetId,
+            episodeDuration: 8000.0
+        )
+
+        let entries = await spy.entries
+        let promoted = entries.filter { $0.finalDecision.action == "autoSkipEligible" }
+        #expect(!promoted.isEmpty,
+                "Expected at least one autoSkipEligible entry; got \(entries.map { $0.finalDecision.action })")
+
+        guard let expanded = promoted.first else { return }
+        let width = expanded.windowBounds.end - expanded.windowBounds.start
+        #expect(width >= 20.0,
+                "Expected autoSkipEligible bounds to be boundary-expanded (>=20s); got [\(expanded.windowBounds.start), \(expanded.windowBounds.end)] width=\(width)")
+        #expect(expanded.windowBounds.start <= 7010.0,
+                "Expected expanded start to be <=7010 (anchored near leading break); got \(expanded.windowBounds.start)")
+        #expect(expanded.windowBounds.end >= 7035.0,
+                "Expected expanded end to be >=7035 (anchored near trailing break); got \(expanded.windowBounds.end)")
+    }
+
+    @Test("autoSkipEligible entry still expands via fallback when feature windows have no acoustic breaks")
+    func hotPathAutoSkipEntryExpandsViaFallbackWithoutBreaks() async throws {
+        // Regression / back-compat: PostClassifyBoundaryExpansion has a
+        // typicalAdDuration.lowerBound/2 (=15s) per-side fallback when no
+        // AcousticBreaks are found in the search envelope. A classifier-only
+        // spike in a feature-flat region still widens materially (not
+        // unboundedly) — this is the existing gtt9.4.1 AdWindow behavior,
+        // and the decision log must mirror it so harness metrics match the
+        // user-facing AdWindow contract.
+        let analysisStore = try await makeTestStore()
+        let assetId = "asset-gtt9.20-flat"
+        try await analysisStore.insertAsset(makeAsset(id: assetId))
+
+        try await analysisStore.insertFeatureWindows(
+            Self.flatFeatureWindows(
+                assetId: assetId,
+                startTime: 6900.0,
+                endTime: 7100.0
+            )
+        )
+
+        let spy = SpyDecisionLogger()
+        let classifier = StubNarrowSlotClassifier(
+            adProbability: 0.85,
+            startTime: 7006.0,
+            endTime: 7008.0
+        )
+        let service = makeService(
+            store: analysisStore,
+            classifier: classifier,
+            autoSkipConfidenceThreshold: 0.80
+        )
+        await service.setDecisionLogger(spy)
+
+        _ = try await service.runHotPath(
+            chunks: Self.narrowAdChunks(assetId: assetId, centeredAt: 7007.0),
+            analysisAssetId: assetId,
+            episodeDuration: 8000.0
+        )
+
+        let entries = await spy.entries
+        let promoted = entries.filter { $0.finalDecision.action == "autoSkipEligible" }
+        #expect(!promoted.isEmpty,
+                "Expected at least one autoSkipEligible entry; got \(entries.map { $0.finalDecision.action })")
+
+        guard let expanded = promoted.first else { return }
+        let width = expanded.windowBounds.end - expanded.windowBounds.start
+        // Fallback symmetric expansion is lowerBound/2 (=15s) per side →
+        // roughly 32s wide. Assert it widened materially beyond the raw 2-s
+        // slot but not unboundedly past the fallback radius.
+        #expect(width >= 20.0,
+                "Fallback should widen to >=20s; got \(width)")
+        #expect(width <= 60.0,
+                "Fallback should not exceed typicalAdDuration bounds; got \(width)")
+    }
+
+    @Test("Below-autoSkip hot-path entry keeps the raw classifier slot bounds")
+    func hotPathBelowAutoSkipEntryKeepsRawBounds() async throws {
+        // Back-compat: the expansion only applies when adProbability clears
+        // autoSkipConfidenceThreshold. A hotPathCandidate (passed candidate
+        // threshold but below autoSkip) must keep the raw classifier slot
+        // so upstream consumers can still distinguish the narrow hit from
+        // its expanded skip-worthy sibling.
+        let analysisStore = try await makeTestStore()
+        let assetId = "asset-gtt9.20-below"
+        try await analysisStore.insertAsset(makeAsset(id: assetId))
+
+        try await analysisStore.insertFeatureWindows(
+            Self.envelopeFeatureWindows(
+                assetId: assetId,
+                envelopeStart: 7007.0,
+                envelopeEnd: 7037.0
+            )
+        )
+
+        let spy = SpyDecisionLogger()
+        let classifier = StubNarrowSlotClassifier(
+            adProbability: 0.65,
+            startTime: 7006.0,
+            endTime: 7008.0
+        )
+        let service = makeService(
+            store: analysisStore,
+            classifier: classifier,
+            autoSkipConfidenceThreshold: 0.80
+        )
+        await service.setDecisionLogger(spy)
+
+        _ = try await service.runHotPath(
+            chunks: Self.narrowAdChunks(assetId: assetId, centeredAt: 7007.0),
+            analysisAssetId: assetId,
+            episodeDuration: 8000.0
+        )
+
+        let entries = await spy.entries
+        let hotPathCandidates = entries.filter { $0.finalDecision.action == "hotPathCandidate" }
+        #expect(!hotPathCandidates.isEmpty,
+                "Expected at least one hotPathCandidate entry; got \(entries.map { $0.finalDecision.action })")
+
+        for entry in hotPathCandidates {
+            #expect(entry.windowBounds.start == 7006.0,
+                    "Below-autoSkip entry must keep raw start 7006.0; got \(entry.windowBounds.start)")
+            #expect(entry.windowBounds.end == 7008.0,
+                    "Below-autoSkip entry must keep raw end 7008.0; got \(entry.windowBounds.end)")
+        }
+    }
+
+    // MARK: - Shared helpers for gtt9.20 tests
+
+    /// Build acoustic feature windows with strong leading/trailing breaks
+    /// (pause cluster + spectral spike) around a synthetic ad envelope.
+    /// Mirrors `PostClassifyBoundaryExpansionTests.makeEnvelopeWindows`.
+    fileprivate static func envelopeFeatureWindows(
+        assetId: String,
+        envelopeStart: Double,
+        envelopeEnd: Double
+    ) -> [FeatureWindow] {
+        var windows: [FeatureWindow] = []
+        let windowDuration: Double = 2.0
+        let padding: Double = 80.0
+        let windowStart = envelopeStart - padding
+        let windowEnd = envelopeEnd + padding
+
+        var t = windowStart
+        while t < windowEnd {
+            let nextT = t + windowDuration
+            let windowCenter = (t + nextT) / 2.0
+
+            let insideEnvelope = t >= envelopeStart && nextT <= envelopeEnd
+            let isLeadingBreakZone = (t >= envelopeStart - 2.0 * windowDuration) && (t < envelopeStart)
+            let isTrailingBreakZone = (t >= envelopeEnd) && (t < envelopeEnd + 2.0 * windowDuration)
+
+            let rms: Double
+            let pauseProbability: Double
+            let spectralFlux: Double
+            if insideEnvelope {
+                rms = 0.18; pauseProbability = 0.15; spectralFlux = 0.05
+            } else if isLeadingBreakZone || isTrailingBreakZone {
+                rms = 0.03; pauseProbability = 0.95; spectralFlux = 0.80
+            } else {
+                rms = 0.60; pauseProbability = 0.10; spectralFlux = 0.05
+            }
+
+            let atLeadingBoundary = abs(windowCenter - envelopeStart) < windowDuration
+            let atTrailingBoundary = abs(windowCenter - envelopeEnd) < windowDuration
+            let effectiveFlux = (atLeadingBoundary || atTrailingBoundary) ? 0.95 : spectralFlux
+
+            windows.append(FeatureWindow(
+                analysisAssetId: assetId,
+                startTime: t,
+                endTime: nextT,
+                rms: rms,
+                spectralFlux: effectiveFlux,
+                musicProbability: insideEnvelope ? 0.6 : 0.1,
+                speakerChangeProxyScore: 0,
+                musicBedChangeScore: 0,
+                pauseProbability: pauseProbability,
+                speakerClusterId: nil,
+                jingleHash: nil,
+                featureVersion: 1
+            ))
+            t = nextT
+        }
+        return windows
+    }
+
+    /// Flat feature windows with no acoustic break signals, so
+    /// `AcousticBreakDetector` returns [] and `PostClassifyBoundaryExpansion`
+    /// falls back to the typicalAdDuration half-width per side.
+    fileprivate static func flatFeatureWindows(
+        assetId: String,
+        startTime: Double,
+        endTime: Double
+    ) -> [FeatureWindow] {
+        var windows: [FeatureWindow] = []
+        let windowDuration: Double = 2.0
+        var t = startTime
+        while t < endTime {
+            let nextT = t + windowDuration
+            windows.append(FeatureWindow(
+                analysisAssetId: assetId,
+                startTime: t,
+                endTime: nextT,
+                rms: 0.30,
+                spectralFlux: 0.10,
+                musicProbability: 0.2,
+                speakerChangeProxyScore: 0,
+                musicBedChangeScore: 0,
+                pauseProbability: 0.15,
+                speakerClusterId: nil,
+                jingleHash: nil,
+                featureVersion: 1
+            ))
+            t = nextT
+        }
+        return windows
+    }
+
+    /// Build 3 narrow chunks around the target time with strong-URL sponsor
+    /// content so the LexicalScanner emits at least one candidate covering
+    /// the stub classifier's synthesized slot. Chunk bounds don't determine
+    /// the emitted decision-log bounds in this test — the StubNarrowSlotClassifier
+    /// returns the configured narrow slot regardless of input candidate.
+    fileprivate static func narrowAdChunks(
+        assetId: String,
+        centeredAt: Double
+    ) -> [TranscriptChunk] {
+        let chunkWidth: Double = 5.0
+        // Strong-URL language ensures a candidate is produced even with a
+        // minimal-width chunk, via the high-weight bypass
+        // (strong URL weight = 0.95 > LexicalScannerConfig.highWeightBypassThreshold).
+        let texts = [
+            "Welcome back to the show today.",
+            "This episode is brought to you by squarespace.com. Use code SHOW for ten percent off at squarespace dot com slash show. Sign up today.",
+            "Back to our conversation."
+        ]
+        return texts.enumerated().map { idx, text in
+            let start = centeredAt - chunkWidth + Double(idx) * chunkWidth
+            let end = start + chunkWidth
+            return TranscriptChunk(
+                id: "c\(idx)-\(assetId)",
+                analysisAssetId: assetId,
+                segmentFingerprint: "fp-\(idx)",
+                chunkIndex: idx,
+                startTime: start,
+                endTime: end,
+                text: text,
+                normalizedText: text.lowercased(),
+                pass: "final",
+                modelVersion: "test-v1",
+                transcriptVersion: nil,
+                atomOrdinal: nil
+            )
+        }
+    }
 }
 
 // MARK: - Test Doubles
@@ -585,6 +899,49 @@ private final class StubHighConfidenceClassifier: @unchecked Sendable, Classifie
             analysisAssetId: input.candidate.analysisAssetId,
             startTime: input.candidate.startTime,
             endTime: input.candidate.endTime,
+            adProbability: adProbability,
+            startAdjustment: 0,
+            endAdjustment: 0,
+            signalBreakdown: SignalBreakdown(
+                lexicalScore: 0,
+                rmsDropScore: 0,
+                spectralChangeScore: 0,
+                musicScore: 0,
+                speakerChangeScore: 0,
+                priorScore: 0
+            )
+        )
+    }
+}
+
+/// Variant of `StubHighConfidenceClassifier` that forces a specific narrow
+/// slot `[startTime, endTime]` on every result, irrespective of the seeding
+/// candidate's bounds. Used by gtt9.20 tests to decouple assertions on the
+/// decision-log's `windowBounds` from LexicalScanner merge-gap heuristics.
+/// Tier 1 uses 30-s slots that don't pass `PostClassifyBoundaryExpansion`'s
+/// duration gate anyway; this stub ensures Tier 1 entries land on the forced
+/// narrow slot so Tier 1 filtering in the expansion helper is also exercised.
+private final class StubNarrowSlotClassifier: @unchecked Sendable, ClassifierService {
+    private let adProbability: Double
+    private let forcedStart: Double
+    private let forcedEnd: Double
+
+    init(adProbability: Double, startTime: Double, endTime: Double) {
+        self.adProbability = adProbability
+        self.forcedStart = startTime
+        self.forcedEnd = endTime
+    }
+
+    func classify(inputs: [ClassifierInput], priors: ShowPriors) -> [ClassifierResult] {
+        inputs.map { classify(input: $0, priors: priors) }
+    }
+
+    func classify(input: ClassifierInput, priors: ShowPriors) -> ClassifierResult {
+        ClassifierResult(
+            candidateId: input.candidate.id,
+            analysisAssetId: input.candidate.analysisAssetId,
+            startTime: forcedStart,
+            endTime: forcedEnd,
             adProbability: adProbability,
             startAdjustment: 0,
             endAdjustment: 0,
