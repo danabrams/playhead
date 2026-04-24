@@ -261,6 +261,54 @@ struct Tier1FeatureOnlyScoringTests {
         #expect(allEntries.count >= tier1Count,
                 "Tier 2 must not remove Tier 1 entries; tier1=\(tier1Count), total=\(allEntries.count)")
     }
+
+    // MARK: - 4. Production wiring: runHotPath invokes Tier 1 even with no chunks
+
+    /// Production contract: Stage 4 ad detection currently calls
+    /// `runHotPath(chunks:analysisAssetId:episodeDuration:)`. Prior to
+    /// gtt9.9, an empty-chunks invocation returned immediately with zero
+    /// decision-log activity. The bead requires Tier 1 to run in production
+    /// every time Stage 4 executes, regardless of transcript state. This
+    /// test asserts the wiring: calling `runHotPath` with empty chunks must
+    /// still populate the decision log with Tier 1 entries covering the
+    /// episode.
+    @Test("runHotPath with empty chunks still emits Tier 1 decision-log entries")
+    func runHotPathWithEmptyChunksEmitsTier1Entries() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-tier1-wired-into-hotpath"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let duration: Double = 180  // 3 min → 6 slots
+        try await insertUniformFeatureGrid(
+            store: store,
+            assetId: assetId,
+            duration: duration
+        )
+
+        let spy = SpyDecisionLogger()
+        let service = makeService(store: store)
+        await service.setDecisionLogger(spy)
+
+        // Empty chunks — mimics Stage 4 running before any transcript is
+        // produced (or after the transcript stalls at 0 s).
+        let windows = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+        #expect(windows.isEmpty,
+                "Hot path must not synthesize AdWindows without transcript chunks")
+
+        let entries = await spy.entries
+        #expect(!entries.isEmpty,
+                "runHotPath must emit Tier 1 entries even with zero transcript chunks")
+
+        let ranges = entries.map { ($0.windowBounds.start, $0.windowBounds.end) }
+        let covered = unionSeconds(ranges)
+        let ratio = covered / duration
+        #expect(ratio >= 0.95,
+                "Tier 1 wired into runHotPath must achieve >= 0.95 coverage; got \(ratio)")
+    }
 }
 
 // MARK: - Test doubles

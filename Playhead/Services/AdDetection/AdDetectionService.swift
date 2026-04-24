@@ -789,6 +789,20 @@ actor AdDetectionService {
         retireUnmatchedReplayCandidates: Bool = false
     ) async throws -> HotPathRunResult {
         self.episodeDuration = episodeDuration
+
+        // playhead-gtt9.9: Tier 1 runs FIRST, independent of transcript
+        // state. Emits one DecisionLogEntry per slot across [0, episodeDuration)
+        // so NARL `scoredCoverageRatio` reflects the full episode even when
+        // transcript coverage has stalled. Transcript-dependent hot-path
+        // evidence (lexical / hypothesis / FM) remains below the
+        // chunks-empty guard — it REFINES scores, it does not gate them.
+        if episodeDuration > 0 {
+            try await runTier1FeatureOnlyScoring(
+                analysisAssetId: analysisAssetId,
+                episodeDuration: episodeDuration
+            )
+        }
+
         guard !chunks.isEmpty else {
             return HotPathRunResult(windows: [], retiredWindowIDs: [])
         }
