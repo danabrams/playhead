@@ -92,6 +92,22 @@ struct CorrectionNormalizerClassificationTests {
         #expect(norm.wholeAssetCorrections.first?.kind == .veto)
     }
 
+    @Test("N5: whole-asset with null correctionType AND unknown source routes to unknown (not fabricated veto)")
+    func wholeAssetUnknownKindRoutesToUnknown() {
+        // Pre-N5 behavior: silently fabricated a `.veto` bucket entry.
+        // Post-N5: unknown-kind rows are counted as unknown, so an
+        // operator sees them surface in report diagnostics instead of
+        // disappearing into the veto count.
+        let corrections = [
+            fc(source: "someFutureSource",
+               scope: "exactSpan:asset-1:0:9223372036854775807",
+               correctionType: nil)
+        ]
+        let norm = CorrectionNormalizer.normalize(corrections)
+        #expect(norm.wholeAssetCorrections.isEmpty)
+        #expect(norm.unknownCount == 1)
+    }
+
     // MARK: - spanFN classification
 
     @Test("exactTimeSpan correction with correctionType=falseNegative is spanFN")

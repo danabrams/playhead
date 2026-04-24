@@ -37,9 +37,10 @@
 // Merging: after classification, adjacent spans on the same asset with the
 // same kind merge when their gap is ≤ 5 s (design value from the bead).
 //
-// Deduplication: the merge pass already collapses exact and near-duplicate
-// spans because near-duplicates trivially satisfy the 5 s adjacency rule.
-// Whole-asset corrections dedupe per (assetId, kind).
+// Deduplication: dedup is purely a side effect of the 5 s merge pass —
+// exact duplicates have gap 0, near-duplicates (±1 s edges) have gap well
+// under 5, so both trivially collapse. There is no separate edge-tolerance
+// pass. Whole-asset corrections dedupe per (assetId, kind).
 
 import Foundation
 @testable import Playhead
@@ -117,14 +118,11 @@ struct NormalizedCorrections: Sendable, Equatable {
 enum CorrectionNormalizer {
 
     /// Gap tolerance for merging adjacent spans of the same kind on the
-    /// same asset. Per-bead value: 5 seconds.
+    /// same asset. Per-bead value: 5 seconds. Exact and near-duplicate
+    /// spans collapse as a side-effect of this pass (they trivially fall
+    /// inside the gap), so there is no separate near-duplicate tolerance
+    /// constant — see the header block.
     static let mergeGapSeconds: Double = 5.0
-
-    /// Edge-tolerance for near-duplicate detection on whole-asset rows and
-    /// the pre-merge dedup step. The merge pass subsumes per-edge tolerance
-    /// ≤ `mergeGapSeconds` anyway, but we keep the ±1 s constant documented
-    /// to match the bead spec ("overlapping time ~±1s").
-    static let nearDuplicateEdgeToleranceSeconds: Double = 1.0
 
     /// Normalize a stream of raw corrections.
     static func normalize(
@@ -221,13 +219,17 @@ enum CorrectionNormalizer {
 
         switch scope {
         case .wholeAssetVeto(let assetId):
-            return .wholeAsset(
-                assetId: assetId,
-                kind: wholeAssetKind(
-                    correctionType: correction.correctionType,
-                    source: correction.source
-                )
-            )
+            // N5: if correctionType is nil AND source is not one of the
+            // known values (manualVeto/listenRevert/falseNegative), we
+            // can't name the kind. Route to `unknown` rather than fabricating
+            // a default veto — fabricated buckets mask real-data anomalies.
+            guard let kind = wholeAssetKind(
+                correctionType: correction.correctionType,
+                source: correction.source
+            ) else {
+                return .unknown
+            }
+            return .wholeAsset(assetId: assetId, kind: kind)
 
         case .exactTimeSpan(let assetId, let start, let end):
             guard start >= 0, end > start else { return .unknown }
@@ -274,10 +276,15 @@ enum CorrectionNormalizer {
         }
     }
 
+    /// Resolve a whole-asset kind from an explicit correctionType or, for
+    /// v1 rows missing correctionType, the source field. Returns `nil` when
+    /// neither field names a known kind — the caller routes that to
+    /// `.unknown` rather than fabricating a default (N5 from the 2026-04-23
+    /// review: fabricated buckets hide real-data anomalies).
     private static func wholeAssetKind(
         correctionType: String?,
         source: String
-    ) -> NormalizedWholeAssetCorrection.Kind {
+    ) -> NormalizedWholeAssetCorrection.Kind? {
         if let t = correctionType {
             switch t {
             case "falsePositive": return .veto
@@ -295,7 +302,7 @@ enum CorrectionNormalizer {
         case "falseNegative":
             return .endorse
         default:
-            return .veto  // conservative: treat unrecognized as veto
+            return nil
         }
     }
 
