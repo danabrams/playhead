@@ -685,6 +685,13 @@ struct NarlEvalHarnessTests {
                     predicted: pred.windows,
                     groundTruth: gtResult.adWindows
                 )
+                // gtt9.8 follow-up: override the evidence-ledger inference
+                // with lifecycle-log truth when the trace carries it. See
+                // `adjustPipelineFailureFlag` for the decision rules.
+                let adjustedCoverage = Self.adjustPipelineFailureFlag(
+                    raw: coverage.metrics,
+                    trace: trace
+                )
 
                 let entry = NarlReportEpisodeEntry(
                     episodeId: trace.episodeId,
@@ -700,7 +707,7 @@ struct NarlEvalHarnessTests {
                     lexicalInjectionAdds: pred.lexicalInjectionAdds,
                     priorShiftAdds: pred.priorShiftAdds,
                     hasShadowCoverage: pred.hasShadowCoverage,
-                    coverageMetrics: coverage.metrics,
+                    coverageMetrics: adjustedCoverage,
                     fnDecomposition: coverage.fnDecomposition,
                     normalizerCounts: normalizerCounts
                 )
@@ -1097,6 +1104,72 @@ struct NarlEvalHarnessTests {
             classifierRecallFNSeconds: sum(\.classifierRecallFNSeconds),
             promotionRecallFNSeconds: sum(\.promotionRecallFNSeconds)
         )
+    }
+
+    /// gtt9.8 follow-up: override the evidence-ledger-inferred
+    /// `pipelineCoverageFailureAsset` flag using lifecycle-log truth when
+    /// available. See `NarlEvalLifecycleLogTests` for the contract tests.
+    ///
+    /// Rules (evaluated in order):
+    ///   1. `analysisState == "completeFull"` → NOT a pipeline-coverage
+    ///      failure. The pipeline ran to completion; any recall miss on this
+    ///      asset is a classifier issue, not coverage.
+    ///   2. `analysisState` prefixed `complete` but NOT `completeFull`, AND
+    ///      at least one correction lies beyond the transcript coverage end
+    ///      → IS a pipeline-coverage failure (partial pipeline, corrections
+    ///      landed where the detector never ran). We keep the raw flag's
+    ///      intent here.
+    ///   3. Any other `analysisState` value → fall through to the raw flag.
+    ///      The evidence-ledger inference (unscoredFNRate > 0.5) remains
+    ///      authoritative.
+    ///   4. `analysisState == nil` (pre-9.8 fixtures) → raw flag is
+    ///      authoritative.
+    ///
+    /// Returns a new `NarlCoverageMetrics` with the flag adjusted; all other
+    /// fields are copied verbatim. When no override applies, the input is
+    /// returned by value.
+    static func adjustPipelineFailureFlag(
+        raw: NarlCoverageMetrics,
+        trace: FrozenTrace
+    ) -> NarlCoverageMetrics {
+        guard let state = trace.analysisState else { return raw }
+
+        // Rule 1: completeFull suppresses the flag.
+        if state == "completeFull" {
+            return raw.withPipelineCoverageFailureAsset(false)
+        }
+
+        // Rule 2: partial complete (completeFeatureOnly / completeAbandoned
+        // etc.) keeps the flag when any correction lies beyond fast
+        // transcript coverage. Corrections record the scope substring
+        // "exactTimeSpan:<asset>:<start>:<end>" — pull out the end and
+        // compare. When we can't parse any, fall back to raw.
+        if state.hasPrefix("complete") {
+            guard let coverEnd = trace.fastTranscriptCoverageEndTime else {
+                return raw
+            }
+            let anyBeyondCoverage = trace.corrections.contains { c in
+                Self.correctionMaxTime(scope: c.scope).map { $0 > coverEnd } ?? false
+            }
+            if anyBeyondCoverage {
+                return raw.withPipelineCoverageFailureAsset(true)
+            }
+            // No corrections beyond coverage — defer to raw inference.
+            return raw
+        }
+
+        // Rule 3: any other state (backfill, spooling, ...) → raw.
+        return raw
+    }
+
+    /// Parse the trailing float from an `exactTimeSpan:<assetId>:<start>:<end>`
+    /// scope. Returns nil for scopes that don't carry a time span (whole-
+    /// asset vetoes, ordinal scopes). Used by `adjustPipelineFailureFlag`.
+    private static func correctionMaxTime(scope: String) -> Double? {
+        guard scope.hasPrefix("exactTimeSpan:") else { return nil }
+        let parts = scope.split(separator: ":")
+        guard parts.count >= 4 else { return nil }
+        return Double(parts[parts.count - 1])
     }
 
     /// gtt9.7: log per-asset correction counts before and after the

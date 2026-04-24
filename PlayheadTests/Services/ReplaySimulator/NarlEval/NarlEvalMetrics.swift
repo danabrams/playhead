@@ -231,6 +231,26 @@ struct NarlCoverageMetrics: Sendable, Codable, Equatable {
         classifierRecallFNSeconds: 0,
         promotionRecallFNSeconds: 0
     )
+
+    /// Return a copy of this metrics struct with
+    /// `pipelineCoverageFailureAsset` overridden. Used by the harness's
+    /// `adjustPipelineFailureFlag` when lifecycle-log truth supersedes the
+    /// evidence-ledger-inferred flag (gtt9.8 follow-up).
+    func withPipelineCoverageFailureAsset(_ newValue: Bool) -> NarlCoverageMetrics {
+        NarlCoverageMetrics(
+            scoredCoverageRatio: scoredCoverageRatio,
+            transcriptCoverageRatio: transcriptCoverageRatio,
+            candidateRecall: candidateRecall,
+            autoSkipPrecision: autoSkipPrecision,
+            autoSkipRecall: autoSkipRecall,
+            segmentIoU: segmentIoU,
+            unscoredFNRate: unscoredFNRate,
+            pipelineCoverageFailureAsset: newValue,
+            pipelineCoverageFNSeconds: pipelineCoverageFNSeconds,
+            classifierRecallFNSeconds: classifierRecallFNSeconds,
+            promotionRecallFNSeconds: promotionRecallFNSeconds
+        )
+    }
 }
 
 enum NarlCoverageMetricsCompute {
