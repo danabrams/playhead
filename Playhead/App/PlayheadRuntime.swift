@@ -462,6 +462,23 @@ final class PlayheadRuntime {
         preBuiltDecisionLogger = nil
         #endif
 
+        // playhead-gtt9.17: on-device ad catalog. Opened synchronously at
+        // startup so the first `runBackfill` observes an initialized store.
+        // A failure to open (e.g. read-only disk) falls back to `nil`,
+        // which degrades to the pre-gtt9.17 behavior: no catalog ingress,
+        // no catalog egress, no runtime crash. We log the failure so
+        // diagnostics can surface the regression rather than silently
+        // losing the feature.
+        let adCatalogStore: AdCatalogStore?
+        do {
+            let dir = try AdCatalogStore.defaultDirectory()
+            adCatalogStore = try AdCatalogStore(directoryURL: dir)
+        } catch {
+            Logger(subsystem: "com.playhead", category: "Runtime")
+                .warning("AdCatalogStore init failed — catalog disabled: \(error.localizedDescription, privacy: .public)")
+            adCatalogStore = nil
+        }
+
         self.adDetectionService = AdDetectionService(
             store: analysisStore,
             metadataExtractor: FallbackExtractor(),
@@ -486,6 +503,9 @@ final class PlayheadRuntime {
             // Phase 6.5 (playhead-4my.16): forward eligible fusion decisions
             // to the orchestrator after each backfill run (step 17).
             skipOrchestrator: skipOrchestrator,
+            // playhead-gtt9.17: on-device catalog for catalog ingress
+            // (autoSkipEligible → insert) and egress (fingerprint → match).
+            adCatalogStore: adCatalogStore,
             decisionLogger: preBuiltDecisionLogger
         )
         self.downloadManager = DownloadManager()

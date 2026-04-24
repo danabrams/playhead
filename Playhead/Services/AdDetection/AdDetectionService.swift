@@ -297,6 +297,15 @@ actor AdDetectionService {
     /// to assert that results flow through; nil suppresses the forwarding call.
     private let skipOrchestrator: SkipOrchestrator?
 
+    /// playhead-gtt9.17: optional on-device ad-catalog store. When non-nil,
+    /// `runBackfill` queries the store for each decoded span (egress) and
+    /// inserts a fingerprint when a span gates to `.autoSkipEligible`
+    /// (ingress). `nil` preserves the pre-gtt9.17 behavior exactly — no
+    /// catalog evidence in the ledger, no inserts, `lastCatalogMatchSimilarity`
+    /// stays at 0. Production wires a real `AdCatalogStore`; tests inject a
+    /// temp-dir store or leave nil to exercise the back-compat path.
+    private let adCatalogStore: AdCatalogStore?
+
     /// Phase 7.2: optional correction store. When non-nil, `runBackfill` pre-computes
     /// a per-span correction factor by querying the store's weighted corrections for
     /// the asset. The factor is passed to `DecisionMapper` so correction-suppressed
@@ -349,6 +358,14 @@ actor AdDetectionService {
     /// round-tripping through the full decision pipeline.
     private var lastAcousticPipelineFusion: [AcousticFeatureFusion.WindowFusion] = []
 
+    /// playhead-gtt9.17: Top `CatalogMatch.similarity` observed across all
+    /// decoded spans in the most recent `runBackfill` invocation. Reset to
+    /// zero at the start of every backfill so stale values from a prior
+    /// episode cannot leak into a fresh one. Zero means "either the catalog
+    /// was nil/empty, or nothing matched above the default similarity
+    /// floor". Test-observable via `lastCatalogMatchSimilarityForTesting`.
+    private var lastCatalogMatchSimilarity: Float = 0
+
     // MARK: - Init
 
     init(
@@ -363,6 +380,7 @@ actor AdDetectionService {
         regionShadowObserver: RegionShadowObserver? = nil,
         phase5ProjectorObserver: Phase5ProjectorObserver? = nil,
         skipOrchestrator: SkipOrchestrator? = nil,
+        adCatalogStore: AdCatalogStore? = nil,
         episodeMetadataProvider: EpisodeMetadataProvider = NullEpisodeMetadataProvider(),
         decisionLogger: DecisionLoggerProtocol? = nil
     ) {
@@ -379,6 +397,7 @@ actor AdDetectionService {
         self.regionShadowObserver = regionShadowObserver
         self.phase5ProjectorObserver = phase5ProjectorObserver
         self.skipOrchestrator = skipOrchestrator
+        self.adCatalogStore = adCatalogStore
         self.episodeMetadataProvider = episodeMetadataProvider
         // playhead-8em9 (narL): allow the logger to be installed at init
         // time so there is no race with the first backfill. PlayheadRuntime
@@ -446,6 +465,15 @@ actor AdDetectionService {
     /// completes.
     func lastAcousticPipelineFusionForTesting() -> [AcousticFeatureFusion.WindowFusion] {
         lastAcousticPipelineFusion
+    }
+
+    /// playhead-gtt9.17: Return the top `CatalogMatch.similarity` from the
+    /// most recent `runBackfill`. Zero if no catalog was wired, the catalog
+    /// was empty, or nothing scored above `AdCatalogStore.defaultSimilarityFloor`.
+    /// Used by `AdCatalogWiringTests` to verify that prior entries do lift
+    /// similarity and empty/absent catalogs do not.
+    func lastCatalogMatchSimilarityForTesting() -> Float {
+        lastCatalogMatchSimilarity
     }
 
     // MARK: - User Correction Persistence
@@ -1347,6 +1375,14 @@ actor AdDetectionService {
             assetCorrectionFactor = 1.0
         }
 
+        // playhead-gtt9.17: reset per-backfill state for catalog egress so a
+        // fresh episode cannot inherit a stale top-similarity from the last
+        // one. Empty/absent catalog leaves this at 0 for the whole run.
+        lastCatalogMatchSimilarity = 0
+        // Capture showId for catalog scoping: null when no podcast was
+        // supplied (rare — matches the analogous priors-update guard above).
+        let catalogShowId: String? = podcastId.isEmpty ? nil : podcastId
+
         for span in decodedSpans {
             try Task.checkCancellation()
 
@@ -1375,6 +1411,29 @@ actor AdDetectionService {
                 for: refinedSpan
             )
 
+            // playhead-gtt9.17: catalog egress. Fingerprint the span's feature
+            // windows (time-invariant) and query `AdCatalogStore` for known
+            // entries that match above the default similarity floor. The top
+            // similarity enters both the evidence ledger (for fusion mass)
+            // and `AutoSkipPrecisionGateInput.catalogMatchSimilarity` (for
+            // the safety-signal conjunction). Zero when no store is wired,
+            // the store is empty, or nothing clears the floor.
+            let spanFeatureWindows = featureWindows.filter { fw in
+                fw.startTime < refinedSpan.endTime && fw.endTime > refinedSpan.startTime
+            }
+            let spanFingerprint = AcousticFingerprint.fromFeatureWindows(spanFeatureWindows)
+            var spanTopCatalogSimilarity: Float = 0
+            if let adCatalogStore, !spanFingerprint.isZero {
+                let matches = await adCatalogStore.matches(
+                    fingerprint: spanFingerprint,
+                    show: catalogShowId
+                )
+                spanTopCatalogSimilarity = matches.first?.similarity ?? 0
+            }
+            if spanTopCatalogSimilarity > lastCatalogMatchSimilarity {
+                lastCatalogMatchSimilarity = spanTopCatalogSimilarity
+            }
+
             let ledger = buildEvidenceLedger(
                 span: refinedSpan,
                 classifierResults: classifierResults,
@@ -1384,6 +1443,7 @@ actor AdDetectionService {
                 semanticScanResults: semanticScanResults,
                 metadataEntries: metadataEntries,
                 acousticPipelineFusion: acousticPipelineResult.fusion,
+                catalogMatchSimilarity: spanTopCatalogSimilarity,
                 fusionConfig: fusionConfig
             )
 
@@ -1454,6 +1514,33 @@ actor AdDetectionService {
                 analysisAssetId: analysisAssetId
             )
             fusionWindows.append(window)
+
+            // playhead-gtt9.17: catalog ingress. When a span gates to
+            // `.autoSkipEligible`, store its fingerprint so future episodes
+            // of the same show can match on the same creative. `markOnly`
+            // decisions are deliberately excluded — those aren't confirmed
+            // ads yet; inserting them would inflate false-positive recurrence
+            // later. A zero fingerprint (e.g., silent span with no feature
+            // signal) is also rejected by `AdCatalogStore.insert` but we
+            // short-circuit the call to avoid touching SQLite needlessly.
+            if let adCatalogStore,
+               policyAction == .autoSkipEligible,
+               !spanFingerprint.isZero {
+                do {
+                    _ = try await adCatalogStore.insert(
+                        showId: catalogShowId,
+                        episodePosition: .unknown,
+                        durationSec: max(0, refinedSpan.endTime - refinedSpan.startTime),
+                        acousticFingerprint: spanFingerprint,
+                        transcriptSnippet: nil,
+                        sponsorTokens: nil,
+                        originalConfidence: decision.skipConfidence
+                    )
+                    logger.debug("Backfill: inserted catalog entry for autoSkipEligible span \(refinedSpan.id, privacy: .public) show=\(catalogShowId ?? "<none>", privacy: .public)")
+                } catch {
+                    logger.warning("Backfill: catalog insert failed for span \(refinedSpan.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
+            }
 
             // Accumulate AdDecisionResult for step 17 (orchestrator forwarding).
             // SkipEligibilityGate has more cases than AdDecisionEligibilityGate; collapse
@@ -1618,6 +1705,7 @@ actor AdDetectionService {
         semanticScanResults: [SemanticScanResult],
         metadataEntries: [EvidenceLedgerEntry] = [],
         acousticPipelineFusion: [AcousticFeatureFusion.WindowFusion] = [],
+        catalogMatchSimilarity: Float = 0,
         fusionConfig: FusionWeightConfig
     ) -> [EvidenceLedgerEntry] {
         // Classifier entry: find the best-matching ClassifierResult for this span.
@@ -1675,11 +1763,28 @@ actor AdDetectionService {
         let combinedAcousticEntries = acousticEntries + musicBedEntries + pipelineAcousticEntries
 
         // Catalog entries: from EvidenceEntry items overlapping the span.
-        let catalogLedgerEntries = buildCatalogLedgerEntries(
+        var catalogLedgerEntries = buildCatalogLedgerEntries(
             span: span,
             entries: catalogEntries,
             fusionConfig: fusionConfig
         )
+
+        // playhead-gtt9.17: add a catalog ledger entry from the
+        // `AdCatalogStore` match similarity when a prior stored ad creative
+        // fingerprint-matches this span above the default floor. The weight
+        // is scaled by similarity so a near-perfect match (≈1.0) gets full
+        // `fusionConfig.catalogCap` mass and borderline matches (≈0.8) get
+        // proportionally less. `entryCount: 1` preserves the existing
+        // `.catalog(entryCount:)` detail variant — the fusion distinctKinds
+        // gate only cares about the source type, not the count.
+        if catalogMatchSimilarity >= AdCatalogStore.defaultSimilarityFloor {
+            let weight = Double(catalogMatchSimilarity) * fusionConfig.catalogCap
+            catalogLedgerEntries.append(EvidenceLedgerEntry(
+                source: .catalog,
+                weight: weight,
+                detail: .catalog(entryCount: 1)
+            ))
+        }
 
         let fusion = BackfillEvidenceFusion(
             span: span,
