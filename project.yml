@@ -61,6 +61,18 @@ targets:
     platform: iOS
     sources:
       - path: PlayheadTests
+        excludes:
+          # Dated NARL FrozenTrace fixture subdirectories are read at
+          # runtime via #filePath — they do not need to be bundled as
+          # test resources, and bundling would cause "Multiple commands
+          # produce ..." build errors because the same FrozenTrace-<id>.json
+          # basename appears in both 2026-04-23/ and 2026-04-24/ (same
+          # asset captured on both days). Exclude the dated dirs from
+          # xcodegen; the baseline 2026-04-22/ set stays bundled for
+          # the synthetic tests.
+          - "Fixtures/NarlEval/2026-04-23/**"
+          - "Fixtures/NarlEval/2026-04-23-1354/**"
+          - "Fixtures/NarlEval/2026-04-24/**"
     dependencies:
       - target: Playhead
     settings:

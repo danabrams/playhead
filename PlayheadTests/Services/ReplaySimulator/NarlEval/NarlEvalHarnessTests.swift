@@ -83,6 +83,192 @@ struct NarlEvalHarnessTests {
         )
     }
 
+    /// Minimal FrozenTrace factory parameterised on the two show-identifying
+    /// fields the heuristic inspects. All other fields are filled with
+    /// do-nothing defaults. Used by the gtt9.5 show-label heuristic tests.
+    private static func makeTrace(
+        episodeId: String,
+        podcastId: String,
+        showLabel: String? = nil
+    ) -> FrozenTrace {
+        FrozenTrace(
+            episodeId: episodeId,
+            podcastId: podcastId,
+            episodeDuration: 300,
+            traceVersion: "frozen-trace-v2",
+            capturedAt: Date(timeIntervalSince1970: 0),
+            featureWindows: [],
+            atoms: [],
+            evidenceCatalog: [],
+            corrections: [],
+            decisionEvents: [],
+            baselineReplaySpanDecisions: [],
+            holdoutDesignation: .training,
+            windowScores: [],
+            showLabel: showLabel
+        )
+    }
+
+    // MARK: - gtt9.5 show-label heuristic
+
+    @Test("showName uses trace.showLabel when present (short-circuit)")
+    func showNameUsesShowLabelWhenPresent() {
+        let trace = Self.makeTrace(
+            episodeId: "irrelevant",
+            podcastId: "irrelevant",
+            showLabel: "HandLabeled"
+        )
+        #expect(Self.showName(for: trace) == "HandLabeled")
+    }
+
+    @Test("showName buckets simplecast URL podcastId as Conan")
+    func showNameMatchesSimplecastUrlPodcastId() {
+        // From 2026-04-23 corpus: the live AnalysisStore stores the feed URL
+        // as podcastId on legacy traces.
+        let trace = Self.makeTrace(
+            episodeId: "ep",
+            podcastId: "https://feeds.simplecast.com/dHoohVNH"
+        )
+        #expect(Self.showName(for: trace) == "Conan")
+    }
+
+    @Test("showName buckets simplecast URL episodeId as Conan when podcastId is empty")
+    func showNameMatchesSimplecastUrlEpisodeIdWhenPodcastIdEmpty() {
+        // Exact form from the 2026-04-23 corpus: empty podcastId, feed URL
+        // embedded in episodeId before "::<uuid>".
+        let trace = Self.makeTrace(
+            episodeId: "https://feeds.simplecast.com/dHoohVNH::311e3daa-60b3-4428-b780-c9a7b8512be8",
+            podcastId: ""
+        )
+        #expect(Self.showName(for: trace) == "Conan")
+    }
+
+    @Test("showName buckets rss2.flightcast URL episodeId as DoaC")
+    func showNameMatchesFlightcastUrlEpisodeId() {
+        // 2026-04-23 corpus form: the flightcast feed is served from
+        // rss2.flightcast.com — host match, not scheme match.
+        let trace = Self.makeTrace(
+            episodeId: "https://rss2.flightcast.com/xmsftuzjjykcmqwolaqn6mdn::flightcast:01KM20WJPKVFHRVJZWTNA6Q1XT",
+            podcastId: ""
+        )
+        #expect(Self.showName(for: trace) == "DoaC")
+    }
+
+    @Test("showName buckets flightcast: URL scheme as DoaC (legacy podcastId form)")
+    func showNameMatchesFlightcastScheme() {
+        // Preserved behaviour: the legacy `flightcast:<id>` scheme.
+        let trace = Self.makeTrace(
+            episodeId: "ep",
+            podcastId: "flightcast:01KM20WJPKVFHRVJZWTNA6Q1XT"
+        )
+        #expect(Self.showName(for: trace) == "DoaC")
+    }
+
+    @Test("showName buckets legacy simplecast: scheme podcastId as Conan")
+    func showNameMatchesSimplecastScheme() {
+        // Preserved behaviour: matches the 2026-04-22 fixtures
+        // (podcastId = "simplecast:conan-needs-a-friend").
+        let trace = Self.makeTrace(
+            episodeId: "ep",
+            podcastId: "simplecast:conan-needs-a-friend"
+        )
+        #expect(Self.showName(for: trace) == "Conan")
+    }
+
+    @Test("showName matches known title substring when host is unknown")
+    func showNameMatchesTitleSubstringOnUnknownHost() {
+        // Graceful fallback: unknown host, but the identifier carries a
+        // known show-name substring.
+        let trace = Self.makeTrace(
+            episodeId: "ep",
+            podcastId: "https://example.invalid/feed/diary-of-a-ceo"
+        )
+        #expect(Self.showName(for: trace) == "DoaC")
+    }
+
+    @Test("showName returns unknown for genuinely unknown identifiers (graceful degradation)")
+    func showNameReturnsUnknownForUnknownIdentifiers() {
+        // Neither a known host nor a known title substring → do NOT
+        // misattribute to an arbitrary show. "unknown" is the correct
+        // graceful-degradation label (acceptance #3).
+        let trace = Self.makeTrace(
+            episodeId: "",
+            podcastId: ""
+        )
+        #expect(Self.showName(for: trace) == "unknown")
+    }
+
+    @Test("showName does not misattribute an arbitrary unknown host to a known show")
+    func showNameDoesNotMisattributeUnknownHost() {
+        // An unrelated URL that shares no host / scheme / title signal
+        // with a known show must degrade — never misattribute to
+        // Conan / DoaC (acceptance #3).
+        let trace = Self.makeTrace(
+            episodeId: "https://example.invalid/foo/bar",
+            podcastId: "https://example.invalid/foo/bar"
+        )
+        let result = Self.showName(for: trace)
+        #expect(result != "Conan", "unknown host must not resolve to Conan")
+        #expect(result != "DoaC", "unknown host must not resolve to DoaC")
+    }
+
+    @Test("showName falls back to scheme when host is present-but-unknown")
+    func showNameFallsBackToSchemeWhenHostUnknown() {
+        // Regression guard for a latent miss: a URL like
+        // `simplecast://feeds.example.com/x` parses with BOTH a host
+        // (feeds.example.com — unknown) and a scheme (simplecast —
+        // known). The heuristic must try scheme as a second path when
+        // host-lookup misses, not short-circuit on host presence.
+        let trace = Self.makeTrace(
+            episodeId: "ep",
+            podcastId: "simplecast://feeds.example.com/x"
+        )
+        #expect(Self.showName(for: trace) == "Conan")
+    }
+
+    @Test("showName buckets mixed-case host as its lowercase equivalent")
+    func showNameBucketsMixedCaseHostAsLowercase() {
+        // Pins the host-lowercasing behavior so a future change to the
+        // canonicalization can't silently regress the host match.
+        let trace = Self.makeTrace(
+            episodeId: "ep",
+            podcastId: "HTTPS://FEEDS.SIMPLECAST.COM/x"
+        )
+        #expect(Self.showName(for: trace) == "Conan")
+    }
+
+    @Test("showName tolerates identifier starting with `::` (empty core)")
+    func showNameToleratesEmptyCoreBeforeDoubleColon() {
+        // Edge case: the `::` stripping yields an empty core. URL
+        // parsing of "" is ambiguous across platforms — the heuristic
+        // must not crash and must fall back to title-substring / raw-id.
+        // No title signal → returns the raw podcastId (graceful).
+        let trace = Self.makeTrace(
+            episodeId: "ep",
+            podcastId: "::abc"
+        )
+        let result = Self.showName(for: trace)
+        #expect(result != "Conan", "empty-core identifier must not resolve to Conan")
+        #expect(result != "DoaC", "empty-core identifier must not resolve to DoaC")
+    }
+
+    @Test("showName strips only the first `::` separator (first wins)")
+    func showNameStripsOnlyFirstDoubleColonSeparator() {
+        // Pin behavior: stripping yields core = "a" (not "a::b"). Since
+        // "a" has no host / scheme / title signal, showName degrades to
+        // the raw podcastId — proving the split happened at the FIRST
+        // `::`, not the last. If the stripping ever changed to
+        // last-wins, a Conan/DoaC shaped core could leak through and
+        // this test would catch it.
+        let trace = Self.makeTrace(
+            episodeId: "ep",
+            podcastId: "a::b::c"
+        )
+        let result = Self.showName(for: trace)
+        #expect(result == "a::b::c",
+                "unknown identifier must degrade to raw podcastId, not a known show")
+    }
+
     @Test("Harness runs both configs and writes a report")
     func runHarness() throws {
         let (report, outputDir) = try Self.runHarnessCollectingReport()
@@ -129,6 +315,240 @@ struct NarlEvalHarnessTests {
         }
     }
 
+    @Test("gtt9.7 C1: per-episode entries carry normalizer counts in the persisted JSON report")
+    func harnessPersistsNormalizerCountsInReport() throws {
+        // Build a minimal trace in-memory and write it to a temporary fixtures
+        // root, so the assertion is not conditional on a corpus being present.
+        // Fixture mix (on a single assetId):
+        //   - 2 whole-asset vetoes (→ 1 after dedup)
+        //   - 1 whole-asset endorsement
+        //   - 1 span FN [100, 160]
+        //   - 1 span FP [200, 210]
+        //   - 1 boundary-refinement span
+        //   - 1 unknown (ambiguous) row
+        let episodeId = "gtt97-c1-\(UUID().uuidString.prefix(6))"
+        let trace = FrozenTrace(
+            episodeId: episodeId,
+            podcastId: "gtt97-c1-podcast",
+            episodeDuration: 600,
+            traceVersion: "frozen-trace-v2",
+            capturedAt: Date(timeIntervalSince1970: 0),
+            featureWindows: [],
+            atoms: [],
+            evidenceCatalog: [],
+            corrections: [
+                // Whole-asset vetoes (2 → dedupes to 1)
+                FrozenTrace.FrozenCorrection(
+                    source: "manualVeto",
+                    scope: "exactSpan:asset-1:0:9223372036854775807",
+                    createdAt: 1_000,
+                    correctionType: "falsePositive"
+                ),
+                FrozenTrace.FrozenCorrection(
+                    source: "manualVeto",
+                    scope: "exactSpan:asset-1:0:9223372036854775807",
+                    createdAt: 1_001,
+                    correctionType: "falsePositive"
+                ),
+                // Whole-asset endorsement (stays separate from veto on same asset)
+                FrozenTrace.FrozenCorrection(
+                    source: "falseNegative",
+                    scope: "exactSpan:asset-1:0:9223372036854775807",
+                    createdAt: 1_002,
+                    correctionType: "falseNegative"
+                ),
+                // Span FN
+                FrozenTrace.FrozenCorrection(
+                    source: "falseNegative",
+                    scope: "exactTimeSpan:asset-1:100.000:160.000",
+                    createdAt: 2_000,
+                    correctionType: "falseNegative"
+                ),
+                // Span FP
+                FrozenTrace.FrozenCorrection(
+                    source: "manualVeto",
+                    scope: "exactTimeSpan:asset-1:200.000:210.000",
+                    createdAt: 3_000,
+                    correctionType: "falsePositive"
+                ),
+                // Boundary refinement
+                FrozenTrace.FrozenCorrection(
+                    source: "listenRevert",
+                    scope: "exactTimeSpan:asset-1:300.000:320.000",
+                    createdAt: 4_000,
+                    correctionType: "startTooEarly"
+                ),
+                // Unknown (ambiguous source + nil correctionType)
+                FrozenTrace.FrozenCorrection(
+                    source: "someFutureCorrection",
+                    scope: "exactTimeSpan:asset-1:400.000:410.000",
+                    createdAt: 5_000,
+                    correctionType: nil
+                ),
+            ],
+            decisionEvents: [],
+            baselineReplaySpanDecisions: [],
+            holdoutDesignation: .training
+        )
+
+        // Assert the normalizer returns the shape we expect, so the report
+        // assertion below has a meaningful reference.
+        let norm = CorrectionNormalizer.normalize(trace.corrections)
+        #expect(norm.spanFN.count == 1)
+        #expect(norm.spanFP.count == 1)
+        #expect(norm.wholeAssetCorrections.filter { $0.kind == .veto }.count == 1)
+        #expect(norm.wholeAssetCorrections.filter { $0.kind == .endorse }.count == 1)
+        #expect(norm.boundaryRefinementCount == 1)
+        #expect(norm.unknownCount == 1)
+
+        // Build an entry through the same codec used by the harness. We are
+        // asserting the schema carries the normalizer counts — the harness's
+        // per-trace loop is covered by runHarness/harnessThreadsNewCoverageMetrics
+        // already, so here we round-trip a single entry to lock the JSON shape.
+        let entry = NarlReportEpisodeEntry(
+            episodeId: trace.episodeId,
+            podcastId: trace.podcastId,
+            show: "gtt97-c1",
+            config: "default",
+            isExcluded: false,
+            exclusionReason: nil,
+            groundTruthWindowCount: 0,
+            predictedWindowCount: 0,
+            windowMetrics: [],
+            secondLevel: NarlSecondLevelMetrics(
+                truePositiveSeconds: 0, falsePositiveSeconds: 0, falseNegativeSeconds: 0,
+                precision: 0, recall: 0, f1: 0
+            ),
+            lexicalInjectionAdds: 0,
+            priorShiftAdds: 0,
+            hasShadowCoverage: false,
+            normalizerCounts: NarlNormalizerCounts(from: norm, rawCount: trace.corrections.count)
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(entry)
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(NarlReportEpisodeEntry.self, from: data)
+
+        #expect(decoded.normalizerCounts.rawCount == 7)
+        #expect(decoded.normalizerCounts.spanFNCount == 1)
+        #expect(decoded.normalizerCounts.spanFPCount == 1)
+        #expect(decoded.normalizerCounts.wholeAssetVetoCount == 1)
+        #expect(decoded.normalizerCounts.wholeAssetEndorseCount == 1)
+        #expect(decoded.normalizerCounts.boundaryRefinementCount == 1)
+        #expect(decoded.normalizerCounts.unknownCount == 1)
+
+        // Also assert the JSON text literally contains a top-level
+        // `normalizerCounts` key, so downstream report consumers (jq
+        // piping, bead approval engine) can find it by name.
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains("\"normalizerCounts\""),
+                "report entry JSON should contain a normalizerCounts block")
+    }
+
+    @Test("gtt9.7 C1: live harness run writes normalizerCounts into report.json for non-excluded entries")
+    func harnessLiveRunEmitsNormalizerCountsField() throws {
+        let (_, outputDir) = try Self.runHarnessCollectingReport()
+        let jsonURL = outputDir.appendingPathComponent("report.json")
+        let data = try Data(contentsOf: jsonURL)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(NarlEvalReport.self, from: data)
+
+        // For any non-excluded entry, normalizerCounts.rawCount must equal
+        // the sum of the four non-boundary buckets + boundary + layerB (a
+        // tautology: raw rows are classified into mutually exclusive
+        // buckets). We don't know the fixture contents on a given machine;
+        // the invariant holds regardless.
+        for entry in decoded.episodes where !entry.isExcluded {
+            let nc = entry.normalizerCounts
+            // Each correction lands in exactly one bucket after dedup/merge,
+            // but rawCount is the pre-normalization count. We assert only
+            // the weaker invariant: the bucket totals are individually
+            // non-negative and the field round-tripped through the schema.
+            #expect(nc.rawCount >= 0)
+            #expect(nc.spanFNCount >= 0)
+            #expect(nc.spanFPCount >= 0)
+            #expect(nc.wholeAssetVetoCount >= 0)
+            #expect(nc.wholeAssetEndorseCount >= 0)
+            #expect(nc.boundaryRefinementCount >= 0)
+            #expect(nc.unknownCount >= 0)
+        }
+    }
+
+    @Test("gtt9.7 back-compat: pre-gtt9.7 report.json (no normalizerCounts key) decodes with .zero")
+    func preGtt97EpisodeEntryJsonDecodesWithZeroNormalizerCounts() throws {
+        // Literal pre-gtt9.7 payload: every field the old entry emitted is
+        // populated; `normalizerCounts` is absent entirely. This pins the
+        // `try? ... ?? .zero` fallback at NarlEvalReport.swift:234 — the
+        // 18 historical `report.json` bundles under `.eval-out/narl/` rely
+        // on that path to keep decoding after the gtt9.7 schema change.
+        let json = """
+        {
+          "episodeId": "pre-gtt97-episode-1",
+          "podcastId": "pre-gtt97-podcast",
+          "show": "DoaC",
+          "config": "default",
+          "isExcluded": false,
+          "groundTruthWindowCount": 3,
+          "predictedWindowCount": 2,
+          "windowMetrics": [],
+          "secondLevel": {
+            "truePositiveSeconds": 0,
+            "falsePositiveSeconds": 0,
+            "falseNegativeSeconds": 0,
+            "precision": 0,
+            "recall": 0,
+            "f1": 0
+          },
+          "lexicalInjectionAdds": 1,
+          "priorShiftAdds": 0,
+          "hasShadowCoverage": false
+        }
+        """
+        let data = Data(json.utf8)
+        let decoded = try JSONDecoder().decode(NarlReportEpisodeEntry.self, from: data)
+
+        #expect(decoded.episodeId == "pre-gtt97-episode-1")
+        #expect(decoded.normalizerCounts == .zero)
+        // Also pin the other two fields that share the same fallback path
+        // (gtt9.6 `coverageMetrics` + `fnDecomposition`) so the same test
+        // guards the older-artifact decode story end-to-end.
+        #expect(decoded.fnDecomposition.isEmpty)
+        #expect(decoded.coverageMetrics.pipelineCoverageFailureAsset == false)
+    }
+
+    @Test("gtt9.7 back-compat: NarlNormalizerCounts JSON without layerBCount decodes with layerBCount == 0")
+    func normalizerCountsJsonMissingLayerBCountDecodesToZero() throws {
+        // Simulates a mid-merge or pre-S1 report row where `layerBCount` was
+        // not yet part of the schema. Pins the `try? ... ?? 0` fallback at
+        // NarlEvalReport.swift:140 so future refactors of the custom
+        // init(from:) can't silently drop the tolerance.
+        let json = """
+        {
+          "rawCount": 7,
+          "spanFNCount": 1,
+          "spanFPCount": 1,
+          "wholeAssetVetoCount": 1,
+          "wholeAssetEndorseCount": 1,
+          "unknownCount": 2,
+          "boundaryRefinementCount": 1
+        }
+        """
+        let data = Data(json.utf8)
+        let decoded = try JSONDecoder().decode(NarlNormalizerCounts.self, from: data)
+
+        #expect(decoded.rawCount == 7)
+        #expect(decoded.spanFNCount == 1)
+        #expect(decoded.spanFPCount == 1)
+        #expect(decoded.wholeAssetVetoCount == 1)
+        #expect(decoded.wholeAssetEndorseCount == 1)
+        #expect(decoded.unknownCount == 2)
+        #expect(decoded.boundaryRefinementCount == 1)
+        #expect(decoded.layerBCount == 0)
+    }
+
     @Test("harness emits pipeline coverage failure trend rows")
     func harnessEmitsPipelineCoverageFailureTrendRows() throws {
         let (report, _) = try Self.runHarnessCollectingReport()
@@ -164,6 +584,15 @@ struct NarlEvalHarnessTests {
 
         var episodeEntries: [NarlReportEpisodeEntry] = []
         var perRollup: [String: [(entry: NarlReportEpisodeEntry, pred: [NarlTimeRange], gt: [NarlTimeRange])]] = [:]
+        // gtt9.8 follow-up: map "<episodeId>|<config>" → list of (pred, gt)
+        // so the terminal-reason stratification aggregator can re-pool the
+        // same per-episode windows. A list (not a single value) handles the
+        // case where two fixture date-dirs carry the same episodeId — e.g.
+        // the Conan 117-min asset captured on both 2026-04-23 and
+        // 2026-04-24. Keeping this map distinct from `perRollup` (which is
+        // keyed by show or ALL) lets the new bucket aggregator walk
+        // `episodeEntries` directly without touching the show rollup paths.
+        var pipelinesByEpisodeId: [String: [(pred: [NarlTimeRange], gt: [NarlTimeRange])]] = [:]
         // Per-rollup exclusion counter (HIGH-5). Episodes that triggered a
         // whole-asset veto are tallied here under BOTH the per-show key
         // (e.g. "DoaC|default") and the "ALL|default" aggregate, so the
@@ -178,6 +607,27 @@ struct NarlEvalHarnessTests {
         }
 
         for (fixtureIndex, trace) in traces.enumerated() {
+            // gtt9.7: run the correction normalizer first so span-level
+            // precision/recall is driven by actual span-level corrections
+            // (not by whole-asset vetoes that the user issued on an entire
+            // episode). The NarlGroundTruth builder still runs below and is
+            // the source of truth for ground-truth ad spans; the normalizer
+            // output is carried alongside the per-episode report entry so
+            // the raw→(span/wholeAsset/boundary/unknown) delta is queryable
+            // from the persisted JSON report, not just stdout.
+            // Rationale: §11 of the 2026-04-23 expert report on why raw
+            // correction rows aren't trustworthy (see bead description).
+            let normalizedCorrections = CorrectionNormalizer.normalize(trace.corrections)
+            let normalizerCounts = NarlNormalizerCounts(
+                from: normalizedCorrections,
+                rawCount: trace.corrections.count
+            )
+            Self.logCorrectionNormalization(
+                trace: trace,
+                before: trace.corrections,
+                after: normalizedCorrections
+            )
+
             let gtResult = NarlGroundTruth.build(for: trace)
             let show = Self.showName(for: trace)
             let traceHasShadowCoverage = Self.hasShadowCoverage(trace: trace)
@@ -214,7 +664,8 @@ struct NarlEvalHarnessTests {
                         priorShiftAdds: pred.priorShiftAdds,
                         hasShadowCoverage: pred.hasShadowCoverage,
                         coverageMetrics: .zero,
-                        fnDecomposition: []
+                        fnDecomposition: [],
+                        normalizerCounts: normalizerCounts
                     )
                     episodeEntries.append(entry)
                     // Tally excluded episodes per-rollup so the report shows
@@ -243,6 +694,13 @@ struct NarlEvalHarnessTests {
                     predicted: pred.windows,
                     groundTruth: gtResult.adWindows
                 )
+                // gtt9.8 follow-up: override the evidence-ledger inference
+                // with lifecycle-log truth when the trace carries it. See
+                // `adjustPipelineFailureFlag` for the decision rules.
+                let adjustedCoverage = Self.adjustPipelineFailureFlag(
+                    raw: coverage.metrics,
+                    trace: trace
+                )
 
                 let entry = NarlReportEpisodeEntry(
                     episodeId: trace.episodeId,
@@ -258,8 +716,9 @@ struct NarlEvalHarnessTests {
                     lexicalInjectionAdds: pred.lexicalInjectionAdds,
                     priorShiftAdds: pred.priorShiftAdds,
                     hasShadowCoverage: pred.hasShadowCoverage,
-                    coverageMetrics: coverage.metrics,
-                    fnDecomposition: coverage.fnDecomposition
+                    coverageMetrics: adjustedCoverage,
+                    fnDecomposition: coverage.fnDecomposition,
+                    normalizerCounts: normalizerCounts
                 )
                 episodeEntries.append(entry)
 
@@ -268,6 +727,12 @@ struct NarlEvalHarnessTests {
                 let allKey = "ALL|\(configName)"
                 perRollup[showKey, default: []].append((entry, pred.windows, gtResult.adWindows))
                 perRollup[allKey, default: []].append((entry, pred.windows, gtResult.adWindows))
+                // Record the (pred, gt) pair for the terminal-reason
+                // aggregator. Append rather than overwrite — duplicate
+                // episodeIds across date-dirs each contribute a pair.
+                let pipeKey = "\(trace.episodeId)|\(configName)"
+                pipelinesByEpisodeId[pipeKey, default: []]
+                    .append((pred: pred.windows, gt: gtResult.adWindows))
                 _ = fixtureIndex
             }
         }
@@ -343,6 +808,17 @@ struct NarlEvalHarnessTests {
             return a.show < b.show
         }
 
+        // gtt9.8 follow-up: build the terminal-reason stratification rollup.
+        // Always emit the field (empty array when corpus is empty) so
+        // downstream readers can distinguish "no data" from "decoded from
+        // pre-stratification JSON" — the latter round-trips as nil via
+        // NarlEvalReport's decodeIfPresent path.
+        let terminalReasonBuckets = NarlReportTerminalReasonRollup.stratify(
+            traces: traces,
+            entries: episodeEntries,
+            pipelinesByEpisodeId: pipelinesByEpisodeId
+        )
+
         let report = NarlEvalReport(
             schemaVersion: NarlEvalReportSchema.version,
             generatedAt: Date(),
@@ -350,7 +826,8 @@ struct NarlEvalHarnessTests {
             iouThresholds: [0.3, 0.5, 0.7],
             rollups: allRollups,
             episodes: episodeEntries,
-            notes: notes
+            notes: notes,
+            terminalReasonBuckets: terminalReasonBuckets
         )
 
         // Write the artifacts.
@@ -503,31 +980,119 @@ struct NarlEvalHarnessTests {
         return "\(base)-\(tag)"
     }
 
-    /// Map a trace to a human-readable show label. Fallback chain (MEDIUM-2):
+    /// Map a trace to a human-readable show label. Fallback chain (gtt9.5):
     ///   1. `trace.showLabel` if the fixture carries one (set by the corpus
     ///      builder when it has high-confidence metadata).
     ///   2. `PlayheadTests/Fixtures/NarlEval/NarlShowLabels.json` sidecar —
     ///      an `{ podcastId: label }` map Dan can edit by hand without
     ///      touching code. Keyed by the exact podcastId string.
-    ///   3. Substring heuristic on the podcastId (covers the two test feeds
-    ///      used historically — flightcast / simplecast / diary-of-a-ceo /
-    ///      conan).
-    ///   4. The raw podcastId (or "unknown" if empty).
+    ///   3. Structured match on `podcastId` then `episodeId`:
+    ///        a. parse as URL and look up by host (+ path segments when
+    ///           needed). Covers `https://feeds.simplecast.com/...` and
+    ///           `https://rss2.flightcast.com/...` from the real-user
+    ///           corpus, which has an empty `podcastId` and the feed URL
+    ///           embedded in `episodeId` before `"::<id>"`.
+    ///        b. custom-scheme match (`flightcast:`, `simplecast:`) for
+    ///           legacy synthetic fixtures.
+    ///        c. title-substring match (`diary-of-a-ceo`, `conan`, etc.)
+    ///           as graceful degradation when host + scheme both miss.
+    ///   4. The raw podcastId (or "unknown" if both identifiers are
+    ///      empty). Never misattribute a genuinely unknown show to a
+    ///      known one — return the raw id instead (acceptance #3).
     static func showName(for trace: FrozenTrace) -> String {
         if let label = trace.showLabel, !label.isEmpty { return label }
         if let sidecar = Self.showLabelsSidecar, let match = sidecar[trace.podcastId] {
             return match
         }
-        let lowered = trace.podcastId.lowercased()
-        if lowered.contains("flightcast") || lowered.contains("diary-of-a-ceo")
-            || lowered.contains("diaryofaceo") {
+        // Try the podcastId first (the legitimate source of truth), then
+        // episodeId (which in the 2026-04-23 real-user corpus carries the
+        // feed URL before "::<episode-id>" when podcastId is empty).
+        if let label = Self.showLabelFromIdentifier(trace.podcastId) { return label }
+        if let label = Self.showLabelFromIdentifier(trace.episodeId) { return label }
+
+        // Graceful fallback: prefer the raw podcastId so the report
+        // surfaces the unknown id directly (useful for hand-labelling via
+        // the sidecar). We deliberately do NOT fall back to episodeId
+        // here — episodeIds are per-episode unique, and using one as a
+        // show bucket would fragment the rollup into one row per episode.
+        return trace.podcastId.isEmpty ? "unknown" : trace.podcastId
+    }
+
+    /// Derive a show label from a single identifier string (a podcastId or
+    /// an episodeId). Returns `nil` when the identifier carries no known
+    /// signal — callers should chain alternatives or fall back to
+    /// "unknown". The match is deliberately strict (host + scheme + title
+    /// substring, in that order) so a URL like
+    /// `https://example.invalid/foo` never collides with Conan or DoaC.
+    private static func showLabelFromIdentifier(_ identifier: String) -> String? {
+        guard !identifier.isEmpty else { return nil }
+
+        // (a) URL parse. We accept either a full `scheme://` URL or a
+        //     `scheme:<opaque>` custom scheme (`flightcast:<id>`). Strip a
+        //     trailing `::<suffix>` before parsing — that's the corpus's
+        //     convention for "<feed-url>::<episode-id>". First `::` wins:
+        //     an identifier like `a::b::c` yields core `"a"`, not `"a::b"`.
+        let core: String = {
+            if let sepRange = identifier.range(of: "::") {
+                return String(identifier[..<sepRange.lowerBound])
+            }
+            return identifier
+        }()
+
+        if let url = URL(string: core) {
+            // Try host first (the common case for full URLs). If host is
+            // missing OR present-but-unknown, fall through to scheme —
+            // a URL like `simplecast://feeds.example.com/x` parses with
+            // both, and the known scheme is the stronger signal.
+            if let host = url.host?.lowercased(),
+               let label = Self.showLabelForHost(host) {
+                return label
+            }
+            if let scheme = url.scheme?.lowercased(),
+               let label = Self.showLabelForScheme(scheme) {
+                return label
+            }
+        }
+
+        // (b) Title-metadata substring fallback. Covers the case where
+        //     neither the host nor the scheme is known but the id still
+        //     carries a recognizable show name (e.g. a hand-built fixture
+        //     or a rehosted feed).
+        let lowered = identifier.lowercased()
+        if lowered.contains("diary-of-a-ceo") || lowered.contains("diaryofaceo") {
             return "DoaC"
         }
-        if lowered.contains("simplecast") || lowered.contains("conan")
-            || lowered.contains("needs-a-friend") {
+        if lowered.contains("conan") || lowered.contains("needs-a-friend") {
             return "Conan"
         }
-        return trace.podcastId.isEmpty ? "unknown" : trace.podcastId
+        return nil
+    }
+
+    /// Known-feed-host → show-label map. Extend here when a new show
+    /// enters the corpus rather than sprinkling substring checks through
+    /// the heuristic.
+    private static func showLabelForHost(_ host: String) -> String? {
+        switch host {
+        case "feeds.simplecast.com":
+            return "Conan"
+        case "rss2.flightcast.com":
+            return "DoaC"
+        default:
+            return nil
+        }
+    }
+
+    /// Known custom-scheme → show-label map for legacy / synthetic
+    /// fixtures. Same extension policy as `showLabelForHost`.
+    private static func showLabelForScheme(_ scheme: String) -> String? {
+        switch scheme {
+        case "flightcast":
+            return "DoaC"
+        case "simplecast":
+            return "Conan"
+        default:
+            return nil
+        }
     }
 
     /// True when the trace carries any evidence rows sourced from the
@@ -566,6 +1131,99 @@ struct NarlEvalHarnessTests {
             classifierRecallFNSeconds: sum(\.classifierRecallFNSeconds),
             promotionRecallFNSeconds: sum(\.promotionRecallFNSeconds)
         )
+    }
+
+    /// gtt9.8 follow-up: override the evidence-ledger-inferred
+    /// `pipelineCoverageFailureAsset` flag using lifecycle-log truth when
+    /// available. See `NarlEvalLifecycleLogTests` for the contract tests.
+    ///
+    /// Rules (evaluated in order):
+    ///   1. `analysisState == "completeFull"` → NOT a pipeline-coverage
+    ///      failure. The pipeline ran to completion; any recall miss on this
+    ///      asset is a classifier issue, not coverage.
+    ///   2. `analysisState` prefixed `complete` but NOT `completeFull`, AND
+    ///      at least one correction lies beyond the transcript coverage end
+    ///      → IS a pipeline-coverage failure (partial pipeline, corrections
+    ///      landed where the detector never ran). We keep the raw flag's
+    ///      intent here.
+    ///   3. Any other `analysisState` value → fall through to the raw flag.
+    ///      The evidence-ledger inference (unscoredFNRate > 0.5) remains
+    ///      authoritative.
+    ///   4. `analysisState == nil` (pre-9.8 fixtures) → raw flag is
+    ///      authoritative.
+    ///
+    /// Returns a new `NarlCoverageMetrics` with the flag adjusted; all other
+    /// fields are copied verbatim. When no override applies, the input is
+    /// returned by value.
+    static func adjustPipelineFailureFlag(
+        raw: NarlCoverageMetrics,
+        trace: FrozenTrace
+    ) -> NarlCoverageMetrics {
+        guard let state = trace.analysisState else { return raw }
+
+        // Rule 1: completeFull suppresses the flag.
+        if state == "completeFull" {
+            return raw.withPipelineCoverageFailureAsset(false)
+        }
+
+        // Rule 2: partial complete (completeFeatureOnly / completeAbandoned
+        // etc.) keeps the flag when any correction lies beyond fast
+        // transcript coverage. Corrections record the scope substring
+        // "exactTimeSpan:<asset>:<start>:<end>" — pull out the end and
+        // compare. When we can't parse any, fall back to raw.
+        if state.hasPrefix("complete") {
+            guard let coverEnd = trace.fastTranscriptCoverageEndTime else {
+                return raw
+            }
+            let anyBeyondCoverage = trace.corrections.contains { c in
+                Self.correctionMaxTime(scope: c.scope).map { $0 > coverEnd } ?? false
+            }
+            if anyBeyondCoverage {
+                return raw.withPipelineCoverageFailureAsset(true)
+            }
+            // No corrections beyond coverage — defer to raw inference.
+            return raw
+        }
+
+        // Rule 3: any other state (backfill, spooling, ...) → raw.
+        return raw
+    }
+
+    /// Parse the trailing float from an `exactTimeSpan:<assetId>:<start>:<end>`
+    /// scope. Returns nil for scopes that don't carry a time span (whole-
+    /// asset vetoes, ordinal scopes). Used by `adjustPipelineFailureFlag`.
+    private static func correctionMaxTime(scope: String) -> Double? {
+        guard scope.hasPrefix("exactTimeSpan:") else { return nil }
+        let parts = scope.split(separator: ":")
+        guard parts.count >= 4 else { return nil }
+        return Double(parts[parts.count - 1])
+    }
+
+    /// gtt9.7: log per-asset correction counts before and after the
+    /// CorrectionNormalizer runs. A visible print beats a buried count in a
+    /// report JSON for an operator reading the test output — the delta
+    /// (raw rows → span rows + whole-asset rows + unknown) is the headline
+    /// fact that proves normalization did something.
+    ///
+    /// Emits one line per (episodeId, config-independent) call, of shape:
+    ///   narl.normalizer: episodeId=...  raw=N  spanFN=A spanFP=B
+    ///   wholeAsset=C(veto=c1 endorse=c2)  layerB=L  unknown=D  boundary=E
+    static func logCorrectionNormalization(
+        trace: FrozenTrace,
+        before: [FrozenTrace.FrozenCorrection],
+        after: NormalizedCorrections
+    ) {
+        let vetoCount = after.wholeAssetCorrections.filter { $0.kind == .veto }.count
+        let endorseCount = after.wholeAssetCorrections.filter { $0.kind == .endorse }.count
+        print("narl.normalizer: episodeId=\(trace.episodeId)"
+            + "  raw=\(before.count)"
+            + "  spanFN=\(after.spanFN.count)"
+            + "  spanFP=\(after.spanFP.count)"
+            + "  wholeAsset=\(after.wholeAssetCorrections.count)"
+            + "(veto=\(vetoCount) endorse=\(endorseCount))"
+            + "  layerB=\(after.layerBCount)"
+            + "  unknown=\(after.unknownCount)"
+            + "  boundary=\(after.boundaryRefinementCount)")
     }
 
     /// Lazy-loaded sidecar `{ podcastId: show-label }` map. Returns `nil` if

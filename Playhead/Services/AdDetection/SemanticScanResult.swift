@@ -192,6 +192,14 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
     /// `EvidenceEvent.sourceType`. The case is purely additive; no migration
     /// is required because no rows reference it pre-shipping.
     case metadata
+    /// 2026-04-23 real-data eval Finding 4: music-bed coverage across a
+    /// span's interior windows. Distinct from `.acoustic` so the quorum
+    /// gate's `distinctKinds.count` increments when both an RMS-drop and
+    /// a music-bed signal fire. Shares the acoustic evidence family
+    /// (see `SourceEvidenceFamily.for`) and the `acousticCap` budget —
+    /// same underlying modality, different trigger geometry.
+    /// Persistence note: additive case; no migration required.
+    case musicBed
 }
 
 struct EvidenceEvent: Sendable, Equatable {

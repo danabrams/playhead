@@ -181,6 +181,7 @@ struct DecisionExplanation: Sendable, Codable, Equatable {
         case .classifier: return config.classifierCap
         case .fingerprint: return config.fingerprintCap
         case .metadata: return config.metadataCap  // playhead-z3ch
+        case .musicBed: return config.acousticCap  // Shares the acoustic family's weight budget.
         case .fusedScore: return 1.0  // Fused score is post-aggregation; no per-source cap applies.
         }
     }

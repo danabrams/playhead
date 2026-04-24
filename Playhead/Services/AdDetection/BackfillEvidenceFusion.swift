@@ -217,10 +217,17 @@ struct BackfillEvidenceFusion: Sendable {
             ledger.append(capped)
         }
 
-        // Acoustic entries: always included
+        // Acoustic entries: always included. 2026-04-23 Finding 4:
+        // this list now also carries `.musicBed`-sourced entries from
+        // `AdDetectionService.buildMusicBedLedgerEntries`. Preserve
+        // `entry.source` so `.musicBed` keeps its distinct kind
+        // instead of being flattened to `.acoustic` — that's what
+        // lets the quorum gate's `distinctKinds.count` increment.
+        // Both `.acoustic` and `.musicBed` share the acoustic family
+        // weight budget (`config.acousticCap`), so the cap is the same.
         for entry in acousticEntries {
             let capped = EvidenceLedgerEntry(
-                source: .acoustic,
+                source: entry.source,
                 weight: min(entry.weight, config.acousticCap),
                 detail: entry.detail
             )
@@ -309,6 +316,11 @@ struct DecisionMapper: Sendable {
     let correctionFactor: Double
     /// ef2.4.3: Per-source calibration profile. v0 (identity) is the default.
     let calibrationProfile: ScoreCalibrationProfile
+    /// playhead-p2iv: Soft monotonic duration prior sourced from
+    /// `ResolvedPriors.typicalAdDuration`. Applied as a multiplier over the
+    /// fused ledger sum — does NOT stack as an independent voter. Defaults to
+    /// `.identity` (no-op) so existing callers keep their current behavior.
+    let durationPrior: DurationPrior
 
     init(
         span: DecodedSpan,
@@ -316,7 +328,8 @@ struct DecisionMapper: Sendable {
         config: FusionWeightConfig,
         transcriptQuality: TranscriptQuality = .good,
         correctionFactor: Double = 1.0,
-        calibrationProfile: ScoreCalibrationProfile = .v0
+        calibrationProfile: ScoreCalibrationProfile = .v0,
+        durationPrior: DurationPrior = .identity
     ) {
         self.span = span
         self.ledger = ledger
@@ -324,6 +337,7 @@ struct DecisionMapper: Sendable {
         self.transcriptQuality = transcriptQuality
         self.correctionFactor = correctionFactor
         self.calibrationProfile = calibrationProfile
+        self.durationPrior = durationPrior
     }
 
     func map() -> DecisionResult {
@@ -336,7 +350,15 @@ struct DecisionMapper: Sendable {
             return sum + sourceCalibrator.calibrate(entry.weight)
         }
         let rawProposalConfidence = min(1.0, calibratedSum)
-        let proposalConfidence = rawProposalConfidence
+
+        // playhead-p2iv: Apply the duration prior as a bounded multiplier over
+        // the fused ledger sum. The multiplier is constrained to ~[0.75, 1.10]
+        // by construction (see DurationPrior) so it can nudge but not dominate
+        // the decision. Clamp back to [0, 1] so downstream treat-as-probability
+        // consumers see a valid range even when a strong ledger × peak > 1.
+        let durationMultiplier = durationPrior.multiplier(forDuration: span.duration)
+        let priorAdjusted = rawProposalConfidence * durationMultiplier
+        let proposalConfidence = max(0.0, min(1.0, priorAdjusted))
 
         // Phase 7.2: apply combined correction factor to skipConfidence.
         // The factor is pre-computed by the caller (AdDetectionService, an actor)
@@ -433,7 +455,7 @@ struct DecisionMapper: Sendable {
         // adProbability is zero). Any other in-audio source — or a
         // classifier entry with a non-zero weight — counts as corroboration.
         let inAudioCorroboratingSources: Set<EvidenceSourceType> = [
-            .lexical, .acoustic, .catalog, .fingerprint, .fm
+            .lexical, .acoustic, .musicBed, .catalog, .fingerprint, .fm
         ]
         let hasInAudioCorroboration = ledger.contains { entry in
             if inAudioCorroboratingSources.contains(entry.source) {
@@ -474,7 +496,7 @@ struct DecisionMapper: Sendable {
     /// Needs external corroboration from any non-FM source: classifier, lexical, catalog, or acoustic.
     /// Classifier is included because it is an independent, non-FM signal that provides corroboration.
     private func quorumGateForFMAcoustic() -> SkipEligibilityGate {
-        let externalSources: Set<EvidenceSourceType> = [.classifier, .lexical, .catalog, .acoustic, .fingerprint]
+        let externalSources: Set<EvidenceSourceType> = [.classifier, .lexical, .catalog, .acoustic, .musicBed, .fingerprint]
         let hasExternalCorroboration = ledger.contains { externalSources.contains($0.source) }
         return hasExternalCorroboration ? .eligible : .blockedByEvidenceQuorum
     }

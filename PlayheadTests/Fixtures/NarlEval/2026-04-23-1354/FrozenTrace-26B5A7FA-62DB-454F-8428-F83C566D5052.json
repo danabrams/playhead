@@ -1,0 +1,69 @@
+{
+  "atoms" : [
+
+  ],
+  "baselineReplaySpanDecisions" : [
+
+  ],
+  "capturedAt" : "2026-04-23T17:59:22Z",
+  "corrections" : [
+    {
+      "createdAt" : 1776811326.859746,
+      "scope" : "exactSpan:26B5A7FA-62DB-454F-8428-F83C566D5052:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776811360.759475,
+      "scope" : "exactSpan:26B5A7FA-62DB-454F-8428-F83C566D5052:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falsePositive",
+      "createdAt" : 1776811371.807226,
+      "scope" : "exactSpan:26B5A7FA-62DB-454F-8428-F83C566D5052:0:9223372036854775807",
+      "source" : "manualVeto"
+    },
+    {
+      "createdAt" : 1776811563.7950711,
+      "scope" : "exactSpan:26B5A7FA-62DB-454F-8428-F83C566D5052:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776811627.8549972,
+      "scope" : "exactSpan:26B5A7FA-62DB-454F-8428-F83C566D5052:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776811707.34213,
+      "scope" : "exactSpan:26B5A7FA-62DB-454F-8428-F83C566D5052:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776811753.650001,
+      "scope" : "exactSpan:26B5A7FA-62DB-454F-8428-F83C566D5052:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776811769.776236,
+      "scope" : "exactSpan:26B5A7FA-62DB-454F-8428-F83C566D5052:0:9223372036854775807",
+      "source" : "falseNegative"
+    }
+  ],
+  "decisionEvents" : [
+
+  ],
+  "episodeDuration" : 3600,
+  "episodeId" : "https:\/\/feeds.simplecast.com\/dHoohVNH::b3cfa749-4273-4e08-873f-a265b9621f65",
+  "evidenceCatalog" : [
+
+  ],
+  "featureWindows" : [
+
+  ],
+  "holdoutDesignation" : "training",
+  "podcastId" : "",
+  "traceVersion" : "frozen-trace-v2",
+  "windowScores" : [
+
+  ]
+}

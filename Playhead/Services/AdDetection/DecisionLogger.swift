@@ -272,6 +272,24 @@ extension DecisionLogEntry.LedgerEntry.Detail {
                 sourceField: sourceField.rawValue,
                 dominantCueType: dominantCueType.rawValue
             )
+        case .musicBed(let presenceFraction, let foregroundCount):
+            // 2026-04-23 Finding 4: music-bed coverage. Reuses the
+            // acoustic-shaped detail fields so the decision-log schema
+            // is purely additive — `breakStrength` holds the
+            // presence fraction, and `entryCount` holds the foreground
+            // window count. Older NARL corpus builders that only read
+            // `source`/`weight` are unaffected; parseDecisionLog treats
+            // `source` as a free-form string.
+            self.init(
+                kind: "musicBed",
+                score: nil,
+                disposition: nil, band: nil, cohortPromptLabel: nil,
+                matchedCategories: nil,
+                breakStrength: presenceFraction,
+                entryCount: foregroundCount,
+                matchCount: nil, averageSimilarity: nil,
+                cueCount: nil, sourceField: nil, dominantCueType: nil
+            )
         }
     }
 }

@@ -51,6 +51,9 @@ Package.resolved
 # Dev-only analysis exports from the app
 *.xcappdata/
 
+# Dated captures we keep locally for repeat analysis (xcappdata bundles moved here)
+.captures/
+
 # Auto-generated session summaries (ntm)
 .ntm/summaries/
 

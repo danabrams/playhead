@@ -73,6 +73,13 @@ struct NarlEvalCorpusBuilderTests {
             ? (try? Self.parseShadowLog(from: shadowLogURL)) ?? [:]
             : [:]
 
+        // gtt9.8 lifecycle log: optional. Pre-9.8 bundles won't have this
+        // file — we gracefully degrade to nil per-asset.
+        let lifecycleLogURL = documentsDir.appendingPathComponent("asset-lifecycle-log.jsonl")
+        let lifecycleSummaries = fm.fileExists(atPath: lifecycleLogURL.path)
+            ? (try? Self.parseLifecycleLog(from: lifecycleLogURL)) ?? [:]
+            : [:]
+
         // Materialize output dir.
         let dateStamp = Self.dateStamp()
         let outDir = try Self.fixturesOutputDir(dateStamp: dateStamp)
@@ -83,13 +90,15 @@ struct NarlEvalCorpusBuilderTests {
             let corrections = correctionsByAsset[asset.id] ?? []
             let decisionLog = decisionLogEntries[asset.id] ?? []
             let shadow = shadowEntries[asset.id] ?? []
+            let lifecycle = lifecycleSummaries[asset.id]
 
             let trace = Self.assembleTrace(
                 asset: asset,
                 decisions: decisions,
                 corrections: corrections,
                 decisionLog: decisionLog,
-                shadow: shadow
+                shadow: shadow,
+                lifecycle: lifecycle
             )
 
             let encoder = JSONEncoder()
@@ -343,6 +352,90 @@ struct NarlEvalCorpusBuilderTests {
         return byAsset
     }
 
+    // MARK: - Lifecycle log parsing (gtt9.8 follow-up)
+
+    /// Per-asset terminal snapshot of the gtt9.8 lifecycle log. The "terminal
+    /// row" is the row with a non-null `terminalReason` when one exists
+    /// (the asset reached completeFull / completeFeatureOnly / completeAbandoned
+    /// etc.); otherwise we fall back to the latest-timestamp row so stalled
+    /// assets still surface their best-known state + coverage snapshot.
+    ///
+    /// Schema v1 fields consumed:
+    ///   - analysisAssetID       (key)
+    ///   - episodeDurationSec    → durationSec
+    ///   - toState               → analysisState
+    ///   - terminalReason        → terminalReason (optional)
+    ///   - transcriptCoverageEndSec → transcriptCoverageEndSec (optional)
+    ///   - featureCoverageEndSec    → featureCoverageEndSec (optional)
+    ///   - timestamp             (used for latest-row fallback)
+    struct BuilderLifecycleSummary: Equatable {
+        let analysisAssetID: String
+        let durationSec: Double
+        let analysisState: String
+        let terminalReason: String?
+        let transcriptCoverageEndSec: Double?
+        let featureCoverageEndSec: Double?
+        let timestamp: Double
+    }
+
+    static func parseLifecycleLog(from url: URL) throws -> [String: BuilderLifecycleSummary] {
+        // One pass: group rows by assetID, track best candidate per asset.
+        // Priority: a row with non-null terminalReason wins; among terminal
+        // rows the latest timestamp wins; absent a terminal row, the latest
+        // timestamp overall wins. `terminalReason != nil` on the stored
+        // summary is the single source of truth — no side-channel needed.
+        var best: [String: BuilderLifecycleSummary] = [:]
+
+        try Self.forEachJSONL(url: url) { obj in
+            guard let assetID = obj["analysisAssetID"] as? String,
+                  !assetID.isEmpty else { return }
+            let duration = (obj["episodeDurationSec"] as? Double)
+                ?? ((obj["episodeDurationSec"] as? NSNumber).map(\.doubleValue))
+                ?? 0
+            let toState = (obj["toState"] as? String) ?? ""
+            let terminalReason = obj["terminalReason"] as? String
+            let transcriptEnd = (obj["transcriptCoverageEndSec"] as? Double)
+                ?? ((obj["transcriptCoverageEndSec"] as? NSNumber).map(\.doubleValue))
+            let featureEnd = (obj["featureCoverageEndSec"] as? Double)
+                ?? ((obj["featureCoverageEndSec"] as? NSNumber).map(\.doubleValue))
+            let timestamp = (obj["timestamp"] as? Double)
+                ?? ((obj["timestamp"] as? NSNumber).map(\.doubleValue))
+                ?? 0
+
+            let candidate = BuilderLifecycleSummary(
+                analysisAssetID: assetID,
+                durationSec: duration,
+                analysisState: toState,
+                terminalReason: terminalReason,
+                transcriptCoverageEndSec: transcriptEnd,
+                featureCoverageEndSec: featureEnd,
+                timestamp: timestamp
+            )
+
+            guard let prior = best[assetID] else {
+                best[assetID] = candidate
+                return
+            }
+            let candidateIsTerminal = (candidate.terminalReason != nil)
+            let priorIsTerminal = (prior.terminalReason != nil)
+
+            switch (candidateIsTerminal, priorIsTerminal) {
+            case (true, false):
+                // Terminal rows always beat non-terminal rows.
+                best[assetID] = candidate
+            case (false, true):
+                // Non-terminal never displaces terminal.
+                return
+            default:
+                // Same terminal class → later timestamp wins.
+                if candidate.timestamp > prior.timestamp {
+                    best[assetID] = candidate
+                }
+            }
+        }
+        return best
+    }
+
     // MARK: - Assemble FrozenTrace
 
     static func assembleTrace(
@@ -350,7 +443,8 @@ struct NarlEvalCorpusBuilderTests {
         decisions: [BuilderDecision],
         corrections: [BuilderCorrection],
         decisionLog: [BuilderDecisionLogEntry],
-        shadow: [BuilderShadowEntry]
+        shadow: [BuilderShadowEntry],
+        lifecycle: BuilderLifecycleSummary? = nil
     ) -> FrozenTrace {
         // Baseline span confidence is sourced from the decision-log row that
         // most-overlaps the span (HIGH-4). Promoted spans are always `isAd=true`
@@ -471,7 +565,12 @@ struct NarlEvalCorpusBuilderTests {
             decisionEvents: decisionEvents,
             baselineReplaySpanDecisions: baseline,
             holdoutDesignation: .training,
-            windowScores: windowScores
+            windowScores: windowScores,
+            durationSec: lifecycle?.durationSec,
+            analysisState: lifecycle?.analysisState,
+            terminalReason: lifecycle?.terminalReason,
+            fastTranscriptCoverageEndTime: lifecycle?.transcriptCoverageEndSec,
+            featureCoverageEndTime: lifecycle?.featureCoverageEndSec
         )
     }
 

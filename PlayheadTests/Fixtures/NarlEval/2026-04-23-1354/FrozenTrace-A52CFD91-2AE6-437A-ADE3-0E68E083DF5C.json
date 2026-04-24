@@ -1,0 +1,34 @@
+{
+  "atoms" : [
+
+  ],
+  "baselineReplaySpanDecisions" : [
+
+  ],
+  "capturedAt" : "2026-04-23T17:59:22Z",
+  "corrections" : [
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776816821.9395552,
+      "scope" : "exactTimeSpan:A52CFD91-2AE6-437A-ADE3-0E68E083DF5C:0.000:29.820",
+      "source" : "falseNegative"
+    }
+  ],
+  "decisionEvents" : [
+
+  ],
+  "episodeDuration" : 3600,
+  "episodeId" : "https:\/\/rss2.flightcast.com\/xmsftuzjjykcmqwolaqn6mdn::flightcast:01KNSKACDHYJGSTEZE6Y0XKJ2Z",
+  "evidenceCatalog" : [
+
+  ],
+  "featureWindows" : [
+
+  ],
+  "holdoutDesignation" : "training",
+  "podcastId" : "",
+  "traceVersion" : "frozen-trace-v2",
+  "windowScores" : [
+
+  ]
+}

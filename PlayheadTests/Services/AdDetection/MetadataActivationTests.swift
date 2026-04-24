@@ -35,8 +35,8 @@ struct MetadataActivationConfigTests {
             lexicalInjectionDiscount: 0.75,
             classifierPriorShiftEnabled: true,
             classifierPriorShiftMinTrust: 0.08,
-            classifierShiftedMidpoint: 0.22,
-            classifierBaselineMidpoint: 0.25,
+            classifierShiftedMidpoint: 0.33,
+            classifierBaselineMidpoint: 0.37,
             fmSchedulingEnabled: true,
             fmSchedulingMinTrust: 0.0,
             counterfactualGateOpen: false  // gate closed
@@ -54,8 +54,8 @@ struct MetadataActivationConfigTests {
             lexicalInjectionDiscount: 0.75,
             classifierPriorShiftEnabled: false,
             classifierPriorShiftMinTrust: 0.08,
-            classifierShiftedMidpoint: 0.22,
-            classifierBaselineMidpoint: 0.25,
+            classifierShiftedMidpoint: 0.33,
+            classifierBaselineMidpoint: 0.37,
             fmSchedulingEnabled: false,
             fmSchedulingMinTrust: 0.0,
             counterfactualGateOpen: true
@@ -77,16 +77,16 @@ struct MetadataActivationConfigTests {
         #expect(config.classifierPriorShiftMinTrust == 0.08)
     }
 
-    @Test("Default shifted midpoint is 0.22")
+    @Test("Default shifted midpoint is 0.33 (playhead-gtt9.3 retune)")
     func shiftedMidpoint() {
         let config = MetadataActivationConfig.default
-        #expect(config.classifierShiftedMidpoint == 0.22)
+        #expect(config.classifierShiftedMidpoint == 0.33)
     }
 
-    @Test("Default baseline midpoint is 0.25")
+    @Test("Default baseline midpoint is 0.37 (playhead-gtt9.3 retune)")
     func baselineMidpoint() {
         let config = MetadataActivationConfig.default
-        #expect(config.classifierBaselineMidpoint == 0.25)
+        #expect(config.classifierBaselineMidpoint == 0.37)
     }
 }
 
@@ -281,8 +281,8 @@ struct MetadataLexiconInjectorTests {
             lexicalInjectionDiscount: 0.75,
             classifierPriorShiftEnabled: false,
             classifierPriorShiftMinTrust: 0.08,
-            classifierShiftedMidpoint: 0.22,
-            classifierBaselineMidpoint: 0.25,
+            classifierShiftedMidpoint: 0.33,
+            classifierBaselineMidpoint: 0.37,
             fmSchedulingEnabled: false,
             fmSchedulingMinTrust: 0.0,
             counterfactualGateOpen: true
@@ -410,28 +410,28 @@ struct MetadataPriorShiftTests {
     func gateClosed() {
         let shift = MetadataPriorShift(config: .default)
         let mid = shift.effectiveMidpoint(metadataTrust: 0.5)
-        #expect(mid == 0.25)
+        #expect(mid == 0.37)
     }
 
     @Test("Baseline midpoint returned when trust is below threshold")
     func trustBelowThreshold() {
         let shift = MetadataPriorShift(config: .allEnabled)
         let mid = shift.effectiveMidpoint(metadataTrust: 0.07)
-        #expect(mid == 0.25, "Trust 0.07 < 0.08 threshold should return baseline")
+        #expect(mid == 0.37, "Trust 0.07 < 0.08 threshold should return baseline")
     }
 
     @Test("Shifted midpoint returned when trust meets threshold")
     func trustMeetsThreshold() {
         let shift = MetadataPriorShift(config: .allEnabled)
         let mid = shift.effectiveMidpoint(metadataTrust: 0.08)
-        #expect(mid == 0.22, "Trust 0.08 >= 0.08 threshold should return shifted midpoint")
+        #expect(mid == 0.33, "Trust 0.08 >= 0.08 threshold should return shifted midpoint")
     }
 
     @Test("Shifted midpoint returned when trust exceeds threshold")
     func trustExceedsThreshold() {
         let shift = MetadataPriorShift(config: .allEnabled)
         let mid = shift.effectiveMidpoint(metadataTrust: 0.5)
-        #expect(mid == 0.22)
+        #expect(mid == 0.33)
     }
 
     @Test("isShiftActive returns false when gate is closed")
@@ -462,7 +462,7 @@ struct MetadataPriorShiftTests {
     func zeroTrust() {
         let shift = MetadataPriorShift(config: .allEnabled)
         let mid = shift.effectiveMidpoint(metadataTrust: 0.0)
-        #expect(mid == 0.25, "Zero trust should return baseline midpoint")
+        #expect(mid == 0.37, "Zero trust should return baseline midpoint")
     }
 
     @Test("Classifier prior shift only with gate open and individual flag on")
@@ -474,15 +474,79 @@ struct MetadataPriorShiftTests {
             lexicalInjectionDiscount: 0.75,
             classifierPriorShiftEnabled: false,
             classifierPriorShiftMinTrust: 0.08,
-            classifierShiftedMidpoint: 0.22,
-            classifierBaselineMidpoint: 0.25,
+            classifierShiftedMidpoint: 0.33,
+            classifierBaselineMidpoint: 0.37,
             fmSchedulingEnabled: true,
             fmSchedulingMinTrust: 0.0,
             counterfactualGateOpen: true
         )
         let shift = MetadataPriorShift(config: noShift)
         let mid = shift.effectiveMidpoint(metadataTrust: 0.5)
-        #expect(mid == 0.25, "Individual flag disabled should return baseline")
+        #expect(mid == 0.37, "Individual flag disabled should return baseline")
+    }
+}
+
+// MARK: - MetadataPriorShift real-data band (playhead-gtt9.3)
+
+/// playhead-gtt9.3: the default midpoint band must overlap the real-data
+/// confidence distribution measured on 2026-04-23. Histogram mode was
+/// [0.30, 0.40) (53% of 147 scored windows); the old 0.22 / 0.25 band
+/// contained zero windows, making PriorShift inert. The new default
+/// band `(0.33, 0.37]` sits mid-mode and captures ~30 real windows.
+///
+/// These tests lock in that behavior at the defaults level so a future
+/// rebase does not silently revert the retune.
+@Suite("MetadataPriorShift — real-data band (gtt9.3)")
+struct MetadataPriorShiftRealDataBandTests {
+
+    /// A confidence in the mode of the real-data histogram. Chosen as the
+    /// center of the new band so a single value exercises both sides of the
+    /// half-open interval `(shifted, baseline]`.
+    private static let realDataBandCenter: Double = 0.35
+
+    @Test("Band center (0.35) sits in (shifted, baseline] under defaults — counterfactual flips decision")
+    func bandCenterFlipsUnderCounterfactual() {
+        // For a window whose fused classifier confidence is the band
+        // center, baseline classification says "not ad" (confidence ≤
+        // baseline midpoint) while shifted classification says "ad"
+        // (confidence > shifted midpoint). That is exactly the flip the
+        // priorShift counterfactual is supposed to produce.
+        let baseline = MetadataActivationConfig.default.classifierBaselineMidpoint
+        let shifted = MetadataActivationConfig.default.classifierShiftedMidpoint
+        let c = Self.realDataBandCenter
+
+        #expect(c > shifted,
+                "Band-center confidence must exceed shifted midpoint; otherwise priorShift cannot flip it.")
+        #expect(c <= baseline,
+                "Band-center confidence must sit at or below baseline midpoint; otherwise the window was already an ad.")
+    }
+
+    @Test("Band invariants: baseline > shifted, both inside (0, 1)")
+    func bandInvariants() {
+        let config = MetadataActivationConfig.default
+        #expect(config.classifierBaselineMidpoint > config.classifierShiftedMidpoint,
+                "Baseline must exceed shifted; otherwise the band inverts and priorShift becomes a no-op.")
+        #expect(config.classifierShiftedMidpoint > 0.0)
+        #expect(config.classifierBaselineMidpoint < 1.0)
+    }
+
+    @Test("Midpoints stay inside the candidate/confirmation envelope")
+    func midpointsInsideDetectionEnvelope() {
+        // The classifier midpoints are sigmoid-level thresholds; they must
+        // sit strictly below AdDetectionConfig.candidateThreshold so
+        // priorShift-flipped windows can still be filtered by the candidate
+        // stage without the midpoint itself being above the emit threshold,
+        // and strictly above suppressionThreshold so no flipped window
+        // triggers suppression. Regression guard against future retunes
+        // that cross either rail.
+        let config = MetadataActivationConfig.default
+        let detection = AdDetectionConfig.default
+        #expect(config.classifierBaselineMidpoint <= detection.candidateThreshold,
+                "Baseline midpoint must not exceed candidateThreshold — flipped windows would be pre-filtered.")
+        #expect(config.classifierShiftedMidpoint >= detection.suppressionThreshold,
+                "Shifted midpoint must stay at or above suppressionThreshold — flipped windows would be suppressed.")
+        #expect(config.classifierBaselineMidpoint < detection.confirmationThreshold,
+                "Baseline midpoint must sit well below confirmationThreshold.")
     }
 }
 

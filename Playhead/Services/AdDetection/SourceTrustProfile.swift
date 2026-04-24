@@ -92,7 +92,12 @@ enum SourceEvidenceFamily: String, Sendable, Equatable, CaseIterable {
         switch source {
         case .lexical, .classifier:
             return .textual
-        case .acoustic:
+        case .acoustic, .musicBed:
+            // musicBed is a peer of acoustic: same modality (audio
+            // features), different trigger geometry (interior coverage
+            // vs. boundary RMS drop). Same family keeps the orthogonal-
+            // corroboration rule honest — two acoustic-family signals
+            // still count as one for trust updates.
             return .acoustic
         case .fm:
             return .model
@@ -228,6 +233,10 @@ struct SourceTrustProfile: Sendable, Equatable {
         // classifier/catalog tier (Beta(6,4) → 0.60) — same metadata reliability
         // family, but never strong enough to drive a skip alone because of the cap.
         .metadata:    BetaPosterior(alpha: 6, beta: 4),   // 0.60 — metadata reliability
+        // 2026-04-23: music-bed is an acoustic-family peer of .acoustic.
+        // Mirror the MusicBracket prior (Beta(5,5) → 0.50) until we have
+        // replay-corpus evidence to update it.
+        .musicBed:    BetaPosterior(alpha: 5, beta: 5),   // 0.50 — music-bed coverage
     ]
 
     // MARK: - Query

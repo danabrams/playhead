@@ -658,6 +658,7 @@ private extension TranscriptPeekView {
             case .evidenceCatalog(let e): return e.category.rawValue
             case .fmAcousticCorroborated: return "FM and acoustic break"
             case .userCorrection: return "user-reported ad"
+            case .classifierSeed: return "classifier"
             }
         }
         return descriptions.joined(separator: ", ")

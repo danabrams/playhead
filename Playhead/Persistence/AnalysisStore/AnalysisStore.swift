@@ -707,13 +707,25 @@ actor AnalysisStore {
         let fm = FileManager.default
         if !fm.fileExists(atPath: dir.path) {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-
-            // Apply file protection to the directory.
-            try fm.setAttributes(
-                [.protectionKey: FileProtectionType.complete],
-                ofItemAtPath: dir.path
-            )
         }
+
+        // Why `.completeUntilFirstUserAuthentication` rather than `.complete`:
+        // the app is woken by `BGProcessingTask` and `BGAppRefreshTask` while
+        // the device may still be locked. `.complete` renders the SQLite file
+        // unreadable in that window, which previously triggered a 4× repro'd
+        // crash chain in `PlayheadRuntime.init` (open fails → retry fails →
+        // `try!` on the tmp fallback traps). `.completeUntilFirstUserAuthentication`
+        // keeps the file protected while the device is at rest pre-unlock and
+        // makes it accessible for the rest of the boot session once the user
+        // has authenticated at least once, which is the envelope every BGTask
+        // runs in.
+        // Applied unconditionally (not only on first create) so existing
+        // `.complete`-protected installs get migrated to the new class on the
+        // next launch.
+        try? fm.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: dir.path
+        )
 
         self.databaseURL = dir.appendingPathComponent("analysis.sqlite")
 
@@ -727,6 +739,14 @@ actor AnalysisStore {
             throw AnalysisStoreError.openFailed(code: rc, message: msg)
         }
         self.db = handle
+
+        // Same migration note for the SQLite file itself — on installs that
+        // predate this change the file inherited `.complete` from the dir
+        // at creation time, so we re-stamp it alongside the dir.
+        try? fm.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: databaseURL.path
+        )
     }
 
     /// Open a database at an explicit SQLite path, including `:memory:` for
@@ -6547,8 +6567,12 @@ actor AnalysisStore {
             if provenanceJSON.isEmpty || provenanceJSON == "[]" {
                 provenance = []
             } else if let data = provenanceJSON.data(using: .utf8),
-                      let decoded = try? decoder.decode([AnchorRef].self, from: data) {
-                provenance = decoded
+                      let wrapped = try? decoder.decode([LossyAnchorRef].self, from: data) {
+                // Per-element tolerant decode: if a future build ships a new
+                // AnchorRef case and the user rolls back, the unknown entries
+                // are dropped individually rather than the whole span losing
+                // all anchors.
+                provenance = wrapped.compactMap(\.value)
             } else {
                 logger.warning("fetchDecodedSpans: failed to decode anchorProvenanceJSON for span \(id, privacy: .public) asset \(aid, privacy: .public)")
                 provenance = []

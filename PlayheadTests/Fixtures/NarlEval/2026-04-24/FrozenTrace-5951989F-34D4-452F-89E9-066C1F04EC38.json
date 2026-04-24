@@ -1,0 +1,59 @@
+{
+  "atoms" : [
+
+  ],
+  "baselineReplaySpanDecisions" : [
+
+  ],
+  "capturedAt" : "2026-04-24T03:33:48Z",
+  "corrections" : [
+    {
+      "createdAt" : 1776807786.051108,
+      "scope" : "exactSpan:5951989F-34D4-452F-89E9-066C1F04EC38:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falsePositive",
+      "createdAt" : 1776810252.461662,
+      "scope" : "exactSpan:5951989F-34D4-452F-89E9-066C1F04EC38:0:9223372036854775807",
+      "source" : "manualVeto"
+    },
+    {
+      "createdAt" : 1776810252.469891,
+      "scope" : "exactSpan:5951989F-34D4-452F-89E9-066C1F04EC38:0:9223372036854775807",
+      "source" : "manualVeto"
+    },
+    {
+      "createdAt" : 1776810450.184032,
+      "scope" : "exactSpan:5951989F-34D4-452F-89E9-066C1F04EC38:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776810489.648334,
+      "scope" : "exactSpan:5951989F-34D4-452F-89E9-066C1F04EC38:0:9223372036854775807",
+      "source" : "falseNegative"
+    },
+    {
+      "createdAt" : 1776810752.2946491,
+      "scope" : "exactSpan:5951989F-34D4-452F-89E9-066C1F04EC38:0:9223372036854775807",
+      "source" : "falseNegative"
+    }
+  ],
+  "decisionEvents" : [
+
+  ],
+  "episodeDuration" : 3600,
+  "episodeId" : "https:\/\/rss2.flightcast.com\/xmsftuzjjykcmqwolaqn6mdn::flightcast:01KM20WJPKVFHRVJZWTNA6Q1XT",
+  "evidenceCatalog" : [
+
+  ],
+  "featureWindows" : [
+
+  ],
+  "holdoutDesignation" : "training",
+  "podcastId" : "",
+  "traceVersion" : "frozen-trace-v2",
+  "windowScores" : [
+
+  ]
+}

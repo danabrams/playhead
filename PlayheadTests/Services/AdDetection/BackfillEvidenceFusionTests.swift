@@ -522,6 +522,58 @@ struct BackfillEvidenceFusionTests {
         #expect(result.eligibilityGate != .blockedByEvidenceQuorum)
     }
 
+    @Test("Classifier-seeded span with co-seeded lexical produces multi-kind ledger and eligible gate")
+    func classifierSeededSpanFusionProducesMultiKindLedger() {
+        // Integration-shape: exercises the path unblocked by the classifier
+        // seeding fix. In production, classifier inputs are derived from
+        // lexical candidates (`classifyCandidates` takes `[LexicalCandidate]`),
+        // so a classifier-seeded region always co-occurs with a lexical
+        // proposal that merges into the same region — the fusion ledger
+        // therefore naturally has both a `.classifier` entry (from the
+        // always-on path in `buildLedger`) AND a co-seeded lexical entry.
+        // This test pins that downstream shape and asserts the gate
+        // returns `.eligible` once the span reaches fusion.
+        //
+        // Why this matters: prior to the fix, a classifier-seeded region
+        // never seeded a ProposedRegion → AtomEvidenceProjector never
+        // anchored → MinimalContiguousSpanDecoder emitted no DecodedSpan
+        // → this fusion call never happened at all.
+        let span = makeSpan(anchorProvenance: [
+            .classifierSeed(regionId: "r-classifier", score: 0.8154)
+        ])
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.8154,
+            fmEntries: [],
+            lexicalEntries: [
+                .init(source: .lexical, weight: 0.18, detail: .lexical(matchedCategories: ["cta"]))
+            ],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .off,
+            config: defaultConfig()
+        )
+        let ledger = fusion.buildLedger()
+        let distinctKinds = Set(ledger.map(\.source))
+        // Classifier (always-on) + lexical → at least 2 kinds.
+        #expect(distinctKinds.count >= 2)
+        #expect(distinctKinds.contains(.classifier))
+        #expect(distinctKinds.contains(.lexical))
+        // The fusion path must adjudicate the span — no FM provenance,
+        // so DecisionMapper's metadataCorroborationGate runs. With an
+        // in-audio lexical entry present (and metadata entries absent),
+        // that gate returns `.eligible`.
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: ledger,
+            config: defaultConfig(),
+            transcriptQuality: .good
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .eligible)
+        #expect(result.skipConfidence > 0.0)
+    }
+
     // MARK: - DecisionMapper: correctionFactor suppression (Phase 7.2)
 
     @Test("correctionFactor < 1.0 gates span as blockedByUserCorrection when effective confidence < 0.40")
