@@ -643,6 +643,13 @@ struct ReplaySpanDecision: Sendable, Codable, Equatable {
 ///     replay of the `MetadataPriorShift` + lexical-injection gate logic).
 ///     All new fields decode as optional to preserve forward/backward
 ///     compatibility with `frozen-trace-v1` fixtures.
+///   - `frozen-trace-v2` (gtt9.8 follow-up, 2026-04-24): adds optional
+///     lifecycle telemetry — `durationSec`, `analysisState`,
+///     `terminalReason`, `fastTranscriptCoverageEndTime`,
+///     `featureCoverageEndTime` — sourced from `asset-lifecycle-log.jsonl`
+///     at capture time. Older fixtures (2026-04-22 / 2026-04-23) decode
+///     with all five fields nil. No schema-version bump: the shape is
+///     strictly additive and all fields are optional.
 struct FrozenTrace: Sendable, Codable {
     static let currentTraceVersion = "frozen-trace-v2"
 
@@ -679,6 +686,33 @@ struct FrozenTrace: Sendable, Codable {
     /// (Added in `frozen-trace-v2`.)
     let showLabel: String?
 
+    // MARK: - Lifecycle telemetry (gtt9.8 follow-up)
+
+    /// Episode duration (seconds) as recorded on the terminal lifecycle
+    /// transition. Distinct from `episodeDuration`, which the corpus
+    /// builder derives from the furthest-out decision window. Nil when
+    /// no lifecycle log was available (pre-9.8 captures).
+    let durationSec: Double?
+    /// Terminal `SessionState.rawValue` the asset reached — e.g.
+    /// `completeFull`, `completeFeatureOnly`, `completeTranscriptPartial`,
+    /// `backfill` (when stalled), `failedTranscript`, `failedFeature`,
+    /// `cancelledBudget`. Nil when the capture has no lifecycle log.
+    let analysisState: String?
+    /// Human-readable classifier output that accompanied the terminal
+    /// transition (e.g. `"full coverage: transcript 1.000, feature 1.000"`).
+    /// Nil when the asset never reached a terminal row OR the capture
+    /// predates gtt9.8.
+    let terminalReason: String?
+    /// Transcript coverage end time (seconds) at the terminal lifecycle
+    /// row. Named `fast` to mirror the production-side field that tracks
+    /// the fast-path transcript pipeline. Nil when absent from the
+    /// terminal row (e.g. `queued → spooling` transitions never carry
+    /// a transcript coverage value).
+    let fastTranscriptCoverageEndTime: Double?
+    /// Feature coverage end time (seconds) at the terminal lifecycle
+    /// row. Nil when absent.
+    let featureCoverageEndTime: Double?
+
     init(
         episodeId: String,
         podcastId: String,
@@ -693,7 +727,12 @@ struct FrozenTrace: Sendable, Codable {
         baselineReplaySpanDecisions: [ReplaySpanDecision],
         holdoutDesignation: HoldoutDesignation,
         windowScores: [FrozenWindowScore] = [],
-        showLabel: String? = nil
+        showLabel: String? = nil,
+        durationSec: Double? = nil,
+        analysisState: String? = nil,
+        terminalReason: String? = nil,
+        fastTranscriptCoverageEndTime: Double? = nil,
+        featureCoverageEndTime: Double? = nil
     ) {
         self.episodeId = episodeId
         self.podcastId = podcastId
@@ -709,6 +748,11 @@ struct FrozenTrace: Sendable, Codable {
         self.holdoutDesignation = holdoutDesignation
         self.windowScores = windowScores
         self.showLabel = showLabel
+        self.durationSec = durationSec
+        self.analysisState = analysisState
+        self.terminalReason = terminalReason
+        self.fastTranscriptCoverageEndTime = fastTranscriptCoverageEndTime
+        self.featureCoverageEndTime = featureCoverageEndTime
     }
 
     // MARK: - Codable (manual to keep new fields optional)
@@ -728,6 +772,11 @@ struct FrozenTrace: Sendable, Codable {
         case holdoutDesignation
         case windowScores
         case showLabel
+        case durationSec
+        case analysisState
+        case terminalReason
+        case fastTranscriptCoverageEndTime
+        case featureCoverageEndTime
     }
 
     init(from decoder: Decoder) throws {
@@ -746,7 +795,12 @@ struct FrozenTrace: Sendable, Codable {
             baselineReplaySpanDecisions: try c.decodeIfPresent([ReplaySpanDecision].self, forKey: .baselineReplaySpanDecisions) ?? [],
             holdoutDesignation: try c.decode(HoldoutDesignation.self, forKey: .holdoutDesignation),
             windowScores: try c.decodeIfPresent([FrozenWindowScore].self, forKey: .windowScores) ?? [],
-            showLabel: try c.decodeIfPresent(String.self, forKey: .showLabel)
+            showLabel: try c.decodeIfPresent(String.self, forKey: .showLabel),
+            durationSec: try c.decodeIfPresent(Double.self, forKey: .durationSec),
+            analysisState: try c.decodeIfPresent(String.self, forKey: .analysisState),
+            terminalReason: try c.decodeIfPresent(String.self, forKey: .terminalReason),
+            fastTranscriptCoverageEndTime: try c.decodeIfPresent(Double.self, forKey: .fastTranscriptCoverageEndTime),
+            featureCoverageEndTime: try c.decodeIfPresent(Double.self, forKey: .featureCoverageEndTime)
         )
     }
 
@@ -766,6 +820,11 @@ struct FrozenTrace: Sendable, Codable {
         try c.encode(holdoutDesignation, forKey: .holdoutDesignation)
         try c.encode(windowScores, forKey: .windowScores)
         try c.encodeIfPresent(showLabel, forKey: .showLabel)
+        try c.encodeIfPresent(durationSec, forKey: .durationSec)
+        try c.encodeIfPresent(analysisState, forKey: .analysisState)
+        try c.encodeIfPresent(terminalReason, forKey: .terminalReason)
+        try c.encodeIfPresent(fastTranscriptCoverageEndTime, forKey: .fastTranscriptCoverageEndTime)
+        try c.encodeIfPresent(featureCoverageEndTime, forKey: .featureCoverageEndTime)
     }
 
     /// Return a copy with a different holdout designation.
@@ -785,7 +844,12 @@ struct FrozenTrace: Sendable, Codable {
             baselineReplaySpanDecisions: baselineReplaySpanDecisions,
             holdoutDesignation: designation,
             windowScores: windowScores,
-            showLabel: showLabel
+            showLabel: showLabel,
+            durationSec: durationSec,
+            analysisState: analysisState,
+            terminalReason: terminalReason,
+            fastTranscriptCoverageEndTime: fastTranscriptCoverageEndTime,
+            featureCoverageEndTime: featureCoverageEndTime
         )
     }
 
