@@ -1198,6 +1198,22 @@ actor AdDetectionService {
             fusionConfig: fusionConfig
         )
 
+        // 2026-04-23 Finding 4: music-bed coverage produces its own
+        // `.musicBed` ledger entry (distinct EvidenceSourceType) so
+        // the quorum gate's `distinctKinds.count` increments when a
+        // span has both an RMS-drop edge and an interior bed.
+        let musicBedEntries = buildMusicBedLedgerEntries(
+            span: span,
+            featureWindows: featureWindows,
+            fusionConfig: fusionConfig
+        )
+        // musicBed entries are merged into the acousticEntries list
+        // passed to BackfillEvidenceFusion. The fusion code already
+        // iterates over acousticEntries and preserves each entry's
+        // `source`, so a `.musicBed`-sourced entry flows through with
+        // the correct kind and increments distinctKinds.count.
+        let combinedAcousticEntries = acousticEntries + musicBedEntries
+
         // Catalog entries: from EvidenceEntry items overlapping the span.
         let catalogLedgerEntries = buildCatalogLedgerEntries(
             span: span,
@@ -1210,7 +1226,7 @@ actor AdDetectionService {
             classifierScore: classifierScore,
             fmEntries: fmEntries,
             lexicalEntries: lexicalEntries,
-            acousticEntries: acousticEntries,
+            acousticEntries: combinedAcousticEntries,
             catalogEntries: catalogLedgerEntries,
             metadataEntries: metadataEntries,
             mode: config.fmBackfillMode,
@@ -1384,6 +1400,30 @@ actor AdDetectionService {
             weight: weight,
             detail: .acoustic(breakStrength: breakStrength)
         )]
+    }
+
+    /// 2026-04-23 Finding 4: build `.musicBed`-source ledger entries
+    /// from the span's interior `MusicBedLevel` coverage.
+    ///
+    /// Delegates the threshold/weight logic to the pure
+    /// `MusicBedLedgerEvaluator`; this method is just the span-window
+    /// filter + plumbing.
+    private func buildMusicBedLedgerEntries(
+        span: DecodedSpan,
+        featureWindows: [FeatureWindow],
+        fusionConfig: FusionWeightConfig
+    ) -> [EvidenceLedgerEntry] {
+        let spanWindows = featureWindows.filter { fw in
+            fw.startTime < span.endTime && fw.endTime > span.startTime
+        }
+        let result = MusicBedLedgerEvaluator.evaluate(
+            spanWindows: spanWindows,
+            fusionConfig: fusionConfig
+        )
+        if let entry = result.entry {
+            return [entry]
+        }
+        return []
     }
 
     /// Build catalog ledger entries from EvidenceEntry items overlapping the span.

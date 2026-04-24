@@ -52,6 +52,20 @@ enum MusicBedLedgerEvaluator {
     /// Evaluate a span's feature windows and return an (optional) ledger
     /// entry plus the diagnostic `Evaluation` struct.
     ///
+    /// Trigger rule:
+    ///   Fire when the span contains ≥`minWindowsRequired` windows AND
+    ///   at least `minPresenceFraction` of them carry a non-`.none`
+    ///   music bed level. The weight scales linearly with the presence
+    ///   fraction and is clamped to `fusionConfig.acousticCap` — a
+    ///   half-bed span produces a half-weight contribution.
+    ///
+    /// The rule is intentionally orthogonal to
+    /// `buildAcousticLedgerEntries`'s boundary-only RMS-drop detector:
+    /// this one keys on *interior* music coverage, so a clean dry
+    /// ad-read with no RMS transition at the edges (because the
+    /// surrounding content also has speech-like RMS) still produces a
+    /// music-bed signal if there's a bed under the copy.
+    ///
     /// - Parameters:
     ///   - spanWindows: `FeatureWindow`s that overlap the target span,
     ///     already filtered by the caller.
@@ -64,13 +78,54 @@ enum MusicBedLedgerEvaluator {
         spanWindows: [FeatureWindow],
         fusionConfig: FusionWeightConfig
     ) -> (entry: EvidenceLedgerEntry?, evaluation: Evaluation) {
-        // Stub — GREEN phase replaces this with the real computation.
+        let total = spanWindows.count
+        guard total > 0 else {
+            let evaluation = Evaluation(
+                presenceFraction: 0,
+                foregroundCount: 0,
+                backgroundCount: 0,
+                fired: false
+            )
+            return (nil, evaluation)
+        }
+
+        var foreground = 0
+        var background = 0
+        for fw in spanWindows {
+            switch fw.musicBedLevel {
+            case .foreground: foreground += 1
+            case .background: background += 1
+            case .none: break
+            }
+        }
+        let musicWindows = foreground + background
+        let presenceFraction = Double(musicWindows) / Double(total)
+
+        let fired = total >= minWindowsRequired && presenceFraction >= minPresenceFraction
+
         let evaluation = Evaluation(
-            presenceFraction: 0,
-            foregroundCount: 0,
-            backgroundCount: 0,
-            fired: false
+            presenceFraction: presenceFraction,
+            foregroundCount: foreground,
+            backgroundCount: background,
+            fired: fired
         )
-        return (nil, evaluation)
+
+        guard fired else { return (nil, evaluation) }
+
+        // Weight scales linearly with coverage. Cap at `acousticCap`
+        // since `.musicBed` is an acoustic-family peer and the cap
+        // already reflects how much we trust a single acoustic signal.
+        let rawWeight = presenceFraction * fusionConfig.acousticCap
+        let cappedWeight = min(rawWeight, fusionConfig.acousticCap)
+
+        let entry = EvidenceLedgerEntry(
+            source: .musicBed,
+            weight: cappedWeight,
+            detail: .musicBed(
+                presenceFraction: presenceFraction,
+                foregroundCount: foreground
+            )
+        )
+        return (entry, evaluation)
     }
 }
