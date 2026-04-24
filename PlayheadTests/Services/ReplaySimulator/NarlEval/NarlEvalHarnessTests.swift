@@ -733,13 +733,14 @@ struct NarlEvalHarnessTests {
     /// "unknown". The match is deliberately strict (host + scheme + title
     /// substring, in that order) so a URL like
     /// `https://example.invalid/foo` never collides with Conan or DoaC.
-    static func showLabelFromIdentifier(_ identifier: String) -> String? {
+    private static func showLabelFromIdentifier(_ identifier: String) -> String? {
         guard !identifier.isEmpty else { return nil }
 
         // (a) URL parse. We accept either a full `scheme://` URL or a
         //     `scheme:<opaque>` custom scheme (`flightcast:<id>`). Strip a
         //     trailing `::<suffix>` before parsing — that's the corpus's
-        //     convention for "<feed-url>::<episode-id>".
+        //     convention for "<feed-url>::<episode-id>". First `::` wins:
+        //     an identifier like `a::b::c` yields core `"a"`, not `"a::b"`.
         let core: String = {
             if let sepRange = identifier.range(of: "::") {
                 return String(identifier[..<sepRange.lowerBound])
@@ -748,12 +749,17 @@ struct NarlEvalHarnessTests {
         }()
 
         if let url = URL(string: core) {
-            if let host = url.host?.lowercased() {
-                if let label = Self.showLabelForHost(host) { return label }
-            } else if let scheme = url.scheme?.lowercased() {
-                // Custom `flightcast:<id>` / `simplecast:<id>` forms have
-                // no host — match the scheme directly.
-                if let label = Self.showLabelForScheme(scheme) { return label }
+            // Try host first (the common case for full URLs). If host is
+            // missing OR present-but-unknown, fall through to scheme —
+            // a URL like `simplecast://feeds.example.com/x` parses with
+            // both, and the known scheme is the stronger signal.
+            if let host = url.host?.lowercased(),
+               let label = Self.showLabelForHost(host) {
+                return label
+            }
+            if let scheme = url.scheme?.lowercased(),
+               let label = Self.showLabelForScheme(scheme) {
+                return label
             }
         }
 
