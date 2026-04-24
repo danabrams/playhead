@@ -274,6 +274,121 @@ struct AcousticFingerprint: Sendable, Hashable, Codable {
 
         return AcousticFingerprint(values: vector)
     }
+
+    // MARK: - FeatureWindow → fingerprint (gtt9.17)
+
+    /// Derive a fingerprint from a sequence of `FeatureWindow`s.
+    ///
+    /// Where `fromPCM` works at the audio layer, this constructor maps the
+    /// episode-level acoustic feature stream (the same signal the
+    /// `AcousticFeaturePipeline` consumes) to the catalog's fingerprint
+    /// space. The main MVP call sites (`AdDetectionService.runBackfill`)
+    /// already have `[FeatureWindow]` on hand and do NOT have raw PCM, so
+    /// this is the cheap path into `AdCatalogStore` without re-decoding
+    /// audio.
+    ///
+    /// Mapping
+    /// -------
+    /// 8 feature streams × 8 summary statistics = 64-dim vector, matching
+    /// `AcousticFingerprint.vectorLength`. Deliberately TIME-INVARIANT —
+    /// no window timestamps enter the summary so the same creative recurring
+    /// at a different timestamp in another episode produces the same
+    /// fingerprint (which is the whole point of a catalog).
+    ///
+    /// Feature streams:
+    ///   1. rms
+    ///   2. spectralFlux
+    ///   3. musicProbability
+    ///   4. speakerChangeProxyScore
+    ///   5. musicBedChangeScore
+    ///   6. musicBedOnsetScore
+    ///   7. musicBedOffsetScore
+    ///   8. pauseProbability
+    ///
+    /// Stats per stream (all bounded non-negative):
+    ///   1. mean
+    ///   2. max
+    ///   3. min
+    ///   4. population standard deviation
+    ///   5. sum / N (scaled energy, redundant with mean for fixed-N inputs
+    ///      but robust against short vs long span length)
+    ///   6. mean of top-3 values (p90-ish)
+    ///   7. mean of bottom-3 values (p10-ish)
+    ///   8. active-fraction (share of windows with value > 0.5)
+    ///
+    /// The resulting 64-float vector is passed to `init(values:)`, which
+    /// L2-normalizes and zero-guards in the usual way. Zero/empty input
+    /// returns a zero fingerprint (filtered out by the catalog insert path).
+    static func fromFeatureWindows(_ windows: [FeatureWindow]) -> AcousticFingerprint {
+        guard !windows.isEmpty else {
+            return AcousticFingerprint(values: [])
+        }
+
+        let streams: [[Double]] = [
+            windows.map { $0.rms },
+            windows.map { $0.spectralFlux },
+            windows.map { $0.musicProbability },
+            windows.map { $0.speakerChangeProxyScore },
+            windows.map { $0.musicBedChangeScore },
+            windows.map { $0.musicBedOnsetScore },
+            windows.map { $0.musicBedOffsetScore },
+            windows.map { $0.pauseProbability }
+        ]
+
+        var vector: [Float] = []
+        vector.reserveCapacity(64)
+
+        for stream in streams {
+            guard !stream.isEmpty else {
+                for _ in 0..<8 { vector.append(0) }
+                continue
+            }
+
+            let n = Double(stream.count)
+            let sum = stream.reduce(0, +)
+            let mean = sum / n
+            let maxV = stream.max() ?? 0
+            let minV = stream.min() ?? 0
+
+            var variance: Double = 0
+            for v in stream {
+                let d = v - mean
+                variance += d * d
+            }
+            variance /= n
+            let stddev = variance > 0 ? variance.squareRoot() : 0
+
+            let energyScaled = sum / n
+
+            let sorted = stream.sorted(by: >)   // descending
+            let topK = min(3, sorted.count)
+            var topMean: Double = 0
+            for i in 0..<topK { topMean += sorted[i] }
+            topMean /= Double(topK)
+
+            let ascCount = min(3, sorted.count)
+            var bottomMean: Double = 0
+            for i in (sorted.count - ascCount)..<sorted.count { bottomMean += sorted[i] }
+            bottomMean /= Double(ascCount)
+
+            let activeFraction = Double(stream.filter { $0 > 0.5 }.count) / n
+
+            // Clamp to non-negative — cosine-similarity on our store assumes
+            // non-negative fingerprints, and all feature streams are already
+            // bounded in `[0, 1]` (or `[0, ∞)` for rms). A rogue negative
+            // would be a bug elsewhere.
+            vector.append(Float(max(0, mean)))
+            vector.append(Float(max(0, maxV)))
+            vector.append(Float(max(0, minV)))
+            vector.append(Float(max(0, stddev)))
+            vector.append(Float(max(0, energyScaled)))
+            vector.append(Float(max(0, topMean)))
+            vector.append(Float(max(0, bottomMean)))
+            vector.append(Float(max(0, activeFraction)))
+        }
+
+        return AcousticFingerprint(values: vector)
+    }
 }
 
 // MARK: - Debug description
