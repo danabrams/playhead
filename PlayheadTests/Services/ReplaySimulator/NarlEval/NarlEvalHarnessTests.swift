@@ -212,6 +212,63 @@ struct NarlEvalHarnessTests {
         #expect(result != "DoaC", "unknown host must not resolve to DoaC")
     }
 
+    @Test("showName falls back to scheme when host is present-but-unknown")
+    func showNameFallsBackToSchemeWhenHostUnknown() {
+        // Regression guard for a latent miss: a URL like
+        // `simplecast://feeds.example.com/x` parses with BOTH a host
+        // (feeds.example.com — unknown) and a scheme (simplecast —
+        // known). The heuristic must try scheme as a second path when
+        // host-lookup misses, not short-circuit on host presence.
+        let trace = Self.makeTrace(
+            episodeId: "ep",
+            podcastId: "simplecast://feeds.example.com/x"
+        )
+        #expect(Self.showName(for: trace) == "Conan")
+    }
+
+    @Test("showName buckets mixed-case host as its lowercase equivalent")
+    func showNameBucketsMixedCaseHostAsLowercase() {
+        // Pins the host-lowercasing behavior so a future change to the
+        // canonicalization can't silently regress the host match.
+        let trace = Self.makeTrace(
+            episodeId: "ep",
+            podcastId: "HTTPS://FEEDS.SIMPLECAST.COM/x"
+        )
+        #expect(Self.showName(for: trace) == "Conan")
+    }
+
+    @Test("showName tolerates identifier starting with `::` (empty core)")
+    func showNameToleratesEmptyCoreBeforeDoubleColon() {
+        // Edge case: the `::` stripping yields an empty core. URL
+        // parsing of "" is ambiguous across platforms — the heuristic
+        // must not crash and must fall back to title-substring / raw-id.
+        // No title signal → returns the raw podcastId (graceful).
+        let trace = Self.makeTrace(
+            episodeId: "ep",
+            podcastId: "::abc"
+        )
+        let result = Self.showName(for: trace)
+        #expect(result != "Conan", "empty-core identifier must not resolve to Conan")
+        #expect(result != "DoaC", "empty-core identifier must not resolve to DoaC")
+    }
+
+    @Test("showName strips only the first `::` separator (first wins)")
+    func showNameStripsOnlyFirstDoubleColonSeparator() {
+        // Pin behavior: stripping yields core = "a" (not "a::b"). Since
+        // "a" has no host / scheme / title signal, showName degrades to
+        // the raw podcastId — proving the split happened at the FIRST
+        // `::`, not the last. If the stripping ever changed to
+        // last-wins, a Conan/DoaC shaped core could leak through and
+        // this test would catch it.
+        let trace = Self.makeTrace(
+            episodeId: "ep",
+            podcastId: "a::b::c"
+        )
+        let result = Self.showName(for: trace)
+        #expect(result == "a::b::c",
+                "unknown identifier must degrade to raw podcastId, not a known show")
+    }
+
     @Test("Harness runs both configs and writes a report")
     func runHarness() throws {
         let (report, outputDir) = try Self.runHarnessCollectingReport()
