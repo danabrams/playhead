@@ -256,6 +256,17 @@ struct NarlEvalReport: Sendable, Codable {
     /// written before this field existed decode with `nil`.
     let terminalReasonBuckets: [NarlReportTerminalReasonRollup]?
 
+    /// gtt9.15: coverage-aware 3-bucket classifier rollup. One row per
+    /// `NarlPipelineCoverageBucket` (always 3 rows in canonical order:
+    /// scoring → pipeline → unknown) with a per-bucket episode count.
+    /// Coarser than `terminalReasonBuckets` — answers the headline
+    /// 2026-04-24 Finding 1 question (full-coverage miss vs
+    /// partial-coverage miss) at a glance.
+    ///
+    /// Optional for Codable back-compat: older `report.json` artifacts
+    /// written before this field existed decode with `nil`.
+    let pipelineCoverageBuckets: [NarlPipelineCoverageBucketRollup]?
+
     init(
         schemaVersion: Int,
         generatedAt: Date,
@@ -264,7 +275,8 @@ struct NarlEvalReport: Sendable, Codable {
         rollups: [NarlReportRollup],
         episodes: [NarlReportEpisodeEntry],
         notes: [String],
-        terminalReasonBuckets: [NarlReportTerminalReasonRollup]? = nil
+        terminalReasonBuckets: [NarlReportTerminalReasonRollup]? = nil,
+        pipelineCoverageBuckets: [NarlPipelineCoverageBucketRollup]? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.generatedAt = generatedAt
@@ -274,17 +286,20 @@ struct NarlEvalReport: Sendable, Codable {
         self.episodes = episodes
         self.notes = notes
         self.terminalReasonBuckets = terminalReasonBuckets
+        self.pipelineCoverageBuckets = pipelineCoverageBuckets
     }
 
     /// Codable default handling: older `report.json` artifacts don't
-    /// carry `terminalReasonBuckets`. Decode to `nil`. Encode uses
-    /// `encodeIfPresent` so a nil value round-trips as an absent key
-    /// rather than `"terminalReasonBuckets": null` — keeps the wire
-    /// format identical to the pre-stratification shape when the
+    /// carry `terminalReasonBuckets` / `pipelineCoverageBuckets`.
+    /// Decode to `nil`. Encode uses `encodeIfPresent` so a nil value
+    /// round-trips as an absent key rather than `"...": null` — keeps
+    /// the wire format identical to the pre-field shape when the
     /// aggregator is opted out.
     enum CodingKeys: String, CodingKey {
         case schemaVersion, generatedAt, runId, iouThresholds
-        case rollups, episodes, notes, terminalReasonBuckets
+        case rollups, episodes, notes
+        case terminalReasonBuckets
+        case pipelineCoverageBuckets
     }
 
     init(from decoder: Decoder) throws {
@@ -300,6 +315,10 @@ struct NarlEvalReport: Sendable, Codable {
             terminalReasonBuckets: try c.decodeIfPresent(
                 [NarlReportTerminalReasonRollup].self,
                 forKey: .terminalReasonBuckets
+            ),
+            pipelineCoverageBuckets: try c.decodeIfPresent(
+                [NarlPipelineCoverageBucketRollup].self,
+                forKey: .pipelineCoverageBuckets
             )
         )
     }
@@ -314,6 +333,7 @@ struct NarlEvalReport: Sendable, Codable {
         try c.encode(episodes, forKey: .episodes)
         try c.encode(notes, forKey: .notes)
         try c.encodeIfPresent(terminalReasonBuckets, forKey: .terminalReasonBuckets)
+        try c.encodeIfPresent(pipelineCoverageBuckets, forKey: .pipelineCoverageBuckets)
     }
 }
 
@@ -573,6 +593,131 @@ struct NarlReportTerminalReasonRollup: Sendable, Codable, Equatable {
     }
 }
 
+// MARK: - Pipeline-coverage bucketing (gtt9.15)
+
+/// Coarser 3-bucket classifier on top of the gtt9.8 lifecycle fields.
+/// Whereas `NarlTerminalReasonBucket` keys on the canonical 6 SessionState
+/// rawValues (useful but operator-noisy), this bucket answers a single
+/// product-relevant question:
+///
+///   "When the harness scores a miss, is it a scoring deficit or a
+///    coverage deficit?"
+///
+/// Concretely:
+///   - `.scoringLimited` — the pipeline ran transcript coverage to
+///     completion (terminalReason mentions "full coverage" OR
+///     fastTranscriptCoverageEndTime ≥ durationSec * 0.95). Any FN on
+///     this asset is a classifier / promotion / fusion problem, NOT a
+///     coverage problem.
+///   - `.pipelineCoverageLimited` — the pipeline stopped before the
+///     episode end (transcript-coverage-end < threshold) OR
+///     terminalReason indicates a coverage failure. Misses on this
+///     asset are unattributable to scoring quality.
+///   - `.unknown` — lifecycle fields are absent (pre-gtt9.8 fixtures or
+///     a degenerate 0/nil duration). Reported but never silently
+///     dropped — most 2026-04-22/-23 fixtures land here.
+///
+/// Why a separate enum from `NarlTerminalReasonBucket`: the per-state
+/// stratification answers "what state did the asset terminate in?";
+/// this 3-bucket classifier answers the headline cohort split for
+/// the 2026-04-24 Finding 1 question (71F0C2AE full-coverage missed
+/// vs 34C7E7CF partial-coverage missed). Both shapes coexist in the
+/// report — they're complementary, not redundant.
+enum NarlPipelineCoverageBucket: String, Sendable, Codable, CaseIterable {
+    case scoringLimited = "scoring-limited"
+    case pipelineCoverageLimited = "pipeline-coverage-limited"
+    case unknown
+
+    /// Coverage-end ratio at which we treat the pipeline as having run
+    /// to completion. The 0.95 floor mirrors the gtt9.15 spec — leaves
+    /// a margin for the few seconds of trailing silence that production
+    /// commonly truncates from the analysis window.
+    static let scoringLimitedRatioThreshold: Double = 0.95
+
+    /// Substrings in `terminalReason` that signal a pipeline coverage
+    /// failure. Matched case-sensitively to mirror the production
+    /// formatter (see `Playhead/Services/AnalysisCoordinator/AnalysisCoordinator.swift`
+    /// for the producer of these strings).
+    static let coverageFailureReasonNeedles: [String] = [
+        "transcript coverage ",
+        "feature coverage ",
+        "coverage failure",
+    ]
+
+    /// Substring in `terminalReason` that signals full coverage. The
+    /// production formatter writes
+    /// `"full coverage: transcript X, feature Y"` on the
+    /// completeFull terminal row.
+    static let fullCoverageReasonNeedle: String = "full coverage"
+
+    /// Classify a single trace. Order of evaluation:
+    ///   1. terminalReason contains "full coverage"           → scoring
+    ///   2. terminalReason contains a coverage-failure needle → pipeline
+    ///   3. ratio = fastTranscriptCoverageEndTime / durationSec
+    ///        a. ratio ≥ 0.95                                 → scoring
+    ///        b. 0 < ratio                                    → pipeline
+    ///   4. otherwise (no usable signal)                      → unknown
+    static func classify(_ trace: FrozenTrace) -> NarlPipelineCoverageBucket {
+        if let reason = trace.terminalReason {
+            if reason.contains(fullCoverageReasonNeedle) {
+                return .scoringLimited
+            }
+            if coverageFailureReasonNeedles.contains(where: { reason.contains($0) }) {
+                return .pipelineCoverageLimited
+            }
+        }
+        // Need both duration and coverage-end to compute a ratio. A 0
+        // or negative duration is degenerate — bucket as unknown rather
+        // than divide-by-zero into a NaN ratio. (A nil coverage-end with
+        // a positive duration falls through to the same bucket: we
+        // can't honestly call it scoring or pipeline-limited without
+        // either a reason hit or a coverage measurement.)
+        guard let duration = trace.durationSec, duration > 0,
+              let coverageEnd = trace.fastTranscriptCoverageEndTime
+        else {
+            return .unknown
+        }
+        let ratio = coverageEnd / duration
+        if ratio >= scoringLimitedRatioThreshold {
+            return .scoringLimited
+        }
+        return .pipelineCoverageLimited
+    }
+
+    /// Tally traces into the canonical 3-bucket ordering. Always
+    /// returns 3 entries (zero-count buckets included) so report
+    /// consumers can rely on a stable shape.
+    static func countsPerBucket(traces: [FrozenTrace]) -> [NarlPipelineCoverageBucketRollup] {
+        var counts: [NarlPipelineCoverageBucket: Int] = [
+            .scoringLimited: 0,
+            .pipelineCoverageLimited: 0,
+            .unknown: 0,
+        ]
+        for trace in traces {
+            counts[classify(trace), default: 0] += 1
+        }
+        // Canonical order: scoring → pipeline → unknown. The case order
+        // in `allCases` matches this ordering, but spell it out
+        // explicitly so a future re-order of the enum can't silently
+        // scramble the output.
+        return [
+            NarlPipelineCoverageBucketRollup(bucket: .scoringLimited,
+                                             count: counts[.scoringLimited] ?? 0),
+            NarlPipelineCoverageBucketRollup(bucket: .pipelineCoverageLimited,
+                                             count: counts[.pipelineCoverageLimited] ?? 0),
+            NarlPipelineCoverageBucketRollup(bucket: .unknown,
+                                             count: counts[.unknown] ?? 0),
+        ]
+    }
+}
+
+/// Per-bucket count rollup row. Tiny by design — the bucket carries the
+/// classification semantics; this struct just pairs it with a count.
+struct NarlPipelineCoverageBucketRollup: Sendable, Codable, Equatable {
+    let bucket: NarlPipelineCoverageBucket
+    let count: Int
+}
+
 // MARK: - Trend log row
 
 /// One row in `.eval-out/narl/trend.jsonl`. We emit many per run (one per
@@ -690,6 +835,31 @@ enum NarlEvalRenderer {
             out += "\n"
         } else {
             out += "_No `terminalReasonBuckets` in this run (pre-stratification report or empty corpus)._\n\n"
+        }
+
+        // gtt9.15: coverage-aware 3-bucket classification. Coarser
+        // than the per-state stratification above — answers the
+        // headline 2026-04-24 Finding 1 question (full-coverage miss
+        // vs partial-coverage miss) at a glance. Always renders the
+        // section header so readers know the field exists; falls back
+        // to an explanatory note when the report predates gtt9.15.
+        out += "## Pipeline-coverage classification\n\n"
+        out += "Bucketed by `terminalReason` + `fastTranscriptCoverageEndTime` "
+        out += "/ `durationSec` ratio (≥ 0.95 → scoring-limited). "
+        out += "`scoring-limited` means the pipeline ran transcript coverage "
+        out += "to completion — any miss is a classifier/promotion/fusion "
+        out += "issue, not a coverage issue. `pipeline-coverage-limited` means "
+        out += "the asset stopped before episode end. `unknown` covers pre-9.8 "
+        out += "captures with no lifecycle telemetry.\n\n"
+        if let coverageBuckets = report.pipelineCoverageBuckets, !coverageBuckets.isEmpty {
+            out += "| Bucket | Episodes |\n"
+            out += "|---|---|\n"
+            for b in coverageBuckets {
+                out += "| \(b.bucket.rawValue) | \(b.count) |\n"
+            }
+            out += "\n"
+        } else {
+            out += "_No `pipelineCoverageBuckets` in this run (pre-gtt9.15 report or empty corpus)._\n\n"
         }
 
         if !excluded.isEmpty {

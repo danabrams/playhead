@@ -819,6 +819,14 @@ struct NarlEvalHarnessTests {
             pipelinesByEpisodeId: pipelinesByEpisodeId
         )
 
+        // gtt9.15: coverage-aware 3-bucket classification rollup. One
+        // count per (scoringLimited, pipelineCoverageLimited, unknown).
+        // Always emitted (3 entries even when corpus is empty) so the
+        // wire shape stays stable across runs.
+        let pipelineCoverageBuckets = NarlPipelineCoverageBucket.countsPerBucket(
+            traces: traces
+        )
+
         let report = NarlEvalReport(
             schemaVersion: NarlEvalReportSchema.version,
             generatedAt: Date(),
@@ -827,7 +835,8 @@ struct NarlEvalHarnessTests {
             rollups: allRollups,
             episodes: episodeEntries,
             notes: notes,
-            terminalReasonBuckets: terminalReasonBuckets
+            terminalReasonBuckets: terminalReasonBuckets,
+            pipelineCoverageBuckets: pipelineCoverageBuckets
         )
 
         // Write the artifacts.
