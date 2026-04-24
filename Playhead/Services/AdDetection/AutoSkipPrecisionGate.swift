@@ -188,6 +188,13 @@ struct AutoSkipPrecisionGateConfig: Sendable, Equatable {
     /// or last 10% of the episode."
     let slotFraction: Double
 
+    /// playhead-gtt9.13: Minimum `catalogMatchSimilarity` to fire
+    /// `SafetySignal.catalogMatch`. 0.80 matches the default floor used
+    /// by `AdCatalogStore.matches(...)` but is configurable here so
+    /// calibration (gtt9.3) can tune gate sensitivity independently of
+    /// the store's retrieval threshold.
+    let catalogMatchSignalFloor: Float
+
     /// Canonical defaults. Not tuned on real data — gtt9.3 will
     /// calibrate.
     static let `default` = AutoSkipPrecisionGateConfig(
@@ -195,8 +202,25 @@ struct AutoSkipPrecisionGateConfig: Sendable, Equatable {
         autoSkipThreshold: 0.55,
         typicalAdDuration: GlobalPriorDefaults.standard.typicalAdDuration,
         minMusicBedCoverage: 0.20,
-        slotFraction: 0.10
+        slotFraction: 0.10,
+        catalogMatchSignalFloor: 0.80
     )
+
+    init(
+        uiCandidateThreshold: Double,
+        autoSkipThreshold: Double,
+        typicalAdDuration: ClosedRange<TimeInterval>,
+        minMusicBedCoverage: Double,
+        slotFraction: Double,
+        catalogMatchSignalFloor: Float = 0.80
+    ) {
+        self.uiCandidateThreshold = uiCandidateThreshold
+        self.autoSkipThreshold = autoSkipThreshold
+        self.typicalAdDuration = typicalAdDuration
+        self.minMusicBedCoverage = minMusicBedCoverage
+        self.slotFraction = slotFraction
+        self.catalogMatchSignalFloor = catalogMatchSignalFloor
+    }
 }
 
 // MARK: - Inputs
@@ -224,6 +248,32 @@ struct AutoSkipPrecisionGateInput: Sendable {
     /// `UserCorrectionStore.correctionBoostFactor(for:)` for this asset.
     /// Pass 1.0 to disable the user-correction signal.
     let userCorrectionBoostFactor: Double
+    /// playhead-gtt9.13: Top catalog-match similarity for this segment
+    /// from `AdCatalogStore`, in `[0, 1]`. Pass 0 when no catalog match
+    /// (or when the catalog is unavailable) — that disables the
+    /// `catalogMatch` signal. Any value ≥
+    /// `catalogMatchSignalFloor` fires `SafetySignal.catalogMatch`.
+    let catalogMatchSimilarity: Float
+
+    init(
+        segmentStartTime: Double,
+        segmentEndTime: Double,
+        segmentScore: Double,
+        episodeDuration: Double,
+        overlappingFeatureWindows: [FeatureWindow],
+        lexicalCategories: Set<LexicalPatternCategory>,
+        userCorrectionBoostFactor: Double,
+        catalogMatchSimilarity: Float = 0
+    ) {
+        self.segmentStartTime = segmentStartTime
+        self.segmentEndTime = segmentEndTime
+        self.segmentScore = segmentScore
+        self.episodeDuration = episodeDuration
+        self.overlappingFeatureWindows = overlappingFeatureWindows
+        self.lexicalCategories = lexicalCategories
+        self.userCorrectionBoostFactor = userCorrectionBoostFactor
+        self.catalogMatchSimilarity = catalogMatchSimilarity
+    }
 
     var segmentDuration: TimeInterval {
         max(0, segmentEndTime - segmentStartTime)
@@ -303,7 +353,10 @@ enum AutoSkipPrecisionGate {
             fired.insert(.userConfirmedLocalPattern)
         }
 
-        // `catalogMatch` is reserved for gtt9.13; never fires here.
+        // playhead-gtt9.13: catalog-match signal.
+        if input.catalogMatchSimilarity >= config.catalogMatchSignalFloor {
+            fired.insert(.catalogMatch)
+        }
 
         return fired
     }
