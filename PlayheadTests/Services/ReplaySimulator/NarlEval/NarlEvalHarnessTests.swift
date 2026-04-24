@@ -584,6 +584,15 @@ struct NarlEvalHarnessTests {
 
         var episodeEntries: [NarlReportEpisodeEntry] = []
         var perRollup: [String: [(entry: NarlReportEpisodeEntry, pred: [NarlTimeRange], gt: [NarlTimeRange])]] = [:]
+        // gtt9.8 follow-up: map "<episodeId>|<config>" → list of (pred, gt)
+        // so the terminal-reason stratification aggregator can re-pool the
+        // same per-episode windows. A list (not a single value) handles the
+        // case where two fixture date-dirs carry the same episodeId — e.g.
+        // the Conan 117-min asset captured on both 2026-04-23 and
+        // 2026-04-24. Keeping this map distinct from `perRollup` (which is
+        // keyed by show or ALL) lets the new bucket aggregator walk
+        // `episodeEntries` directly without touching the show rollup paths.
+        var pipelinesByEpisodeId: [String: [(pred: [NarlTimeRange], gt: [NarlTimeRange])]] = [:]
         // Per-rollup exclusion counter (HIGH-5). Episodes that triggered a
         // whole-asset veto are tallied here under BOTH the per-show key
         // (e.g. "DoaC|default") and the "ALL|default" aggregate, so the
@@ -718,6 +727,12 @@ struct NarlEvalHarnessTests {
                 let allKey = "ALL|\(configName)"
                 perRollup[showKey, default: []].append((entry, pred.windows, gtResult.adWindows))
                 perRollup[allKey, default: []].append((entry, pred.windows, gtResult.adWindows))
+                // Record the (pred, gt) pair for the terminal-reason
+                // aggregator. Append rather than overwrite — duplicate
+                // episodeIds across date-dirs each contribute a pair.
+                let pipeKey = "\(trace.episodeId)|\(configName)"
+                pipelinesByEpisodeId[pipeKey, default: []]
+                    .append((pred: pred.windows, gt: gtResult.adWindows))
                 _ = fixtureIndex
             }
         }
@@ -793,6 +808,17 @@ struct NarlEvalHarnessTests {
             return a.show < b.show
         }
 
+        // gtt9.8 follow-up: build the terminal-reason stratification rollup.
+        // Always emit the field (empty array when corpus is empty) so
+        // downstream readers can distinguish "no data" from "decoded from
+        // pre-stratification JSON" — the latter round-trips as nil via
+        // NarlEvalReport's decodeIfPresent path.
+        let terminalReasonBuckets = NarlReportTerminalReasonRollup.stratify(
+            traces: traces,
+            entries: episodeEntries,
+            pipelinesByEpisodeId: pipelinesByEpisodeId
+        )
+
         let report = NarlEvalReport(
             schemaVersion: NarlEvalReportSchema.version,
             generatedAt: Date(),
@@ -800,7 +826,8 @@ struct NarlEvalHarnessTests {
             iouThresholds: [0.3, 0.5, 0.7],
             rollups: allRollups,
             episodes: episodeEntries,
-            notes: notes
+            notes: notes,
+            terminalReasonBuckets: terminalReasonBuckets
         )
 
         // Write the artifacts.

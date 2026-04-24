@@ -30,6 +30,7 @@
 		08A58D27487E849399CC695B /* BackfillEvidenceFusionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40D43FFE3E323CC58F4AFE3B /* BackfillEvidenceFusionTests.swift */; };
 		08D7241A8987BB4BD1E143E2 /* CorpusLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10AE76A7837166F6EB25404 /* CorpusLoader.swift */; };
 		08EB034A48DD465CD1BC2528 /* ReplaySimulatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 706B2C65A529A7841685AB7E /* ReplaySimulatorTests.swift */; };
+		0914EFF6CA903FC5EECC48AE /* NarlEvalTerminalReasonStratifiedTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C4512B6D758AAE51F2FD8F7 /* NarlEvalTerminalReasonStratifiedTests.swift */; };
 		09528F9D09719704FF57CA8E /* TranscriptQualityEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FFE1D6297B023C8B12CC94E /* TranscriptQualityEstimator.swift */; };
 		0A9A15459F9A045064D77DD0 /* ShowTraitProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21E319F52631904CBCA63F0B /* ShowTraitProfile.swift */; };
 		0B04861A42DCCDDEB5DC7FF3 /* InterruptionMocks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6665EE41820179B7BD79B186 /* InterruptionMocks.swift */; };
@@ -785,6 +786,7 @@
 		5AFBAB349BF373CCBC27D193 /* DecodedSpanPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecodedSpanPersistenceTests.swift; sourceTree = "<group>"; };
 		5B1789A6210334EF0CFD7263 /* EvidenceLedgerEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvidenceLedgerEntry.swift; sourceTree = "<group>"; };
 		5B5D16BDFE1C900A9D44EF1C /* fixtures-rotation-seed.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "fixtures-rotation-seed.txt"; sourceTree = "<group>"; };
+		5C4512B6D758AAE51F2FD8F7 /* NarlEvalTerminalReasonStratifiedTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NarlEvalTerminalReasonStratifiedTests.swift; sourceTree = "<group>"; };
 		5C48701F391C6C10FE3B4E65 /* SkipPolicyMatrix.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkipPolicyMatrix.swift; sourceTree = "<group>"; };
 		5C96548F57B9AC14A52B040A /* MusicBedClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicBedClassifier.swift; sourceTree = "<group>"; };
 		5CB9CDFA6219B4F278DE5B11 /* MetadataLexiconInjector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataLexiconInjector.swift; sourceTree = "<group>"; };
@@ -1461,6 +1463,7 @@
 				18BF608D6168E53F1DF7A685 /* NarlEvalMetrics.swift */,
 				44F53B39FC47A2BE39733282 /* NarlEvalMetricsTests.swift */,
 				12DAE78E188C8E68A62918D8 /* NarlEvalReport.swift */,
+				5C4512B6D758AAE51F2FD8F7 /* NarlEvalTerminalReasonStratifiedTests.swift */,
 				3709F3D7FB806032EA897BA0 /* NarlGroundTruth.swift */,
 				BE9A5F8FC628987DE19E2CAE /* NarlGroundTruthTests.swift */,
 				85F12F12E30159A0FDC9D5E9 /* NarlReplayPredictor.swift */,
@@ -2924,6 +2927,7 @@
 				6CA335CB271BCB29CD0B4BC3 /* NarlEvalMetrics.swift in Sources */,
 				2C2E6F50CBE3BE479128C0B5 /* NarlEvalMetricsTests.swift in Sources */,
 				B71790B7FC7949F10535F787 /* NarlEvalReport.swift in Sources */,
+				0914EFF6CA903FC5EECC48AE /* NarlEvalTerminalReasonStratifiedTests.swift in Sources */,
 				B75729BE1F16347E07C18628 /* NarlGroundTruth.swift in Sources */,
 				2A5756ED9AD573EB17515D57 /* NarlGroundTruthTests.swift in Sources */,
 				1F1A500D74F603A6E0CFA2FC /* NarlReplayPredictor.swift in Sources */,

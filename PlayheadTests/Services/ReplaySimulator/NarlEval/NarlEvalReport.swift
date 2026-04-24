@@ -243,6 +243,334 @@ struct NarlEvalReport: Sendable, Codable {
     let rollups: [NarlReportRollup]
     let episodes: [NarlReportEpisodeEntry]
     let notes: [String]
+    /// gtt9.8 follow-up: per-`analysisState` stratification. The bundled
+    /// ALL/Conan/DoaC rollups hide a real signal — episodes that
+    /// completed transcription fully (`completeFull`) should have
+    /// systematically different detection quality than episodes that
+    /// stopped early. Bucketing by `trace.analysisState` lets the
+    /// downstream reader compare "pre-9.1.1 partial captures" vs
+    /// "post-9.1.1 full captures" without them diluting each other in
+    /// the aggregate.
+    ///
+    /// Optional for Codable back-compat: older `report.json` artifacts
+    /// written before this field existed decode with `nil`.
+    let terminalReasonBuckets: [NarlReportTerminalReasonRollup]?
+
+    init(
+        schemaVersion: Int,
+        generatedAt: Date,
+        runId: String,
+        iouThresholds: [Double],
+        rollups: [NarlReportRollup],
+        episodes: [NarlReportEpisodeEntry],
+        notes: [String],
+        terminalReasonBuckets: [NarlReportTerminalReasonRollup]? = nil
+    ) {
+        self.schemaVersion = schemaVersion
+        self.generatedAt = generatedAt
+        self.runId = runId
+        self.iouThresholds = iouThresholds
+        self.rollups = rollups
+        self.episodes = episodes
+        self.notes = notes
+        self.terminalReasonBuckets = terminalReasonBuckets
+    }
+
+    /// Codable default handling: older `report.json` artifacts don't
+    /// carry `terminalReasonBuckets`. Decode to `nil`. Encode uses
+    /// `encodeIfPresent` so a nil value round-trips as an absent key
+    /// rather than `"terminalReasonBuckets": null` — keeps the wire
+    /// format identical to the pre-stratification shape when the
+    /// aggregator is opted out.
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, generatedAt, runId, iouThresholds
+        case rollups, episodes, notes, terminalReasonBuckets
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            schemaVersion: try c.decode(Int.self, forKey: .schemaVersion),
+            generatedAt: try c.decode(Date.self, forKey: .generatedAt),
+            runId: try c.decode(String.self, forKey: .runId),
+            iouThresholds: try c.decode([Double].self, forKey: .iouThresholds),
+            rollups: try c.decode([NarlReportRollup].self, forKey: .rollups),
+            episodes: try c.decode([NarlReportEpisodeEntry].self, forKey: .episodes),
+            notes: try c.decode([String].self, forKey: .notes),
+            terminalReasonBuckets: try c.decodeIfPresent(
+                [NarlReportTerminalReasonRollup].self,
+                forKey: .terminalReasonBuckets
+            )
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(schemaVersion, forKey: .schemaVersion)
+        try c.encode(generatedAt, forKey: .generatedAt)
+        try c.encode(runId, forKey: .runId)
+        try c.encode(iouThresholds, forKey: .iouThresholds)
+        try c.encode(rollups, forKey: .rollups)
+        try c.encode(episodes, forKey: .episodes)
+        try c.encode(notes, forKey: .notes)
+        try c.encodeIfPresent(terminalReasonBuckets, forKey: .terminalReasonBuckets)
+    }
+}
+
+// MARK: - Terminal-reason stratification (gtt9.8 follow-up)
+
+/// Bucket key for the new terminalReason stratification. Values mirror
+/// the six canonical `SessionState` terminal rawValues plus an
+/// `.unknown` catch-all covering pre-9.8 captures (where
+/// `trace.analysisState` is nil) and any non-terminal state that leaked
+/// into a FrozenTrace (e.g. a capture whose asset was still in
+/// `backfill` / `spooling` at snapshot time).
+///
+/// Rationale: `terminalReason` in the lifecycle log is prose
+/// ("full coverage: transcript 1.000, feature 1.000") — useful for
+/// humans but unstable as a bucket key. `analysisState` is the
+/// canonical, code-grade SessionState.rawValue emitted on the same row
+/// and is what the harness's `adjustPipelineFailureFlag` already keys
+/// on. We name the field/bucket set "terminalReason" to match how the
+/// user describes the cohort ("stratify by why the pipeline ended"),
+/// while the classifier's underlying key is `analysisState`.
+enum NarlTerminalReasonBucket: String, Sendable, Codable, CaseIterable {
+    case completeFull
+    case completeFeatureOnly
+    case completeTranscriptPartial
+    case cancelledBudget
+    case failedTranscript
+    case failedFeature
+    /// Catch-all for (a) pre-9.8 captures whose FrozenTrace carries
+    /// `analysisState == nil`, and (b) any non-canonical or non-terminal
+    /// state (backfill, spooling, the deprecated monolithic `.complete`,
+    /// etc.). Crucially this bucket is NOT silently dropped — most
+    /// 2026-04-24 fixtures currently fall into it.
+    case unknown
+
+    /// Resolve a trace to its bucket. The only inputs are
+    /// `trace.analysisState`; `trace.terminalReason` (the human-readable
+    /// string) is deliberately NOT consulted — it's descriptive, not
+    /// categorical, and a partial-coverage terminal can carry a nil
+    /// `terminalReason` even when `analysisState` is set (the 34C7E7CF
+    /// stall in the 2026-04-23 lifecycle log is the canonical example).
+    static func classify(_ trace: FrozenTrace) -> NarlTerminalReasonBucket {
+        guard let state = trace.analysisState else { return .unknown }
+        return NarlTerminalReasonBucket(rawValue: state) ?? .unknown
+    }
+
+    /// Lifecycle-ordered sort index for report rendering. Buckets read
+    /// naturally in pipeline-exit-severity order: fully-successful
+    /// outcomes first, partial outcomes next, failures last, unknown
+    /// as the catch-all tail. Alphabetical rawValue ordering would
+    /// interleave "cancelledBudget" ahead of "completeFull" — visually
+    /// wrong for a stratified dashboard.
+    var sortOrder: Int {
+        switch self {
+        case .completeFull: return 0
+        case .completeFeatureOnly: return 1
+        case .completeTranscriptPartial: return 2
+        case .cancelledBudget: return 3
+        case .failedTranscript: return 4
+        case .failedFeature: return 5
+        case .unknown: return 6
+        }
+    }
+}
+
+/// A (bucket × config) rollup. Shape mirrors `NarlReportRollup` but
+/// keyed on `bucket` rather than `show`, and carries only the metric
+/// families that are meaningful at this cohort resolution. Coverage-
+/// derived AutoSkip Prec/Recall are hoisted into first-class fields
+/// (rather than nested under `coverageMetrics`) so a downstream `jq`
+/// reader can pull them without needing to know the aggregation rule.
+struct NarlReportTerminalReasonRollup: Sendable, Codable, Equatable {
+    /// The canonical bucket key.
+    let bucket: NarlTerminalReasonBucket
+    /// `"default"` | `"allEnabled"` — one rollup row per bucket × config.
+    let config: String
+    /// Number of non-excluded episode entries in this bucket.
+    let episodeCount: Int
+    /// Number of excluded entries (whole-asset veto) in this bucket.
+    let excludedEpisodeCount: Int
+    /// Window-level metrics at each τ in {0.3, 0.5, 0.7}. Same semantics
+    /// as `NarlReportRollup.windowMetrics`: corpus-level pool of TP/FP
+    /// across all episodes in the bucket.
+    let windowMetrics: [NarlWindowMetricsAtThreshold]
+    /// Second-level (Sec-F1) metrics, same corpus-level pool.
+    let secondLevel: NarlSecondLevelMetrics
+    /// Corpus-pooled AutoSkip precision across non-excluded episodes
+    /// in the bucket: sum(TP seconds) / sum(TP + FP seconds). 0.0 when
+    /// the bucket has no predicted auto-skip seconds. The headline
+    /// user-facing number per the 2026-04-24 findings §5. (Previously
+    /// a per-episode mean; pooled to match the show-rollup convention
+    /// where small-bucket means diverge materially from the true
+    /// corpus number.)
+    let autoSkipPrecision: Double
+    /// Corpus-pooled AutoSkip recall: sum(TP seconds) / sum(TP + FN
+    /// seconds). 0.0 when the bucket has no GT seconds.
+    let autoSkipRecall: Double
+
+    /// Stratify a set of episode entries by bucket × config, producing
+    /// one rollup row per non-empty bucket. Empty buckets are elided —
+    /// a zero-episode row would just be noise in the rendered report.
+    ///
+    /// - Parameters:
+    ///   - traces: every FrozenTrace loaded by the harness. Used to
+    ///     resolve `episodeId → analysisState` so the bucket key is
+    ///     derived from lifecycle-log truth, not inferred from the
+    ///     entry.
+    ///   - entries: every `NarlReportEpisodeEntry` emitted by the
+    ///     harness (one per trace × config). Excluded entries are
+    ///     counted under `excludedEpisodeCount` but never folded into
+    ///     the metric aggregation — same rule as `NarlReportRollup`.
+    ///   - pipelinesByEpisodeId: map from `"<episodeId>|<config>"` to
+    ///     the list of (predicted, groundTruth) window pairs for that
+    ///     key. The list handles the case where the same episodeId
+    ///     appears in multiple fixture date-dirs (e.g. the Conan
+    ///     117-min asset captured on both 2026-04-23 and 2026-04-24) —
+    ///     each copy contributes its own (pred, gt) to the bucket
+    ///     pool. The aggregator pools all lists across every episode
+    ///     in the bucket and computes corpus-level metrics — identical
+    ///     rule to `NarlEvalHarnessTests.runHarnessCollectingReport`'s
+    ///     show-rollup loop. Missing keys contribute empty lists.
+    static func stratify(
+        traces: [FrozenTrace],
+        entries: [NarlReportEpisodeEntry],
+        pipelinesByEpisodeId: [String: [(pred: [NarlTimeRange], gt: [NarlTimeRange])]]
+    ) -> [NarlReportTerminalReasonRollup] {
+        // Build episodeId → bucket lookup. The same episodeId can
+        // appear in multiple date-dirs of the fixture tree (e.g. the
+        // Conan 117-min asset `flightcast:01KM20W...` captured on both
+        // 2026-04-23 and 2026-04-24). When the bucket differs across
+        // duplicates, prefer the NON-`.unknown` classification so a
+        // later 9.8 capture doesn't get masked by an earlier pre-9.8
+        // copy of the same episode. Equal buckets collapse into
+        // themselves.
+        var bucketByEpisodeId: [String: NarlTerminalReasonBucket] = [:]
+        for trace in traces {
+            let bucket = NarlTerminalReasonBucket.classify(trace)
+            if let existing = bucketByEpisodeId[trace.episodeId] {
+                if existing == .unknown && bucket != .unknown {
+                    bucketByEpisodeId[trace.episodeId] = bucket
+                }
+            } else {
+                bucketByEpisodeId[trace.episodeId] = bucket
+            }
+        }
+
+        struct Aggregate {
+            var episodeCount: Int = 0
+            var excludedEpisodeCount: Int = 0
+            var allPred: [NarlTimeRange] = []
+            var allGt: [NarlTimeRange] = []
+            // Corpus-pooled AutoSkip counters (seconds-granularity).
+            // TP = predicted auto-skip seconds that overlap GT.
+            // FP = predicted auto-skip seconds outside GT.
+            // FN = GT seconds not covered by predicted auto-skip.
+            // Accumulated per-episode (no cross-episode merge) so the
+            // rollup pools sums the same way the show-rollup pools
+            // allPred/allGt in NarlEvalHarnessTests — precision/recall
+            // divide the sums rather than averaging per-episode rates.
+            var autoSkipTpSec: Double = 0
+            var autoSkipFpSec: Double = 0
+            var autoSkipFnSec: Double = 0
+        }
+
+        // Track which (episodeId, config) pairs we've already consumed
+        // from `pipelinesByEpisodeId`. Each entry pops one (pred, gt)
+        // from the per-key queue in order, so duplicate entries (same
+        // episodeId captured on multiple days) each get their own
+        // pair — no double-counting, no dropped episode.
+        var pipelineCursors: [String: Int] = [:]
+
+        var buckets: [String: Aggregate] = [:]
+        for entry in entries {
+            let bucket = bucketByEpisodeId[entry.episodeId] ?? .unknown
+            let key = "\(bucket.rawValue)|\(entry.config)"
+            var agg = buckets[key] ?? Aggregate()
+            if entry.isExcluded {
+                agg.excludedEpisodeCount += 1
+            } else {
+                agg.episodeCount += 1
+                let pipeKey = "\(entry.episodeId)|\(entry.config)"
+                let cursor = pipelineCursors[pipeKey] ?? 0
+                if let pipes = pipelinesByEpisodeId[pipeKey], cursor < pipes.count {
+                    let pipe = pipes[cursor]
+                    agg.allPred.append(contentsOf: pipe.pred)
+                    agg.allGt.append(contentsOf: pipe.gt)
+                    // Per-episode seconds-granularity TP / FP / FN for
+                    // AutoSkip. Summing these across episodes and
+                    // dividing at emit time corpus-pools precision /
+                    // recall instead of mean-of-ratios — matches the
+                    // show-rollup's allPred/allGt pooling convention.
+                    let predTotal = NarlCoverageMetricsCompute.unionLength(pipe.pred)
+                    let gtTotal = NarlCoverageMetricsCompute.unionLength(pipe.gt)
+                    let tpSec = NarlCoverageMetricsCompute.overlapLength(pipe.pred, pipe.gt)
+                    agg.autoSkipTpSec += tpSec
+                    agg.autoSkipFpSec += max(0, predTotal - tpSec)
+                    agg.autoSkipFnSec += max(0, gtTotal - tpSec)
+                    pipelineCursors[pipeKey] = cursor + 1
+                }
+            }
+            buckets[key] = agg
+        }
+
+        let rollups: [NarlReportTerminalReasonRollup] = buckets
+            .compactMap { key, agg -> NarlReportTerminalReasonRollup? in
+                // Elide buckets with zero episodes AND zero excluded — they
+                // carry no information. A bucket with only excluded entries
+                // still surfaces the excluded count (parity with the show-
+                // rollup "excluded-only" emission in the main harness).
+                if agg.episodeCount == 0 && agg.excludedEpisodeCount == 0 { return nil }
+                let parts = key.split(separator: "|", maxSplits: 1).map(String.init)
+                guard parts.count == 2,
+                      let bucket = NarlTerminalReasonBucket(rawValue: parts[0]) else {
+                    return nil
+                }
+                let winMetrics = [0.3, 0.5, 0.7].map { τ in
+                    NarlWindowMetrics.compute(
+                        predicted: agg.allPred, groundTruth: agg.allGt, threshold: τ
+                    )
+                }
+                let secMetrics = NarlSecondLevel.compute(
+                    predicted: agg.allPred, groundTruth: agg.allGt
+                )
+                // Corpus-pool AutoSkip precision/recall: divide the
+                // summed TP/FP/FN seconds rather than averaging per-
+                // episode rates. Zero-guard falls back to 0.0 — matches
+                // NarlCoverageMetricsCompute.compute's convention at the
+                // per-episode level (empty-denominator → 0, not NaN).
+                let precDenom = agg.autoSkipTpSec + agg.autoSkipFpSec
+                let recDenom = agg.autoSkipTpSec + agg.autoSkipFnSec
+                let autoSkipPrec = precDenom > 0 ? agg.autoSkipTpSec / precDenom : 0.0
+                let autoSkipRec = recDenom > 0 ? agg.autoSkipTpSec / recDenom : 0.0
+                return NarlReportTerminalReasonRollup(
+                    bucket: bucket,
+                    config: parts[1],
+                    episodeCount: agg.episodeCount,
+                    excludedEpisodeCount: agg.excludedEpisodeCount,
+                    windowMetrics: winMetrics,
+                    secondLevel: secMetrics,
+                    autoSkipPrecision: autoSkipPrec,
+                    autoSkipRecall: autoSkipRec
+                )
+            }
+            // Lifecycle-ordered rendering: primary key is the bucket's
+            // sortOrder (completeFull → … → unknown), secondary key is
+            // the config name for stability across runs. Previously the
+            // sort was alphabetical on "<rawValue>|<config>", which put
+            // cancelledBudget ahead of completeFull — visually wrong
+            // for a stratified dashboard read.
+            .sorted { lhs, rhs in
+                if lhs.bucket.sortOrder != rhs.bucket.sortOrder {
+                    return lhs.bucket.sortOrder < rhs.bucket.sortOrder
+                }
+                return lhs.config < rhs.config
+            }
+
+        return rollups
+    }
 }
 
 // MARK: - Trend log row
@@ -333,6 +661,36 @@ enum NarlEvalRenderer {
             out += "| \(r.pipelineCoverageFailureAssetCount) |\n"
         }
         out += "\n"
+
+        // gtt9.8 follow-up: per-analysisState stratification. Emits a
+        // table that matches the show-rollup shape but keyed on
+        // `bucket` rather than `show`. Only present when the report
+        // carries the optional field; older `report.json` artifacts
+        // decode with `terminalReasonBuckets == nil` and this block
+        // renders as the explanatory paragraph without the table.
+        out += "## Terminal-reason stratification\n\n"
+        out += "Bucketed by `trace.analysisState` (lifecycle-log truth). "
+        out += "Episodes that completed transcription fully (`completeFull`) "
+        out += "should be compared to each other, not to partial-coverage "
+        out += "or failed captures — the bundled ALL / Conan / DoaC rollups "
+        out += "above dilute these cohorts together. `unknown` covers pre-9.8 "
+        out += "captures where `analysisState` is nil and any non-terminal "
+        out += "state (backfill, spooling, etc.).\n\n"
+        if let buckets = report.terminalReasonBuckets, !buckets.isEmpty {
+            out += "| Bucket | Config | Episodes | Excluded | Win F1 @ τ=0.3 | @ 0.5 | @ 0.7 | Sec-F1 | AutoSkip Prec | AutoSkip Recall |\n"
+            out += "|---|---|---|---|---|---|---|---|---|---|\n"
+            for b in buckets {
+                let f13 = b.windowMetrics.first(where: { abs($0.threshold - 0.3) < 1e-6 })?.f1 ?? 0
+                let f15 = b.windowMetrics.first(where: { abs($0.threshold - 0.5) < 1e-6 })?.f1 ?? 0
+                let f17 = b.windowMetrics.first(where: { abs($0.threshold - 0.7) < 1e-6 })?.f1 ?? 0
+                out += "| \(b.bucket.rawValue) | \(b.config) | \(b.episodeCount) | \(b.excludedEpisodeCount) "
+                out += "| \(fmt(f13)) | \(fmt(f15)) | \(fmt(f17)) | \(fmt(b.secondLevel.f1)) "
+                out += "| \(fmt(b.autoSkipPrecision)) | \(fmt(b.autoSkipRecall)) |\n"
+            }
+            out += "\n"
+        } else {
+            out += "_No `terminalReasonBuckets` in this run (pre-stratification report or empty corpus)._\n\n"
+        }
 
         if !excluded.isEmpty {
             // Dedupe by episodeId — the exclusion reason is the same across
