@@ -3287,8 +3287,11 @@ actor AdDetectionService {
             // skip-worthy on its own merit. Surfacing it as "autoSkipEligible"
             // (rather than generic "hotPathCandidate") makes the signal
             // visible to downstream consumers — including the NARL corpus
-            // builder, whose isAdUnderDefault heuristic matches on
-            // "autoskip"/"markonly"/"skip" in the logged action.
+            // builder, whose `isAdUnderDefault(policyAction:)` mapping
+            // (playhead-gtt9.19) treats `autoSkipEligible` as a positive ad
+            // determination via exact raw-value match. `hotPathCandidate`
+            // is explicitly mapped to `false` because it's an intermediate
+            // state, not a final ad verdict.
             //
             // Regression: 2026-04-23 dogfood capture asset
             // 71F0C2AE-7260-4D1E-B41A-BCFD5103A641 @ [7006..7008],

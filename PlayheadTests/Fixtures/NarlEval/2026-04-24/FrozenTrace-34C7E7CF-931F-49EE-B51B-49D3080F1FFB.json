@@ -431,7 +431,7 @@
       "classificationTrust" : 1,
       "fusedSkipConfidence" : 0.6140736673711324,
       "hasMetadataEvidence" : true,
-      "isAdUnderDefault" : false,
+      "isAdUnderDefault" : true,
       "windowEnd" : 35.16,
       "windowStart" : 27
     },
@@ -439,7 +439,7 @@
       "classificationTrust" : 1,
       "fusedSkipConfidence" : 0.6140736673711324,
       "hasMetadataEvidence" : true,
-      "isAdUnderDefault" : false,
+      "isAdUnderDefault" : true,
       "windowEnd" : 35.16,
       "windowStart" : 27
     },
@@ -447,7 +447,7 @@
       "classificationTrust" : 1,
       "fusedSkipConfidence" : 0.6140736673711324,
       "hasMetadataEvidence" : true,
-      "isAdUnderDefault" : false,
+      "isAdUnderDefault" : true,
       "windowEnd" : 35.16,
       "windowStart" : 27
     },
@@ -455,7 +455,7 @@
       "classificationTrust" : 1,
       "fusedSkipConfidence" : 0.6140736673711324,
       "hasMetadataEvidence" : true,
-      "isAdUnderDefault" : false,
+      "isAdUnderDefault" : true,
       "windowEnd" : 35.16,
       "windowStart" : 27
     }

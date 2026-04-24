@@ -518,15 +518,13 @@ struct NarlEvalCorpusBuilderTests {
         // evidence source starts with "metadata" (production's
         // MetadataLexiconInjector / MetadataPriorShift both key off that
         // string). isAdUnderDefault is derived from the production final
-        // action — autoSkip or markOnly means the .default path accepted it
-        // as an ad.
+        // action via `isAdUnderDefault(policyAction:)` — an exact-match
+        // mapping over SkipPolicyAction raw values plus the hot-path /
+        // aggregator / precision-gate action strings (playhead-gtt9.19).
         let windowScores: [FrozenTrace.FrozenWindowScore] = decisionLog.map { entry in
             let trust = entry.evidence.map(\.classificationTrust).max() ?? 0
             let hasMetadata = entry.evidence.contains { $0.source.hasPrefix("metadata") }
-            let action = entry.finalAction.lowercased()
-            let isAdUnderDefault = action.contains("autoskip")
-                || action.contains("markonly")
-                || action.contains("skip") && !action.contains("suppress")
+            let isAdUnderDefault = Self.isAdUnderDefault(policyAction: entry.finalAction)
             return FrozenTrace.FrozenWindowScore(
                 windowStart: entry.windowStart,
                 windowEnd: entry.windowEnd,
@@ -611,5 +609,228 @@ struct NarlEvalCorpusBuilderTests {
                   let dict = parsed as? [String: Any] else { continue }
             handler(dict)
         }
+    }
+
+    // MARK: - policyAction → isAdUnderDefault mapping (playhead-gtt9.19)
+
+    /// Pure function that maps a decision-log `finalDecision.action` string to
+    /// the NARL harness's `isAdUnderDefault` bit.
+    ///
+    /// Replaces the pre-gtt9.19 substring heuristic
+    /// (`action.contains("autoskip") || action.contains("markonly")
+    /// || (action.contains("skip") && !action.contains("suppress"))`), which
+    /// silently dropped `detectOnly` — a legitimate positive ad determination
+    /// emitted by `SkipPolicyMatrix` for owned/affiliate/unknown-unknown
+    /// content. Substring matching also had a false-positive surface
+    /// (`hotPathAutoSkipEligible` would match `autoskip`) and was case-
+    /// insensitive in an unprincipled way.
+    ///
+    /// Mapping rules (exact match against production action strings):
+    ///
+    /// `SkipPolicyAction` raw values — the policy-matrix output:
+    ///   - `autoSkipEligible` → true (the canonical skip-worthy ad)
+    ///   - `detectOnly`       → true (banner-shown ad; real determination, not a skip)
+    ///   - `logOnly`          → false (telemetry only; insufficient signal)
+    ///   - `suppress`         → false (organic content; never shown)
+    ///
+    /// Hot-path synthetic actions (`AdDetectionService`):
+    ///   - `hotPathCandidate`         → false (below autoSkip threshold; intermediate)
+    ///   - `hotPathBelowThreshold`    → false (below candidate threshold; intermediate)
+    ///
+    /// Aggregator (`AdDetectionService.segmentAggregatorPromotedAction`):
+    ///   - `segmentAggregatorPromoted` → true (aggregator said "this is an ad")
+    ///
+    /// Precision-gate (`AutoSkipPrecisionGateAction.markOnlyCandidate`):
+    ///   - `markOnlyCandidate` → true (gtt9.11 precision-gate mark-only; still a positive)
+    ///   - `markOnly`          → true (legacy eligibility-gate value)
+    ///
+    /// Any unknown / empty string → false (safe default; surfaces as unmapped).
+    static func isAdUnderDefault(policyAction: String) -> Bool {
+        // Fast path: if the action decodes as a canonical SkipPolicyAction raw
+        // value, use the compile-time-exhaustive switch below. The Swift
+        // compiler will fail to build if a new `SkipPolicyAction` case lands
+        // and isn't explicitly mapped — that's the regression guard requested
+        // in the bead.
+        if let policy = SkipPolicyAction(rawValue: policyAction) {
+            switch policy {
+            case .autoSkipEligible: return true
+            case .detectOnly:       return true
+            case .logOnly:          return false
+            case .suppress:         return false
+            }
+        }
+
+        // Non-enum action strings emitted by production (hot-path synthetic,
+        // aggregator, precision-gate). These bypass the policy matrix, so we
+        // enumerate them explicitly. Any other string → false.
+        switch policyAction {
+        case "hotPathCandidate":                           return false  // below autoSkip, intermediate
+        case "hotPathBelowThreshold":                      return false  // below candidate, intermediate
+        case AdDetectionService.segmentAggregatorPromotedAction:
+                                                           return true   // aggregator-promoted segment
+        case AutoSkipPrecisionGateAction.markOnlyCandidate:
+                                                           return true   // gtt9.11 precision gate
+        case "markOnly":                                   return true   // legacy eligibility-gate value
+        default:                                           return false  // unknown / empty
+        }
+    }
+}
+
+// MARK: - isAdUnderDefault unit tests (playhead-gtt9.19)
+
+@Suite("NarlEvalCorpusBuilder.isAdUnderDefault")
+struct NarlEvalCorpusBuilderIsAdUnderDefaultTests {
+
+    // ── SkipPolicyAction enum cases (exhaustive coverage) ────────────────
+
+    @Test("autoSkipEligible → true (classic auto-skip ad)")
+    func autoSkipEligibleIsAd() {
+        #expect(NarlEvalCorpusBuilderTests.isAdUnderDefault(
+            policyAction: SkipPolicyAction.autoSkipEligible.rawValue
+        ) == true)
+    }
+
+    @Test("detectOnly → true (positive ad determination for owned/affiliate/unknown-unknown)")
+    func detectOnlyIsAd() {
+        // Regression: 2026-04-24 Conan 71F0C2AE capture logged both baseline
+        // ads ([0, 29.82] and [5670.6, 5690.52]) as `detectOnly` with
+        // confidence=1.0, and the pre-gtt9.19 substring heuristic silently
+        // dropped them → GT=3, Pred=0, Sec-F1=0.
+        #expect(NarlEvalCorpusBuilderTests.isAdUnderDefault(
+            policyAction: SkipPolicyAction.detectOnly.rawValue
+        ) == true)
+    }
+
+    @Test("logOnly → false (telemetry only, not a positive determination)")
+    func logOnlyIsNotAd() {
+        #expect(NarlEvalCorpusBuilderTests.isAdUnderDefault(
+            policyAction: SkipPolicyAction.logOnly.rawValue
+        ) == false)
+    }
+
+    @Test("suppress → false (organic content, never shown)")
+    func suppressIsNotAd() {
+        #expect(NarlEvalCorpusBuilderTests.isAdUnderDefault(
+            policyAction: SkipPolicyAction.suppress.rawValue
+        ) == false)
+    }
+
+    // ── Exhaustive coverage of SkipPolicyAction via CaseIterable ──────────
+
+    @Test("every SkipPolicyAction case has a mapping (no silent passthrough)")
+    func everyEnumCaseIsMapped() {
+        // If a new SkipPolicyAction case lands without being mapped, the
+        // switch inside `isAdUnderDefault` fails to compile. This test also
+        // asserts the mapping is sane by exercising all cases at runtime.
+        for action in SkipPolicyAction.allCases {
+            let result = NarlEvalCorpusBuilderTests.isAdUnderDefault(
+                policyAction: action.rawValue
+            )
+            switch action {
+            case .autoSkipEligible, .detectOnly:
+                #expect(result == true,
+                        "\(action.rawValue) should map to isAdUnderDefault=true")
+            case .logOnly, .suppress:
+                #expect(result == false,
+                        "\(action.rawValue) should map to isAdUnderDefault=false")
+            }
+        }
+    }
+
+    // ── Non-enum strings emitted by production ───────────────────────────
+
+    @Test("hotPathCandidate → false (below autoSkip, not a final determination)")
+    func hotPathCandidateIsNotAd() {
+        #expect(NarlEvalCorpusBuilderTests.isAdUnderDefault(
+            policyAction: "hotPathCandidate"
+        ) == false)
+    }
+
+    @Test("hotPathBelowThreshold → false (below candidate threshold)")
+    func hotPathBelowThresholdIsNotAd() {
+        #expect(NarlEvalCorpusBuilderTests.isAdUnderDefault(
+            policyAction: "hotPathBelowThreshold"
+        ) == false)
+    }
+
+    @Test("segmentAggregatorPromoted → true (aggregator said this is an ad)")
+    func segmentAggregatorPromotedIsAd() {
+        #expect(NarlEvalCorpusBuilderTests.isAdUnderDefault(
+            policyAction: AdDetectionService.segmentAggregatorPromotedAction
+        ) == true)
+    }
+
+    @Test("markOnlyCandidate → true (gtt9.11 precision-gate positive)")
+    func markOnlyCandidateIsAd() {
+        #expect(NarlEvalCorpusBuilderTests.isAdUnderDefault(
+            policyAction: AutoSkipPrecisionGateAction.markOnlyCandidate
+        ) == true)
+    }
+
+    @Test("markOnly (legacy eligibility-gate value) → true")
+    func markOnlyIsAd() {
+        #expect(NarlEvalCorpusBuilderTests.isAdUnderDefault(
+            policyAction: "markOnly"
+        ) == true)
+    }
+
+    // ── Defensive / edge cases ───────────────────────────────────────────
+
+    @Test("empty string → false (unknown / missing)")
+    func emptyStringIsNotAd() {
+        #expect(NarlEvalCorpusBuilderTests.isAdUnderDefault(
+            policyAction: ""
+        ) == false)
+    }
+
+    @Test("unknown action string → false (safe default)")
+    func unknownStringIsNotAd() {
+        #expect(NarlEvalCorpusBuilderTests.isAdUnderDefault(
+            policyAction: "someFutureAction"
+        ) == false)
+    }
+
+    // ── Bug-reproduction tests (the substring heuristic's failure modes) ──
+
+    @Test("case sensitivity: 'AUTOSKIPELIGIBLE' (wrong case) → false")
+    func caseSensitiveMatch() {
+        // The old heuristic lowercased the action and called .contains("autoskip"),
+        // which matched the wrong case too. Exact raw-value match is case-sensitive
+        // like the enum itself.
+        #expect(NarlEvalCorpusBuilderTests.isAdUnderDefault(
+            policyAction: "AUTOSKIPELIGIBLE"
+        ) == false)
+    }
+
+    @Test("substring-style false positive: 'hotPathAutoSkipEligible' → false")
+    func substringFalsePositiveRejected() {
+        // The old heuristic's .contains("autoskip") would have matched this
+        // hypothetical name as positive. Exact match rejects it — callers
+        // must use the canonical enum raw value. This protects against
+        // future names that happen to share a substring.
+        #expect(NarlEvalCorpusBuilderTests.isAdUnderDefault(
+            policyAction: "hotPathAutoSkipEligible"
+        ) == false)
+    }
+
+    @Test("substring-style false negative avoided: 'detectOnly' is now recognized")
+    func detectOnlySubstringFalseNegativeFixed() {
+        // Pre-gtt9.19: action.contains("autoskip") || action.contains("markonly")
+        //              || (action.contains("skip") && !action.contains("suppress"))
+        // "detectonly" does not contain any of those → false (BUG).
+        // Post-gtt9.19: exact raw-value match → true.
+        let old = detectOnlyUnderOldHeuristic()
+        #expect(old == false, "sanity: old heuristic dropped detectOnly")
+        #expect(NarlEvalCorpusBuilderTests.isAdUnderDefault(
+            policyAction: "detectOnly"
+        ) == true, "new mapping must recognize detectOnly as a positive")
+    }
+
+    // Reproduction of the pre-gtt9.19 substring heuristic for contrast.
+    private func detectOnlyUnderOldHeuristic() -> Bool {
+        let action = "detectOnly".lowercased()
+        return action.contains("autoskip")
+            || action.contains("markonly")
+            || action.contains("skip") && !action.contains("suppress")
     }
 }
