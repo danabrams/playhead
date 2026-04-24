@@ -233,6 +233,18 @@ actor BackgroundFeedRefreshService {
     /// URLSession call and produce unrelated transient errors.
     private var expired = false
 
+    /// Idempotence guard for `setTaskCompleted`. iOS rules:
+    ///   1. The expiration handler MUST call `setTaskCompleted(success:)`
+    ///      before it returns or the system terminates the app.
+    ///   2. Calling `setTaskCompleted` twice on the same task is
+    ///      undefined behavior (Apple's "task is already completed"
+    ///      InternalInconsistencyException has been seen in crash logs).
+    /// Both the expiration path and the normal-exit path therefore go
+    /// through `completeTaskOnce(_:success:)`, which flips this flag
+    /// under the actor and only calls through to the underlying task
+    /// the first time.
+    private var taskCompleted = false
+
     // MARK: - Init
 
     init(
@@ -303,10 +315,11 @@ actor BackgroundFeedRefreshService {
     func handleFeedRefreshTask(_ task: any BackgroundProcessingTaskProtocol) async {
         logger.info("Feed refresh task started")
 
-        // Reset the per-fire expiration flag. A test or long-lived process
-        // may reuse the service across fires; the flag must not leak state
-        // from a prior expiration into this one.
+        // Reset per-fire flags. A test or long-lived process may reuse
+        // the service across fires; the flags must not leak state from
+        // a prior expiration/completion into this one.
         expired = false
+        taskCompleted = false
 
         // Reschedule first — see spec: "Next refresh re-scheduled at
         // handler end (even on cancel)." Doing it up front makes that
@@ -315,24 +328,50 @@ actor BackgroundFeedRefreshService {
         scheduleNextRefresh()
 
         // The expiration callback fires on an arbitrary queue; bounce
-        // through a Task so the flag mutation lands on the actor.
+        // through a Task so the flag mutation AND the `setTaskCompleted`
+        // call both land on the actor. We MUST call `setTaskCompleted`
+        // from the expiration path itself: iOS terminates the app if the
+        // expiration handler returns without it, and iOS' post-expiration
+        // grace is measured in a handful of seconds — too short to
+        // reliably wait for `runRefreshOnce` to notice the flag and
+        // unwind through an in-flight URLSession call. `completeTaskOnce`
+        // guards against the normal-exit path calling `setTaskCompleted`
+        // a second time.
         task.expirationHandler = { [weak self] in
             guard let self else { return }
-            Task { await self.markExpired() }
+            let taskBox = _UncheckedSendableBox(task)
+            Task { await self.markExpiredAndComplete(taskBox.value) }
         }
 
         await runRefreshOnce()
 
         let succeeded = !expired
-        task.setTaskCompleted(success: succeeded)
+        completeTaskOnce(task, success: succeeded)
         logger.info("Feed refresh task completed (success=\(succeeded, privacy: .public))")
     }
 
-    /// Flip the expiration flag. Called from the expiration callback's
-    /// Task hop so actor isolation is preserved.
-    private func markExpired() {
+    /// Expiration-path hop: flip the flag so `runRefreshOnce` bails at
+    /// its next per-feed boundary AND call `setTaskCompleted(success: false)`
+    /// through the idempotence guard so iOS' post-expiration termination
+    /// timer doesn't fire. The normal-exit path that eventually returns
+    /// from `runRefreshOnce` will also call `completeTaskOnce`, but
+    /// `taskCompleted` will already be set and the second call is a no-op.
+    private func markExpiredAndComplete(_ task: any BackgroundProcessingTaskProtocol) {
         expired = true
         logger.info("Feed refresh task expired — bailing at next boundary")
+        completeTaskOnce(task, success: false)
+    }
+
+    /// Idempotent `setTaskCompleted`. Guards against the expiration and
+    /// normal-exit paths both reaching the BG task's `setTaskCompleted`
+    /// (which is undefined behavior per iOS contract). First caller wins.
+    private func completeTaskOnce(
+        _ task: any BackgroundProcessingTaskProtocol,
+        success: Bool
+    ) {
+        guard !taskCompleted else { return }
+        taskCompleted = true
+        task.setTaskCompleted(success: success)
     }
 
     /// Core work of a single fire. Factored out so a future test can

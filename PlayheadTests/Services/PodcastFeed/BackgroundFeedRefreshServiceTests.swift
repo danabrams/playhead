@@ -423,6 +423,88 @@ struct BackgroundFeedRefreshAutoDownloadSettingTests {
     }
 }
 
+// MARK: - Expiration handler contract
+
+@Suite("BackgroundFeedRefreshService — expiration")
+struct BackgroundFeedRefreshExpirationTests {
+
+    /// Refresher that yields per-feed until the test signals it to
+    /// return. Lets the test fire the expiration handler mid-work so
+    /// both the expiration path and the normal-exit path race for
+    /// `setTaskCompleted`. Only one of those calls must land — iOS
+    /// terminates the app on a double-complete.
+    private actor GatedRefresher: FeedRefreshing {
+        private var released = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func release() {
+            released = true
+            for waiter in waiters { waiter.resume() }
+            waiters.removeAll()
+        }
+
+        func refreshEpisodes(
+            feedURL _: URL,
+            existingEpisodeGUIDs _: Set<String>
+        ) async throws -> [FeedRefreshNewEpisode] {
+            if released { return [] }
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                waiters.append(cont)
+            }
+            return []
+        }
+    }
+
+    @Test("Expiration mid-refresh completes task exactly once and reports success=false")
+    func expirationCompletesTaskExactlyOnce() async throws {
+        let feed = URL(string: "https://example.com/a.xml")!
+        let enumerator = StubPodcastEnumerator(
+            [PodcastFeedSnapshot(feedURL: feed, existingEpisodeGUIDs: [])]
+        )
+        let refresher = GatedRefresher()
+        let downloader = StubAutoDownloadEnqueuer()
+        let settings = StubDownloadsSettingsProvider(setting: .off)
+        let scheduler = StubTaskScheduler()
+
+        let service = BackgroundFeedRefreshService(
+            enumerator: enumerator,
+            refresher: refresher,
+            downloader: downloader,
+            settingsProvider: settings,
+            taskScheduler: scheduler
+        )
+        let task = StubBackgroundTask()
+
+        // Kick off the handler; refresher is gated so it parks mid-loop.
+        async let handlerFinished: Void = service.handleFeedRefreshTask(task)
+
+        // Wait until the handler has installed its expiration handler.
+        // A short poll is acceptable: the handler sets it before awaiting
+        // `runRefreshOnce`, so it appears within a tick or two.
+        for _ in 0..<200 {
+            if task.expirationHandler != nil { break }
+            try? await Task.sleep(nanoseconds: 1_000_000)  // 1ms
+        }
+        #expect(task.expirationHandler != nil,
+                "Handler must install expirationHandler before awaiting work")
+
+        // Simulate iOS firing expiration while the refresher is still
+        // parked. This must complete the task exactly once and set
+        // success=false. A second completion from the normal-exit path
+        // after `release()` would violate the iOS contract.
+        task.simulateExpiration()
+
+        // Release the gate so the handler can unwind.
+        await refresher.release()
+        _ = await handlerFinished
+
+        #expect(task.setTaskCompletedCallCount == 1,
+                "setTaskCompleted must fire exactly once even when expiration and normal-exit race")
+        #expect(task.completedSuccess == false,
+                "Expired handler must report success=false")
+    }
+}
+
 // MARK: - Task identifier contract
 
 @Suite("BackgroundFeedRefreshService — task identifier")
