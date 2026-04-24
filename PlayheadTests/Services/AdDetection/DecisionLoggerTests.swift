@@ -480,10 +480,16 @@ struct DecisionLoggerPipelineTests {
     // (asset 71F0C2AE-7260-4D1E-B41A-BCFD5103A641 @ [7006..7008]):
     // a classifier-only window with adProbability above the autoSkip
     // threshold was logged as "hotPathCandidate" and was therefore
-    // invisible to the NARL corpus builder's isAdUnderDefault heuristic
-    // (which only treats "autoskip"/"markonly"/"skip" actions as ads).
-    // Real-world effect: GT=3, Pred=0, Sec-F1=0 despite the classifier
-    // confidently firing on the ad.
+    // invisible to the NARL corpus builder's `isAdUnderDefault` mapping.
+    // Post-playhead-gtt9.19 that mapping is an exact raw-value match
+    // (not a substring check); `hotPathCandidate` is explicitly mapped
+    // to `false` as an intermediate-state, not a final ad verdict, so
+    // the promotion in `AdDetectionService` — hotPath → autoSkipEligible
+    // at adProbability >= autoSkipConfidenceThreshold — remains the
+    // mechanism that makes high-confidence classifier-only windows
+    // visible to the harness.
+    // Real-world effect before the fix: GT=3, Pred=0, Sec-F1=0 despite
+    // the classifier confidently firing on the ad.
     //
     // Fix contract: when adProbability >= autoSkipConfidenceThreshold,
     // the decision-log action must be "autoSkipEligible" so downstream
