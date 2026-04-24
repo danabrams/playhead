@@ -834,3 +834,168 @@ struct NarlEvalCorpusBuilderIsAdUnderDefaultTests {
             || action.contains("skip") && !action.contains("suppress")
     }
 }
+
+// MARK: - Shadow-fold defense in depth (playhead-gtt9.4.5)
+
+@Suite("NarlEvalCorpusBuilder shadow fold (gtt9.4.5)")
+struct NarlEvalCorpusBuilderShadowFoldTests {
+
+    // ── Helpers ──────────────────────────────────────────────────────────
+
+    /// Materialize a minimal asset + drive `assembleTrace` with only the
+    /// shadow rows under test. Other inputs are empty so the resulting
+    /// `evidenceCatalog` contains exactly the shadow-derived entries.
+    private func runAssembleTrace(
+        shadow: [NarlEvalCorpusBuilderTests.BuilderShadowEntry]
+    ) -> FrozenTrace {
+        let asset = NarlEvalCorpusBuilderTests.BuilderAsset(
+            id: "asset-test",
+            episodeId: "ep-test",
+            podcastId: "pod-test"
+        )
+        return NarlEvalCorpusBuilderTests.assembleTrace(
+            asset: asset,
+            decisions: [],
+            corrections: [],
+            decisionLog: [],
+            shadow: shadow,
+            lifecycle: nil
+        )
+    }
+
+    private func shadowEntries(_ trace: FrozenTrace) -> [FrozenTrace.FrozenEvidenceEntry] {
+        trace.evidenceCatalog.filter { $0.source.hasPrefix("shadow:") }
+    }
+
+    private func makeShadowRow(
+        windowStart: Double = 0,
+        windowEnd: Double = 30,
+        shadowIsAd: Bool? = nil,
+        shadowConfidence: Double? = nil
+    ) -> NarlEvalCorpusBuilderTests.BuilderShadowEntry {
+        NarlEvalCorpusBuilderTests.BuilderShadowEntry(
+            assetId: "asset-test",
+            windowStart: windowStart,
+            windowEnd: windowEnd,
+            configVariant: "allEnabledShadow",
+            shadowIsAd: shadowIsAd,
+            shadowConfidence: shadowConfidence
+        )
+    }
+
+    // ── Defense in depth: missing fields must not produce phantom 0-weight rows ──
+
+    @Test("Shadow row with no isAd / no shadowConfidence is skipped (not folded as weight=0)")
+    func skipsRowWithNoSignalFields() {
+        let trace = runAssembleTrace(shadow: [
+            makeShadowRow(shadowIsAd: nil, shadowConfidence: nil)
+        ])
+        let shadow = shadowEntries(trace)
+        #expect(shadow.isEmpty,
+                "rows with neither isAd nor shadowConfidence must not surface as evidence")
+    }
+
+    @Test("Mix of pre-gtt9.4.4 and post-gtt9.4.4 rows: only post rows surface")
+    func mixedSchemaRowsSkipPreCaptures() {
+        let pre = makeShadowRow(windowStart: 0, windowEnd: 30,
+                                 shadowIsAd: nil, shadowConfidence: nil)
+        let postFalse = makeShadowRow(windowStart: 30, windowEnd: 60,
+                                       shadowIsAd: false, shadowConfidence: 0.0)
+        let postTrue = makeShadowRow(windowStart: 60, windowEnd: 90,
+                                      shadowIsAd: true, shadowConfidence: 0.66)
+        let trace = runAssembleTrace(shadow: [pre, postFalse, postTrue])
+        let shadow = shadowEntries(trace)
+        #expect(shadow.count == 2,
+                "pre-gtt9.4.4 row must drop; both post rows must surface")
+        let starts = Set(shadow.map(\.windowStart))
+        #expect(starts == [30, 60])
+    }
+
+    // ── Behavior when fields ARE present ─────────────────────────────────
+
+    @Test("shadowConfidence wins when both fields are present")
+    func confidenceWinsOverBoolean() {
+        let trace = runAssembleTrace(shadow: [
+            makeShadowRow(shadowIsAd: true, shadowConfidence: 0.33)
+        ])
+        let shadow = shadowEntries(trace)
+        #expect(shadow.count == 1)
+        #expect(shadow.first?.weight == 0.33,
+                "shadowConfidence must take precedence over the boolean fold")
+    }
+
+    @Test("shadowConfidence alone (no isAd) is folded as weight=confidence")
+    func confidenceAloneFoldsAsWeight() {
+        let trace = runAssembleTrace(shadow: [
+            makeShadowRow(shadowIsAd: nil, shadowConfidence: 0.66)
+        ])
+        let shadow = shadowEntries(trace)
+        #expect(shadow.count == 1)
+        #expect(shadow.first?.weight == 0.66)
+    }
+
+    @Test("shadowIsAd=true alone (no confidence) is folded as weight=1.0")
+    func booleanTrueAloneFoldsAsWeightOne() {
+        let trace = runAssembleTrace(shadow: [
+            makeShadowRow(shadowIsAd: true, shadowConfidence: nil)
+        ])
+        let shadow = shadowEntries(trace)
+        #expect(shadow.count == 1)
+        #expect(shadow.first?.weight == 1.0)
+    }
+
+    @Test("shadowIsAd=false alone (no confidence) is folded as weight=0.0 (genuine disagreement)")
+    func booleanFalseAloneFoldsAsWeightZero() {
+        let trace = runAssembleTrace(shadow: [
+            makeShadowRow(shadowIsAd: false, shadowConfidence: nil)
+        ])
+        let shadow = shadowEntries(trace)
+        #expect(shadow.count == 1,
+                "an explicit false from a gtt9.4.4-aware writer is honest signal — surface it")
+        #expect(shadow.first?.weight == 0.0)
+    }
+
+    @Test("shadowConfidence outside [0, 1] is clamped defensively")
+    func confidenceClampedDefensively() {
+        let traceHi = runAssembleTrace(shadow: [
+            makeShadowRow(shadowConfidence: 1.5)
+        ])
+        let traceLo = runAssembleTrace(shadow: [
+            makeShadowRow(shadowConfidence: -0.5)
+        ])
+        #expect(shadowEntries(traceHi).first?.weight == 1.0)
+        #expect(shadowEntries(traceLo).first?.weight == 0.0)
+    }
+
+    // ── Helper unit tests (direct call to the pure function) ─────────────
+
+    @Test("shadowEvidenceWeight: nil/nil returns nil so caller skips")
+    func shadowEvidenceWeightNilNil() {
+        let w = NarlEvalCorpusBuilderTests.shadowEvidenceWeight(
+            shadowIsAd: nil,
+            shadowConfidence: nil
+        )
+        #expect(w == nil)
+    }
+
+    @Test("shadowEvidenceWeight: confidence beats boolean")
+    func shadowEvidenceWeightConfidenceBeatsBoolean() {
+        let w = NarlEvalCorpusBuilderTests.shadowEvidenceWeight(
+            shadowIsAd: false,
+            shadowConfidence: 0.9
+        )
+        #expect(w == 0.9)
+    }
+
+    @Test("shadowEvidenceWeight: boolean fallback works when confidence missing")
+    func shadowEvidenceWeightBooleanFallback() {
+        let w1 = NarlEvalCorpusBuilderTests.shadowEvidenceWeight(
+            shadowIsAd: true, shadowConfidence: nil
+        )
+        let w0 = NarlEvalCorpusBuilderTests.shadowEvidenceWeight(
+            shadowIsAd: false, shadowConfidence: nil
+        )
+        #expect(w1 == 1.0)
+        #expect(w0 == 0.0)
+    }
+}
