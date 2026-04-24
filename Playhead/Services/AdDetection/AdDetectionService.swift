@@ -118,6 +118,11 @@ enum AdBoundaryState: String, Sendable {
     case lexical
     /// Boundaries refined using acoustic feature transitions.
     case acousticRefined
+    /// Span came from `SegmentAggregator` fusing multiple sub-threshold
+    /// per-window scores into a coherent segment. Its extents are the
+    /// aggregator's `[startTime, endTime)`; `gtt9.4.1` boundary expansion
+    /// still composes independently on top. playhead-0usd.
+    case segmentAggregated
 }
 
 // MARK: - AdDetectionProviding
@@ -576,6 +581,25 @@ actor AdDetectionService {
         episodeDuration: Double,
         windowSeconds: TimeInterval = AdDetectionService.tier1DefaultWindowSeconds
     ) async throws -> Int {
+        let results = try await runTier1Scoring(
+            analysisAssetId: analysisAssetId,
+            episodeDuration: episodeDuration,
+            windowSeconds: windowSeconds
+        )
+        return results.count
+    }
+
+    /// playhead-0usd: Same contract as `runTier1FeatureOnlyScoring`, but
+    /// returns the `[ClassifierResult]` stream so the caller (the hot path
+    /// integrator) can feed the scores through `SegmentAggregator` without
+    /// re-running the classifier. The decision-log emission side effect is
+    /// preserved 1:1, so any existing caller of the public
+    /// `runTier1FeatureOnlyScoring` sees no observable difference.
+    private func runTier1Scoring(
+        analysisAssetId: String,
+        episodeDuration: Double,
+        windowSeconds: TimeInterval = AdDetectionService.tier1DefaultWindowSeconds
+    ) async throws -> [ClassifierResult] {
         // Record episode duration so the classifier's position-based prior
         // sees the same value both Tier 1 and Tier 2 use.
         self.episodeDuration = episodeDuration
@@ -586,7 +610,7 @@ actor AdDetectionService {
         )
         guard !slots.isEmpty else {
             logger.info("Tier 1: no slots (episodeDuration=\(episodeDuration), windowSeconds=\(windowSeconds))")
-            return 0
+            return []
         }
 
         // Single range fetch — cheaper than N overlapping queries.
@@ -620,7 +644,7 @@ actor AdDetectionService {
             analysisAssetId: analysisAssetId
         )
         logger.info("Tier 1: emitted \(results.count) decision-log entries over \(slots.count) slots (asset=\(analysisAssetId))")
-        return results.count
+        return results
     }
 
     /// Slice [0, episodeDuration) into non-overlapping slots of `windowSeconds`.
@@ -796,15 +820,41 @@ actor AdDetectionService {
         // transcript coverage has stalled. Transcript-dependent hot-path
         // evidence (lexical / hypothesis / FM) remains below the
         // chunks-empty guard — it REFINES scores, it does not gate them.
+        //
+        // playhead-0usd: Tier 1 results are captured locally so the
+        // SegmentAggregator downstream can fuse them with Tier 2 per-window
+        // scores into coherent multi-window segments.
+        let tier1Results: [ClassifierResult]
         if episodeDuration > 0 {
-            try await runTier1FeatureOnlyScoring(
+            tier1Results = try await runTier1Scoring(
                 analysisAssetId: analysisAssetId,
                 episodeDuration: episodeDuration
             )
+        } else {
+            tier1Results = []
         }
 
         guard !chunks.isEmpty else {
-            return HotPathRunResult(windows: [], retiredWindowIDs: [])
+            // playhead-0usd: Even with empty transcript chunks, the aggregator
+            // is given a chance to promote a segment from Tier 1 evidence
+            // alone. This is the "transcript-coverage stalled" scenario where
+            // multiple sub-threshold Tier 1 windows collectively establish
+            // an ad region without any lexical/FM corroboration.
+            let aggregatorWindows = try await runSegmentAggregation(
+                tier1Results: tier1Results,
+                tier2Results: [],
+                singleWindowAdWindows: [],
+                analysisAssetId: analysisAssetId
+            )
+            if !aggregatorWindows.isEmpty {
+                try await store.upsertHotPathAdWindows(
+                    aggregatorWindows,
+                    existingIDs: [],
+                    retiredIDs: []
+                )
+                logger.info("Hot path: aggregator persisted \(aggregatorWindows.count) AdWindows (chunks-empty branch)")
+            }
+            return HotPathRunResult(windows: aggregatorWindows, retiredWindowIDs: [])
         }
 
         let replayCandidateIDs: Set<String>
@@ -826,14 +876,30 @@ actor AdDetectionService {
 
         guard !candidates.isEmpty else {
             logger.info("Hot path: no candidates from \(chunks.count) chunks")
-            if !replayCandidateIDs.isEmpty {
+            // playhead-0usd: Run aggregator over Tier 1 evidence alone. When
+            // Tier 2 has no lexical candidates the single-window path can't
+            // fire, but the aggregator may still coalesce Tier 1 into a
+            // promoted segment.
+            let aggregatorWindows = try await runSegmentAggregation(
+                tier1Results: tier1Results,
+                tier2Results: [],
+                singleWindowAdWindows: [],
+                analysisAssetId: analysisAssetId
+            )
+            if !aggregatorWindows.isEmpty || !replayCandidateIDs.isEmpty {
                 try await store.upsertHotPathAdWindows(
-                    [],
+                    aggregatorWindows,
                     existingIDs: [],
                     retiredIDs: replayCandidateIDs
                 )
             }
-            return HotPathRunResult(windows: [], retiredWindowIDs: replayCandidateIDs)
+            if !aggregatorWindows.isEmpty {
+                logger.info("Hot path: aggregator persisted \(aggregatorWindows.count) AdWindows (no-candidates branch)")
+            }
+            return HotPathRunResult(
+                windows: aggregatorWindows,
+                retiredWindowIDs: replayCandidateIDs
+            )
         }
 
         logger.info("Hot path: \(candidates.count) candidates from \(chunks.count) chunks")
@@ -880,8 +946,21 @@ actor AdDetectionService {
             analysisAssetId: analysisAssetId
         )
 
-        guard !adWindows.isEmpty else {
-            logger.info("Hot path: all \(classifierResults.count) results below threshold")
+        // playhead-0usd: Build aggregator windows from Tier 1 + Tier 2
+        // classifier results. Aggregator segments overlapping any single-
+        // window AdWindow from this run are filtered out (the single-window
+        // path wins for those regions — it has richer evidence text /
+        // boundary refinement). The single-window `adWindows` are passed in
+        // for overlap-dedup.
+        let aggregatorWindows = try await runSegmentAggregation(
+            tier1Results: tier1Results,
+            tier2Results: classifierResults,
+            singleWindowAdWindows: adWindows,
+            analysisAssetId: analysisAssetId
+        )
+
+        guard !adWindows.isEmpty || !aggregatorWindows.isEmpty else {
+            logger.info("Hot path: all \(classifierResults.count) results below threshold and no aggregator segments")
             if !replayCandidateIDs.isEmpty {
                 try await store.upsertHotPathAdWindows(
                     [],
@@ -896,7 +975,7 @@ actor AdDetectionService {
             adWindows,
             analysisAssetId: analysisAssetId
         )
-        guard !reconciledWindows.isEmpty else {
+        guard !reconciledWindows.isEmpty || !aggregatorWindows.isEmpty else {
             logger.info("Hot path: replay matched only terminal windows; nothing new to persist")
             if !replayCandidateIDs.isEmpty {
                 try await store.upsertHotPathAdWindows(
@@ -920,17 +999,21 @@ actor AdDetectionService {
             )
         }
 
-        // Persist to SQLite.
+        // Persist to SQLite. playhead-0usd: aggregator-emitted windows are
+        // NOT subject to the single-window reconciliation path (they carry
+        // no lexical evidence to match against existing candidates), so they
+        // are appended alongside the reconciled single-window set.
+        let allWindowsToPersist = reconciledWindows.map(\.window) + aggregatorWindows
         try await store.upsertHotPathAdWindows(
-            reconciledWindows.map(\.window),
+            allWindowsToPersist,
             existingIDs: matchedExistingIDs,
             retiredIDs: retiredWindowIDs
         )
 
-        logger.info("Hot path: persisted \(reconciledWindows.count) candidate AdWindows")
+        logger.info("Hot path: persisted \(reconciledWindows.count) single-window + \(aggregatorWindows.count) aggregator AdWindows")
 
         return HotPathRunResult(
-            windows: reconciledWindows.map(\.window),
+            windows: allWindowsToPersist,
             retiredWindowIDs: retiredWindowIDs
         )
     }
@@ -3106,6 +3189,171 @@ actor AdDetectionService {
             await decisionLogger.record(logEntry)
         }
     }
+
+    // MARK: - Segment Aggregation (playhead-0usd)
+
+    /// Fuse per-window classifier scores from Tier 1 + Tier 2 into coherent
+    /// segments via `SegmentAggregator`, build `AdWindow`s for promoted
+    /// segments that don't overlap an existing single-window AdWindow from
+    /// this run, and emit distinguishing decision-log entries for
+    /// observability.
+    ///
+    /// Additive contract: the aggregator path is a parallel channel to the
+    /// existing single-window promotion — it never overrides a single-window
+    /// AdWindow, only ADDS windows when the single-window path missed them.
+    ///
+    /// - Parameters:
+    ///   - tier1Results: Per-Tier-1-slot classifier results (30 s slots).
+    ///   - tier2Results: Per-hot-path-candidate classifier results (2 s
+    ///     lexical-derived regions). Pass `[]` when the hot path bypasses
+    ///     transcript scoring (empty chunks, or no candidates from chunks).
+    ///   - singleWindowAdWindows: AdWindows already produced by the single-
+    ///     window hot path in this run. Aggregator segments overlapping any
+    ///     of these are dropped — the single-window result wins (it carries
+    ///     richer evidence text / gtt9.4.1 boundary expansion).
+    ///   - analysisAssetId: Asset under analysis.
+    /// - Returns: Net-new aggregator-promoted AdWindows ready for
+    ///   persistence. Caller wires them into `upsertHotPathAdWindows`.
+    private func runSegmentAggregation(
+        tier1Results: [ClassifierResult],
+        tier2Results: [ClassifierResult],
+        singleWindowAdWindows: [AdWindow],
+        analysisAssetId: String
+    ) async throws -> [AdWindow] {
+        // Merge tier 1 + tier 2 into a single sorted WindowScore stream.
+        // SegmentAggregator requires ASC by startTime.
+        let allResults = (tier1Results + tier2Results)
+            .filter { $0.endTime > $0.startTime }
+        guard !allResults.isEmpty else { return [] }
+
+        let windowScores: [SegmentAggregator.WindowScore] = allResults
+            .map {
+                SegmentAggregator.WindowScore(
+                    startTime: $0.startTime,
+                    endTime: $0.endTime,
+                    score: max(0.0, min(1.0, $0.adProbability))
+                )
+            }
+            .sorted { lhs, rhs in
+                if lhs.startTime != rhs.startTime { return lhs.startTime < rhs.startTime }
+                return lhs.endTime < rhs.endTime
+            }
+
+        let segments = SegmentAggregator.aggregate(windows: windowScores)
+        let promotedSegments = segments.filter(\.promoted)
+        guard !promotedSegments.isEmpty else { return [] }
+
+        // Observability: emit one decision-log entry per promoted segment
+        // with a distinguishing action string so replay tooling can
+        // distinguish aggregator promotions from single-window promotions
+        // (which carry "hotPathCandidate" / "autoSkipEligible").
+        let fusionConfig = FusionWeightConfig()
+        let classifierCap = fusionConfig.classifierCap
+        let activationSnapshot = DecisionLogEntry.ActivationConfigSnapshot(
+            MetadataActivationConfig.resolved()
+        )
+        for segment in promotedSegments {
+            let timestamp = Date().timeIntervalSince1970
+            let clampedScore = max(0.0, min(1.0, segment.segmentScore))
+            let cappedWeight = min(clampedScore * classifierCap, classifierCap)
+            let classifierEntry = EvidenceLedgerEntry(
+                source: .classifier,
+                weight: cappedWeight,
+                detail: .classifier(score: segment.segmentScore)
+            )
+            let authority: ProposalAuthority = cappedWeight > classifierCap * 0.5 ? .strong : .weak
+            let breakdown = [
+                SourceEvidence(
+                    source: EvidenceSourceType.classifier.rawValue,
+                    weight: cappedWeight,
+                    capApplied: classifierCap,
+                    authority: authority
+                )
+            ]
+            let entry = DecisionLogEntry(
+                schemaVersion: DecisionLogEntry.currentSchemaVersion,
+                analysisAssetID: analysisAssetId,
+                timestamp: timestamp,
+                windowBounds: .init(start: segment.startTime, end: segment.endTime),
+                activationConfig: activationSnapshot,
+                evidence: [DecisionLogEntry.LedgerEntry(classifierEntry)],
+                fusedConfidence: .init(
+                    proposalConfidence: segment.segmentScore,
+                    skipConfidence: segment.segmentScore,
+                    breakdown: breakdown
+                ),
+                finalDecision: .init(
+                    action: Self.segmentAggregatorPromotedAction,
+                    gate: "eligible",
+                    skipConfidence: segment.segmentScore,
+                    thresholdCrossed: SegmentAggregatorConfig.default.promotionThreshold
+                )
+            )
+            await decisionLogger.record(entry)
+        }
+
+        // Drop segments overlapping any single-window AdWindow already
+        // produced this run. A half-open-interval overlap test suffices:
+        // [s.start, s.end) intersects [w.start, w.end) iff s.end > w.start
+        // && s.start < w.end.
+        //
+        // Also drop segments overlapping any previously-persisted AdWindow
+        // for this asset, regardless of boundaryState. Without this guard,
+        // re-running the hot path (e.g. on transcript-coverage progress)
+        // would insert duplicate aggregator windows at the same span with
+        // fresh UUIDs, because aggregator windows carry no lexical evidence
+        // to reconcile against. Including single-window AdWindows in this
+        // check covers replays where a prior single-window window is still
+        // persisted but the current replay has no transcript chunks to
+        // regenerate it — the aggregator would otherwise add a duplicate-
+        // span aggregator window next to the existing single-window one.
+        let previouslyPersistedWindows = try await store
+            .fetchAdWindows(assetId: analysisAssetId)
+            .filter { $0.detectorVersion == config.detectorVersion }
+        let surviving = promotedSegments.filter { segment in
+            let overlapsSingleWindow = singleWindowAdWindows.contains { window in
+                segment.endTime > window.startTime && segment.startTime < window.endTime
+            }
+            let overlapsExistingWindow = previouslyPersistedWindows.contains { window in
+                segment.endTime > window.startTime && segment.startTime < window.endTime
+            }
+            return !overlapsSingleWindow && !overlapsExistingWindow
+        }
+        guard !surviving.isEmpty else { return [] }
+
+        // Build AdWindows for surviving segments. boundaryState uses the
+        // dedicated `.segmentAggregated` marker so downstream observability
+        // can tell aggregator windows from lexical / acoustic-refined ones.
+        let newWindows = surviving.map { segment in
+            AdWindow(
+                id: UUID().uuidString,
+                analysisAssetId: analysisAssetId,
+                startTime: segment.startTime,
+                endTime: segment.endTime,
+                confidence: segment.segmentScore,
+                boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+                decisionState: AdDecisionState.candidate.rawValue,
+                detectorVersion: config.detectorVersion,
+                advertiser: nil,
+                product: nil,
+                adDescription: nil,
+                evidenceText: nil,
+                evidenceStartTime: nil,
+                metadataSource: "none",
+                metadataConfidence: nil,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false
+            )
+        }
+        logger.info("Hot path: aggregator produced \(newWindows.count) windows (of \(promotedSegments.count) promoted segments, \(promotedSegments.count - surviving.count) deduped against single-window path)")
+        return newWindows
+    }
+
+    /// Decision-log `finalDecision.action` string stamped on aggregator-
+    /// promoted segments so replay tooling can filter them out vs. single-
+    /// window promotions. playhead-0usd.
+    static let segmentAggregatorPromotedAction: String = "segmentAggregatorPromoted"
 
     // MARK: - AdWindow Construction (hot path)
 

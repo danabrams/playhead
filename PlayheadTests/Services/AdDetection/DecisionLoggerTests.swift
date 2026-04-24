@@ -464,9 +464,13 @@ struct DecisionLoggerPipelineTests {
             // them from backfill-fusion entries.
             #expect(entry.evidence.count == 1)
             #expect(entry.evidence.first?.detail.kind == "classifier")
+            // playhead-0usd: `segmentAggregatorPromoted` is a second hot-path
+            // channel (aggregator-derived) that emits alongside the single-
+            // window actions.
             #expect(entry.finalDecision.action == "hotPathCandidate"
                     || entry.finalDecision.action == "hotPathBelowThreshold"
-                    || entry.finalDecision.action == "autoSkipEligible")
+                    || entry.finalDecision.action == "autoSkipEligible"
+                    || entry.finalDecision.action == "segmentAggregatorPromoted")
         }
     }
 

@@ -105,20 +105,25 @@ struct SegmentAggregatorWiringTests {
         // slot granularity (Tier 1 runs on 30-s slots per
         // `AdDetectionService.tier1DefaultWindowSeconds`):
         //
-        //   slot 0  [  0, 30)  @ 0.30   (continuation-grade)
-        //   slot 1  [ 30, 60)  @ 0.55   (candidate-grade, below highConfidence)
-        //   slot 2  [ 60, 90)  @ 0.30
-        //   slot 3  [ 90,120)  @ 0.30
-        //   slot 4  [120,150)  @ 0.55   (candidate-grade, below highConfidence)
-        //   slot 5  [150,180)  @ 0.30
+        //   slot 0  [  0, 30)  @ 0.33   (continuation-grade, below candidate)
+        //   slot 1  [ 30, 60)  @ 0.59   (candidate-grade, below highConfidence)
+        //   slot 2  [ 60, 90)  @ 0.33
+        //   slot 3  [ 90,120)  @ 0.33
+        //   slot 4  [120,150)  @ 0.59   (candidate-grade, below highConfidence)
+        //   slot 5  [150,180)  @ 0.33
         //
-        // The two 0.55 windows are below the 0.60 high-confidence threshold so
+        // The two 0.59 windows are below the 0.60 high-confidence threshold so
         // they do NOT open individually on the aggregator's fast branch, but
         // together they complete the N=2-nearby start (both within 90 s of each
-        // other) and the segment absorbs the intervening 0.30 continuation-
-        // grade context, producing:
-        //   mean = (0.55 + 0.30 + 0.30 + 0.55) / 4 = 0.425 >= 0.40 promotion
-        //   duration = 120 s >= 30 s minAdDuration → promoted.
+        // other) and the segment absorbs the intervening 0.33 continuation-
+        // grade context AND the trailing 0.33 window, producing:
+        //   mean = (0.33*4 + 0.59*2) / 6 = 2.50 / 6 = 0.4167 >= 0.40 promotion
+        //   duration = 180 s >= 30 s minAdDuration → promoted.
+        //
+        // The baseline 0.33 is strictly below `candidateThreshold = 0.35`
+        // (so those windows cannot seed starts on their own) yet strictly
+        // above `continuationThreshold = 0.28` (so they still contribute as
+        // ad-bed context once a segment opens).
         //
         // The run passes `chunks: []` so the existing single-window hot path
         // (which scores LexicalCandidate-derived regions) never fires. The
@@ -135,13 +140,13 @@ struct SegmentAggregatorWiringTests {
         )
 
         let classifier = SlotScoringClassifier(scoresByStartTime: [
-            0.0:   0.30,
-            30.0:  0.55,
-            60.0:  0.30,
-            90.0:  0.30,
-            120.0: 0.55,
-            150.0: 0.30
-        ], defaultScore: 0.30)
+            0.0:   0.33,
+            30.0:  0.59,
+            60.0:  0.33,
+            90.0:  0.33,
+            120.0: 0.59,
+            150.0: 0.33
+        ], defaultScore: 0.33)
         let service = makeService(store: store, classifier: classifier)
 
         let windows = try await service.runHotPath(
@@ -288,13 +293,13 @@ struct SegmentAggregatorWiringTests {
         )
 
         let classifier = SlotScoringClassifier(scoresByStartTime: [
-            0.0:   0.30,
-            30.0:  0.55,
-            60.0:  0.30,
-            90.0:  0.30,
-            120.0: 0.55,
-            150.0: 0.30
-        ], defaultScore: 0.30)
+            0.0:   0.33,
+            30.0:  0.59,
+            60.0:  0.33,
+            90.0:  0.33,
+            120.0: 0.59,
+            150.0: 0.33
+        ], defaultScore: 0.33)
         let spy = SpyDecisionLogger()
         let service = makeService(store: store, classifier: classifier)
         await service.setDecisionLogger(spy)

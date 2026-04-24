@@ -181,9 +181,18 @@ private func makeHotPathFeatureWindow(
 private final class CapturingClassifier: @unchecked Sendable, ClassifierService {
     private(set) var capturedInputs: [ClassifierInput] = []
     private let adProbability: Double
+    /// Score returned for Tier 1 feature-only inputs (candidates whose id is
+    /// prefixed with `tier1-`). playhead-0usd: the aggregator runs over the
+    /// Tier 1 stream, so returning `adProbability` for every Tier 1 slot
+    /// would synthesize a whole-episode ad segment in these tests. Keep the
+    /// Tier 1 score below the aggregator's `continuationThreshold` (0.28) by
+    /// default, so these integration tests remain driven by the lexical /
+    /// transcript-derived candidate stream they intend to exercise.
+    private let tier1AdProbability: Double
 
-    init(adProbability: Double) {
+    init(adProbability: Double, tier1AdProbability: Double = 0.10) {
         self.adProbability = adProbability
+        self.tier1AdProbability = tier1AdProbability
     }
 
     func classify(inputs: [ClassifierInput], priors: ShowPriors) -> [ClassifierResult] {
@@ -192,12 +201,15 @@ private final class CapturingClassifier: @unchecked Sendable, ClassifierService 
     }
 
     func classify(input: ClassifierInput, priors: ShowPriors) -> ClassifierResult {
-        ClassifierResult(
+        let probability = input.candidate.id.hasPrefix("tier1-")
+            ? tier1AdProbability
+            : adProbability
+        return ClassifierResult(
             candidateId: input.candidate.id,
             analysisAssetId: input.candidate.analysisAssetId,
             startTime: input.candidate.startTime,
             endTime: input.candidate.endTime,
-            adProbability: adProbability,
+            adProbability: probability,
             startAdjustment: 0,
             endAdjustment: 0,
             signalBreakdown: SignalBreakdown(
