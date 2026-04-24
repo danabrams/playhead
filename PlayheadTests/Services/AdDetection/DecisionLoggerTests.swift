@@ -798,7 +798,7 @@ struct DecisionLoggerPipelineTests {
                 pauseProbability: pauseProbability,
                 speakerClusterId: nil,
                 jingleHash: nil,
-                featureVersion: 1
+                featureVersion: 4
             ))
             t = nextT
         }
@@ -830,7 +830,7 @@ struct DecisionLoggerPipelineTests {
                 pauseProbability: 0.15,
                 speakerClusterId: nil,
                 jingleHash: nil,
-                featureVersion: 1
+                featureVersion: 4
             ))
             t = nextT
         }
