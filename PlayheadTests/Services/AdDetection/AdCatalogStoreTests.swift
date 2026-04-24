@@ -22,6 +22,18 @@ struct AdCatalogStoreTests {
         return AcousticFingerprint(values: values)
     }
 
+    /// Build an orthogonal-ish fingerprint distinct from `sampleFingerprint(seed:)`.
+    /// Nonzero bins live in the back half of the vector while `sampleFingerprint`
+    /// is weighted toward the front, making the two sit well below any
+    /// default similarity floor.
+    private func orthogonalFingerprint(seed: Int = 1) -> AcousticFingerprint {
+        var values = [Float](repeating: 0, count: 64)
+        for i in 32..<64 {
+            values[i] = Float((i + seed) % 13) + 1.0
+        }
+        return AcousticFingerprint(values: values)
+    }
+
     // MARK: - Insert + query roundtrip
 
     @Test("insert + matches roundtrip returns the inserted entry")
@@ -113,7 +125,7 @@ struct AdCatalogStoreTests {
         let store = try AdCatalogStore(directoryURL: dir)
 
         let fpA = sampleFingerprint(seed: 1)
-        let fpB = sampleFingerprint(seed: 2)
+        let fpB = orthogonalFingerprint(seed: 2)
 
         _ = try await store.insert(
             showId: "show-a",
@@ -141,9 +153,18 @@ struct AdCatalogStoreTests {
             #expect(m.entry.showId == "show-a" || m.entry.showId == nil)
         }
 
+        // Searching show-b for fpB: only show-b entry matches; the null-show
+        // row uses fpA which is orthogonal to fpB under this fixture.
         let matchesB = await store.matches(fingerprint: fpB, show: "show-b", similarityFloor: 0.80)
         #expect(matchesB.count == 1)
         #expect(matchesB.first?.entry.showId == "show-b")
+
+        // Cross-show scoping: searching show-b with fpA should NOT find the
+        // show-a entry even though fpA is highly similar to itself. Only the
+        // null-show entry (fpA) should surface.
+        let crossScope = await store.matches(fingerprint: fpA, show: "show-b", similarityFloor: 0.80)
+        #expect(crossScope.count == 1)
+        #expect(crossScope.first?.entry.showId == nil)
     }
 
     // MARK: - Zero fingerprint handling
