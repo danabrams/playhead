@@ -880,11 +880,29 @@ actor AdDetectionService {
                     authority: authority
                 )
             ]
+            // playhead-gtt9.20: mirror the hot-path emit-site expansion so
+            // Tier 1 entries that clear autoSkipConfidenceThreshold also carry
+            // boundary-expanded bounds. In production Tier 1 slots are 30 s
+            // and the duration guard inside `expandedBounds` short-circuits
+            // (no expansion); the call is a cheap no-op there. The mirror is
+            // structural — keeps both emit sites aligned so the NARL harness
+            // sees the same bounds shape regardless of which path produced
+            // the autoSkipEligible verdict.
+            let logBounds: (start: Double, end: Double)
+            if promotesToAutoSkip {
+                let expanded = await expandedBounds(
+                    for: result,
+                    analysisAssetId: analysisAssetId
+                )
+                logBounds = (expanded.startTime, expanded.endTime)
+            } else {
+                logBounds = (result.startTime, result.endTime)
+            }
             let logEntry = DecisionLogEntry(
                 schemaVersion: DecisionLogEntry.currentSchemaVersion,
                 analysisAssetID: analysisAssetId,
                 timestamp: timestamp,
-                windowBounds: .init(start: result.startTime, end: result.endTime),
+                windowBounds: .init(start: logBounds.start, end: logBounds.end),
                 activationConfig: snapshot,
                 evidence: [DecisionLogEntry.LedgerEntry(classifierEntry)],
                 fusedConfidence: .init(
@@ -3473,11 +3491,31 @@ actor AdDetectionService {
                     authority: authority
                 )
             ]
+            // playhead-gtt9.20: for autoSkip-eligible candidates, carry the
+            // gtt9.4.1 boundary-expanded bounds into the decision log instead
+            // of the raw 2-s classifier slot. AdWindow already gets expanded
+            // bounds via `expandedBounds(for:)` in `runHotPath`; without this
+            // mirror, `DecisionLogEntry.windowBounds` stays at the narrow slot
+            // and the NARL harness scores even confidently-detected closing-
+            // block ads as FN (IoU = 2 / span_width ≪ 0.3).
+            //
+            // Below-autoSkip results keep raw bounds — they're informational
+            // shadow logs, and `expandedBounds` short-circuits anyway.
+            let logBounds: (start: Double, end: Double)
+            if promotesToAutoSkip {
+                let expanded = await expandedBounds(
+                    for: result,
+                    analysisAssetId: analysisAssetId
+                )
+                logBounds = (expanded.startTime, expanded.endTime)
+            } else {
+                logBounds = (result.startTime, result.endTime)
+            }
             let logEntry = DecisionLogEntry(
                 schemaVersion: DecisionLogEntry.currentSchemaVersion,
                 analysisAssetID: analysisAssetId,
                 timestamp: timestamp,
-                windowBounds: .init(start: result.startTime, end: result.endTime),
+                windowBounds: .init(start: logBounds.start, end: logBounds.end),
                 activationConfig: snapshot,
                 evidence: [DecisionLogEntry.LedgerEntry(classifierEntry)],
                 fusedConfidence: .init(
