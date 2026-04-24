@@ -221,7 +221,7 @@ struct AcousticFeaturePipelineWiringTests {
     func funnelComputesAllFeaturesDuringBackfill() async throws {
         let store = try await makeTestStore()
         let assetId = "asset-gtt9.16-funnel"
-        try await store.insertAnalysisAsset(makeAsset(id: assetId))
+        try await store.insertAsset(makeAsset(id: assetId))
         let windows = syntheticAdWindows(assetId: assetId)
         try await store.insertFeatureWindows(windows)
 
@@ -236,9 +236,10 @@ struct AcousticFeaturePipelineWiringTests {
 
         let funnel = await service.acousticFunnelForTesting()
         for feature in AcousticFeatureKind.allCases {
+            let computed = funnel.count(AcousticFeatureFunnelStage.computed, feature)
             #expect(
-                funnel.count(.computed, feature) == windows.count,
-                "expected \(windows.count) computed events for \(feature), got \(funnel.count(.computed, feature))"
+                computed == windows.count,
+                "expected \(windows.count) computed events for \(feature), got \(computed)"
             )
         }
     }
@@ -247,7 +248,7 @@ struct AcousticFeaturePipelineWiringTests {
     func pipelineContributesFusionEvidence() async throws {
         let store = try await makeTestStore()
         let assetId = "asset-gtt9.16-fusion"
-        try await store.insertAnalysisAsset(makeAsset(id: assetId))
+        try await store.insertAsset(makeAsset(id: assetId))
         let windows = syntheticAdWindows(assetId: assetId)
         try await store.insertFeatureWindows(windows)
 
@@ -262,7 +263,7 @@ struct AcousticFeaturePipelineWiringTests {
         // After wiring, the pipeline should have produced at least one window
         // where the fused combined score is > 0 and included in fusion.
         let funnel = await service.acousticFunnelForTesting()
-        let includedTotal = funnel.total(.includedInFusion)
+        let includedTotal = funnel.total(AcousticFeatureFunnelStage.includedInFusion)
         #expect(includedTotal > 0, "expected at least one pipeline feature to be included in fusion, got \(includedTotal)")
 
         // The pipeline surface (captured for inspection) should have fused
@@ -276,7 +277,7 @@ struct AcousticFeaturePipelineWiringTests {
     func zeroSignalBackCompat() async throws {
         let store = try await makeTestStore()
         let assetId = "asset-gtt9.16-zero"
-        try await store.insertAnalysisAsset(makeAsset(id: assetId))
+        try await store.insertAsset(makeAsset(id: assetId))
         try await store.insertFeatureWindows(zeroSignalWindows(assetId: assetId, count: 30))
 
         let service = makeService(store: store)
@@ -291,7 +292,7 @@ struct AcousticFeaturePipelineWiringTests {
         // it into fusion. The funnel records compute but zero passedGate /
         // zero includedInFusion across all eight features.
         let funnel = await service.acousticFunnelForTesting()
-        #expect(funnel.total(.includedInFusion) == 0, "expected zero pipeline features in fusion on silent input")
+        #expect(funnel.total(AcousticFeatureFunnelStage.includedInFusion) == 0, "expected zero pipeline features in fusion on silent input")
 
         // Pipeline result was captured but contributed zero combined mass.
         let fusion = await service.lastAcousticPipelineFusionForTesting()
