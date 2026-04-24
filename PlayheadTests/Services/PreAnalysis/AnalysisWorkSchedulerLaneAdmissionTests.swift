@@ -85,7 +85,7 @@ struct AnalysisWorkSchedulerLaneAdmissionTests {
         #expect(admission.pauseAllWork == false)
     }
 
-    @Test("serious thermal -> serious QualityProfile, Soon + Background paused")
+    @Test("serious thermal -> serious QualityProfile, Soon + Background paused (background state)")
     func testSeriousAdmission() async throws {
         let store = try await makeTestStore()
         let capabilities = StubCapabilitiesProvider(
@@ -100,6 +100,12 @@ struct AnalysisWorkSchedulerLaneAdmissionTests {
         battery.charging = true
 
         let scheduler = makeScheduler(store: store, capabilities: capabilities, battery: battery)
+        // playhead-gtt9.14: this test asserts the raw QualityProfile.serious
+        // baseline (Soon + Background both paused). Under foreground-aggressive
+        // mode (foreground + paused/idle) the scheduler reopens the Soon
+        // lane — a separate assertion covers that. Drive the scheduler into
+        // the `.background` phase here so the baseline is observable.
+        await scheduler.updateScenePhase(.background)
         let admission = await scheduler.currentLaneAdmission()
 
         #expect(admission.qualityProfile == .serious)

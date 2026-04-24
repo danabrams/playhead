@@ -215,6 +215,19 @@ actor AnalysisCoordinator {
     /// existing tests that do not pass a logger keep working.
     private let lifecycleLogger: AssetLifecycleLoggerProtocol
 
+    /// playhead-gtt9.14: optional scheduler-state snapshot provider.
+    /// When non-nil, every lifecycle record additionally captures the
+    /// scheduler's (scenePhase, playbackContext, qualityProfile) triple
+    /// so post-ship real-data traces can be bucketed by admission
+    /// state. Nil provider leaves all three v2 fields as nil on the
+    /// recorded entry, which is the backwards-compatible no-op.
+    ///
+    /// `var` (not `let`) because `PlayheadRuntime` constructs the
+    /// coordinator before the scheduler and must wire the provider in
+    /// after both are live. Tests that construct a coordinator in
+    /// isolation pass the provider at init.
+    private var schedulerStateSnapshotProvider: (any SchedulerStateSnapshotProviding)?
+
     // MARK: - Active Session State
 
     /// The currently active session, if any.
@@ -301,7 +314,8 @@ actor AnalysisCoordinator {
         skipOrchestrator: SkipOrchestrator,
         downloadManager: DownloadManager? = nil,
         surfaceStatusObserver: EpisodeSurfaceStatusObserver? = nil,
-        lifecycleLogger: AssetLifecycleLoggerProtocol = NoOpAssetLifecycleLogger()
+        lifecycleLogger: AssetLifecycleLoggerProtocol = NoOpAssetLifecycleLogger(),
+        schedulerStateSnapshotProvider: (any SchedulerStateSnapshotProviding)? = nil
     ) {
         self.store = store
         self.audioService = audioService
@@ -313,6 +327,18 @@ actor AnalysisCoordinator {
         self.downloadManager = downloadManager
         self.surfaceStatusObserver = surfaceStatusObserver
         self.lifecycleLogger = lifecycleLogger
+        self.schedulerStateSnapshotProvider = schedulerStateSnapshotProvider
+    }
+
+    /// playhead-gtt9.14: install (or replace) the scheduler-state
+    /// snapshot provider after construction. `PlayheadRuntime` calls
+    /// this once, after both `AnalysisCoordinator` and
+    /// `AnalysisWorkScheduler` have been constructed — the coordinator
+    /// needs to exist first so it can be passed into the scheduler's
+    /// dependency wiring, and the provider needs the scheduler to
+    /// return meaningful snapshots.
+    func setSchedulerStateSnapshotProvider(_ provider: (any SchedulerStateSnapshotProviding)?) {
+        self.schedulerStateSnapshotProvider = provider
     }
 
     // MARK: - Lifecycle
@@ -1405,6 +1431,12 @@ actor AnalysisCoordinator {
         let assetForLog = (try? await store.fetchAsset(id: assetId))
         let transcriptChunksForLog = (try? await store.fetchTranscriptChunks(assetId: assetId)) ?? []
         let transcriptCoverageEnd = transcriptChunksForLog.map(\.endTime).max()
+        // playhead-gtt9.14: capture the scheduler's admission inputs so
+        // the lifecycle log carries enough context for post-ship triage
+        // of stranded-asset cases (e.g. "stopped at tx=840" — was the
+        // user paused-foreground, or backgrounded with cold BPS?).
+        let schedulerSnapshot = await schedulerStateSnapshotProvider?.schedulerStateSnapshot()
+            ?? SchedulerStateSnapshot.empty
         let entry = AssetLifecycleLogEntry(
             schemaVersion: AssetLifecycleLogEntry.currentSchemaVersion,
             analysisAssetID: assetId,
@@ -1415,7 +1447,10 @@ actor AnalysisCoordinator {
             terminalReason: terminalReason,
             episodeDurationSec: currentEpisodeDuration(),
             featureCoverageEndSec: assetForLog?.featureCoverageEndTime,
-            transcriptCoverageEndSec: transcriptCoverageEnd
+            transcriptCoverageEndSec: transcriptCoverageEnd,
+            schedulerScenePhase: schedulerSnapshot.scenePhase,
+            schedulerPlaybackContext: schedulerSnapshot.playbackContext,
+            schedulerQualityProfile: schedulerSnapshot.qualityProfile
         )
         await lifecycleLogger.record(entry)
 

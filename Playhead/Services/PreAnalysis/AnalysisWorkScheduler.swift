@@ -51,6 +51,41 @@ protocol ShadowLaneTickHandler: Sendable {
 // `NWPathMonitor`-backed provider will land in playhead-ml96.
 
 actor AnalysisWorkScheduler {
+    // MARK: - PlaybackContext + ScenePhase signals (playhead-gtt9.14)
+
+    /// Transport-level playback state the scheduler consults when deciding
+    /// whether to admit deferred work. Threaded from `PlaybackState.Status`
+    /// by `PlayheadRuntime`'s status-observer loop.
+    ///
+    /// - `playing`: the audio decoder is actively producing frames. Deferred
+    ///   pre-analysis must stand down so the shared pipeline bandwidth stays
+    ///   available to the hot path.
+    /// - `paused`: an episode is loaded but audio is halted. This is the
+    ///   MOST aggressive mode for deferred work — device is awake, user is
+    ///   engaged in the app, no OS time limit applies.
+    /// - `idle`: no episode is loaded, or playback stopped entirely.
+    ///
+    /// `.loading` and `.failed` states from `PlaybackState.Status` are
+    /// folded into `.paused` (loaded but not producing audio) so the
+    /// scheduler does not have to enumerate every transport variant.
+    enum PlaybackContext: Sendable, Equatable {
+        case playing
+        case paused
+        case idle
+    }
+
+    /// Scene-phase projection consumed by the admission filter. A deliberate
+    /// stripped-down mirror of SwiftUI's `ScenePhase` so the scheduler
+    /// doesn't import SwiftUI and tests can drive state without an
+    /// `@Environment` harness. `.inactive` (SwiftUI) folds into
+    /// `.foreground` because the user is still holding the device — the
+    /// scheduler's BGProcessingTask handoff only fires on a true
+    /// `.background` transition.
+    enum SchedulerScenePhase: Sendable, Equatable {
+        case foreground
+        case background
+    }
+
     private static let coverageProgressEpsilon = 0.001
     /// Back-off applied when the scheduler decides not to run the job at
     /// the top of the queue on this pass — either the Soon-vs-Background
@@ -206,7 +241,24 @@ actor AnalysisWorkScheduler {
     private var currentRunningTask: Task<Void, Never>?
     private var currentJobId: String?
     private var currentEpisodeId: String?
+    /// Episode id of the currently-loaded playback session, if any.
+    /// Retained alongside `playbackContext` because several cancellation
+    /// paths key on the episode identity rather than the coarse context.
+    /// A `nil` value is equivalent to `playbackContext == .idle`.
     private var activePlaybackEpisodeId: String?
+    /// playhead-gtt9.14: transport-level playback state, threaded from
+    /// `PlaybackState.Status` by `PlayheadRuntime`. The admission filter
+    /// in `runLoop()` blocks deferred work only when this is `.playing`
+    /// AND `scenePhase == .foreground`. See the 4-state matrix in the
+    /// `PlaybackContext` doc comment.
+    private var playbackContext: PlaybackContext = .idle
+    /// playhead-gtt9.14: SwiftUI scene-phase projection forwarded from
+    /// `PlayheadApp`'s `.onChange(of: scenePhase)` observer. Starts at
+    /// `.foreground` so a scheduler constructed mid-session (e.g. in a
+    /// background runtime that hasn't received a phase signal yet) does
+    /// not silently admit background work it shouldn't. The first real
+    /// `.background` transition re-gates appropriately.
+    private var schedulerScenePhase: SchedulerScenePhase = .foreground
     private var shouldCancelCurrentJob = false
     /// Set to `true` by the lease-renewal task when its CAS finds no
     /// matching row — i.e. orphan recovery (or another scheduler
@@ -659,8 +711,14 @@ actor AnalysisWorkScheduler {
     /// Notify the scheduler that playback has started for an episode.
     /// Cancel any running pre-analysis work while the foreground hot path owns
     /// the shared analysis pipeline.
+    ///
+    /// Compatibility shim: sets `playbackContext = .playing` under the hood
+    /// so existing call sites (PlayheadRuntime.playEpisode) need no change.
+    /// Newer call sites that distinguish play vs. load should prefer
+    /// `updatePlaybackContext(_:)` directly.
     func playbackStarted(episodeId: String) async {
         activePlaybackEpisodeId = episodeId
+        playbackContext = .playing
         if currentRunningTask != nil {
             shouldCancelCurrentJob = true
             currentRunningTask?.cancel()
@@ -673,7 +731,132 @@ actor AnalysisWorkScheduler {
     /// queued deferred work to resume.
     func playbackStopped() {
         activePlaybackEpisodeId = nil
+        playbackContext = .idle
         wakeSchedulerLoop()
+    }
+
+    /// playhead-gtt9.14: update the transport-level playback context. The
+    /// admission filter in `runLoop` consults this together with
+    /// `schedulerScenePhase` to decide whether deferred work may admit.
+    ///
+    /// Call from `PlayheadRuntime`'s status observer whenever
+    /// `PlaybackState.Status` flips between `.playing`, `.paused`, and
+    /// `.idle` (or the `.loading` / `.failed` states, which both fold
+    /// into `.paused` for admission purposes). A status update that
+    /// doesn't change the admission state still wakes the loop — the
+    /// scheduler's own back-off decides whether to reconsider immediately.
+    func updatePlaybackContext(_ context: PlaybackContext) {
+        let priorContext = playbackContext
+        playbackContext = context
+        if context == .idle {
+            activePlaybackEpisodeId = nil
+        }
+        // Wake only on a genuine transition so the idle poll loop doesn't
+        // get hammered by coalesced status ticks (observeStates fires at
+        // AVPlayer's periodic-time cadence — many ticks per second).
+        if priorContext != context {
+            wakeSchedulerLoop()
+        }
+    }
+
+    /// playhead-gtt9.14: update the scene-phase projection. Forwarded by
+    /// `PlayheadApp.onChange(of: scenePhase)` on the main actor. Foreground
+    /// → background transitions preempt the idle poll so the filter
+    /// re-evaluates on the next iteration.
+    func updateScenePhase(_ phase: SchedulerScenePhase) {
+        let priorPhase = schedulerScenePhase
+        schedulerScenePhase = phase
+        if priorPhase != phase {
+            wakeSchedulerLoop()
+        }
+    }
+
+    #if DEBUG
+    /// Test-only accessor for the current playback context.
+    func playbackContextForTesting() -> PlaybackContext {
+        playbackContext
+    }
+
+    /// Test-only accessor for the current scene phase.
+    func scenePhaseForTesting() -> SchedulerScenePhase {
+        schedulerScenePhase
+    }
+
+    /// Test-only projection of the admission-filter predicate. Returns
+    /// `true` iff the scheduler's `runLoop` would admit deferred work on
+    /// the next iteration under the current (scenePhase, playbackContext,
+    /// QualityProfile) triple. Thermal `.critical` (`pauseAllWork`) still
+    /// dominates — this returns `false` in that case regardless of
+    /// scene/playback state.
+    func wouldAdmitDeferredWorkForTesting() async -> Bool {
+        let admission = await currentLaneAdmission()
+        if admission.pauseAllWork { return false }
+        return !admissionBlocksDeferred()
+    }
+    #endif
+
+    /// Decide whether the admission filter should short-circuit the run
+    /// loop before reaching the store fetch. True ⇒ skip this pass and
+    /// sleep. This is the 4-state matrix from playhead-gtt9.14:
+    ///
+    ///   (foreground, playing)  → BLOCK  (audio pipeline owns bandwidth)
+    ///   (foreground, paused)   → ADMIT  (most aggressive mode)
+    ///   (foreground, idle)     → ADMIT
+    ///   (background, playing)  → BLOCK  (episode loaded; BPS owns window)
+    ///   (background, paused)   → BLOCK
+    ///   (background, idle)     → ADMIT
+    ///
+    /// The background row preserves the pre-gtt9.14 contract: when an
+    /// episode is loaded, the scheduler defers to
+    /// `BackgroundProcessingService`'s BGProcessingTask window rather than
+    /// sneaking opportunistic work under the audio session.
+    private func admissionBlocksDeferred() -> Bool {
+        switch schedulerScenePhase {
+        case .foreground:
+            return playbackContext == .playing
+        case .background:
+            return playbackContext != .idle
+        }
+    }
+
+    /// Whether the scheduler is in the "foreground-paused or foreground-idle"
+    /// mode where it relaxes the thermal gate by one step so that
+    /// `QualityProfile == .serious` still admits Soon-lane work. The
+    /// Background lane remains gated because maintenance transfers have
+    /// independent reasons (transport preference, charging heuristics)
+    /// to wait for a cooler device.
+    private func isForegroundAggressiveMode() -> Bool {
+        schedulerScenePhase == .foreground && playbackContext != .playing
+    }
+
+    // MARK: - SchedulerStateSnapshotProviding (playhead-gtt9.14)
+
+    /// Current scheduler-state snapshot — the triple the lifecycle
+    /// logger records at every session-state transition. Safe to call
+    /// from any isolation domain thanks to actor-hop on `await`. A
+    /// `critical` thermal read is still reported as the dominant
+    /// profile — callers use the tuple for bucketing, not for policy
+    /// decisions.
+    func currentSchedulerStateSnapshot() async -> SchedulerStateSnapshot {
+        let sceneString: String = {
+            switch schedulerScenePhase {
+            case .foreground: return "foreground"
+            case .background: return "background"
+            }
+        }()
+        let contextString: String = {
+            switch playbackContext {
+            case .playing: return "playing"
+            case .paused:  return "paused"
+            case .idle:    return "idle"
+            }
+        }()
+        let admission = await currentLaneAdmission()
+        return SchedulerStateSnapshot(
+            scenePhase: sceneString,
+            playbackContext: contextString,
+            qualityProfile: admission.qualityProfile.rawValue
+        )
     }
 
     /// Mark jobs for a deleted episode as superseded.
@@ -813,9 +996,14 @@ actor AnalysisWorkScheduler {
                 continue
             }
 
-            // Foreground playback owns the shared transcript/backfill pipeline.
-            // Do not start deferred pre-analysis work until playback stops.
-            if activePlaybackEpisodeId != nil {
+            // playhead-gtt9.14: 4-state admission filter over
+            // (scenePhase, playbackContext). Prior to gtt9.14 the
+            // scheduler blocked deferred work whenever an episode was
+            // loaded — treating foreground-paused the same as
+            // foreground-playing, which is the opposite of what the
+            // device's capability envelope suggests. See
+            // `admissionBlocksDeferred()` for the full matrix.
+            if admissionBlocksDeferred() {
                 await sleepOrWake(seconds: Self.idlePollSeconds)
                 continue
             }
@@ -1108,7 +1296,41 @@ actor AnalysisWorkScheduler {
             batteryLevel: batteryState.level,
             isCharging: batteryState.isCharging
         )
-        return LaneAdmission(qualityProfile: profile, policy: profile.schedulerPolicy)
+        // playhead-gtt9.14: foreground-paused / foreground-idle is the
+        // MOST aggressive scheduling mode — device awake, user engaged,
+        // no audio producer, no OS time limit. Under `.serious` thermal
+        // the baseline policy blocks both Soon and Background; the
+        // relaxation opens Soon back up so deferred transcript work
+        // drains while the user is looking at the app. Background lane
+        // stays gated (maintenance transfers defer to a cooler device).
+        // `.critical` is never relaxed — `pauseAllWork` is dominant in
+        // every state.
+        let effectivePolicy = relaxedPolicy(
+            for: profile.schedulerPolicy,
+            profile: profile,
+            foregroundAggressive: isForegroundAggressiveMode()
+        )
+        return LaneAdmission(qualityProfile: profile, policy: effectivePolicy)
+    }
+
+    /// playhead-gtt9.14: derive the effective `SchedulerPolicy` from the
+    /// baseline `QualityProfile` policy. When the scheduler is in the
+    /// foreground-aggressive mode (foreground + paused/idle) and the
+    /// thermal baseline is `.serious`, reopen the Soon lane. All other
+    /// inputs pass through unchanged — this is not a general-purpose
+    /// profile override.
+    private func relaxedPolicy(
+        for policy: QualityProfile.SchedulerPolicy,
+        profile: QualityProfile,
+        foregroundAggressive: Bool
+    ) -> QualityProfile.SchedulerPolicy {
+        guard foregroundAggressive, profile == .serious else { return policy }
+        return QualityProfile.SchedulerPolicy(
+            sliceFraction: policy.sliceFraction,
+            allowSoonLane: true,
+            allowBackgroundLane: policy.allowBackgroundLane,
+            pauseAllWork: policy.pauseAllWork
+        )
     }
 
     private func sleepOrWake(seconds: UInt64) async {

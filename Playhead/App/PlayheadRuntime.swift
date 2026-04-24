@@ -570,6 +570,19 @@ final class PlayheadRuntime {
             batteryProvider: batteryProvider,
             candidateWindowCascade: CandidateWindowCascade()
         )
+        // playhead-gtt9.14: wire the scheduler as the coordinator's
+        // scheduler-state snapshot source so every lifecycle-log record
+        // carries the (scenePhase, playbackContext, qualityProfile)
+        // triple. The coordinator must be constructed first (above) so
+        // it can accept this setter; attaching post-init keeps the two
+        // dependency cones decoupled.
+        do {
+            let adapter = AnalysisWorkSchedulerStateSnapshotAdapter(
+                scheduler: analysisWorkScheduler
+            )
+            let coordinator = analysisCoordinator
+            Task { await coordinator.setSchedulerStateSnapshotProvider(adapter) }
+        }
         self.analysisJobReconciler = AnalysisJobReconciler(
             store: analysisStore,
             downloadManager: downloadManager,
@@ -747,7 +760,7 @@ final class PlayheadRuntime {
             await analysisWorkScheduler.startSchedulerLoop()
         }
 
-        Task { [playbackService, analysisCoordinator, skipOrchestrator, shadowCaptureCoordinator] in
+        Task { [playbackService, analysisCoordinator, skipOrchestrator, shadowCaptureCoordinator, analysisWorkScheduler] in
             await skipOrchestrator.setSkipCueHandler { cues in
                 Task { @PlaybackServiceActor in
                     playbackService.setSkipCues(cues)
@@ -756,6 +769,12 @@ final class PlayheadRuntime {
 
             var lastStatus: PlaybackState.Status = .idle
             var lastSpeed: Float = 1.0
+            // playhead-gtt9.14: coalesce PlaybackState.Status → scheduler
+            // PlaybackContext updates. The transport stream emits on every
+            // AVPlayer periodic-time tick; re-entering the actor on each
+            // one would hammer the scheduler. Forward only when the mapped
+            // context actually changes.
+            var lastForwardedContext: AnalysisWorkScheduler.PlaybackContext = .idle
 
             let stateStream = await playbackService.observeStates()
             for await state in stateStream {
@@ -766,6 +785,21 @@ final class PlayheadRuntime {
                     await analysisCoordinator.handlePlaybackEvent(
                         .speedChanged(rate: state.playbackSpeed, time: state.currentTime)
                     )
+                }
+
+                // playhead-gtt9.14: forward transport status to the
+                // scheduler so its admission filter distinguishes playing
+                // from paused. `.loading` and `.failed` fold into
+                // `.paused` (loaded but not producing audio).
+                let mappedContext: AnalysisWorkScheduler.PlaybackContext
+                switch state.status {
+                case .playing:                   mappedContext = .playing
+                case .paused, .loading, .failed: mappedContext = .paused
+                case .idle:                      mappedContext = .idle
+                }
+                if mappedContext != lastForwardedContext {
+                    lastForwardedContext = mappedContext
+                    await analysisWorkScheduler.updatePlaybackContext(mappedContext)
                 }
 
                 switch state.status {
