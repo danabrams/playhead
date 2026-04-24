@@ -616,17 +616,63 @@ struct NarlEvalCorpusBuilderTests {
     /// Pure function that maps a decision-log `finalDecision.action` string to
     /// the NARL harness's `isAdUnderDefault` bit.
     ///
-    /// playhead-gtt9.19 RED step: this implementation is the pre-fix
-    /// substring heuristic, preserved verbatim so the new unit tests exercise
-    /// the known-buggy behavior. The GREEN step replaces this body with an
-    /// exact-match enum mapping. See
-    /// docs/narl/2026-04-24-finding1-conan-classifier-diagnosis.md for why
-    /// this is wrong.
+    /// Replaces the pre-gtt9.19 substring heuristic
+    /// (`action.contains("autoskip") || action.contains("markonly")
+    /// || (action.contains("skip") && !action.contains("suppress"))`), which
+    /// silently dropped `detectOnly` — a legitimate positive ad determination
+    /// emitted by `SkipPolicyMatrix` for owned/affiliate/unknown-unknown
+    /// content. Substring matching also had a false-positive surface
+    /// (`hotPathAutoSkipEligible` would match `autoskip`) and was case-
+    /// insensitive in an unprincipled way.
+    ///
+    /// Mapping rules (exact match against production action strings):
+    ///
+    /// `SkipPolicyAction` raw values — the policy-matrix output:
+    ///   - `autoSkipEligible` → true (the canonical skip-worthy ad)
+    ///   - `detectOnly`       → true (banner-shown ad; real determination, not a skip)
+    ///   - `logOnly`          → false (telemetry only; insufficient signal)
+    ///   - `suppress`         → false (organic content; never shown)
+    ///
+    /// Hot-path synthetic actions (`AdDetectionService`):
+    ///   - `hotPathCandidate`         → false (below autoSkip threshold; intermediate)
+    ///   - `hotPathBelowThreshold`    → false (below candidate threshold; intermediate)
+    ///
+    /// Aggregator (`AdDetectionService.segmentAggregatorPromotedAction`):
+    ///   - `segmentAggregatorPromoted` → true (aggregator said "this is an ad")
+    ///
+    /// Precision-gate (`AutoSkipPrecisionGateAction.markOnlyCandidate`):
+    ///   - `markOnlyCandidate` → true (gtt9.11 precision-gate mark-only; still a positive)
+    ///   - `markOnly`          → true (legacy eligibility-gate value)
+    ///
+    /// Any unknown / empty string → false (safe default; surfaces as unmapped).
     static func isAdUnderDefault(policyAction: String) -> Bool {
-        let action = policyAction.lowercased()
-        return action.contains("autoskip")
-            || action.contains("markonly")
-            || action.contains("skip") && !action.contains("suppress")
+        // Fast path: if the action decodes as a canonical SkipPolicyAction raw
+        // value, use the compile-time-exhaustive switch below. The Swift
+        // compiler will fail to build if a new `SkipPolicyAction` case lands
+        // and isn't explicitly mapped — that's the regression guard requested
+        // in the bead.
+        if let policy = SkipPolicyAction(rawValue: policyAction) {
+            switch policy {
+            case .autoSkipEligible: return true
+            case .detectOnly:       return true
+            case .logOnly:          return false
+            case .suppress:         return false
+            }
+        }
+
+        // Non-enum action strings emitted by production (hot-path synthetic,
+        // aggregator, precision-gate). These bypass the policy matrix, so we
+        // enumerate them explicitly. Any other string → false.
+        switch policyAction {
+        case "hotPathCandidate":                           return false  // below autoSkip, intermediate
+        case "hotPathBelowThreshold":                      return false  // below candidate, intermediate
+        case AdDetectionService.segmentAggregatorPromotedAction:
+                                                           return true   // aggregator-promoted segment
+        case AutoSkipPrecisionGateAction.markOnlyCandidate:
+                                                           return true   // gtt9.11 precision gate
+        case "markOnly":                                   return true   // legacy eligibility-gate value
+        default:                                           return false  // unknown / empty
+        }
     }
 }
 
