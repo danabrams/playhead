@@ -98,7 +98,24 @@ enum ShadowDecisionsExporter {
     /// Serialize one row as a compact JSON object (no trailing newline).
     /// Deterministic key ordering is not required — the corpus builder is
     /// line-oriented and parses each line independently.
+    ///
+    /// gtt9.4.4: in addition to the opaque ``fmResponseBase64`` blob (kept
+    /// for back-compat), emit two top-level fields that summarize the
+    /// shadow classifier's decision so downstream consumers don't have to
+    /// decode the blob themselves:
+    ///   - `isAd` (Bool): true when any decoded span carries a commercial
+    ///     `commercialIntent` (paid / owned / affiliate). Organic and
+    ///     unknown intents are treated as non-ad — matching the live
+    ///     classifier's promotion logic.
+    ///   - `shadowConfidence` (Double in [0, 1]): the maximum certainty band
+    ///     across ad-bearing spans, mapped weak=0.33, moderate=0.66,
+    ///     strong=1.00 (mirrors the AdDetectionService FM weighting in
+    ///     `AdDetectionService.swift:1962-1968`). 0.0 when `isAd=false`.
+    /// Both fields default to (`false`, 0.0) when the blob can't be decoded
+    /// or `refinementResponse` is nil (FM error path) — those rows are
+    /// honestly "no signal" rather than synthetic disagreement.
     static func serialize(_ row: ShadowFMResponse) throws -> Data {
+        let summary = decodeShadowSummary(row.fmResponse)
         let obj: [String: Any] = [
             "schemaVersion": shadowSchemaVersion,
             "type": "shadow_fm_response",
@@ -110,12 +127,74 @@ enum ShadowDecisionsExporter {
             "capturedAt": row.capturedAt,
             "capturedBy": row.capturedBy.rawValue,
             "fmModelVersion": row.fmModelVersion as Any? ?? NSNull(),
+            "isAd": summary.isAd,
+            "shadowConfidence": summary.confidence,
         ]
         // .withoutEscapingSlashes keeps asset ids / model-version strings readable.
         return try JSONSerialization.data(
             withJSONObject: obj,
             options: [.withoutEscapingSlashes]
         )
+    }
+
+    // MARK: - Shadow decision summary (gtt9.4.4)
+
+    /// Compact summary of a shadow FM payload's classification outcome.
+    /// Populated by ``decodeShadowSummary(_:)``; surfaced in the JSONL line
+    /// as the top-level `isAd` + `shadowConfidence` fields.
+    struct ShadowDecisionSummary: Equatable {
+        let isAd: Bool
+        /// Confidence in [0, 1]. Zero whenever `isAd == false` (no
+        /// ad-bearing span was detected, or the blob/response was missing).
+        let confidence: Double
+    }
+
+    /// Decode a shadow `fmResponse` blob and reduce it to a compact
+    /// `ShadowDecisionSummary`. Soft-fails to `(false, 0.0)` on any decode
+    /// problem — the export path is not the right place to throw on a
+    /// malformed row, since the raw bytes are also retained verbatim in
+    /// `fmResponseBase64` for forensic decoding by hand if needed.
+    static func decodeShadowSummary(_ fmResponse: Data) -> ShadowDecisionSummary {
+        let decoder = JSONDecoder()
+        guard let payload = try? decoder.decode(ShadowFMPayload.self, from: fmResponse) else {
+            return ShadowDecisionSummary(isAd: false, confidence: 0.0)
+        }
+        guard let response = payload.refinementResponse else {
+            // FM error path (refusal / decoding / rate-limit / etc.) —
+            // recorded as a datum but with no positive ad signal.
+            return ShadowDecisionSummary(isAd: false, confidence: 0.0)
+        }
+        // Filter to spans that assert commerce. Organic and unknown are
+        // not ad signals — same convention the live classifier uses to
+        // avoid promoting host monologue into the ad gradient.
+        let adSpans = response.spans.filter { span in
+            switch span.commercialIntent {
+            case .paid, .owned, .affiliate: return true
+            case .organic, .unknown: return false
+            }
+        }
+        guard !adSpans.isEmpty else {
+            return ShadowDecisionSummary(isAd: false, confidence: 0.0)
+        }
+        // Confidence = max certainty across ad spans, mapped to [0, 1].
+        // Mirrors the AdDetectionService FM weight ladder structure
+        // (strong > moderate > weak) without coupling to fusionConfig
+        // caps; this number is the shadow path's own honest signal.
+        let confidence = adSpans
+            .map { confidenceFor(certainty: $0.certainty) }
+            .max() ?? 0.0
+        return ShadowDecisionSummary(isAd: true, confidence: confidence)
+    }
+
+    /// Map a `CertaintyBand` to a [0, 1] scalar suitable for the
+    /// `shadowConfidence` JSONL field. Stable convention — downstream
+    /// fixtures and tests bake these constants in.
+    private static func confidenceFor(certainty: CertaintyBand) -> Double {
+        switch certainty {
+        case .weak: return 0.33
+        case .moderate: return 0.66
+        case .strong: return 1.0
+        }
     }
 
     // MARK: - Parse (round-trip helper)
