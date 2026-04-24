@@ -489,19 +489,38 @@ struct BackgroundFeedRefreshExpirationTests {
                 "Handler must install expirationHandler before awaiting work")
 
         // Simulate iOS firing expiration while the refresher is still
-        // parked. This must complete the task exactly once and set
-        // success=false. A second completion from the normal-exit path
-        // after `release()` would violate the iOS contract.
+        // parked. This spawns a Task that hops to the actor; the actor
+        // is currently parked at `await withCheckedContinuation` inside
+        // the refresher, so it can accept the `markExpiredAndComplete`
+        // reentrant message and complete the task with success=false.
+        // A second completion from the normal-exit path after `release()`
+        // would violate the iOS contract; the idempotence guard prevents
+        // that.
         task.simulateExpiration()
 
-        // Release the gate so the handler can unwind.
+        // Wait until the expiration hop has landed and called
+        // `setTaskCompleted`. Without this sync point, the test race
+        // lets `release()` wake the actor first and the normal-exit
+        // path wins, masking a bug where the expiration Task never
+        // actually runs.
+        for _ in 0..<500 {
+            if task.setTaskCompletedCallCount >= 1 { break }
+            try? await Task.sleep(nanoseconds: 1_000_000)  // 1ms
+        }
+        #expect(task.setTaskCompletedCallCount == 1,
+                "Expiration hop must complete the task before release")
+        #expect(task.completedSuccess == false,
+                "Expired handler must report success=false")
+
+        // Release the gate so the handler can unwind. The post-release
+        // completeTaskOnce must no-op because the guard is already set.
         await refresher.release()
         _ = await handlerFinished
 
         #expect(task.setTaskCompletedCallCount == 1,
-                "setTaskCompleted must fire exactly once even when expiration and normal-exit race")
+                "Normal-exit path must NOT call setTaskCompleted a second time")
         #expect(task.completedSuccess == false,
-                "Expired handler must report success=false")
+                "Post-release completion must not overwrite the expired status")
     }
 }
 
