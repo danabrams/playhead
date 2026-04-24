@@ -523,6 +523,236 @@ actor AdDetectionService {
         }
     }
 
+    // MARK: - Tier 1: Feature-Only Scoring (playhead-gtt9.9)
+
+    /// Default slot length (seconds) for Tier 1's transcript-independent
+    /// sliding window. 30 s matches the canonical short-ad atom in
+    /// `GlobalPriorDefaults` and keeps the number of classifier invocations
+    /// proportional to episode length (≈120 calls on a 1-hour show).
+    static let tier1DefaultWindowSeconds: TimeInterval = 30.0
+
+    /// Internal slot bookkeeping for `runTier1FeatureOnlyScoring`.
+    /// Each slot becomes a synthesized `LexicalCandidate` carrying features,
+    /// then a classifier call, then a `DecisionLogEntry`.
+    private struct Tier1Slot: Sendable {
+        let index: Int
+        let startTime: Double
+        let endTime: Double
+    }
+
+    /// Tier 1 scoring: emit a scored `DecisionLogEntry` for every
+    /// non-overlapping `windowSeconds` slot in [0, episodeDuration), regardless
+    /// of transcript state. This fixes the gtt9.9 regression where empty-
+    /// transcript episodes produced zero scored windows because every
+    /// candidate was derived from transcript atoms.
+    ///
+    /// Tier 1 uses ONLY feature-derived and metadata signals (feature windows
+    /// from the acoustic extractor, plus the classifier's own time-position
+    /// prior fed via `episodeDuration`). Transcript-dependent evidence —
+    /// lexical, FM, catalog, promotion — is Tier 2's job (`runBackfill`) and
+    /// REFINES Tier 1 scores without gating whether a region is scored.
+    ///
+    /// Hard contract:
+    /// - Every second of the episode (modulo a <1 s trailing sliver) is
+    ///   evaluated and logged, even with zero transcript chunks.
+    /// - The emitted `DecisionLogEntry.action` mirrors the hot path:
+    ///   `autoSkipEligible` ≥ `config.autoSkipConfidenceThreshold`,
+    ///   `hotPathCandidate` ≥ `config.candidateThreshold`, else
+    ///   `hotPathBelowThreshold`.
+    /// - Tier 1 does NOT persist `AdWindow`s. The aggregation step (gtt9.10)
+    ///   owns span materialization.
+    /// - Tier 1 does NOT grant auto-skip authority on its own. Existing
+    ///   eligibility gates in `DecisionMapper`/`SkipPolicyMatrix` remain the
+    ///   sole skip authorities.
+    ///
+    /// - Parameters:
+    ///   - analysisAssetId: Asset to score.
+    ///   - episodeDuration: Full episode length in seconds.
+    ///   - windowSeconds: Slot length (default `tier1DefaultWindowSeconds`).
+    /// - Returns: Number of `DecisionLogEntry` records emitted.
+    @discardableResult
+    func runTier1FeatureOnlyScoring(
+        analysisAssetId: String,
+        episodeDuration: Double,
+        windowSeconds: TimeInterval = AdDetectionService.tier1DefaultWindowSeconds
+    ) async throws -> Int {
+        // Record episode duration so the classifier's position-based prior
+        // sees the same value both Tier 1 and Tier 2 use.
+        self.episodeDuration = episodeDuration
+
+        let slots = makeTier1Slots(
+            episodeDuration: episodeDuration,
+            windowSeconds: windowSeconds
+        )
+        guard !slots.isEmpty else {
+            logger.info("Tier 1: no slots (episodeDuration=\(episodeDuration), windowSeconds=\(windowSeconds))")
+            return 0
+        }
+
+        // Single range fetch — cheaper than N overlapping queries.
+        let allFeatureWindows = try await store.fetchFeatureWindows(
+            assetId: analysisAssetId,
+            from: 0,
+            to: episodeDuration
+        )
+        let featureWindowsBySlot = bucketFeatureWindowsBySlot(
+            allFeatureWindows,
+            slots: slots
+        )
+
+        var inputs: [ClassifierInput] = []
+        inputs.reserveCapacity(slots.count)
+        for slot in slots {
+            let candidate = makeTier1SyntheticCandidate(
+                analysisAssetId: analysisAssetId,
+                slot: slot
+            )
+            inputs.append(ClassifierInput(
+                candidate: candidate,
+                featureWindows: featureWindowsBySlot[slot.index] ?? [],
+                episodeDuration: episodeDuration
+            ))
+        }
+
+        let results = classifier.classify(inputs: inputs, priors: showPriors)
+        await emitTier1DecisionLogs(
+            classifierResults: results,
+            analysisAssetId: analysisAssetId
+        )
+        logger.info("Tier 1: emitted \(results.count) decision-log entries over \(slots.count) slots (asset=\(analysisAssetId))")
+        return results.count
+    }
+
+    /// Slice [0, episodeDuration) into non-overlapping slots of `windowSeconds`.
+    /// Trailing slivers < 1 s are dropped (noise-floor guard).
+    private func makeTier1Slots(
+        episodeDuration: Double,
+        windowSeconds: TimeInterval
+    ) -> [Tier1Slot] {
+        guard episodeDuration > 0, windowSeconds > 0 else { return [] }
+        var slots: [Tier1Slot] = []
+        var t = 0.0
+        var idx = 0
+        let minTail = 1.0
+        while t < episodeDuration {
+            let end = min(t + windowSeconds, episodeDuration)
+            let span = end - t
+            if span < minTail { break }
+            slots.append(Tier1Slot(index: idx, startTime: t, endTime: end))
+            idx += 1
+            t = end
+        }
+        return slots
+    }
+
+    /// Bucket feature windows into the slot whose `[start, end)` contains
+    /// the feature window's midpoint. O(n+m).
+    private func bucketFeatureWindowsBySlot(
+        _ windows: [FeatureWindow],
+        slots: [Tier1Slot]
+    ) -> [Int: [FeatureWindow]] {
+        guard !slots.isEmpty else { return [:] }
+        var buckets: [Int: [FeatureWindow]] = [:]
+        let slotLength = slots.first!.endTime - slots.first!.startTime
+        guard slotLength > 0 else { return [:] }
+        for window in windows {
+            let midpoint = (window.startTime + window.endTime) / 2
+            let idx = Int(midpoint / slotLength)
+            guard idx >= 0, idx < slots.count else { continue }
+            buckets[idx, default: []].append(window)
+        }
+        return buckets
+    }
+
+    /// Build a minimal-content `LexicalCandidate` for a Tier 1 slot.
+    /// confidence=0, empty categories, and a Tier 1-distinguishing id so
+    /// downstream tooling can filter Tier 1 rows without extending the
+    /// DecisionLogEntry schema.
+    private func makeTier1SyntheticCandidate(
+        analysisAssetId: String,
+        slot: Tier1Slot
+    ) -> LexicalCandidate {
+        LexicalCandidate(
+            id: "tier1-\(analysisAssetId)-\(slot.index)",
+            analysisAssetId: analysisAssetId,
+            startTime: slot.startTime,
+            endTime: slot.endTime,
+            confidence: 0.0,
+            hitCount: 0,
+            categories: [],
+            evidenceText: "",
+            evidenceStartTime: slot.startTime,
+            detectorVersion: config.detectorVersion
+        )
+    }
+
+    /// Mirror of `emitHotPathDecisionLogs` action naming. Kept separate from
+    /// hot path so future Tier 1 evolution (acoustic evidence, metadata
+    /// corroboration) does not require a flag-laden shared helper.
+    private func emitTier1DecisionLogs(
+        classifierResults: [ClassifierResult],
+        analysisAssetId: String
+    ) async {
+        let snapshot = DecisionLogEntry.ActivationConfigSnapshot(
+            MetadataActivationConfig.resolved()
+        )
+        let fusionConfig = FusionWeightConfig()
+        let classifierCap = fusionConfig.classifierCap
+        for result in classifierResults {
+            let timestamp = Date().timeIntervalSince1970
+            let passed = result.adProbability >= config.candidateThreshold
+            let promotesToAutoSkip = result.adProbability >= config.autoSkipConfidenceThreshold
+            let action: String
+            let thresholdCrossed: Double
+            if promotesToAutoSkip {
+                action = "autoSkipEligible"
+                thresholdCrossed = config.autoSkipConfidenceThreshold
+            } else if passed {
+                action = "hotPathCandidate"
+                thresholdCrossed = config.candidateThreshold
+            } else {
+                action = "hotPathBelowThreshold"
+                thresholdCrossed = config.candidateThreshold
+            }
+            let clampedScore = max(0.0, min(1.0, result.adProbability))
+            let cappedWeight = min(clampedScore * classifierCap, classifierCap)
+            let classifierEntry = EvidenceLedgerEntry(
+                source: .classifier,
+                weight: cappedWeight,
+                detail: .classifier(score: result.adProbability)
+            )
+            let authority: ProposalAuthority = cappedWeight > classifierCap * 0.5 ? .strong : .weak
+            let breakdown = [
+                SourceEvidence(
+                    source: EvidenceSourceType.classifier.rawValue,
+                    weight: cappedWeight,
+                    capApplied: classifierCap,
+                    authority: authority
+                )
+            ]
+            let logEntry = DecisionLogEntry(
+                schemaVersion: DecisionLogEntry.currentSchemaVersion,
+                analysisAssetID: analysisAssetId,
+                timestamp: timestamp,
+                windowBounds: .init(start: result.startTime, end: result.endTime),
+                activationConfig: snapshot,
+                evidence: [DecisionLogEntry.LedgerEntry(classifierEntry)],
+                fusedConfidence: .init(
+                    proposalConfidence: result.adProbability,
+                    skipConfidence: result.adProbability,
+                    breakdown: breakdown
+                ),
+                finalDecision: .init(
+                    action: action,
+                    gate: "eligible",
+                    skipConfidence: result.adProbability,
+                    thresholdCrossed: thresholdCrossed
+                )
+            )
+            await decisionLogger.record(logEntry)
+        }
+    }
+
     // MARK: - Hot Path
 
     /// Run the hot-path detection pipeline on fast-pass transcript chunks
