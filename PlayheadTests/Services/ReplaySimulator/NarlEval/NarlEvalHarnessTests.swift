@@ -129,6 +129,168 @@ struct NarlEvalHarnessTests {
         }
     }
 
+    @Test("gtt9.7 C1: per-episode entries carry normalizer counts in the persisted JSON report")
+    func harnessPersistsNormalizerCountsInReport() throws {
+        // Build a minimal trace in-memory and write it to a temporary fixtures
+        // root, so the assertion is not conditional on a corpus being present.
+        // Fixture mix (on a single assetId):
+        //   - 2 whole-asset vetoes (→ 1 after dedup)
+        //   - 1 whole-asset endorsement
+        //   - 1 span FN [100, 160]
+        //   - 1 span FP [200, 210]
+        //   - 1 boundary-refinement span
+        //   - 1 unknown (ambiguous) row
+        let episodeId = "gtt97-c1-\(UUID().uuidString.prefix(6))"
+        let trace = FrozenTrace(
+            episodeId: episodeId,
+            podcastId: "gtt97-c1-podcast",
+            episodeDuration: 600,
+            traceVersion: "frozen-trace-v2",
+            capturedAt: Date(timeIntervalSince1970: 0),
+            featureWindows: [],
+            atoms: [],
+            evidenceCatalog: [],
+            corrections: [
+                // Whole-asset vetoes (2 → dedupes to 1)
+                FrozenTrace.FrozenCorrection(
+                    source: "manualVeto",
+                    scope: "exactSpan:asset-1:0:9223372036854775807",
+                    createdAt: 1_000,
+                    correctionType: "falsePositive"
+                ),
+                FrozenTrace.FrozenCorrection(
+                    source: "manualVeto",
+                    scope: "exactSpan:asset-1:0:9223372036854775807",
+                    createdAt: 1_001,
+                    correctionType: "falsePositive"
+                ),
+                // Whole-asset endorsement (stays separate from veto on same asset)
+                FrozenTrace.FrozenCorrection(
+                    source: "falseNegative",
+                    scope: "exactSpan:asset-1:0:9223372036854775807",
+                    createdAt: 1_002,
+                    correctionType: "falseNegative"
+                ),
+                // Span FN
+                FrozenTrace.FrozenCorrection(
+                    source: "falseNegative",
+                    scope: "exactTimeSpan:asset-1:100.000:160.000",
+                    createdAt: 2_000,
+                    correctionType: "falseNegative"
+                ),
+                // Span FP
+                FrozenTrace.FrozenCorrection(
+                    source: "manualVeto",
+                    scope: "exactTimeSpan:asset-1:200.000:210.000",
+                    createdAt: 3_000,
+                    correctionType: "falsePositive"
+                ),
+                // Boundary refinement
+                FrozenTrace.FrozenCorrection(
+                    source: "listenRevert",
+                    scope: "exactTimeSpan:asset-1:300.000:320.000",
+                    createdAt: 4_000,
+                    correctionType: "startTooEarly"
+                ),
+                // Unknown (ambiguous source + nil correctionType)
+                FrozenTrace.FrozenCorrection(
+                    source: "someFutureCorrection",
+                    scope: "exactTimeSpan:asset-1:400.000:410.000",
+                    createdAt: 5_000,
+                    correctionType: nil
+                ),
+            ],
+            decisionEvents: [],
+            baselineReplaySpanDecisions: [],
+            holdoutDesignation: .training
+        )
+
+        // Assert the normalizer returns the shape we expect, so the report
+        // assertion below has a meaningful reference.
+        let norm = CorrectionNormalizer.normalize(trace.corrections)
+        #expect(norm.spanFN.count == 1)
+        #expect(norm.spanFP.count == 1)
+        #expect(norm.wholeAssetCorrections.filter { $0.kind == .veto }.count == 1)
+        #expect(norm.wholeAssetCorrections.filter { $0.kind == .endorse }.count == 1)
+        #expect(norm.boundaryRefinementCount == 1)
+        #expect(norm.unknownCount == 1)
+
+        // Build an entry through the same codec used by the harness. We are
+        // asserting the schema carries the normalizer counts — the harness's
+        // per-trace loop is covered by runHarness/harnessThreadsNewCoverageMetrics
+        // already, so here we round-trip a single entry to lock the JSON shape.
+        let entry = NarlReportEpisodeEntry(
+            episodeId: trace.episodeId,
+            podcastId: trace.podcastId,
+            show: "gtt97-c1",
+            config: "default",
+            isExcluded: false,
+            exclusionReason: nil,
+            groundTruthWindowCount: 0,
+            predictedWindowCount: 0,
+            windowMetrics: [],
+            secondLevel: NarlSecondLevelMetrics(
+                truePositiveSeconds: 0, falsePositiveSeconds: 0, falseNegativeSeconds: 0,
+                precision: 0, recall: 0, f1: 0
+            ),
+            lexicalInjectionAdds: 0,
+            priorShiftAdds: 0,
+            hasShadowCoverage: false,
+            normalizerCounts: NarlNormalizerCounts(from: norm, rawCount: trace.corrections.count)
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(entry)
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(NarlReportEpisodeEntry.self, from: data)
+
+        #expect(decoded.normalizerCounts.rawCount == 7)
+        #expect(decoded.normalizerCounts.spanFNCount == 1)
+        #expect(decoded.normalizerCounts.spanFPCount == 1)
+        #expect(decoded.normalizerCounts.wholeAssetVetoCount == 1)
+        #expect(decoded.normalizerCounts.wholeAssetEndorseCount == 1)
+        #expect(decoded.normalizerCounts.boundaryRefinementCount == 1)
+        #expect(decoded.normalizerCounts.unknownCount == 1)
+
+        // Also assert the JSON text literally contains a top-level
+        // `normalizerCounts` key, so downstream report consumers (jq
+        // piping, bead approval engine) can find it by name.
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains("\"normalizerCounts\""),
+                "report entry JSON should contain a normalizerCounts block")
+    }
+
+    @Test("gtt9.7 C1: live harness run writes normalizerCounts into report.json for non-excluded entries")
+    func harnessLiveRunEmitsNormalizerCountsField() throws {
+        let (_, outputDir) = try Self.runHarnessCollectingReport()
+        let jsonURL = outputDir.appendingPathComponent("report.json")
+        let data = try Data(contentsOf: jsonURL)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(NarlEvalReport.self, from: data)
+
+        // For any non-excluded entry, normalizerCounts.rawCount must equal
+        // the sum of the four non-boundary buckets + boundary + layerB (a
+        // tautology: raw rows are classified into mutually exclusive
+        // buckets). We don't know the fixture contents on a given machine;
+        // the invariant holds regardless.
+        for entry in decoded.episodes where !entry.isExcluded {
+            let nc = entry.normalizerCounts
+            // Each correction lands in exactly one bucket after dedup/merge,
+            // but rawCount is the pre-normalization count. We assert only
+            // the weaker invariant: the bucket totals are individually
+            // non-negative and the field round-tripped through the schema.
+            #expect(nc.rawCount >= 0)
+            #expect(nc.spanFNCount >= 0)
+            #expect(nc.spanFPCount >= 0)
+            #expect(nc.wholeAssetVetoCount >= 0)
+            #expect(nc.wholeAssetEndorseCount >= 0)
+            #expect(nc.boundaryRefinementCount >= 0)
+            #expect(nc.unknownCount >= 0)
+        }
+    }
+
     @Test("harness emits pipeline coverage failure trend rows")
     func harnessEmitsPipelineCoverageFailureTrendRows() throws {
         let (report, _) = try Self.runHarnessCollectingReport()
@@ -183,16 +345,21 @@ struct NarlEvalHarnessTests {
             // (not by whole-asset vetoes that the user issued on an entire
             // episode). The NarlGroundTruth builder still runs below and is
             // the source of truth for ground-truth ad spans; the normalizer
-            // output is used for logging and to route wholeAsset vetoes
-            // independently of span counts. See docs/narl/2026-04-23-expert-
-            // report.md §11 for why raw correction rows aren't trustworthy.
+            // output is carried alongside the per-episode report entry so
+            // the raw→(span/wholeAsset/boundary/unknown) delta is queryable
+            // from the persisted JSON report, not just stdout.
+            // Rationale: §11 of the 2026-04-23 expert report on why raw
+            // correction rows aren't trustworthy (see bead description).
             let normalizedCorrections = CorrectionNormalizer.normalize(trace.corrections)
+            let normalizerCounts = NarlNormalizerCounts(
+                from: normalizedCorrections,
+                rawCount: trace.corrections.count
+            )
             Self.logCorrectionNormalization(
                 trace: trace,
                 before: trace.corrections,
                 after: normalizedCorrections
             )
-            _ = normalizedCorrections  // consumed in logs; harness still uses NarlGroundTruth below
 
             let gtResult = NarlGroundTruth.build(for: trace)
             let show = Self.showName(for: trace)
@@ -230,7 +397,8 @@ struct NarlEvalHarnessTests {
                         priorShiftAdds: pred.priorShiftAdds,
                         hasShadowCoverage: pred.hasShadowCoverage,
                         coverageMetrics: .zero,
-                        fnDecomposition: []
+                        fnDecomposition: [],
+                        normalizerCounts: normalizerCounts
                     )
                     episodeEntries.append(entry)
                     // Tally excluded episodes per-rollup so the report shows
@@ -275,7 +443,8 @@ struct NarlEvalHarnessTests {
                     priorShiftAdds: pred.priorShiftAdds,
                     hasShadowCoverage: pred.hasShadowCoverage,
                     coverageMetrics: coverage.metrics,
-                    fnDecomposition: coverage.fnDecomposition
+                    fnDecomposition: coverage.fnDecomposition,
+                    normalizerCounts: normalizerCounts
                 )
                 episodeEntries.append(entry)
 

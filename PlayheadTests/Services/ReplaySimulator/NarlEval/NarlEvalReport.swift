@@ -35,6 +35,77 @@ struct NarlReportRollup: Sendable, Codable {
     let pipelineCoverageFailureAssetCount: Int
 }
 
+/// gtt9.7 C1: per-episode counts emitted by `CorrectionNormalizer`, persisted
+/// alongside the metric fields so report consumers can see how many raw rows
+/// were bucketed where. Previously these counts only surfaced as stdout log
+/// lines under `narl.normalizer:`; placing them in the typed report makes
+/// before/after deltas (raw → span/whole-asset/boundary/unknown) queryable
+/// from `.eval-out/narl/<ts>/report.json` rather than test output.
+///
+/// Field semantics (see `CorrectionNormalizer.swift`):
+///   - `rawCount`            — count of FrozenCorrection rows fed into normalize.
+///   - `spanFNCount`         — span-level FN corrections after merge.
+///   - `spanFPCount`         — span-level FP corrections after merge.
+///   - `wholeAssetVetoCount` — whole-asset vetoes after (assetId, kind) dedup.
+///   - `wholeAssetEndorseCount` — whole-asset endorsements after dedup.
+///   - `unknownCount`        — rows the normalizer couldn't place (ordinal
+///                             exactSpans, unrecognized source+type combos,
+///                             malformed scopes). Excluded from span metrics.
+///   - `boundaryRefinementCount` — rows with correctionType in
+///                             {startTooEarly/Late, endTooEarly/Late}.
+struct NarlNormalizerCounts: Sendable, Codable, Equatable {
+    let rawCount: Int
+    let spanFNCount: Int
+    let spanFPCount: Int
+    let wholeAssetVetoCount: Int
+    let wholeAssetEndorseCount: Int
+    let unknownCount: Int
+    let boundaryRefinementCount: Int
+
+    static let zero = NarlNormalizerCounts(
+        rawCount: 0,
+        spanFNCount: 0,
+        spanFPCount: 0,
+        wholeAssetVetoCount: 0,
+        wholeAssetEndorseCount: 0,
+        unknownCount: 0,
+        boundaryRefinementCount: 0
+    )
+
+    /// Build from a `NormalizedCorrections` result + the raw-row count used
+    /// as input. Centralizes the veto/endorse split so callers don't have to
+    /// hand-filter `wholeAssetCorrections` at every site.
+    init(from normalized: NormalizedCorrections, rawCount: Int) {
+        self.rawCount = rawCount
+        self.spanFNCount = normalized.spanFN.count
+        self.spanFPCount = normalized.spanFP.count
+        self.wholeAssetVetoCount = normalized.wholeAssetCorrections
+            .filter { $0.kind == .veto }.count
+        self.wholeAssetEndorseCount = normalized.wholeAssetCorrections
+            .filter { $0.kind == .endorse }.count
+        self.unknownCount = normalized.unknownCount
+        self.boundaryRefinementCount = normalized.boundaryRefinementCount
+    }
+
+    init(
+        rawCount: Int,
+        spanFNCount: Int,
+        spanFPCount: Int,
+        wholeAssetVetoCount: Int,
+        wholeAssetEndorseCount: Int,
+        unknownCount: Int,
+        boundaryRefinementCount: Int
+    ) {
+        self.rawCount = rawCount
+        self.spanFNCount = spanFNCount
+        self.spanFPCount = spanFPCount
+        self.wholeAssetVetoCount = wholeAssetVetoCount
+        self.wholeAssetEndorseCount = wholeAssetEndorseCount
+        self.unknownCount = unknownCount
+        self.boundaryRefinementCount = boundaryRefinementCount
+    }
+}
+
 /// Per-episode entry in the report (one row per trace × config).
 struct NarlReportEpisodeEntry: Sendable, Codable {
     let episodeId: String
@@ -54,6 +125,11 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
     let coverageMetrics: NarlCoverageMetrics
     /// gtt9.6: per-GT-span FN decomposition. Excluded episodes carry `[]`.
     let fnDecomposition: [NarlFNDecomp]
+    /// gtt9.7 C1: per-episode counts emitted by `CorrectionNormalizer`. This
+    /// is observability-only — the metric fields above are still derived from
+    /// the existing NarlGroundTruth pipeline; the normalizer's output is
+    /// carried alongside so the delta is visible in the persisted report.
+    let normalizerCounts: NarlNormalizerCounts
 
     init(
         episodeId: String,
@@ -70,7 +146,8 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
         priorShiftAdds: Int,
         hasShadowCoverage: Bool,
         coverageMetrics: NarlCoverageMetrics = .zero,
-        fnDecomposition: [NarlFNDecomp] = []
+        fnDecomposition: [NarlFNDecomp] = [],
+        normalizerCounts: NarlNormalizerCounts = .zero
     ) {
         self.episodeId = episodeId
         self.podcastId = podcastId
@@ -87,6 +164,39 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
         self.hasShadowCoverage = hasShadowCoverage
         self.coverageMetrics = coverageMetrics
         self.fnDecomposition = fnDecomposition
+        self.normalizerCounts = normalizerCounts
+    }
+
+    /// Codable default handling: older `report.json` artifacts written before
+    /// gtt9.7 do not carry a `normalizerCounts` block. Decode gracefully by
+    /// defaulting the field to `.zero`. Encode always emits the new field.
+    enum CodingKeys: String, CodingKey {
+        case episodeId, podcastId, show, config, isExcluded, exclusionReason
+        case groundTruthWindowCount, predictedWindowCount
+        case windowMetrics, secondLevel
+        case lexicalInjectionAdds, priorShiftAdds, hasShadowCoverage
+        case coverageMetrics, fnDecomposition
+        case normalizerCounts
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.episodeId = try c.decode(String.self, forKey: .episodeId)
+        self.podcastId = try c.decode(String.self, forKey: .podcastId)
+        self.show = try c.decode(String.self, forKey: .show)
+        self.config = try c.decode(String.self, forKey: .config)
+        self.isExcluded = try c.decode(Bool.self, forKey: .isExcluded)
+        self.exclusionReason = try c.decodeIfPresent(String.self, forKey: .exclusionReason)
+        self.groundTruthWindowCount = try c.decode(Int.self, forKey: .groundTruthWindowCount)
+        self.predictedWindowCount = try c.decode(Int.self, forKey: .predictedWindowCount)
+        self.windowMetrics = try c.decode([NarlWindowMetricsAtThreshold].self, forKey: .windowMetrics)
+        self.secondLevel = try c.decode(NarlSecondLevelMetrics.self, forKey: .secondLevel)
+        self.lexicalInjectionAdds = try c.decode(Int.self, forKey: .lexicalInjectionAdds)
+        self.priorShiftAdds = try c.decode(Int.self, forKey: .priorShiftAdds)
+        self.hasShadowCoverage = try c.decode(Bool.self, forKey: .hasShadowCoverage)
+        self.coverageMetrics = (try? c.decode(NarlCoverageMetrics.self, forKey: .coverageMetrics)) ?? .zero
+        self.fnDecomposition = (try? c.decode([NarlFNDecomp].self, forKey: .fnDecomposition)) ?? []
+        self.normalizerCounts = (try? c.decode(NarlNormalizerCounts.self, forKey: .normalizerCounts)) ?? .zero
     }
 }
 

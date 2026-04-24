@@ -13,7 +13,8 @@
 //   Output: NormalizedCorrections — three streams (wholeAsset, spanFN,
 //           spanFP), an unknown count, and a boundary-refinement count.
 //
-// Classification heuristic (§11 of docs/narl/2026-04-23-expert-report.md):
+// Classification heuristic (§11 of the 2026-04-23 expert report; see the
+// playhead-gtt9.7 bead description for excerpts):
 //   1. scope parses as `.wholeAssetVeto` → wholeAsset bucket. kind:
 //        • correctionType == "falsePositive" → .veto
 //        • correctionType == "falseNegative" → .endorse
@@ -51,7 +52,8 @@ import Foundation
 struct NormalizedWholeAssetCorrection: Sendable, Equatable {
     enum Kind: Sendable, Equatable {
         /// User said the whole episode is NOT ad-content (vetoed ad-skip).
-        /// This is the dominant real-data pattern — see expert-report §3.
+        /// This is the dominant real-data pattern — see the 2026-04-23 expert
+        /// report §3 (referenced in the playhead-gtt9.7 bead description).
         case veto
         /// User said the whole episode IS ad-content. Rare but valid.
         case endorse
