@@ -35,8 +35,8 @@ struct MetadataActivationConfigTests {
             lexicalInjectionDiscount: 0.75,
             classifierPriorShiftEnabled: true,
             classifierPriorShiftMinTrust: 0.08,
-            classifierShiftedMidpoint: 0.22,
-            classifierBaselineMidpoint: 0.25,
+            classifierShiftedMidpoint: 0.33,
+            classifierBaselineMidpoint: 0.37,
             fmSchedulingEnabled: true,
             fmSchedulingMinTrust: 0.0,
             counterfactualGateOpen: false  // gate closed
@@ -54,8 +54,8 @@ struct MetadataActivationConfigTests {
             lexicalInjectionDiscount: 0.75,
             classifierPriorShiftEnabled: false,
             classifierPriorShiftMinTrust: 0.08,
-            classifierShiftedMidpoint: 0.22,
-            classifierBaselineMidpoint: 0.25,
+            classifierShiftedMidpoint: 0.33,
+            classifierBaselineMidpoint: 0.37,
             fmSchedulingEnabled: false,
             fmSchedulingMinTrust: 0.0,
             counterfactualGateOpen: true
@@ -77,16 +77,16 @@ struct MetadataActivationConfigTests {
         #expect(config.classifierPriorShiftMinTrust == 0.08)
     }
 
-    @Test("Default shifted midpoint is 0.22")
+    @Test("Default shifted midpoint is 0.33 (playhead-gtt9.3 retune)")
     func shiftedMidpoint() {
         let config = MetadataActivationConfig.default
-        #expect(config.classifierShiftedMidpoint == 0.22)
+        #expect(config.classifierShiftedMidpoint == 0.33)
     }
 
-    @Test("Default baseline midpoint is 0.25")
+    @Test("Default baseline midpoint is 0.37 (playhead-gtt9.3 retune)")
     func baselineMidpoint() {
         let config = MetadataActivationConfig.default
-        #expect(config.classifierBaselineMidpoint == 0.25)
+        #expect(config.classifierBaselineMidpoint == 0.37)
     }
 }
 
@@ -281,8 +281,8 @@ struct MetadataLexiconInjectorTests {
             lexicalInjectionDiscount: 0.75,
             classifierPriorShiftEnabled: false,
             classifierPriorShiftMinTrust: 0.08,
-            classifierShiftedMidpoint: 0.22,
-            classifierBaselineMidpoint: 0.25,
+            classifierShiftedMidpoint: 0.33,
+            classifierBaselineMidpoint: 0.37,
             fmSchedulingEnabled: false,
             fmSchedulingMinTrust: 0.0,
             counterfactualGateOpen: true
@@ -410,28 +410,28 @@ struct MetadataPriorShiftTests {
     func gateClosed() {
         let shift = MetadataPriorShift(config: .default)
         let mid = shift.effectiveMidpoint(metadataTrust: 0.5)
-        #expect(mid == 0.25)
+        #expect(mid == 0.37)
     }
 
     @Test("Baseline midpoint returned when trust is below threshold")
     func trustBelowThreshold() {
         let shift = MetadataPriorShift(config: .allEnabled)
         let mid = shift.effectiveMidpoint(metadataTrust: 0.07)
-        #expect(mid == 0.25, "Trust 0.07 < 0.08 threshold should return baseline")
+        #expect(mid == 0.37, "Trust 0.07 < 0.08 threshold should return baseline")
     }
 
     @Test("Shifted midpoint returned when trust meets threshold")
     func trustMeetsThreshold() {
         let shift = MetadataPriorShift(config: .allEnabled)
         let mid = shift.effectiveMidpoint(metadataTrust: 0.08)
-        #expect(mid == 0.22, "Trust 0.08 >= 0.08 threshold should return shifted midpoint")
+        #expect(mid == 0.33, "Trust 0.08 >= 0.08 threshold should return shifted midpoint")
     }
 
     @Test("Shifted midpoint returned when trust exceeds threshold")
     func trustExceedsThreshold() {
         let shift = MetadataPriorShift(config: .allEnabled)
         let mid = shift.effectiveMidpoint(metadataTrust: 0.5)
-        #expect(mid == 0.22)
+        #expect(mid == 0.33)
     }
 
     @Test("isShiftActive returns false when gate is closed")
@@ -462,7 +462,7 @@ struct MetadataPriorShiftTests {
     func zeroTrust() {
         let shift = MetadataPriorShift(config: .allEnabled)
         let mid = shift.effectiveMidpoint(metadataTrust: 0.0)
-        #expect(mid == 0.25, "Zero trust should return baseline midpoint")
+        #expect(mid == 0.37, "Zero trust should return baseline midpoint")
     }
 
     @Test("Classifier prior shift only with gate open and individual flag on")
@@ -474,15 +474,15 @@ struct MetadataPriorShiftTests {
             lexicalInjectionDiscount: 0.75,
             classifierPriorShiftEnabled: false,
             classifierPriorShiftMinTrust: 0.08,
-            classifierShiftedMidpoint: 0.22,
-            classifierBaselineMidpoint: 0.25,
+            classifierShiftedMidpoint: 0.33,
+            classifierBaselineMidpoint: 0.37,
             fmSchedulingEnabled: true,
             fmSchedulingMinTrust: 0.0,
             counterfactualGateOpen: true
         )
         let shift = MetadataPriorShift(config: noShift)
         let mid = shift.effectiveMidpoint(metadataTrust: 0.5)
-        #expect(mid == 0.25, "Individual flag disabled should return baseline")
+        #expect(mid == 0.37, "Individual flag disabled should return baseline")
     }
 }
 
