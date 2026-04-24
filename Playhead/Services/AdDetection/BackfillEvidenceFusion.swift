@@ -433,7 +433,7 @@ struct DecisionMapper: Sendable {
         // adProbability is zero). Any other in-audio source — or a
         // classifier entry with a non-zero weight — counts as corroboration.
         let inAudioCorroboratingSources: Set<EvidenceSourceType> = [
-            .lexical, .acoustic, .catalog, .fingerprint, .fm
+            .lexical, .acoustic, .musicBed, .catalog, .fingerprint, .fm
         ]
         let hasInAudioCorroboration = ledger.contains { entry in
             if inAudioCorroboratingSources.contains(entry.source) {
@@ -474,7 +474,7 @@ struct DecisionMapper: Sendable {
     /// Needs external corroboration from any non-FM source: classifier, lexical, catalog, or acoustic.
     /// Classifier is included because it is an independent, non-FM signal that provides corroboration.
     private func quorumGateForFMAcoustic() -> SkipEligibilityGate {
-        let externalSources: Set<EvidenceSourceType> = [.classifier, .lexical, .catalog, .acoustic, .fingerprint]
+        let externalSources: Set<EvidenceSourceType> = [.classifier, .lexical, .catalog, .acoustic, .musicBed, .fingerprint]
         let hasExternalCorroboration = ledger.contains { externalSources.contains($0.source) }
         return hasExternalCorroboration ? .eligible : .blockedByEvidenceQuorum
     }
