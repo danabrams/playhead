@@ -97,6 +97,20 @@ struct AdDetectionConfig: Sendable {
     /// untrustworthy shows.
     let bracketRefinementMinFineConfidence: Double
 
+    /// playhead-kgby: master flag for the transcript-aware boundary cue.
+    /// When `true` (the conservative default), `runBackfill` builds
+    /// `[TranscriptBoundaryHit]` from the final-pass transcript chunks
+    /// and threads them into `BoundaryRefiner.computeAdjustments`. The
+    /// resolver then runs with `transcriptBoundary` weight 0.20 and
+    /// `pauseVAD` weight 0.70 (down from 0.90) so a sentence terminal
+    /// near a candidate boundary contributes a soft cue.
+    ///
+    /// Setting this flag to `false` is the one-line rollback: the
+    /// service passes empty transcript hits, the resolver picks the
+    /// legacy 90/10 weight schedule, and the snap output is bit-
+    /// identical to pre-kgby behaviour.
+    let transcriptBoundaryCueEnabled: Bool
+
     /// ef2.6.3: Derive ConfidenceBandThresholds from config fields for band classification.
     /// Requires candidate < markOnly < confirmation < autoSkip (asserted in debug).
     var bandThresholds: ConfidenceBandThresholds {
@@ -124,7 +138,8 @@ struct AdDetectionConfig: Sendable {
         bracketRefinementEnabled: Bool = true,
         bracketRefinementMinTrust: Double = 0.40,
         bracketRefinementMinCoarseScore: Double = 0.30,
-        bracketRefinementMinFineConfidence: Double = 0.20
+        bracketRefinementMinFineConfidence: Double = 0.20,
+        transcriptBoundaryCueEnabled: Bool = true
     ) {
         self.candidateThreshold = candidateThreshold
         self.confirmationThreshold = confirmationThreshold
@@ -142,6 +157,7 @@ struct AdDetectionConfig: Sendable {
         self.bracketRefinementMinTrust = bracketRefinementMinTrust
         self.bracketRefinementMinCoarseScore = bracketRefinementMinCoarseScore
         self.bracketRefinementMinFineConfidence = bracketRefinementMinFineConfidence
+        self.transcriptBoundaryCueEnabled = transcriptBoundaryCueEnabled
     }
 
     static let `default` = AdDetectionConfig(
@@ -160,7 +176,8 @@ struct AdDetectionConfig: Sendable {
         bracketRefinementEnabled: true,
         bracketRefinementMinTrust: 0.40,
         bracketRefinementMinCoarseScore: 0.30,
-        bracketRefinementMinFineConfidence: 0.20
+        bracketRefinementMinFineConfidence: 0.20,
+        transcriptBoundaryCueEnabled: true
     )
 }
 
@@ -1593,6 +1610,28 @@ actor AdDetectionService {
             bracketShowTrust = 0.5
         }
 
+        // playhead-kgby: build sentence-terminal hits from the final-pass
+        // chunks once per run. We pass these into `BoundaryRefiner` so the
+        // resolver can score boundary candidates near sentence ends. When
+        // the master flag is off, or no chunks produce a hit (sparse or
+        // unpunctuated transcript — the dominant failure mode for
+        // conversational shows like Conan), the array is empty and the
+        // refiner uses its legacy 90/10 weight schedule. This is the
+        // graceful degradation path: when the transcript carries no
+        // useful signal, the cue contributes 0 and acoustic snapping is
+        // unchanged.
+        let transcriptBoundaryHits: [TranscriptBoundaryHit]
+        if config.transcriptBoundaryCueEnabled {
+            transcriptBoundaryHits = TranscriptBoundaryCueBuilder.buildHits(
+                from: finalChunks
+            )
+        } else {
+            transcriptBoundaryHits = []
+        }
+        if !transcriptBoundaryHits.isEmpty {
+            logger.info("[kgby] backfill transcript boundary hits: \(transcriptBoundaryHits.count) (from \(finalChunks.count) final chunks)")
+        }
+
         for span in decodedSpans {
             try Task.checkCancellation()
 
@@ -1606,6 +1645,14 @@ actor AdDetectionService {
             // "scored cue, not an override" contract holds — the bracket
             // path is additive when it has high-confidence evidence and
             // a no-op everywhere else.
+            //
+            // playhead-kgby: when the transcript-aware cue is enabled and
+            // we have transcript hits, the legacy `BoundaryRefiner` runs
+            // with the transcript-aware weight schedule (transcriptBoundary
+            // weight 0.20, pauseVAD 0.70). The bracket-refined path is
+            // unaffected — it uses `FineBoundaryRefiner` which has its
+            // own snap logic. So this bead is purely additive within the
+            // legacy fallback path; the bracket cascade is unchanged.
             let (startAdj, endAdj): (Double, Double)
             if featureWindows.isEmpty {
                 startAdj = 0.0
@@ -1626,7 +1673,8 @@ actor AdDetectionService {
                     let legacy = BoundaryRefiner.computeAdjustments(
                         windows: featureWindows,
                         candidateStart: span.startTime,
-                        candidateEnd: span.endTime
+                        candidateEnd: span.endTime,
+                        transcriptHits: transcriptBoundaryHits
                     )
                     startAdj = legacy.startAdjust
                     endAdj = legacy.endAdjust
