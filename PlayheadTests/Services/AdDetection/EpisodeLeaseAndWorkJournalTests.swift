@@ -996,6 +996,167 @@ struct EpisodeLeaseAndWorkJournalTests {
         #expect(lastEvent?.eventType == .acquired)
     }
 
+    // MARK: - playhead-5uvz.3 (Gap-3): processJob outcome arm atomicity
+
+    @Test("commitProcessJobOutcomeArm: success path applies progress + state + lease release together")
+    func commitProcessJobOutcomeArmSuccess() async throws {
+        let store = try await makeTestStore()
+        let job = makeAnalysisJob(
+            jobId: "j-arm-ok",
+            episodeId: "ep-arm-ok",
+            workKey: "wk-arm-ok",
+            featureCoverageSec: 0,
+            transcriptCoverageSec: 0,
+            cueCoverageSec: 0,
+            attemptCount: 0
+        )
+        try await store.insertJob(job)
+        // Acquire so the lease is held — the arm releases it.
+        let now = 10_000.0
+        _ = try await store.acquireLeaseWithJournal(
+            jobId: "j-arm-ok",
+            episodeId: "ep-arm-ok",
+            owner: "preAnalysis",
+            expiresAt: now + 30,
+            now: now
+        )
+
+        try await store.commitProcessJobOutcomeArm(
+            AnalysisStore.ProcessJobOutcomeArmCommit(
+                jobId: "j-arm-ok",
+                progress: .init(featureCoverageSec: 60, transcriptCoverageSec: 55, cueCoverageSec: 50),
+                stateUpdate: .init(state: "complete", nextEligibleAt: nil, lastErrorCode: nil)
+            )
+        )
+
+        let after = try await store.fetchJob(byId: "j-arm-ok")
+        #expect(after?.state == "complete", "Terminal mark must commit")
+        #expect(after?.featureCoverageSec == 60, "Progress must commit")
+        #expect(after?.transcriptCoverageSec == 55)
+        #expect(after?.cueCoverageSec == 50)
+        #expect(after?.leaseOwner == nil, "Lease must be released")
+        #expect(after?.leaseExpiresAt == nil)
+    }
+
+    @Test("commitProcessJobOutcomeArm: throw between progress and state rolls everything back (no torn arm)")
+    func commitProcessJobOutcomeArmRollbackOnProgressFault() async throws {
+        let store = try await makeTestStore()
+        let job = makeAnalysisJob(
+            jobId: "j-arm-rb1",
+            episodeId: "ep-arm-rb1",
+            workKey: "wk-arm-rb1",
+            featureCoverageSec: 7,
+            transcriptCoverageSec: 6,
+            cueCoverageSec: 5,
+            attemptCount: 2
+        )
+        try await store.insertJob(job)
+        let now = 11_000.0
+        _ = try await store.acquireLeaseWithJournal(
+            jobId: "j-arm-rb1",
+            episodeId: "ep-arm-rb1",
+            owner: "preAnalysis",
+            expiresAt: now + 30,
+            now: now
+        )
+        let preArm = try await store.fetchJob(byId: "j-arm-rb1")
+        // Sanity: post-acquire row is `running` and lease-held.
+        #expect(preArm?.state == "running")
+        #expect(preArm?.leaseOwner == "preAnalysis")
+
+        // Arm a fault between the progress UPDATE and the state UPDATE.
+        await store.setProcessJobOutcomeFaultInjectionForTesting(.afterProgressUpdateBeforeStateUpdate)
+
+        await #expect(throws: (any Error).self) {
+            try await store.commitProcessJobOutcomeArm(
+                AnalysisStore.ProcessJobOutcomeArmCommit(
+                    jobId: "j-arm-rb1",
+                    progress: .init(featureCoverageSec: 999, transcriptCoverageSec: 999, cueCoverageSec: 999),
+                    incrementAttempt: true,
+                    stateUpdate: .init(state: "complete", nextEligibleAt: nil, lastErrorCode: nil)
+                )
+            )
+        }
+
+        // Everything must be unchanged: the progress UPDATE that ran
+        // BEFORE the fault must have rolled back too.
+        let after = try await store.fetchJob(byId: "j-arm-rb1")
+        #expect(after?.featureCoverageSec == 7, "Progress UPDATE must roll back")
+        #expect(after?.transcriptCoverageSec == 6)
+        #expect(after?.cueCoverageSec == 5)
+        #expect(after?.state == "running", "State change must not have applied")
+        #expect(after?.attemptCount == 2, "incrementAttemptCount must roll back")
+        #expect(after?.leaseOwner == "preAnalysis", "Lease must still be held — release did not run")
+    }
+
+    @Test("commitProcessJobOutcomeArm: throw between state and lease release rolls everything back (Gap-3 the bead targeted)")
+    func commitProcessJobOutcomeArmRollbackOnReleaseFault() async throws {
+        let store = try await makeTestStore()
+        let job = makeAnalysisJob(
+            jobId: "j-arm-rb2",
+            episodeId: "ep-arm-rb2",
+            workKey: "wk-arm-rb2",
+            featureCoverageSec: 12,
+            transcriptCoverageSec: 11,
+            cueCoverageSec: 10,
+            attemptCount: 1
+        )
+        try await store.insertJob(job)
+        let now = 12_000.0
+        _ = try await store.acquireLeaseWithJournal(
+            jobId: "j-arm-rb2",
+            episodeId: "ep-arm-rb2",
+            owner: "preAnalysis",
+            expiresAt: now + 30,
+            now: now
+        )
+
+        // Arm a fault BETWEEN the state UPDATE and the lease release.
+        // This is the precise Gap-3 crash window: pre-fix, the state
+        // would commit (job marked terminal) and then the next
+        // transaction's release-lease would never run, leaving a
+        // terminal-but-leased row that AnalysisJobReconciler eventually
+        // requeues. Post-fix, the state UPDATE rolls back too — the row
+        // is observably unchanged from the caller's perspective and
+        // orphan recovery handles the abandoned lease cleanly.
+        await store.setProcessJobOutcomeFaultInjectionForTesting(.afterStateUpdateBeforeLeaseRelease)
+
+        await #expect(throws: (any Error).self) {
+            try await store.commitProcessJobOutcomeArm(
+                AnalysisStore.ProcessJobOutcomeArmCommit(
+                    jobId: "j-arm-rb2",
+                    progress: .init(featureCoverageSec: 200, transcriptCoverageSec: 190, cueCoverageSec: 180),
+                    stateUpdate: .init(
+                        state: "complete",
+                        nextEligibleAt: nil,
+                        lastErrorCode: "shouldNotPersist"
+                    )
+                )
+            )
+        }
+
+        let after = try await store.fetchJob(byId: "j-arm-rb2")
+        #expect(after?.state == "running", "Terminal mark must roll back when lease release would have failed")
+        #expect(after?.featureCoverageSec == 12, "Progress must roll back")
+        #expect(after?.transcriptCoverageSec == 11)
+        #expect(after?.cueCoverageSec == 10)
+        #expect(after?.lastErrorCode == nil, "lastErrorCode must roll back")
+        #expect(after?.leaseOwner == "preAnalysis", "Lease must still be held since we never released")
+
+        // After the one-shot fault clears, a retry must succeed clean.
+        try await store.commitProcessJobOutcomeArm(
+            AnalysisStore.ProcessJobOutcomeArmCommit(
+                jobId: "j-arm-rb2",
+                progress: .init(featureCoverageSec: 200, transcriptCoverageSec: 190, cueCoverageSec: 180),
+                stateUpdate: .init(state: "complete", nextEligibleAt: nil, lastErrorCode: nil)
+            )
+        )
+        let final = try await store.fetchJob(byId: "j-arm-rb2")
+        #expect(final?.state == "complete")
+        #expect(final?.featureCoverageSec == 200)
+        #expect(final?.leaseOwner == nil, "Retry releases the lease cleanly")
+    }
+
     // MARK: - Helpers
 
     /// Replays `AnalysisCoordinator.recoverOrphans` against the store's
