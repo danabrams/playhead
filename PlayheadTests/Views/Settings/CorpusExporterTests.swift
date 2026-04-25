@@ -814,6 +814,17 @@ private struct FailingSource: CorpusExportSource {
         return spans[assetId] ?? []
     }
 
+    /// playhead-epfk: `FailingSource` doesn't model ad-window fixtures —
+    /// the existing exporter tests only cover the asset / span / correction
+    /// paths. Returning an empty array exercises the "no ad_windows for
+    /// this asset" branch of the per-asset loop without changing any
+    /// existing test's expectations. The dedicated end-to-end coverage
+    /// for the new `ad_window` record lives in
+    /// `AdCatalogStoreMatchTelemetryTests`.
+    func fetchAdWindows(assetId: String) async throws -> [AdWindow] {
+        return []
+    }
+
     func loadCorrectionEvents(analysisAssetId: String) async throws -> [CorrectionEvent] {
         if failEventsFor.contains(analysisAssetId) {
             throw SimulatedSQLError(method: "loadCorrectionEvents", assetId: analysisAssetId)

@@ -136,6 +136,13 @@ struct DecisionLogEntry: Codable, Equatable, Sendable {
         let weight: Double
         let classificationTrust: Double
         let detail: Detail
+        /// playhead-epfk: optional disambiguator for sources that have
+        /// multiple distinct producers under one umbrella label. Today
+        /// only `.catalog` populates this — `transcriptCatalog` (sponsor
+        /// tokens) versus `fingerprintStore` (`AdCatalogStore` matches).
+        /// `nil` for every other source. Decodes as `nil` on pre-epfk
+        /// log lines so older replay tooling stays bit-compatible.
+        let subSource: String?
 
         struct Detail: Codable, Equatable, Sendable {
             /// Discriminator matching the `EvidenceLedgerDetail` case name.
@@ -166,6 +173,37 @@ struct DecisionLogEntry: Codable, Equatable, Sendable {
             self.weight = entry.weight
             self.classificationTrust = entry.classificationTrust
             self.detail = Detail(entry.detail)
+            self.subSource = entry.subSource?.rawValue
+        }
+
+        // playhead-epfk: explicit decode that defaults `subSource` to nil
+        // when absent. Auto-synthesized Codable on a non-optional field
+        // would throw here; we want pre-epfk log lines to round-trip cleanly.
+        private enum CodingKeys: String, CodingKey {
+            case source, weight, classificationTrust, detail, subSource
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.source = try c.decode(String.self, forKey: .source)
+            self.weight = try c.decode(Double.self, forKey: .weight)
+            self.classificationTrust = try c.decode(Double.self, forKey: .classificationTrust)
+            self.detail = try c.decode(Detail.self, forKey: .detail)
+            self.subSource = try c.decodeIfPresent(String.self, forKey: .subSource)
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(source, forKey: .source)
+            try c.encode(weight, forKey: .weight)
+            try c.encode(classificationTrust, forKey: .classificationTrust)
+            try c.encode(detail, forKey: .detail)
+            // Always emit the key (even when nil → JSON null) so consumers
+            // can tell "post-epfk capture, no subSource" from "pre-epfk
+            // capture, key absent." Both decode the same on the read side
+            // (nil), but the wire shape unambiguously self-identifies the
+            // capture cohort.
+            try c.encode(subSource, forKey: .subSource)
         }
     }
 

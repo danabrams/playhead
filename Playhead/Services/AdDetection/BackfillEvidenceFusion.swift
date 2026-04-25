@@ -234,12 +234,17 @@ struct BackfillEvidenceFusion: Sendable {
             ledger.append(capped)
         }
 
-        // Catalog entries: always included
+        // Catalog entries: always included.
+        // playhead-epfk: preserve `entry.subSource` so the producer label
+        // (`transcriptCatalog` vs `fingerprintStore`) survives the cap
+        // re-stamp into the final ledger; otherwise the disambiguation
+        // stamped at the call site would be silently lost here.
         for entry in catalogEntries {
             let capped = EvidenceLedgerEntry(
                 source: .catalog,
                 weight: min(entry.weight, config.catalogCap),
-                detail: entry.detail
+                detail: entry.detail,
+                subSource: entry.subSource
             )
             ledger.append(capped)
         }

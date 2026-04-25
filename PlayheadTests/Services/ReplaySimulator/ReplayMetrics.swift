@@ -921,6 +921,12 @@ struct FrozenTrace: Sendable, Codable {
     /// `classificationTrust` is what the production
     /// `EvidenceLedgerEntry.classificationTrust` carried at capture time —
     /// 0.0 when absent (e.g. sources that don't score metadata trust).
+    /// playhead-epfk: optional `subSource` carries the producer label
+    /// for sources that have multiple distinct backends under one
+    /// umbrella. Today only `.catalog` populates it (`transcriptCatalog`
+    /// for `EvidenceCatalogBuilder`'s sponsor tokens versus
+    /// `fingerprintStore` for `AdCatalogStore` matches). Absent on v1
+    /// fixtures → `nil`; readers that don't care can ignore the key.
     struct FrozenEvidenceEntry: Sendable, Codable {
         let source: String
         let weight: Double
@@ -928,23 +934,28 @@ struct FrozenTrace: Sendable, Codable {
         let windowEnd: Double
         /// v2: classificationTrust at decision time. Absent = 0.0.
         let classificationTrust: Double
+        /// playhead-epfk: optional disambiguator for `.catalog`-sourced
+        /// entries. `nil` on every other source and on pre-epfk fixtures.
+        let subSource: String?
 
         init(
             source: String,
             weight: Double,
             windowStart: Double,
             windowEnd: Double,
-            classificationTrust: Double = 0.0
+            classificationTrust: Double = 0.0,
+            subSource: String? = nil
         ) {
             self.source = source
             self.weight = weight
             self.windowStart = windowStart
             self.windowEnd = windowEnd
             self.classificationTrust = classificationTrust
+            self.subSource = subSource
         }
 
         private enum CodingKeys: String, CodingKey {
-            case source, weight, windowStart, windowEnd, classificationTrust
+            case source, weight, windowStart, windowEnd, classificationTrust, subSource
         }
 
         init(from decoder: Decoder) throws {
@@ -954,8 +965,24 @@ struct FrozenTrace: Sendable, Codable {
                 weight: try c.decode(Double.self, forKey: .weight),
                 windowStart: try c.decode(Double.self, forKey: .windowStart),
                 windowEnd: try c.decode(Double.self, forKey: .windowEnd),
-                classificationTrust: try c.decodeIfPresent(Double.self, forKey: .classificationTrust) ?? 0.0
+                classificationTrust: try c.decodeIfPresent(Double.self, forKey: .classificationTrust) ?? 0.0,
+                subSource: try c.decodeIfPresent(String.self, forKey: .subSource)
             )
+        }
+
+        // playhead-epfk: explicit encode so `subSource` is omitted from the
+        // JSON when nil (matching the v1 fixture wire shape) rather than
+        // emitted as `null`. Auto-synth'd Codable would always emit the
+        // key, which would break byte-equal round-trip tests on pre-epfk
+        // fixtures.
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(source, forKey: .source)
+            try c.encode(weight, forKey: .weight)
+            try c.encode(windowStart, forKey: .windowStart)
+            try c.encode(windowEnd, forKey: .windowEnd)
+            try c.encode(classificationTrust, forKey: .classificationTrust)
+            try c.encodeIfPresent(subSource, forKey: .subSource)
         }
     }
 
