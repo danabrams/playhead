@@ -851,6 +851,36 @@ struct SchedulingTests {
         // If we got here, no crash occurred.
         #expect(scheduler.submittedRequests.isEmpty)
     }
+
+    // playhead-fuo6: regression — the 12-hour overnight blackout
+    // (04-24 20h → 04-25 07h) reproduced because the only paths that
+    // submit a backfill BGProcessingTask were `playbackDidStop()` and
+    // the handler's self-rearm. A user who queued episodes overnight
+    // *without ever pressing play* never triggered `playbackDidStop`,
+    // so iOS had no submitted task to wake — the in-memory
+    // AnalysisWorkScheduler runLoop got CPU only until the process
+    // was suspended (~30s after backgrounding).
+    //
+    // The fix wires `appDidEnterBackground()` so PlayheadApp's
+    // `.background` scenePhase transition submits a backfill request
+    // unconditionally. iOS coalesces duplicate submissions, so it is
+    // safe to call even when one is already in-flight.
+    @Test("appDidEnterBackground submits a backfill request (queued-not-playing reproduction)")
+    func appDidEnterBackgroundSubmitsBackfill() async throws {
+        let (bps, _, scheduler, _) = makeBPS()
+
+        // Bug reproduction: app backgrounds with queued work but no
+        // playback ever started. Pre-fix, no `scheduleBackfillIfNeeded`
+        // call existed for this path, so iOS had nothing to wake the
+        // app with for ~12 hours.
+        await bps.appDidEnterBackground()
+
+        let backfillRequests = scheduler.submittedRequests.filter {
+            $0.identifier == BackgroundTaskID.backfillProcessing
+        }
+        #expect(backfillRequests.count == 1,
+                "Backgrounding the app must submit a backfill request so iOS can wake the app to drain queued analysis work")
+    }
 }
 
 // MARK: - Lifecycle
