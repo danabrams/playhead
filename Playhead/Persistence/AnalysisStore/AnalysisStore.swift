@@ -723,6 +723,26 @@ actor AnalysisStore {
     }
 
     private var leaseJournalFaultInjection: LeaseJournalFaultInjection?
+
+    /// playhead-5uvz.3 (Gap-3): test-only fault-injection points for the
+    /// `AnalysisWorkScheduler.processJob` outcome arms. The arms now run
+    /// inside a single `runSchedulingPass` transaction so progress, the
+    /// state-specific writes, and the lease release commit or roll back
+    /// together. These checkpoints let tests force a throw between the
+    /// individual writes inside that transaction and verify the row's
+    /// pre-arm state is preserved (no half-finalized terminal mark).
+    enum ProcessJobOutcomeFaultInjection: Equatable {
+        /// Throw after the progress UPDATE but before the state UPDATE.
+        /// Validates that the progress write rolls back so the row keeps
+        /// its previous coverage and is requeued cleanly by orphan recovery.
+        case afterProgressUpdateBeforeStateUpdate
+        /// Throw after the state UPDATE but before the final lease release.
+        /// Validates that the terminal-mark write rolls back so the row
+        /// is not stranded with `state=complete` but a still-held lease.
+        case afterStateUpdateBeforeLeaseRelease
+    }
+
+    private var processJobOutcomeFaultInjection: ProcessJobOutcomeFaultInjection?
     #endif
 
     /// bd-1tl: dedicated logger for store-level diagnostics that should
@@ -3489,6 +3509,20 @@ actor AnalysisStore {
             "Injected lease-with-journal failure at \(injection)"
         )
     }
+
+    /// playhead-5uvz.3 (Gap-3): one-shot fault trigger called inside the
+    /// `processJob` outcome-arm transaction. Same single-fire semantics
+    /// as `triggerLeaseJournalFaultIfNeeded`: it clears itself so a retry
+    /// (e.g. orphan recovery's requeue) does not re-trip the fault.
+    func triggerProcessJobOutcomeFaultIfNeeded(
+        _ injection: ProcessJobOutcomeFaultInjection
+    ) throws {
+        guard processJobOutcomeFaultInjection == injection else { return }
+        processJobOutcomeFaultInjection = nil
+        throw AnalysisStoreError.insertFailed(
+            "Injected processJob outcome-arm failure at \(injection)"
+        )
+    }
     #endif
 
     #if DEBUG
@@ -5011,6 +5045,106 @@ actor AnalysisStore {
         }
     }
 
+    // MARK: - playhead-5uvz.3 (Gap-3): processJob outcome-arm atomic commit
+
+    /// Spec describing every write a single `AnalysisWorkScheduler.processJob`
+    /// outcome arm performs. Bundling them into a value lets the
+    /// scheduler hand the entire arm to the store as one transactional
+    /// unit instead of issuing 2-4 separate `await store.X(...)` calls.
+    /// Without this, a process kill between two of those awaits could
+    /// leave the row at `state='running'` with progress recorded but no
+    /// terminal mark — exactly the Gap-3 failure mode the bead audit
+    /// flagged at `AnalysisWorkScheduler.swift:1664-1869`.
+    ///
+    /// Field order in the struct matches the apply order inside
+    /// `commitProcessJobOutcomeArm` so callers can read it as a script.
+    struct ProcessJobOutcomeArmCommit {
+        var jobId: String
+        /// If non-nil, runs `updateJobProgress` first (the same call the
+        /// scheduler made unconditionally before the switch).
+        var progress: ProgressUpdate?
+        /// If `true`, runs `incrementAttemptCount` after progress and
+        /// before the optional state update. The scheduler precomputes
+        /// `attemptCount + 1` (it owns the lease, so no concurrent
+        /// writer) instead of round-tripping a fetch.
+        var incrementAttempt: Bool = false
+        /// If non-nil, runs `insertJob` for the next-tier child row
+        /// (only used by the tier-advance arm).
+        var insertNextJob: AnalysisJob?
+        /// If non-nil, runs `updateJobState` (the terminal/transition
+        /// write).
+        var stateUpdate: StateUpdate?
+        /// If `true` (default), runs `releaseLease` as the last write
+        /// inside the transaction — closes the Gap-3 window where a
+        /// crash between the terminal mark and the lease release
+        /// stranded the row.
+        var releaseLease: Bool = true
+
+        struct ProgressUpdate: Equatable {
+            var featureCoverageSec: Double
+            var transcriptCoverageSec: Double
+            var cueCoverageSec: Double
+        }
+
+        struct StateUpdate: Equatable {
+            var state: String
+            var nextEligibleAt: Double?
+            var lastErrorCode: String?
+        }
+    }
+
+    /// Applies a `ProcessJobOutcomeArmCommit` inside a single
+    /// `BEGIN IMMEDIATE..COMMIT` transaction via `runSchedulingPass`.
+    /// If any step throws (real SQLite error or DEBUG fault injection),
+    /// the entire arm rolls back — progress, increment, child insert,
+    /// state update, and lease release commit or are reverted as one
+    /// unit.
+    ///
+    /// Mirrors the atomicity contract pattern from
+    /// `acquireLeaseWithJournal`: the production scheduler relies on
+    /// "no torn arm" rather than auditing each transition manually.
+    func commitProcessJobOutcomeArm(_ commit: ProcessJobOutcomeArmCommit) throws {
+        try runSchedulingPass {
+            if let progress = commit.progress {
+                try updateJobProgress(
+                    jobId: commit.jobId,
+                    featureCoverageSec: progress.featureCoverageSec,
+                    transcriptCoverageSec: progress.transcriptCoverageSec,
+                    cueCoverageSec: progress.cueCoverageSec
+                )
+            }
+
+            #if DEBUG
+            try triggerProcessJobOutcomeFaultIfNeeded(.afterProgressUpdateBeforeStateUpdate)
+            #endif
+
+            if commit.incrementAttempt {
+                try incrementAttemptCount(jobId: commit.jobId)
+            }
+
+            if let nextJob = commit.insertNextJob {
+                _ = try insertJob(nextJob)
+            }
+
+            if let stateUpdate = commit.stateUpdate {
+                try updateJobState(
+                    jobId: commit.jobId,
+                    state: stateUpdate.state,
+                    nextEligibleAt: stateUpdate.nextEligibleAt,
+                    lastErrorCode: stateUpdate.lastErrorCode
+                )
+            }
+
+            #if DEBUG
+            try triggerProcessJobOutcomeFaultIfNeeded(.afterStateUpdateBeforeLeaseRelease)
+            #endif
+
+            if commit.releaseLease {
+                try releaseLease(jobId: commit.jobId)
+            }
+        }
+    }
+
     #if DEBUG
     /// Test seam for crash-rollback verification (playhead-uzdq).
     /// Runs a scheduling pass that bumps the scheduler epoch, appends
@@ -5956,6 +6090,17 @@ actor AnalysisStore {
         _ injection: LeaseJournalFaultInjection?
     ) {
         leaseJournalFaultInjection = injection
+    }
+
+    /// playhead-5uvz.3 (Gap-3): arms a one-shot fault inside the
+    /// `AnalysisWorkScheduler.processJob` outcome-arm transaction so
+    /// tests can validate that progress + state + lease release roll
+    /// back together if any inner write throws. Production code MUST
+    /// NOT call this.
+    func setProcessJobOutcomeFaultInjectionForTesting(
+        _ injection: ProcessJobOutcomeFaultInjection?
+    ) {
+        processJobOutcomeFaultInjection = injection
     }
     #endif
 

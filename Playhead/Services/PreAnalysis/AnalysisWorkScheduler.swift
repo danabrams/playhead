@@ -1659,25 +1659,25 @@ actor AnalysisWorkScheduler {
                 coverageSec: outcome.cueCoverageSec
             )
 
-            // First check before the outcome write chain. Each
-            // individual `store.X(...)` below is also wrapped in
-            // `writeIfStillOwned` so the renewer flipping the flag at
-            // any subsequent `await` suspension point does not slip a
-            // late write through.
+            // playhead-5uvz.3 (Gap-3): each outcome arm now lands as a
+            // single `BEGIN IMMEDIATE..COMMIT` transaction via
+            // `commitOutcomeArm`. Progress + state + lease release
+            // commit or roll back together, so a process kill mid-arm
+            // can no longer leave the row at `state='running'` with
+            // progress recorded but no terminal mark. The single
+            // `lostOwnership` check below is sufficient because each
+            // arm is now one atomic await — the renewer cannot wedge a
+            // partial state across an internal suspension point.
             if lostOwnership {
                 logger.warning("Skipping outcome writes for job \(job.jobId): lease reclaimed by orphan recovery")
                 return
             }
 
-            // Update progress in the store.
-            await writeIfStillOwned("updateJobProgress") {
-                try await store.updateJobProgress(
-                    jobId: job.jobId,
-                    featureCoverageSec: outcome.featureCoverageSec,
-                    transcriptCoverageSec: outcome.transcriptCoverageSec,
-                    cueCoverageSec: outcome.cueCoverageSec
-                )
-            }
+            let progress = AnalysisStore.ProcessJobOutcomeArmCommit.ProgressUpdate(
+                featureCoverageSec: outcome.featureCoverageSec,
+                transcriptCoverageSec: outcome.transcriptCoverageSec,
+                cueCoverageSec: outcome.cueCoverageSec
+            )
 
             // Handle outcome.
             switch outcome.stopReason {
@@ -1712,18 +1712,26 @@ actor AnalysisWorkScheduler {
                         createdAt: now,
                         updatedAt: now
                     )
-                    await writeIfStillOwned("tierAdvance.insertNext") {
-                        try await store.insertJob(nextJob)
-                    }
-                    await writeIfStillOwned("tierAdvance.markComplete") {
-                        try await store.updateJobState(jobId: job.jobId, state: "complete")
-                    }
+                    await commitOutcomeArm(
+                        "tierAdvance",
+                        AnalysisStore.ProcessJobOutcomeArmCommit(
+                            jobId: job.jobId,
+                            progress: progress,
+                            insertNextJob: nextJob,
+                            stateUpdate: .init(state: "complete", nextEligibleAt: nil, lastErrorCode: nil)
+                        )
+                    )
                     PreAnalysisInstrumentation.logTierCompletion(tier: "\(Int(job.desiredCoverageSec))s", completed: true)
                     logger.info("Tier advancement: \(job.desiredCoverageSec)s -> \(nextCoverage)s for episode \(job.episodeId)")
                 } else {
-                    await writeIfStillOwned("allTiersDone.markComplete") {
-                        try await store.updateJobState(jobId: job.jobId, state: "complete")
-                    }
+                    await commitOutcomeArm(
+                        "allTiersDone",
+                        AnalysisStore.ProcessJobOutcomeArmCommit(
+                            jobId: job.jobId,
+                            progress: progress,
+                            stateUpdate: .init(state: "complete", nextEligibleAt: nil, lastErrorCode: nil)
+                        )
+                    )
                     PreAnalysisInstrumentation.logTierCompletion(tier: "\(Int(job.desiredCoverageSec))s", completed: true)
                     logger.info("Job \(job.jobId) complete (all tiers done)")
                 }
@@ -1732,27 +1740,42 @@ actor AnalysisWorkScheduler {
                 // Re-queue, but with a guard against infinite loops for short episodes
                 // or episodes that can never reach the desired coverage.
                 if !Self.shouldRetryCoverageInsufficient(job: job, outcome: outcome) {
-                    await writeIfStillOwned("coverageInsufficient.noProgress") {
-                        try await store.updateJobState(
+                    await commitOutcomeArm(
+                        "coverageInsufficient.noProgress",
+                        AnalysisStore.ProcessJobOutcomeArmCommit(
                             jobId: job.jobId,
-                            state: "complete",
-                            lastErrorCode: "coverageInsufficient:noProgress"
+                            progress: progress,
+                            stateUpdate: .init(
+                                state: "complete",
+                                nextEligibleAt: nil,
+                                lastErrorCode: "coverageInsufficient:noProgress"
+                            )
                         )
-                    }
+                    )
                     logger.info("Job \(job.jobId) marked complete after no-progress pass (coverage insufficient)")
                 } else {
-                    await writeIfStillOwned("coverageInsufficient.increment") {
-                        try await store.incrementAttemptCount(jobId: job.jobId)
-                    }
-                    let updatedJob = lostOwnership ? nil : (try? await store.fetchJob(byId: job.jobId))
-                    if (updatedJob?.attemptCount ?? 0) >= Self.maxAttemptCount {
-                        await writeIfStillOwned("coverageInsufficient.maxAttempts") {
-                            try await store.updateJobState(
+                    // playhead-5uvz.3: predict the post-increment value
+                    // from the in-memory `job.attemptCount`. We hold the
+                    // lease, so no concurrent writer races us; this
+                    // matches the existing fallback (see prior
+                    // `updated?.attemptCount ?? job.attemptCount + 1`)
+                    // and lets the increment + terminal write commit
+                    // atomically without a mid-arm fetch.
+                    let attempts = job.attemptCount + 1
+                    if attempts >= Self.maxAttemptCount {
+                        await commitOutcomeArm(
+                            "coverageInsufficient.maxAttempts",
+                            AnalysisStore.ProcessJobOutcomeArmCommit(
                                 jobId: job.jobId,
-                                state: "complete",
-                                lastErrorCode: "maxAttemptsReached:coverageInsufficient"
+                                progress: progress,
+                                incrementAttempt: true,
+                                stateUpdate: .init(
+                                    state: "complete",
+                                    nextEligibleAt: nil,
+                                    lastErrorCode: "maxAttemptsReached:coverageInsufficient"
+                                )
                             )
-                        }
+                        )
                         logger.info("Job \(job.jobId) marked complete after max attempts (coverage insufficient)")
                     } else {
                         // Backoff before next attempt: without a
@@ -1762,85 +1785,123 @@ actor AnalysisWorkScheduler {
                         // times in a tight loop. Match the
                         // `.failed` exponential backoff so
                         // attempt-N waits min(2^N * 60, 3600) s.
-                        let attemptIndex = Double((updatedJob?.attemptCount ?? 1))
+                        let attemptIndex = Double(attempts)
                         let backoff = min(pow(2.0, attemptIndex) * 60, 3600)
-                        await writeIfStillOwned("coverageInsufficient.requeue") {
-                            try await store.updateJobState(
+                        await commitOutcomeArm(
+                            "coverageInsufficient.requeue",
+                            AnalysisStore.ProcessJobOutcomeArmCommit(
                                 jobId: job.jobId,
-                                state: "queued",
-                                nextEligibleAt: clock().timeIntervalSince1970 + backoff
+                                progress: progress,
+                                incrementAttempt: true,
+                                stateUpdate: .init(
+                                    state: "queued",
+                                    nextEligibleAt: clock().timeIntervalSince1970 + backoff,
+                                    lastErrorCode: nil
+                                )
                             )
-                        }
+                        )
                     }
                 }
 
             case .blockedByModel:
                 let nextEligible = clock().timeIntervalSince1970 + 300
-                await writeIfStillOwned("blockedByModel") {
-                    try await store.updateJobState(
+                await commitOutcomeArm(
+                    "blockedByModel",
+                    AnalysisStore.ProcessJobOutcomeArmCommit(
                         jobId: job.jobId,
-                        state: "blocked:modelUnavailable",
-                        nextEligibleAt: nextEligible
+                        progress: progress,
+                        stateUpdate: .init(
+                            state: "blocked:modelUnavailable",
+                            nextEligibleAt: nextEligible,
+                            lastErrorCode: nil
+                        )
                     )
-                }
+                )
                 logger.info("Job \(job.jobId) blocked: model unavailable, retry in 300s")
 
             case .pausedForThermal, .memoryPressure:
                 let nextEligible = clock().timeIntervalSince1970 + 30
-                await writeIfStillOwned("pausedThermalOrMemory") {
-                    try await store.updateJobState(
+                await commitOutcomeArm(
+                    "pausedThermalOrMemory",
+                    AnalysisStore.ProcessJobOutcomeArmCommit(
                         jobId: job.jobId,
-                        state: "paused",
-                        nextEligibleAt: nextEligible
+                        progress: progress,
+                        stateUpdate: .init(
+                            state: "paused",
+                            nextEligibleAt: nextEligible,
+                            lastErrorCode: nil
+                        )
                     )
-                }
+                )
                 logger.info("Job \(job.jobId) paused for thermal/memory, retry in 30s")
 
             case .failed(let reason):
-                await writeIfStillOwned("failed.increment") {
-                    try await store.incrementAttemptCount(jobId: job.jobId)
-                }
-                let updated = lostOwnership ? nil : (try? await store.fetchJob(byId: job.jobId))
-                let attempts = updated?.attemptCount ?? job.attemptCount + 1
+                let attempts = job.attemptCount + 1
                 if attempts >= Self.maxAttemptCount {
-                    await writeIfStillOwned("failed.supersede") {
-                        try await store.updateJobState(
+                    await commitOutcomeArm(
+                        "failed.supersede",
+                        AnalysisStore.ProcessJobOutcomeArmCommit(
                             jobId: job.jobId,
-                            state: "superseded",
-                            lastErrorCode: "maxAttemptsReached:\(reason)"
+                            progress: progress,
+                            incrementAttempt: true,
+                            stateUpdate: .init(
+                                state: "superseded",
+                                nextEligibleAt: nil,
+                                lastErrorCode: "maxAttemptsReached:\(reason)"
+                            )
                         )
-                    }
+                    )
                     logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: \(reason)")
                 } else {
                     let backoff = Self.exponentialBackoffSeconds(attempt: attempts)
                     let nextEligible = clock().timeIntervalSince1970 + backoff
-                    await writeIfStillOwned("failed.requeue") {
-                        try await store.updateJobState(
+                    await commitOutcomeArm(
+                        "failed.requeue",
+                        AnalysisStore.ProcessJobOutcomeArmCommit(
                             jobId: job.jobId,
-                            state: "failed",
-                            nextEligibleAt: nextEligible,
-                            lastErrorCode: reason
+                            progress: progress,
+                            incrementAttempt: true,
+                            stateUpdate: .init(
+                                state: "failed",
+                                nextEligibleAt: nextEligible,
+                                lastErrorCode: reason
+                            )
                         )
-                    }
+                    )
                     logger.warning("Job \(job.jobId) failed: \(reason), attempt \(attempts), backoff \(backoff)s")
                 }
 
             case .backgroundExpired:
-                await writeIfStillOwned("backgroundExpired.requeue") {
-                    try await store.updateJobState(jobId: job.jobId, state: "queued")
-                }
+                await commitOutcomeArm(
+                    "backgroundExpired.requeue",
+                    AnalysisStore.ProcessJobOutcomeArmCommit(
+                        jobId: job.jobId,
+                        progress: progress,
+                        stateUpdate: .init(state: "queued", nextEligibleAt: nil, lastErrorCode: nil)
+                    )
+                )
                 logger.info("Job \(job.jobId) background expired, requeued")
 
             case .cancelledByPlayback:
-                await writeIfStillOwned("cancelledByPlayback.requeue") {
-                    try await store.updateJobState(jobId: job.jobId, state: "queued")
-                }
+                await commitOutcomeArm(
+                    "cancelledByPlayback.requeue",
+                    AnalysisStore.ProcessJobOutcomeArmCommit(
+                        jobId: job.jobId,
+                        progress: progress,
+                        stateUpdate: .init(state: "queued", nextEligibleAt: nil, lastErrorCode: nil)
+                    )
+                )
                 logger.info("Job \(job.jobId) cancelled by playback, requeued")
 
             case .preempted:
-                await writeIfStillOwned("preempted.requeue") {
-                    try await store.updateJobState(jobId: job.jobId, state: "queued")
-                }
+                await commitOutcomeArm(
+                    "preempted.requeue",
+                    AnalysisStore.ProcessJobOutcomeArmCommit(
+                        jobId: job.jobId,
+                        progress: progress,
+                        stateUpdate: .init(state: "queued", nextEligibleAt: nil, lastErrorCode: nil)
+                    )
+                )
                 logger.info("Job \(job.jobId) preempted by higher-lane work, requeued")
             }
         } catch {
@@ -1849,42 +1910,40 @@ actor AnalysisWorkScheduler {
                 logger.warning("Skipping failure cleanup writes for job \(job.jobId): lease reclaimed by orphan recovery (error: \(error))")
                 return
             }
-            await writeIfStillOwned("outerCatch.increment") {
-                try await store.incrementAttemptCount(jobId: job.jobId)
-            }
-            let updated = lostOwnership ? nil : (try? await store.fetchJob(byId: job.jobId))
-            let attempts = updated?.attemptCount ?? job.attemptCount + 1
+            // playhead-5uvz.3 (Gap-3): the outer-catch path also commits
+            // as one transaction so the increment + terminal mark +
+            // lease release roll back together if any one fails.
+            let attempts = job.attemptCount + 1
             if attempts >= Self.maxAttemptCount {
-                await writeIfStillOwned("outerCatch.supersede") {
-                    try await store.updateJobState(
+                await commitOutcomeArm(
+                    "outerCatch.supersede",
+                    AnalysisStore.ProcessJobOutcomeArmCommit(
                         jobId: job.jobId,
-                        state: "superseded",
-                        lastErrorCode: "maxAttemptsReached:\(error.localizedDescription)"
+                        incrementAttempt: true,
+                        stateUpdate: .init(
+                            state: "superseded",
+                            nextEligibleAt: nil,
+                            lastErrorCode: "maxAttemptsReached:\(error.localizedDescription)"
+                        )
                     )
-                }
+                )
             } else {
                 let backoff = Self.exponentialBackoffSeconds(attempt: attempts)
                 let nextEligible = clock().timeIntervalSince1970 + backoff
-                await writeIfStillOwned("outerCatch.requeue") {
-                    try await store.updateJobState(
+                await commitOutcomeArm(
+                    "outerCatch.requeue",
+                    AnalysisStore.ProcessJobOutcomeArmCommit(
                         jobId: job.jobId,
-                        state: "failed",
-                        nextEligibleAt: nextEligible,
-                        lastErrorCode: error.localizedDescription
+                        incrementAttempt: true,
+                        stateUpdate: .init(
+                            state: "failed",
+                            nextEligibleAt: nextEligible,
+                            lastErrorCode: error.localizedDescription
+                        )
                     )
-                }
+                )
             }
             logger.error("Job \(job.jobId) threw: \(error)")
-        }
-
-        // Final releaseLease is the load-bearing tail for the
-        // happy-path arms (e.g. `.reachedTarget` with all tiers done)
-        // that don't early-return. Gated like every other store write
-        // because AnalysisStore.releaseLease is a blind UPDATE-by-jobId
-        // (not owner-scoped); calling it after losing ownership
-        // clears the new owner's lease.
-        await writeIfStillOwned("releaseLease.tail") {
-            try await store.releaseLease(jobId: job.jobId)
         }
     }
 
@@ -1911,6 +1970,30 @@ actor AnalysisWorkScheduler {
             logger.warning("Cleanup write [\(what)] cancelled (likely lease reclaim mid-write)")
         } catch {
             logger.error("Failed cleanup write [\(what)]: \(error)")
+        }
+    }
+
+    /// playhead-5uvz.3 (Gap-3): submits an outcome-arm's writes to the
+    /// store as a single `BEGIN IMMEDIATE..COMMIT` transaction via
+    /// `AnalysisStore.commitProcessJobOutcomeArm`. Mirrors
+    /// `writeIfStillOwned` for the lostOwnership gate and the
+    /// catch-and-log semantics. If any inner write throws, the entire
+    /// transaction rolls back — so progress + state + lease release
+    /// commit or roll back as one unit. Closes the Gap-3 crash window
+    /// where a process kill between separate transactions could leave
+    /// the `analysis_jobs` row at `state='running'` with progress
+    /// recorded but no terminal mark.
+    private func commitOutcomeArm(
+        _ what: String,
+        _ commit: AnalysisStore.ProcessJobOutcomeArmCommit
+    ) async {
+        guard !lostOwnership else { return }
+        do {
+            try await store.commitProcessJobOutcomeArm(commit)
+        } catch is CancellationError {
+            logger.warning("Outcome arm [\(what)] cancelled (likely lease reclaim mid-transaction)")
+        } catch {
+            logger.error("Failed outcome arm [\(what)]: \(error)")
         }
     }
 
