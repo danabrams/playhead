@@ -28,6 +28,12 @@ struct ParsedEpisode: Sendable, Equatable {
     var description: String?
     var showNotes: String?
     var chapters: [ParsedChapter]
+    /// playhead-gtt9.22: URL of the Podcasting 2.0 `<podcast:chapters>`
+    /// JSON document, when the feed advertises one. Captured but NOT
+    /// fetched at parse time — fetching is opt-in (it introduces a new
+    /// network call) and is mediated by `ChapterEvidenceParser
+    /// .parsePodcasting20Chapters(from:)` if/when the runtime opts in.
+    var chaptersFeedURL: URL?
     var itunesAuthor: String?
     var itunesImageURL: URL?
     var itunesEpisodeNumber: Int?
@@ -219,7 +225,29 @@ final class FeedParser: NSObject, XMLParserDelegate {
 
         // Podcasting 2.0 chapters link (external JSON)
         if local == "chapters" && ns == Self.podcastNS && insideItem {
-            // We note the chapters URL but do not fetch it here.
+            // playhead-gtt9.22: Capture the URL into ParsedEpisode so the
+            // runtime can opt-in to fetching the JSON document via
+            // `ChapterEvidenceParser.parsePodcasting20Chapters`. We do not
+            // fetch here — keeping the parser pure (no network calls from
+            // XML parsing). When the JSON `type` attribute is absent we
+            // still capture the URL; downstream code is responsible for
+            // type validation (handled by HTTP content-negotiation + JSON
+            // decode error suppression in the parser).
+            if let href = attributes["url"] {
+                currentEpisode?.chaptersFeedURL = resolveURL(href)
+            }
+            return
+        }
+
+        // iTunes namespace chapters link (rare; documented for parity).
+        // Most podcasts using iTunes-style chapters embed them in ID3 CHAP
+        // frames inside the audio file rather than a separate XML element,
+        // so this branch is mostly here so we do not silently lump
+        // iTunes-namespace `<chapters>` into the generic catch-all later.
+        if local == "chapters" && ns == Self.itunesNS && insideItem {
+            if let href = attributes["url"], currentEpisode?.chaptersFeedURL == nil {
+                currentEpisode?.chaptersFeedURL = resolveURL(href)
+            }
             return
         }
 
@@ -387,6 +415,7 @@ final class FeedParser: NSObject, XMLParserDelegate {
             pubDate: nil, duration: nil,
             description: nil, showNotes: nil,
             chapters: [],
+            chaptersFeedURL: nil,
             itunesAuthor: nil, itunesImageURL: nil,
             itunesEpisodeNumber: nil
         )

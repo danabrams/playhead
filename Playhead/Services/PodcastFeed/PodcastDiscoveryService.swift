@@ -266,9 +266,21 @@ actor PodcastDiscoveryService {
         for parsedEp in feed.episodes {
             guard !parsedEp.guid.isEmpty else { continue }
 
+            // playhead-gtt9.22: convert inline RSS chapter markers into
+            // classified evidence at persistence time so the ad-detection
+            // pipeline (which queries `Episode.feedMetadata`) can fuse
+            // chapter signal without re-parsing XML. Episode duration is
+            // forwarded so end-time inference works for the last chapter.
+            let chapterEvidence = ChapterEvidenceParser.fromParsedChapters(
+                parsedEp.chapters,
+                episodeDuration: parsedEp.duration
+            )
+
             let metadata = FeedTextNormalizer.makeMetadata(
                 rawDescription: parsedEp.description,
-                rawSummary: parsedEp.showNotes
+                rawSummary: parsedEp.showNotes,
+                chapterEvidence: chapterEvidence.isEmpty ? nil : chapterEvidence,
+                chaptersFeedURL: parsedEp.chaptersFeedURL
             )
 
             if let ep = existingByGUID[parsedEp.guid] {

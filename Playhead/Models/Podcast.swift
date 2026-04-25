@@ -189,6 +189,23 @@ struct FeedDescriptionMetadata: Codable, Sendable, Equatable {
     /// Hashes of the raw source strings, enabling change detection without
     /// storing unbounded HTML blobs.
     var sourceHashes: SourceHashes
+    /// playhead-gtt9.22: Chapter evidence parsed from RSS-feed inline
+    /// `<podcast:chapter>` markers (zero-cost, deterministic). Optional
+    /// so the additive Codable migration is non-destructive: existing
+    /// rows decode with `nil` and the ad-detection pipeline simply sees
+    /// no chapter-derived signal until the next feed refresh repopulates
+    /// the field. Each entry already carries source/disposition/quality
+    /// — the heavy lifting was done in `ChapterEvidenceParser`.
+    /// Out of scope for this field: ID3 CHAP and Podcasting 2.0 JSON
+    /// chapters (those are non-RSS sources; future beads can extend).
+    var chapterEvidence: [ChapterEvidence]?
+    /// playhead-gtt9.22: URL of the optional Podcasting 2.0
+    /// `<podcast:chapters>` external JSON document. Captured at parse
+    /// time so a future opt-in fetch path can hydrate it on demand. The
+    /// parser does NOT fetch the URL (no new network calls during
+    /// XMLParse); fetch is mediated by `ChapterEvidenceParser
+    /// .parsePodcasting20Chapters(from:)` only when the runtime opts in.
+    var chaptersFeedURL: URL?
 
     struct SourceHashes: Codable, Sendable, Equatable, Hashable {
         // Stored as Int64 (raw bit-pattern of the original FNV-1a 64-bit

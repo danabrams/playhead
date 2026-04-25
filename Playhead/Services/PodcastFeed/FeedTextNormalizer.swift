@@ -77,15 +77,31 @@ enum FeedTextNormalizer {
     }
 
     /// Build `FeedDescriptionMetadata` from raw parsed episode fields.
+    ///
+    /// playhead-gtt9.22: Optional `chapterEvidence` and `chaptersFeedURL`
+    /// arguments allow the persistence layer to seed chapter-derived
+    /// signal at feed-refresh time. When both raw text fields are nil/
+    /// empty AND there is no chapter evidence AND no chapters URL,
+    /// metadata creation is suppressed (consumers expect a non-nil
+    /// metadata blob to mean "we have *something* useful for this
+    /// episode" — preserving that invariant prevents needless allocs
+    /// for chapter-less feeds).
     static func makeMetadata(
         rawDescription: String?,
-        rawSummary: String?
+        rawSummary: String?,
+        chapterEvidence: [ChapterEvidence]? = nil,
+        chaptersFeedURL: URL? = nil
     ) -> FeedDescriptionMetadata? {
         let descHash = stableHash(rawDescription)
         let sumHash = stableHash(rawSummary)
 
-        // If both sources are nil/empty, don't create metadata at all.
-        guard descHash != nil || sumHash != nil else { return nil }
+        let hasChapters = !(chapterEvidence?.isEmpty ?? true)
+        let hasChaptersURL = chaptersFeedURL != nil
+
+        // Suppress empty metadata for episodes with literally no signal.
+        guard descHash != nil || sumHash != nil || hasChapters || hasChaptersURL else {
+            return nil
+        }
 
         return FeedDescriptionMetadata(
             feedDescription: normalize(rawDescription),
@@ -93,7 +109,9 @@ enum FeedTextNormalizer {
             sourceHashes: .init(
                 descriptionHash: descHash,
                 summaryHash: sumHash
-            )
+            ),
+            chapterEvidence: hasChapters ? chapterEvidence : nil,
+            chaptersFeedURL: chaptersFeedURL
         )
     }
 

@@ -1555,17 +1555,24 @@ actor AdDetectionService {
         // is feed-level (description + summary) so it has no per-span variance;
         // fanning out the same cues across every span keeps the corroboration
         // gate honest while sharing the extraction cost.
+        // playhead-gtt9.22: also pull cached `chapterEvidence` from the
+        // metadata provider so the chapter ledger builder can fuse
+        // publisher-supplied chapter markers into the metadata channel.
         let metadataCues: [EpisodeMetadataCue]
+        let assetChapterEvidence: [ChapterEvidence]
         if let feedMetadata = await episodeMetadataProvider.metadata(for: analysisAssetId) {
             let extractor = MetadataCueExtractor()
             metadataCues = extractor.extractCues(
                 description: feedMetadata.feedDescription,
                 summary: feedMetadata.feedSummary
             )
+            assetChapterEvidence = feedMetadata.chapterEvidence ?? []
         } else {
             metadataCues = []
+            assetChapterEvidence = []
         }
         let metadataEvidenceBuilder = FeedDescriptionEvidenceBuilder()
+        let chapterEvidenceBuilder = ChapterMetadataEvidenceBuilder()
         var fusionWindows: [AdWindow] = []
         var decisionEvents: [DecisionEvent] = []
         // Phase 6.5 (playhead-4my.16): accumulate AdDecisionResult for step 17 forwarding.
@@ -1707,10 +1714,25 @@ actor AdDetectionService {
 
             // playhead-z3ch: build per-span metadata entries from the cached cues.
             // Builder is pure; the heavy work (cue extraction) was done once above.
-            let metadataEntries = metadataEvidenceBuilder.buildEntries(
+            var metadataEntries = metadataEvidenceBuilder.buildEntries(
                 cues: metadataCues,
                 for: refinedSpan
             )
+
+            // playhead-gtt9.22: fuse chapter-derived evidence onto the
+            // metadata channel for spans whose interval overlaps a
+            // publisher-labeled "Sponsor"/"Ad break" chapter. The
+            // builder emits at most one entry per span; the entry is
+            // hard-clamped to `metadataCap` (0.15) by the same
+            // `FusionBudgetClamp` that guards description/summary cues
+            // — chapters cannot exceed the metadata family budget, and
+            // the corroboration gate still requires an in-audio signal
+            // before the metadata family can trigger a skip.
+            let chapterMetadataEntries = chapterEvidenceBuilder.buildEntries(
+                chapters: assetChapterEvidence,
+                for: refinedSpan
+            )
+            metadataEntries.append(contentsOf: chapterMetadataEntries)
 
             // playhead-gtt9.17: catalog egress. Fingerprint the span's feature
             // windows (time-invariant) and query `AdCatalogStore` for known
