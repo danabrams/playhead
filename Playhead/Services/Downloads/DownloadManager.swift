@@ -950,7 +950,9 @@ actor DownloadManager {
                 podcastId: context?.podcastId,
                 downloadId: episodeId,
                 sourceFingerprint: strongHash,
-                isExplicitDownload: context?.isExplicitDownload ?? false
+                isExplicitDownload: context?.isExplicitDownload ?? false,
+                podcastTitle: context?.podcastTitle,
+                episodeTitle: context?.episodeTitle
             )
         }
 
