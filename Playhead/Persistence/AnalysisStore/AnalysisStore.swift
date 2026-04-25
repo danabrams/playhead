@@ -4669,6 +4669,37 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    /// playhead-yqax: persist a new `desiredCoverageSec` on an
+    /// `analysis_jobs` row. Used by the foreground catch-up bypass in
+    /// `AnalysisWorkScheduler.dispatchForegroundCatchup` so the runner
+    /// picks up the escalated coverage target on its next read of the
+    /// row, AND so a crash mid-catch-up resumes against the deeper
+    /// target rather than the stale tier value the row was enqueued
+    /// with.
+    ///
+    /// Idempotent: writing the same value twice is a no-op for the
+    /// runner. `updatedAt` always advances so the row's lease/lifecycle
+    /// observers see the touch. Does NOT change `state`, `priority`,
+    /// `attemptCount`, or any coverage-progress columns — those are
+    /// owned by the standard outcome-arm transitions in
+    /// `AnalysisWorkScheduler.processJob`.
+    func updateJobDesiredCoverage(
+        jobId: String,
+        desiredCoverageSec: Double
+    ) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET desiredCoverageSec = ?, updatedAt = ?
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, desiredCoverageSec)
+        bind(stmt, 2, Date().timeIntervalSince1970)
+        bind(stmt, 3, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
     func acquireLease(jobId: String, owner: String, expiresAt: Double) throws -> Bool {
         let sql = """
             UPDATE analysis_jobs
