@@ -855,8 +855,18 @@ actor AnalysisCoordinator {
                 case .checkpointed, .acquired, .preempted, .none:
                     // Resume path: requeue with fresh identity under a
                     // freshly-bumped scheduler epoch.
-                    if decisionEvent == .acquired || decisionEvent == nil {
-                        logger.notice("orphan_recovered_no_progress episode=\(job.episodeId)")
+                    // playhead-uhdu (5uvz.1 NIT #4): split the log by
+                    // surprise level. `.acquired` with no checkpoint is a
+                    // genuine "worker crashed before any progress" anomaly
+                    // worth `.notice`. `nil` is the legitimate first-launch-
+                    // after-rollout case (rows claimed pre-5uvz.1 had no
+                    // journal trail to read), so that path stays at `.debug`
+                    // to avoid noisy Console output on every cold launch
+                    // until the legacy rows drain.
+                    if decisionEvent == .acquired {
+                        logger.notice("orphan_recovered_no_progress episode=\(job.episodeId) reason=acquired_without_checkpoint")
+                    } else if decisionEvent == nil {
+                        logger.debug("orphan_recovered_no_progress episode=\(job.episodeId) reason=no_journal_trail")
                     }
                     let newEpoch = try await store.incrementSchedulerEpoch()
                     let newGenerationID = UUID()

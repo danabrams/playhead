@@ -709,6 +709,20 @@ actor AnalysisStore {
     }
 
     private var featureBatchPersistenceFaultInjection: FeatureBatchPersistenceFaultInjection?
+
+    /// playhead-uhdu (5uvz.1 NIT #1): test-only fault injection points
+    /// for `acquireLeaseWithJournal`. Lets tests force the inner journal
+    /// append to throw so the rollback contract — phantom-lease impossible
+    /// by construction — is validated by execution rather than visual
+    /// inspection of the catch block.
+    enum LeaseJournalFaultInjection: Equatable {
+        /// Throw between the lease UPDATE and the journal append.
+        /// Validates that the catch block rolls back the UPDATE so no
+        /// phantom-lease (lease held, no journal trail) survives.
+        case afterUpdateBeforeJournalAppend
+    }
+
+    private var leaseJournalFaultInjection: LeaseJournalFaultInjection?
     #endif
 
     /// bd-1tl: dedicated logger for store-level diagnostics that should
@@ -3462,6 +3476,19 @@ actor AnalysisStore {
             "Injected feature extraction batch persistence failure at \(injection)"
         )
     }
+
+    /// playhead-uhdu (5uvz.1 NIT #1): one-shot fault trigger consumed by
+    /// `acquireLeaseWithJournal`. Single-fire by design — clears itself
+    /// so retries succeed without the test having to reset state.
+    private func triggerLeaseJournalFaultIfNeeded(
+        _ injection: LeaseJournalFaultInjection
+    ) throws {
+        guard leaseJournalFaultInjection == injection else { return }
+        leaseJournalFaultInjection = nil
+        throw AnalysisStoreError.insertFailed(
+            "Injected lease-with-journal failure at \(injection)"
+        )
+    }
     #endif
 
     #if DEBUG
@@ -4706,6 +4733,10 @@ actor AnalysisStore {
                 return false
             }
 
+            #if DEBUG
+            try triggerLeaseJournalFaultIfNeeded(.afterUpdateBeforeJournalAppend)
+            #endif
+
             // Atomically append the `acquired` journal row in the same
             // transaction. If this throws, the catch below rolls back
             // the UPDATE — phantom-lease (lease held, no journal trail)
@@ -5915,6 +5946,16 @@ actor AnalysisStore {
         _ injection: FeatureBatchPersistenceFaultInjection?
     ) {
         featureBatchPersistenceFaultInjection = injection
+    }
+
+    /// playhead-uhdu (5uvz.1 NIT #1): arms a one-shot fault inside
+    /// `acquireLeaseWithJournal` so tests can validate the rollback
+    /// contract on the journal-append path. Production code MUST NOT
+    /// call this — the setter is only present in DEBUG builds.
+    func setLeaseJournalFaultInjectionForTesting(
+        _ injection: LeaseJournalFaultInjection?
+    ) {
+        leaseJournalFaultInjection = injection
     }
     #endif
 
