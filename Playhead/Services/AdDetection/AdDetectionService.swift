@@ -65,6 +65,38 @@ struct AdDetectionConfig: Sendable {
     /// gtt9.3 owns calibration.
     let segmentAutoSkipThreshold: Double
 
+    /// playhead-arf8: master kill switch for music-bracket boundary
+    /// refinement (BracketDetector + FineBoundaryRefiner graduated from
+    /// shadow). Default `true` because the components have shipped under
+    /// shadow telemetry; flipping to `false` is the one-line rollback if
+    /// dogfooding reveals a regression. When `false`, the backfill loop
+    /// uses only the legacy `BoundaryRefiner.computeAdjustments` path.
+    let bracketRefinementEnabled: Bool
+
+    /// playhead-arf8: per-show `musicBracketTrust` floor below which
+    /// bracket evidence is suppressed. Trust is sampled from the
+    /// `MusicBracketTrustStore` Beta posterior; the prior mean is 0.50,
+    /// so a floor of 0.40 leaves bracket refinement active for every show
+    /// until accumulated outcome history pulls trust below the floor.
+    /// Tightening this (e.g. to 0.55) makes the gate more conservative.
+    let bracketRefinementMinTrust: Double
+
+    /// playhead-arf8: minimum `BracketEvidence.coarseScore` required for
+    /// bracket detection to influence boundary refinement. Below this
+    /// threshold the detector reported a candidate but the envelope
+    /// signal was too weak to override the legacy snap. Default 0.30
+    /// matches `BracketDetector.Config.default.onsetScoreThreshold`.
+    let bracketRefinementMinCoarseScore: Double
+
+    /// playhead-arf8: minimum `BoundaryEstimate.confidence` from
+    /// `FineBoundaryRefiner` required to apply the fine-grained snap.
+    /// When the local search yields a low-confidence cue (no silence,
+    /// no energy valley, no spectral discontinuity), the legacy
+    /// `BoundaryRefiner` adjustment is used instead. Default 0.20 keeps
+    /// the bar low because the bracket trust gate already filtered out
+    /// untrustworthy shows.
+    let bracketRefinementMinFineConfidence: Double
+
     /// ef2.6.3: Derive ConfidenceBandThresholds from config fields for band classification.
     /// Requires candidate < markOnly < confirmation < autoSkip (asserted in debug).
     var bandThresholds: ConfidenceBandThresholds {
@@ -88,7 +120,11 @@ struct AdDetectionConfig: Sendable {
         markOnlyThreshold: Double = 0.60,
         autoSkipConfidenceThreshold: Double = 0.80,
         segmentUICandidateThreshold: Double = 0.40,
-        segmentAutoSkipThreshold: Double = 0.55
+        segmentAutoSkipThreshold: Double = 0.55,
+        bracketRefinementEnabled: Bool = true,
+        bracketRefinementMinTrust: Double = 0.40,
+        bracketRefinementMinCoarseScore: Double = 0.30,
+        bracketRefinementMinFineConfidence: Double = 0.20
     ) {
         self.candidateThreshold = candidateThreshold
         self.confirmationThreshold = confirmationThreshold
@@ -102,6 +138,10 @@ struct AdDetectionConfig: Sendable {
         self.autoSkipConfidenceThreshold = autoSkipConfidenceThreshold
         self.segmentUICandidateThreshold = segmentUICandidateThreshold
         self.segmentAutoSkipThreshold = segmentAutoSkipThreshold
+        self.bracketRefinementEnabled = bracketRefinementEnabled
+        self.bracketRefinementMinTrust = bracketRefinementMinTrust
+        self.bracketRefinementMinCoarseScore = bracketRefinementMinCoarseScore
+        self.bracketRefinementMinFineConfidence = bracketRefinementMinFineConfidence
     }
 
     static let `default` = AdDetectionConfig(
@@ -116,8 +156,39 @@ struct AdDetectionConfig: Sendable {
         markOnlyThreshold: 0.60,
         autoSkipConfidenceThreshold: 0.80,
         segmentUICandidateThreshold: 0.40,
-        segmentAutoSkipThreshold: 0.55
+        segmentAutoSkipThreshold: 0.55,
+        bracketRefinementEnabled: true,
+        bracketRefinementMinTrust: 0.40,
+        bracketRefinementMinCoarseScore: 0.30,
+        bracketRefinementMinFineConfidence: 0.20
     )
+}
+
+// MARK: - Bracket Refinement Telemetry
+
+/// playhead-arf8: per-`runBackfill` aggregate counts for the bracket-
+/// refinement gate. Lets tests assert how the live activation distributed
+/// spans across the gate paths without scraping logs.
+struct BracketRefinementCounts: Sendable, Equatable {
+    /// Spans where the bracket-aware refiner actually moved the boundary
+    /// (path == .bracketRefined). The legacy refiner did not run for these.
+    var bracketRefined: Int = 0
+    /// Spans where bracket refinement was active but the detector found
+    /// no envelope (host-read ad copy with no music bed).
+    var noBracket: Int = 0
+    /// Spans where bracket evidence existed but the per-show trust gate
+    /// suppressed it. Caller fell back to the legacy refiner.
+    var trustGated: Int = 0
+    /// Spans where bracket evidence existed but coarse score was below
+    /// the floor. Caller fell back to the legacy refiner.
+    var coarseGated: Int = 0
+    /// Spans where bracket evidence existed but at least one fine
+    /// boundary estimate was below the confidence floor. Caller fell
+    /// back to the legacy refiner.
+    var fineConfidenceGated: Int = 0
+    /// Spans where the bracket path was bypassed by configuration
+    /// (master flag off, or not enough feature windows).
+    var legacyBypass: Int = 0
 }
 
 // MARK: - Decision State
@@ -366,6 +437,22 @@ actor AdDetectionService {
     /// floor". Test-observable via `lastCatalogMatchSimilarityForTesting`.
     private var lastCatalogMatchSimilarity: Float = 0
 
+    /// playhead-arf8: per-show music-bracket trust store. Lazily-built
+    /// actor that wraps the same `AnalysisStore` used by the rest of the
+    /// service. `nil` until first lookup so tests / runs that never cross
+    /// the bracket-refinement gate don't pay the actor-init cost.
+    /// Outcome recording is intentionally absent in this bead — trust
+    /// stays at the prior `Beta(5,5)` default, which keeps every show
+    /// above the configured floor (0.40) until later work introduces
+    /// hit/miss signals.
+    private var bracketTrustStore: MusicBracketTrustStore?
+
+    /// playhead-arf8: counters for the most recent `runBackfill` showing
+    /// how each decoded span flowed through the bracket-refinement gate.
+    /// Test-observable so the activation contract can be asserted at
+    /// integration level. Reset at the start of every backfill run.
+    private var lastBracketRefinementCounts = BracketRefinementCounts()
+
     // MARK: - Init
 
     init(
@@ -474,6 +561,53 @@ actor AdDetectionService {
     /// similarity and empty/absent catalogs do not.
     func lastCatalogMatchSimilarityForTesting() -> Float {
         lastCatalogMatchSimilarity
+    }
+
+    // MARK: - playhead-arf8: Bracket Refinement Telemetry / Trust Lookup
+
+    /// Test seam: returns the per-`runBackfill` aggregate counts emitted by
+    /// the bracket-aware refiner gate. Resets to all-zero at the start of
+    /// every backfill run so successive calls reflect only the most recent
+    /// run. Used by `BracketActivationTests` to assert that the master
+    /// flag, trust gate, and confidence gates route spans to the expected
+    /// path without log scraping.
+    func bracketRefinementCountsForTesting() -> BracketRefinementCounts {
+        lastBracketRefinementCounts
+    }
+
+    /// Lazy accessor for `MusicBracketTrustStore`. Constructs the actor on
+    /// the first request and caches it for the lifetime of the service.
+    /// Both the actor itself and its `AnalysisStore` backing are safe to
+    /// share across runs, so reuse is the cheapest correct option.
+    private func bracketTrustStoreLazy() -> MusicBracketTrustStore {
+        if let existing = bracketTrustStore {
+            return existing
+        }
+        let fresh = MusicBracketTrustStore(store: store)
+        bracketTrustStore = fresh
+        return fresh
+    }
+
+    /// Increment the matching counter on `lastBracketRefinementCounts` so
+    /// `bracketRefinementCountsForTesting()` and any future log emission
+    /// can attribute decoded spans to gate paths. Pure bookkeeping — does
+    /// not feed back into `MusicBracketTrustStore`. Outcome accumulation
+    /// is intentionally deferred until offline ground-truth signals exist.
+    private func tallyBracketRefinementOutcome(_ path: BracketAwareBoundaryRefiner.Path) {
+        switch path {
+        case .legacy:
+            lastBracketRefinementCounts.legacyBypass += 1
+        case .noBracket:
+            lastBracketRefinementCounts.noBracket += 1
+        case .trustGated:
+            lastBracketRefinementCounts.trustGated += 1
+        case .coarseGated:
+            lastBracketRefinementCounts.coarseGated += 1
+        case .fineConfidenceGated:
+            lastBracketRefinementCounts.fineConfidenceGated += 1
+        case .bracketRefined:
+            lastBracketRefinementCounts.bracketRefined += 1
+        }
     }
 
     // MARK: - User Correction Persistence
@@ -1442,17 +1576,62 @@ actor AdDetectionService {
         // supplied (rare — matches the analogous priors-update guard above).
         let catalogShowId: String? = podcastId.isEmpty ? nil : podcastId
 
+        // playhead-arf8: reset per-backfill bracket-refinement counts and
+        // resolve the per-show music-bracket trust once per run. The store
+        // backs onto the same `AnalysisStore` as everything else; lookup is
+        // O(1) after the first hit per show. Empty `podcastId` (rare; only
+        // when the caller never supplied a podcast) skips the lookup and
+        // uses the default prior mean (0.50) so refinement can still apply
+        // for the duration of the run — matches the conservative default
+        // configured in `AdDetectionConfig`.
+        lastBracketRefinementCounts = BracketRefinementCounts()
+        let bracketShowTrust: Double
+        if config.bracketRefinementEnabled, !podcastId.isEmpty {
+            let trustStore = bracketTrustStoreLazy()
+            bracketShowTrust = await trustStore.trust(forShow: podcastId)
+        } else {
+            bracketShowTrust = 0.5
+        }
+
         for span in decodedSpans {
             try Task.checkCancellation()
 
             // Step 13 (moved before fusion): snap span boundaries to acoustic transitions
             // so that the evidence lookup and gate decision use the final refined boundaries.
-            let (startAdj, endAdj) = featureWindows.isEmpty ? (0.0, 0.0) :
-                BoundaryRefiner.computeAdjustments(
+            //
+            // playhead-arf8: try the bracket-aware refiner first. If it
+            // successfully refines (path == .bracketRefined) we use its
+            // adjustments; otherwise we fall back to the legacy
+            // `BoundaryRefiner.computeAdjustments` so the bead's
+            // "scored cue, not an override" contract holds — the bracket
+            // path is additive when it has high-confidence evidence and
+            // a no-op everywhere else.
+            let (startAdj, endAdj): (Double, Double)
+            if featureWindows.isEmpty {
+                startAdj = 0.0
+                endAdj = 0.0
+            } else {
+                let bracketResult = BracketAwareBoundaryRefiner.computeAdjustments(
                     windows: featureWindows,
                     candidateStart: span.startTime,
-                    candidateEnd: span.endTime
+                    candidateEnd: span.endTime,
+                    showTrust: bracketShowTrust,
+                    config: config
                 )
+                tallyBracketRefinementOutcome(bracketResult.path)
+                if case .bracketRefined = bracketResult.path {
+                    startAdj = bracketResult.startAdjust
+                    endAdj = bracketResult.endAdjust
+                } else {
+                    let legacy = BoundaryRefiner.computeAdjustments(
+                        windows: featureWindows,
+                        candidateStart: span.startTime,
+                        candidateEnd: span.endTime
+                    )
+                    startAdj = legacy.startAdjust
+                    endAdj = legacy.endAdjust
+                }
+            }
             let refinedSpan = DecodedSpan(
                 id: span.id,
                 assetId: span.assetId,
@@ -1741,6 +1920,14 @@ actor AdDetectionService {
         let funnel = acousticPipelineResult.funnel
         logger.info(
             "Backfill acoustic-pipeline funnel: computed=\(funnel.total(.computed)) producedSignal=\(funnel.total(.producedSignal)) passedGate=\(funnel.total(.passedGate)) includedInFusion=\(funnel.total(.includedInFusion))"
+        )
+
+        // playhead-arf8: per-run bracket-refinement cascade counts. Greppable
+        // marker `[arf8]` lets dogfood verify activation is firing and which
+        // gate is shedding spans without scraping per-window logs.
+        let arf8Counts = lastBracketRefinementCounts
+        logger.info(
+            "[arf8] backfill bracket counts: refined=\(arf8Counts.bracketRefined) noBracket=\(arf8Counts.noBracket) trustGated=\(arf8Counts.trustGated) coarseGated=\(arf8Counts.coarseGated) fineGated=\(arf8Counts.fineConfidenceGated) legacyBypass=\(arf8Counts.legacyBypass) showTrust=\(String(format: "%.2f", bracketShowTrust))"
         )
     }
 

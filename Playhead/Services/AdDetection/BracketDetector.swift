@@ -1,6 +1,13 @@
 // BracketDetector.swift
 // ef2.3.6: Finite-state envelope scanner that identifies music-bed brackets
-// around candidate ad regions. SHADOW MODE only — not wired into live skip.
+// around candidate ad regions.
+//
+// playhead-arf8: graduated from SHADOW MODE. The detector is now invoked
+// from `BracketAwareBoundaryRefiner.computeAdjustments` upstream of
+// `SkipOrchestrator` whenever the per-show music-bracket trust clears the
+// configured floor. Output remains a scored cue, not an override — gates
+// in the refiner enforce coarse-score and fine-confidence floors before
+// any boundary moves.
 //
 // The state machine is deterministic: given the same FeatureWindow sequence
 // and candidate region, it always produces the same BracketEvidence.
