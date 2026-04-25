@@ -2,7 +2,13 @@
 // ef2.3.7: Local search ±3s around candidate boundary edges at 100-250ms hops.
 // Produces high-precision boundary estimates with uncertainty intervals.
 //
-// SHADOW MODE only — not wired into live skip pipeline.
+// playhead-arf8: graduated from SHADOW MODE. Invoked by
+// `BracketAwareBoundaryRefiner.computeAdjustments` once the bracket
+// detector clears its trust + coarse-score gates, to lock down each edge
+// at silence/energy/spectral cues. Both edges must clear the configured
+// fine-confidence floor or the refinement is rejected and the caller
+// falls back to the legacy `BoundaryRefiner` path.
+//
 // Pure computation on value types — no actor needed.
 
 import Foundation

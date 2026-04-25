@@ -1,6 +1,13 @@
 // MusicBracketTrustStore.swift
 // ef2.3.6: Per-show Beta posterior trust for music-bed bracket reliability.
-// SHADOW MODE only — not wired into live skip pipeline.
+//
+// playhead-arf8: graduated from SHADOW MODE for *reads*. The bracket-aware
+// boundary refiner consults `trust(forShow:)` once per `runBackfill` to
+// decide whether to engage the bracket path. Outcome accumulation
+// (`recordOutcome(showId:hit:)`) remains intentionally untouched in this
+// bead — there is no offline ground-truth signal yet to drive it, so
+// every show stays at the `Beta(5,5)` prior mean (0.50). Hit/miss
+// recording is scoped post-dogfood once a labelling source exists.
 //
 // Each show starts with Beta(5,5) = 0.50 mean trust. Bracket hit/miss
 // feedback updates the posterior. Trust is persisted to SQLite via
