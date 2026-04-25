@@ -935,6 +935,67 @@ struct EpisodeLeaseAndWorkJournalTests {
         #expect(originalGenLast?.eventType == .acquired)
     }
 
+    // MARK: - playhead-uhdu (5uvz.1 NIT #1): rollback contract under fault
+
+    @Test("acquireLeaseWithJournal: journal-append throw rolls back the lease UPDATE (no phantom lease)")
+    func acquireLeaseWithJournalRollbackOnJournalFault() async throws {
+        let store = try await makeTestStore()
+        let job = makeAnalysisJob(jobId: "j-rollback", episodeId: "ep-rollback", workKey: "wk-rollback")
+        try await store.insertJob(job)
+
+        // Arm the one-shot fault: throw between the UPDATE and the
+        // journal append. This validates the docstring's load-bearing
+        // claim — phantom-lease is impossible by construction.
+        await store.setLeaseJournalFaultInjectionForTesting(.afterUpdateBeforeJournalAppend)
+
+        let now = 5_000.0
+        await #expect(throws: (any Error).self) {
+            _ = try await store.acquireLeaseWithJournal(
+                jobId: "j-rollback",
+                episodeId: "ep-rollback",
+                owner: "preAnalysis",
+                expiresAt: now + 300,
+                now: now
+            )
+        }
+
+        // The lease UPDATE must have rolled back: row is still in its
+        // pre-acquire state (no leaseOwner, no expiry, original state).
+        let after = try await store.fetchJob(byId: "j-rollback")
+        #expect(after?.leaseOwner == nil, "Phantom lease: UPDATE did not roll back")
+        #expect(after?.leaseExpiresAt == nil, "Phantom expiry: UPDATE did not roll back")
+        #expect(after?.state != "running", "Row state changed despite rollback")
+
+        // No journal trail was written for this episode either.
+        let entries = try await store.fetchWorkJournalEntries(
+            episodeId: "ep-rollback",
+            generationID: after?.generationID ?? ""
+        )
+        #expect(entries.isEmpty, "Journal must be empty when the append throws")
+
+        // After the fault is consumed (one-shot), a retry must succeed
+        // cleanly — proves the rollback left the DB in a fully consistent
+        // state, not a half-broken transaction the next acquire would
+        // stumble over.
+        let retry = try await store.acquireLeaseWithJournal(
+            jobId: "j-rollback",
+            episodeId: "ep-rollback",
+            owner: "preAnalysis",
+            expiresAt: now + 300,
+            now: now + 1
+        )
+        #expect(retry == true, "Retry after rollback must succeed")
+
+        let recovered = try await store.fetchJob(byId: "j-rollback")
+        #expect(recovered?.leaseOwner == "preAnalysis")
+        #expect(recovered?.state == "running")
+        let lastEvent = try await store.fetchLastWorkJournalEntry(
+            episodeId: "ep-rollback",
+            generationID: recovered?.generationID ?? ""
+        )
+        #expect(lastEvent?.eventType == .acquired)
+    }
+
     // MARK: - Helpers
 
     /// Replays `AnalysisCoordinator.recoverOrphans` against the store's
