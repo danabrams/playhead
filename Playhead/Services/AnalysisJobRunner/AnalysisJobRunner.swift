@@ -246,8 +246,22 @@ actor AnalysisJobRunner {
 
         PreAnalysisInstrumentation.endStage(transcriptSignpost)
 
-        // TODO: Stop the transcript engine to prevent orphaned work if the timeout fired.
-        // TranscriptEngineService does not yet expose a stopTranscription() method.
+        // playhead-5uvz.5 (Gap-6): if the 5-minute timeout fired ahead
+        // of `.completed`, the engine is still running in the
+        // background — its subsequent `transcript_chunks` writes and
+        // coverage updates would target an asset whose owning scheduler
+        // has already moved on. Stop the engine for this asset before
+        // the runner returns; the engine drops in-flight chunks and
+        // gates any late writes/events for the stopped asset id.
+        //
+        // Calling unconditionally on zero coverage is safe: a normal
+        // `.completed` path also yields zero coverage when the engine
+        // genuinely produced nothing, and stopping a session that
+        // already terminated is a no-op aside from the gate insertion
+        // (which is harmless because no further writes can land).
+        if transcriptCoverage == 0 {
+            await transcriptEngine.stopTranscription(analysisAssetId: assetId)
+        }
 
         if transcriptCoverage == 0 {
             // playhead-01t8: if a preempt flipped during transcription,

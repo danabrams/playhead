@@ -90,6 +90,13 @@ enum TranscriptEngineEvent: Sendable {
 /// without logging a shard failure.
 struct TranscriptEnginePreempted: Error {}
 
+/// playhead-5uvz.5 (Gap-6): thrown by `transcribeShard` when a
+/// `stopTranscription(analysisAssetId:)` lands while a shard is
+/// in-flight. The transcription loop catches this to exit cleanly
+/// without logging a shard failure or persisting partial output for
+/// the stopped asset.
+struct TranscriptEngineStopped: Error {}
+
 // MARK: - TranscriptEngineService
 
 /// Orchestrates transcription of decoded audio shards into TranscriptChunks
@@ -151,6 +158,23 @@ actor TranscriptEngineService {
     /// analysis coordinator without forcing it to poll SQLite.
     private var eventContinuations: [UUID: AsyncStream<TranscriptEngineEvent>.Continuation] = [:]
 
+    /// playhead-5uvz.5 (Gap-6): assets the caller explicitly stopped via
+    /// `stopTranscription(analysisAssetId:)`. Used to drop late writes,
+    /// late event emissions, and any queued append shards that race the
+    /// stop. The set is small (one entry per stopped asset) and is
+    /// cleared opportunistically when a fresh `startTranscription` is
+    /// called for that asset (so a re-run after stop is not silently
+    /// suppressed).
+    ///
+    /// Why a set rather than a single flag: `appendShards` from a
+    /// streaming producer can land for an asset that the runner has
+    /// already stopped — those late appends must be dropped on contact,
+    /// not enqueued and then re-dropped at transcribe time. Tracking
+    /// the asset id (rather than just the active id) lets us reject
+    /// post-stop appends even if `activeAssetId` has rotated to a
+    /// different asset in the meantime.
+    private var stoppedAssetIds: Set<String> = []
+
     // MARK: - Init
 
     init(
@@ -197,6 +221,12 @@ actor TranscriptEngineService {
             inputClosed = false
         }
         appendedShards = []
+        // playhead-5uvz.5: an explicit `startTranscription` for this
+        // asset rescinds any prior `stopTranscription` gate — re-runs
+        // are allowed and must not be silently suppressed by a stale
+        // stop. We only clear the entry for *this* asset; stops for
+        // other assets remain in place.
+        stoppedAssetIds.remove(analysisAssetId)
         // Wake any leftover waiters from a previous loop so they exit
         // promptly; this keeps stale continuations from being orphaned.
         resumeAllAppendWaiters()
@@ -257,6 +287,17 @@ actor TranscriptEngineService {
         snapshot: PlaybackSnapshot
     ) {
         guard !newShards.isEmpty else { return }
+        // playhead-5uvz.5: drop appends targeting an asset that the
+        // runner has explicitly stopped. Without this guard a streaming
+        // producer racing the timeout could re-arm the session by
+        // appending shards (and wake a waiter that is no longer parked
+        // in any meaningful sense) right after the runner moved on.
+        if stoppedAssetIds.contains(analysisAssetId) {
+            logger.info(
+                "Dropping \(newShards.count) appended shards for stopped asset \(analysisAssetId)"
+            )
+            return
+        }
         latestSnapshot = snapshot
 
         // The transcript engine is single-asset. If a late append arrives for
@@ -330,6 +371,75 @@ actor TranscriptEngineService {
         // Close input and release any suspended waiter so a loop that is
         // parked on `waitForMoreShards()` returns promptly when the task
         // is cancelled.
+        inputClosed = true
+        resumeAllAppendWaiters()
+    }
+
+    /// playhead-5uvz.5 (Gap-6): Stop transcription for a specific asset
+    /// without disturbing other engine state.
+    ///
+    /// `AnalysisJobRunner.run` calls this from its 5-minute zero-coverage
+    /// timeout branch. Before the fix, the runner would return
+    /// `.failed("transcription:zeroCoverage")` while leaving
+    /// `TranscriptEngineService` running in the background. The orphan's
+    /// subsequent `transcript_chunks` writes and
+    /// `analysis_assets.fastTranscriptCoverageEndTime` updates targeted
+    /// an `analysisAssetId` whose owning scheduler had already moved on
+    /// — so the asset's coverage advanced out-of-band after the job row
+    /// was marked failed, confusing both the coverage-guard recovery
+    /// path and the partial-coverage gate.
+    ///
+    /// Contract:
+    /// - Cancels the underlying SpeechAnalyzer task if `analysisAssetId`
+    ///   matches the active asset. (Mismatch is a no-op — a stale stop
+    ///   call must not tear down an unrelated session.)
+    /// - Drops any in-flight `appendedShards` tagged for the active
+    ///   session (whose asset id, on a match, is the one being stopped).
+    /// - Records the asset id so any late `transcribeShard` writes,
+    ///   late `appendShards` calls, or late `emitEvent(.completed/...)`
+    ///   for that asset are dropped instead of persisted.
+    /// - Resumes any waiter parked in `waitForMoreShards()` so the loop
+    ///   can observe cancellation and exit promptly.
+    ///
+    /// Idempotent: stopping an already-stopped asset is a no-op aside
+    /// from re-asserting the gate. A subsequent
+    /// `startTranscription(...)` for the same asset clears the stopped
+    /// flag — explicit re-run is allowed.
+    func stopTranscription(analysisAssetId: String) {
+        // Always record the stopped asset, even on a stale call. A
+        // streaming producer that already started racing more shards
+        // toward this asset must see the gate on its next append even
+        // if the active session has rotated away.
+        stoppedAssetIds.insert(analysisAssetId)
+
+        // Mismatch: don't tear down an unrelated active session. The
+        // gate on `stoppedAssetIds` still covers the late-write case
+        // even though we don't cancel.
+        guard activeAssetId == analysisAssetId else {
+            logger.info(
+                "stopTranscription(\(analysisAssetId)): asset is not active; gate set but no task to cancel"
+            )
+            return
+        }
+
+        logger.info("stopTranscription(\(analysisAssetId)): cancelling active task")
+
+        activeTask?.cancel()
+        activeTask = nil
+        activeAssetId = nil
+        activePodcastId = nil
+        latestSnapshot = nil
+        chunkCounter = 0
+        // Drop the queued append backlog for the now-stopped session.
+        // Anything still queued was destined for the asset id we just
+        // gated; the gate would drop it later anyway, but emptying the
+        // queue here avoids spinning the loop through dead work.
+        appendedShards = []
+        loopRunning = false
+        preemption = nil
+        // Close input and wake any waiter so a loop parked on
+        // `waitForMoreShards()` exits promptly. Cancellation is the
+        // primary stop signal but the wake makes the exit deterministic.
         inputClosed = true
         resumeAllAppendWaiters()
     }
@@ -422,6 +532,14 @@ actor TranscriptEngineService {
             } catch is TranscriptEnginePreempted {
                 logger.info("Transcription preempted at safe point after shard \(shard.id) [end=\(String(format: "%.1f", shard.startTime + shard.duration))s]")
                 return
+            } catch is TranscriptEngineStopped {
+                // playhead-5uvz.5: caller invoked
+                // `stopTranscription(analysisAssetId:)`. Exit the loop
+                // without emitting `.completed`; the asset is gated so
+                // any late writes/events from this point on would be
+                // dropped anyway.
+                logger.info("Transcription stopped for asset \(analysisAssetId) during shard \(shard.id)")
+                return
             } catch {
                 logger.error("""
                     Transcription failed for shard \(shard.id) \
@@ -463,6 +581,9 @@ actor TranscriptEngineService {
                     } catch is TranscriptEnginePreempted {
                         logger.info("Transcription preempted at safe point after appended shard \(shard.id)")
                         return
+                    } catch is TranscriptEngineStopped {
+                        logger.info("Transcription stopped for asset \(analysisAssetId) during appended shard \(shard.id)")
+                        return
                     } catch {
                         logger.error("""
                             Transcription failed for appended shard \(shard.id) \
@@ -485,6 +606,14 @@ actor TranscriptEngineService {
         // exit without emitting `.completed`. Cancellation is not a
         // legitimate end-of-input.
         if Task.isCancelled { return }
+
+        // playhead-5uvz.5: a stop landing while we were parked on a
+        // waiter is also not a legitimate end-of-input. Bail before
+        // running the shard-0 backfill or emitting `.completed`.
+        if stoppedAssetIds.contains(analysisAssetId) {
+            logger.info("Transcription loop exiting for stopped asset \(analysisAssetId) — no .completed emitted")
+            return
+        }
 
         // Verify the first shard was transcribed. If the first 30s is missing,
         // transcribe shard 0 explicitly.
@@ -540,9 +669,18 @@ actor TranscriptEngineService {
         analysisAssetId: String
     ) async throws {
         try Task.checkCancellation()
+        // playhead-5uvz.5: per-shard stopped check at entry. The check
+        // re-runs after every await point inside the shard so a
+        // `stopTranscription(analysisAssetId:)` that lands mid-shard
+        // exits before any subsequent store write or event emission.
+        try checkStopped(analysisAssetId: analysisAssetId)
 
         // Run Apple Speech transcription.
         let segments = try await speechService.transcribe(shard: shard, podcastId: activePodcastId)
+
+        // The await above can release the actor; a stop call could land
+        // here. Re-check before any persistence work.
+        try checkStopped(analysisAssetId: analysisAssetId)
 
         guard !segments.isEmpty else {
             logger.debug("No segments from shard \(shard.id) — silence or noise")
@@ -562,6 +700,7 @@ actor TranscriptEngineService {
 
         for segment in segments {
             try Task.checkCancellation()
+            try checkStopped(analysisAssetId: analysisAssetId)
 
             let fingerprint = computeFingerprint(
                 text: segment.text,
@@ -630,6 +769,14 @@ actor TranscriptEngineService {
             emittedChunks.append(chunk)
             chunkCounter += 1
         }
+
+        // playhead-5uvz.5: final pre-persistence check. The previous
+        // `await store.fetchTranscriptChunk(...)` / `await
+        // store.updateTranscriptChunkWeakAnchorMetadata(...)` calls
+        // inside the segment loop release the actor; a
+        // `stopTranscription` could land before the batch insert. Bail
+        // before writing rows or emitting events for a stopped asset.
+        try checkStopped(analysisAssetId: analysisAssetId)
 
         // Batch-insert to SQLite.
         if !chunksToInsert.isEmpty {
@@ -708,12 +855,31 @@ actor TranscriptEngineService {
         return shard0 + hotPath + coldAhead + behindWithoutShard0
     }
 
+    // MARK: - Stop gate (playhead-5uvz.5)
+
+    /// Throws `TranscriptEngineStopped` if the asset has been gated by
+    /// `stopTranscription(analysisAssetId:)`. Called at every safe
+    /// point inside `transcribeShard` so the loop bails before any
+    /// post-stop persistence write or event emission.
+    private func checkStopped(analysisAssetId: String) throws {
+        if stoppedAssetIds.contains(analysisAssetId) {
+            throw TranscriptEngineStopped()
+        }
+    }
+
     // MARK: - Coverage updates
 
     private func updateCoverage(
         analysisAssetId: String,
         endTime: Double
     ) async throws {
+        // playhead-5uvz.5: a stop landing between the
+        // `speechService.transcribe` await and this write would
+        // otherwise advance `analysis_assets.fastTranscriptCoverageEndTime`
+        // out-of-band after the runner had moved on. Re-check the gate
+        // here as a belt-and-suspenders to the per-shard checks in
+        // `transcribeShard`.
+        try checkStopped(analysisAssetId: analysisAssetId)
         try await store.updateFastTranscriptCoverage(
             id: analysisAssetId,
             endTime: endTime
@@ -772,6 +938,23 @@ actor TranscriptEngineService {
     }
 
     private func emitEvent(_ event: TranscriptEngineEvent) {
+        // playhead-5uvz.5: silently drop events for assets that have
+        // been gated by `stopTranscription`. The bead contract is that
+        // a stopped asset must produce no further `.chunksPersisted`
+        // or `.completed` notifications — subscribers (e.g. the
+        // `AnalysisJobRunner.run` event loop) treat `.completed` as the
+        // signal that coverage is durable and queue downstream work.
+        let stopped: Bool
+        switch event {
+        case .chunksPersisted(let assetId, _):
+            stopped = stoppedAssetIds.contains(assetId)
+        case .completed(let assetId):
+            stopped = stoppedAssetIds.contains(assetId)
+        }
+        if stopped {
+            logger.info("Dropping event for stopped asset: \(String(describing: event))")
+            return
+        }
         for continuation in eventContinuations.values {
             continuation.yield(event)
         }
