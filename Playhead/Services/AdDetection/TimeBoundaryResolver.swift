@@ -25,9 +25,30 @@ struct StartBoundaryCueWeights: Sendable, Equatable {
     let musicBedChange: Double
     let spectralChange: Double
     let lexicalDensityDelta: Double
+    /// playhead-kgby: Transcript sentence-terminal cue weight. Default 0
+    /// so legacy callers (which omit this field) have bit-identical scoring.
+    /// Live callers that wire transcript hits set a non-zero weight and
+    /// reduce one of the existing weights to keep `totalWeight == 1.0`.
+    let transcriptBoundary: Double
+
+    init(
+        pauseVAD: Double,
+        speakerChangeProxy: Double,
+        musicBedChange: Double,
+        spectralChange: Double,
+        lexicalDensityDelta: Double,
+        transcriptBoundary: Double = 0
+    ) {
+        self.pauseVAD = pauseVAD
+        self.speakerChangeProxy = speakerChangeProxy
+        self.musicBedChange = musicBedChange
+        self.spectralChange = spectralChange
+        self.lexicalDensityDelta = lexicalDensityDelta
+        self.transcriptBoundary = transcriptBoundary
+    }
 
     var totalWeight: Double {
-        pauseVAD + speakerChangeProxy + musicBedChange + spectralChange + lexicalDensityDelta
+        pauseVAD + speakerChangeProxy + musicBedChange + spectralChange + lexicalDensityDelta + transcriptBoundary
     }
 }
 
@@ -37,9 +58,28 @@ struct EndBoundaryCueWeights: Sendable, Equatable {
     let musicBedChange: Double
     let spectralChange: Double
     let explicitReturnMarker: Double
+    /// playhead-kgby: Transcript sentence-terminal cue weight. Default 0
+    /// so legacy callers (which omit this field) have bit-identical scoring.
+    let transcriptBoundary: Double
+
+    init(
+        pauseVAD: Double,
+        speakerChangeProxy: Double,
+        musicBedChange: Double,
+        spectralChange: Double,
+        explicitReturnMarker: Double,
+        transcriptBoundary: Double = 0
+    ) {
+        self.pauseVAD = pauseVAD
+        self.speakerChangeProxy = speakerChangeProxy
+        self.musicBedChange = musicBedChange
+        self.spectralChange = spectralChange
+        self.explicitReturnMarker = explicitReturnMarker
+        self.transcriptBoundary = transcriptBoundary
+    }
 
     var totalWeight: Double {
-        pauseVAD + speakerChangeProxy + musicBedChange + spectralChange + explicitReturnMarker
+        pauseVAD + speakerChangeProxy + musicBedChange + spectralChange + explicitReturnMarker + transcriptBoundary
     }
 }
 
@@ -52,6 +92,15 @@ struct BoundarySnappingConfig: Sendable, Equatable {
     let minImprovementOverOriginal: Double
     let lexicalDensityDeltaCap: Double
     let spectralBaselineFloor: Double
+    /// playhead-kgby: Half-width (seconds) of the window around a candidate
+    /// boundary in which a transcript sentence-terminal hit can contribute
+    /// to the boundary cue. Hits beyond this radius contribute 0; hits
+    /// inside decay linearly from 1 (on-boundary) to 0 (at the edge).
+    /// Default 1.5s matches the typical sentence-terminal apportionment
+    /// noise from `TranscriptBoundaryCueBuilder` (chunks are 5-15s with
+    /// 30-50 characters per second of speech, so character-offset error
+    /// at the chunk midpoint is ~0.5-1.5s).
+    let transcriptHitRadius: Double
 
     init(
         startWeights: StartBoundaryCueWeights = .init(
@@ -73,7 +122,8 @@ struct BoundarySnappingConfig: Sendable, Equatable {
         minBoundaryScore: Double = 0.3,
         minImprovementOverOriginal: Double = 0.1,
         lexicalDensityDeltaCap: Double = 3.0,
-        spectralBaselineFloor: Double = 0.001
+        spectralBaselineFloor: Double = 0.001,
+        transcriptHitRadius: Double = 1.5
     ) {
         precondition(Self.isApproximatelyOne(startWeights.totalWeight), "Start-boundary cue weights must total 1.0")
         precondition(Self.isApproximatelyOne(endWeights.totalWeight), "End-boundary cue weights must total 1.0")
@@ -86,6 +136,7 @@ struct BoundarySnappingConfig: Sendable, Equatable {
         self.minImprovementOverOriginal = minImprovementOverOriginal
         self.lexicalDensityDeltaCap = lexicalDensityDeltaCap
         self.spectralBaselineFloor = spectralBaselineFloor
+        self.transcriptHitRadius = transcriptHitRadius
     }
 
     static let `default` = BoundarySnappingConfig()
@@ -130,6 +181,11 @@ struct ScoredBoundaryCandidate: Sendable, Equatable {
     let lexicalDensityDelta: Double
     let explicitReturnMarker: Double
     let spectralChange: Double
+    /// playhead-kgby: Per-window contribution from the transcript
+    /// sentence-terminal cue, before multiplication by the configured
+    /// weight. Always 0 when `transcriptHits` is empty or the resolver
+    /// is invoked through a path that omits transcripts.
+    let transcriptBoundary: Double
     let windowStartTime: Double
     let windowEndTime: Double
 }
@@ -142,6 +198,7 @@ struct TimeBoundaryResolver: Sendable {
         anchorType: AnchorType,
         featureWindows: [FeatureWindow],
         lexicalHits: [LexicalHit],
+        transcriptHits: [TranscriptBoundaryHit] = [],
         config: BoundarySnappingConfig = .default
     ) -> Double {
         let scored = scoredCandidates(
@@ -150,6 +207,7 @@ struct TimeBoundaryResolver: Sendable {
             anchorType: anchorType,
             featureWindows: featureWindows,
             lexicalHits: lexicalHits,
+            transcriptHits: transcriptHits,
             config: config
         )
 
@@ -160,6 +218,7 @@ struct TimeBoundaryResolver: Sendable {
             boundaryType: boundaryType,
             featureWindows: featureWindows,
             lexicalHits: lexicalHits,
+            transcriptHits: transcriptHits,
             maxSnapDistance: config.maxSnapDistance(for: anchorType, boundaryType: boundaryType),
             config: config
         )
@@ -193,6 +252,7 @@ struct TimeBoundaryResolver: Sendable {
         anchorType: AnchorType,
         featureWindows: [FeatureWindow],
         lexicalHits: [LexicalHit],
+        transcriptHits: [TranscriptBoundaryHit] = [],
         config: BoundarySnappingConfig = .default
     ) -> [ScoredBoundaryCandidate] {
         let maxSnapDistance = config.maxSnapDistance(for: anchorType, boundaryType: boundaryType)
@@ -224,12 +284,19 @@ struct TimeBoundaryResolver: Sendable {
                 radius: maxSnapDistance,
                 baselineFloor: config.spectralBaselineFloor
             )
+            let transcriptBoundary = transcriptBoundaryScore(
+                for: window,
+                boundaryType: boundaryType,
+                transcriptHits: transcriptHits,
+                config: config
+            )
             let cueBlend = cueBlend(
                 for: window,
                 boundaryType: boundaryType,
                 lexicalDensityDelta: lexicalDensityDelta,
                 explicitReturnMarker: explicitReturnMarker,
                 spectralChange: spectralChange,
+                transcriptBoundary: transcriptBoundary,
                 config: config
             )
             let normalizedDistance = min(1.0, abs(boundaryTime - candidateTime) / maxSnapDistance)
@@ -244,6 +311,7 @@ struct TimeBoundaryResolver: Sendable {
                 lexicalDensityDelta: lexicalDensityDelta,
                 explicitReturnMarker: explicitReturnMarker,
                 spectralChange: spectralChange,
+                transcriptBoundary: transcriptBoundary,
                 windowStartTime: window.startTime,
                 windowEndTime: window.endTime
             )
@@ -255,6 +323,7 @@ struct TimeBoundaryResolver: Sendable {
         boundaryType: BoundaryType,
         featureWindows: [FeatureWindow],
         lexicalHits: [LexicalHit],
+        transcriptHits: [TranscriptBoundaryHit],
         maxSnapDistance: Double,
         config: BoundarySnappingConfig
     ) -> Double {
@@ -286,6 +355,12 @@ struct TimeBoundaryResolver: Sendable {
             radius: maxSnapDistance,
             baselineFloor: config.spectralBaselineFloor
         )
+        let transcriptBoundary = transcriptBoundaryScore(
+            for: window,
+            boundaryType: boundaryType,
+            transcriptHits: transcriptHits,
+            config: config
+        )
 
         return cueBlend(
             for: window,
@@ -293,6 +368,7 @@ struct TimeBoundaryResolver: Sendable {
             lexicalDensityDelta: lexicalDensityDelta,
             explicitReturnMarker: explicitReturnMarker,
             spectralChange: spectralChange,
+            transcriptBoundary: transcriptBoundary,
             config: config
         )
     }
@@ -316,6 +392,7 @@ struct TimeBoundaryResolver: Sendable {
         lexicalDensityDelta: Double,
         explicitReturnMarker: Double,
         spectralChange: Double,
+        transcriptBoundary: Double,
         config: BoundarySnappingConfig
     ) -> Double {
         // Use directional onset/offset scores when available (non-zero),
@@ -331,7 +408,8 @@ struct TimeBoundaryResolver: Sendable {
                 clamp01(window.speakerChangeProxyScore) * config.startWeights.speakerChangeProxy +
                 musicCue * config.startWeights.musicBedChange +
                 spectralChange * config.startWeights.spectralChange +
-                lexicalDensityDelta * config.startWeights.lexicalDensityDelta
+                lexicalDensityDelta * config.startWeights.lexicalDensityDelta +
+                transcriptBoundary * config.startWeights.transcriptBoundary
         case .end:
             musicCue = window.musicBedOffsetScore > 0
                 ? clamp01(window.musicBedOffsetScore)
@@ -340,8 +418,57 @@ struct TimeBoundaryResolver: Sendable {
                 clamp01(window.speakerChangeProxyScore) * config.endWeights.speakerChangeProxy +
                 musicCue * config.endWeights.musicBedChange +
                 spectralChange * config.endWeights.spectralChange +
-                explicitReturnMarker * config.endWeights.explicitReturnMarker
+                explicitReturnMarker * config.endWeights.explicitReturnMarker +
+                transcriptBoundary * config.endWeights.transcriptBoundary
         }
+    }
+
+    /// playhead-kgby: Compute the per-window transcript-boundary cue value
+    /// in `[0, 1]` from `transcriptHits`. The cue is high when one or more
+    /// hits land near the window's boundary (within `transcriptHitRadius`),
+    /// weighted by the hit's confidence and a Gaussian-style proximity
+    /// decay so an exactly-on-the-boundary hit dominates a hit a couple
+    /// seconds away.
+    ///
+    /// Returns 0 when:
+    ///   * `transcriptHits` is empty (the dominant case for the legacy
+    ///     `BoundaryRefiner` path that doesn't yet pass transcript hits).
+    ///   * No hit falls within the search radius.
+    ///
+    /// This is the "graceful degradation when transcript is missing"
+    /// pathway promised in the bead.
+    private func transcriptBoundaryScore(
+        for window: FeatureWindow,
+        boundaryType: BoundaryType,
+        transcriptHits: [TranscriptBoundaryHit],
+        config: BoundarySnappingConfig
+    ) -> Double {
+        guard !transcriptHits.isEmpty else { return 0 }
+        let radius = config.transcriptHitRadius
+        guard radius > 0 else { return 0 }
+
+        let referenceTime = boundaryTime(for: window, boundaryType: boundaryType)
+
+        // The cue value is the maximum confidence-weighted proximity score
+        // across all hits in the radius. We deliberately take the max
+        // (not the sum) so a window with two nearby hits doesn't double-
+        // count — the cue answers "how strong is the *best* sentence
+        // boundary near this window".
+        var best = 0.0
+        for hit in transcriptHits {
+            let distance = abs(hit.time - referenceTime)
+            guard distance <= radius else { continue }
+            // Linear decay from 1 (on-boundary) to 0 (at radius edge).
+            // Linear is intentional: cheaper than Gaussian, matches the
+            // resolver's other proximity calculations, and the bead's
+            // probabilistic framing doesn't require sub-linear precision.
+            let proximity = 1.0 - (distance / radius)
+            let scored = clamp01(hit.confidence) * proximity
+            if scored > best {
+                best = scored
+            }
+        }
+        return clamp01(best)
     }
 
     private func lexicalOverlapCounts(
