@@ -430,12 +430,13 @@ enum CauseEmissionRegistry {
         // asr_failed — TranscriptEngineService throws on model failure
         // or returns no segments; AnalysisJobRunner.run(...) surfaces
         // this as `.failed("transcription:zeroCoverage")` at the
-        // `.preempted`/`.failed` outcome boundary. Wiring asr_failed as
-        // a live cause requires threading a WorkJournalRecording into
-        // the runner (today the runner returns an AnalysisOutcome and
-        // the scheduler maps it — neither holds a recorder). Blocked by
-        // dfem (runner recorder injection).
-        declarePlanned(cause: .asrFailed, tag: "AnalysisJobRunner.run.transcriptionFailed")
+        // `.preempted`/`.failed` outcome boundary. Upgraded to LIVE in
+        // playhead-5uvz.7 (Gap-9): the runner now writes a structured
+        // `work_journal` row directly via
+        // `AnalysisStore.appendWorkJournalEntry(_:)` from the zero-
+        // coverage failure branch, so the cause has a real production
+        // emitter without needing the dfem runner-recorder injection.
+        declareLive(cause: .asrFailed, tag: "AnalysisJobRunner.run.transcriptionTimeout")
 
         // pipeline_error catch-all in the runner. Already declared live
         // for the DownloadManager site above; the runner hook is
@@ -459,6 +460,10 @@ enum CauseEmissionRegistry {
         .appForceQuitRequiresRelaunch,
         .taskExpired,
         .userCancelled,
+        // playhead-5uvz.7: AnalysisJobRunner.run writes a structured
+        // `failed` row directly to `work_journal` from the zero-coverage
+        // transcription branch (cause = .asrFailed).
+        .asrFailed,
     ]
 
     #if DEBUG

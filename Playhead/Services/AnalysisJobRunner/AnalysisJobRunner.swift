@@ -227,6 +227,12 @@ actor AnalysisJobRunner {
         let transcriptSignpost = PreAnalysisInstrumentation.beginStage("transcription")
         let snapshot = PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: false)
         let existingChunkCount = (try? await store.fetchTranscriptChunks(assetId: assetId).count) ?? 0
+        // playhead-5uvz.7 (Gap-9): mark stage start so the zero-coverage
+        // journal row can compute `chunk_rate_per_sec` against the actual
+        // wall-clock spent inside the stage (rather than assuming the
+        // 5-minute timeout always elapsed in full — a stream that ends
+        // without `.completed` returns much earlier).
+        let transcriptStageStart = clock()
 
         // Fire-and-forget: startTranscription kicks off work internally.
         await transcriptEngine.startTranscription(
@@ -315,6 +321,21 @@ actor AnalysisJobRunner {
                 )
             }
             logger.warning("Transcription for asset \(assetId) finished with zero coverage — stream may have ended prematurely or timed out")
+            // playhead-5uvz.7 (Gap-9): write a structured `failed` row to
+            // `work_journal` so a class of episodes that systematically
+            // times out (long, refusal-prone, music-heavy) shows up in
+            // aggregate without operators having to grep `lastErrorCode`
+            // across `analysis_jobs`. Best-effort: a failure here logs but
+            // does NOT affect the runner's outcome — the analysis_jobs
+            // row's `lastErrorCode = 'transcription:zeroCoverage'` remains
+            // the primary signal; the journal row is observability gravy.
+            await emitTranscriptionTimeoutJournal(
+                request: request,
+                assetId: assetId,
+                allShards: allShards,
+                existingChunkCount: existingChunkCount,
+                transcriptStageStart: transcriptStageStart
+            )
             return makeOutcome(
                 assetId: assetId,
                 request: request,
@@ -553,6 +574,94 @@ actor AnalysisJobRunner {
     private func currentFeatureCoverage(assetId: String) async -> Double {
         guard let asset = try? await store.fetchAsset(id: assetId) else { return 0 }
         return asset.featureCoverageEndTime ?? 0
+    }
+
+    // MARK: - Transcription timeout journaling (playhead-5uvz.7)
+
+    /// Emit a structured `work_journal` row when stage 3 produced zero
+    /// coverage (timeout firing ahead of `.completed`, or a stream that
+    /// ended prematurely without ever advancing the watermark). The row
+    /// carries `eventType = .failed`, `cause = .asrFailed`, and a JSON
+    /// metadata blob describing the episode shape and the engine's
+    /// progress at the moment of timeout — `episode_duration`,
+    /// `transcript_coverage_end_time`, `chunks_persisted`, and
+    /// `chunk_rate_per_sec` — so operators can spot a systematic stall
+    /// pattern (long, refusal-prone, music-heavy episodes) in aggregate
+    /// rather than grepping `lastErrorCode` across `analysis_jobs`.
+    ///
+    /// Best-effort: a fetch / append failure logs at warning level and
+    /// does NOT alter the runner's outcome. The `analysis_jobs` row's
+    /// `lastErrorCode = 'transcription:zeroCoverage'` remains the
+    /// primary signal; this row is observability gravy.
+    private func emitTranscriptionTimeoutJournal(
+        request: AnalysisRangeRequest,
+        assetId: String,
+        allShards: [AnalysisShard],
+        existingChunkCount: Int,
+        transcriptStageStart: Date
+    ) async {
+        // Resolve the active job's `{generationID, schedulerEpoch}` so
+        // the journal row joins the lease lifecycle written by 5uvz.1.
+        // Both fields default to safe scalar values on lookup failure
+        // so the row still lands and is grouped under "no-generation".
+        let job = try? await store.fetchJob(byId: request.jobId)
+        let generationID = (job?.generationID).flatMap { UUID(uuidString: $0) } ?? UUID()
+        let schedulerEpoch = job?.schedulerEpoch ?? 0
+
+        // Engine progress at the moment of zero-coverage exit.
+        let currentChunkCount = (try? await store.fetchTranscriptChunks(assetId: assetId).count) ?? existingChunkCount
+        let chunksPersisted = max(0, currentChunkCount - existingChunkCount)
+        let transcriptCoverageEndTime = (try? await store.fetchAsset(id: assetId))?.fastTranscriptCoverageEndTime ?? 0
+        let episodeDuration = allShards.map { $0.startTime + $0.duration }.max() ?? 0
+
+        let now = clock()
+        let elapsedSec = max(0, now.timeIntervalSince(transcriptStageStart))
+        let elapsedMs = Int((elapsedSec * 1000).rounded())
+        // Avoid /0 — for elapsed below 1ms the rate becomes meaningless.
+        // Encode `0` so consumers don't see an `inf` row; the elapsed_ms
+        // field already captures that the stage barely ran.
+        let chunkRatePerSec = elapsedSec > 0.001
+            ? Double(chunksPersisted) / elapsedSec
+            : 0
+
+        // Match the metadata-encoding style of `SliceCompletionInstrumentation`:
+        // a flat JSON object with the structural keys promoted by the
+        // recordFailed helper and the timeout-specific keys carried as
+        // string-typed siblings under `extras`. Numbers go through
+        // `String(format:)` so the JSON column stays self-describing
+        // without needing a typed schema bump on the consumer side.
+        let metadata = await SliceCompletionInstrumentation.recordFailed(
+            cause: .asrFailed,
+            deviceClass: DeviceClass.detect(),
+            sliceDurationMs: elapsedMs,
+            bytesProcessed: 0,
+            shardsCompleted: 0,
+            extras: [
+                "stage": "analysisJobRunner.run.transcriptionTimeout",
+                "job_id": request.jobId,
+                "episode_duration": String(format: "%.3f", episodeDuration),
+                "transcript_coverage_end_time": String(format: "%.3f", transcriptCoverageEndTime),
+                "chunks_persisted": String(chunksPersisted),
+                "chunk_rate_per_sec": String(format: "%.4f", chunkRatePerSec),
+            ]
+        )
+
+        let entry = WorkJournalEntry(
+            id: UUID().uuidString,
+            episodeId: request.episodeId,
+            generationID: generationID,
+            schedulerEpoch: schedulerEpoch,
+            timestamp: now.timeIntervalSince1970,
+            eventType: .failed,
+            cause: .asrFailed,
+            metadata: metadata.encodeJSON(),
+            artifactClass: .scratch
+        )
+        do {
+            try await store.appendWorkJournalEntry(entry)
+        } catch {
+            logger.warning("Failed to append transcriptionTimeout work_journal row for asset \(assetId): \(error)")
+        }
     }
 
     // MARK: - Outcome Builder
