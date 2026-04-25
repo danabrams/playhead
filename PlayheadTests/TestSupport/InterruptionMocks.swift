@@ -51,12 +51,11 @@ final class MockBackgroundTaskScheduler: BackgroundTaskScheduling, @unchecked Se
 
     func submit(_ taskRequest: BGTaskRequest) throws {
         lock.lock()
+        defer { lock.unlock() }
         if _shouldThrow {
-            lock.unlock()
             throw NSError(domain: "MockBackgroundTaskScheduler", code: 1)
         }
         _requests.append(taskRequest)
-        lock.unlock()
     }
 
     func reset() {
