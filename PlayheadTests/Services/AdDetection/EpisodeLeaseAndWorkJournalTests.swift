@@ -734,6 +734,207 @@ struct EpisodeLeaseAndWorkJournalTests {
         #expect(entries.isEmpty)
     }
 
+    // MARK: - playhead-5uvz.1: acquireLeaseWithJournal (Gap-1)
+
+    @Test("acquireLeaseWithJournal: success appends one .acquired row and stamps row identity")
+    func acquireLeaseWithJournalSuccessJournalAndIdentity() async throws {
+        let store = try await makeTestStore()
+        let job = makeAnalysisJob(jobId: "j-acq-1", episodeId: "ep-acq-1", workKey: "wk-acq-1")
+        try await store.insertJob(job)
+
+        let now = 1_000.0
+        let acquired = try await store.acquireLeaseWithJournal(
+            jobId: "j-acq-1",
+            episodeId: "ep-acq-1",
+            owner: "preAnalysis",
+            expiresAt: now + 300,
+            now: now
+        )
+        #expect(acquired == true)
+
+        // Row carries the freshly-minted generationID + epoch.
+        let fetched = try await store.fetchJob(byId: "j-acq-1")
+        #expect(fetched?.leaseOwner == "preAnalysis")
+        #expect(fetched?.leaseExpiresAt == now + 300)
+        #expect(fetched?.state == "running")
+        #expect(fetched?.generationID != "", "generationID must be stamped on acquire")
+        // playhead-uzdq seeds _meta.scheduler_epoch='1' on migration, so
+        // the first acquire stamps epoch=1 (not 0).
+        #expect(fetched?.schedulerEpoch == 1, "Migrated epoch on first acquire")
+
+        // The journal row's {episodeId, generationID} matches the row.
+        let lastEvent = try await store.fetchLastWorkJournalEntry(
+            episodeId: "ep-acq-1",
+            generationID: fetched?.generationID ?? ""
+        )
+        #expect(lastEvent?.eventType == .acquired)
+        #expect(lastEvent?.timestamp == now)
+    }
+
+    @Test("acquireLeaseWithJournal: contention returns false and writes no journal row")
+    func acquireLeaseWithJournalContentionNoJournal() async throws {
+        let store = try await makeTestStore()
+        let job = makeAnalysisJob(jobId: "j-acq-2", episodeId: "ep-acq-2", workKey: "wk-acq-2")
+        try await store.insertJob(job)
+
+        let now = 2_000.0
+        let first = try await store.acquireLeaseWithJournal(
+            jobId: "j-acq-2",
+            episodeId: "ep-acq-2",
+            owner: "preAnalysis",
+            expiresAt: now + 300,
+            now: now
+        )
+        #expect(first == true)
+
+        let firstFetched = try await store.fetchJob(byId: "j-acq-2")
+        let firstGen = firstFetched?.generationID ?? ""
+
+        // Second worker contends — lease still live, must return false.
+        let second = try await store.acquireLeaseWithJournal(
+            jobId: "j-acq-2",
+            episodeId: "ep-acq-2",
+            owner: "preAnalysis-other",
+            expiresAt: now + 600,
+            now: now + 1
+        )
+        #expect(second == false, "Live lease must reject second acquire")
+
+        // Row identity must be unchanged (no second-owner clobber).
+        let after = try await store.fetchJob(byId: "j-acq-2")
+        #expect(after?.leaseOwner == "preAnalysis")
+        #expect(after?.generationID == firstGen, "generationID must not rotate on contention")
+
+        // Journal must contain exactly one .acquired row for this {episode, gen}.
+        let entries = try await store.fetchWorkJournalEntries(
+            episodeId: "ep-acq-2",
+            generationID: firstGen
+        )
+        #expect(entries.count == 1)
+        #expect(entries.first?.eventType == .acquired)
+    }
+
+    @Test("acquireLeaseWithJournal: expired prior lease still produces journal row on takeover")
+    func acquireLeaseWithJournalExpiredTakeoverJournals() async throws {
+        let store = try await makeTestStore()
+        let job = makeAnalysisJob(jobId: "j-acq-3", episodeId: "ep-acq-3", workKey: "wk-acq-3")
+        try await store.insertJob(job)
+
+        let t0 = 3_000.0
+        _ = try await store.acquireLeaseWithJournal(
+            jobId: "j-acq-3",
+            episodeId: "ep-acq-3",
+            owner: "preAnalysis",
+            expiresAt: t0 + 60,  // short TTL
+            now: t0
+        )
+
+        // Move clock past expiry, second worker takes over.
+        let t1 = t0 + 120
+        let takeover = try await store.acquireLeaseWithJournal(
+            jobId: "j-acq-3",
+            episodeId: "ep-acq-3",
+            owner: "preAnalysis-takeover",
+            expiresAt: t1 + 300,
+            now: t1
+        )
+        #expect(takeover == true)
+
+        let fetched = try await store.fetchJob(byId: "j-acq-3")
+        #expect(fetched?.leaseOwner == "preAnalysis-takeover")
+        let newGen = fetched?.generationID ?? ""
+
+        // Two journal entries exist for the episode (one per generation),
+        // each carrying the .acquired event type. The second generation's
+        // last event matches the new row identity.
+        let lastEvent = try await store.fetchLastWorkJournalEntry(
+            episodeId: "ep-acq-3",
+            generationID: newGen
+        )
+        #expect(lastEvent?.eventType == .acquired)
+        #expect(lastEvent?.timestamp == t1)
+    }
+
+    @Test("Cold-launch journal-aware path: empty-journal post-acquire orphan routes to resume branch")
+    func coldLaunchEmptyJournalRoutesToResume() async throws {
+        // Simulates the very first run after 5uvz.1 ships: a job that
+        // was acquired BEFORE the new wiring (no journal trail) crashes
+        // mid-flight. recoverOrphans must NOT skip it — the resume
+        // branch fires when fetchLastWorkJournalEntry returns nil.
+        let store = try await makeTestStore()
+        let job = makeAnalysisJob(
+            jobId: "j-empty",
+            episodeId: "ep-empty",
+            workKey: "wk-empty",
+            state: "running",
+            leaseOwner: "preAnalysis",
+            leaseExpiresAt: 1_000  // expired
+        )
+        try await store.insertJob(job)
+
+        let rebuilt = try await recoverOrphans(store: store, now: 2_000, graceSeconds: 10)
+        #expect(rebuilt == ["j-empty"], "Empty-journal orphan must requeue, not be silently dropped")
+
+        // Row was rotated: fresh generationID, fresh epoch, lease cleared.
+        let after = try await store.fetchJob(byId: "j-empty")
+        #expect(after?.leaseOwner == nil)
+        #expect(after?.leaseExpiresAt == nil)
+        #expect(after?.generationID != "")
+        #expect((after?.schedulerEpoch ?? 0) > 0, "Epoch must bump on requeue")
+    }
+
+    @Test("Acquire-then-crash flow: acquired row is visible to recoverOrphans by generation join")
+    func acquireThenCrashFlow() async throws {
+        // End-to-end flow in one test: 5uvz.1 acquire writes journal,
+        // then we simulate crash by manually expiring the lease, then
+        // 5uvz.2 recoverOrphans reads the .acquired row and routes the
+        // orphan correctly.
+        let store = try await makeTestStore()
+        let job = makeAnalysisJob(
+            jobId: "j-crash",
+            episodeId: "ep-crash",
+            workKey: "wk-crash"
+        )
+        try await store.insertJob(job)
+
+        let acquireTime = 1_000.0
+        _ = try await store.acquireLeaseWithJournal(
+            jobId: "j-crash",
+            episodeId: "ep-crash",
+            owner: "preAnalysis",
+            expiresAt: acquireTime + 30,
+            now: acquireTime
+        )
+
+        // Snapshot the row's generationID (the one stamped at acquire).
+        let mid = try await store.fetchJob(byId: "j-crash")
+        let crashedGen = mid?.generationID ?? ""
+        #expect(crashedGen != "")
+
+        // Now simulate cold-launch reaper running well past expiry.
+        let coldLaunch = acquireTime + 120
+        let rebuilt = try await recoverOrphans(
+            store: store,
+            now: coldLaunch,
+            graceSeconds: 10
+        )
+        #expect(rebuilt == ["j-crash"], "Acquired-then-crashed orphan must requeue via journal-aware path")
+
+        // The row's generationID rotated; lease cleared; epoch bumped.
+        let after = try await store.fetchJob(byId: "j-crash")
+        #expect(after?.generationID != crashedGen, "generationID must rotate on requeue")
+        #expect(after?.leaseOwner == nil)
+        #expect((after?.schedulerEpoch ?? 0) > 0)
+
+        // The original .acquired row is still readable by the original
+        // generation (journal append-only invariant).
+        let originalGenLast = try await store.fetchLastWorkJournalEntry(
+            episodeId: "ep-crash",
+            generationID: crashedGen
+        )
+        #expect(originalGenLast?.eventType == .acquired)
+    }
+
     // MARK: - Helpers
 
     /// Replays `AnalysisCoordinator.recoverOrphans` against the store's

@@ -95,6 +95,27 @@ actor AnalysisJobReconciler {
 
     // MARK: - Step 1: Recover expired leases
 
+    /// Blind-sweep fallback for stranded leases.
+    ///
+    /// playhead-5uvz.2 (Gap-2): `PlayheadRuntime.startSchedulerLoop`
+    /// now calls `AnalysisCoordinator.recoverOrphans` BEFORE
+    /// `reconcile()`, so this step is no longer the primary
+    /// cold-launch reaper. The journal-aware path claims every orphan
+    /// whose `work_journal` row routes its decision (terminal → clear,
+    /// else requeue with fresh epoch/generation + Now→Soon demotion).
+    /// This sweep stays as cheap insurance for the residual classes
+    /// the journal-aware path skips:
+    ///   - rows whose journal row carries an epoch >
+    ///     `_meta.scheduler_epoch` (corruption-skip branch in
+    ///     `recoverOrphans`),
+    ///   - rows whose per-orphan `try` body threw (the journal-aware
+    ///     path swallows per-job errors and continues, leaving those
+    ///     rows for this fallback),
+    ///   - and pre-5uvz.1 rows that never wrote a journal trail
+    ///     (`fetchLastWorkJournalEntry` returns nil → resume branch
+    ///     requeues them too, but this sweep catches anything missed).
+    /// The cost is a few extra UPDATEs against rows the journal-aware
+    /// path already cleared; SQLite makes that essentially free.
     private func recoverExpiredLeases() async throws -> Int {
         let now = Date().timeIntervalSince1970
         let expired = try await store.fetchJobsWithExpiredLeases(before: now)

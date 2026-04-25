@@ -771,6 +771,57 @@ final class PlayheadRuntime {
                     ShadowLaneBAdapter(coordinator: shadowCaptureCoordinator)
                 )
             }
+            // playhead-5uvz.2 (Gap-2): journal-aware orphan recovery.
+            // Runs BEFORE the reconciler's blind `recoverExpiredLeases`
+            // sweep so the journal-aware policy (terminal vs. resumable
+            // based on the last `work_journal` event) gets first dibs on
+            // every stranded `analysis_jobs` row. Bumps schedulerEpoch,
+            // mints fresh generationIDs, demotes Now-lane orphans stale
+            // > 60 s to Soon. Errors are logged and swallowed — the
+            // reconciler.reconcile fallback below still runs on failure
+            // so a corrupt journal cannot brick startup.
+            //
+            // Empty-journal cold-launch behavior: when the journal has
+            // no row for an orphan's {episodeId, generationID} (the
+            // legitimate first-launch-after-rollout state, or any row
+            // last touched before the playhead-5uvz.1 wiring landed),
+            // `recoverOrphans` routes via `decisionEvent == .none` →
+            // resume branch (requeue with fresh epoch + generation).
+            // Same effective behavior as the reconciler's blind sweep,
+            // but with the additional epoch bump + lane demotion that
+            // the reconciler skips.
+            //
+            // graceSeconds=30: large enough to absorb clock skew at
+            // cold launch, small enough that an orphan whose owner
+            // crashed seconds before the relaunch still gets recovered
+            // on this pass rather than the next.
+            do {
+                let now = Date().timeIntervalSince1970
+                let rebuilt = try await analysisCoordinator.recoverOrphans(
+                    now: now,
+                    graceSeconds: 30
+                )
+                if !rebuilt.isEmpty {
+                    Logger(subsystem: "com.playhead", category: "Runtime")
+                        .info("recoverOrphans rebuilt \(rebuilt.count, privacy: .public) lease(s) at cold launch")
+                }
+            } catch {
+                Logger(subsystem: "com.playhead", category: "Runtime")
+                    .error("recoverOrphans failed at startup; falling back to reconciler sweep: \(error)")
+            }
+
+            // Reconciler.reconcile remains the fallback path. Its
+            // `recoverExpiredLeases` step is now redundant for any
+            // orphan the journal-aware path already requeued (the
+            // journal-aware path cleared the lease slot OR moved the
+            // row to a fresh epoch), but kept as cheap insurance for
+            // edge cases the journal-aware path skips: corrupt epoch
+            // (journal row's epoch > _meta.scheduler_epoch), per-job
+            // DB errors, and the journal-empty rows that appeared
+            // BEFORE this PR shipped (their generationID is "", so
+            // `fetchLastWorkJournalEntry` returns nil → resume branch
+            // requeues them too — but the reconciler's blind sweep
+            // catches anything missed).
             do {
                 _ = try await analysisJobReconciler.reconcile()
             } catch {
