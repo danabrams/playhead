@@ -582,13 +582,27 @@ final class PlayheadRuntime {
         // observable on a real device. Constructed with the cascade's
         // own defaults — both `PreAnalysisConfig.load()` and the
         // canonical `Logger` subsystem/category live on the cascade.
+        // playhead-gjz6 (Gap-4 second half): wire the live
+        // `BackgroundProcessingService` into the scheduler via the
+        // existing `ProductionBackfillScheduler` adapter so an
+        // `enqueue` call that lands while the app is already
+        // backgrounded triggers a fresh `BGProcessingTaskRequest`.
+        // Without this seam, downloads that complete via background
+        // URLSession after the foreground→background transition has
+        // already fired leave their analysis work queued until the
+        // next foreground. Reuses the `BackfillScheduling` adapter
+        // shipped for Gap-5 (`BackgroundFeedRefreshService.swift`) —
+        // same protocol, same production wrapper.
         self.analysisWorkScheduler = AnalysisWorkScheduler(
             store: analysisStore,
             jobRunner: analysisJobRunner,
             capabilitiesService: capabilitiesService,
             downloadManager: downloadManager,
             batteryProvider: batteryProvider,
-            candidateWindowCascade: CandidateWindowCascade()
+            candidateWindowCascade: CandidateWindowCascade(),
+            backfillScheduler: ProductionBackfillScheduler(
+                backgroundProcessingService: backgroundProcessingService
+            )
         )
         // playhead-gtt9.14: wire the scheduler as the coordinator's
         // scheduler-state snapshot source so every lifecycle-log record
