@@ -634,10 +634,17 @@ final class InterruptionHarness: @unchecked Sendable {
         // This call exercises the mock's real admit path (forced branch)
         // and is the observation point for the per-cycle "admit called
         // at least once" assertion in the storage test suite.
+        //
+        // Clear the forced decision once the pathway is done so a
+        // subsequent cycle of a different type within the same test
+        // method cannot observe a stale forced decision (defensive: no
+        // current test mixes cycle types within one method, but a future
+        // umbrella test could).
         let decision = await mockStorageBudget.admit(
             class: .media,
             sizeBytes: .max  // well past any sane media cap
         )
+        defer { mockStorageBudget.forcedDecision = nil }
         guard let derivedCause = admissionDecisionToMissCause(decision) else {
             // admit returned `.accept` — the forced-decision inject must
             // have mis-fired. The scripted fallback would silently
