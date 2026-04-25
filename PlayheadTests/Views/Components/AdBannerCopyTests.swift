@@ -192,4 +192,115 @@ final class AdBannerCopyTests: XCTestCase {
         // The detail is passed through verbatim, never rewritten.
         XCTAssertEqual(copy.detail, "Meal kits")
     }
+
+    // MARK: - Evidence Copy (playhead-vjxc)
+
+    private func makeEntry(
+        category: EvidenceCategory,
+        text: String,
+        ref: Int = 0,
+        start: Double = 100,
+        end: Double = 101
+    ) -> EvidenceEntry {
+        EvidenceEntry(
+            evidenceRef: ref,
+            category: category,
+            matchedText: text,
+            normalizedText: text.lowercased(),
+            atomOrdinal: 0,
+            startTime: start,
+            endTime: end
+        )
+    }
+
+    func testEvidenceLineForDisclosurePhraseQuotesText() {
+        let line = AdBannerView.evidenceLine(
+            for: makeEntry(category: .disclosurePhrase, text: "brought to you by")
+        )
+        XCTAssertEqual(line, "Sponsor disclosure: \u{201C}brought to you by\u{201D}")
+    }
+
+    func testEvidenceLineForUrlIsUnquoted() {
+        let line = AdBannerView.evidenceLine(
+            for: makeEntry(category: .url, text: "betterhelp.com/podcast")
+        )
+        XCTAssertEqual(line, "Sponsor link: betterhelp.com/podcast")
+    }
+
+    func testEvidenceLineForPromoCodeIsUnquoted() {
+        let line = AdBannerView.evidenceLine(
+            for: makeEntry(category: .promoCode, text: "use code SAVE10")
+        )
+        XCTAssertEqual(line, "Promo code: use code SAVE10")
+    }
+
+    func testEvidenceLineForCtaPhraseQuotesText() {
+        let line = AdBannerView.evidenceLine(
+            for: makeEntry(category: .ctaPhrase, text: "sign up today")
+        )
+        XCTAssertEqual(line, "Sponsor cue: \u{201C}sign up today\u{201D}")
+    }
+
+    func testEvidenceLineForBrandSpanIsUnquotedAndPreservesCasing() {
+        let line = AdBannerView.evidenceLine(
+            for: makeEntry(category: .brandSpan, text: "BetterHelp")
+        )
+        XCTAssertEqual(line, "Sponsor mention: BetterHelp")
+    }
+
+    func testEvidenceLinesEmptyWhenNoEntries() {
+        XCTAssertEqual(AdBannerView.evidenceLines(for: []), [])
+    }
+
+    func testEvidenceLinesOrderedByPriority() {
+        let entries = [
+            makeEntry(category: .ctaPhrase, text: "sign up today"),
+            makeEntry(category: .brandSpan, text: "BetterHelp"),
+            makeEntry(category: .promoCode, text: "code SAVE10"),
+            makeEntry(category: .disclosurePhrase, text: "sponsored by"),
+            makeEntry(category: .url, text: "betterhelp.com"),
+        ]
+        let lines = AdBannerView.evidenceLines(for: entries)
+        // Limit is 3 — we expect promoCode, url, disclosure (in that order).
+        XCTAssertEqual(lines.count, 3)
+        XCTAssertTrue(lines[0].hasPrefix("Promo code:"), "Got: \(lines[0])")
+        XCTAssertTrue(lines[1].hasPrefix("Sponsor link:"), "Got: \(lines[1])")
+        XCTAssertTrue(lines[2].hasPrefix("Sponsor disclosure:"), "Got: \(lines[2])")
+    }
+
+    func testEvidenceLinesRespectsLineLimit() {
+        let entries = (0..<10).map { i in
+            makeEntry(
+                category: .promoCode,
+                text: "code C\(i)",
+                ref: i,
+                start: Double(i),
+                end: Double(i) + 0.5
+            )
+        }
+        let lines = AdBannerView.evidenceLines(for: entries)
+        XCTAssertEqual(lines.count, AdBannerView.evidenceLineLimit)
+    }
+
+    func testEvidenceLinesDeduplicatesCaseInsensitive() {
+        let entries = [
+            makeEntry(category: .brandSpan, text: "BetterHelp", ref: 0),
+            makeEntry(category: .brandSpan, text: "betterhelp", ref: 1),
+            makeEntry(category: .brandSpan, text: "BETTERHELP", ref: 2),
+        ]
+        let lines = AdBannerView.evidenceLines(for: entries)
+        XCTAssertEqual(lines.count, 1, "Three case variants of one brand should collapse to one line")
+    }
+
+    func testEvidenceLineLimitIs3() {
+        // Locked-in constant: 3 keeps the banner glanceable.
+        XCTAssertEqual(AdBannerView.evidenceLineLimit, 3)
+    }
+
+    func testEvidenceLineTrimsWhitespace() {
+        let line = AdBannerView.evidenceLine(
+            for: makeEntry(category: .url, text: "  betterhelp.com  ")
+        )
+        XCTAssertEqual(line, "Sponsor link: betterhelp.com")
+    }
 }
