@@ -58,6 +58,19 @@ struct LanePreemptionCoordinatorTests {
         )
     }
 
+    /// Tiny actor used by `pauseOccursOnlyAtSafePoints` to coordinate
+    /// deterministic mid-shard preemption without relying on wall-clock
+    /// `Task.sleep` from the test side. The simulated job sets
+    /// `enteredShard` to the index of the shard it has just started
+    /// processing; the test polls until the job has reported entering
+    /// shard 0, which guarantees the preempt request lands while shard 0
+    /// is still running (i.e. mid-shard) rather than racing the job's
+    /// natural completion. See `pollUntil` docstring re: playhead-qtc.
+    actor ShardEntrySignal {
+        private(set) var enteredShard: Int? = nil
+        func recordEntered(shard: Int) { enteredShard = shard }
+    }
+
     /// Simulates a running analysis job that polls the preemption signal
     /// at every post-shard boundary. `shardCount` is the total number of
     /// shards the job plans to process; `shardDuration` is the wall-clock
@@ -74,7 +87,8 @@ struct LanePreemptionCoordinatorTests {
         lease: EpisodeExecutionLease,
         shardCount: Int,
         shardDuration: Duration,
-        coordinator: LanePreemptionCoordinator
+        coordinator: LanePreemptionCoordinator,
+        entrySignal: ShardEntrySignal? = nil
     ) async -> Int? {
         let signal = await coordinator.register(
             jobId: jobId,
@@ -83,6 +97,14 @@ struct LanePreemptionCoordinatorTests {
         )
 
         for shardIndex in 0..<shardCount {
+            // Notify the test harness (if one is attached) that we have
+            // entered this shard's compute window, BEFORE doing any
+            // wall-clock work. The test uses this to land its preempt
+            // request mid-shard deterministically.
+            if let entrySignal {
+                await entrySignal.recordEntered(shard: shardIndex)
+            }
+
             // Simulated in-shard work. This is the "unit" the bead spec
             // says must NOT be interrupted mid-flight; we only poll the
             // signal on the post-shard boundary below.
@@ -187,29 +209,51 @@ struct LanePreemptionCoordinatorTests {
     @Test("Pause occurs only at post-shard boundaries, not mid-shard")
     func pauseOccursOnlyAtSafePoints() async {
         let coordinator = LanePreemptionCoordinator()
+        let entrySignal = ShardEntrySignal()
+
+        // Use a generous shard duration so that even under heavy
+        // parallel-CPU load (where `Task.sleep` resumes can be
+        // delayed by 100ms–1s+, see playhead-qtc / playhead-ss38),
+        // we're guaranteed to land the preempt request while shard 0
+        // is still in its `Task.sleep` window.
+        let shardDuration: Duration = .seconds(2)
         let jobRun = Task {
             await Self.runSimulatedJob(
                 jobId: "soon-1",
                 lane: .soon,
                 lease: makeLease(),
                 shardCount: 10,
-                shardDuration: .milliseconds(100),
-                coordinator: coordinator
+                shardDuration: shardDuration,
+                coordinator: coordinator,
+                entrySignal: entrySignal
             )
         }
 
-        // Wait for the first shard to start so the mid-shard preempt
-        // actually lands mid-shard. 30 ms < 100 ms shard duration.
-        try? await Task.sleep(for: .milliseconds(30))
+        // Wait for the simulated job to ENTER shard 0 — i.e. it has
+        // recorded its entry into the shard's compute window but has
+        // not yet completed it. This replaces a brittle `Task.sleep`
+        // wait whose wake-up was contention-sensitive (the original
+        // 30ms sleep could resume after shard 0 had already
+        // completed under parallel-CPU pressure, causing the test to
+        // either pause at a later shard or miss the preempt entirely).
+        let entered = await pollUntil(timeout: .seconds(10)) {
+            await entrySignal.enteredShard == 0
+        }
+        #expect(entered, "Simulated job must enter shard 0 before the test preempts")
 
         await coordinator.preemptLowerLanes(for: .now)
 
         let pausedAtShard = await jobRun.value
         #expect(pausedAtShard != nil, "Job should have paused at a safe point")
-        // Mid-shard preemption on shard 0 (~30 ms into a 100 ms shard)
-        // must run to the end of shard 0 before pausing → pauses at
-        // shard 0. A later shard index would indicate the preemption
-        // was missed or delayed past the next safe point.
+        // Mid-shard preemption on shard 0 must run to the end of
+        // shard 0 before pausing → pauses at shard 0. A later shard
+        // index would indicate the preemption was missed or delayed
+        // past the next safe point. Because we deterministically
+        // observe shard 0 entry above (rather than guessing with a
+        // wall-clock sleep), this assertion is robust to scheduler
+        // jitter: the only way `pausedAtShard != 0` is if the
+        // coordinator failed to flip the flag before the post-shard
+        // poll, which is the actual bug condition we want to catch.
         if let pausedAtShard {
             #expect(pausedAtShard == 0,
                     "Expected pause at first post-shard boundary (shard 0), got \(pausedAtShard)")
