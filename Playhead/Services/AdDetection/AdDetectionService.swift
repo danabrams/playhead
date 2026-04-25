@@ -1921,6 +1921,14 @@ actor AdDetectionService {
         logger.info(
             "Backfill acoustic-pipeline funnel: computed=\(funnel.total(.computed)) producedSignal=\(funnel.total(.producedSignal)) passedGate=\(funnel.total(.passedGate)) includedInFusion=\(funnel.total(.includedInFusion))"
         )
+
+        // playhead-arf8: per-run bracket-refinement cascade counts. Greppable
+        // marker `[arf8]` lets dogfood verify activation is firing and which
+        // gate is shedding spans without scraping per-window logs.
+        let arf8Counts = lastBracketRefinementCounts
+        logger.info(
+            "[arf8] backfill bracket counts: refined=\(arf8Counts.bracketRefined) noBracket=\(arf8Counts.noBracket) trustGated=\(arf8Counts.trustGated) coarseGated=\(arf8Counts.coarseGated) fineGated=\(arf8Counts.fineConfidenceGated) legacyBypass=\(arf8Counts.legacyBypass) showTrust=\(String(format: "%.2f", bracketShowTrust))"
+        )
     }
 
     // MARK: - Fusion Evidence Construction (playhead-4my.6.4)
