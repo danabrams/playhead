@@ -448,6 +448,20 @@ actor BackgroundProcessingService {
         scheduleBackfillIfNeeded()
     }
 
+    /// playhead-fuo6: signal that the app has entered the background.
+    ///
+    /// Stub for the RED commit -- currently a no-op so the bead's failing
+    /// test compiles. The GREEN commit replaces this body with a real
+    /// `scheduleBackfillIfNeeded()` call so iOS has a registered task to
+    /// wake the app for. The 12-hour overnight gap (capture
+    /// `2026-04-25 07:43.49.095`) reproduced because the only previous
+    /// callers of `scheduleBackfillIfNeeded` were `playbackDidStop()` and
+    /// the handler self-rearm -- neither fires on a queued-but-never-played
+    /// session.
+    func appDidEnterBackground() {
+        // intentionally empty; see GREEN commit
+    }
+
     /// Returns the recommended hot-path lookahead multiplier based on
     /// thermal state and power mode. 1.0 = full, 0.5 = reduced.
     func hotPathLookaheadMultiplier() -> Double {
