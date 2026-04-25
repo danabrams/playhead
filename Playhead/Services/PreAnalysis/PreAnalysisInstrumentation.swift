@@ -90,4 +90,34 @@ enum PreAnalysisInstrumentation {
             "metric.foregroundCatchUp episode=\(episodeId, privacy: .public) job=\(jobId, privacy: .public) prior=\(priorCoverageSec, format: .fixed(precision: 1)) escalated=\(escalatedCoverageSec, format: .fixed(precision: 1)) playhead=\(playheadPositionSec, format: .fixed(precision: 1)) runway=\(transcribedAheadSec, format: .fixed(precision: 1))"
         )
     }
+
+    /// playhead-gtt9.24: emit a structured log line each time the
+    /// scheduler fires an acoustic-triggered transcription dispatch.
+    /// Surfaces in FrozenTrace as `acousticPromoted` so the harness can
+    /// distinguish a content-driven escalation from a playhead-driven
+    /// one (`foregroundCatchUp`) and from the standard tier-ladder
+    /// progression (`linearProgression`, implicit in absence of either
+    /// metric).
+    ///
+    /// Fields:
+    ///   - `episode`/`job`: identity
+    ///   - `prior`/`escalated`: the `desiredCoverageSec` change
+    ///   - `windowStart`/`windowEnd`: episode-time bounds of the window
+    ///     whose acoustic features triggered the promotion
+    ///   - `score`: acoustic-likelihood score in `[0, 1]` for the
+    ///     trigger window. High values (>0.7) indicate a clear ad
+    ///     onset/offset; borderline values (~0.5) flag soft promotions.
+    static func logAcousticPromotion(
+        episodeId: String,
+        jobId: String,
+        priorCoverageSec: Double,
+        escalatedCoverageSec: Double,
+        windowStartSec: Double,
+        windowEndSec: Double,
+        score: Double
+    ) {
+        logger.info(
+            "metric.acousticPromoted episode=\(episodeId, privacy: .public) job=\(jobId, privacy: .public) prior=\(priorCoverageSec, format: .fixed(precision: 1)) escalated=\(escalatedCoverageSec, format: .fixed(precision: 1)) windowStart=\(windowStartSec, format: .fixed(precision: 1)) windowEnd=\(windowEndSec, format: .fixed(precision: 1)) score=\(score, format: .fixed(precision: 3))"
+        )
+    }
 }

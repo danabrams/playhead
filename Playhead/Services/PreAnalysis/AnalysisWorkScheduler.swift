@@ -320,6 +320,107 @@ actor AnalysisWorkScheduler {
         let playheadPositionSec: TimeInterval
     }
 
+    // MARK: - AcousticPromotionPolicy (playhead-gtt9.24)
+
+    /// Configuration for acoustic-triggered transcription scheduling
+    /// (playhead-gtt9.24). Acoustic features are extracted cheaply at
+    /// Stage 2 (`FeatureExtractionService.extractAndPersist`) and
+    /// persisted to `feature_windows`. When feature coverage extends
+    /// beyond transcript coverage — typically because the episode is
+    /// long enough that the tier ladder will hit T2 short of the end —
+    /// the scheduler scores each unscored window for ad-likelihood via
+    /// ``AcousticLikelihoodScorer`` and picks the highest-scoring
+    /// region as the next coverage target. The ad region transcribes
+    /// before equivalent-position clean speech because the escalation
+    /// happens immediately, before linear progression has a chance to
+    /// burn the BG-task budget on the prefix.
+    ///
+    /// **Composition with ``PlayheadCatchupPolicy``:** foreground
+    /// catch-up (``currentCatchupOpportunity()``) is playhead-driven
+    /// — fired on every (foreground, playing) tick when the user is
+    /// catching up to the trailing edge of transcribed audio. Acoustic
+    /// promotion is content-driven — fired whenever an unscored window
+    /// past the current target scores above the threshold. The two
+    /// compose: the scheduler consults catch-up FIRST (it's the more
+    /// time-sensitive bypass — user is actively listening), and falls
+    /// through to acoustic promotion when no catch-up opportunity
+    /// exists. Both ultimately escalate `desiredCoverageSec` via the
+    /// same `updateJobDesiredCoverage` mechanism, so they cannot
+    /// fight each other — the runner sees the deeper of the two
+    /// targets on its next dispatch.
+    ///
+    /// **Cold-start behaviour:** when an asset has no persisted
+    /// feature windows yet (first run, before Stage 2 has produced
+    /// any output for this asset), `highestLikelihoodBeyond(...)`
+    /// returns `nil` and acoustic promotion is a no-op. The scheduler
+    /// falls back to the standard tier ladder, which is the right
+    /// answer — without features there is no acoustic signal to act
+    /// on. As soon as the first tier (T0 = 90 s) completes, features
+    /// for that prefix exist and promotion can begin to fire on
+    /// subsequent passes.
+    struct AcousticPromotionPolicy: Sendable, Equatable {
+        /// Minimum acoustic-likelihood score (in `[0, 1]`) for a
+        /// window beyond the current coverage target to trigger
+        /// promotion. Higher = pickier; lower = more aggressive
+        /// (will burn more BG-task wakes on borderline regions).
+        ///
+        /// 0.5 default — half the theoretical max. The scorer's
+        /// default-prior weights (see ``AcousticLikelihoodScorer.Weights``)
+        /// are calibrated so that a window with foreground music bed
+        /// + clear speaker change crosses 0.5 even without spectral
+        /// flux contribution; clean host conversation rarely scores
+        /// above 0.2.
+        let scoreThreshold: Double
+
+        /// Minimum lookahead (seconds) the promotion target must
+        /// extend past the current `desiredCoverageSec`. Below this
+        /// gap, the standard tier ladder will reach the high-score
+        /// window soon enough on its own and we don't burn an extra
+        /// admission cycle. 60 s default — one tier-ladder step
+        /// beyond T0's depth granularity.
+        let minimumEscalationGapSec: Double
+
+        /// Default policy used when the scheduler is constructed
+        /// without an explicit override.
+        static let `default` = AcousticPromotionPolicy(
+            scoreThreshold: 0.5,
+            minimumEscalationGapSec: 60
+        )
+
+        /// Disabled policy — score threshold above 1.0, so no window
+        /// can ever pass. Used by tests + experiments that want to
+        /// assert promotion does NOT fire under a given snapshot.
+        static let disabled = AcousticPromotionPolicy(
+            scoreThreshold: 2.0,
+            minimumEscalationGapSec: 0
+        )
+    }
+
+    /// Resolved acoustic-promotion opportunity. Returned by
+    /// ``currentAcousticPromotionOpportunity(for:)`` when a window past
+    /// the current coverage target scores above the policy's score
+    /// threshold AND the escalated target is far enough beyond the
+    /// current target to be worth a separate dispatch.
+    struct AcousticPromotionOpportunity: Sendable, Equatable {
+        let jobId: String
+        let episodeId: String
+        let priorDesiredCoverageSec: Double
+        let escalatedDesiredCoverageSec: Double
+        /// Episode-time start of the window that triggered the
+        /// promotion. Surfaced for instrumentation only.
+        let triggerWindowStartSec: Double
+        /// Episode-time end of the window that triggered the
+        /// promotion. The promoted coverage target equals this value
+        /// (capped at episode duration when known).
+        let triggerWindowEndSec: Double
+        /// Acoustic-likelihood score of the trigger window
+        /// (`[0, 1]`). Surfaced for instrumentation + telemetry —
+        /// callers stamp it onto FrozenTrace so the harness can
+        /// distinguish a "high-confidence" promotion from a
+        /// borderline one.
+        let triggerWindowScore: Double
+    }
+
     private var schedulerTask: Task<Void, Never>?
     private var currentRunningTask: Task<Void, Never>?
     private var currentJobId: String?
@@ -358,6 +459,15 @@ actor AnalysisWorkScheduler {
     /// custom policy to explore boundary cases or `.disabled` to assert
     /// catch-up fires zero times under a given snapshot.
     private let catchupPolicy: PlayheadCatchupPolicy
+
+    /// playhead-gtt9.24: the acoustic-promotion policy this scheduler
+    /// applies. Production callers pass `.default`; tests pass either a
+    /// custom policy (e.g. lower threshold, smaller escalation gap) to
+    /// explore boundary cases or `.disabled` to assert acoustic
+    /// promotion fires zero times under a given snapshot. See
+    /// ``AcousticPromotionPolicy`` for the composition contract with
+    /// foreground catch-up.
+    private let acousticPromotionPolicy: AcousticPromotionPolicy
 
     private var shouldCancelCurrentJob = false
     /// Set to `true` by the lease-renewal task when its CAS finds no
@@ -467,7 +577,8 @@ actor AnalysisWorkScheduler {
         config: PreAnalysisConfig = .load(),
         clock: @escaping @Sendable () -> Date = { Date() },
         backfillScheduler: (any BackfillScheduling)? = nil,
-        catchupPolicy: PlayheadCatchupPolicy = .default
+        catchupPolicy: PlayheadCatchupPolicy = .default,
+        acousticPromotionPolicy: AcousticPromotionPolicy = .default
     ) {
         self.store = store
         self.jobRunner = jobRunner
@@ -480,6 +591,7 @@ actor AnalysisWorkScheduler {
         self.clock = clock
         self.backfillScheduler = backfillScheduler
         self.catchupPolicy = catchupPolicy
+        self.acousticPromotionPolicy = acousticPromotionPolicy
         var continuation: AsyncStream<Void>.Continuation?
         self.wakeStream = AsyncStream<Void> { continuation = $0 }
         self.wakeContinuation = continuation
@@ -1230,6 +1342,169 @@ actor AnalysisWorkScheduler {
     }
     #endif
 
+    // MARK: - Acoustic-triggered promotion evaluation (playhead-gtt9.24)
+
+    /// Evaluate whether the scheduler should fire an acoustic-triggered
+    /// dispatch on the next run-loop iteration. Inspects persisted
+    /// `feature_windows` for the candidate job's asset and asks
+    /// ``AcousticLikelihoodScorer.highestLikelihoodBeyond(...)`` for the
+    /// highest-scoring window past the job's current
+    /// `desiredCoverageSec`. When that window's score crosses the
+    /// policy threshold AND the implied escalation is a non-trivial
+    /// step beyond the current target (per
+    /// ``AcousticPromotionPolicy.minimumEscalationGapSec``), returns an
+    /// ``AcousticPromotionOpportunity`` describing the promotion.
+    ///
+    /// **Why "candidate job" not "currently-playing episode":** unlike
+    /// foreground catch-up, acoustic promotion is content-driven — it
+    /// asks "is there an ad-shaped region waiting in the unscored
+    /// portion of the queue's current target episode?" The "queue's
+    /// current target" is whatever job `selectNextDispatchableJob`
+    /// would dispatch next; if the cascade re-orders the queue (swws),
+    /// promotion follows the cascade winner. The two questions
+    /// (content-driven vs playhead-driven) are deliberately separated
+    /// so a backgrounded catch-up does not preempt foreground catch-up,
+    /// and so a foreground listening session whose runway is fine still
+    /// gets ad-region pre-fetch in the background.
+    ///
+    /// **Cold-start fallback:** when the asset has no persisted
+    /// feature windows yet (first run, before Stage 2 has produced
+    /// any output for this asset), the scorer returns nil and this
+    /// method also returns nil. The scheduler falls back to the
+    /// standard tier ladder, which is the right answer — without
+    /// features there is no acoustic signal to act on. Once T0 has
+    /// completed, features for that prefix exist and promotion can
+    /// fire on subsequent passes.
+    ///
+    /// Returns `nil` when:
+    ///   - `pauseAllWork` admission (thermal `.critical`).
+    ///   - Policy threshold is misconfigured above 1.0 (`disabled`).
+    ///   - No candidate job exists for the queue.
+    ///   - The candidate job is not eligible for dispatch
+    ///     (state/lease/nextEligibleAt).
+    ///   - The asset has no `analysisAssetId` persisted yet.
+    ///   - No persisted feature window past `desiredCoverageSec`
+    ///     scores above the threshold.
+    ///   - The escalation gap to the trigger window is below
+    ///     `minimumEscalationGapSec`.
+    ///
+    /// Best-effort: SQL hiccups log and return nil rather than
+    /// propagating, so a transient store error cannot stall the loop.
+    private func currentAcousticPromotionOpportunity(
+        admission: LaneAdmission,
+        deferredWorkAllowed: Bool,
+        now: TimeInterval
+    ) async -> AcousticPromotionOpportunity? {
+        // Pause-all dominates everything (matches catch-up semantics).
+        guard !admission.pauseAllWork else { return nil }
+
+        // Trivially-misconfigured policy guard. A score threshold above
+        // 1.0 is the `.disabled` sentinel — bail before any store work.
+        guard acousticPromotionPolicy.scoreThreshold <= 1.0 else { return nil }
+
+        // Resolve the candidate job: whichever job the run loop would
+        // dispatch next under the current admission.
+        guard let selected = await selectNextDispatchableJob(
+            deferredWorkAllowed: deferredWorkAllowed,
+            now: now
+        ) else { return nil }
+        let job = selected.job
+
+        // The asset must already have an analysisAssetId; without it
+        // there are no persisted feature_windows to score.
+        guard let assetId = job.analysisAssetId else { return nil }
+
+        // Fetch persisted feature windows past the current coverage
+        // target. We bound the read at `Double.greatestFiniteMagnitude`
+        // so the asset's full feature coverage is considered (the
+        // scorer's `highestLikelihoodBeyond` already filters internally
+        // by `endTime > currentCoverageSec`).
+        let windows: [FeatureWindow]
+        do {
+            windows = try await store.fetchFeatureWindows(
+                assetId: assetId,
+                from: 0,
+                to: Double.greatestFiniteMagnitude
+            )
+        } catch {
+            logger.warning("currentAcousticPromotionOpportunity: fetchFeatureWindows threw for asset \(assetId): \(error)")
+            return nil
+        }
+
+        // Empty feature window set → cold start (Stage 2 hasn't run yet
+        // for this asset). Scorer also returns nil for empty input but
+        // we early-out for clarity / log volume.
+        guard !windows.isEmpty else { return nil }
+
+        // Score the windows past the current target and pick the
+        // highest. The scorer applies the threshold internally.
+        let currentCoverage = job.desiredCoverageSec
+        guard let best = AcousticLikelihoodScorer.highestLikelihoodBeyond(
+            windows: windows,
+            currentCoverageSec: currentCoverage,
+            threshold: acousticPromotionPolicy.scoreThreshold
+        ) else { return nil }
+
+        // Compute the escalation target: the trigger window's end time,
+        // capped at episode duration when the asset row knows it.
+        // Reading the asset is best-effort — if the row is missing the
+        // duration cap is simply skipped.
+        let asset: AnalysisAsset?
+        do {
+            asset = try await store.fetchAsset(id: assetId)
+        } catch {
+            logger.warning("currentAcousticPromotionOpportunity: fetchAsset threw for asset \(assetId): \(error)")
+            asset = nil
+        }
+        let unclampedTarget = best.windowEnd
+        let escalatedTarget: Double = {
+            guard let duration = asset?.episodeDurationSec else { return unclampedTarget }
+            return min(unclampedTarget, duration)
+        }()
+
+        // Escalation-gap gate: only fire when the new target is at
+        // least `minimumEscalationGapSec` past the current target.
+        // Below this gap the standard tier ladder will reach the
+        // window soon enough on its own.
+        guard escalatedTarget - currentCoverage >= acousticPromotionPolicy.minimumEscalationGapSec else {
+            return nil
+        }
+
+        return AcousticPromotionOpportunity(
+            jobId: job.jobId,
+            episodeId: job.episodeId,
+            priorDesiredCoverageSec: currentCoverage,
+            escalatedDesiredCoverageSec: escalatedTarget,
+            triggerWindowStartSec: best.windowStart,
+            triggerWindowEndSec: best.windowEnd,
+            triggerWindowScore: best.score
+        )
+    }
+
+    #if DEBUG
+    /// Test-only accessor returning the `AcousticPromotionOpportunity`
+    /// the run loop would dispatch on the next iteration, or `nil` if
+    /// no acoustic promotion should fire under the current snapshot.
+    /// Tests use this to assert the trigger predicate without driving
+    /// the full loop.
+    func currentAcousticPromotionOpportunityForTesting() async -> AcousticPromotionOpportunity? {
+        let admission = await currentLaneAdmission()
+        let now = clock().timeIntervalSince1970
+        let deferredWorkAllowed = admission.policy.allowSoonLane
+            || admission.policy.allowBackgroundLane
+        return await currentAcousticPromotionOpportunity(
+            admission: admission,
+            deferredWorkAllowed: deferredWorkAllowed,
+            now: now
+        )
+    }
+
+    /// Test-only accessor for the persisted acoustic-promotion policy.
+    func acousticPromotionPolicyForTesting() -> AcousticPromotionPolicy {
+        acousticPromotionPolicy
+    }
+    #endif
+
     // MARK: - SchedulerStateSnapshotProviding (playhead-gtt9.14)
 
     /// Current scheduler-state snapshot — the triple the lifecycle
@@ -1461,6 +1736,41 @@ actor AnalysisWorkScheduler {
             let deferredWorkAllowed = admission.policy.allowSoonLane
                 || admission.policy.allowBackgroundLane
 
+            // playhead-gtt9.24: acoustic-triggered transcription
+            // scheduling. Inspect persisted feature_windows for the
+            // queue's current candidate job and ask whether any
+            // unscored window past `desiredCoverageSec` carries enough
+            // ad-likelihood mass to justify escalating the coverage
+            // target ahead of the standard tier ladder.
+            //
+            // Why this fires AFTER catchup and admissionBlocksDeferred:
+            //   - Catchup is the most time-sensitive bypass — user is
+            //     actively listening at the trailing edge of the
+            //     transcribed region — it always wins.
+            //   - admissionBlocksDeferred() is the (foreground, playing)
+            //     guard that prevents the scheduler from competing with
+            //     the playback decode path. Acoustic promotion is
+            //     deferred work by definition, so it must respect that
+            //     guard.
+            //
+            // The dispatch persists the new `desiredCoverageSec` to the
+            // job row via `updateJobDesiredCoverage`, then falls
+            // through to the standard `selectNextDispatchableJob` path.
+            // When the standard path picks the same job (which it will,
+            // because it's the same `selectNextDispatchableJob` query)
+            // the dispatch carries the deeper coverage target into the
+            // runner. A crash mid-promotion does not lose the deeper
+            // target on resume — same persistence guarantee as
+            // foreground catchup.
+            if let promotion = await currentAcousticPromotionOpportunity(
+                admission: admission,
+                deferredWorkAllowed: deferredWorkAllowed,
+                now: now
+            ) {
+                await dispatchAcousticPromotion(opportunity: promotion)
+                continue
+            }
+
             // playhead-swws: cascade-aware job selection. When the
             // candidate-window cascade has at least one seeded
             // episode, prefer the queued job whose episode has the
@@ -1644,6 +1954,101 @@ actor AnalysisWorkScheduler {
             escalatedCoverageSec: opportunity.escalatedDesiredCoverageSec,
             playheadPositionSec: opportunity.playheadPositionSec,
             transcribedAheadSec: opportunity.transcribedAheadSec
+        )
+
+        didStart(job: job)
+        await processJob(job, cascadeWindow: nil)
+        didFinish(job: job)
+    }
+
+    // MARK: - Acoustic-triggered promotion dispatch (playhead-gtt9.24)
+
+    /// Dispatch an acoustic-triggered transcription promotion. Persists
+    /// the escalated `desiredCoverageSec` onto the `analysis_jobs` row
+    /// so the runner picks up the deeper target, emits the
+    /// `acousticPromoted` instrumentation line, then routes through
+    /// the standard `processJob` path.
+    ///
+    /// Why a separate dispatch entrypoint (mirrors yqax catchup):
+    ///   1. Telemetry — the dispatch reason needs to be stamped before
+    ///      `processJob` so the harness can distinguish acoustic
+    ///      promotion from linear progression.
+    ///   2. Re-fetch — after `updateJobDesiredCoverage` the in-memory
+    ///      job row is stale; the dispatch must read the persisted row
+    ///      so the runner's coverage gating sees the new target.
+    ///   3. The lane-cap (`canAdmit`) and per-lane
+    ///      `evaluateAdmissionGate` checks still gate this path so
+    ///      promotion can't bust the Now-cap or skip the multi-resource
+    ///      gate. A rejection at either point falls back to the
+    ///      standard sleep — the next loop iteration will re-evaluate
+    ///      promotion (with the persisted escalation still in place;
+    ///      the standard path will eventually pick it up).
+    ///
+    /// **Composition note:** because `currentAcousticPromotionOpportunity`
+    /// uses `selectNextDispatchableJob` to pick the candidate, the
+    /// dispatched job here is the same one `selectNextDispatchableJob`
+    /// would pick under the standard path. We therefore process it
+    /// directly with `cascadeWindow: nil` (the cascade entry is
+    /// observability-only per the audit; running through processJob
+    /// without it does not bypass any execution semantic — slice
+    /// execution is playhead-1iq1).
+    private func dispatchAcousticPromotion(opportunity: AcousticPromotionOpportunity) async {
+        // Persist the escalation so the runner reads the deeper
+        // target on its next `fetchJob(byId:)` (and a crash mid-
+        // promotion resumes against the deeper target rather than the
+        // stale tier value).
+        do {
+            try await store.updateJobDesiredCoverage(
+                jobId: opportunity.jobId,
+                desiredCoverageSec: opportunity.escalatedDesiredCoverageSec
+            )
+        } catch {
+            logger.warning("Acoustic promotion: updateJobDesiredCoverage threw for job \(opportunity.jobId): \(error)")
+            await sleepOrWake(seconds: Self.idlePollSeconds)
+            return
+        }
+
+        // Re-fetch the row so the dispatch reflects the persisted
+        // escalation. A `nil` here is unusual (the row existed at
+        // `currentAcousticPromotionOpportunity` evaluation moments ago)
+        // but bail safely if the row was concurrently superseded.
+        let job: AnalysisJob
+        do {
+            guard let refreshed = try await store.fetchJob(byId: opportunity.jobId) else {
+                logger.warning("Acoustic promotion: job \(opportunity.jobId) disappeared after escalation")
+                return
+            }
+            job = refreshed
+        } catch {
+            logger.warning("Acoustic promotion: fetchJob threw for \(opportunity.jobId): \(error)")
+            return
+        }
+
+        // Lane-cap and admission-gate checks mirror `runLoop()` and
+        // `dispatchForegroundCatchup`. We consult both because
+        // promotion should never bust the Now-cap or skip the bnrs
+        // gate.
+        guard canAdmit(job: job) else {
+            logger.info("Acoustic promotion: lane \(String(describing: job.schedulerLane), privacy: .public) at capacity; deferring")
+            await sleepOrWake(seconds: Self.idlePollSeconds)
+            return
+        }
+
+        let gateDecision = await evaluateAdmissionGate(for: job)
+        if case .reject(let cause) = gateDecision {
+            logger.info("Acoustic promotion: AdmissionGate rejected job \(job.jobId) cause=\(cause.rawValue, privacy: .public)")
+            await sleepOrWake(seconds: Self.rejectionBackoffSeconds)
+            return
+        }
+
+        PreAnalysisInstrumentation.logAcousticPromotion(
+            episodeId: opportunity.episodeId,
+            jobId: opportunity.jobId,
+            priorCoverageSec: opportunity.priorDesiredCoverageSec,
+            escalatedCoverageSec: opportunity.escalatedDesiredCoverageSec,
+            windowStartSec: opportunity.triggerWindowStartSec,
+            windowEndSec: opportunity.triggerWindowEndSec,
+            score: opportunity.triggerWindowScore
         )
 
         didStart(job: job)
