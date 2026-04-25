@@ -1435,13 +1435,32 @@ actor AnalysisWorkScheduler {
             return
         }
 
-        // Acquire lease.
-        let leaseExpiry = clock().timeIntervalSince1970 + Self.leaseExpirySeconds
-        let leaseAcquired = (try? await store.acquireLease(
-            jobId: job.jobId,
-            owner: "preAnalysis",
-            expiresAt: leaseExpiry
-        )) ?? false
+        // Acquire lease. playhead-5uvz.1 (Gap-1): use the journal-aware
+        // variant so the lease UPDATE and the `acquired` work_journal
+        // row land in the SAME SQL transaction. Without this the
+        // production journal stays empty and AnalysisCoordinator's
+        // `recoverOrphans` (the journal-aware cold-launch reaper)
+        // degrades to the same blind sweep AnalysisJobReconciler runs.
+        let now = clock().timeIntervalSince1970
+        let leaseExpiry = now + Self.leaseExpirySeconds
+        let leaseAcquired: Bool
+        do {
+            leaseAcquired = try await store.acquireLeaseWithJournal(
+                jobId: job.jobId,
+                episodeId: job.episodeId,
+                owner: "preAnalysis",
+                expiresAt: leaseExpiry,
+                now: now
+            )
+        } catch {
+            // playhead-5uvz.1 NIT #3: surface the thrown error in the
+            // log instead of silently coercing to `false`. Without this,
+            // a sustained SQLite-side problem (disk full, locked DB,
+            // schema drift) is indistinguishable from "lease already
+            // taken" — the scheduler retries forever with no signal.
+            logger.error("acquireLeaseWithJournal threw for job \(job.jobId): \(error)")
+            leaseAcquired = false
+        }
 
         guard leaseAcquired else {
             logger.info("Failed to acquire lease for job \(job.jobId), skipping")

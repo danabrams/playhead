@@ -4626,6 +4626,113 @@ actor AnalysisStore {
         return sqlite3_changes(db) > 0
     }
 
+    /// playhead-5uvz.1 (Gap-1): jobId-keyed lease acquire that ALSO
+    /// atomically appends a `work_journal` row with `eventType=.acquired`
+    /// inside the same SQL transaction as the `analysis_jobs` UPDATE.
+    ///
+    /// This is the production-scheduler-friendly variant of
+    /// ``acquireEpisodeLease``: same atomic-journal-append guarantee,
+    /// keyed on `jobId` (the scheduler's primary handle) instead of
+    /// `episodeId`, and it does NOT require the caller to supply a
+    /// `schedulerEpoch` / `generationID` / `ownerWorkerId`. Those are
+    /// minted/read inside the transaction so a worker that has not
+    /// adopted the rich `EpisodeExecutionLease` API still produces a
+    /// journal trail that ``AnalysisCoordinator/recoverOrphans`` can
+    /// read.
+    ///
+    /// **Atomicity contract:** the lease columns and the journal row land
+    /// in the same `BEGIN IMMEDIATE..COMMIT` envelope. If the journal
+    /// append fails, the lease UPDATE rolls back — the caller sees a
+    /// thrown error and **never holds a phantom lease without journal
+    /// evidence**. This avoids the "lease held but `recoverOrphans`
+    /// cannot route it" failure mode that prompted Gap-1.
+    ///
+    /// Return semantics match the bare ``acquireLease`` for drop-in
+    /// substitution: `true` iff the row was both updated AND a journal
+    /// row was appended (both inside the same committed transaction).
+    /// Returns `false` when the lease slot was already taken (no UPDATE,
+    /// no journal append, no transaction commit).
+    ///
+    /// **Behavioral divergence from the bare API:** `generationID` and
+    /// `schedulerEpoch` rotate on every successful acquire here (the
+    /// journal join in `recoverOrphans` requires them in sync between
+    /// the row and its `.acquired` event). Callers that previously relied
+    /// on identity preservation across reacquires must not assume drop-in
+    /// equivalence on those two columns.
+    ///
+    /// `episodeId` is the only addition over the bare API — needed for
+    /// the journal's primary key. The scheduler always has it on the
+    /// job it just claimed.
+    func acquireLeaseWithJournal(
+        jobId: String,
+        episodeId: String,
+        owner: String,
+        expiresAt: Double,
+        now: Double = Date().timeIntervalSince1970,
+        metadataJSON: String = "{}"
+    ) throws -> Bool {
+        try exec("BEGIN IMMEDIATE")
+        do {
+            // Mint a fresh generationID for this acquire and read the
+            // store's current epoch. The journal row and the
+            // analysis_jobs row are stamped with the same pair so
+            // `recoverOrphans` can join them via
+            // `fetchLastWorkJournalEntry(episodeId:generationID:)`.
+            let generationID = UUID().uuidString
+            let currentEpoch = try fetchSchedulerEpoch() ?? 0
+
+            let updateSQL = """
+                UPDATE analysis_jobs
+                SET leaseOwner = ?, leaseExpiresAt = ?,
+                    generationID = ?, schedulerEpoch = ?,
+                    state = 'running', updatedAt = ?
+                WHERE jobId = ? AND (leaseOwner IS NULL OR leaseExpiresAt < ?)
+                """
+            let stmt = try prepare(updateSQL)
+            defer { sqlite3_finalize(stmt) }
+            bind(stmt, 1, owner)
+            bind(stmt, 2, expiresAt)
+            bind(stmt, 3, generationID)
+            bind(stmt, 4, currentEpoch)
+            bind(stmt, 5, now)
+            bind(stmt, 6, jobId)
+            bind(stmt, 7, now)
+            try step(stmt, expecting: SQLITE_DONE)
+            if sqlite3_changes(db) == 0 {
+                // Lease slot already taken — nothing to journal, no
+                // state change to commit. Roll back the (empty) txn
+                // and report no acquisition. No phantom row.
+                try exec("ROLLBACK")
+                return false
+            }
+
+            // Atomically append the `acquired` journal row in the same
+            // transaction. If this throws, the catch below rolls back
+            // the UPDATE — phantom-lease (lease held, no journal trail)
+            // is impossible by construction.
+            try appendWorkJournalEntryLocked(
+                episodeId: episodeId,
+                generationID: generationID,
+                schedulerEpoch: currentEpoch,
+                timestamp: now,
+                eventType: .acquired,
+                cause: nil,
+                metadataJSON: metadataJSON
+            )
+
+            try exec("COMMIT")
+            return true
+        } catch {
+            // Ignore rollback failures — the primary error is what the
+            // caller cares about, and a successful COMMIT cannot be
+            // followed by a ROLLBACK that succeeds (so this only fires
+            // on the actual failure paths, where it tears down the
+            // partial UPDATE).
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
     func releaseLease(jobId: String) throws {
         let sql = """
             UPDATE analysis_jobs
