@@ -110,6 +110,12 @@ struct CorpusExporterTests {
             // `analysis_assets.terminalReason`. Nullable on pre-gtt9.8
             // rows and on sessions still in flight.
             "terminalReason",
+            // playhead-i9dj: human-readable identifiers so the exported
+            // corpus is legible standalone. Nullable on rows that
+            // pre-date the i9dj migration and on rows whose first
+            // observation hasn't yet supplied the title.
+            "podcastTitle",
+            "episodeTitle",
         ] {
             #expect(json.keys.contains(key), "\(key) must be present as a key")
             #expect(json[key] is NSNull, "\(key) must serialize as null for a minimal asset, not omitted or empty-string")
@@ -154,6 +160,37 @@ struct CorpusExporterTests {
         let stampedVersion = json["detectorVersion"] as? String
         #expect(stampedVersion == AdDetectionConfig.default.detectorVersion,
                 "When the caller does not pass detectorVersion, exporter must stamp AdDetectionConfig.default.detectorVersion")
+    }
+
+    @Test("asset record carries podcastTitle + episodeTitle when threaded through (i9dj)")
+    func assetRecordTitlePassthrough() throws {
+        // playhead-i9dj: `episodeTitle` lives on the AnalysisAsset row;
+        // `podcastTitle` is supplied by the caller (looked up by
+        // CorpusExporter via `fetchProfile(podcastId:)?.title` on the
+        // export path). Both must serialize as their string values
+        // when present, and as explicit JSON null when absent.
+        let asset = AnalysisAsset(
+            id: "asset-i9dj",
+            episodeId: "ep-i9dj",
+            assetFingerprint: "fp-i9dj",
+            weakFingerprint: nil,
+            sourceURL: "file:///tmp/i9dj.m4a",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "queued",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeTitle: "How to escape burnout"
+        )
+        let data = try CorpusExporter.assetLine(
+            asset,
+            podcastId: "pod-i9dj",
+            podcastTitle: "Diary of a CEO"
+        )
+        let json = try decodeJSONObject(from: data)
+        #expect(json["episodeTitle"] as? String == "How to escape burnout")
+        #expect(json["podcastTitle"] as? String == "Diary of a CEO")
     }
 
     @Test("asset record carries terminalReason when the classifier set one (gtt9.8)")
@@ -788,6 +825,14 @@ private struct FailingSource: CorpusExportSource {
     /// tolerates `nil` (emits JSON null) so returning nil here exercises
     /// the "podcastId absent" JSONL path.
     func fetchPodcastId(forEpisodeId episodeId: String) async throws -> String? {
+        return nil
+    }
+
+    /// playhead-i9dj: no profile rows in the failing-source fixtures.
+    /// The exporter tolerates `nil` (emits explicit JSON null for
+    /// `podcastTitle`) so returning nil here exercises the
+    /// "podcastTitle absent" JSONL path.
+    func fetchPodcastProfile(podcastId: String) async throws -> PodcastProfile? {
         return nil
     }
 

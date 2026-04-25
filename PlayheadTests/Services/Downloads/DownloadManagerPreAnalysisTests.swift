@@ -15,6 +15,8 @@ struct DownloadContextTests {
         let ctx = DownloadContext(podcastId: "pod-123", isExplicitDownload: true)
         #expect(ctx.podcastId == "pod-123")
         #expect(ctx.isExplicitDownload == true)
+        #expect(ctx.podcastTitle == nil)
+        #expect(ctx.episodeTitle == nil)
     }
 
     @Test("Constructs with nil podcastId")
@@ -22,6 +24,22 @@ struct DownloadContextTests {
         let ctx = DownloadContext(podcastId: nil, isExplicitDownload: false)
         #expect(ctx.podcastId == nil)
         #expect(ctx.isExplicitDownload == false)
+    }
+
+    // playhead-i9dj: titles must round-trip through DownloadContext so both
+    // streamingDownload and progressiveDownload paths can hand them to
+    // AnalysisWorkScheduler. Reviewer flagged a latent drop on the
+    // progressiveDownload enqueue site; this guards the contract.
+    @Test("Carries podcastTitle and episodeTitle when supplied")
+    func carriesTitles() {
+        let ctx = DownloadContext(
+            podcastId: "pod-1",
+            isExplicitDownload: false,
+            podcastTitle: "Diary of a CEO",
+            episodeTitle: "How to Build a Billion-Dollar Company"
+        )
+        #expect(ctx.podcastTitle == "Diary of a CEO")
+        #expect(ctx.episodeTitle == "How to Build a Billion-Dollar Company")
     }
 }
 

@@ -101,6 +101,15 @@ struct AnalysisAsset: Sendable {
     /// `"featureFailed"`, `"budgetCancelled"`,
     /// `"coverageBelowThreshold"`.
     let terminalReason: String?
+    /// playhead-i9dj: human-readable episode title (e.g. "How to escape
+    /// burnout"). Defaults to `nil` so:
+    ///   * existing call-sites construct an `AnalysisAsset` unchanged,
+    ///   * pre-i9dj rows decode to `nil` for this field,
+    ///   * the corpus exporter emits explicit JSON `null` when missing.
+    /// Populated lazily on first observation via
+    /// ``AnalysisStore/updateAssetEpisodeTitle(id:episodeTitle:)`` once
+    /// the SwiftData side has the title.
+    let episodeTitle: String?
 
     init(
         id: String,
@@ -116,7 +125,8 @@ struct AnalysisAsset: Sendable {
         capabilitySnapshot: String?,
         artifactClass: ArtifactClass = .media,
         episodeDurationSec: Double? = nil,
-        terminalReason: String? = nil
+        terminalReason: String? = nil,
+        episodeTitle: String? = nil
     ) {
         self.id = id
         self.episodeId = episodeId
@@ -132,6 +142,7 @@ struct AnalysisAsset: Sendable {
         self.artifactClass = artifactClass
         self.episodeDurationSec = episodeDurationSec
         self.terminalReason = terminalReason
+        self.episodeTitle = episodeTitle
     }
 }
 
@@ -389,6 +400,19 @@ struct PodcastProfile: Sendable {
     /// ef2.5.1: JSON-encoded `ShowTraitProfile`. `nil` until first episode
     /// observation populates the profile. Decoded lazily by consumers.
     let traitProfileJSON: String?
+    /// playhead-i9dj: human-readable show title (e.g. "Diary of a CEO").
+    /// `nil` on pre-i9dj rows that have not been touched, and on the
+    /// transient profile values that bounce through trust-scoring rebuilds
+    /// without the title in scope. Defaults to `nil` so:
+    ///   * existing PodcastProfile constructors compile unchanged,
+    ///   * trust-scoring rebuilds that pass `title: nil` do NOT clobber
+    ///     a previously-persisted title — `upsertProfile` uses
+    ///     `COALESCE(excluded.title, podcast_profiles.title)` to preserve
+    ///     the existing column value when the new write is `nil`.
+    /// Populated via the dedicated
+    /// ``AnalysisStore/updateProfileTitle(podcastId:title:)`` setter from
+    /// the call site that owns the SwiftData `Podcast`.
+    let title: String?
 
     init(
         podcastId: String,
@@ -401,7 +425,8 @@ struct PodcastProfile: Sendable {
         observationCount: Int,
         mode: String,
         recentFalseSkipSignals: Int,
-        traitProfileJSON: String? = nil
+        traitProfileJSON: String? = nil,
+        title: String? = nil
     ) {
         self.podcastId = podcastId
         self.sponsorLexicon = sponsorLexicon
@@ -414,6 +439,7 @@ struct PodcastProfile: Sendable {
         self.mode = mode
         self.recentFalseSkipSignals = recentFalseSkipSignals
         self.traitProfileJSON = traitProfileJSON
+        self.title = title
     }
 
     /// Convenience: decode the stored trait profile, falling back to
@@ -656,7 +682,7 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 14
+    nonisolated private static let currentSchemaVersion = 15
 
     /// bd-m8k / Cycle 2 C4: Maximum number of recent full-rescan **recall**
     /// samples retained for the `stable_recall_flag` ring. Must match the
@@ -929,6 +955,11 @@ actor AnalysisStore {
             try migrateShadowFMResponsesV13IfNeeded()
             // playhead-gtt9.8: terminalReason column on analysis_assets.
             try migrateTerminalReasonV14IfNeeded()
+            // playhead-i9dj: human-readable show + episode titles so an
+            // exported analysis.sqlite is legible without joining to the
+            // SwiftData side. Adds `analysis_assets.episodeTitle` and
+            // `podcast_profiles.title` (both nullable; lazily populated).
+            try migrateSelfDescribingTitlesV15IfNeeded()
             // ef2.5.1: ShowTraitProfile JSON on podcast_profiles.
             try addColumnIfNeeded(
                 table: "podcast_profiles",
@@ -1053,6 +1084,15 @@ actor AnalysisStore {
         // fixtures may omit analysis_assets.
         if try tableExists("analysis_assets") {
             try migrateTerminalReasonV14IfNeeded()
+        }
+        // playhead-i9dj: episodeTitle on analysis_assets, title on
+        // podcast_profiles. Ladder-only seam mirrors `migrate()` so
+        // schema-version tests lock at v15. Each branch is guarded by
+        // `tableExists` because seeded fixtures may omit either table.
+        let assetsExist = try tableExists("analysis_assets")
+        let profilesExist = try tableExists("podcast_profiles")
+        if assetsExist || profilesExist {
+            try migrateSelfDescribingTitlesV15IfNeeded()
         }
         // H1 fix: mirror the addColumnIfNeeded calls from migrate() that
         // follow the versioned ladder steps. Without these, the isolated-
@@ -2178,6 +2218,59 @@ actor AnalysisStore {
         try setSchemaVersion(14)
     }
 
+    /// playhead-i9dj: human-readable identifiers on `analysis_assets` and
+    /// `podcast_profiles` so an exported `analysis.sqlite` is legible without
+    /// joining to the SwiftData side. Adds:
+    ///   * `analysis_assets.episodeTitle  TEXT`  — episode title from the feed
+    ///     entry / SwiftData `Episode.title`.
+    ///   * `podcast_profiles.title         TEXT` — show title from the feed /
+    ///     SwiftData `Podcast.title`.
+    ///
+    /// Both columns are nullable so:
+    ///   * Pre-i9dj rows decode unchanged (NULL for the new columns).
+    ///   * The on-device write path can populate them lazily on first
+    ///     observation (next download / play / scheduler enqueue) — no
+    ///     synchronous one-shot backfill is needed because the values are
+    ///     stable and recoverable from the SwiftData side at any time.
+    ///   * Old exports without titles still parse: the corpus exporter emits
+    ///     explicit JSON `null` when the column is NULL.
+    ///
+    /// Idempotent via `addColumnIfNeeded`. Both columns are appended at the
+    /// END of their tables (SQLite's only supported ADD COLUMN position).
+    /// `analysis_assets` reads use the explicit ``assetSelectColumns``
+    /// (not `SELECT *`) so the new index doesn't disturb existing readers.
+    /// `podcast_profiles` is read via `SELECT *` in `fetchProfile` — the
+    /// reader has been updated to decode the new trailing column at the
+    /// matching positional index.
+    ///
+    /// Rollback: `ADD COLUMN` is additive-only. There is no destructive
+    /// rollback path. Downgrading the schema version leaves the columns in
+    /// place but unread; existing INSERT paths continue to work because the
+    /// columns are nullable and the upsert SQL preserves any pre-existing
+    /// title via `COALESCE(excluded.title, podcast_profiles.title)` — see
+    /// `upsertProfile`.
+    private func migrateSelfDescribingTitlesV15IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 15 else { return }
+
+        if try tableExists("analysis_assets") {
+            try addColumnIfNeeded(
+                table: "analysis_assets",
+                column: "episodeTitle",
+                definition: "TEXT"
+            )
+        }
+
+        if try tableExists("podcast_profiles") {
+            try addColumnIfNeeded(
+                table: "podcast_profiles",
+                column: "title",
+                definition: "TEXT"
+            )
+        }
+
+        try setSchemaVersion(15)
+    }
+
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
     /// is missing (only possible on a corrupted store, since `migrate()` writes
     /// it on first run).
@@ -2236,6 +2329,10 @@ actor AnalysisStore {
             """)
 
         // analysis_assets
+        // playhead-i9dj: `episodeTitle` (nullable) carries the
+        // human-readable episode title pulled from the feed / SwiftData
+        // `Episode.title`. Populated lazily on first observation; NULL on
+        // pre-i9dj rows that have not yet been touched.
         try exec("""
             CREATE TABLE IF NOT EXISTS analysis_assets (
                 id                          TEXT PRIMARY KEY,
@@ -2249,7 +2346,8 @@ actor AnalysisStore {
                 analysisState               TEXT NOT NULL DEFAULT 'new',
                 analysisVersion             INTEGER NOT NULL DEFAULT 1,
                 capabilitySnapshot          TEXT,
-                createdAt                   REAL NOT NULL DEFAULT (strftime('%s', 'now'))
+                createdAt                   REAL NOT NULL DEFAULT (strftime('%s', 'now')),
+                episodeTitle                TEXT
             )
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_assets_episode ON analysis_assets(episodeId)")
@@ -2406,6 +2504,10 @@ actor AnalysisStore {
         try exec("CREATE INDEX IF NOT EXISTS idx_skip_cues_time ON skip_cues(analysisAssetId, startTime)")
 
         // podcast_profiles
+        // playhead-i9dj: `title` (nullable) carries the human-readable show
+        // title pulled from the feed / SwiftData `Podcast.title`. Populated
+        // lazily on first observation; NULL on pre-i9dj rows that have not
+        // yet been touched.
         try exec("""
             CREATE TABLE IF NOT EXISTS podcast_profiles (
                 podcastId                   TEXT PRIMARY KEY,
@@ -2418,7 +2520,8 @@ actor AnalysisStore {
                 observationCount            INTEGER NOT NULL DEFAULT 0,
                 mode                        TEXT NOT NULL DEFAULT 'shadow',
                 recentFalseSkipSignals      INTEGER NOT NULL DEFAULT 0,
-                traitProfileJSON            TEXT
+                traitProfileJSON            TEXT,
+                title                       TEXT
             )
             """)
 
@@ -2695,13 +2798,18 @@ actor AnalysisStore {
         // go through ``updateEpisodeDuration`` once the shard sum is
         // known. Placeholder inserts from `resolveAssetId` pass nil
         // and the column lands NULL.
+        // playhead-i9dj: `episodeTitle` is bound at insert time when the
+        // caller passed it on `AnalysisAsset.episodeTitle`. Existing
+        // call-sites that don't yet thread the title leave it `nil`, and
+        // ``updateAssetEpisodeTitle(id:episodeTitle:)`` populates it
+        // lazily on first observation.
         let sql = """
             INSERT INTO analysis_assets
             (id, episodeId, assetFingerprint, weakFingerprint, sourceURL,
              featureCoverageEndTime, fastTranscriptCoverageEndTime, confirmedAdCoverageEndTime,
              analysisState, analysisVersion, capabilitySnapshot, artifact_class,
-             episodeDurationSec)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             episodeDurationSec, episodeTitle)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -2718,6 +2826,7 @@ actor AnalysisStore {
         bind(stmt, 11, asset.capabilitySnapshot)
         bind(stmt, 12, asset.artifactClass.rawValue)
         bind(stmt, 13, asset.episodeDurationSec)
+        bind(stmt, 14, asset.episodeTitle)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -2896,12 +3005,13 @@ actor AnalysisStore {
     /// here is the contract ``readAsset`` decodes against.
     ///
     /// playhead-gtt9.8: `terminalReason` appended at index 13.
+    /// playhead-i9dj: `episodeTitle` appended at index 14.
     private static let assetSelectColumns: String = """
         id, episodeId, assetFingerprint, weakFingerprint, sourceURL, \
         featureCoverageEndTime, fastTranscriptCoverageEndTime, \
         confirmedAdCoverageEndTime, analysisState, analysisVersion, \
         capabilitySnapshot, artifact_class, episodeDurationSec, \
-        terminalReason
+        terminalReason, episodeTitle
         """
 
     private var assetSelectColumns: String { Self.assetSelectColumns }
@@ -2924,6 +3034,7 @@ actor AnalysisStore {
         //  11: artifact_class  (playhead-h7r)
         //  12: episodeDurationSec  (playhead-gtt9.1.1)
         //  13: terminalReason  (playhead-gtt9.8)
+        //  14: episodeTitle  (playhead-i9dj)
         AnalysisAsset(
             id: text(stmt, 0),
             episodeId: text(stmt, 1),
@@ -2938,7 +3049,8 @@ actor AnalysisStore {
             capabilitySnapshot: optionalText(stmt, 10),
             artifactClass: ArtifactClass.fromPersistedRaw(optionalText(stmt, 11)),
             episodeDurationSec: optionalDouble(stmt, 12),
-            terminalReason: optionalText(stmt, 13)
+            terminalReason: optionalText(stmt, 13),
+            episodeTitle: optionalText(stmt, 14)
         )
     }
 
@@ -3139,6 +3251,38 @@ actor AnalysisStore {
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, episodeDurationSec)
+        bind(stmt, 2, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-i9dj: persist the human-readable episode title on the
+    /// `analysis_assets` row so an exported `analysis.sqlite` is legible
+    /// without joining to the SwiftData side.
+    ///
+    /// Idempotent, lazy backfill semantics: passing a non-nil title
+    /// always overwrites the column; passing `nil` is a no-op (keeps any
+    /// previously-recorded title). Callers fetch the canonical title
+    /// from SwiftData (`Episode.title`) on first observation — typically
+    /// at download enqueue time or playback-start — and invoke this
+    /// setter; later writes from the same call site re-confirm the
+    /// (usually unchanged) title at zero cost.
+    ///
+    /// - Parameters:
+    ///   - id: `analysis_assets.id` of the row to update.
+    ///   - episodeTitle: the title to persist, or `nil` to leave the
+    ///     existing value untouched. Whitespace-only strings are written
+    ///     verbatim — the caller is responsible for trimming if desired.
+    func updateAssetEpisodeTitle(id: String, episodeTitle: String?) throws {
+        // nil-write is a no-op rather than a NULL-overwrite. This
+        // matches the bead's "lazy backfill" intent: a reconciler that
+        // doesn't yet have the title in scope must not erase one that a
+        // prior, better-informed call site already wrote.
+        guard let episodeTitle else { return }
+
+        let sql = "UPDATE analysis_assets SET episodeTitle = ? WHERE id = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, episodeTitle)
         bind(stmt, 2, id)
         try step(stmt, expecting: SQLITE_DONE)
     }
@@ -3877,12 +4021,20 @@ actor AnalysisStore {
     // MARK: - CRUD: podcast_profiles
 
     func upsertProfile(_ profile: PodcastProfile) throws {
+        // playhead-i9dj: `title` participates in the upsert with
+        // COALESCE-preserve semantics — a profile rebuild that doesn't
+        // know the title (e.g. TrustScoringService re-upserting a
+        // fetched profile) must NOT clobber a previously-recorded
+        // title. `COALESCE(excluded.title, podcast_profiles.title)`
+        // keeps the existing column when the new write is NULL and
+        // overwrites only when the new write carries a non-NULL value.
         let sql = """
             INSERT INTO podcast_profiles
             (podcastId, sponsorLexicon, normalizedAdSlotPriors, repeatedCTAFragments,
              jingleFingerprints, implicitFalsePositiveCount, skipTrustScore,
-             observationCount, mode, recentFalseSkipSignals, traitProfileJSON)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             observationCount, mode, recentFalseSkipSignals, traitProfileJSON,
+             title)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(podcastId) DO UPDATE SET
                 sponsorLexicon = excluded.sponsorLexicon,
                 normalizedAdSlotPriors = excluded.normalizedAdSlotPriors,
@@ -3893,7 +4045,8 @@ actor AnalysisStore {
                 observationCount = excluded.observationCount,
                 mode = excluded.mode,
                 recentFalseSkipSignals = excluded.recentFalseSkipSignals,
-                traitProfileJSON = excluded.traitProfileJSON
+                traitProfileJSON = excluded.traitProfileJSON,
+                title = COALESCE(excluded.title, podcast_profiles.title)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -3908,11 +4061,21 @@ actor AnalysisStore {
         bind(stmt, 9, profile.mode)
         bind(stmt, 10, profile.recentFalseSkipSignals)
         bind(stmt, 11, profile.traitProfileJSON)
+        bind(stmt, 12, profile.title)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
     func fetchProfile(podcastId: String) throws -> PodcastProfile? {
-        let sql = "SELECT * FROM podcast_profiles WHERE podcastId = ?"
+        // playhead-i9dj: explicit column list (not `SELECT *`) so future
+        // additive migrations don't shift the positional indices the
+        // decoder reads. `title` lands at index 11 — append-only.
+        let sql = """
+            SELECT podcastId, sponsorLexicon, normalizedAdSlotPriors, repeatedCTAFragments,
+                   jingleFingerprints, implicitFalsePositiveCount, skipTrustScore,
+                   observationCount, mode, recentFalseSkipSignals, traitProfileJSON,
+                   title
+            FROM podcast_profiles WHERE podcastId = ?
+            """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, podcastId)
@@ -3928,8 +4091,37 @@ actor AnalysisStore {
             observationCount: Int(sqlite3_column_int(stmt, 7)),
             mode: text(stmt, 8),
             recentFalseSkipSignals: Int(sqlite3_column_int(stmt, 9)),
-            traitProfileJSON: optionalText(stmt, 10)
+            traitProfileJSON: optionalText(stmt, 10),
+            title: optionalText(stmt, 11)
         )
+    }
+
+    /// playhead-i9dj: persist the human-readable show title on the
+    /// `podcast_profiles` row so an exported `analysis.sqlite` is
+    /// legible without joining to the SwiftData side.
+    ///
+    /// Lazy-create + idempotent semantics:
+    ///   * If no profile row exists for `podcastId`, this method is a
+    ///     no-op (the title will land on the next `upsertProfile` from
+    ///     trust-scoring once the title parameter is threaded — until
+    ///     then we don't materialize a title-only stub).
+    ///   * If a profile row exists, the title column is overwritten
+    ///     with the supplied value. Passing `nil` is a no-op (preserves
+    ///     any previously-recorded title) — same conservative semantics
+    ///     as ``updateAssetEpisodeTitle(id:episodeTitle:)``.
+    ///
+    /// - Parameters:
+    ///   - podcastId: `podcast_profiles.podcastId` of the row to update.
+    ///   - title: the show title to persist, or `nil` for a no-op.
+    func updateProfileTitle(podcastId: String, title: String?) throws {
+        guard let title else { return }
+
+        let sql = "UPDATE podcast_profiles SET title = ? WHERE podcastId = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, title)
+        bind(stmt, 2, podcastId)
+        try step(stmt, expecting: SQLITE_DONE)
     }
 
     // MARK: - CRUD: podcast_planner_state (bd-m8k)

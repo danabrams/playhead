@@ -77,9 +77,26 @@ protocol CorpusExportSource: ShadowDecisionsExportSource {
     /// HIGH-3). The mock can return `nil` for all episodes to exercise the
     /// "podcastId absent" JSONL path.
     func fetchPodcastId(forEpisodeId episodeId: String) async throws -> String?
+    /// playhead-i9dj: look up the `podcast_profiles` row for `podcastId`
+    /// so the exporter can emit the human-readable show title alongside
+    /// the existing podcastId. Returns `nil` when no profile row exists
+    /// (cold-start before trust-scoring has materialized one). Mocks can
+    /// return `nil` to exercise the missing-title JSONL path.
+    func fetchPodcastProfile(podcastId: String) async throws -> PodcastProfile?
 }
 
-extension AnalysisStore: CorpusExportSource {}
+extension AnalysisStore: CorpusExportSource {
+    /// playhead-i9dj: protocol bridge for `fetchPodcastProfile(podcastId:)` —
+    /// the canonical method on `AnalysisStore` is `fetchProfile(podcastId:)`.
+    /// Renaming the actor method in place would ripple through every trust-
+    /// scoring call site, so the protocol uses the longer name and the
+    /// extension trampolines into the existing one. `fetchProfile` is
+    /// actor-isolated and synchronous internally; the protocol method
+    /// is `async` so non-isolated callers can hop onto the actor.
+    nonisolated func fetchPodcastProfile(podcastId: String) async throws -> PodcastProfile? {
+        try await fetchProfile(podcastId: podcastId)
+    }
+}
 
 // MARK: - CorpusExporter
 
@@ -130,15 +147,25 @@ enum CorpusExporter {
     static func assetLine(
         _ asset: AnalysisAsset,
         podcastId: String? = nil,
+        podcastTitle: String? = nil,
         detectorVersion: String = AdDetectionConfig.default.detectorVersion,
         buildCommitSHA: String = BuildInfo.commitSHA
     ) throws -> Data {
+        // playhead-i9dj: emit the human-readable identifiers so the
+        // exported corpus is legible standalone. Both fields are
+        // explicit JSON `null` when missing — old exports without
+        // titles still parse on the read side because consumers should
+        // treat them as optional. `episodeTitle` comes off the
+        // `analysis_assets` row directly; `podcastTitle` is looked up
+        // by the caller via `fetchProfile(podcastId:)?.title`.
         let obj: [String: Any] = [
             "type": "asset",
             "schemaVersion": schemaVersion,
             "analysisAssetId": asset.id,
             "episodeId": asset.episodeId,
             "podcastId": podcastId as Any? ?? NSNull(),
+            "podcastTitle": podcastTitle as Any? ?? NSNull(),
+            "episodeTitle": asset.episodeTitle as Any? ?? NSNull(),
             "assetFingerprint": asset.assetFingerprint,
             "weakFingerprint": asset.weakFingerprint as Any? ?? NSNull(),
             "sourceURL": asset.sourceURL,
@@ -255,6 +282,11 @@ enum CorpusExporter {
         var skippedCorrectionCount = 0
 
         let assets = try await store.fetchAllAssets()
+        // playhead-i9dj: cache resolved podcast titles by podcastId so
+        // we don't re-query `podcast_profiles` for every asset that
+        // shares a show. The cache is per-export (function scope) so it
+        // never grows unbounded across runs.
+        var podcastTitleCache: [String: String?] = [:]
         for asset in assets {
             // Look up podcastId by episodeId. A failing lookup is non-fatal:
             // downstream tooling reads podcastId as optional (HIGH-3 allows
@@ -269,8 +301,33 @@ enum CorpusExporter {
                 podcastId = nil
             }
 
+            // playhead-i9dj: look up the podcast (show) title via
+            // `podcast_profiles.title`. Cache hits avoid the extra
+            // SQL on shows that span many episodes; misses go through
+            // a single fetchProfile and are memoized for this export.
+            // Failures emit null rather than aborting (parity with the
+            // podcastId lookup above).
+            let podcastTitle: String?
+            if let pid = podcastId {
+                if let cached = podcastTitleCache[pid] {
+                    podcastTitle = cached
+                } else {
+                    do {
+                        podcastTitle = try await store.fetchPodcastProfile(podcastId: pid)?.title
+                    } catch {
+                        logger.warning(
+                            "export: fetchPodcastProfile failed for asset=\(asset.id, privacy: .public) podcast=\(pid, privacy: .public) error=\(String(describing: error), privacy: .public) — emitting null"
+                        )
+                        podcastTitle = nil
+                    }
+                    podcastTitleCache[pid] = podcastTitle
+                }
+            } else {
+                podcastTitle = nil
+            }
+
             // asset record
-            let assetData = try assetLine(asset, podcastId: podcastId)
+            let assetData = try assetLine(asset, podcastId: podcastId, podcastTitle: podcastTitle)
             try write(line: assetData, to: handle)
             assetCount += 1
 

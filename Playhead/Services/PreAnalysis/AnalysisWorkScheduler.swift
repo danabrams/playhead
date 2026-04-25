@@ -321,6 +321,20 @@ actor AnalysisWorkScheduler {
     /// Tracks OSSignposter queue-wait intervals keyed by jobId.
     private var queueWaitStates: [String: OSSignpostIntervalState] = [:]
 
+    /// playhead-i9dj: stash episode titles observed at `enqueue(...)` time
+    /// so `resolveAnalysisAssetId` can populate `episodeTitle` on the
+    /// `analysis_assets` row at first insert.
+    ///
+    /// Without this seam the very first enqueue would lose the title
+    /// (the asset row does not yet exist, so `updateAssetEpisodeTitle`
+    /// finds nothing to update) and the column would only be populated
+    /// on a later observation. Subsequent enqueues that include the
+    /// title overwrite the entry; missing titles are no-ops.
+    ///
+    /// The dictionary is cleared per-episode at materialization time;
+    /// it is purely best-effort and never blocks enqueue or processing.
+    private var pendingEpisodeTitles: [String: String] = [:]
+
     init(
         store: AnalysisStore,
         jobRunner: AnalysisJobRunner,
@@ -350,13 +364,23 @@ actor AnalysisWorkScheduler {
 
     /// Enqueue a new pre-analysis job for an episode.
     /// Explicit downloads get priority=10, auto-downloads get priority=0.
+    ///
+    /// playhead-i9dj: `podcastTitle` and `episodeTitle` (when supplied)
+    /// are persisted on the AnalysisStore rows immediately so an
+    /// exported analysis.sqlite is legible without joining to the
+    /// SwiftData side. Both fields are optional — if nil, AnalysisStore
+    /// title columns are left untouched (the `nil`-write contract on
+    /// `updateAssetEpisodeTitle` / `updateProfileTitle` is a no-op, not a
+    /// NULL overwrite).
     func enqueue(
         episodeId: String,
         podcastId: String?,
         downloadId: String,
         sourceFingerprint: String,
         isExplicitDownload: Bool,
-        desiredCoverage: Double? = nil
+        desiredCoverage: Double? = nil,
+        podcastTitle: String? = nil,
+        episodeTitle: String? = nil
     ) async {
         let priority = isExplicitDownload ? 10 : 0
         let coverage = desiredCoverage ?? config.defaultT0DepthSeconds
@@ -396,6 +420,42 @@ actor AnalysisWorkScheduler {
         } catch {
             logger.error("Failed to enqueue job: \(error)")
         }
+
+        // playhead-i9dj: write self-describing titles to the
+        // AnalysisStore as soon as the SwiftData side has them in scope.
+        // Both writes are best-effort — a SQL hiccup must not block the
+        // download / analysis pipeline. The setters are nil-safe (a nil
+        // title is a no-op, never a NULL overwrite), so call sites that
+        // partially populate (e.g. only `podcastTitle`) work too.
+        if let podcastTitle, let podcastId {
+            do {
+                try await store.updateProfileTitle(podcastId: podcastId, title: podcastTitle)
+            } catch {
+                logger.warning("Failed to persist podcast title for \(podcastId): \(error)")
+            }
+        }
+        if let episodeTitle {
+            // The asset row may not exist yet (it's created lazily by
+            // `resolveAnalysisAssetId` at job execution time). Look it
+            // up by episodeId and write opportunistically.
+            do {
+                if let asset = try await store.fetchAssetByEpisodeId(episodeId) {
+                    try await store.updateAssetEpisodeTitle(id: asset.id, episodeTitle: episodeTitle)
+                }
+            } catch {
+                logger.warning("Failed to persist episode title for \(episodeId): \(error)")
+            }
+        }
+
+        // playhead-i9dj: stash the titles for `resolveAnalysisAssetId`
+        // to consume when it materializes the analysis_assets row at
+        // job execution time. Without this seam, the very first enqueue
+        // (asset row does not yet exist) would lose the episodeTitle
+        // until the second observation rewrites it.
+        if let episodeTitle {
+            pendingEpisodeTitles[episodeId] = episodeTitle
+        }
+
         wakeSchedulerLoop()
     }
 
@@ -1878,6 +1938,11 @@ actor AnalysisWorkScheduler {
         }
 
         let assetId = UUID().uuidString
+        // playhead-i9dj: consume any stashed episode title from `enqueue(...)`
+        // so the asset row carries the self-describing metadata at first
+        // insert. The stash is cleared regardless — a missing entry simply
+        // means no title was observed yet (lazy backfill on next enqueue).
+        let stashedEpisodeTitle = pendingEpisodeTitles.removeValue(forKey: job.episodeId)
         let asset = AnalysisAsset(
             id: assetId,
             episodeId: job.episodeId,
@@ -1889,7 +1954,8 @@ actor AnalysisWorkScheduler {
             confirmedAdCoverageEndTime: nil,
             analysisState: "queued",
             analysisVersion: PreAnalysisConfig.analysisVersion,
-            capabilitySnapshot: capabilityJSON
+            capabilitySnapshot: capabilityJSON,
+            episodeTitle: stashedEpisodeTitle
         )
         guard !lostOwnership else { throw CancellationError() }
         try await store.insertAsset(asset)
