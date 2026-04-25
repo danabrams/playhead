@@ -198,6 +198,14 @@ actor SkipOrchestrator {
     /// The podcast ID for the current episode. Needed to populate banner items.
     private var activePodcastId: String?
 
+    /// The deterministic evidence catalog for the current episode's transcript,
+    /// pushed by `AnalysisCoordinator` whenever new transcript material lands.
+    /// Sliced per-window when emitting banner items so callers see only the
+    /// evidence that overlaps the skipped span. `nil` when no catalog has
+    /// been pushed for the active asset — the banner falls back to an empty
+    /// `evidenceCatalogEntries` array, which the UI handles gracefully.
+    private var activeEvidenceCatalog: EvidenceCatalog?
+
     /// Hasher used to stamp `auto_skip_fired` events with a per-install
     /// episode ID hash. Production passes a closure bound to the shared
     /// `SurfaceStatusInvariantLogger` instance so the hash is byte-
@@ -293,11 +301,34 @@ actor SkipOrchestrator {
         bannerContinuations.removeValue(forKey: id)
     }
 
+    // MARK: - Evidence Catalog (banner transparency)
+
+    /// Push the deterministic evidence catalog for the active asset. The
+    /// catalog is sliced per-window when emitting banners so each banner
+    /// carries only the evidence overlapping its skipped span.
+    ///
+    /// Callers may push successively richer catalogs as transcript material
+    /// arrives (e.g. fast pass first, then final). Late-arriving catalogs do
+    /// NOT retroactively update banners already emitted — those carry the
+    /// snapshot taken at emit time.
+    ///
+    /// Mismatched-asset catalogs are dropped silently: the orchestrator only
+    /// retains a catalog whose `analysisAssetId` matches `activeAssetId`. This
+    /// guards against late deliveries that race a podcast/episode change.
+    func setEvidenceCatalog(_ catalog: EvidenceCatalog) {
+        guard let activeAssetId, catalog.analysisAssetId == activeAssetId else {
+            logger.debug("Dropping evidence catalog for non-active asset \(catalog.analysisAssetId, privacy: .public)")
+            return
+        }
+        activeEvidenceCatalog = catalog
+    }
+
     /// Emit a banner item for the given managed window to all banner listeners.
     private func emitBannerItem(for managed: ManagedWindow) {
         guard !bannerContinuations.isEmpty else { return }
         let adWindow = managed.adWindow
         let podcastId = activePodcastId ?? ""
+        let entries = catalogEntries(overlapping: managed.snappedStart, end: managed.snappedEnd)
         let item = AdSkipBannerItem(
             id: UUID().uuidString,
             windowId: adWindow.id,
@@ -308,14 +339,25 @@ actor SkipOrchestrator {
             metadataConfidence: adWindow.metadataConfidence,
             metadataSource: adWindow.metadataSource,
             podcastId: podcastId,
-            // EvidenceCatalog entries are not carried on ManagedWindow/AdWindow today.
-            // Phase 7's UserCorrectionStore wires catalog data at the call site;
-            // until then the banner carries an empty array and correction inference
-            // falls back to windowId-scoped reverts.
-            evidenceCatalogEntries: []
+            evidenceCatalogEntries: entries
         )
         for (_, continuation) in bannerContinuations {
             continuation.yield(item)
+        }
+    }
+
+    /// Slice catalog entries whose coverage span overlaps the skipped window.
+    /// Returns an empty array when no catalog is available or none overlap.
+    private func catalogEntries(overlapping start: Double, end: Double) -> [EvidenceEntry] {
+        guard let catalog = activeEvidenceCatalog else { return [] }
+        // Closed-interval overlap: an entry overlaps the window iff its
+        // coverage span shares ANY point with [start, end], including the
+        // boundaries themselves. We deliberately use `<=` on both sides so
+        // zero-duration entries that fall exactly on a snapped boundary
+        // still surface — typical for short FM-bounded ad windows where the
+        // disclosure phrase straddles the snap edge.
+        return catalog.entries.filter { entry in
+            entry.coverageStartTime <= end && entry.coverageEndTime >= start
         }
     }
 
@@ -351,6 +393,7 @@ actor SkipOrchestrator {
         activeAssetId = analysisAssetId
         activeEpisodeId = episodeId
         activePodcastId = podcastId
+        activeEvidenceCatalog = nil
         inAdState = false
         lastSeekTime = nil
         skipSuppressedAfterSeek = false
@@ -405,6 +448,7 @@ actor SkipOrchestrator {
         activeAssetId = nil
         activeEpisodeId = nil
         activePodcastId = nil
+        activeEvidenceCatalog = nil
         inAdState = false
         banneredWindowIds.removeAll()
         pushSkipCues()
