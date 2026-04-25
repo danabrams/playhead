@@ -112,12 +112,24 @@ private struct StubDownloadsSettingsProvider: DownloadsSettingsProviding {
     func currentAutoDownloadSetting() -> AutoDownloadOnSubscribe { setting }
 }
 
+/// playhead-5uvz.4 (Gap-5): records `scheduleBackfillIfNeeded` calls so
+/// the rearm-after-refresh contract is observable without standing up a
+/// real `BackgroundProcessingService`.
+private actor StubBackfillScheduler: BackfillScheduling {
+    private(set) var scheduleCallCount = 0
+
+    func scheduleBackfillIfNeeded() async {
+        scheduleCallCount += 1
+    }
+}
+
 // MARK: - Factory
 
 private func makeService(
     podcasts: [PodcastFeedSnapshot] = [],
     setting: AutoDownloadOnSubscribe = .off,
-    scheduler: StubTaskScheduler = StubTaskScheduler()
+    scheduler: StubTaskScheduler = StubTaskScheduler(),
+    backfillScheduler: (any BackfillScheduling)? = nil
 ) -> (
     service: BackgroundFeedRefreshService,
     enumerator: StubPodcastEnumerator,
@@ -135,7 +147,8 @@ private func makeService(
         refresher: refresher,
         downloader: downloader,
         settingsProvider: settings,
-        taskScheduler: scheduler
+        taskScheduler: scheduler,
+        backfillScheduler: backfillScheduler
     )
     return (service, enumerator, refresher, downloader, scheduler)
 }
@@ -521,6 +534,117 @@ struct BackgroundFeedRefreshExpirationTests {
                 "Normal-exit path must NOT call setTaskCompleted a second time")
         #expect(task.completedSuccess == false,
                 "Post-release completion must not overwrite the expired status")
+    }
+}
+
+// MARK: - Backfill rearm (Gap-5)
+
+@Suite("BackgroundFeedRefreshService — backfill rearm after refresh")
+struct BackgroundFeedRefreshBackfillRearmTests {
+
+    // playhead-5uvz.4 (Gap-5): regression — `BackgroundFeedRefreshService`
+    // and `BackgroundProcessingService` register independent BGTaskScheduler
+    // identifiers and have no shared lifecycle. A feed-refresh fire that
+    // adds 4 downloads but doesn't explicitly arm a backfill task leaves
+    // those 4 downloads unanalyzed until iOS happens to grant a backfill
+    // window — empirically up to ~12h overnight (same class of gap as
+    // playhead-fuo6's `appDidEnterBackground` fix).
+    //
+    // The fix wires `BackgroundFeedRefreshService.runRefreshOnce` to call
+    // the injected `BackfillScheduling.scheduleBackfillIfNeeded()` after
+    // any fire that enqueued at least one new download. iOS coalesces
+    // duplicate submissions, so a stale outstanding request does not
+    // cause double-work.
+    @Test("Refresh that enqueues new downloads rearms the backfill BG task")
+    func refreshWithNewDownloadsRearmsBackfill() async throws {
+        let feed = URL(string: "https://example.com/a.xml")!
+        let backfillScheduler = StubBackfillScheduler()
+        let (service, _, refresher, downloader, _) = makeService(
+            podcasts: [
+                PodcastFeedSnapshot(feedURL: feed, existingEpisodeGUIDs: [])
+            ],
+            setting: .all,
+            backfillScheduler: backfillScheduler
+        )
+        await refresher.setNewEpisodes(
+            [
+                newRecord(key: "ep-new-1", feed: feed),
+                newRecord(key: "ep-new-2", feed: feed),
+            ],
+            for: feed
+        )
+
+        let task = StubBackgroundTask()
+        await service.handleFeedRefreshTask(task)
+
+        // Sanity: downloads actually got enqueued.
+        let enqueued = await downloader.enqueuedEpisodeIds()
+        #expect(Set(enqueued) == Set(["ep-new-1", "ep-new-2"]))
+
+        // The contract under test: rearm fires exactly once when the
+        // fire enqueued downloads. Idempotent submission on iOS's side
+        // means a second call would be safe, but the service shouldn't
+        // be making redundant calls per fire — keep the count tight.
+        let rearmCount = await backfillScheduler.scheduleCallCount
+        #expect(rearmCount == 1,
+                "Refresh that enqueued downloads must rearm backfill exactly once (got \(rearmCount))")
+    }
+
+    @Test("Refresh with no new downloads does not rearm backfill")
+    func refreshWithNoNewDownloadsDoesNotRearm() async throws {
+        let feed = URL(string: "https://example.com/a.xml")!
+        let backfillScheduler = StubBackfillScheduler()
+        let (service, _, _, _, _) = makeService(
+            podcasts: [
+                PodcastFeedSnapshot(feedURL: feed, existingEpisodeGUIDs: ["ep-known"])
+            ],
+            setting: .all,
+            backfillScheduler: backfillScheduler
+        )
+        // Refresher returns no new episodes — nothing to enqueue.
+
+        let task = StubBackgroundTask()
+        await service.handleFeedRefreshTask(task)
+
+        // No downloads were enqueued, so there's no new analysis work
+        // for backfill to drain. Skipping the rearm here keeps the
+        // BGTaskScheduler queue lean — iOS heuristics already deprioritize
+        // tasks the app submits without them being needed, and avoiding
+        // gratuitous submissions matters on an OS that throttles apps
+        // which over-submit BG requests.
+        let rearmCount = await backfillScheduler.scheduleCallCount
+        #expect(rearmCount == 0,
+                "Refresh that enqueued zero downloads must not rearm backfill (got \(rearmCount))")
+    }
+
+    @Test("Refresh with auto-download .off does not rearm even when new episodes are discovered")
+    func refreshWithAutoDownloadOffDoesNotRearm() async throws {
+        let feed = URL(string: "https://example.com/a.xml")!
+        let backfillScheduler = StubBackfillScheduler()
+        let (service, _, refresher, downloader, _) = makeService(
+            podcasts: [
+                PodcastFeedSnapshot(feedURL: feed, existingEpisodeGUIDs: [])
+            ],
+            setting: .off,
+            backfillScheduler: backfillScheduler
+        )
+        await refresher.setNewEpisodes(
+            [newRecord(key: "ep-new-1", feed: feed)],
+            for: feed
+        )
+
+        let task = StubBackgroundTask()
+        await service.handleFeedRefreshTask(task)
+
+        // No downloads under `.off`, so backfill has nothing to drain
+        // from this fire. The rearm trigger is "did we enqueue downloads",
+        // not "did we discover new episodes" — the latter is a UI signal,
+        // the former is the analysis-pipeline signal.
+        let enqueued = await downloader.enqueuedEpisodeIds()
+        #expect(enqueued.isEmpty)
+        let rearmCount = await backfillScheduler.scheduleCallCount
+        #expect(rearmCount == 0,
+                "Refresh under auto-download .off must not rearm backfill")
     }
 }
 

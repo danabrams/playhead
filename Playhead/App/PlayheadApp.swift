@@ -152,7 +152,14 @@ struct PlayheadApp: App {
                         downloader: ProductionAutoDownloadEnqueuer(
                             downloadManager: runtime.downloadManager
                         ),
-                        settingsProvider: ProductionDownloadsSettingsProvider()
+                        settingsProvider: ProductionDownloadsSettingsProvider(),
+                        // playhead-5uvz.4 (Gap-5): rearm the backfill
+                        // BGProcessingTask after a refresh that enqueues
+                        // downloads so iOS wakes us to drain analysis
+                        // even when the user never presses play.
+                        backfillScheduler: ProductionBackfillScheduler(
+                            backgroundProcessingService: runtime.backgroundProcessingService
+                        )
                     )
                     BackgroundFeedRefreshService.attachSharedService(feedRefreshService)
                     feedRefreshService.start()

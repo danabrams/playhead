@@ -108,6 +108,25 @@ protocol DownloadsSettingsProviding: Sendable {
     func currentAutoDownloadSetting() -> AutoDownloadOnSubscribe
 }
 
+/// playhead-5uvz.4 (Gap-5): submits a backfill `BGProcessingTask` so
+/// iOS wakes the app to drain the analysis queue after a feed refresh
+/// just enqueued new downloads.
+///
+/// `BackgroundFeedRefreshService` and `BackgroundProcessingService`
+/// register independent BGTaskScheduler identifiers and have no
+/// shared lifecycle. A feed-refresh fire that adds 4 downloads but
+/// finishes without explicitly arming a backfill task leaves those
+/// 4 downloads unanalyzed until iOS happens to grant a backfill
+/// window — empirically up to ~12h while the device is locked
+/// overnight (same class of gap as playhead-fuo6).
+///
+/// Production wires this to `BackgroundProcessingService.scheduleBackfillIfNeeded()`
+/// via `ProductionBackfillScheduler`. Tests inject a stub to assert the
+/// rearm fires (or doesn't) without standing up the real scheduler.
+protocol BackfillScheduling: Sendable {
+    func scheduleBackfillIfNeeded() async
+}
+
 // MARK: - BackgroundFeedRefreshService
 
 /// Drives the `BGAppRefreshTask` that periodically re-fetches every
@@ -223,6 +242,14 @@ actor BackgroundFeedRefreshService {
     private let settingsProvider: any DownloadsSettingsProviding
     private let taskScheduler: any BackgroundTaskScheduling
 
+    /// playhead-5uvz.4 (Gap-5): rearms the backfill BGProcessingTask
+    /// when this fire enqueued at least one new download. nil-able so
+    /// older test factories that don't care about the rearm path can
+    /// continue to construct a service without a scheduler stub. In
+    /// production the App-scope wiring always supplies one — see
+    /// `ProductionBackfillScheduler`.
+    private let backfillScheduler: (any BackfillScheduling)?
+
     /// Actor-local expiration flag. iOS's `BGAppRefreshTask.expirationHandler`
     /// fires on an arbitrary system queue; the handler closure hops back
     /// onto the actor to flip this flag so the refresh loop can bail at
@@ -252,13 +279,15 @@ actor BackgroundFeedRefreshService {
         refresher: any FeedRefreshing,
         downloader: any AutoDownloadEnqueueing,
         settingsProvider: any DownloadsSettingsProviding,
-        taskScheduler: any BackgroundTaskScheduling = BGTaskScheduler.shared
+        taskScheduler: any BackgroundTaskScheduling = BGTaskScheduler.shared,
+        backfillScheduler: (any BackfillScheduling)? = nil
     ) {
         self.enumerator = enumerator
         self.refresher = refresher
         self.downloader = downloader
         self.settingsProvider = settingsProvider
         self.taskScheduler = taskScheduler
+        self.backfillScheduler = backfillScheduler
     }
 
     // MARK: - Start
@@ -406,16 +435,31 @@ actor BackgroundFeedRefreshService {
             newEpisodes: allNewEpisodes,
             setting: setting
         )
+        var enqueuedCount = 0
         for episode in toDownload {
             if expired { break }
             await downloader.enqueueBackgroundDownload(
                 episodeId: episode.canonicalEpisodeKey,
                 from: episode.audioURL
             )
+            enqueuedCount += 1
         }
         logger.info(
             "Feed refresh: \(allNewEpisodes.count, privacy: .public) new episodes, \(toDownload.count, privacy: .public) enqueued (setting=\(setting.rawValue, privacy: .public))"
         )
+
+        // playhead-5uvz.4 (Gap-5): if this fire enqueued any new
+        // downloads, ask `BackgroundProcessingService` to submit a
+        // backfill BGProcessingTask so iOS wakes the app to drain the
+        // analysis queue. Without this hop, the feed-refresh and
+        // backfill schedulers have independent lifecycles and the
+        // device can stall for hours before backfill gets a window
+        // (overnight blackout class of bug — same shape as fuo6).
+        // Skip the rearm when no downloads were enqueued: a refresh
+        // that found nothing new doesn't change the backfill backlog.
+        if enqueuedCount > 0 {
+            await backfillScheduler?.scheduleBackfillIfNeeded()
+        }
     }
 
     /// Pure selection rule. Separated so tests can pin the ordering
@@ -538,6 +582,21 @@ struct ProductionAutoDownloadEnqueuer: AutoDownloadEnqueueing {
 struct ProductionDownloadsSettingsProvider: DownloadsSettingsProviding {
     func currentAutoDownloadSetting() -> AutoDownloadOnSubscribe {
         DownloadsSettings.load().autoDownloadOnSubscribe
+    }
+}
+
+/// Production `BackfillScheduling` backed by `BackgroundProcessingService`.
+/// Forwards `scheduleBackfillIfNeeded()` to the live BPS so a feed-refresh
+/// fire that just enqueued downloads also rearms the backfill BGProcessingTask
+/// (playhead-5uvz.4 / Gap-5). Holding the BPS through a small wrapper rather
+/// than threading the actor itself keeps the BackgroundFeedRefreshService
+/// dependency surface narrow — the feed-refresh service has no other reason
+/// to know about BPS internals.
+struct ProductionBackfillScheduler: BackfillScheduling {
+    let backgroundProcessingService: BackgroundProcessingService
+
+    func scheduleBackfillIfNeeded() async {
+        await backgroundProcessingService.scheduleBackfillIfNeeded()
     }
 }
 
