@@ -114,10 +114,20 @@ struct FeedDescriptionEvidenceBuilder: Sendable {
     /// Source-field trust factor. Description (`<description>`) is the
     /// canonical home for sponsor disclosures in podcast RSS; summary is a
     /// secondary fallback that often duplicates description content.
+    ///
+    /// playhead-gtt9.22: chapter and showNotes are present here for
+    /// completeness but `FeedDescriptionEvidenceBuilder` only consumes
+    /// description/summary cues; chapter-derived ledger entries flow
+    /// through `ChapterMetadataEvidenceBuilder` (publisher metadata is a
+    /// different signal shape). Show-notes-extracted cues retain a
+    /// description-equivalent trust because they share the same prose
+    /// origin.
     private func sourceFieldTrust(_ field: MetadataCueSourceField) -> Double {
         switch field {
         case .description: return 1.0
         case .summary:     return 0.8
+        case .chapter:     return 1.0
+        case .showNotes:   return 1.0
         }
     }
 

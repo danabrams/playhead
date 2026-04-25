@@ -32,6 +32,20 @@ enum MetadataCueType: String, Sendable, Codable, CaseIterable {
 enum MetadataCueSourceField: String, Sendable, Codable, CaseIterable {
     case description
     case summary
+    /// playhead-gtt9.22: Cue derived from a chapter marker
+    /// (`<podcast:chapter>`, `<podcast:chapters>` JSON, or ID3 CHAP).
+    /// Distinct from `description`/`summary` so FrozenTrace, the
+    /// reliability matrix, and any future per-source policy can treat
+    /// chapter-derived signals separately. Trust factor for this field
+    /// lives in `FeedDescriptionEvidenceBuilder.sourceFieldTrust`.
+    case chapter
+    /// playhead-gtt9.22: Cue derived from a structured sponsor mention
+    /// in show-notes HTML (e.g. "This episode is sponsored by …" lists).
+    /// Distinct from `description` because show-notes (`content:encoded`
+    /// or fallback `description`) often contains a richer prose-form
+    /// sponsor disclosure than the iTunes summary, and we want telemetry
+    /// to attribute hits separately.
+    case showNotes
 }
 
 // MARK: - EpisodeMetadataCue
