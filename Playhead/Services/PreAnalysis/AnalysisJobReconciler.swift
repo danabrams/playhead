@@ -13,6 +13,12 @@ struct ReconciliationReport: Sendable {
     let missingFilesStillBlocked: Int
     let modelsUnblocked: Int
     let staleVersionsSuperseded: Int
+    /// playhead-5uvz.8 (Gap-10): jobs re-enqueued at the current
+    /// analysis version inside the same `reconcile()` pass that
+    /// superseded their predecessors. Counted distinctly from
+    /// `unEnqueuedDownloadsCreated` (step 7) so callers can tell
+    /// version-bump churn apart from "new download discovered."
+    let staleVersionsReenqueued: Int
     let completedJobsGarbageCollected: Int
     let failedJobsBackedOff: Int
     let unEnqueuedDownloadsCreated: Int
@@ -52,7 +58,8 @@ actor AnalysisJobReconciler {
             return ReconciliationReport(
                 expiredLeasesRecovered: 0, missingFilesUnblocked: 0,
                 missingFilesStillBlocked: 0, modelsUnblocked: 0,
-                staleVersionsSuperseded: 0, completedJobsGarbageCollected: 0,
+                staleVersionsSuperseded: 0, staleVersionsReenqueued: 0,
+                completedJobsGarbageCollected: 0,
                 failedJobsBackedOff: 0, unEnqueuedDownloadsCreated: 0
             )
         }
@@ -72,7 +79,8 @@ actor AnalysisJobReconciler {
             missingFilesUnblocked: step2.unblocked,
             missingFilesStillBlocked: step2.stillBlocked,
             modelsUnblocked: step3,
-            staleVersionsSuperseded: step4,
+            staleVersionsSuperseded: step4.superseded,
+            staleVersionsReenqueued: step4.reenqueued,
             completedJobsGarbageCollected: step5,
             failedJobsBackedOff: step6,
             unEnqueuedDownloadsCreated: step7
@@ -85,6 +93,7 @@ actor AnalysisJobReconciler {
         missingFilesStillBlocked=\(report.missingFilesStillBlocked), \
         modelsUnblocked=\(report.modelsUnblocked), \
         staleVersions=\(report.staleVersionsSuperseded), \
+        staleReenqueued=\(report.staleVersionsReenqueued), \
         gc=\(report.completedJobsGarbageCollected), \
         backoff=\(report.failedJobsBackedOff), \
         newJobs=\(report.unEnqueuedDownloadsCreated)
@@ -168,25 +177,111 @@ actor AnalysisJobReconciler {
 
     // MARK: - Step 4: Supersede stale versions
 
-    private func supersedeStaleVersions() async throws -> Int {
+    /// Marks every non-terminal job whose `workKey` encodes a stale
+    /// `analysisVersion` as `superseded`, then enqueues a fresh
+    /// replacement at the current version in the same pass.
+    ///
+    /// playhead-5uvz.8 (Gap-10): without the in-pass re-enqueue,
+    /// in-process analysis-version bumps (test harness, hot config) had
+    /// to wait for the next `reconcile()` call before step 7
+    /// (`discoverUnEnqueuedDownloads`) noticed the episode had no active
+    /// job. Cold launch happened to work because step 7 runs in the
+    /// same pass and `fetchActiveJobEpisodeIds` filters
+    /// `superseded`/`complete` out of the active set — but the
+    /// "same-pass re-enqueue" was incidental, not contractual. This
+    /// method now explicitly mints a `queued` row at
+    /// `currentAnalysisVersion` for every superseded predecessor whose
+    /// download is still cached, preserving correlated fields
+    /// (`analysisAssetId`, `podcastId`, `priority`, `downloadId`) and
+    /// resetting attempt/error/lease state.
+    ///
+    /// Returns the count of superseded rows AND the count of fresh
+    /// `queued` replacements minted in the same pass. The replacement
+    /// count is reported separately on `ReconciliationReport`
+    /// (`staleVersionsReenqueued`) to keep version-bump churn visible
+    /// against step 7's "new download discovered" newJobs counter.
+    private func supersedeStaleVersions() async throws -> (superseded: Int, reenqueued: Int) {
         // Fetch all non-terminal jobs and check their workKey version.
         let allStates = ["queued", "running", "paused",
                          "blocked:missingFile", "blocked:modelUnavailable", "failed"]
         var superseded = 0
+        var reenqueued = 0
+        // Track episodes already re-enqueued in this pass so multiple
+        // stale rows for the same episode (same workKey is unique, but
+        // different jobTypes can coexist) only produce one replacement.
+        var reenqueuedEpisodes = Set<String>()
         for state in allStates {
             let jobs = try await store.fetchJobsByState(state)
             for job in jobs {
                 let version = parseVersionFromWorkKey(job.workKey)
-                if let version, version != Self.currentAnalysisVersion {
-                    try await store.updateJobState(jobId: job.jobId, state: "superseded")
-                    superseded += 1
+                guard let version, version != Self.currentAnalysisVersion else { continue }
+                try await store.updateJobState(jobId: job.jobId, state: "superseded")
+                superseded += 1
+                if !reenqueuedEpisodes.contains(job.episodeId),
+                   try await enqueueReplacement(for: job) {
+                    reenqueuedEpisodes.insert(job.episodeId)
+                    reenqueued += 1
                 }
             }
         }
         if superseded > 0 {
-            logger.info("Superseded \(superseded) stale-version job(s)")
+            logger.info("""
+            Superseded \(superseded) stale-version job(s); \
+            re-enqueued \(reenqueued) at v\(Self.currentAnalysisVersion)
+            """)
         }
-        return superseded
+        return (superseded, reenqueued)
+    }
+
+    /// Inserts a fresh `queued` replacement for a job we just
+    /// superseded. Returns `true` if a new row was inserted, `false` if
+    /// no replacement was needed (download no longer cached, or a row
+    /// at the new workKey already exists — `INSERT OR IGNORE` semantics
+    /// in `AnalysisStore.insertJob`). Caller has already marked the
+    /// predecessor `superseded`.
+    private func enqueueReplacement(for staleJob: AnalysisJob) async throws -> Bool {
+        // Only replace pre-analysis jobs. Playback/backfill rows are
+        // fanned out by the playback or backfill pipelines themselves;
+        // re-creating one here would race with their own enqueue paths.
+        guard staleJob.jobType == "preAnalysis" else { return false }
+        // Don't mint a job for an episode whose download no longer
+        // exists; step 7 has the same skip and we match its semantics.
+        guard await downloadManager.cachedFileURL(for: staleJob.episodeId) != nil else {
+            return false
+        }
+        let now = Date().timeIntervalSince1970
+        let workKey = AnalysisJob.computeWorkKey(
+            fingerprint: staleJob.sourceFingerprint,
+            analysisVersion: Self.currentAnalysisVersion,
+            jobType: staleJob.jobType
+        )
+        let replacement = AnalysisJob(
+            jobId: UUID().uuidString,
+            jobType: staleJob.jobType,
+            episodeId: staleJob.episodeId,
+            podcastId: staleJob.podcastId,
+            // Reuse the prior asset row — feature/transcript artifacts
+            // already attached to it remain accessible. The runner will
+            // re-derive coverage from the asset on its next pass.
+            analysisAssetId: staleJob.analysisAssetId,
+            workKey: workKey,
+            sourceFingerprint: staleJob.sourceFingerprint,
+            downloadId: staleJob.downloadId,
+            priority: staleJob.priority,
+            desiredCoverageSec: staleJob.desiredCoverageSec,
+            featureCoverageSec: 0,
+            transcriptCoverageSec: 0,
+            cueCoverageSec: 0,
+            state: "queued",
+            attemptCount: 0,
+            nextEligibleAt: nil,
+            leaseOwner: nil,
+            leaseExpiresAt: nil,
+            lastErrorCode: nil,
+            createdAt: now,
+            updatedAt: now
+        )
+        return try await store.insertJob(replacement)
     }
 
     // MARK: - Step 5: GC old completed/superseded jobs

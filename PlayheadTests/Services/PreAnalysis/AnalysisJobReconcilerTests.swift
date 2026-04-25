@@ -309,8 +309,132 @@ struct AnalysisJobReconcilerTests {
         #expect(second.missingFilesStillBlocked == 0)
         #expect(second.modelsUnblocked == 0)
         #expect(second.staleVersionsSuperseded == 0)
+        #expect(second.staleVersionsReenqueued == 0)
         #expect(second.completedJobsGarbageCollected == 0)
         #expect(second.failedJobsBackedOff == 0)
         #expect(second.unEnqueuedDownloadsCreated == 0)
+    }
+
+    // MARK: - playhead-5uvz.8 (Gap-10): same-pass re-enqueue
+
+    @Test("Bumping analysis version produces fresh queued rows in the same reconcile pass")
+    func testStaleVersionReenqueuesInSamePass() async throws {
+        let store = try await makeTestStore()
+
+        // Simulate the post-bump state: existing queued jobs at v0 for
+        // episodes whose downloads are still cached. The bead's
+        // motivating scenario is "in-process analysis-version bump"
+        // (test harness, hot config). `PreAnalysisConfig.analysisVersion`
+        // is a `static let`, so we encode the same end state by
+        // inserting jobs with a workKey that's NOT at the current
+        // version — semantically identical to "the version was bumped
+        // since these jobs were created."
+        let cachedFingerprints: [(episode: String, fingerprint: String)] = [
+            ("ep-bumped-1", "fp-bumped-1"),
+            ("ep-bumped-2", "fp-bumped-2"),
+        ]
+        let downloads = StubDownloadProvider()
+        for entry in cachedFingerprints {
+            downloads.cachedURLs[entry.episode] = URL(
+                fileURLWithPath: "/tmp/\(entry.episode).mp3"
+            )
+            downloads.fingerprints[entry.episode] = AudioFingerprint(
+                weak: entry.fingerprint, strong: nil
+            )
+            try await store.insertJob(makeAnalysisJob(
+                jobId: "stale-\(entry.episode)",
+                jobType: "preAnalysis",
+                episodeId: entry.episode,
+                workKey: "\(entry.fingerprint):0:preAnalysis", // stale (current=1)
+                sourceFingerprint: entry.fingerprint,
+                priority: 5,
+                desiredCoverageSec: 240,
+                state: "queued"
+            ))
+        }
+
+        let reconciler = makeReconciler(store: store, downloads: downloads)
+        let report = try await reconciler.reconcile()
+
+        // Both old jobs got marked superseded.
+        #expect(report.staleVersionsSuperseded == 2)
+        // AND both got fresh queued replacements in the SAME pass —
+        // not on the next launch's reconciler pass.
+        #expect(report.staleVersionsReenqueued == 2)
+        // The newJobs counter from step 7 stays at zero — every
+        // episode here already had an active row by the time step 7
+        // ran, so nothing was "discovered."
+        #expect(report.unEnqueuedDownloadsCreated == 0)
+
+        for entry in cachedFingerprints {
+            let stale = try await store.fetchJob(byId: "stale-\(entry.episode)")
+            #expect(stale?.state == "superseded",
+                    "Predecessor must be marked superseded")
+
+            // Find the freshly enqueued v1 job for this episode.
+            let queuedJobs = try await store.fetchJobsByState("queued")
+            let replacements = queuedJobs.filter { $0.episodeId == entry.episode }
+            #expect(replacements.count == 1,
+                    "Exactly one replacement per superseded episode")
+            guard let replacement = replacements.first else { continue }
+            #expect(replacement.workKey == "\(entry.fingerprint):1:preAnalysis",
+                    "Replacement workKey encodes the current analysis version")
+            #expect(replacement.attemptCount == 0,
+                    "Replacement starts with a fresh attempt counter")
+            #expect(replacement.lastErrorCode == nil)
+            #expect(replacement.leaseOwner == nil)
+            #expect(replacement.leaseExpiresAt == nil)
+            // Correlated fields propagate from the predecessor.
+            #expect(replacement.priority == 5)
+            #expect(replacement.desiredCoverageSec == 240)
+            #expect(replacement.sourceFingerprint == entry.fingerprint)
+        }
+
+        // Re-enqueue is idempotent: a second pass finds nothing stale
+        // (predecessors are already `superseded`, replacements are at
+        // the current version) so produces zero on both counters.
+        let second = try await reconciler.reconcile()
+        #expect(second.staleVersionsSuperseded == 0)
+        #expect(second.staleVersionsReenqueued == 0)
+        #expect(second.unEnqueuedDownloadsCreated == 0)
+    }
+
+    @Test("Stale-version replacement is skipped when the download is no longer cached")
+    func testStaleVersionNoReenqueueWithoutDownload() async throws {
+        let store = try await makeTestStore()
+
+        // A stale-version job whose download has been deleted from the
+        // cache. We must NOT mint a replacement: step 7's contract is
+        // "no download → no enqueue" and we match it.
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "stale-evicted",
+            jobType: "preAnalysis",
+            episodeId: "ep-evicted",
+            workKey: "fp-evicted:0:preAnalysis",
+            sourceFingerprint: "fp-evicted",
+            state: "queued"
+        ))
+
+        let downloads = StubDownloadProvider()
+        // No cachedURLs entry for ep-evicted.
+
+        let reconciler = makeReconciler(store: store, downloads: downloads)
+        let report = try await reconciler.reconcile()
+
+        #expect(report.staleVersionsSuperseded == 1)
+        #expect(report.staleVersionsReenqueued == 0,
+                "No replacement should be minted for an evicted download")
+
+        // Predecessor is still marked superseded — that part is
+        // unconditional.
+        let predecessor = try await store.fetchJob(byId: "stale-evicted")
+        #expect(predecessor?.state == "superseded")
+
+        // No queued v1 job materialized.
+        let allEpisodeIds = try await store.fetchAllJobEpisodeIds()
+        let queued = try await store.fetchJobsByState("queued")
+        #expect(queued.first(where: { $0.episodeId == "ep-evicted" }) == nil)
+        #expect(allEpisodeIds.contains("ep-evicted"),
+                "The superseded predecessor row still exists for GC's later sweep")
     }
 }
