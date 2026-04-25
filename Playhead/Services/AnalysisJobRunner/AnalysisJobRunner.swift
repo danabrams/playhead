@@ -473,10 +473,11 @@ actor AnalysisJobRunner {
     /// Build a synthetic `EpisodeExecutionLease` purely for
     /// `LanePreemptionCoordinator.register(...)` diagnostics. The
     /// runner is invoked from `AnalysisWorkScheduler`, which uses its
-    /// own `analysis_jobs`-row lease (see
-    /// `AnalysisStore.acquireLease(jobId:owner:expiresAt:)`) that is
-    /// structurally different from `EpisodeExecutionLease` (which is
-    /// owned by `AnalysisCoordinator`). The coordinator only stores
+    /// own `analysis_jobs`-row lease — claimed via
+    /// `AnalysisStore.acquireLeaseWithJournal(...)` (playhead-5uvz.1)
+    /// so the lease takeover and `work_journal.acquired` row commit
+    /// atomically — which is structurally different from
+    /// `EpisodeExecutionLease` (owned by `AnalysisCoordinator`). The coordinator only stores
     /// the lease value on its `LanePreemptionRegistration` for
     /// diagnostics — it never re-acquires it or reads any of its
     /// fields to make decisions. A synthetic value is therefore

@@ -4653,6 +4653,13 @@ actor AnalysisStore {
     /// Returns `false` when the lease slot was already taken (no UPDATE,
     /// no journal append, no transaction commit).
     ///
+    /// **Behavioral divergence from the bare API:** `generationID` and
+    /// `schedulerEpoch` rotate on every successful acquire here (the
+    /// journal join in `recoverOrphans` requires them in sync between
+    /// the row and its `.acquired` event). Callers that previously relied
+    /// on identity preservation across reacquires must not assume drop-in
+    /// equivalence on those two columns.
+    ///
     /// `episodeId` is the only addition over the bare API — needed for
     /// the journal's primary key. The scheduler always has it on the
     /// job it just claimed.
