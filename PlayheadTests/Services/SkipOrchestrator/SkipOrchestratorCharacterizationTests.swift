@@ -893,3 +893,249 @@ struct SkipOrchestratorBannerItemStreamTests {
         #expect(received == nil, "Suppressed windows must not emit banners")
     }
 }
+
+// MARK: - Suggest-Tier (markOnly) Banner Tests — playhead-gtt9.23
+//
+// Acceptance criterion for playhead-gtt9.23:
+//   "Unit test fixture: medium-confidence detection produces banner +
+//    skip-affordance, no auto-skip."
+//
+// `eligibilityGate == "markOnly"` is the gate stamp that the AutoSkipPrecisionGate
+// applies to medium-confidence windows (between the uiCandidate and autoSkip
+// thresholds). Before this bead these windows were silently dropped on the
+// floor — the orchestrator logged "not adding to active windows" and that
+// was the end of the story. The bead's job is to surface them as a
+// `.suggest`-tier banner without putting them in the skip-cue path. These
+// tests pin that behaviour from both directions: the suggest banner must
+// fire AND no skip cue must be pushed.
+
+@Suite("SkipOrchestrator Suggest-Tier (markOnly) Banner")
+struct SkipOrchestratorSuggestTierTests {
+
+    /// Build a markOnly AdWindow at medium confidence. The factory in
+    /// TestHelpers does not expose `eligibilityGate`, so we inline the
+    /// init here. `confidence: 0.45` sits in the suggest band (default
+    /// uiCandidate=0.40, autoSkip=0.55) — the gate decision lives in
+    /// AdDetectionService; once a window arrives at the orchestrator the
+    /// stamp is what's load-bearing, not the score itself.
+    private func makeMarkOnlyAdWindow(
+        id: String = "ad-suggest-1",
+        startTime: Double = 60,
+        endTime: Double = 120
+    ) -> AdWindow {
+        AdWindow(
+            id: id,
+            analysisAssetId: "asset-1",
+            startTime: startTime,
+            endTime: endTime,
+            confidence: 0.45,
+            boundaryState: "lexical",
+            decisionState: "candidate",
+            detectorVersion: "detection-v1",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            evidenceText: "brought to you by",
+            evidenceStartTime: startTime,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: nil,
+            eligibilityGate: "markOnly"
+        )
+    }
+
+    @Test("markOnly window emits a suggest-tier banner")
+    func markOnlyEmitsSuggestBanner() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        let stream = await orchestrator.bannerItemStream()
+
+        let window = makeMarkOnlyAdWindow(id: "ad-suggest-emit")
+        await orchestrator.receiveAdWindows([window])
+
+        nonisolated(unsafe) var received: AdSkipBannerItem?
+        let collectTask = Task {
+            for await item in stream {
+                received = item
+                break
+            }
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        collectTask.cancel()
+
+        let item = try #require(received,
+            "markOnly windows must surface as a suggest-tier banner (playhead-gtt9.23)")
+        #expect(item.windowId == "ad-suggest-emit")
+        #expect(item.tier == .suggest,
+            "Banner emitted for a markOnly window must be tier=.suggest, not .autoSkipped")
+        #expect(item.adStartTime == 60)
+        #expect(item.adEndTime == 120)
+    }
+
+    @Test("markOnly window does NOT auto-skip in auto trust mode")
+    func markOnlyDoesNotAutoSkip() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // Auto mode + high trust would happily auto-skip an *eligible*
+        // window. The gate stamp must be authoritative — even with the
+        // most permissive trust, a markOnly window stays out of the
+        // skip-cue path.
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.95,
+            observations: 50
+        )
+        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        let window = makeMarkOnlyAdWindow(id: "ad-suggest-noskip")
+        await orchestrator.receiveAdWindows([window])
+
+        // No active window should exist for a markOnly stamp — the
+        // orchestrator stores it in the parallel `suggestWindows`
+        // dictionary, not the skip-evaluation `windows` map.
+        let confirmed = await orchestrator.confirmedWindows()
+        #expect(!confirmed.contains { $0.id == "ad-suggest-noskip" },
+            "markOnly window must not enter the confirmed-windows skip path")
+
+        // No applied/confirmed decision should be in the log either.
+        let log = await orchestrator.getDecisionLog()
+        let appliedOrConfirmed = log.filter {
+            $0.adWindowId == "ad-suggest-noskip"
+                && ($0.decision == .applied || $0.decision == .confirmed)
+        }
+        #expect(appliedOrConfirmed.isEmpty,
+            "markOnly window must not produce applied/confirmed decisions; got \(appliedOrConfirmed)")
+    }
+
+    @Test("acceptSuggestedSkip promotes window to confirmed and clears suggest state")
+    func acceptSuggestedSkipConfirmsWindow() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        let window = makeMarkOnlyAdWindow(id: "ad-suggest-accept")
+        await orchestrator.receiveAdWindows([window])
+
+        // Pre-condition: not yet in the confirmed set.
+        let confirmedBefore = await orchestrator.confirmedWindows()
+        #expect(!confirmedBefore.contains { $0.id == "ad-suggest-accept" })
+
+        await orchestrator.acceptSuggestedSkip(windowId: "ad-suggest-accept")
+
+        // Post-condition: a confirmed window covering the same span now
+        // exists. The orchestrator allocates a fresh promoted-window id so
+        // the eligibilityGate stamp on the original markOnly window can't
+        // re-block it; we match by span rather than id.
+        let confirmedAfter = await orchestrator.confirmedWindows()
+        let match = confirmedAfter.first {
+            $0.startTime == window.startTime && $0.endTime == window.endTime
+        }
+        let promoted = try #require(match,
+            "acceptSuggestedSkip must promote the suggest window into the confirmed set")
+        #expect(promoted.confidence == 1.0,
+            "User-confirmed skip should pin confidence to 1.0; got \(promoted.confidence)")
+    }
+
+    @Test("acceptSuggestedSkip is a no-op when window is unknown")
+    func acceptSuggestedSkipUnknownIsNoOp() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        // No suggest window has ever been registered — accepting a
+        // phantom id must not crash, must not poison state, must not
+        // synthesize a window.
+        await orchestrator.acceptSuggestedSkip(windowId: "ad-never-existed")
+
+        let confirmed = await orchestrator.confirmedWindows()
+        #expect(confirmed.isEmpty,
+            "acceptSuggestedSkip on an unknown windowId must be a clean no-op")
+    }
+
+    @Test("declineSuggestedSkip drops the window without confirming it")
+    func declineSuggestedSkipDoesNotConfirm() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        let window = makeMarkOnlyAdWindow(id: "ad-suggest-decline")
+        await orchestrator.receiveAdWindows([window])
+
+        await orchestrator.declineSuggestedSkip(windowId: "ad-suggest-decline")
+
+        let confirmed = await orchestrator.confirmedWindows()
+        #expect(confirmed.isEmpty,
+            "declineSuggestedSkip must not promote the window into the skip path")
+
+        // Subsequent accept on the same id is now a no-op — the suggest
+        // entry has been cleared. (This protects against a stale tap
+        // arriving after the user has dismissed the banner.)
+        await orchestrator.acceptSuggestedSkip(windowId: "ad-suggest-decline")
+        let confirmedAfter = await orchestrator.confirmedWindows()
+        #expect(confirmedAfter.isEmpty,
+            "Accept after decline must be a no-op — the suggest window is gone")
+    }
+
+    @Test("Suggest banner fires only once per markOnly window")
+    func suggestBannerEmittedOnlyOnce() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        let stream = await orchestrator.bannerItemStream()
+
+        let window = makeMarkOnlyAdWindow(id: "ad-suggest-once")
+        // Deliver the same markOnly window twice; only one banner should
+        // fire. Same dedupe contract as the auto-skipped path.
+        await orchestrator.receiveAdWindows([window])
+        await orchestrator.receiveAdWindows([window])
+
+        nonisolated(unsafe) var count = 0
+        let collectTask = Task {
+            for await _ in stream {
+                count += 1
+                if count >= 2 { break }
+            }
+        }
+        try await Task.sleep(for: .milliseconds(150))
+        collectTask.cancel()
+
+        #expect(count == 1,
+            "Suggest banner must dedupe across repeated markOnly deliveries; got \(count)")
+    }
+}

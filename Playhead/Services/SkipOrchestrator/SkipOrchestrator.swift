@@ -195,6 +195,22 @@ actor SkipOrchestrator {
     /// Window IDs for which a banner has already been emitted. Prevents re-fires.
     private var banneredWindowIds: Set<String> = []
 
+    /// playhead-gtt9.23: window IDs for which a `.suggest` tier banner has
+    /// already been emitted. Tracked separately from `banneredWindowIds`
+    /// (auto-skip-tier emissions) so the two paths don't collide on a
+    /// gate-flip mid-episode (a window first seen as markOnly that later
+    /// promotes to auto-skip is allowed to emit a fresh auto-skipped
+    /// banner — the user-facing event "we just skipped this" is the new
+    /// information, not a duplicate).
+    private var suggestBanneredWindowIds: Set<String> = []
+
+    /// playhead-gtt9.23: in-memory record of windows currently surfaced as
+    /// suggest-tier markers. Keyed by `AdWindow.id`. We hold them here
+    /// rather than in `windows` so the auto-skip evaluation loop never
+    /// considers them — the tier is strictly a UI surface, not a skip
+    /// candidate. Cleared at episode end.
+    private var suggestWindows: [String: AdWindow] = [:]
+
     /// The podcast ID for the current episode. Needed to populate banner items.
     private var activePodcastId: String?
 
@@ -339,7 +355,35 @@ actor SkipOrchestrator {
             metadataConfidence: adWindow.metadataConfidence,
             metadataSource: adWindow.metadataSource,
             podcastId: podcastId,
-            evidenceCatalogEntries: entries
+            evidenceCatalogEntries: entries,
+            tier: .autoSkipped
+        )
+        for (_, continuation) in bannerContinuations {
+            continuation.yield(item)
+        }
+    }
+
+    /// playhead-gtt9.23: emit a suggest-tier banner for a markOnly window.
+    /// Suggest banners ask the user "Sounds like a sponsor break. Skip?";
+    /// they never imply a skip has happened. Persistence and trust signals
+    /// are deferred to the user's tap (handled by `acceptSuggestedSkip` /
+    /// `declineSuggestedSkip` below).
+    private func emitSuggestBanner(for adWindow: AdWindow) {
+        guard !bannerContinuations.isEmpty else { return }
+        let podcastId = activePodcastId ?? ""
+        let entries = catalogEntries(overlapping: adWindow.startTime, end: adWindow.endTime)
+        let item = AdSkipBannerItem(
+            id: UUID().uuidString,
+            windowId: adWindow.id,
+            advertiser: adWindow.advertiser,
+            product: adWindow.product,
+            adStartTime: adWindow.startTime,
+            adEndTime: adWindow.endTime,
+            metadataConfidence: adWindow.metadataConfidence,
+            metadataSource: adWindow.metadataSource,
+            podcastId: podcastId,
+            evidenceCatalogEntries: entries,
+            tier: .suggest
         )
         for (_, continuation) in bannerContinuations {
             continuation.yield(item)
@@ -400,6 +444,8 @@ actor SkipOrchestrator {
         currentPlayheadTime = 0
         decisionLog.removeAll()
         banneredWindowIds.removeAll()
+        suggestBanneredWindowIds.removeAll()
+        suggestWindows.removeAll()
 
         // Load per-show trust mode.
         if let podcastId, let trustService {
@@ -451,6 +497,8 @@ actor SkipOrchestrator {
         activeEvidenceCatalog = nil
         inAdState = false
         banneredWindowIds.removeAll()
+        suggestBanneredWindowIds.removeAll()
+        suggestWindows.removeAll()
         pushSkipCues()
     }
 
@@ -478,10 +526,24 @@ actor SkipOrchestrator {
             // skip path. Mirror the blocked-gate check in
             // `receiveAdDecisionResults` so both entry points honor the
             // precision contract.
+            //
+            // playhead-gtt9.23: route markOnly windows into the suggest
+            // tier so the user can see them and tap-to-skip. The skip
+            // path remains untouched — `suggestWindows` is stored
+            // separately from `windows` and is never evaluated by
+            // `evaluateAndPush()`. The only effect is one banner emission
+            // (per window) on the existing `bannerItemStream`, tagged
+            // `tier: .suggest` so the UI renders the medium-tier copy.
             if adWindow.eligibilityGate == "markOnly" {
                 logger.debug(
-                    "AdWindow \(adWindow.id, privacy: .public) eligibilityGate=markOnly — not adding to active windows"
+                    "AdWindow \(adWindow.id, privacy: .public) eligibilityGate=markOnly — surfacing as suggest tier"
                 )
+                if !suggestBanneredWindowIds.contains(adWindow.id),
+                   !banneredWindowIds.contains(adWindow.id) {
+                    suggestBanneredWindowIds.insert(adWindow.id)
+                    suggestWindows[adWindow.id] = adWindow
+                    emitSuggestBanner(for: adWindow)
+                }
                 continue
             }
 
@@ -802,6 +864,93 @@ actor SkipOrchestrator {
                 source: source
             )
         }
+    }
+
+    /// playhead-gtt9.23: User tapped "Skip" on a suggest-tier banner.
+    /// Promotes the markOnly window into the active skip path with a
+    /// user-confirmed confidence so the existing skip-cue machinery handles
+    /// playback transport and persistence. Also records a `.falseNegative`
+    /// CorrectionEvent — the user has just told us "this WAS an ad we
+    /// didn't auto-skip," which is exactly the calibration signal that
+    /// future threshold tuning needs.
+    ///
+    /// No-op when the window is not in the suggest set (e.g. already
+    /// auto-skipped, dismissed, or never registered as markOnly).
+    func acceptSuggestedSkip(windowId: String) async {
+        guard let suggested = suggestWindows.removeValue(forKey: windowId) else { return }
+
+        // Build a fresh confirmed AdWindow with the suggest window's span and
+        // confidence pinned to 1.0. We deliberately do not reuse the original
+        // markOnly window's id — its eligibilityGate would block it again.
+        let promotedId = UUID().uuidString
+        let assetId = suggested.analysisAssetId
+        let promoted = AdWindow(
+            id: promotedId,
+            analysisAssetId: assetId,
+            startTime: suggested.startTime,
+            endTime: suggested.endTime,
+            confidence: 1.0,
+            boundaryState: "userConfirmedSuggested",
+            decisionState: AdDecisionState.confirmed.rawValue,
+            detectorVersion: suggested.detectorVersion,
+            advertiser: suggested.advertiser,
+            product: suggested.product,
+            adDescription: suggested.adDescription,
+            evidenceText: suggested.evidenceText,
+            evidenceStartTime: suggested.evidenceStartTime,
+            metadataSource: suggested.metadataSource,
+            metadataConfidence: suggested.metadataConfidence,
+            metadataPromptVersion: suggested.metadataPromptVersion,
+            wasSkipped: false,
+            userDismissedBanner: false
+        )
+
+        let key = idempotencyKey(assetId: assetId, windowId: promotedId)
+        let managed = ManagedWindow(
+            adWindow: promoted,
+            decisionState: .confirmed,
+            snappedStart: promoted.startTime,
+            snappedEnd: promoted.endTime,
+            idempotencyKey: key,
+            cueActive: false
+        )
+        windows[promotedId] = managed
+
+        logDecision(
+            managed: managed,
+            decision: .confirmed,
+            reason: "User accepted suggested skip"
+        )
+
+        // Calibration signal: record a `.falseNegative` veto on the
+        // suggest window's span. Same correction surface the
+        // "Hearing an ad" button uses, so existing trust + boost
+        // pipelines pick it up unchanged.
+        persistManualCorrectionVeto(
+            startTime: suggested.startTime,
+            endTime: suggested.endTime,
+            assetId: assetId,
+            podcastId: activePodcastId,
+            source: .falseNegative
+        )
+
+        if let podcastId = activePodcastId, let trustService {
+            await trustService.recordFalseNegativeSignal(podcastId: podcastId)
+        }
+
+        evaluateAndPush()
+    }
+
+    /// playhead-gtt9.23: User dismissed a suggest-tier banner without
+    /// skipping. We treat this as a soft "leave it alone" signal: the
+    /// suggest window is dropped from the in-memory suggest set so its
+    /// cue is gone from the UI, but no skip happens, no veto is recorded,
+    /// and no trust signal fires. Future calibration work (gtt9.3) may
+    /// promote this to an explicit decline signal; for now silence is
+    /// the conservative reading.
+    func declineSuggestedSkip(windowId: String) async {
+        guard suggestWindows.removeValue(forKey: windowId) != nil else { return }
+        logger.debug("User dismissed suggest banner for window \(windowId, privacy: .public)")
     }
 
     /// User tapped "Skip Ad" in manual mode. Promotes a confirmed window
