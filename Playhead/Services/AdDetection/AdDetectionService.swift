@@ -418,6 +418,17 @@ actor AdDetectionService {
     /// no log file is ever written on a shipping binary.
     private(set) var decisionLogger: DecisionLoggerProtocol = NoOpDecisionLogger()
 
+    /// playhead-gtt9.26: Versioned profile of fitted Platt-scaling
+    /// coefficients applied to the post-fusion classifier score that
+    /// drives `AutoSkipPrecisionGate`. Defaults to
+    /// `ClassifierCalibrationProfile.production`, which currently ships
+    /// empty so production behaviour is byte-identical to pre-gtt9.26
+    /// — every lookup returns `.identity` (pass-through) until a fit is
+    /// baked in. Tests inject `.empty` to assert the cold-start
+    /// contract, or a fit-bearing profile to assert the calibration
+    /// math is plumbed end-to-end.
+    private let classifierCalibrationProfile: ClassifierCalibrationProfile
+
     // MARK: - Cached State
 
     /// Scanner is recreated per-episode when profile changes.
@@ -486,7 +497,8 @@ actor AdDetectionService {
         skipOrchestrator: SkipOrchestrator? = nil,
         adCatalogStore: AdCatalogStore? = nil,
         episodeMetadataProvider: EpisodeMetadataProvider = NullEpisodeMetadataProvider(),
-        decisionLogger: DecisionLoggerProtocol? = nil
+        decisionLogger: DecisionLoggerProtocol? = nil,
+        classifierCalibrationProfile: ClassifierCalibrationProfile = .production
     ) {
         self.store = store
         self.classifier = classifier
@@ -511,6 +523,7 @@ actor AdDetectionService {
         if let decisionLogger {
             self.decisionLogger = decisionLogger
         }
+        self.classifierCalibrationProfile = classifierCalibrationProfile
     }
 
     #if DEBUG
@@ -4112,10 +4125,24 @@ actor AdDetectionService {
             slotFraction: AutoSkipPrecisionGateConfig.default.slotFraction
         )
 
+        // playhead-gtt9.26: Calibrate the post-fusion classifier score
+        // before it enters the gate. Cold-start (`.production` ships
+        // empty) returns `.identity` so the calibrated score equals the
+        // raw score and behaviour is byte-identical to pre-gtt9.26.
+        // Once a fit is baked in for the active
+        // (detectorVersion, buildCommitSHA), the calibrated score
+        // replaces the raw score everywhere the gate compares against
+        // its thresholds.
+        let calibrator = classifierCalibrationProfile.calibrator(
+            detectorVersion: config.detectorVersion,
+            buildCommitSHA: BuildInfo.commitSHA
+        )
+        let calibratedScore = calibrator.calibrate(segmentScore)
+
         let input = AutoSkipPrecisionGateInput(
             segmentStartTime: startTime,
             segmentEndTime: endTime,
-            segmentScore: segmentScore,
+            segmentScore: calibratedScore,
             episodeDuration: episodeDuration,
             overlappingFeatureWindows: overlappingFeatureWindows,
             lexicalCategories: lexicalCategories,
