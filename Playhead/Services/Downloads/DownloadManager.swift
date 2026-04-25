@@ -99,9 +99,30 @@ enum DownloadManagerError: Error, CustomStringConvertible {
 // MARK: - DownloadContext
 
 /// Metadata passed by the caller to connect a download to the analysis pipeline.
+///
+/// playhead-i9dj: `podcastTitle` and `episodeTitle` carry the human-readable
+/// identifiers from the SwiftData `Podcast`/`Episode` so the AnalysisStore can
+/// persist them at first observation. Both fields are optional — callers that
+/// don't have the SwiftData side in scope (e.g. background-session completion
+/// routes) leave them `nil`, and the AnalysisStore reconciles titles lazily on
+/// the next call site that does supply them.
 struct DownloadContext: Sendable {
     let podcastId: String?
     let isExplicitDownload: Bool
+    let podcastTitle: String?
+    let episodeTitle: String?
+
+    init(
+        podcastId: String?,
+        isExplicitDownload: Bool,
+        podcastTitle: String? = nil,
+        episodeTitle: String? = nil
+    ) {
+        self.podcastId = podcastId
+        self.isExplicitDownload = isExplicitDownload
+        self.podcastTitle = podcastTitle
+        self.episodeTitle = episodeTitle
+    }
 }
 
 // MARK: - DownloadProviding
@@ -1168,7 +1189,12 @@ actor DownloadManager {
             podcastId: context?.podcastId,
             downloadId: episodeId,
             sourceFingerprint: sourceFingerprint,
-            isExplicitDownload: context?.isExplicitDownload ?? false
+            isExplicitDownload: context?.isExplicitDownload ?? false,
+            // playhead-i9dj: human-readable titles flow through to
+            // AnalysisStore writes inside the scheduler so an exported
+            // analysis.sqlite is legible on its own.
+            podcastTitle: context?.podcastTitle,
+            episodeTitle: context?.episodeTitle
         )
     }
 

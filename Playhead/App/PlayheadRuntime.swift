@@ -1078,12 +1078,30 @@ final class PlayheadRuntime {
             // Not cached — stream-download and play once enough is buffered.
             logger.info("Episode not cached — streaming download: \(episodeId)")
             audioCacheTask?.cancel()
+
+            // playhead-i9dj: capture the SwiftData titles before entering
+            // the Task closure so the AnalysisStore can persist them for
+            // self-describing exports without re-reading SwiftData inside
+            // the Task. The podcastId mirrors the rest of the runtime
+            // (`feedURL.absoluteString`) — see line 1032. Both title
+            // fields are optional: `Episode.title` is required-non-empty
+            // in our SwiftData schema, but `Podcast.title` may legitimately
+            // be missing on partial feeds.
+            let titleContext = DownloadContext(
+                podcastId: podcastId,
+                isExplicitDownload: false,
+                podcastTitle: episode.podcast?.title,
+                episodeTitle: episode.title
+            )
+            let audioURL = episode.audioURL
+
             audioCacheTask = Task { [weak self, downloadManager, analysisCoordinator] in
                 guard let self else { return }
                 do {
                     let result = try await downloadManager.streamingDownload(
                         episodeId: episodeId,
-                        from: episode.audioURL
+                        from: audioURL,
+                        context: titleContext
                     )
                     guard !Task.isCancelled, self.currentEpisodeId == episodeId else { return }
 

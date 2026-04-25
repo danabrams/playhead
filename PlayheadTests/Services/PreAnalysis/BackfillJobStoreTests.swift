@@ -239,8 +239,10 @@ struct BackfillJobStoreTests {
     func testSchemaVersionRecorded() async throws {
         let store = try await makeTestStore()
         let version = try await store.schemaVersion()
-        // Current schema is v14 after playhead-gtt9.8 added analysis_assets.terminalReason.
-        #expect(version == 14)
+        // Current schema is v15 after playhead-i9dj added the
+        // self-describing title columns (`analysis_assets.episodeTitle`
+        // and `podcast_profiles.title`).
+        #expect(version == 15)
     }
 
     @Test("M8: deleting an asset cascades to its backfill_jobs rows")
