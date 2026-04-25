@@ -49,10 +49,12 @@ enum SentenceTerminalKind: String, Sendable, Equatable, Codable {
 /// occurs. Because iOS `SFSpeechRecognizer` does not expose per-word
 /// timestamps for finalised chunks, we approximate by linearly apportioning
 /// the chunk's `[startTime, endTime]` interval across the chunk text by
-/// character offset. This is intentionally coarse — the resolver consumes
-/// the cue probabilistically (weight × confidence) so a 1-2s
-/// approximation error degrades the score smoothly rather than jumping
-/// the snap target.
+/// *word offset* (not character offset — character-offset apportionment
+/// produced ±2-2.5s error at typical chunk midpoints, exceeding the
+/// resolver's 1.5s match radius). Word offset is robust to density
+/// variation because speech rate is roughly constant in words-per-second.
+/// The resolver still consumes the cue probabilistically (weight ×
+/// confidence) so any residual timing error degrades the score smoothly.
 ///
 /// `confidence` is a per-hit weight in `[0, 1]` already attenuated by the
 /// chunk's ASR-quality signal. A confidence near 0 means "the transcript
@@ -164,27 +166,39 @@ enum TranscriptBoundaryCueBuilder {
             return []
         }
 
-        // Find every terminal punctuation position by character offset.
-        // We use UTF-16 length to match `String.utf16.count` when
-        // apportioning — that keeps positions deterministic across
-        // grapheme-cluster edge cases (emoji, accented chars).
+        // Apportion by word offset rather than character offset. Real ASR
+        // chunks have variable word density (long words, numbers spelled
+        // out, repeated short fillers) — character-offset apportionment
+        // produces ±2-2.5s timing error at typical chunk midpoints, which
+        // exceeds the 1.5s resolver radius and makes the cue actively
+        // misleading. Word-offset apportionment is robust to density
+        // variation because speech rate is roughly constant in
+        // words-per-second.
         let scalarText = text
-        let totalLength = scalarText.count
-        guard totalLength > 0 else { return [] }
 
         // Quick word-count sanity check before doing any apportionment.
         // Single-word fragments don't carry meaningful sentence structure.
-        let wordCount = text.split(whereSeparator: \.isWhitespace).count
-        guard wordCount >= config.minWordsForApportionment else { return [] }
+        let totalWords = text.split(whereSeparator: \.isWhitespace).count
+        guard totalWords >= config.minWordsForApportionment else { return [] }
 
         var localHits: [TranscriptBoundaryHit] = []
-        for (offset, character) in scalarText.enumerated() {
+        var inWord = false
+        var wordsCompleted = 0
+        for character in scalarText {
+            if character.isWhitespace {
+                if inWord {
+                    wordsCompleted += 1
+                    inWord = false
+                }
+                continue
+            }
+            inWord = true
             guard let kind = terminalKind(for: character) else { continue }
-            // Map character offset → time by linear apportionment within
-            // the chunk's [startTime, endTime] interval. The +1 ensures
-            // the punctuation's *end* — not start — is what we point to,
-            // matching how a listener perceives a sentence break.
-            let fraction = Double(offset + 1) / Double(totalLength)
+            // Word containing the terminator ends right here. The next
+            // whitespace transition will not double-count because we keep
+            // `wordsCompleted` driven by the whitespace transition only.
+            let wordsThroughTerminator = wordsCompleted + 1
+            let fraction = Double(wordsThroughTerminator) / Double(totalWords)
             let time = chunk.startTime + fraction * duration
 
             // Confidence = chunk quality score, scaled mildly down for

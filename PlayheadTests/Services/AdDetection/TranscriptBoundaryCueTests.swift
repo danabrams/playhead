@@ -62,34 +62,39 @@ struct TranscriptBoundaryCueBuilderTests {
         #expect(times == times.sorted())
     }
 
-    @Test("hit time scales linearly with character offset")
+    @Test("hit time scales linearly with word offset, not character offset")
     func hitTimeApportionment() throws {
-        // Build a chunk with two terminators and a natural-speech word
-        // density (~2.5 wps) so it survives the quality gate. The point
-        // of this test is the apportionment math, not the gate.
-        // 8 words across 3.2 seconds = 2.5 wps; one terminator per ~4 words
-        // matches a healthy punctuation ratio.
+        // 7 words across 3.2 seconds (~2.2 wps, inside the natural-speech
+        // band). First terminator falls after the 3rd word (3/7); second
+        // after the 7th (7/7 = 1.0). Word-anchored apportionment is
+        // independent of word length — that's the kgby reviewer fix.
         let chunk = makeChunk(
             startTime: 0,
             endTime: 3.2,
             text: "Stop here now. Keep going forward please."
         )
         let hits = TranscriptBoundaryCueBuilder.buildHits(from: [chunk])
-        // Recompute expected positions from the actual character offsets so
-        // the assertion stays robust to text edits above.
-        let total = Double(chunk.text.count)
-        let firstFraction = Double(chunk.text.distance(
-            from: chunk.text.startIndex,
-            to: chunk.text.firstIndex(of: ".")!
-        ) + 1) / total
-        let lastFraction = Double(chunk.text.distance(
-            from: chunk.text.startIndex,
-            to: chunk.text.lastIndex(of: ".")!
-        ) + 1) / total
-
         try #require(hits.count == 2)
-        #expect(abs(hits[0].time - (chunk.startTime + firstFraction * (chunk.endTime - chunk.startTime))) < 0.001)
-        #expect(abs(hits[1].time - (chunk.startTime + lastFraction * (chunk.endTime - chunk.startTime))) < 0.001)
+        let duration = chunk.endTime - chunk.startTime
+        #expect(abs(hits[0].time - (chunk.startTime + (3.0 / 7.0) * duration)) < 0.001)
+        #expect(abs(hits[1].time - (chunk.startTime + (7.0 / 7.0) * duration)) < 0.001)
+    }
+
+    @Test("apportionment is robust to extreme word-length variation")
+    func apportionmentIgnoresWordLength() throws {
+        // Three short words, two normal words, terminator at the end.
+        // 5 words across 5 seconds at the terminator. With character
+        // apportionment, word lengths skew the position; with word
+        // apportionment, the terminator lands at exactly chunk.endTime.
+        let chunk = makeChunk(
+            startTime: 10,
+            endTime: 20,
+            text: "Hi go yo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa really."
+        )
+        let hits = TranscriptBoundaryCueBuilder.buildHits(from: [chunk])
+        try #require(hits.count == 1)
+        // Word offset 5 of 5 → fraction 1.0 → time at chunk.endTime.
+        #expect(abs(hits[0].time - chunk.endTime) < 0.001)
     }
 
     @Test("low-quality chunk is suppressed")

@@ -1678,6 +1678,21 @@ actor AdDetectionService {
                     )
                     startAdj = legacy.startAdjust
                     endAdj = legacy.endAdjust
+
+                    // playhead-kgby: per-span dogfood marker. The [kgby]
+                    // backfill-summary line tells us if the cue *built*
+                    // hits at all; this line tells us if any hit was
+                    // close enough to a candidate boundary to actually
+                    // influence the snap. Radius matches the resolver's
+                    // production default (1.5s).
+                    if !transcriptBoundaryHits.isEmpty {
+                        let radius = 1.5
+                        let nearStart = transcriptBoundaryHits.contains { abs($0.time - span.startTime) <= radius }
+                        let nearEnd = transcriptBoundaryHits.contains { abs($0.time - span.endTime) <= radius }
+                        if nearStart || nearEnd {
+                            logger.info("[kgby] legacy span snap: spanId=\(span.id) startAdj=\(String(format: "%.2f", startAdj)) endAdj=\(String(format: "%.2f", endAdj)) hitsNearStart=\(nearStart) hitsNearEnd=\(nearEnd)")
+                        }
+                    }
                 }
             }
             let refinedSpan = DecodedSpan(
