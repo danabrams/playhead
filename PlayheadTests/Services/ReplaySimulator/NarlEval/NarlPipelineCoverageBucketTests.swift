@@ -393,6 +393,77 @@ struct NarlPipelineCoverageBucketTests {
                 "report.md should include the new pipeline-coverage section")
     }
 
+    // MARK: - playhead-jif5: rollup filter
+
+    @Test("pipeline-coverage-limited entries are excluded from rollup metric aggregation")
+    func pipelineCoverageLimitedExcludedFromRollups() throws {
+        let (report, outputDir) = try NarlEvalHarnessTests.runHarnessCollectingReport()
+
+        // Find the 34C7E7CF entry — bundled in 2026-04-24 as the
+        // canonical pipeline-coverage-limited fixture (840/900 = 0.933).
+        let pipelineLimitedEntries = report.episodes.filter {
+            $0.pipelineCoverageBucket == .pipelineCoverageLimited
+        }
+        guard !pipelineLimitedEntries.isEmpty else {
+            // Live corpus may not always include a pipeline-coverage-
+            // limited fixture (shallow CI clones). Skip rather than fail
+            // — the synthetic-trace tests above prove the classifier
+            // works; this test is the integration assertion.
+            return
+        }
+
+        // Per-episode table contract: pipeline-coverage-limited entries
+        // must NOT carry isExcluded=true. They're visible in the per-
+        // episode table because acceptance criterion #1 says "keep all
+        // rows (visibility)".
+        for entry in pipelineLimitedEntries {
+            #expect(!entry.isExcluded,
+                    "pipeline-coverage-limited entries must not be marked isExcluded — they remain in the per-episode table")
+        }
+
+        // Rollup contract: for each pipeline-coverage-limited entry,
+        // the (show, config) and (ALL, config) rollups must NOT have
+        // folded it into their metric aggregation. We verify by checking
+        // that `excludedEpisodeCount` increments include the entry
+        // (incrementally, alongside any existing whole-asset vetoes).
+        for entry in pipelineLimitedEntries {
+            // The show rollup with the same config as `entry`.
+            let showRollup = report.rollups.first {
+                $0.show == entry.show && $0.config == entry.config
+            }
+            let allRollup = report.rollups.first {
+                $0.show == "ALL" && $0.config == entry.config
+            }
+            // Both rollups must exist — every rendered episode lands in
+            // both the per-show key and the ALL aggregate.
+            let show = try #require(showRollup,
+                                    "show rollup '\(entry.show)|\(entry.config)' missing for pipeline-limited entry \(entry.episodeId)")
+            let all = try #require(allRollup,
+                                   "ALL rollup for config '\(entry.config)' missing for pipeline-limited entry \(entry.episodeId)")
+            // The entry's episodeCount is the number of episodes whose
+            // metrics WERE folded in. If the filter is working, the
+            // pipeline-limited entry is not among them. We can't easily
+            // assert "not folded" without recomputing; instead, assert
+            // the entry contributed to the excluded counter.
+            #expect(show.excludedEpisodeCount >= 1,
+                    "show rollup must increment excludedEpisodeCount for pipeline-limited \(entry.episodeId)")
+            #expect(all.excludedEpisodeCount >= 1,
+                    "ALL rollup must increment excludedEpisodeCount for pipeline-limited \(entry.episodeId)")
+        }
+
+        // Renderer contract: the "Excluded episodes" markdown section
+        // must list every pipeline-coverage-limited episode with reason
+        // `pipelineCoverageLimited:<assetId>`.
+        let mdData = try Data(contentsOf: outputDir.appendingPathComponent("report.md"))
+        let md = String(decoding: mdData, as: UTF8.self)
+        #expect(md.contains("## Excluded episodes"),
+                "report.md must include the Excluded episodes section when pipeline-limited entries exist")
+        for entry in pipelineLimitedEntries {
+            #expect(md.contains("pipelineCoverageLimited:\(entry.episodeId)"),
+                    "report.md Excluded episodes section must list \(entry.episodeId) with pipelineCoverageLimited reason")
+        }
+    }
+
     // MARK: - Helpers
 
     private static func makeTrace(

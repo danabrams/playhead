@@ -643,6 +643,15 @@ struct NarlEvalHarnessTests {
                     hasShadowCoverage: traceHasShadowCoverage
                 )
 
+                // playhead-jif5: classify the trace once per loop so the
+                // bucket is stamped on every entry (excluded or not). The
+                // rollup aggregator below filters out
+                // `pipeline-coverage-limited` entries from metric
+                // aggregation while leaving them visible in the per-
+                // episode table; the renderer's "Excluded episodes"
+                // section pulls them in alongside whole-asset vetoes.
+                let pipelineBucket = NarlPipelineCoverageBucket.classify(trace)
+
                 if gtResult.isExcluded {
                     let entry = NarlReportEpisodeEntry(
                         episodeId: trace.episodeId,
@@ -673,7 +682,8 @@ struct NarlEvalHarnessTests {
                         // by ground-truth veto. Empty strings here
                         // mean a pre-gtt9.21 fixture (back-compat).
                         detectorVersion: trace.detectorVersion,
-                        buildCommitSHA: trace.buildCommitSHA
+                        buildCommitSHA: trace.buildCommitSHA,
+                        pipelineCoverageBucket: pipelineBucket
                     )
                     episodeEntries.append(entry)
                     // Tally excluded episodes per-rollup so the report shows
@@ -733,13 +743,34 @@ struct NarlEvalHarnessTests {
                     // populated. Empty strings here mean a
                     // pre-gtt9.21 fixture (back-compat).
                     detectorVersion: trace.detectorVersion,
-                    buildCommitSHA: trace.buildCommitSHA
+                    buildCommitSHA: trace.buildCommitSHA,
+                    pipelineCoverageBucket: pipelineBucket
                 )
                 episodeEntries.append(entry)
 
-                // Accumulate for rollups: per-show and ALL.
+                // playhead-jif5: skip pipeline-coverage-limited episodes
+                // from rollup metric aggregation. They still count toward
+                // `excludedCounts` (so the rollup row's denominator
+                // change is visible) and remain in `episodeEntries` for
+                // the per-episode table + the renderer's "Excluded
+                // episodes" section. Misses on these assets are coverage
+                // failures, not classifier failures — folding them into
+                // headline F1/Sec-F1 / AutoSkip Recall systematically
+                // depresses metrics for reasons unrelated to detector
+                // quality.
                 let showKey = "\(show)|\(configName)"
                 let allKey = "ALL|\(configName)"
+                if pipelineBucket == .pipelineCoverageLimited {
+                    excludedCounts[showKey, default: 0] += 1
+                    excludedCounts[allKey, default: 0] += 1
+                    let pipeKey = "\(trace.episodeId)|\(configName)"
+                    pipelinesByEpisodeId[pipeKey, default: []]
+                        .append((pred: pred.windows, gt: gtResult.adWindows))
+                    _ = fixtureIndex
+                    continue
+                }
+
+                // Accumulate for rollups: per-show and ALL.
                 perRollup[showKey, default: []].append((entry, pred.windows, gtResult.adWindows))
                 perRollup[allKey, default: []].append((entry, pred.windows, gtResult.adWindows))
                 // Record the (pred, gt) pair for the terminal-reason

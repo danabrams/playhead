@@ -1,0 +1,806 @@
+{
+  "analysisState" : "completeFull",
+  "atoms" : [
+
+  ],
+  "baselineReplaySpanDecisions" : [
+
+  ],
+  "buildCommitSHA" : "36111a1",
+  "capturedAt" : "2026-04-25T11:50:03Z",
+  "corrections" : [
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116020.431745,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:41.373:42.960",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116052.591443,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:3.000:43.980",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116085.858042,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:46.320:88.860",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116326.5842671,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:1443.000:1609.620",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116382.473764,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:1612.680:1670.400",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116458.101665,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:1673.460:1746.960",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116603.5253072,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:3480.360:3542.100",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116659.775817,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:3545.160:3621.660",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116020.431745,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:41.373:42.960",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116052.591443,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:3.000:43.980",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116085.858042,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:46.320:88.860",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116326.5842671,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:1443.000:1609.620",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116382.473764,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:1612.680:1670.400",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116458.101665,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:1673.460:1746.960",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116603.5253072,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:3480.360:3542.100",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116659.775817,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:3545.160:3621.660",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116020.431745,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:41.373:42.960",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116052.591443,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:3.000:43.980",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116085.858042,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:46.320:88.860",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116326.5842671,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:1443.000:1609.620",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116382.473764,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:1612.680:1670.400",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116458.101665,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:1673.460:1746.960",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116603.5253072,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:3480.360:3542.100",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116659.775817,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:3545.160:3621.660",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116020.431745,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:41.373:42.960",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116052.591443,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:3.000:43.980",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116085.858042,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:46.320:88.860",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116326.5842671,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:1443.000:1609.620",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116382.473764,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:1612.680:1670.400",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116458.101665,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:1673.460:1746.960",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116603.5253072,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:3480.360:3542.100",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116659.775817,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:3545.160:3621.660",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116020.431745,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:41.373:42.960",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116052.591443,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:3.000:43.980",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116085.858042,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:46.320:88.860",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116326.5842671,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:1443.000:1609.620",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116382.473764,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:1612.680:1670.400",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116458.101665,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:1673.460:1746.960",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116603.5253072,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:3480.360:3542.100",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777116659.775817,
+      "scope" : "exactTimeSpan:E8F0F867-C453-4119-B984-8224FABFBF08:3545.160:3621.660",
+      "source" : "falseNegative"
+    }
+  ],
+  "decisionEvents" : [
+
+  ],
+  "detectorVersion" : "detection-v1",
+  "durationSec" : 552.933875,
+  "episodeDuration" : 3600,
+  "episodeId" : "https:\/\/feeds.simplecast.com\/dHoohVNH::6b0c053c-e975-40dd-b875-f3024d230368",
+  "evidenceCatalog" : [
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 30,
+      "windowStart" : 0
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 60,
+      "windowStart" : 30
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 61.75,
+      "windowStart" : 60
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 64.25,
+      "windowStart" : 60
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 65.5,
+      "windowStart" : 60
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 90,
+      "windowStart" : 60
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 120,
+      "windowStart" : 90
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 150,
+      "windowStart" : 120
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 0,
+      "windowEnd" : 180,
+      "windowStart" : 150
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 0,
+      "windowEnd" : 210,
+      "windowStart" : 180
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 0,
+      "windowEnd" : 240,
+      "windowStart" : 210
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 0,
+      "windowEnd" : 270,
+      "windowStart" : 240
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 300,
+      "windowStart" : 270
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 330,
+      "windowStart" : 300
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 360,
+      "windowStart" : 330
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 390,
+      "windowStart" : 360
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 420,
+      "windowStart" : 390
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 450,
+      "windowStart" : 420
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 480,
+      "windowStart" : 450
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 0,
+      "windowEnd" : 510,
+      "windowStart" : 480
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 540,
+      "windowStart" : 510
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 570,
+      "windowStart" : 540
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 600,
+      "windowStart" : 570
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 630,
+      "windowStart" : 600
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 660,
+      "windowStart" : 630
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 690,
+      "windowStart" : 660
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 720,
+      "windowStart" : 690
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 750,
+      "windowStart" : 720
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 780,
+      "windowStart" : 750
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 810,
+      "windowStart" : 780
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 840,
+      "windowStart" : 810
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 870,
+      "windowStart" : 840
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 900,
+      "windowStart" : 870
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 930,
+      "windowStart" : 900
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 960,
+      "windowStart" : 930
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 990,
+      "windowStart" : 960
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1020,
+      "windowStart" : 990
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1050,
+      "windowStart" : 1020
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1080,
+      "windowStart" : 1050
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1110,
+      "windowStart" : 1080
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1140,
+      "windowStart" : 1110
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1170,
+      "windowStart" : 1140
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1200,
+      "windowStart" : 1170
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1230,
+      "windowStart" : 1200
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1260,
+      "windowStart" : 1230
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 0,
+      "windowEnd" : 1290,
+      "windowStart" : 1260
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1320,
+      "windowStart" : 1290
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1350,
+      "windowStart" : 1320
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1380,
+      "windowStart" : 1350
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1410,
+      "windowStart" : 1380
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1440,
+      "windowStart" : 1410
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1470,
+      "windowStart" : 1440
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1500,
+      "windowStart" : 1470
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1530,
+      "windowStart" : 1500
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1560,
+      "windowStart" : 1530
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1590,
+      "windowStart" : 1560
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1620,
+      "windowStart" : 1590
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1650,
+      "windowStart" : 1620
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1680,
+      "windowStart" : 1650
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 0,
+      "windowEnd" : 1710,
+      "windowStart" : 1680
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1740,
+      "windowStart" : 1710
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1770,
+      "windowStart" : 1740
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1800,
+      "windowStart" : 1770
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1830,
+      "windowStart" : 1800
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1860,
+      "windowStart" : 1830
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1890,
+      "windowStart" : 1860
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1920,
+      "windowStart" : 1890
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1950,
+      "windowStart" : 1920
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 1980,
+      "windowStart" : 1950
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 2010,
+      "windowStart" : 1980
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 2040,
+      "windowStart" : 2010
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 2070,
+      "windowStart" : 2040
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 2100,
+      "windowStart" : 2070
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 2130,
+      "windowStart" : 2100
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 2160,
+      "windowStart" : 2130
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 2190,
+      "windowStart" : 2160
+    }
+  ],
+  "fastTranscriptCoverageEndTime" : 3810,
+  "featureCoverageEndTime" : 4482,
+  "featureWindows" : [
+
+  ],
+  "holdoutDesignation" : "training",
+  "podcastId" : "",
+  "terminalReason" : "full coverage: transcript 6.891, feature 8.106",
+  "traceVersion" : "frozen-trace-v2",
+  "windowScores" : [
+
+  ]
+}

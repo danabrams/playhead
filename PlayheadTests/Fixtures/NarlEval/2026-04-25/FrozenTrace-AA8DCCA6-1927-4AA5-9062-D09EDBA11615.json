@@ -1,0 +1,151 @@
+{
+  "atoms" : [
+
+  ],
+  "baselineReplaySpanDecisions" : [
+    {
+      "confidence" : 0.22,
+      "endTime" : 75.6,
+      "isAd" : true,
+      "sourceTag" : "baseline",
+      "startTime" : 61.38
+    },
+    {
+      "confidence" : 0.22,
+      "endTime" : 75.6,
+      "isAd" : true,
+      "sourceTag" : "baseline",
+      "startTime" : 61.38
+    }
+  ],
+  "buildCommitSHA" : "",
+  "capturedAt" : "2026-04-25T11:50:03Z",
+  "corrections" : [
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776978995.828532,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:0.000:37.750",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776979002.812527,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:14.251:74.251",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falsePositive",
+      "createdAt" : 1776979029.962995,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:61.380:74.460",
+      "source" : "manualVeto"
+    },
+    {
+      "correctionType" : "falsePositive",
+      "createdAt" : 1776979029.967314,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:61.380:74.460",
+      "source" : "manualVeto"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776979941.049386,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:1820.625:1830.000",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776979949.037499,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:1820.625:1830.000",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falsePositive",
+      "createdAt" : 1776979992.759304,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:1816.560:1827.300",
+      "source" : "manualVeto"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776980021.61588,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:1833.000:1863.900",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776980034.630701,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:1863.960:1890.000",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776978995.828532,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:0.000:37.750",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776979002.812527,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:14.251:74.251",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falsePositive",
+      "createdAt" : 1776979029.962995,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:61.380:74.460",
+      "source" : "manualVeto"
+    },
+    {
+      "correctionType" : "falsePositive",
+      "createdAt" : 1776979029.967314,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:61.380:74.460",
+      "source" : "manualVeto"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776979941.049386,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:1820.625:1830.000",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776979949.037499,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:1820.625:1830.000",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falsePositive",
+      "createdAt" : 1776979992.759304,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:1816.560:1827.300",
+      "source" : "manualVeto"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776980021.61588,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:1833.000:1863.900",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776980034.630701,
+      "scope" : "exactTimeSpan:AA8DCCA6-1927-4AA5-9062-D09EDBA11615:1863.960:1890.000",
+      "source" : "falseNegative"
+    }
+  ],
+  "decisionEvents" : [
+
+  ],
+  "detectorVersion" : "",
+  "episodeDuration" : 75.6,
+  "episodeId" : "https:\/\/feeds.simplecast.com\/dHoohVNH::3ff57582-e226-461e-99ec-a3b5bc3c2598",
+  "evidenceCatalog" : [
+
+  ],
+  "featureWindows" : [
+
+  ],
+  "holdoutDesignation" : "training",
+  "podcastId" : "",
+  "traceVersion" : "frozen-trace-v2",
+  "windowScores" : [
+
+  ]
+}

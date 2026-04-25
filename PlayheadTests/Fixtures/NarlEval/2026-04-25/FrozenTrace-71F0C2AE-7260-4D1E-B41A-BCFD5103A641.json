@@ -1,0 +1,66 @@
+{
+  "analysisState" : "completeFull",
+  "atoms" : [
+
+  ],
+  "baselineReplaySpanDecisions" : [
+    {
+      "confidence" : 0.22,
+      "endTime" : 29.82,
+      "isAd" : true,
+      "sourceTag" : "baseline",
+      "startTime" : 0
+    },
+    {
+      "confidence" : 0.22,
+      "endTime" : 5690.52,
+      "isAd" : true,
+      "sourceTag" : "baseline",
+      "startTime" : 5670.6
+    }
+  ],
+  "buildCommitSHA" : "",
+  "capturedAt" : "2026-04-25T11:50:03Z",
+  "corrections" : [
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776992426.240094,
+      "scope" : "exactTimeSpan:71F0C2AE-7260-4D1E-B41A-BCFD5103A641:7006.000:7008.000",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776992431.811864,
+      "scope" : "exactTimeSpan:71F0C2AE-7260-4D1E-B41A-BCFD5103A641:7007.340:7009.505",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1776992488.679404,
+      "scope" : "exactTimeSpan:71F0C2AE-7260-4D1E-B41A-BCFD5103A641:7007.340:7037.340",
+      "source" : "falseNegative"
+    }
+  ],
+  "decisionEvents" : [
+
+  ],
+  "detectorVersion" : "",
+  "durationSec" : 7037.834375,
+  "episodeDuration" : 5690.52,
+  "episodeId" : "https:\/\/rss2.flightcast.com\/xmsftuzjjykcmqwolaqn6mdn::flightcast:01KM20WJPKVFHRVJZWTNA6Q1XT",
+  "evidenceCatalog" : [
+
+  ],
+  "fastTranscriptCoverageEndTime" : 7037.34,
+  "featureCoverageEndTime" : 7036,
+  "featureWindows" : [
+
+  ],
+  "holdoutDesignation" : "training",
+  "podcastId" : "",
+  "terminalReason" : "full coverage: transcript 1.000, feature 1.000",
+  "traceVersion" : "frozen-trace-v2",
+  "windowScores" : [
+
+  ]
+}

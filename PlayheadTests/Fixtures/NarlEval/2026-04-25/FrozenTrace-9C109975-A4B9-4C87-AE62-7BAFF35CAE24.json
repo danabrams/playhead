@@ -1,0 +1,42 @@
+{
+  "analysisState" : "completeFull",
+  "atoms" : [
+
+  ],
+  "baselineReplaySpanDecisions" : [
+
+  ],
+  "buildCommitSHA" : "36111a1",
+  "capturedAt" : "2026-04-25T11:50:03Z",
+  "corrections" : [
+
+  ],
+  "decisionEvents" : [
+
+  ],
+  "detectorVersion" : "detection-v1",
+  "durationSec" : 3959.769375,
+  "episodeDuration" : 3600,
+  "episodeId" : "https:\/\/feeds.simplecast.com\/dHoohVNH::b0bb6854-494f-4a69-8724-fb1509361e1b",
+  "evidenceCatalog" : [
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 60,
+      "windowStart" : 30
+    }
+  ],
+  "fastTranscriptCoverageEndTime" : 3959.769375,
+  "featureCoverageEndTime" : 3958,
+  "featureWindows" : [
+
+  ],
+  "holdoutDesignation" : "training",
+  "podcastId" : "",
+  "terminalReason" : "full coverage: transcript 1.000, feature 1.000",
+  "traceVersion" : "frozen-trace-v2",
+  "windowScores" : [
+
+  ]
+}

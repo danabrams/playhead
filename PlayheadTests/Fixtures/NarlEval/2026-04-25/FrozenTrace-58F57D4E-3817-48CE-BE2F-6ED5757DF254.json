@@ -1,0 +1,85 @@
+{
+  "analysisState" : "completeTranscriptPartial",
+  "atoms" : [
+
+  ],
+  "baselineReplaySpanDecisions" : [
+
+  ],
+  "buildCommitSHA" : "36111a1",
+  "capturedAt" : "2026-04-25T11:50:03Z",
+  "corrections" : [
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777074263.593461,
+      "scope" : "exactTimeSpan:58F57D4E-3817-48CE-BE2F-6ED5757DF254:0.000:31.250",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777074263.593461,
+      "scope" : "exactTimeSpan:58F57D4E-3817-48CE-BE2F-6ED5757DF254:0.000:31.250",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777074263.593461,
+      "scope" : "exactTimeSpan:58F57D4E-3817-48CE-BE2F-6ED5757DF254:0.000:31.250",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777074263.593461,
+      "scope" : "exactTimeSpan:58F57D4E-3817-48CE-BE2F-6ED5757DF254:0.000:31.250",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777074263.593461,
+      "scope" : "exactTimeSpan:58F57D4E-3817-48CE-BE2F-6ED5757DF254:0.000:31.250",
+      "source" : "falseNegative"
+    }
+  ],
+  "decisionEvents" : [
+
+  ],
+  "detectorVersion" : "detection-v1",
+  "durationSec" : 5435.2054375,
+  "episodeDuration" : 3600,
+  "episodeId" : "https:\/\/rss2.flightcast.com\/xmsftuzjjykcmqwolaqn6mdn::flightcast:01KPJQR48KNQ71A7C2HCY9PGPY",
+  "evidenceCatalog" : [
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 30,
+      "windowStart" : 0
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 60,
+      "windowStart" : 30
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 90,
+      "windowStart" : 60
+    }
+  ],
+  "fastTranscriptCoverageEndTime" : 2189.82,
+  "featureCoverageEndTime" : 5434,
+  "featureWindows" : [
+
+  ],
+  "holdoutDesignation" : "training",
+  "podcastId" : "",
+  "terminalReason" : "partial transcript 2189.8\/5435.2s (ratio 0.403 < 0.950)",
+  "traceVersion" : "frozen-trace-v2",
+  "windowScores" : [
+
+  ]
+}

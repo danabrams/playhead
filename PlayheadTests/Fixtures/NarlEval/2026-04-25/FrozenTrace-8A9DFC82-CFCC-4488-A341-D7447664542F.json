@@ -1,0 +1,129 @@
+{
+  "analysisState" : "completeFull",
+  "atoms" : [
+
+  ],
+  "baselineReplaySpanDecisions" : [
+
+  ],
+  "buildCommitSHA" : "36111a1",
+  "capturedAt" : "2026-04-25T11:50:03Z",
+  "corrections" : [
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777077291.5536351,
+      "scope" : "exactTimeSpan:8A9DFC82-CFCC-4488-A341-D7447664542F:0.000:1.904",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777077317.1713362,
+      "scope" : "exactTimeSpan:8A9DFC82-CFCC-4488-A341-D7447664542F:0.000:29.820",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777077291.5536351,
+      "scope" : "exactTimeSpan:8A9DFC82-CFCC-4488-A341-D7447664542F:0.000:1.904",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777077317.1713362,
+      "scope" : "exactTimeSpan:8A9DFC82-CFCC-4488-A341-D7447664542F:0.000:29.820",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777077291.5536351,
+      "scope" : "exactTimeSpan:8A9DFC82-CFCC-4488-A341-D7447664542F:0.000:1.904",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777077317.1713362,
+      "scope" : "exactTimeSpan:8A9DFC82-CFCC-4488-A341-D7447664542F:0.000:29.820",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777077291.5536351,
+      "scope" : "exactTimeSpan:8A9DFC82-CFCC-4488-A341-D7447664542F:0.000:1.904",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777077317.1713362,
+      "scope" : "exactTimeSpan:8A9DFC82-CFCC-4488-A341-D7447664542F:0.000:29.820",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777077291.5536351,
+      "scope" : "exactTimeSpan:8A9DFC82-CFCC-4488-A341-D7447664542F:0.000:1.904",
+      "source" : "falseNegative"
+    },
+    {
+      "correctionType" : "falseNegative",
+      "createdAt" : 1777077317.1713362,
+      "scope" : "exactTimeSpan:8A9DFC82-CFCC-4488-A341-D7447664542F:0.000:29.820",
+      "source" : "falseNegative"
+    }
+  ],
+  "decisionEvents" : [
+
+  ],
+  "detectorVersion" : "detection-v1",
+  "durationSec" : 748.1730625,
+  "episodeDuration" : 3600,
+  "episodeId" : "https:\/\/rss2.flightcast.com\/xmsftuzjjykcmqwolaqn6mdn::flightcast:01KPV0GH4GHGBQT7BD84WEBAMS",
+  "evidenceCatalog" : [
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 30,
+      "windowStart" : 0
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 60,
+      "windowStart" : 30
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 64.75,
+      "windowStart" : 60
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 65.75,
+      "windowStart" : 60
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 66.75,
+      "windowStart" : 60
+    }
+  ],
+  "fastTranscriptCoverageEndTime" : 870,
+  "featureCoverageEndTime" : 1290,
+  "featureWindows" : [
+
+  ],
+  "holdoutDesignation" : "training",
+  "podcastId" : "",
+  "terminalReason" : "full coverage: transcript 1.163, feature 1.724",
+  "traceVersion" : "frozen-trace-v2",
+  "windowScores" : [
+
+  ]
+}

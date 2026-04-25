@@ -1,0 +1,49 @@
+{
+  "analysisState" : "completeFull",
+  "atoms" : [
+
+  ],
+  "baselineReplaySpanDecisions" : [
+
+  ],
+  "buildCommitSHA" : "36111a1",
+  "capturedAt" : "2026-04-25T11:50:03Z",
+  "corrections" : [
+
+  ],
+  "decisionEvents" : [
+
+  ],
+  "detectorVersion" : "detection-v1",
+  "durationSec" : 2181.58225,
+  "episodeDuration" : 3600,
+  "episodeId" : "https:\/\/rss2.flightcast.com\/xmsftuzjjykcmqwolaqn6mdn::flightcast:01KMZRHZSZVPJZYBJQ2MA8ZSXX",
+  "evidenceCatalog" : [
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 30,
+      "windowStart" : 0
+    },
+    {
+      "classificationTrust" : 0,
+      "source" : "shadow:allEnabledShadow",
+      "weight" : 1,
+      "windowEnd" : 120,
+      "windowStart" : 90
+    }
+  ],
+  "fastTranscriptCoverageEndTime" : 2181.18,
+  "featureCoverageEndTime" : 2180,
+  "featureWindows" : [
+
+  ],
+  "holdoutDesignation" : "training",
+  "podcastId" : "",
+  "terminalReason" : "full coverage: transcript 1.000, feature 0.999",
+  "traceVersion" : "frozen-trace-v2",
+  "windowScores" : [
+
+  ]
+}

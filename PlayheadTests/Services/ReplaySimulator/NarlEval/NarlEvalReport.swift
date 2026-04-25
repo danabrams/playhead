@@ -173,6 +173,12 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
     let detectorVersion: String
     /// gtt9.21: build-commit-SHA stamp from the FrozenTrace.
     let buildCommitSHA: String
+    /// playhead-jif5: gtt9.15 pipeline-coverage classification of the
+    /// underlying trace, persisted onto the entry so the rollup
+    /// aggregator (and the renderer's "Excluded episodes" section) can
+    /// filter out `pipeline-coverage-limited` episodes without re-
+    /// classifying. Defaults to `.unknown` for pre-jif5 report artifacts.
+    let pipelineCoverageBucket: NarlPipelineCoverageBucket
 
     init(
         episodeId: String,
@@ -192,7 +198,8 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
         fnDecomposition: [NarlFNDecomp] = [],
         normalizerCounts: NarlNormalizerCounts = .zero,
         detectorVersion: String = "",
-        buildCommitSHA: String = ""
+        buildCommitSHA: String = "",
+        pipelineCoverageBucket: NarlPipelineCoverageBucket = .unknown
     ) {
         self.episodeId = episodeId
         self.podcastId = podcastId
@@ -212,6 +219,7 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
         self.normalizerCounts = normalizerCounts
         self.detectorVersion = detectorVersion
         self.buildCommitSHA = buildCommitSHA
+        self.pipelineCoverageBucket = pipelineCoverageBucket
     }
 
     /// Codable default handling: older `report.json` artifacts written before
@@ -225,6 +233,7 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
         case coverageMetrics, fnDecomposition
         case normalizerCounts
         case detectorVersion, buildCommitSHA
+        case pipelineCoverageBucket
     }
 
     init(from decoder: Decoder) throws {
@@ -247,6 +256,8 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
         self.normalizerCounts = (try? c.decode(NarlNormalizerCounts.self, forKey: .normalizerCounts)) ?? .zero
         self.detectorVersion = (try? c.decode(String.self, forKey: .detectorVersion)) ?? ""
         self.buildCommitSHA = (try? c.decode(String.self, forKey: .buildCommitSHA)) ?? ""
+        self.pipelineCoverageBucket = (try? c.decode(NarlPipelineCoverageBucket.self,
+                                                     forKey: .pipelineCoverageBucket)) ?? .unknown
     }
 }
 
@@ -863,8 +874,16 @@ enum NarlEvalRenderer {
         // Each episode appears once per config in `report.episodes`, so without
         // deduping, an excluded episode would show up twice in the summary
         // with identical zeros (LOW-4).
+        //
+        // playhead-jif5: the per-episode metric table still renders every
+        // entry where `isExcluded == false` — pipeline-coverage-limited
+        // episodes stay visible there for transparency. The excluded list
+        // is union'd with pipeline-coverage-limited entries so the report
+        // explains why headline rollups dropped them.
         let included = report.episodes.filter { !$0.isExcluded }
-        let excluded = report.episodes.filter { $0.isExcluded }
+        let excluded = report.episodes.filter {
+            $0.isExcluded || $0.pipelineCoverageBucket == .pipelineCoverageLimited
+        }
 
         out += "## Per-episode\n\n"
         out += "| Episode | Podcast | Config | GT | Pred | F1@0.3 | F1@0.5 | F1@0.7 | Sec-F1 | PipelineFail |\n"
@@ -964,7 +983,18 @@ enum NarlEvalRenderer {
             out += "| Episode | Podcast | Reason |\n"
             out += "|---|---|---|\n"
             for e in dedupedExcluded {
-                out += "| \(e.episodeId) | \(e.podcastId) | \(e.exclusionReason ?? "yes") |\n"
+                // playhead-jif5: when an entry is excluded from rollups
+                // *only* by the pipeline-coverage classifier (not by a
+                // whole-asset veto), surface that as the reason. A whole-
+                // asset veto wins precedence — `isExcluded` is the harder
+                // signal and may carry a more specific exclusionReason.
+                let reason: String
+                if e.isExcluded {
+                    reason = e.exclusionReason ?? "yes"
+                } else {
+                    reason = "pipelineCoverageLimited:\(e.episodeId)"
+                }
+                out += "| \(e.episodeId) | \(e.podcastId) | \(reason) |\n"
             }
             out += "\n"
         }
