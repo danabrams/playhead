@@ -315,6 +315,27 @@ actor AnalysisWorkScheduler {
     /// sleeping in the no-dispatchable-job branch of the run loop.
     private var shadowLaneTickHandler: (any ShadowLaneTickHandler)?
 
+    /// playhead-gjz6 (Gap-4 second half): submits a backfill
+    /// `BGProcessingTask` so iOS wakes the app to drain the analysis
+    /// queue when `enqueue` is called while the app is already
+    /// backgrounded. The first half of Gap-4 (playhead-fuo6) covered
+    /// the `.background` *transition* path via PlayheadApp's scenePhase
+    /// observer; this seam covers the inverse case where a download
+    /// completes via background URLSession, lands on `enqueue`, and no
+    /// scenePhase transition fires because the app was already in
+    /// `.background`. Without this rearm the new analysis job sits
+    /// queued until the next foreground.
+    ///
+    /// Production wires this to `BackgroundProcessingService.scheduleBackfillIfNeeded()`
+    /// via `ProductionBackfillScheduler`. Tests inject a stub to assert
+    /// the rearm fires (or doesn't) without standing up the real BPS.
+    /// nil-able so existing test factories that don't care about the
+    /// rearm path can continue to construct a scheduler without a
+    /// scheduler stub. Reuses the `BackfillScheduling` protocol declared
+    /// in `BackgroundFeedRefreshService.swift` (Gap-5 fix) — same
+    /// contract, same production adapter (`ProductionBackfillScheduler`).
+    private let backfillScheduler: (any BackfillScheduling)?
+
     private var wakeContinuation: AsyncStream<Void>.Continuation?
     private var wakeStream: AsyncStream<Void>
 
@@ -344,7 +365,8 @@ actor AnalysisWorkScheduler {
         transportStatusProvider: any TransportStatusProviding = WifiTransportStatusProvider(),
         candidateWindowCascade: CandidateWindowCascade? = nil,
         config: PreAnalysisConfig = .load(),
-        clock: @escaping @Sendable () -> Date = { Date() }
+        clock: @escaping @Sendable () -> Date = { Date() },
+        backfillScheduler: (any BackfillScheduling)? = nil
     ) {
         self.store = store
         self.jobRunner = jobRunner
@@ -355,6 +377,7 @@ actor AnalysisWorkScheduler {
         self.candidateWindowCascade = candidateWindowCascade
         self.config = config
         self.clock = clock
+        self.backfillScheduler = backfillScheduler
         var continuation: AsyncStream<Void>.Continuation?
         self.wakeStream = AsyncStream<Void> { continuation = $0 }
         self.wakeContinuation = continuation
@@ -457,6 +480,26 @@ actor AnalysisWorkScheduler {
         }
 
         wakeSchedulerLoop()
+
+        // playhead-gjz6 (Gap-4 second half): if the app is currently
+        // backgrounded, ask `BackgroundProcessingService` to submit a
+        // backfill `BGProcessingTask` so iOS wakes the app to drain the
+        // analysis queue. Without this hop, a download that completes
+        // via background URLSession while the app is already in
+        // `.background` produces no scenePhase transition (the
+        // first-half PlayheadApp observer in playhead-fuo6 covers
+        // foreground→background), so the just-enqueued job sits queued
+        // until the next foreground (overnight blackout class of bug
+        // — same shape as fuo6 / 5uvz.4 Gap-5).
+        //
+        // Skip the rearm in foreground: the scheduler's run loop is
+        // already eligible to pick up the new job on its next iteration
+        // (we just woke it above). Submitting a BGProcessingTask while
+        // foregrounded is wasted iOS budget and would compete with the
+        // foreground run loop for the same queue.
+        if schedulerScenePhase == .background {
+            await backfillScheduler?.scheduleBackfillIfNeeded()
+        }
     }
 
     /// playhead-c3pi: seed the candidate-window cascade for an episode.

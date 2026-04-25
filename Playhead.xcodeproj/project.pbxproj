@@ -476,6 +476,7 @@
 		BBAF007B9BEF2A3BDF04B849 /* BackgroundProcessingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FF386614C954C71D052A28C /* BackgroundProcessingService.swift */; };
 		BBB6525847B2FC96375F2B06 /* SurfaceReasonCopyTemplateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89733ACCD4FB0B148C9D6244 /* SurfaceReasonCopyTemplateTests.swift */; };
 		BBD14284EECCA3C46E510EA5 /* ChapterEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0095F306E2C02D345F9B18 /* ChapterEvidence.swift */; };
+		BC6879E2D1E3163D83E33886 /* AnalysisWorkSchedulerBackfillRearmTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFCBD9A239AF9AFF6B5BAA97 /* AnalysisWorkSchedulerBackfillRearmTests.swift */; };
 		BD602BE820AF7C051104731D /* BackfillJobRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD272EA3B2EF1BFE6A737BC8 /* BackfillJobRunner.swift */; };
 		BD692996D85CF83F95F5F5FF /* AssetLifecycleLoggerSchedulerStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 885785B2DA7CBF8D9363717D /* AssetLifecycleLoggerSchedulerStateTests.swift */; };
 		BD94B99D7E3639342FB29833 /* RealEpisodeBenchmarkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32E26469D00AFA7A2A14FA96 /* RealEpisodeBenchmarkTests.swift */; };
@@ -1267,6 +1268,7 @@
 		FF38243D35CA07BE595A877C /* FoundationModelExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoundationModelExtractor.swift; sourceTree = "<group>"; };
 		FF87059092BDF6E5FF9B1DB4 /* DecisionLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionLogger.swift; sourceTree = "<group>"; };
 		FFAC0AF611301A8AF53A5A5F /* MetadataEvidenceFusionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataEvidenceFusionTests.swift; sourceTree = "<group>"; };
+		FFCBD9A239AF9AFF6B5BAA97 /* AnalysisWorkSchedulerBackfillRearmTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisWorkSchedulerBackfillRearmTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -1973,6 +1975,7 @@
 				8C8EF742FFE6F6BB80D6777C /* AdmissionControllerTests.swift */,
 				E78F6AB5A3A1E794946FF04C /* AdmissionGateTests.swift */,
 				0C0D89779F1E024AB0F81FC9 /* AnalysisJobReconcilerTests.swift */,
+				FFCBD9A239AF9AFF6B5BAA97 /* AnalysisWorkSchedulerBackfillRearmTests.swift */,
 				89F391BB391AD909A18A6D8E /* AnalysisWorkSchedulerCandidateWindowTests.swift */,
 				EFED86CF004D90387FB61B0A /* AnalysisWorkSchedulerCascadeOrderingTests.swift */,
 				AE468775AFF9C829AB67B18C /* AnalysisWorkSchedulerLaneAdmissionTests.swift */,
@@ -3033,6 +3036,7 @@
 				635E12040A94A22C1C90EA24 /* AnalysisJobStoreTests.swift in Sources */,
 				3C2E8E517357EEAADBF0A178 /* AnalysisStoreVersionColumnsMigrationTests.swift in Sources */,
 				F01C35C4EE3650E5AD070C2E /* AnalysisUnavailableReasonTests.swift in Sources */,
+				BC6879E2D1E3163D83E33886 /* AnalysisWorkSchedulerBackfillRearmTests.swift in Sources */,
 				7611C2BEDB753905B31AAF0F /* AnalysisWorkSchedulerCandidateWindowTests.swift in Sources */,
 				423F31BE200E18A24E1BBCC7 /* AnalysisWorkSchedulerCascadeOrderingTests.swift in Sources */,
 				A07D9336F2F0FDA49631B0AA /* AnalysisWorkSchedulerLaneAdmissionTests.swift in Sources */,
