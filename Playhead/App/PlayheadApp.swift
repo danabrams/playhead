@@ -220,6 +220,19 @@ struct PlayheadApp: App {
                         trigger: .background
                     )
                 }
+                // playhead-fuo6: submit a backfill BGProcessingTask on
+                // every `.background` transition so iOS has a registered
+                // task to wake us with even when the user queued
+                // episodes without ever pressing play. Pre-fix, the
+                // only `scheduleBackfillIfNeeded` callers were
+                // `playbackDidStop()` and the backfill handler's own
+                // self-rearm, neither of which fires on a queued-but-
+                // never-played session. Capture
+                // `.captures/2026-04-25/...07:43.49.095` shows the
+                // 12-hour overnight blackout this caused.
+                Task {
+                    await runtime.backgroundProcessingService.appDidEnterBackground()
+                }
             case .active:
                 Self.logger.info("Scene phase: active")
             case .inactive:

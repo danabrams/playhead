@@ -448,18 +448,35 @@ actor BackgroundProcessingService {
         scheduleBackfillIfNeeded()
     }
 
-    /// playhead-fuo6: signal that the app has entered the background.
+    /// playhead-fuo6: submit a backfill BGProcessingTask whenever the
+    /// app enters the background.
     ///
-    /// Stub for the RED commit -- currently a no-op so the bead's failing
-    /// test compiles. The GREEN commit replaces this body with a real
-    /// `scheduleBackfillIfNeeded()` call so iOS has a registered task to
-    /// wake the app for. The 12-hour overnight gap (capture
-    /// `2026-04-25 07:43.49.095`) reproduced because the only previous
-    /// callers of `scheduleBackfillIfNeeded` were `playbackDidStop()` and
-    /// the handler self-rearm -- neither fires on a queued-but-never-played
-    /// session.
+    /// The 12-hour overnight blackout in capture
+    /// `2026-04-25 07:43.49.095` reproduced because the only callers of
+    /// `scheduleBackfillIfNeeded()` were `playbackDidStop()` and the
+    /// backfill handler's own self-rearm. A user who queues episodes
+    /// without ever pressing play never triggers either path, so iOS
+    /// has no submitted BGProcessingTask to wake the app for. The
+    /// in-memory `AnalysisWorkScheduler.runLoop` only gets CPU until
+    /// iOS suspends the process (~30s after backgrounding).
+    ///
+    /// Wiring it on every `.background` scenePhase transition is safe
+    /// because:
+    ///   * `BGTaskScheduler.submit(_:)` deduplicates identical
+    ///     identifiers; iOS coalesces duplicate submissions.
+    ///   * The submitted request is identical to the one already used
+    ///     by `playbackDidStop()` and the self-rearm path
+    ///     (`requiresExternalPower=false`, `requiresNetworkConnectivity
+    ///     =false`); there is no network/power policy regression.
+    ///   * If the OS later runs the task, the existing handler
+    ///     re-arms via `scheduleBackfillIfNeeded()` so periodic
+    ///     submission continues without further app-side action.
+    ///
+    /// Called from `PlayheadApp.onChange(of: scenePhase)` on the main
+    /// actor when the new phase is `.background`.
     func appDidEnterBackground() {
-        // intentionally empty; see GREEN commit
+        logger.info("App entered background -- submitting backfill task")
+        scheduleBackfillIfNeeded()
     }
 
     /// Returns the recommended hot-path lookahead multiplier based on
