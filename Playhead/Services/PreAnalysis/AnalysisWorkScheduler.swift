@@ -237,6 +237,89 @@ actor AnalysisWorkScheduler {
         }
     }
 
+    // MARK: - PlayheadCatchupPolicy (playhead-yqax)
+
+    /// Configuration for the foreground transcript catch-up escalation
+    /// (playhead-yqax). When the user is actively playing an episode in
+    /// the foreground and the playhead is approaching the end of the
+    /// transcribed region, the scheduler escalates the active episode's
+    /// `analysis_jobs` row to a deeper `desiredCoverageSec` so
+    /// transcription chases the playhead rather than running out behind
+    /// it. Long-form podcasts (Conan ≈ 117 min) systematically overflow
+    /// the BG-task budget ceiling — without catch-up, the trailing
+    /// 60–90 min are never transcribed and ad windows in that tail are
+    /// scored only by the limited audio-feature path.
+    ///
+    /// The trigger is **distance-based**: when transcribed audio
+    /// remaining ahead of the playhead is less than
+    /// `triggerThresholdSec`, the catch-up bypass admits a single Now-
+    /// lane dispatch for the active episode despite the standard
+    /// `(foreground, playing)` block on deferred work in
+    /// ``admissionBlocksDeferred()``. The escalated coverage target is
+    /// `playheadPositionSec + lookaheadWindowSec`, capped at the
+    /// episode duration when known.
+    ///
+    /// Backpressure: catch-up reuses the existing ``LaneAdmission``
+    /// gate. ``LaneAdmission.pauseAllWork`` (thermal `.critical`) still
+    /// dominates and blocks catch-up the same way it blocks every other
+    /// admission. The bead documents that pipeline-FN time on an
+    /// actively-listening user is worse than transient bandwidth
+    /// contention at `.serious` thermal, so catch-up is admitted under
+    /// `.serious` even though Soon/Background lanes are gated there.
+    struct PlayheadCatchupPolicy: Sendable, Equatable {
+        /// When transcribed-ahead < `triggerThresholdSec`, fire catch-up.
+        /// 60 s default — enough lead time to absorb an FM cold start
+        /// (~3 s) plus shard decode for the next chunk at 1× playback,
+        /// while still being short enough that we are not ahead-prefetching
+        /// for a user who might pause / change episode. Tied to the
+        /// 30 s `seekRelatchThresholdSeconds` only by analogy — the
+        /// units differ (transcript-coverage runway vs. seek delta).
+        let triggerThresholdSec: TimeInterval
+
+        /// How far ahead of the current playhead we want transcription
+        /// to extend on each catch-up dispatch. 300 s default — five
+        /// minutes of headroom is enough to outrun 1.5× / 2× playback
+        /// while one stage 3 transcription pass runs (typically 30–60 s
+        /// per minute of audio on M-class silicon). Independent of the
+        /// T0/T1/T2 tier ladder.
+        let lookaheadWindowSec: TimeInterval
+
+        /// Default policy used when the scheduler is constructed without
+        /// an explicit override.
+        static let `default` = PlayheadCatchupPolicy(
+            triggerThresholdSec: 60,
+            lookaheadWindowSec: 300
+        )
+
+        /// Disabled policy — both thresholds zero. Used by tests that
+        /// want to assert catch-up does NOT fire under the current
+        /// (scenePhase, playbackContext, position) snapshot.
+        static let disabled = PlayheadCatchupPolicy(
+            triggerThresholdSec: 0,
+            lookaheadWindowSec: 0
+        )
+    }
+
+    /// Resolved catch-up opportunity. Returned by
+    /// ``currentCatchupOpportunity()`` when a foreground catch-up
+    /// dispatch should fire on the next loop iteration. The scheduler
+    /// uses `escalatedDesiredCoverageSec` to override the persisted
+    /// row's `desiredCoverageSec` before dispatch so the runner
+    /// transcribes deeper than the standard tier ladder allows.
+    struct CatchupOpportunity: Sendable, Equatable {
+        let jobId: String
+        let episodeId: String
+        let priorDesiredCoverageSec: Double
+        let escalatedDesiredCoverageSec: Double
+        /// Transcript coverage end time read from the asset row at
+        /// trigger time. Surfaced for instrumentation only — the
+        /// scheduler does not consume it after the dispatch decision.
+        let transcribedAheadSec: Double
+        /// Playhead position observed at trigger time. Surfaced for
+        /// instrumentation only.
+        let playheadPositionSec: TimeInterval
+    }
+
     private var schedulerTask: Task<Void, Never>?
     private var currentRunningTask: Task<Void, Never>?
     private var currentJobId: String?
@@ -259,6 +342,23 @@ actor AnalysisWorkScheduler {
     /// not silently admit background work it shouldn't. The first real
     /// `.background` transition re-gates appropriately.
     private var schedulerScenePhase: SchedulerScenePhase = .foreground
+
+    /// playhead-yqax: live playhead position for the actively-playing
+    /// episode. Updated from the run-loop status observer via
+    /// ``noteCurrentPlayheadPosition(episodeId:position:)`` on every
+    /// distinct ~1 s tick (the runtime call site coalesces sub-second
+    /// updates so the scheduler isn't hammered). `nil` when no episode
+    /// is loaded or playback has fully stopped. Catch-up reads this
+    /// alongside `activePlaybackEpisodeId` and the asset's
+    /// `fastTranscriptCoverageEndTime` to decide whether to fire.
+    private var playheadPositionSec: TimeInterval?
+
+    /// playhead-yqax: the foreground-catch-up policy this scheduler
+    /// applies. Production callers pass `.default`; tests pass either a
+    /// custom policy to explore boundary cases or `.disabled` to assert
+    /// catch-up fires zero times under a given snapshot.
+    private let catchupPolicy: PlayheadCatchupPolicy
+
     private var shouldCancelCurrentJob = false
     /// Set to `true` by the lease-renewal task when its CAS finds no
     /// matching row — i.e. orphan recovery (or another scheduler
@@ -366,7 +466,8 @@ actor AnalysisWorkScheduler {
         candidateWindowCascade: CandidateWindowCascade? = nil,
         config: PreAnalysisConfig = .load(),
         clock: @escaping @Sendable () -> Date = { Date() },
-        backfillScheduler: (any BackfillScheduling)? = nil
+        backfillScheduler: (any BackfillScheduling)? = nil,
+        catchupPolicy: PlayheadCatchupPolicy = .default
     ) {
         self.store = store
         self.jobRunner = jobRunner
@@ -378,6 +479,7 @@ actor AnalysisWorkScheduler {
         self.config = config
         self.clock = clock
         self.backfillScheduler = backfillScheduler
+        self.catchupPolicy = catchupPolicy
         var continuation: AsyncStream<Void>.Continuation?
         self.wakeStream = AsyncStream<Void> { continuation = $0 }
         self.wakeContinuation = continuation
@@ -835,6 +937,10 @@ actor AnalysisWorkScheduler {
     func playbackStopped() {
         activePlaybackEpisodeId = nil
         playbackContext = .idle
+        // playhead-yqax: drop the playhead snapshot in lockstep with
+        // the active-episode reset so a stale position cannot fire
+        // catch-up against a future episode load.
+        playheadPositionSec = nil
         wakeSchedulerLoop()
     }
 
@@ -853,6 +959,13 @@ actor AnalysisWorkScheduler {
         playbackContext = context
         if context == .idle {
             activePlaybackEpisodeId = nil
+            // playhead-yqax: drop the playhead snapshot when the
+            // transport reports idle so a stale position from the
+            // prior episode cannot fire catch-up against the next
+            // load. Repopulated by the next
+            // ``noteCurrentPlayheadPosition(episodeId:position:)``
+            // call once playback resumes.
+            playheadPositionSec = nil
         }
         // Wake only on a genuine transition so the idle poll loop doesn't
         // get hammered by coalesced status ticks (observeStates fires at
@@ -860,6 +973,37 @@ actor AnalysisWorkScheduler {
         if priorContext != context {
             wakeSchedulerLoop()
         }
+    }
+
+    /// playhead-yqax: update the live playhead position for the
+    /// actively-playing episode. Called from the runtime's transport-
+    /// status observer on each periodic-time tick. The scheduler reads
+    /// this in ``currentCatchupOpportunity()`` together with
+    /// ``activePlaybackEpisodeId`` to decide whether to fire a
+    /// foreground catch-up dispatch despite the standard
+    /// `(foreground, playing)` block on deferred work.
+    ///
+    /// `episodeId` must match `activePlaybackEpisodeId`; if it does
+    /// not (e.g. a stale tick arriving after a track-change) the call
+    /// is silently dropped so the catch-up trigger cannot run on a
+    /// position from the prior episode. A `nil` position from the
+    /// caller resets the field — used at end-of-episode and in tests.
+    ///
+    /// Coalescing: callers should already throttle (the runtime
+    /// observer forwards only on whole-second changes) so this method
+    /// does NOT re-implement throttling. Each call wakes the loop
+    /// because a position change can flip the catch-up trigger from
+    /// "no opportunity" to "fire now"; a wake here is the fastest path
+    /// to react. The wake is no-op if the loop is already running.
+    func noteCurrentPlayheadPosition(
+        episodeId: String,
+        position: TimeInterval?
+    ) {
+        guard episodeId == activePlaybackEpisodeId else { return }
+        playheadPositionSec = position
+        // Wake the loop so a newly-eligible catch-up dispatch is
+        // considered immediately rather than after the next idle poll.
+        wakeSchedulerLoop()
     }
 
     /// playhead-gtt9.14: update the scene-phase projection. Forwarded by
@@ -931,6 +1075,160 @@ actor AnalysisWorkScheduler {
     private func isForegroundAggressiveMode() -> Bool {
         schedulerScenePhase == .foreground && playbackContext != .playing
     }
+
+    // MARK: - Foreground catch-up (playhead-yqax)
+
+    /// playhead-yqax: evaluate whether a foreground transcript catch-up
+    /// dispatch should fire on this loop iteration. Returns the
+    /// resolved opportunity (job to escalate + escalated coverage) or
+    /// `nil` when no catch-up is needed.
+    ///
+    /// Trigger preconditions (all must hold):
+    ///   1. `(scenePhase, playbackContext) == (.foreground, .playing)`.
+    ///   2. An episode is loaded (`activePlaybackEpisodeId != nil`).
+    ///   3. A live playhead position has been observed for this
+    ///      episode.
+    ///   4. The latest non-terminal job for the active episode is
+    ///      eligible for dispatch (queued/paused/failed,
+    ///      lease free/expired, `nextEligibleAt` due).
+    ///   5. `transcriptCoverageEnd - playheadPosition < triggerThresholdSec`.
+    ///   6. The escalated coverage (`playheadPosition + lookaheadWindowSec`,
+    ///      capped to episode duration when known) strictly exceeds
+    ///      the job's persisted `desiredCoverageSec` — otherwise the
+    ///      job is already targeted at a deeper coverage and the
+    ///      standard scheduler path will pick it up the moment
+    ///      audio releases the pipeline.
+    ///   7. The current `LaneAdmission` does not pause all work
+    ///      (thermal `.critical`); we deliberately admit catch-up at
+    ///      `.serious` because the bead's premise is that pipeline-FN
+    ///      time on an actively-listening user is worse than transient
+    ///      bandwidth contention.
+    ///
+    /// Returns `nil` when any precondition fails. Best-effort: a SQL
+    /// hiccup mid-evaluation logs and returns nil rather than
+    /// propagating, so a transient store error cannot stall the loop.
+    private func currentCatchupOpportunity(
+        admission: LaneAdmission,
+        now: TimeInterval
+    ) async -> CatchupOpportunity? {
+        // Precondition 7 — pauseAllWork dominates everything.
+        guard !admission.pauseAllWork else { return nil }
+        // Preconditions 1 + 2.
+        guard schedulerScenePhase == .foreground,
+              playbackContext == .playing,
+              let episodeId = activePlaybackEpisodeId
+        else { return nil }
+        // Precondition 3.
+        guard let playheadPosition = playheadPositionSec else { return nil }
+        // Trivially-misconfigured policy guard. A zero trigger
+        // threshold means "never fire" by construction; bail before
+        // any store work.
+        guard catchupPolicy.triggerThresholdSec > 0,
+              catchupPolicy.lookaheadWindowSec > 0
+        else { return nil }
+
+        // Resolve the latest job row for this episode; a missing row
+        // means the episode was deleted or never enqueued — no
+        // catch-up to fire.
+        let job: AnalysisJob
+        do {
+            guard let row = try await store.fetchLatestJobForEpisode(episodeId)
+            else { return nil }
+            job = row
+        } catch {
+            logger.warning("currentCatchupOpportunity: fetchLatestJobForEpisode threw for \(episodeId): \(error)")
+            return nil
+        }
+
+        // Precondition 4 — same eligibility predicate the loop's
+        // selector applies. We do NOT consult `deferredWorkAllowed`:
+        // catch-up is the explicit override of the deferred-work
+        // block in `(foreground, playing)`, and the lane-cap +
+        // QualityProfile checks happen later in the run loop using
+        // the same gates regular admissions use.
+        guard isEligibleForDispatch(job: job, deferredWorkAllowed: true, now: now)
+        else { return nil }
+
+        // Read transcript coverage from the asset row. If no asset row
+        // exists yet (first run, asset not materialized), the runner
+        // will create one — but coverage is necessarily zero, so a
+        // distance check against `playheadPosition` always trips and
+        // catch-up should fire if the playhead is non-trivial.
+        let asset: AnalysisAsset?
+        do {
+            if let assetId = job.analysisAssetId {
+                asset = try await store.fetchAsset(id: assetId)
+            } else if let byEpisode = try await store.fetchAssetByEpisodeId(episodeId) {
+                asset = byEpisode
+            } else {
+                asset = nil
+            }
+        } catch {
+            logger.warning("currentCatchupOpportunity: fetchAsset threw for \(episodeId): \(error)")
+            return nil
+        }
+        let transcriptCoverageEnd = asset?.fastTranscriptCoverageEndTime ?? 0
+        let transcribedAhead = max(0, transcriptCoverageEnd - playheadPosition)
+
+        // Precondition 5 — distance gate.
+        guard transcribedAhead < catchupPolicy.triggerThresholdSec else {
+            return nil
+        }
+
+        // Compute the escalated coverage target.
+        // playheadPosition + lookaheadWindowSec, clamped at episode
+        // duration when known. Episode duration is `nil` until
+        // Stage 1 of the runner persists it (Pipeline B path) or
+        // `AnalysisCoordinator.runFromSpooling` writes it (Pipeline A
+        // path). Without a duration we cap at a large but finite
+        // value (`Double.greatestFiniteMagnitude` would feed
+        // confusing telemetry) — use the playhead + lookahead
+        // unclamped which is the natural target.
+        let unclampedTarget = playheadPosition + catchupPolicy.lookaheadWindowSec
+        let escalatedTarget: Double = {
+            guard let duration = asset?.episodeDurationSec else { return unclampedTarget }
+            return min(unclampedTarget, duration)
+        }()
+
+        // Precondition 6 — only fire when the escalation is strictly
+        // greater than the persisted target. Equal-or-less means the
+        // existing tier ladder already handles the runway and the
+        // standard `(foreground, playing)` block correctly applies.
+        guard escalatedTarget > job.desiredCoverageSec + 0.001 else {
+            return nil
+        }
+
+        return CatchupOpportunity(
+            jobId: job.jobId,
+            episodeId: episodeId,
+            priorDesiredCoverageSec: job.desiredCoverageSec,
+            escalatedDesiredCoverageSec: escalatedTarget,
+            transcribedAheadSec: transcribedAhead,
+            playheadPositionSec: playheadPosition
+        )
+    }
+
+    #if DEBUG
+    /// Test-only accessor returning the `CatchupOpportunity` the run
+    /// loop would dispatch on the next iteration, or `nil` if no
+    /// catch-up should fire under the current snapshot. Tests use this
+    /// to assert the trigger predicate without driving the full loop.
+    func currentCatchupOpportunityForTesting() async -> CatchupOpportunity? {
+        let admission = await currentLaneAdmission()
+        let now = clock().timeIntervalSince1970
+        return await currentCatchupOpportunity(admission: admission, now: now)
+    }
+
+    /// Test-only accessor for the persisted catch-up policy.
+    func catchupPolicyForTesting() -> PlayheadCatchupPolicy {
+        catchupPolicy
+    }
+
+    /// Test-only accessor for the live playhead position field.
+    func playheadPositionSecForTesting() -> TimeInterval? {
+        playheadPositionSec
+    }
+    #endif
 
     // MARK: - SchedulerStateSnapshotProviding (playhead-gtt9.14)
 
@@ -1099,6 +1397,44 @@ actor AnalysisWorkScheduler {
                 continue
             }
 
+            let admission = await currentLaneAdmission()
+
+            // Critical thermal (or equivalent) pauses every lane, including
+            // T0 playback drains AND foreground catch-up. Wait for the next
+            // wake/capability change.
+            if admission.pauseAllWork {
+                await sleepOrWake(seconds: Self.idlePollSeconds)
+                continue
+            }
+
+            let now = clock().timeIntervalSince1970
+
+            // playhead-yqax: foreground transcript catch-up bypass.
+            // When the user is actively playing an episode in the
+            // foreground and the playhead is approaching the end of
+            // the transcribed region, escalate the active episode's
+            // job's `desiredCoverageSec` and dispatch it as a Now-lane
+            // job — bypassing the standard `(foreground, playing)`
+            // block on deferred work. The bypass is consulted BEFORE
+            // `admissionBlocksDeferred()` so the (foreground, playing)
+            // sleep does not pre-empt the catch-up evaluation; the
+            // opportunity itself implicitly requires
+            // (foreground, playing) so non-catch-up states fall through
+            // unchanged.
+            //
+            // The escalation persists to the `analysis_jobs` row
+            // (`updateJobDesiredCoverage`) so the runner sees the new
+            // target, the outcome arms route through "all tiers done"
+            // when the post-run coverage exceeds T2, and a crash mid-
+            // catch-up does not lose the deeper target on resume.
+            if let opportunity = await currentCatchupOpportunity(
+                admission: admission,
+                now: now
+            ) {
+                await dispatchForegroundCatchup(opportunity: opportunity)
+                continue
+            }
+
             // playhead-gtt9.14: 4-state admission filter over
             // (scenePhase, playbackContext). Prior to gtt9.14 the
             // scheduler blocked deferred work whenever an episode was
@@ -1106,16 +1442,13 @@ actor AnalysisWorkScheduler {
             // foreground-playing, which is the opposite of what the
             // device's capability envelope suggests. See
             // `admissionBlocksDeferred()` for the full matrix.
+            //
+            // playhead-yqax: this block now follows the catch-up
+            // bypass above. When `(foreground, playing)` is hit we
+            // first ask "is catch-up needed?" — if yes we dispatched
+            // and `continue`'d above; if no we fall through to the
+            // pre-yqax behavior (sleep the loop).
             if admissionBlocksDeferred() {
-                await sleepOrWake(seconds: Self.idlePollSeconds)
-                continue
-            }
-
-            let admission = await currentLaneAdmission()
-
-            // Critical thermal (or equivalent) pauses every lane, including
-            // T0 playback drains. Wait for the next wake/capability change.
-            if admission.pauseAllWork {
                 await sleepOrWake(seconds: Self.idlePollSeconds)
                 continue
             }
@@ -1127,7 +1460,6 @@ actor AnalysisWorkScheduler {
             // Background.
             let deferredWorkAllowed = admission.policy.allowSoonLane
                 || admission.policy.allowBackgroundLane
-            let now = clock().timeIntervalSince1970
 
             // playhead-swws: cascade-aware job selection. When the
             // candidate-window cascade has at least one seeded
@@ -1231,6 +1563,92 @@ actor AnalysisWorkScheduler {
             await processJob(job, cascadeWindow: dispatchedCascadeWindow)
             didFinish(job: job)
         }
+    }
+
+    // MARK: - Foreground catch-up dispatch (playhead-yqax)
+
+    /// Dispatch a foreground transcript catch-up admission. Persists
+    /// the escalated `desiredCoverageSec` onto the `analysis_jobs` row
+    /// so the runner picks up the deeper target, then routes through
+    /// the standard `processJob` path. The job's lane (computed from
+    /// its `priority`) determines which lane counter increments — for
+    /// the typical `preAnalysis` row at priority 0 / 10 this lands in
+    /// Background or Soon, and the Now-cap is therefore not consumed.
+    ///
+    /// Why a separate dispatch entrypoint:
+    ///   1. The standard `selectNextDispatchableJob` honors FIFO across
+    ///      every eligible episode; catch-up specifically wants THIS
+    ///      episode's job, not whichever happens to be top-of-queue.
+    ///   2. The lane-cap (`canAdmit`) and per-lane `evaluateAdmissionGate`
+    ///      checks are still consulted here so catch-up can't bust the
+    ///      Now-cap or skip the multi-resource gate. A rejection at
+    ///      either point falls back to the standard sleep (no special
+    ///      catch-up retry path — the next loop iteration will
+    ///      re-evaluate the trigger predicate against the next observed
+    ///      playhead).
+    private func dispatchForegroundCatchup(opportunity: CatchupOpportunity) async {
+        // Persist the escalation so the runner reads the deeper
+        // target on its next `fetchJob(byId:)` (and a crash mid-
+        // catch-up resumes against the deeper target rather than the
+        // stale tier value).
+        do {
+            try await store.updateJobDesiredCoverage(
+                jobId: opportunity.jobId,
+                desiredCoverageSec: opportunity.escalatedDesiredCoverageSec
+            )
+        } catch {
+            logger.warning("Foreground catch-up: updateJobDesiredCoverage threw for job \(opportunity.jobId): \(error)")
+            await sleepOrWake(seconds: Self.idlePollSeconds)
+            return
+        }
+
+        // Re-fetch the row so the dispatch reflects the persisted
+        // escalation. A `nil` here is unusual (the row existed at
+        // `currentCatchupOpportunity` evaluation time moments ago)
+        // but bail safely if the row was concurrently superseded.
+        let job: AnalysisJob
+        do {
+            guard let refreshed = try await store.fetchJob(byId: opportunity.jobId) else {
+                logger.warning("Foreground catch-up: job \(opportunity.jobId) disappeared after escalation")
+                return
+            }
+            job = refreshed
+        } catch {
+            logger.warning("Foreground catch-up: fetchJob threw for \(opportunity.jobId): \(error)")
+            return
+        }
+
+        // Lane-cap and admission-gate checks mirror `runLoop()`. We
+        // consult both because catch-up should never bust the Now-cap
+        // or skip the bnrs gate — both invariants are preserved when
+        // catch-up escalates the same row that would have been
+        // dispatched normally; the only thing that changed is the
+        // coverage target.
+        guard canAdmit(job: job) else {
+            logger.info("Foreground catch-up: lane \(String(describing: job.schedulerLane), privacy: .public) at capacity; deferring")
+            await sleepOrWake(seconds: Self.idlePollSeconds)
+            return
+        }
+
+        let gateDecision = await evaluateAdmissionGate(for: job)
+        if case .reject(let cause) = gateDecision {
+            logger.info("Foreground catch-up: AdmissionGate rejected job \(job.jobId) cause=\(cause.rawValue, privacy: .public)")
+            await sleepOrWake(seconds: Self.rejectionBackoffSeconds)
+            return
+        }
+
+        PreAnalysisInstrumentation.logForegroundCatchUp(
+            episodeId: opportunity.episodeId,
+            jobId: opportunity.jobId,
+            priorCoverageSec: opportunity.priorDesiredCoverageSec,
+            escalatedCoverageSec: opportunity.escalatedDesiredCoverageSec,
+            playheadPositionSec: opportunity.playheadPositionSec,
+            transcribedAheadSec: opportunity.transcribedAheadSec
+        )
+
+        didStart(job: job)
+        await processJob(job, cascadeWindow: nil)
+        didFinish(job: job)
     }
 
     // MARK: - Lane concurrency accounting (playhead-r835)

@@ -64,4 +64,30 @@ enum PreAnalysisInstrumentation {
     static func logJobOutcome(jobId: String, stopReason: String, coverageSec: Double) {
         logger.info("metric.job_outcome job=\(jobId) reason=\(stopReason) coverage=\(coverageSec, format: .fixed(precision: 1))")
     }
+
+    /// playhead-yqax: emit a structured log line each time the
+    /// scheduler fires a foreground transcript catch-up dispatch.
+    /// Surfaces in FrozenTrace as `foregroundCatchUp` per the bead's
+    /// telemetry acceptance criterion ("distinguishable in FrozenTrace
+    /// as `foregroundCatchUp` so we can verify it actually moved Conan
+    /// pipeline coverage in the next NARL capture").
+    ///
+    /// Fields:
+    ///   - `episode`/`job`: identity
+    ///   - `prior`/`escalated`: the desiredCoverageSec change
+    ///   - `playhead`: live playhead position observed at trigger
+    ///   - `runway`: transcribed audio remaining ahead of playhead
+    ///     when the trigger fired (i.e. how late we caught it)
+    static func logForegroundCatchUp(
+        episodeId: String,
+        jobId: String,
+        priorCoverageSec: Double,
+        escalatedCoverageSec: Double,
+        playheadPositionSec: Double,
+        transcribedAheadSec: Double
+    ) {
+        logger.info(
+            "metric.foregroundCatchUp episode=\(episodeId, privacy: .public) job=\(jobId, privacy: .public) prior=\(priorCoverageSec, format: .fixed(precision: 1)) escalated=\(escalatedCoverageSec, format: .fixed(precision: 1)) playhead=\(playheadPositionSec, format: .fixed(precision: 1)) runway=\(transcribedAheadSec, format: .fixed(precision: 1))"
+        )
+    }
 }

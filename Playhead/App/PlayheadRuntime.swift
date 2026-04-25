@@ -131,6 +131,19 @@ final class PlayheadRuntime {
     /// coordinator that would read it.
     private let currentAssetIdMirror = OSAllocatedUnfairLock<String?>(initialState: nil)
 
+    /// playhead-yqax: lock-protected mirror of `currentEpisodeId` that the
+    /// transport-status observer Task reads from when forwarding the live
+    /// playhead position into the scheduler's foreground catch-up trigger.
+    /// The Task captures dependencies by value (no `self`) to avoid
+    /// retaining the runtime through this hot loop, so it cannot read the
+    /// MainActor-confined `currentEpisodeId` directly. Every site that
+    /// mutates `currentEpisodeId` MUST also publish into this mirror via
+    /// ``setCurrentEpisodeId(_:)`` — a forgotten mirror update would
+    /// silently break catch-up dispatch (the position would forward with
+    /// a stale or nil episodeId and be dropped by the scheduler's
+    /// stale-tick filter).
+    private let currentEpisodeIdMirror = OSAllocatedUnfairLock<String?>(initialState: nil)
+
     private let isPreviewRuntime: Bool
     private let logger = Logger(subsystem: "com.playhead", category: "Runtime")
     @ObservationIgnored
@@ -160,6 +173,16 @@ final class PlayheadRuntime {
         currentAnalysisAssetId = newValue
         // playhead-narl.2: mirror for Sendable closure access.
         currentAssetIdMirror.withLock { $0 = newValue }
+    }
+
+    /// Single write site for `currentEpisodeId`. Updates both the
+    /// MainActor-confined `@Observable` property and the
+    /// `OSAllocatedUnfairLock`-protected `currentEpisodeIdMirror` that
+    /// the transport-status observer Task reads from. Call this instead
+    /// of assigning `currentEpisodeId` directly; see playhead-yqax.
+    private func setCurrentEpisodeId(_ newValue: String?) {
+        currentEpisodeId = newValue
+        currentEpisodeIdMirror.withLock { $0 = newValue }
     }
 
     /// Background download task for the current episode's audio cache.
@@ -845,7 +868,7 @@ final class PlayheadRuntime {
             await analysisWorkScheduler.startSchedulerLoop()
         }
 
-        Task { [playbackService, analysisCoordinator, skipOrchestrator, shadowCaptureCoordinator, analysisWorkScheduler] in
+        Task { [playbackService, analysisCoordinator, skipOrchestrator, shadowCaptureCoordinator, analysisWorkScheduler, currentEpisodeIdMirror] in
             await skipOrchestrator.setSkipCueHandler { cues in
                 Task { @PlaybackServiceActor in
                     playbackService.setSkipCues(cues)
@@ -860,6 +883,18 @@ final class PlayheadRuntime {
             // one would hammer the scheduler. Forward only when the mapped
             // context actually changes.
             var lastForwardedContext: AnalysisWorkScheduler.PlaybackContext = .idle
+
+            // playhead-yqax: coalesce playhead-position forwarding to the
+            // scheduler at whole-second granularity. The transport stream
+            // emits on every AVPlayer periodic-time tick (sub-second
+            // cadence) — forwarding each tick into the actor would
+            // re-evaluate the catch-up trigger many times per second for
+            // no real signal change. Whole-second coalescing keeps the
+            // scheduler responsive (catch-up fires within ~1 s of the
+            // trigger condition becoming true) without burning actor
+            // hops on duplicate work. `Int.max` sentinel ensures the
+            // first observed position always forwards.
+            var lastForwardedPlayheadSec: Int = .max
 
             let stateStream = await playbackService.observeStates()
             for await state in stateStream {
@@ -885,6 +920,33 @@ final class PlayheadRuntime {
                 if mappedContext != lastForwardedContext {
                     lastForwardedContext = mappedContext
                     await analysisWorkScheduler.updatePlaybackContext(mappedContext)
+                }
+
+                // playhead-yqax: forward the live playhead position so
+                // the scheduler can fire foreground transcript catch-up
+                // when transcribed audio runs low ahead of the user.
+                // We only forward while playing — `.paused` / `.idle` /
+                // `.loading` / `.failed` either aren't producing forward
+                // motion (paused) or have already cleared the position
+                // via `updatePlaybackContext`. Coalesce at 1 s
+                // granularity so the actor sees one update per second
+                // worst case rather than the 5–10 Hz periodic-time
+                // cadence.
+                if mappedContext == .playing,
+                   let activeEpisodeId = currentEpisodeIdMirror.withLock({ $0 }) {
+                    let bucketed = Int(state.currentTime)
+                    if bucketed != lastForwardedPlayheadSec {
+                        lastForwardedPlayheadSec = bucketed
+                        await analysisWorkScheduler.noteCurrentPlayheadPosition(
+                            episodeId: activeEpisodeId,
+                            position: state.currentTime
+                        )
+                    }
+                } else if mappedContext == .idle {
+                    // Reset the coalescing sentinel so the next
+                    // play-start always forwards its first observed
+                    // position regardless of whole-second alignment.
+                    lastForwardedPlayheadSec = .max
                 }
 
                 switch state.status {
@@ -1097,7 +1159,7 @@ final class PlayheadRuntime {
         let podcastId = episode.podcast?.feedURL.absoluteString
         let position = episode.playbackPosition
 
-        currentEpisodeId = episodeId
+        setCurrentEpisodeId(episodeId)
         currentPodcastId = podcastId
         currentEpisodeTitle = episode.title
         currentPodcastTitle = episode.podcast?.title
@@ -1281,7 +1343,7 @@ final class PlayheadRuntime {
         await analysisCoordinator.handlePlaybackEvent(.stopped)
         await skipOrchestrator.endEpisode()
         await playbackService.pause()
-        currentEpisodeId = nil
+        setCurrentEpisodeId(nil)
         currentPodcastId = nil
         setCurrentAnalysisAssetId(nil)
         currentEpisodeTitle = nil
