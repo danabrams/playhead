@@ -549,4 +549,131 @@ struct AnalysisJobRunnerTests {
             Issue.record("Expected .reachedTarget but got \(outcome.stopReason)")
         }
     }
+
+    // MARK: - playhead-5uvz.6 (Gap-7) episodeDurationSec persistence
+
+    /// Pipeline B (scheduler-driven) must persist the shard-sum
+    /// `episodeDurationSec` after stage 1 so the coverage guard at
+    /// `AnalysisCoordinator.runFromBackfill` has a denominator. Without
+    /// this, an episode driven exclusively through Pipeline B leaves
+    /// the column NULL and the gtt9.1.1 fail-safe shortcut to
+    /// `.restart` triggers on every Pipeline-B-only episode.
+    @Test("Stage 1 persists episodeDurationSec when NULL")
+    func testStage1PersistsEpisodeDurationWhenNull() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store: store, fastTranscriptCoverageEndTime: 120)
+
+        // Confirm seed actually leaves episodeDurationSec NULL — this
+        // is the precondition for the bug we're closing.
+        let seeded = try await store.fetchAsset(id: "test-asset")
+        #expect(seeded?.episodeDurationSec == nil)
+
+        let audioStub = StubAnalysisAudioProvider()
+        // 4 shards × 30s = 120s of decoded audio.
+        audioStub.shardsToReturn = makeShards(count: 4)
+
+        let featureService = FeatureExtractionService(store: store)
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let materializer = SkipCueMaterializer(store: store)
+
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub,
+            cueMaterializer: materializer
+        )
+
+        _ = await runner.run(makeTestRequest(desiredCoverageSec: 120))
+
+        let after = try await store.fetchAsset(id: "test-asset")
+        #expect(after?.episodeDurationSec == 120.0)
+    }
+
+    /// When the desired coverage is shorter than the full episode, the
+    /// persisted `episodeDurationSec` must reflect the full episode
+    /// (sum of `allShards`), not the bounded slice. Otherwise the
+    /// coverage guard would compute a too-small denominator and
+    /// over-report coverage on resume.
+    @Test("Stage 1 persists full episode duration even for bounded coverage requests")
+    func testStage1PersistsFullDurationForBoundedCoverage() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store: store, fastTranscriptCoverageEndTime: 90)
+
+        let audioStub = StubAnalysisAudioProvider()
+        // 10 shards × 30s = 300s episode; request only the first 90s.
+        audioStub.shardsToReturn = makeShards(count: 10)
+
+        let featureService = FeatureExtractionService(store: store)
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let materializer = SkipCueMaterializer(store: store)
+
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub,
+            cueMaterializer: materializer
+        )
+
+        _ = await runner.run(makeTestRequest(desiredCoverageSec: 90))
+
+        let after = try await store.fetchAsset(id: "test-asset")
+        #expect(after?.episodeDurationSec == 300.0)
+    }
+
+    /// If `episodeDurationSec` is already populated (e.g. Pipeline A
+    /// ran first via `runFromSpooling`), Pipeline B must not overwrite
+    /// it. This keeps the persistence write idempotent and avoids
+    /// clobbering an authoritative value with a re-decoded sum that
+    /// could differ by floating-point noise.
+    @Test("Stage 1 does not overwrite existing episodeDurationSec")
+    func testStage1DoesNotOverwriteExistingDuration() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store: store, fastTranscriptCoverageEndTime: 60)
+
+        // Pre-populate as if Pipeline A had already written it.
+        try await store.updateEpisodeDuration(id: "test-asset", episodeDurationSec: 999.0)
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 2) // 60s
+
+        let featureService = FeatureExtractionService(store: store)
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let materializer = SkipCueMaterializer(store: store)
+
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub,
+            cueMaterializer: materializer
+        )
+
+        _ = await runner.run(makeTestRequest(desiredCoverageSec: 60))
+
+        let after = try await store.fetchAsset(id: "test-asset")
+        #expect(after?.episodeDurationSec == 999.0)
+    }
 }

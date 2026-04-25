@@ -131,6 +131,41 @@ actor AnalysisJobRunner {
             return makeOutcome(assetId: assetId, request: request, stopReason: .failed("no shards within desired coverage"))
         }
 
+        // playhead-5uvz.6 (Gap-7): persist the shard-sum duration onto
+        // the `analysis_assets` row if it is still NULL, mirroring
+        // ``AnalysisCoordinator/runFromSpooling``. The coverage guard at
+        // ``AnalysisCoordinator/runFromBackfill`` needs
+        // `episodeDurationSec` as a denominator; without this write,
+        // any episode driven exclusively through Pipeline B (scheduler)
+        // — e.g. an overnight backfill where the user never presses
+        // play — leaves the column NULL and the gtt9.1.1 fail-safe
+        // shortcut to `.restart` triggers on every Pipeline-B-only
+        // episode. We compute from `allShards` (full decode) rather
+        // than `shards` (coverage-bounded slice) so the persisted
+        // duration is the true episode length, not the bounded slice
+        // requested by this run.
+        //
+        // Idempotent + lazy: only writes when the column is NULL, so
+        // re-running a partially-completed job — or a job whose
+        // episodeDurationSec was already populated by Pipeline A — is
+        // a no-op. A failed write is non-fatal: the in-memory
+        // `episodeDuration` computation in stage 4 still works from
+        // `allShards`, and the next run will retry the persist.
+        let totalAudio = allShards.map(\.duration).reduce(0, +)
+        if totalAudio > 0 {
+            do {
+                let asset = try await store.fetchAsset(id: assetId)
+                if asset?.episodeDurationSec == nil {
+                    try await store.updateEpisodeDuration(
+                        id: assetId,
+                        episodeDurationSec: totalAudio
+                    )
+                }
+            } catch {
+                logger.warning("Failed to persist episodeDurationSec=\(totalAudio) for asset \(assetId): \(error)")
+            }
+        }
+
         // -- Checkpoint: cancellation + thermal --
 
         if let earlyStop = checkStopConditions() {
