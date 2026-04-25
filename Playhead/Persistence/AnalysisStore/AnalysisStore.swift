@@ -327,6 +327,17 @@ struct AdWindow: Sendable {
     let userDismissedBanner: Bool
     let evidenceSources: String?
     let eligibilityGate: String?
+    /// playhead-epfk: top `AdCatalogStore.matches(...)` similarity in
+    /// `[0, 1]` for this window's acoustic fingerprint, computed at
+    /// fusion time. `nil` when the catalog store was unavailable, the
+    /// fingerprint was zero, or no match cleared the floor; `0.0` when
+    /// the catalog ran but produced no positive match. Surfaced into
+    /// `corpus-export.jsonl` so NARL eval can measure the
+    /// fingerprint-store firing rate independently from the
+    /// transcript-token catalog (which shares the `.catalog` evidence
+    /// source label). Persisted on the row so a re-export of an old
+    /// device DB doesn't lose the value.
+    let catalogStoreMatchSimilarity: Double?
 
     init(
         id: String,
@@ -348,7 +359,8 @@ struct AdWindow: Sendable {
         wasSkipped: Bool,
         userDismissedBanner: Bool,
         evidenceSources: String? = nil,
-        eligibilityGate: String? = nil
+        eligibilityGate: String? = nil,
+        catalogStoreMatchSimilarity: Double? = nil
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -370,6 +382,7 @@ struct AdWindow: Sendable {
         self.userDismissedBanner = userDismissedBanner
         self.evidenceSources = evidenceSources
         self.eligibilityGate = eligibilityGate
+        self.catalogStoreMatchSimilarity = catalogStoreMatchSimilarity
     }
 }
 
@@ -1048,6 +1061,15 @@ actor AnalysisStore {
             // where `activeShards` is never rehydrated. See
             // `addEpisodeDurationColumnIfNeeded()` for rationale.
             try addEpisodeDurationColumnIfNeeded()
+            // playhead-epfk: per-window `AdCatalogStore` top-match
+            // similarity. Nullable REAL — `nil` means "store was not
+            // wired or no fingerprint was queryable." Existing rows on
+            // upgraded DBs get NULL via SQLite's ADD COLUMN default.
+            try addColumnIfNeeded(
+                table: "ad_windows",
+                column: "catalogStoreMatchSimilarity",
+                definition: "REAL"
+            )
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -2492,6 +2514,12 @@ actor AnalysisStore {
         try exec("CREATE INDEX IF NOT EXISTS idx_chunks_time ON transcript_chunks(analysisAssetId, startTime)")
 
         // ad_windows
+        // playhead-epfk: `catalogStoreMatchSimilarity` carries the
+        // per-window top similarity returned by `AdCatalogStore.matches`
+        // (cosine in `[0, 1]`); nullable because not every backfill has
+        // a wired store. Appended at the END of the column list so the
+        // positional `SELECT *` reader below stays correct without
+        // reshuffling indices.
         try exec("""
             CREATE TABLE IF NOT EXISTS ad_windows (
                 id                  TEXT PRIMARY KEY,
@@ -2513,7 +2541,8 @@ actor AnalysisStore {
                 wasSkipped          INTEGER NOT NULL DEFAULT 0,
                 userDismissedBanner INTEGER NOT NULL DEFAULT 0,
                 evidenceSources     TEXT,
-                eligibilityGate     TEXT
+                eligibilityGate     TEXT,
+                catalogStoreMatchSimilarity REAL
             )
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_ad_asset ON ad_windows(analysisAssetId)")
@@ -3755,6 +3784,7 @@ actor AnalysisStore {
         // product=10 adDescription=11 evidenceText=12 evidenceStartTime=13
         // metadataSource=14 metadataConfidence=15 metadataPromptVersion=16 wasSkipped=17
         // userDismissedBanner=18 evidenceSources=19 eligibilityGate=20
+        // catalogStoreMatchSimilarity=21 (playhead-epfk)
         // Keep bind() call indices and this comment in sync when adding columns.
         let sql = """
             INSERT INTO ad_windows
@@ -3762,8 +3792,8 @@ actor AnalysisStore {
              decisionState, detectorVersion, advertiser, product, adDescription,
              evidenceText, evidenceStartTime, metadataSource, metadataConfidence,
              metadataPromptVersion, wasSkipped, userDismissedBanner,
-             evidenceSources, eligibilityGate)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             evidenceSources, eligibilityGate, catalogStoreMatchSimilarity)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -3787,6 +3817,7 @@ actor AnalysisStore {
         bind(stmt, 18, ad.userDismissedBanner ? 1 : 0)
         bind(stmt, 19, ad.evidenceSources)
         bind(stmt, 20, ad.eligibilityGate)
+        bind(stmt, 21, ad.catalogStoreMatchSimilarity)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -3817,7 +3848,11 @@ actor AnalysisStore {
                 wasSkipped: sqlite3_column_int(stmt, 16) != 0,
                 userDismissedBanner: sqlite3_column_int(stmt, 17) != 0,
                 evidenceSources: optionalText(stmt, 18),
-                eligibilityGate: optionalText(stmt, 19)
+                eligibilityGate: optionalText(stmt, 19),
+                // playhead-epfk: column 20 is the new
+                // `catalogStoreMatchSimilarity` (REAL). Pre-epfk DBs that
+                // run the migration get NULL → optionalDouble returns nil.
+                catalogStoreMatchSimilarity: optionalDouble(stmt, 20)
             ))
         }
         return results

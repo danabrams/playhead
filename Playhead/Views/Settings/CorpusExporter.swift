@@ -42,6 +42,9 @@ struct CorpusExportResult: Sendable, Equatable {
     let correctionCount: Int
     /// Number of CorrectionEvent rows skipped due to unparseable `scope` strings.
     let skippedCorrectionCount: Int
+    /// playhead-epfk: Number of `ad_window` rows emitted (one JSONL line
+    /// per persisted `AdWindow`, carrying `catalogStoreMatchSimilarity`).
+    let adWindowCount: Int
     /// Absolute path of the sibling `decision-log.jsonl` written by narL,
     /// if it exists in the same Documents directory — exposed so the
     /// caller can build a combined bundle.
@@ -69,6 +72,15 @@ struct CorpusExportResult: Sendable, Equatable {
 protocol CorpusExportSource: ShadowDecisionsExportSource {
     func fetchAllAssets() async throws -> [AnalysisAsset]
     func fetchDecodedSpans(assetId: String) async throws -> [DecodedSpan]
+    /// playhead-epfk: pull the persisted ad-window rows so the exporter
+    /// can emit a per-window record carrying `catalogStoreMatchSimilarity`
+    /// (the cross-episode `AdCatalogStore` top-match similarity recorded
+    /// at fusion time). NARL eval needs this column to measure the
+    /// fingerprint-store firing rate independently from the in-pipeline
+    /// transcript sponsor catalog (both share the `.catalog` evidence
+    /// source label until the `subSource` disambiguator lands in
+    /// readers).
+    func fetchAdWindows(assetId: String) async throws -> [AdWindow]
     func loadCorrectionEvents(analysisAssetId: String) async throws -> [CorrectionEvent]
     /// Look up the `podcastId` recorded for an episode in the
     /// `analysis_jobs` table, or `nil` when no job row exists for the
@@ -209,6 +221,43 @@ enum CorpusExporter {
         return try jsonLineData(from: obj)
     }
 
+    /// Serialize an `AdWindow` row as a single JSONL line body.
+    ///
+    /// playhead-epfk: emits the per-window `catalogStoreMatchSimilarity`
+    /// (top match similarity from `AdCatalogStore.matches` recorded at
+    /// fusion time) as an explicit JSON value or `null`. NARL eval reads
+    /// this column to compute the fingerprint-store firing rate
+    /// (`catalogStoreMatchSimilarity >= 0.80 / total ad_windows with non-
+    /// null value`) — the only way to measure how tightly the
+    /// correction loop closes on real corpora today.
+    static func adWindowLine(_ window: AdWindow) throws -> Data {
+        let obj: [String: Any] = [
+            "type": "ad_window",
+            "schemaVersion": schemaVersion,
+            "id": window.id,
+            "analysisAssetId": window.analysisAssetId,
+            "startTime": window.startTime,
+            "endTime": window.endTime,
+            "confidence": window.confidence,
+            "boundaryState": window.boundaryState,
+            "decisionState": window.decisionState,
+            "detectorVersion": window.detectorVersion,
+            "metadataSource": window.metadataSource,
+            "metadataConfidence": window.metadataConfidence as Any? ?? NSNull(),
+            "evidenceSources": window.evidenceSources as Any? ?? NSNull(),
+            "eligibilityGate": window.eligibilityGate as Any? ?? NSNull(),
+            "wasSkipped": window.wasSkipped,
+            "userDismissedBanner": window.userDismissedBanner,
+            // playhead-epfk: the field this whole bead exists to surface.
+            // Explicit JSON `null` when the catalog store wasn't wired or
+            // no fingerprint was queryable; `0.0` when the store ran but
+            // produced no positive match (distinct from null — eval can
+            // distinguish "loop is wired but inert" from "loop is off").
+            "catalogStoreMatchSimilarity": window.catalogStoreMatchSimilarity as Any? ?? NSNull(),
+        ]
+        return try jsonLineData(from: obj)
+    }
+
     /// Serialize a `CorrectionEvent` as a single JSONL line body. Returns nil if
     /// the row has an unparseable `scope` string, signalling the caller to skip it.
     static func correctionLine(_ event: CorrectionEvent) throws -> Data? {
@@ -280,6 +329,7 @@ enum CorpusExporter {
         var spanCount = 0
         var correctionCount = 0
         var skippedCorrectionCount = 0
+        var adWindowCount = 0
 
         let assets = try await store.fetchAllAssets()
         // playhead-i9dj: cache resolved podcast titles by podcastId so
@@ -350,6 +400,28 @@ enum CorpusExporter {
                 spanCount += 1
             }
 
+            // playhead-epfk: ad_window records for this asset. Carries
+            // the `catalogStoreMatchSimilarity` column NARL eval needs to
+            // measure the AdCatalogStore correction loop. Lookup failures
+            // are non-fatal (parity with fetchDecodedSpans above): one
+            // bad asset must not abort the entire export. Empty arrays
+            // simply emit zero ad_window lines for that asset, which
+            // downstream tooling treats as "no fusion windows persisted."
+            let adWindows: [AdWindow]
+            do {
+                adWindows = try await store.fetchAdWindows(assetId: asset.id)
+            } catch {
+                logger.warning(
+                    "export: fetchAdWindows failed for asset=\(asset.id, privacy: .public) error=\(String(describing: error), privacy: .public) — emitting 0 ad_window rows for this asset"
+                )
+                adWindows = []
+            }
+            for window in adWindows {
+                let windowData = try adWindowLine(window)
+                try write(line: windowData, to: handle)
+                adWindowCount += 1
+            }
+
             // correction records for this asset
             let events: [CorrectionEvent]
             do {
@@ -415,6 +487,7 @@ enum CorpusExporter {
             spanCount: spanCount,
             correctionCount: correctionCount,
             skippedCorrectionCount: skippedCorrectionCount,
+            adWindowCount: adWindowCount,
             decisionLogManifestURL: decisionLogManifestURL,
             shadowManifestURL: shadowManifestURL,
             shadowRowCount: shadowRowCount

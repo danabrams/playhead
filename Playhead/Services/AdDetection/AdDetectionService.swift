@@ -1843,11 +1843,21 @@ actor AdDetectionService {
             }
 
             // Build AdWindow from fusion decision (uses already-refined span boundaries).
+            // playhead-epfk: thread the per-span top `AdCatalogStore`
+            // similarity computed above so it persists to `ad_windows`
+            // and surfaces in the corpus export. `nil` only when no
+            // catalog store was wired; otherwise we record the queried
+            // value (which may be 0 if no match cleared the floor —
+            // distinguishable from `nil` by NARL eval).
+            let catalogStoreMatchSimilarity: Double? = (adCatalogStore == nil)
+                ? nil
+                : Double(spanTopCatalogSimilarity)
             let window = buildFusionAdWindow(
                 span: refinedSpan,
                 decision: decision,
                 policyAction: policyAction,
-                analysisAssetId: analysisAssetId
+                analysisAssetId: analysisAssetId,
+                catalogStoreMatchSimilarity: catalogStoreMatchSimilarity
             )
             fusionWindows.append(window)
 
@@ -2126,7 +2136,15 @@ actor AdDetectionService {
             catalogLedgerEntries.append(EvidenceLedgerEntry(
                 source: .catalog,
                 weight: weight,
-                detail: .catalog(entryCount: 1)
+                detail: .catalog(entryCount: 1),
+                // playhead-epfk: stamp the cross-episode `AdCatalogStore`
+                // fingerprint match so NARL replay can attribute this entry
+                // to the correction-loop channel (vs. the transcript token
+                // catalog which uses `.transcriptCatalog`). The raw
+                // similarity that produced this weight is also persisted
+                // on `AdWindow.catalogStoreMatchSimilarity` for direct
+                // inspection in the corpus export.
+                subSource: .fingerprintStore
             ))
         }
 
@@ -2396,7 +2414,11 @@ actor AdDetectionService {
         return [EvidenceLedgerEntry(
             source: .catalog,
             weight: weight,
-            detail: .catalog(entryCount: overlapping.count)
+            detail: .catalog(entryCount: overlapping.count),
+            // playhead-epfk: stamp the in-pipeline transcript-token catalog
+            // so NARL replay can distinguish it from `AdCatalogStore`
+            // fingerprint matches that share the `.catalog` source label.
+            subSource: .transcriptCatalog
         )]
     }
 
@@ -2411,11 +2433,18 @@ actor AdDetectionService {
     }
 
     /// Build an AdWindow from a fusion DecisionResult.
+    /// playhead-epfk: `catalogStoreMatchSimilarity` carries the per-span
+    /// top similarity from `AdCatalogStore.matches`. Pass `nil` when the
+    /// catalog store was not wired or no match was attempted; `0` means
+    /// "wired and queried but no match cleared the floor"; positive
+    /// values surface in the corpus export so NARL can measure the
+    /// fingerprint-store firing rate.
     private func buildFusionAdWindow(
         span: DecodedSpan,
         decision: DecisionResult,
         policyAction: SkipPolicyAction,
-        analysisAssetId: String
+        analysisAssetId: String,
+        catalogStoreMatchSimilarity: Double? = nil
     ) -> AdWindow {
         // Map fusion policy action + gate to AdDecisionState for persistence.
         // autoSkipEligible: confirmed when gate passes, candidate otherwise.
@@ -2450,7 +2479,8 @@ actor AdDetectionService {
             metadataConfidence: decision.proposalConfidence,
             metadataPromptVersion: nil,
             wasSkipped: false,
-            userDismissedBanner: false
+            userDismissedBanner: false,
+            catalogStoreMatchSimilarity: catalogStoreMatchSimilarity
         )
     }
 
@@ -2487,7 +2517,13 @@ actor AdDetectionService {
             metadataConfidence: window.metadataConfidence,
             metadataPromptVersion: window.metadataPromptVersion,
             wasSkipped: window.wasSkipped,
-            userDismissedBanner: window.userDismissedBanner
+            userDismissedBanner: window.userDismissedBanner,
+            evidenceSources: window.evidenceSources,
+            eligibilityGate: window.eligibilityGate,
+            // playhead-epfk: preserve catalog-store match similarity
+            // across boundary refinement; this branch only adjusts time
+            // bounds, never re-runs the AdCatalogStore query.
+            catalogStoreMatchSimilarity: window.catalogStoreMatchSimilarity
         )
     }
 
@@ -3054,7 +3090,12 @@ actor AdDetectionService {
                 wasSkipped: existing.wasSkipped,
                 userDismissedBanner: existing.userDismissedBanner,
                 evidenceSources: existing.evidenceSources,
-                eligibilityGate: existing.eligibilityGate
+                eligibilityGate: existing.eligibilityGate,
+                // playhead-epfk: hot-path reconciliation preserves the
+                // existing row's catalog-store match similarity. Hot-path
+                // candidates are not re-fingerprinted; the value lives or
+                // dies with the originating backfill row.
+                catalogStoreMatchSimilarity: existing.catalogStoreMatchSimilarity
             )
             reconciled.append(
                 ReconciledHotPathWindow(

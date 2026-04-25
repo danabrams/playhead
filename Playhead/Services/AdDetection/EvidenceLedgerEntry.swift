@@ -77,6 +77,34 @@ enum EvidenceLedgerDetail: Sendable {
     case musicBed(presenceFraction: Double, foregroundCount: Int)
 }
 
+// MARK: - EvidenceSubSource
+
+/// playhead-epfk: Disambiguates the producer of a `.catalog`-sourced
+/// `EvidenceLedgerEntry`. Two distinct subsystems both emit `source =
+/// .catalog`, and a single unified label hides which one fired:
+///
+///   - `.transcriptCatalog` — `EvidenceCatalogBuilder` extracts sponsor
+///     tokens / URLs / promo codes / disclosures deterministically from
+///     transcript atoms in the *current* episode. Per-backfill, never
+///     persisted.
+///   - `.fingerprintStore` — `AdCatalogStore` matches a span's acoustic
+///     fingerprint against the cross-episode SQLite store accumulated
+///     from prior auto-skips and user corrections. Per-span similarity
+///     in `[0, 1]`.
+///
+/// `nil` (the default for back-compat constructors) means "source label
+/// is the only producer marker," matching pre-epfk fixtures and call
+/// sites that predate the disambiguation.
+enum EvidenceSubSource: String, Sendable, Codable, Equatable, Hashable, CaseIterable {
+    /// `EvidenceCatalogBuilder`'s sponsor-token catalog (in-pipeline,
+    /// transcript-derived). The label NARL replay should attribute to
+    /// the per-episode evidence channel.
+    case transcriptCatalog
+    /// `AdCatalogStore` cross-episode fingerprint match. The label NARL
+    /// replay should attribute to the cumulative correction-loop signal.
+    case fingerprintStore
+}
+
 // MARK: - EvidenceLedgerEntry
 
 /// A single capped, trust-scaled contribution from one evidence source.
@@ -95,16 +123,26 @@ struct EvidenceLedgerEntry: Sendable {
     /// Applied by `BackfillEvidenceFusion.buildLedger()` to modulate FM evidence weight.
     /// Default of 1.0 means no modulation (backward compatible with pre-ef2.4.5 entries).
     let classificationTrust: Double
+    /// playhead-epfk: Optional disambiguator for sources that have multiple
+    /// distinct producers under one umbrella label. Today only `.catalog`
+    /// uses this — the in-pipeline transcript sponsor catalog versus the
+    /// cross-episode `AdCatalogStore` fingerprint match. `nil` for every
+    /// other source (and pre-epfk callers) so adding the field is purely
+    /// additive: existing constructors compile unchanged and the JSONL
+    /// schema gains an optional key.
+    let subSource: EvidenceSubSource?
 
     init(
         source: EvidenceSourceType,
         weight: Double,
         detail: EvidenceLedgerDetail,
-        classificationTrust: Double = 1.0
+        classificationTrust: Double = 1.0,
+        subSource: EvidenceSubSource? = nil
     ) {
         self.source = source
         self.weight = weight
         self.detail = detail
         self.classificationTrust = classificationTrust
+        self.subSource = subSource
     }
 }
