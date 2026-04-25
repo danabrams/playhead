@@ -145,6 +145,12 @@ struct AdBannerView: View {
     /// production, tests swap in a `RecordingHapticPlayer`.
     var hapticPlayer: any HapticPlaying = SystemHapticPlayer()
 
+    /// playhead-vjxc: Tracks whether the user has tapped the disclosure
+    /// chevron to expand the evidence detail. Keyed by banner id so the
+    /// expansion never carries over when the queue advances to the next
+    /// banner — every new banner starts collapsed (default ergonomics).
+    @State private var expandedBannerId: String?
+
     /// Factored handler for the banner-appear haptic so tests can drive
     /// it without rendering a live SwiftUI hierarchy.
     func handleBannerAppear() {
@@ -166,6 +172,12 @@ struct AdBannerView: View {
             }
         }
         .animation(Motion.standard, value: queue.currentBanner?.id)
+        .onChange(of: queue.currentBanner?.id) { _, _ in
+            // Always start each new banner collapsed so the default
+            // ergonomics (compact, low-attention margin note) survive
+            // queued skips.
+            expandedBannerId = nil
+        }
     }
 
     // MARK: - Copy Logic
@@ -212,11 +224,95 @@ struct AdBannerView: View {
         let detail: String?
     }
 
+    // MARK: - Evidence Copy (playhead-vjxc)
+
+    /// Maximum number of evidence lines surfaced when the banner is expanded.
+    /// Caps the list at a glanceable height — power users still get the gist
+    /// without the banner becoming a full-page transcript.
+    static let evidenceLineLimit: Int = 3
+
+    /// Translate a single deterministic evidence entry into a calm,
+    /// user-facing line. Pure function — no side effects, no localized
+    /// strings (yet — playhead is en-US only at the MVP).
+    ///
+    /// Voice: every line should read as a quiet observation, never a metric
+    /// or a counter. The verbatim transcript text is preserved in quotes
+    /// where it is short and self-explanatory; brand names and codes are
+    /// surfaced unquoted as they read more naturally that way.
+    static func evidenceLine(for entry: EvidenceEntry) -> String {
+        let cleaned = entry.matchedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch entry.category {
+        case .disclosurePhrase:
+            return "Sponsor disclosure: \u{201C}\(cleaned)\u{201D}"
+        case .url:
+            return "Sponsor link: \(cleaned)"
+        case .promoCode:
+            return "Promo code: \(cleaned)"
+        case .ctaPhrase:
+            return "Sponsor cue: \u{201C}\(cleaned)\u{201D}"
+        case .brandSpan:
+            // Preserve the matched casing — the catalog already canonicalizes
+            // common variants, and ASR-lowercased brand names ("betterhelp")
+            // still read clearly in this context. We deliberately do NOT
+            // re-titlecase here: a forced "Hellofresh" would look uglier
+            // than the verbatim "hellofresh" the user actually heard.
+            return "Sponsor mention: \(cleaned)"
+        }
+    }
+
+    /// Build the ordered list of evidence lines surfaced in the expanded
+    /// banner detail. Deduplicates by line text (cheap defense against the
+    /// same brand or URL surfacing twice through different category passes)
+    /// and caps at `evidenceLineLimit`.
+    ///
+    /// Ordering priority (most concrete first):
+    /// 1. promoCode — the line a listener is most likely to recognize
+    /// 2. url — the second most concrete signal
+    /// 3. disclosurePhrase — names the read explicitly
+    /// 4. brandSpan — names the advertiser when no disclosure landed
+    /// 5. ctaPhrase — softest signal, most likely to be a false positive
+    static func evidenceLines(for entries: [EvidenceEntry]) -> [String] {
+        guard !entries.isEmpty else { return [] }
+        let priority: [EvidenceCategory: Int] = [
+            .promoCode: 0,
+            .url: 1,
+            .disclosurePhrase: 2,
+            .brandSpan: 3,
+            .ctaPhrase: 4,
+        ]
+        let sorted = entries.sorted { lhs, rhs in
+            let l = priority[lhs.category] ?? Int.max
+            let r = priority[rhs.category] ?? Int.max
+            if l != r { return l < r }
+            // Stable secondary key: earlier in the audio first.
+            return lhs.startTime < rhs.startTime
+        }
+        var seen = Set<String>()
+        var lines: [String] = []
+        for entry in sorted {
+            let line = evidenceLine(for: entry)
+            // Case-insensitive dedup so "BetterHelp" and "betterhelp" don't
+            // surface twice (the catalog can produce both via different
+            // capture paths).
+            let key = line.lowercased()
+            if seen.insert(key).inserted {
+                lines.append(line)
+                if lines.count >= evidenceLineLimit { break }
+            }
+        }
+        return lines
+    }
+
     // MARK: - Banner Card
 
     @ViewBuilder
     private func bannerCard(_ item: AdSkipBannerItem) -> some View {
         let copy = Self.bannerCopy(for: item)
+        // playhead-vjxc: only build the evidence detail strings once per
+        // render so we can both decide whether to show the chevron and
+        // populate the expanded list from a single source of truth.
+        let evidenceLines = Self.evidenceLines(for: item.evidenceCatalogEntries)
+        let isExpanded = expandedBannerId == item.id && !evidenceLines.isEmpty
 
         VStack(alignment: .leading, spacing: Spacing.xs) {
             // Top line: template-driven copy
@@ -247,6 +343,28 @@ struct AdBannerView: View {
                 Spacer(minLength: Spacing.xs)
             }
 
+            // playhead-vjxc: Expanded evidence detail. Renders below the
+            // top line and above the action row so the actions remain in
+            // the same screen position whether collapsed or expanded.
+            // Hidden entirely (graceful absence) when no catalog entries
+            // overlap the skipped span.
+            if isExpanded {
+                VStack(alignment: .leading, spacing: Spacing.xxs) {
+                    ForEach(Array(evidenceLines.enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(AppTypography.sans(size: 12, weight: .regular))
+                            .foregroundStyle(boneText.opacity(0.75))
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(
+                    "Why we skipped: " + evidenceLines.joined(separator: ", ")
+                )
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
             // Bottom line: actions
             HStack {
                 // Phase 7.2: "Not an ad" correction button (leading, muted).
@@ -265,6 +383,28 @@ struct AdBannerView: View {
                 }
 
                 Spacer()
+
+                // playhead-vjxc: chevron toggle. Only shown when there is
+                // catalog evidence to surface — empty-list banners keep
+                // the original three-button action row exactly.
+                if !evidenceLines.isEmpty {
+                    Button {
+                        if expandedBannerId == item.id {
+                            expandedBannerId = nil
+                        } else {
+                            expandedBannerId = item.id
+                        }
+                    } label: {
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(boneText.opacity(0.5))
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(BannerButtonStyle())
+                    .accessibilityLabel(isExpanded ? "Hide evidence" : "Show evidence")
+                    .accessibilityHint("Reveals the signals that led Playhead to skip this segment")
+                }
 
                 // Listen button — copper accent
                 Button {
@@ -305,6 +445,7 @@ struct AdBannerView: View {
                 .fill(Palette.ink)
                 .themeShadow(AppShadow.elevated)
         )
+        .animation(Motion.standard, value: isExpanded)
         .accessibilityElement(children: .contain)
         .onAppear {
             // Subtle haptic on banner appear.
@@ -404,6 +545,61 @@ private struct BannerButtonStyle: ButtonStyle {
                     metadataSource: "none",
                     podcastId: "podcast-1",
                     evidenceCatalogEntries: []
+                ))
+                return q
+            }()
+        )
+    }
+    .preferredColorScheme(.dark)
+}
+
+#Preview("Ad Banner — Evidence Detail") {
+    ZStack {
+        AppColors.background
+            .ignoresSafeArea()
+
+        AdBannerView(
+            queue: {
+                let q = AdBannerQueue()
+                q.enqueue(AdSkipBannerItem(
+                    id: "preview-4",
+                    windowId: "w-4",
+                    advertiser: "BetterHelp",
+                    product: nil,
+                    adStartTime: 240.0,
+                    adEndTime: 300.0,
+                    metadataConfidence: 0.82,
+                    metadataSource: "foundationModels",
+                    podcastId: "podcast-1",
+                    evidenceCatalogEntries: [
+                        EvidenceEntry(
+                            evidenceRef: 0,
+                            category: .disclosurePhrase,
+                            matchedText: "sponsored by",
+                            normalizedText: "sponsored by",
+                            atomOrdinal: 12,
+                            startTime: 245.0,
+                            endTime: 246.0
+                        ),
+                        EvidenceEntry(
+                            evidenceRef: 1,
+                            category: .url,
+                            matchedText: "betterhelp.com/podcast",
+                            normalizedText: "betterhelp.com/podcast",
+                            atomOrdinal: 14,
+                            startTime: 270.0,
+                            endTime: 271.0
+                        ),
+                        EvidenceEntry(
+                            evidenceRef: 2,
+                            category: .promoCode,
+                            matchedText: "use code PODCAST",
+                            normalizedText: "podcast",
+                            atomOrdinal: 15,
+                            startTime: 285.0,
+                            endTime: 286.0
+                        ),
+                    ]
                 ))
                 return q
             }()

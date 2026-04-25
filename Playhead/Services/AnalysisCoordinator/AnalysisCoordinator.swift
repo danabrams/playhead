@@ -1844,10 +1844,48 @@ actor AnalysisCoordinator {
             }
             let windows = result.windows
             guard !windows.isEmpty else { return }
+            // playhead-vjxc: build & push the deterministic evidence catalog
+            // BEFORE pushing windows so the orchestrator's `emitBannerItem`
+            // path can slice catalog entries for any newly-banneredwindow.
+            await pushEvidenceCatalog(chunks: persistedChunks, assetId: assetId)
             await skipOrchestrator.receiveAdWindows(windows)
         } catch {
             logger.error("Hot-path ad detection failed for asset \(assetId): \(error.localizedDescription)")
         }
+    }
+
+    /// playhead-vjxc: Build the deterministic evidence catalog from persisted
+    /// transcript chunks and push it onto the SkipOrchestrator so banner
+    /// emission can attach overlapping evidence to each AdSkipBannerItem.
+    ///
+    /// Catalog construction is purely in-memory and side-effect-free; failures
+    /// degrade silently — banners simply emit with empty evidence rather than
+    /// blocking the skip pipeline.
+    private func pushEvidenceCatalog(
+        chunks: [TranscriptChunk],
+        assetId: String
+    ) async {
+        guard !chunks.isEmpty else { return }
+        // Prefer "final" chunks when available so the catalog reflects the most
+        // accurate transcript pass; otherwise build from whatever we have so a
+        // fast-pass-only episode still surfaces evidence.
+        let preferred: [TranscriptChunk] = {
+            let finals = chunks.filter { $0.pass == "final" }
+            return finals.isEmpty ? chunks : finals
+        }()
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: preferred,
+            analysisAssetId: assetId,
+            normalizationHash: "norm-v1",
+            sourceHash: "asr-v1"
+        )
+        guard !atoms.isEmpty else { return }
+        let catalog = EvidenceCatalogBuilder.build(
+            atoms: atoms,
+            analysisAssetId: assetId,
+            transcriptVersion: version.transcriptVersion
+        )
+        await skipOrchestrator.setEvidenceCatalog(catalog)
     }
 
     private func finalizeBackfill(sessionId: String, assetId: String) async throws {
@@ -1876,6 +1914,10 @@ actor AnalysisCoordinator {
 
         let updatedWindows = try await store.fetchAdWindows(assetId: assetId)
         if !updatedWindows.isEmpty {
+            // playhead-vjxc: refresh the catalog with the now-richer chunk
+            // set (final pass) so backfill-emitted banners get the same
+            // overlap-sliced evidence as hot-path-emitted banners.
+            await pushEvidenceCatalog(chunks: allChunks, assetId: assetId)
             await skipOrchestrator.receiveAdWindows(updatedWindows)
         }
 
