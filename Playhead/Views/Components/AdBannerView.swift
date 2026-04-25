@@ -13,6 +13,34 @@
 
 import SwiftUI
 
+// MARK: - Banner Tier (playhead-gtt9.23)
+
+/// The skip-worthiness tier this banner represents. Drives copy and
+/// affordance choice in `AdBannerView`. Auto-skip / suggest tiers correspond
+/// to the high / medium bands in the gradient UX spec; the silent tier
+/// (low confidence) never produces a banner and therefore is not modelled
+/// here.
+///
+/// Voice rules (per `feedback_peace_of_mind_not_metrics`):
+/// - No quantified language anywhere in tier-driven copy.
+/// - Auto-skip copy describes a completed action ("Skipped …").
+/// - Suggest copy describes an observation + an actionable affordance
+///   ("Sounds like a sponsor break. Skip?"), never a probability.
+enum AdBannerTier: String, Sendable, Equatable, Codable {
+    /// High-confidence tier (≥ `segmentAutoSkipThreshold`, default 0.55).
+    /// Banner reports a skip that has already happened; user can rewind via
+    /// "Listen" or correct via "Not an ad". This is the existing behavior.
+    case autoSkipped
+
+    /// Medium-confidence tier ([uiCandidate, autoSkip), default [0.40, 0.55)).
+    /// Banner asks the user to confirm a skip that has NOT happened. The
+    /// auto-skip path is deliberately suppressed; the user is the gate.
+    /// Tap-to-skip on the banner records a `.falseNegative` user
+    /// correction (calibration signal); tap-to-dismiss / auto-fade leaves
+    /// playback alone (silent decline).
+    case suggest
+}
+
 // MARK: - Banner Data
 
 /// Data for a single ad skip banner notification.
@@ -39,6 +67,10 @@ struct AdSkipBannerItem: Identifiable, Equatable {
     /// (e.g. phraseOnShow) when the user taps "Listen" to revert a skip.
     /// Empty when no catalog data is available — callers must handle [] gracefully.
     let evidenceCatalogEntries: [EvidenceEntry]
+    /// playhead-gtt9.23: skip-worthiness tier this banner is rendered as.
+    /// Defaults to `.autoSkipped` to preserve every existing call site
+    /// (the historical banner emitter is the high-confidence path).
+    var tier: AdBannerTier = .autoSkipped
 }
 
 // MARK: - Banner Queue (ViewModel)
@@ -57,11 +89,28 @@ final class AdBannerQueue {
     /// Auto-dismiss timer handle.
     private var dismissTask: Task<Void, Never>?
 
-    /// Duration before auto-dismiss.
+    /// Duration before auto-dismiss for an auto-skipped (high-tier) banner.
+    /// 8 s is a calm dwell that leaves time to read but never lingers.
     private static let autoDismissSeconds: TimeInterval = 8.0
+
+    /// playhead-gtt9.23: Duration before auto-fade for a suggest-tier
+    /// (medium-confidence) banner. Slightly longer than the auto-skipped
+    /// dwell because the user is being asked to make a choice — they
+    /// need a beat or two more to read the line and decide whether to
+    /// tap "Skip". Auto-fade with no user action is interpreted as a
+    /// silent decline (see `SkipOrchestrator.declineSuggestedSkip`).
+    private static let suggestAutoDismissSeconds: TimeInterval = 12.0
 
     /// Maximum gap (seconds) between skipped ads to coalesce into one banner.
     private static let coalesceGap: TimeInterval = 10.0
+
+    /// playhead-gtt9.23: Invoked when a suggest-tier banner exits without
+    /// the user tapping Skip — either via the dismiss button or via the
+    /// auto-fade timer. Wired by `NowPlayingView` to
+    /// `SkipOrchestrator.declineSuggestedSkip` so the orchestrator can
+    /// drop the suggested window from its in-memory set. `nil` when the
+    /// view does not need this signal (tests, previews).
+    var onSuggestExitWithoutSkip: ((AdSkipBannerItem) -> Void)?
 
     // MARK: - Public API
 
@@ -91,10 +140,40 @@ final class AdBannerQueue {
     func dismiss() {
         dismissTask?.cancel()
         dismissTask = nil
+        // playhead-gtt9.23: notify any suggest-tier exit handler so the
+        // orchestrator can clean up its in-memory suggest set when a
+        // suggest banner leaves WITHOUT a Skip tap (auto-fade, dismiss
+        // button, or queue advance). The Skip tap path bypasses this
+        // callback by setting `currentBanner` to nil before invoking
+        // `dismiss()` — see `dismissAfterAccept(_:)`.
+        if let banner = currentBanner, banner.tier == .suggest {
+            onSuggestExitWithoutSkip?(banner)
+        }
         currentBanner = nil
 
         // Show next queued banner after a brief pause so the exit animation
         // finishes before the next slide-in.
+        if !queue.isEmpty {
+            Task {
+                try? await Task.sleep(for: .milliseconds(350))
+                showNext()
+            }
+        }
+    }
+
+    /// playhead-gtt9.23: Special dismiss path used after the user taps
+    /// "Skip" on a suggest banner. Suppresses the
+    /// `onSuggestExitWithoutSkip` callback (the orchestrator will be
+    /// notified via `acceptSuggestedSkip` instead) but otherwise behaves
+    /// exactly like `dismiss()`.
+    func dismissAfterAccept(_ item: AdSkipBannerItem) {
+        // Clear the current banner reference BEFORE invoking dismiss so
+        // the suggest-exit callback short-circuits.
+        if currentBanner?.id == item.id {
+            currentBanner = nil
+        }
+        dismissTask?.cancel()
+        dismissTask = nil
         if !queue.isEmpty {
             Task {
                 try? await Task.sleep(for: .milliseconds(350))
@@ -113,16 +192,37 @@ final class AdBannerQueue {
 
     private func restartAutoDismiss() {
         dismissTask?.cancel()
+        let dwell: TimeInterval = {
+            switch currentBanner?.tier {
+            case .suggest: return Self.suggestAutoDismissSeconds
+            case .autoSkipped, .none: return Self.autoDismissSeconds
+            }
+        }()
         dismissTask = Task {
-            try? await Task.sleep(for: .seconds(Self.autoDismissSeconds))
+            try? await Task.sleep(for: .seconds(dwell))
             guard !Task.isCancelled else { return }
             dismiss()
         }
     }
 
+    /// Internal hook so tier-aware tests can read the dwell choice without
+    /// driving the live SwiftUI hierarchy.
+    static func dwellSeconds(for tier: AdBannerTier) -> TimeInterval {
+        switch tier {
+        case .suggest: return suggestAutoDismissSeconds
+        case .autoSkipped: return autoDismissSeconds
+        }
+    }
+
     /// Two banners coalesce if they are close in time (adjacent/near-adjacent skips).
+    ///
+    /// playhead-gtt9.23: tier mismatch suppresses coalescing. An auto-skipped
+    /// banner ("we just skipped") and a suggest banner ("skip this?") have
+    /// different intents and different copy; collapsing them into one cell
+    /// would lose the distinction the user relies on to know what happened.
     private func canCoalesce(_ a: AdSkipBannerItem, _ b: AdSkipBannerItem) -> Bool {
-        abs(a.adEndTime - b.adStartTime) <= Self.coalesceGap
+        guard a.tier == b.tier else { return false }
+        return abs(a.adEndTime - b.adStartTime) <= Self.coalesceGap
     }
 }
 
@@ -140,6 +240,14 @@ struct AdBannerView: View {
     /// Phase 7.2: Called when the user taps "Not an ad" to record a correction.
     /// When nil, the button is hidden.
     var onNotAnAd: ((AdSkipBannerItem) -> Void)?
+
+    /// playhead-gtt9.23: Called when the user taps "Skip" on a suggest-tier
+    /// banner. The orchestrator promotes the suggested span into the active
+    /// skip path and records a `.falseNegative` correction. When nil on a
+    /// suggest banner, the Skip button is hidden — but suggest banners
+    /// without an action are not useful, so production wiring always
+    /// supplies this. Auto-skipped banners ignore the callback.
+    var onSuggestSkip: ((AdSkipBannerItem) -> Void)?
 
     /// Injected haptic player — defaults to `SystemHapticPlayer` in
     /// production, tests swap in a `RecordingHapticPlayer`.
@@ -188,6 +296,13 @@ struct AdBannerView: View {
 
     /// Resolve the banner copy line from metadata, applying strict
     /// evidence-bound rules. Never surfaces a brand solely from a model guess.
+    ///
+    /// playhead-gtt9.23: branches on the banner's tier. Auto-skipped banners
+    /// keep the existing "Skipped …" voice (a completed observation).
+    /// Suggest banners use a calm "Sounds like a sponsor break." voice
+    /// paired with a "Skip?" affordance — never quantified, never
+    /// "X% confidence." Per `feedback_peace_of_mind_not_metrics`,
+    /// suggest copy describes what was heard, not how sure we are.
     static func bannerCopy(for item: AdSkipBannerItem) -> BannerCopyLine {
         // Only surface specific copy when:
         // 1. metadataSource is not "none" (metadata was actually extracted)
@@ -201,20 +316,41 @@ struct AdBannerView: View {
             return true
         }()
 
-        if hasStrongEvidence, let advertiser = item.advertiser {
+        switch item.tier {
+        case .autoSkipped:
+            if hasStrongEvidence, let advertiser = item.advertiser {
+                return BannerCopyLine(
+                    prefix: "Skipped",
+                    advertiser: advertiser,
+                    detail: item.product
+                )
+            }
+            // Weak or missing evidence: generic copy, never hallucinated names.
             return BannerCopyLine(
-                prefix: "Skipped",
-                advertiser: advertiser,
-                detail: item.product
+                prefix: "Skipped sponsor segment",
+                advertiser: nil,
+                detail: nil
+            )
+
+        case .suggest:
+            if hasStrongEvidence, let advertiser = item.advertiser {
+                return BannerCopyLine(
+                    prefix: "Sounds like a sponsor break",
+                    advertiser: advertiser,
+                    detail: item.product
+                )
+            }
+            // No reliable advertiser → calm generic prompt. Phrasing is a
+            // declarative observation ("Sounds like …") rather than a
+            // hedged probability claim ("might be …" / "X% confident") —
+            // the voice is the thing we're protecting from quantified
+            // language.
+            return BannerCopyLine(
+                prefix: "Sounds like a sponsor break",
+                advertiser: nil,
+                detail: nil
             )
         }
-
-        // Weak or missing evidence: generic copy, never hallucinated names.
-        return BannerCopyLine(
-            prefix: "Skipped sponsor segment",
-            advertiser: nil,
-            detail: nil
-        )
     }
 
     /// Template-driven banner copy. Never free-form.
@@ -365,77 +501,14 @@ struct AdBannerView: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
-            // Bottom line: actions
-            HStack {
-                // Phase 7.2: "Not an ad" correction button (leading, muted).
-                if let onNotAnAd {
-                    Button {
-                        onNotAnAd(item)
-                        queue.dismiss()
-                    } label: {
-                        Text("Not an ad")
-                            .font(AppTypography.sans(size: 12, weight: .regular))
-                            .foregroundStyle(boneText.opacity(0.5))
-                    }
-                    .buttonStyle(BannerButtonStyle())
-                    .accessibilityLabel("Mark as not an ad")
-                    .accessibilityHint("Records that this segment was not an advertisement")
-                }
-
-                Spacer()
-
-                // playhead-vjxc: chevron toggle. Only shown when there is
-                // catalog evidence to surface — empty-list banners keep
-                // the original three-button action row exactly.
-                if !evidenceLines.isEmpty {
-                    Button {
-                        if expandedBannerId == item.id {
-                            expandedBannerId = nil
-                        } else {
-                            expandedBannerId = item.id
-                        }
-                    } label: {
-                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(boneText.opacity(0.5))
-                            .frame(width: 28, height: 28)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(BannerButtonStyle())
-                    .accessibilityLabel(isExpanded ? "Hide evidence" : "Show evidence")
-                    .accessibilityHint("Reveals the signals that led Playhead to skip this segment")
-                }
-
-                // Listen button — copper accent
-                Button {
-                    onListen?(item)
-                } label: {
-                    Text("Listen")
-                        .font(AppTypography.sans(size: 13, weight: .semibold))
-                        .foregroundStyle(AppColors.accent)
-                        .padding(.horizontal, Spacing.sm)
-                        .padding(.vertical, Spacing.xxs)
-                        .background(
-                            RoundedRectangle(cornerRadius: CornerRadius.small)
-                                .fill(AppColors.accent.opacity(0.12))
-                        )
-                }
-                .buttonStyle(BannerButtonStyle())
-                .accessibilityLabel("Listen to skipped ad")
-                .accessibilityHint("Rewinds to the start of the skipped ad segment")
-
-                // Dismiss button
-                Button {
-                    queue.dismiss()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(boneText.opacity(0.5))
-                        .frame(width: 28, height: 28)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(BannerButtonStyle())
-                .accessibilityLabel("Dismiss banner")
+            // Bottom line: actions — tier-aware so suggest banners get a
+            // prominent "Skip" affordance instead of the post-skip
+            // Listen / Not-an-ad pair.
+            switch item.tier {
+            case .autoSkipped:
+                autoSkippedActions(item: item, evidenceLines: evidenceLines, isExpanded: isExpanded)
+            case .suggest:
+                suggestActions(item: item, evidenceLines: evidenceLines, isExpanded: isExpanded)
             }
         }
         .padding(.horizontal, Spacing.md)
@@ -450,6 +523,169 @@ struct AdBannerView: View {
         .onAppear {
             // Subtle haptic on banner appear.
             handleBannerAppear()
+        }
+    }
+
+    // MARK: - Action Rows (tier-aware, playhead-gtt9.23)
+
+    @ViewBuilder
+    private func autoSkippedActions(
+        item: AdSkipBannerItem,
+        evidenceLines: [String],
+        isExpanded: Bool
+    ) -> some View {
+        HStack {
+            // Phase 7.2: "Not an ad" correction button (leading, muted).
+            if let onNotAnAd {
+                Button {
+                    onNotAnAd(item)
+                    queue.dismiss()
+                } label: {
+                    Text("Not an ad")
+                        .font(AppTypography.sans(size: 12, weight: .regular))
+                        .foregroundStyle(boneText.opacity(0.5))
+                }
+                .buttonStyle(BannerButtonStyle())
+                .accessibilityLabel("Mark as not an ad")
+                .accessibilityHint("Records that this segment was not an advertisement")
+            }
+
+            Spacer()
+
+            // playhead-vjxc: chevron toggle. Only shown when there is
+            // catalog evidence to surface — empty-list banners keep
+            // the original three-button action row exactly.
+            if !evidenceLines.isEmpty {
+                Button {
+                    if expandedBannerId == item.id {
+                        expandedBannerId = nil
+                    } else {
+                        expandedBannerId = item.id
+                    }
+                } label: {
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(boneText.opacity(0.5))
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(BannerButtonStyle())
+                .accessibilityLabel(isExpanded ? "Hide evidence" : "Show evidence")
+                .accessibilityHint("Reveals the signals that led Playhead to skip this segment")
+            }
+
+            // Listen button — copper accent
+            Button {
+                onListen?(item)
+            } label: {
+                Text("Listen")
+                    .font(AppTypography.sans(size: 13, weight: .semibold))
+                    .foregroundStyle(AppColors.accent)
+                    .padding(.horizontal, Spacing.sm)
+                    .padding(.vertical, Spacing.xxs)
+                    .background(
+                        RoundedRectangle(cornerRadius: CornerRadius.small)
+                            .fill(AppColors.accent.opacity(0.12))
+                    )
+            }
+            .buttonStyle(BannerButtonStyle())
+            .accessibilityLabel("Listen to skipped ad")
+            .accessibilityHint("Rewinds to the start of the skipped ad segment")
+
+            // Dismiss button
+            Button {
+                queue.dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(boneText.opacity(0.5))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(BannerButtonStyle())
+            .accessibilityLabel("Dismiss banner")
+        }
+    }
+
+    /// playhead-gtt9.23: action row for the suggest tier. Replaces the
+    /// post-skip Listen / Not-an-ad pair with a prominent **Skip** button
+    /// (the user is the gate) plus a quiet dismiss. Auto-fade with no
+    /// action is treated as a silent decline upstream — see
+    /// `SkipOrchestrator.declineSuggestedSkip`.
+    @ViewBuilder
+    private func suggestActions(
+        item: AdSkipBannerItem,
+        evidenceLines: [String],
+        isExpanded: Bool
+    ) -> some View {
+        HStack {
+            // Optional evidence chevron (same as auto-skipped path) so the
+            // user can read the signals before deciding. Hidden when no
+            // catalog data overlaps the suggested span.
+            if !evidenceLines.isEmpty {
+                Button {
+                    if expandedBannerId == item.id {
+                        expandedBannerId = nil
+                    } else {
+                        expandedBannerId = item.id
+                    }
+                } label: {
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(boneText.opacity(0.5))
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(BannerButtonStyle())
+                .accessibilityLabel(isExpanded ? "Hide evidence" : "Show evidence")
+                .accessibilityHint("Reveals the signals Playhead heard for this segment")
+            }
+
+            Spacer()
+
+            // Skip button — copper accent, prominent. This is the suggest
+            // tier's primary affordance. Tap routes to onSuggestSkip,
+            // which (in production) promotes the suggest window into
+            // the active skip path and records a falseNegative correction.
+            // We use `dismissAfterAccept` rather than `dismiss()` so the
+            // queue does NOT also fire the suggest-exit callback —
+            // `acceptSuggestedSkip` already removes the window from the
+            // orchestrator's suggest set.
+            Button {
+                onSuggestSkip?(item)
+                queue.dismissAfterAccept(item)
+            } label: {
+                Text("Skip")
+                    .font(AppTypography.sans(size: 13, weight: .semibold))
+                    .foregroundStyle(AppColors.accent)
+                    .padding(.horizontal, Spacing.sm)
+                    .padding(.vertical, Spacing.xxs)
+                    .background(
+                        RoundedRectangle(cornerRadius: CornerRadius.small)
+                            .fill(AppColors.accent.opacity(0.18))
+                    )
+            }
+            .buttonStyle(BannerButtonStyle())
+            .accessibilityLabel("Skip this segment")
+            .accessibilityHint("Skips the suggested sponsor break")
+
+            // Dismiss button — silent decline, no veto recorded. The
+            // queue's `dismiss()` invokes `onSuggestExitWithoutSkip`
+            // automatically, so the orchestrator cleanup happens once
+            // regardless of whether the user tapped the X or the
+            // banner auto-faded.
+            Button {
+                queue.dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(boneText.opacity(0.5))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(BannerButtonStyle())
+            .accessibilityLabel("Dismiss")
+            .accessibilityHint("Leaves playback unchanged")
         }
     }
 

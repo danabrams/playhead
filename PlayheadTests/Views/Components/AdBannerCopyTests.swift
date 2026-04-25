@@ -14,7 +14,8 @@ final class AdBannerCopyTests: XCTestCase {
         advertiser: String? = nil,
         product: String? = nil,
         metadataConfidence: Double? = nil,
-        metadataSource: String = "none"
+        metadataSource: String = "none",
+        tier: AdBannerTier = .autoSkipped
     ) -> AdSkipBannerItem {
         AdSkipBannerItem(
             id: UUID().uuidString,
@@ -26,7 +27,8 @@ final class AdBannerCopyTests: XCTestCase {
             metadataConfidence: metadataConfidence,
             metadataSource: metadataSource,
             podcastId: "podcast-test",
-            evidenceCatalogEntries: []
+            evidenceCatalogEntries: [],
+            tier: tier
         )
     }
 
@@ -302,5 +304,125 @@ final class AdBannerCopyTests: XCTestCase {
             for: makeEntry(category: .url, text: "  betterhelp.com  ")
         )
         XCTAssertEqual(line, "Sponsor link: betterhelp.com")
+    }
+
+    // MARK: - Suggest Tier Copy (playhead-gtt9.23)
+    //
+    // Suggest-tier banners ask the user to confirm a skip that has NOT
+    // happened. Their voice is calm and evidence-bound: "Sounds like a
+    // sponsor break." — never a quantified probability, never "X%
+    // confidence." Per `feedback_peace_of_mind_not_metrics`, the
+    // suggest copy describes what was heard, not how sure we are.
+
+    func testSuggestTierUsesSoundsLikePrefix() {
+        let item = makeBannerItem(
+            advertiser: "Squarespace",
+            product: "Build your website",
+            metadataConfidence: 0.85,
+            metadataSource: "foundationModels",
+            tier: .suggest
+        )
+        let copy = AdBannerView.bannerCopy(for: item)
+
+        XCTAssertEqual(copy.prefix, "Sounds like a sponsor break",
+            "Suggest tier must use the calm declarative prefix, never the past-tense 'Skipped'")
+        XCTAssertEqual(copy.advertiser, "Squarespace",
+            "Suggest tier still surfaces a known advertiser when evidence is strong")
+        XCTAssertEqual(copy.detail, "Build your website")
+    }
+
+    func testSuggestTierWithWeakEvidenceFallsBackToCalmGeneric() {
+        let item = makeBannerItem(
+            advertiser: "Maybe Corp",
+            product: "Some product",
+            metadataConfidence: 0.40,
+            metadataSource: "foundationModels",
+            tier: .suggest
+        )
+        let copy = AdBannerView.bannerCopy(for: item)
+
+        // Below the metadata confidence threshold the advertiser is not
+        // surfaced — same evidence rule as the autoSkipped tier — but
+        // the *prefix* must remain the suggest-tier voice, not collapse
+        // back into "Skipped sponsor segment".
+        XCTAssertEqual(copy.prefix, "Sounds like a sponsor break",
+            "Suggest tier with weak evidence must still use the suggest prefix, not the auto-skipped fallback")
+        XCTAssertNil(copy.advertiser,
+            "Below-threshold confidence must not surface advertiser, even on suggest tier")
+        XCTAssertNil(copy.detail)
+    }
+
+    func testSuggestTierContainsNoQuantifiedLanguage() {
+        // Belt-and-suspenders against future drift: every suggest copy
+        // we produce must avoid percent signs, the word "confidence",
+        // and any digit cluster that looks like a probability. This is
+        // a content-policy test — it'll fail loudly if someone slips
+        // "73% sure" or "confidence: 0.45" into the prefix later.
+        let cases: [AdSkipBannerItem] = [
+            makeBannerItem(tier: .suggest),
+            makeBannerItem(advertiser: "BetterHelp", metadataConfidence: 0.70,
+                           metadataSource: "foundationModels", tier: .suggest),
+            makeBannerItem(advertiser: nil, metadataConfidence: 0.20,
+                           metadataSource: "foundationModels", tier: .suggest),
+        ]
+        for item in cases {
+            let copy = AdBannerView.bannerCopy(for: item)
+            let blob = [copy.prefix, copy.advertiser, copy.detail]
+                .compactMap { $0 }
+                .joined(separator: " ")
+                .lowercased()
+            XCTAssertFalse(blob.contains("%"),
+                "Suggest copy must not contain '%' (got: \(blob))")
+            XCTAssertFalse(blob.contains("confidence"),
+                "Suggest copy must not contain 'confidence' (got: \(blob))")
+            XCTAssertNil(blob.range(of: #"\b\d{1,3}\s*%"#, options: .regularExpression),
+                "Suggest copy must not contain percent-style numbers (got: \(blob))")
+        }
+    }
+
+    func testAutoSkippedTierStillUsesSkippedPrefix() {
+        // Regression guard: introducing the suggest tier must not
+        // change the existing auto-skipped voice. Same fixture as the
+        // playhead-9yj copy tests, asserted with an explicit
+        // tier=.autoSkipped to pin the contract.
+        let item = makeBannerItem(
+            advertiser: "Squarespace",
+            metadataConfidence: 0.85,
+            metadataSource: "foundationModels",
+            tier: .autoSkipped
+        )
+        let copy = AdBannerView.bannerCopy(for: item)
+
+        XCTAssertEqual(copy.prefix, "Skipped",
+            "Auto-skipped tier voice must remain 'Skipped' after the suggest tier landed")
+        XCTAssertEqual(copy.advertiser, "Squarespace")
+    }
+
+    // MARK: - Tier-aware dwell (playhead-gtt9.23)
+
+    func testSuggestTierHasLongerDwellThanAutoSkipped() {
+        // Suggest banners ask the user a question — they need a beat
+        // longer to read and decide than auto-skipped banners (which
+        // are an after-the-fact notification). The exact ratio is not
+        // pinned, but suggest must be strictly longer than auto-skipped.
+        let suggestDwell = AdBannerQueue.dwellSeconds(for: .suggest)
+        let autoSkippedDwell = AdBannerQueue.dwellSeconds(for: .autoSkipped)
+        XCTAssertGreaterThan(suggestDwell, autoSkippedDwell,
+            "Suggest dwell (\(suggestDwell)s) must exceed auto-skipped dwell (\(autoSkippedDwell)s)")
+    }
+
+    func testAutoSkippedDwellIsEightSeconds() {
+        // Pinned constant: 8 s is the calm dwell that survived UX review.
+        XCTAssertEqual(AdBannerQueue.dwellSeconds(for: .autoSkipped), 8.0,
+            "Auto-skipped dwell must remain 8 s")
+    }
+
+    func testSuggestDwellIsTwelveSeconds() {
+        // Pinned constant: 12 s gives the user a beat or two more to
+        // decide whether to tap "Skip". If this changes, the suggest
+        // banner UX needs to be re-reviewed — this assertion is a
+        // canary for an implicit policy shift.
+        XCTAssertEqual(AdBannerQueue.dwellSeconds(for: .suggest), 12.0,
+            "Suggest dwell must remain 12 s")
     }
 }

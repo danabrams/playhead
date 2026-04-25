@@ -103,6 +103,18 @@ struct NowPlayingView: View {
                             podcastId: podcastId
                         )
                     }
+                },
+                // playhead-gtt9.23: tap-to-skip on a suggest-tier banner.
+                // Promotes the suggested span into the active skip path
+                // and records a falseNegative correction (the user just
+                // told us "this WAS an ad" — exactly the calibration
+                // signal future threshold tuning needs).
+                onSuggestSkip: { item in
+                    let orchestrator = runtime.skipOrchestrator
+                    let windowId = item.windowId
+                    Task {
+                        await orchestrator.acceptSuggestedSkip(windowId: windowId)
+                    }
                 }
             )
         }
@@ -110,6 +122,17 @@ struct NowPlayingView: View {
             viewModel.startObserving()
             viewModel.observeAdSegments(from: runtime.skipOrchestrator)
             viewModel.observeBanners(from: runtime.skipOrchestrator, into: bannerQueue)
+            // playhead-gtt9.23: when a suggest-tier banner exits without
+            // a Skip tap (auto-fade or dismiss button), tell the
+            // orchestrator to drop the suggest window. Set once on
+            // appear; the queue retains the closure for its lifetime.
+            bannerQueue.onSuggestExitWithoutSkip = { item in
+                let orchestrator = runtime.skipOrchestrator
+                let windowId = item.windowId
+                Task {
+                    await orchestrator.declineSuggestedSkip(windowId: windowId)
+                }
+            }
             Task { await viewModel.loadSkipMode(from: runtime.skipOrchestrator) }
         }
         .onDisappear {
