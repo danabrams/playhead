@@ -954,7 +954,9 @@ struct NarlEvalCorpusBuilderShadowFoldTests {
         let asset = NarlEvalCorpusBuilderTests.BuilderAsset(
             id: "asset-test",
             episodeId: "ep-test",
-            podcastId: "pod-test"
+            podcastId: "pod-test",
+            detectorVersion: "",
+            buildCommitSHA: ""
         )
         return NarlEvalCorpusBuilderTests.assembleTrace(
             asset: asset,
