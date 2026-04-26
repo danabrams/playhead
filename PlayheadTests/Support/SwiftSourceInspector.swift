@@ -205,6 +205,113 @@ enum SwiftSourceInspector {
         return out
     }
 
+    /// Returns `source` with both comments AND double-quoted string
+    /// literal **contents** replaced by spaces. The opening and
+    /// closing quote characters of each string literal are preserved
+    /// so a regex anchored on a quote boundary still matches. Newlines
+    /// inside multi-line content are preserved so line numbers in
+    /// error messages still line up.
+    ///
+    /// Use this in source canaries whose token of interest could
+    /// plausibly appear inside a string literal — e.g. a regex that
+    /// matches `try ... .write(` would false-trigger on a
+    /// `print("retrying try foo.write(...)")` log line. Stripping
+    /// string contents neutralises that false positive without
+    /// affecting genuine code mentions of the token.
+    ///
+    /// This is the stricter cousin of ``strippingComments(_:)``;
+    /// callers that need to grep for tokens that should match inside
+    /// string interpolations (e.g. an asset key that the codebase
+    /// hardcodes via a literal) should keep using
+    /// ``strippingComments(_:)``.
+    static func strippingCommentsAndStrings(_ source: String) -> String {
+        var out = String()
+        out.reserveCapacity(source.count)
+        var i = source.startIndex
+        var inLineComment = false
+        var inBlockComment = false
+        var inString = false
+        let endIdx = source.endIndex
+
+        while i < endIdx {
+            let c = source[i]
+            let next = source.index(after: i) < endIdx ? source[source.index(after: i)] : Character("\0")
+
+            if inLineComment {
+                if c == "\n" {
+                    inLineComment = false
+                    out.append(c) // preserve line breaks
+                } else {
+                    out.append(" ")
+                }
+                i = source.index(after: i)
+                continue
+            }
+            if inBlockComment {
+                if c == "*" && next == "/" {
+                    inBlockComment = false
+                    out.append("  ")
+                    i = source.index(i, offsetBy: 2)
+                    continue
+                }
+                if c == "\n" {
+                    out.append(c)
+                } else {
+                    out.append(" ")
+                }
+                i = source.index(after: i)
+                continue
+            }
+            if inString {
+                // Preserve the closing quote so the boundary survives;
+                // blank everything else inside the literal so no token
+                // inside the string contents can match a regex.
+                if c == "\\" && source.index(after: i) < endIdx {
+                    let escaped = source[source.index(after: i)]
+                    // Preserve newlines inside the literal so line
+                    // numbers stay aligned, blank everything else.
+                    out.append(" ")
+                    out.append(escaped == "\n" ? "\n" : " ")
+                    i = source.index(i, offsetBy: 2)
+                    continue
+                }
+                if c == "\"" {
+                    inString = false
+                    out.append(c) // preserve closing quote
+                } else if c == "\n" {
+                    out.append(c) // preserve raw newlines
+                } else {
+                    out.append(" ")
+                }
+                i = source.index(after: i)
+                continue
+            }
+
+            if c == "/" && next == "/" {
+                inLineComment = true
+                out.append("  ")
+                i = source.index(i, offsetBy: 2)
+                continue
+            }
+            if c == "/" && next == "*" {
+                inBlockComment = true
+                out.append("  ")
+                i = source.index(i, offsetBy: 2)
+                continue
+            }
+            if c == "\"" {
+                inString = true
+                out.append(c) // preserve opening quote
+                i = source.index(after: i)
+                continue
+            }
+
+            out.append(c)
+            i = source.index(after: i)
+        }
+        return out
+    }
+
     /// Returns the index of the first `{` at or after `position` that
     /// is not inside a string literal or comment. Returns `nil` if no
     /// such brace exists in the rest of the file.

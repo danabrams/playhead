@@ -307,13 +307,20 @@ final class PlayheadRuntimeInitLaunchPathSourceCanaryTests: XCTestCase {
 
     /// Loads `PlayheadRuntime.swift` and returns the brace-isolated
     /// body of `init(isPreviewRuntime:Bool = false)` with all `//` and
-    /// `/* */` comments stripped. Stripping is critical because the
-    /// init body carries multi-line audit comments that mention every
-    /// forbidden token by name (`SystemLanguageModel`, `sqlite3_open`,
-    /// etc.) — a naive grep on the raw body false-positives on those
-    /// comments. The brace walker preserves comments inside the
-    /// returned body slice; ``SwiftSourceInspector.strippingComments``
-    /// neutralises them while preserving line numbers.
+    /// `/* */` comments stripped AND all string-literal contents
+    /// blanked. Stripping comments is critical because the init body
+    /// carries multi-line audit comments that mention every forbidden
+    /// token by name (`SystemLanguageModel`, `sqlite3_open`, etc.) — a
+    /// naive grep on the raw body false-positives on those comments.
+    ///
+    /// String-literal stripping is also required: a regression that
+    /// introduces a log line like `print("retrying try foo.write(...)")`
+    /// would falsely trip the `tryWritePattern` if we only stripped
+    /// comments. The canary should match the actual call sites, not
+    /// log strings that happen to mention the forbidden token. The
+    /// quote characters themselves are preserved by
+    /// ``SwiftSourceInspector.strippingCommentsAndStrings`` so a
+    /// regex anchored on a quote boundary is unaffected.
     private static func loadInitBody() throws -> String {
         let source = try SwiftSourceInspector.loadSource(
             repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
@@ -330,6 +337,6 @@ final class PlayheadRuntimeInitLaunchPathSourceCanaryTests: XCTestCase {
                 ]
             )
         }
-        return SwiftSourceInspector.strippingComments(body)
+        return SwiftSourceInspector.strippingCommentsAndStrings(body)
     }
 }
