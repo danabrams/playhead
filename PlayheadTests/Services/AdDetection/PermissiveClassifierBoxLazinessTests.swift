@@ -155,9 +155,18 @@ final class PlayheadRuntimeInitLazyClassifierSourceCanaryTests: XCTestCase {
         // future swift-format reflow that breaks the closure across
         // lines (e.g. `PermissiveClassifierBox {\n    PermissiveAdClassifier()\n}`)
         // still matches and doesn't cause a spurious failure here.
-        let totalCalls = SwiftSourceInspector.occurrences(of: "PermissiveAdClassifier()", in: body)
+        //
+        // Strip comments before counting: `bracedBody` returns the raw
+        // source slice including any comments inside init. The init
+        // currently carries multi-line audit comments that name
+        // `PermissiveAdClassifier()` (jndk discussion of the lazy
+        // wrapping) — a naïve grep on the raw body false-positives on
+        // those comments. Mirrors the pattern adopted in the
+        // launch-perf source canaries (PlayheadRuntimeLaunchPerfTests).
+        let scrubbed = SwiftSourceInspector.strippingComments(body)
+        let totalCalls = SwiftSourceInspector.occurrences(of: "PermissiveAdClassifier()", in: scrubbed)
         let lazyWrappedPattern = #"PermissiveClassifierBox\s*\{\s*PermissiveAdClassifier\s*\(\s*\)\s*\}"#
-        let lazyWrapped = SwiftSourceInspector.regexOccurrences(of: lazyWrappedPattern, in: body)
+        let lazyWrapped = SwiftSourceInspector.regexOccurrences(of: lazyWrappedPattern, in: scrubbed)
 
         XCTAssertEqual(
             totalCalls, lazyWrapped,
