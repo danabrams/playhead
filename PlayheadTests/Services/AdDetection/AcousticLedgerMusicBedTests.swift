@@ -1,20 +1,21 @@
 // AcousticLedgerMusicBedTests.swift
-// playhead-sqhj (2026-04-26 follow-up to gtt9.4): the 2026-04-23 corpus
-// eval found `.acoustic` ledger entries firing on only ~2% of decisions
-// because `buildAcousticLedgerEntries` early-exits whenever the boundary
-// RMS-drop score is zero. `MusicBedLevel` is computed in `FeatureWindow`
-// (and consumed by `BracketDetector` for boundary refinement) but was
-// not threaded into the acoustic ledger entry.
+// playhead-sqhj (2026-04-26): pins the contract that `.acoustic` is
+// the audio-energy break (RMS-drop) signal and is independent of the
+// music-bed signal. Music-bed presence reaches production via
+// `MusicBedLedgerEvaluator`'s parallel `.musicBed` entry, NOT through
+// `.acoustic`; emitting both for a music-bed-only span would
+// double-count one physical signal into the quorum gate's
+// `distinctKinds.count`.
 //
-// This suite pins the post-fix behaviour:
-//   1. RMS drop alone still fires (back-compat with pre-sqhj behaviour).
-//   2. Music-bed coverage alone (≥30% of windows non-`.none`) now fires
-//      an `.acoustic` entry even when RMS drop is zero.
+// This suite pins:
+//   1. RMS drop alone fires an `.acoustic` entry (back-compat with
+//      pre-sqhj behaviour).
+//   2. Music-bed coverage alone (no RMS drop) does NOT fire an
+//      `.acoustic` entry — the `.musicBed` entry from
+//      `MusicBedLedgerEvaluator` is the path that signal takes.
 //   3. Empty windows / no signal of either kind still returns no entry
 //      (no zero-weight clutter in the ledger).
-//   4. The `.acoustic` source is preserved (this is `.acoustic`, not
-//      `.musicBed`; `MusicBedLedgerEvaluator` continues to emit the
-//      distinct `.musicBed` entry for distinctKinds purposes).
+//   4. Empty span (no overlapping windows) does not crash.
 
 import Foundation
 import Testing
@@ -81,20 +82,21 @@ struct AcousticLedgerMusicBedTests {
         )
     }
 
-    // MARK: - Music-bed-only path (the new behaviour)
+    // MARK: - Music-bed-only path (must NOT emit `.acoustic`)
 
-    /// Sustained music-bed coverage with NO RMS drop must still produce
-    /// an `.acoustic` ledger entry. This is the regression the bead
-    /// fixes: previously the early-exit on `breakStrength == 0`
-    /// silently dropped the signal even though `MusicBedLevel` was
-    /// fully populated.
-    @Test("music-bed coverage with no RMS drop fires an .acoustic entry")
-    func musicBedAloneFiresAcousticEntry() async throws {
+    /// Sustained music-bed coverage with NO RMS drop must NOT produce
+    /// an `.acoustic` ledger entry. The music-bed signal reaches
+    /// production via `MusicBedLedgerEvaluator`'s parallel `.musicBed`
+    /// entry; emitting `.acoustic` on the same span would double-count
+    /// the same physical evidence into the quorum gate's
+    /// `distinctKinds.count`.
+    @Test("music-bed coverage with no RMS drop does NOT fire an .acoustic entry")
+    func musicBedAloneDoesNotFireAcousticEntry() async throws {
         let svc = try await makeService()
 
         // Flat RMS across 10 windows → computeRmsDropScore returns 0.
-        // 7/10 windows carry a music bed → fraction 0.70, well above
-        // the 0.30 floor and ≥ minWindowsRequired.
+        // 7/10 windows carry a music bed → fraction 0.70. Pre-fix this
+        // would have lifted `.acoustic`; post-fix it must not.
         var windows: [FeatureWindow] = []
         for i in 0..<7 {
             windows.append(window(start: Double(i) * 2.0, rms: 0.10, musicBedLevel: .background))
@@ -110,18 +112,8 @@ struct AcousticLedgerMusicBedTests {
             fusionConfig: FusionWeightConfig()
         )
 
-        try #require(entries.count == 1,
-                     "Expected one .acoustic entry from music-bed coverage; got \(entries.count)")
-        let only = entries[0]
-        #expect(only.source == .acoustic,
-                "Music-bed-augmented entry must stay on .acoustic source; .musicBed is the parallel path")
-        #expect(only.weight > 0,
-                "Combined-strength entry must carry a positive weight when music bed is present")
-        if case .acoustic(let strength) = only.detail {
-            #expect(strength > 0, "Acoustic detail strength must be positive when music bed is present")
-        } else {
-            Issue.record("Expected .acoustic detail variant; got \(only.detail)")
-        }
+        #expect(entries.isEmpty,
+                "Music-bed-only span must not emit `.acoustic`; the `.musicBed` entry from MusicBedLedgerEvaluator is that signal's path to production")
     }
 
     // MARK: - RMS-only path (back-compat)
@@ -172,32 +164,6 @@ struct AcousticLedgerMusicBedTests {
 
         #expect(entries.isEmpty,
                 "No RMS drop and no music bed must not produce a ledger entry")
-    }
-
-    /// Sub-threshold music coverage (below the 30% floor) with no RMS
-    /// drop must NOT fire — this is the same conservative threshold
-    /// `MusicBedLedgerEvaluator` uses; the acoustic path matches it
-    /// to avoid trusting spectral noise.
-    @Test("sub-threshold music coverage with no RMS drop does not fire")
-    func subThresholdMusicDoesNotFire() async throws {
-        let svc = try await makeService()
-
-        // 2 of 10 windows = 0.20 fraction → below 0.30 floor.
-        var windows: [FeatureWindow] = []
-        windows.append(window(start: 0, rms: 0.10, musicBedLevel: .background))
-        windows.append(window(start: 2, rms: 0.10, musicBedLevel: .background))
-        for i in 2..<10 {
-            windows.append(window(start: Double(i) * 2.0, rms: 0.10, musicBedLevel: .none))
-        }
-
-        let span = makeSpan(start: 0, end: 20)
-        let entries = await svc.buildAcousticLedgerEntries(
-            span: span,
-            featureWindows: windows,
-            fusionConfig: FusionWeightConfig()
-        )
-        #expect(entries.isEmpty,
-                "Sparse music below the 30% floor must not lift the acoustic entry")
     }
 
     /// No windows in the span → no entry, no crash. (Pre-sqhj guard
