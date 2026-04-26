@@ -110,7 +110,7 @@ struct ActivityView: View {
         .task {
             // Initial load.
             viewModel.beginLoad()
-            await scheduleSkeletonPromotion()
+            scheduleSkeletonPromotion()
             await refresh()
         }
         .onReceive(
@@ -132,8 +132,10 @@ struct ActivityView: View {
     /// the first `inputProvider()` call: if inputs arrive first the
     /// flip is a no-op (`refresh()` clears `showSkeleton`); if the
     /// store read stalls past the threshold the user sees a neutral
-    /// skeleton instead of an empty list.
-    private func scheduleSkeletonPromotion() async {
+    /// skeleton instead of an empty list. Fire-and-forget — the View
+    /// is the only thing observing `showSkeleton` and the work is
+    /// purely presentational.
+    private func scheduleSkeletonPromotion() {
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(Self.skeletonPromotionDelay * 1_000_000_000))
             if viewModel.loadState != .loaded {
