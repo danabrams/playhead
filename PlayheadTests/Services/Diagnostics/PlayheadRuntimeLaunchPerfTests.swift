@@ -76,14 +76,20 @@ final class PlayheadRuntimeLaunchPerfTests: XCTestCase {
             await runtime.shutdown()
         }
 
-        // Measured runs.
+        // Measured runs. `mach_absolute_time` via `DispatchTime` is the
+        // monotonic source on Apple platforms — it cannot drift if the
+        // simulator host re-syncs wall-clock mid-test (an `NSDate`-based
+        // measurement would silently inflate or compress the sample on
+        // an NTP slew). The conversion to seconds uses the API-stable
+        // `uptimeNanoseconds` field, which is documented as monotonic
+        // mach time.
         var samples: [Double] = []
         samples.reserveCapacity(Self.measuredIterations)
         for _ in 0..<Self.measuredIterations {
-            let start = Date()
+            let startNanos = DispatchTime.now().uptimeNanoseconds
             let runtime = PlayheadRuntime(isPreviewRuntime: false)
-            let elapsed = Date().timeIntervalSince(start)
-            samples.append(elapsed)
+            let endNanos = DispatchTime.now().uptimeNanoseconds
+            samples.append(Double(endNanos - startNanos) / 1_000_000_000.0)
             // Shut the runtime down between samples so the deferred
             // migrate Task spawned by init() doesn't pile up across
             // iterations. `shutdown()` cancels the startup task and
@@ -121,9 +127,10 @@ final class PlayheadRuntimeLaunchPerfTests: XCTestCase {
             budget = \(String(format: "%.0f", Self.budgetSeconds * 1000)) ms. \
             Samples (post-warmup): [\(formatted)]. \
             Inspect the recent diff for new synchronous file-system, FoundationModels, \
-            or SQLite work added to init's body — the existing source canaries in \
-            PlayheadRuntimeLaunchPerfTests / PermissiveClassifierBoxLazinessTests / \
-            PlayheadRuntimeLoggerLazinessTests pin the known hazards.
+            or SQLite work added to init's body — the source canaries in \
+            PlayheadRuntimeInitLaunchPathSourceCanaryTests / \
+            PermissiveClassifierBoxLazinessTests / \
+            PlayheadRuntimeLoggerLazinessSourceCanaryTests pin the known hazards.
             """
         )
     }

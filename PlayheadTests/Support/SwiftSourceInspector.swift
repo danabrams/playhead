@@ -306,13 +306,12 @@ enum SwiftSourceInspector {
         return bracedBody(in: source, startingAt: braceIdx)
     }
 
-    /// Locates the body of the FIRST function/initialiser whose
-    /// signature matches any of the supplied candidates. Returns the
-    /// concatenated bodies of EVERY occurrence of any of the supplied
-    /// candidates — this matches the historical behaviour of
+    /// Returns the concatenated bodies of EVERY init/function whose
+    /// signature matches any of the supplied candidates. This matches
+    /// the historical behaviour of
     /// `PlayheadRuntimeLoggerLazinessTests.assertInitBodyHasNoFileSystemCalls`,
-    /// which auditing both a façade-init and an internal-state-init in
-    /// a single pass.
+    /// which audits both a façade-init AND an internal-state-init in
+    /// a single pass (`SurfaceStatusInvariantLogger` + `LoggerState`).
     ///
     /// Returns `nil` if NONE of the signatures are found.
     static func combinedBodies(in source: String, matchingAnyOf signatures: [String]) -> String? {
