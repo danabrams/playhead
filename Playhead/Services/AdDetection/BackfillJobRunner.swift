@@ -292,6 +292,17 @@ actor BackfillJobRunner {
     /// the scan cohort and transcript version are unchanged. Returns a
     /// `RunResult` describing what was admitted, persisted, or deferred.
     func runPendingBackfill(for inputs: AssetInputs) async throws -> RunResult {
+        // playhead-6boz: AnalysisStore is now lazily-opened. The
+        // backfill runner runs on a background actor, so blocking
+        // until DDL is ready is exactly the right behavior — anything
+        // racing the deferred warmup blocks here, then proceeds once
+        // the schema is in place. Mirrors the loggers' deferred-
+        // bootstrap pattern (jncn) but uses an explicit await so the
+        // first store call inside the pipeline doesn't stall on a
+        // surprise multi-hundred-ms first-open below the actor's
+        // execution surface.
+        try await store.awaitReady()
+
         // Cycle 4 H-3: reset per-run counters BEFORE plan execution so
         // a second invocation of `runPendingBackfill` on the same actor
         // instance does not accumulate permissive/asymmetric telemetry
