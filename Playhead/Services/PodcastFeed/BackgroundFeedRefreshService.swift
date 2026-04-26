@@ -219,6 +219,13 @@ actor BackgroundFeedRefreshService {
                 // service, which is a vanishingly small window but we
                 // must handle it without crashing. Submit is best-effort
                 // since BGTaskScheduler may itself reject in that window.
+                //
+                // playhead-shpy: this fallback path runs with no service
+                // attached and therefore no `BGTaskTelemetryLogging`
+                // instance to call. We accept the gap rather than
+                // building a parallel logger here — the window is
+                // empirically small (one App-scope `.task` await) and
+                // the next regular fire will land on the wired path.
                 let nextRequest = BGAppRefreshTaskRequest(identifier: taskIdentifier)
                 nextRequest.earliestBeginDate = Date(
                     timeIntervalSinceNow: minimumRefreshInterval
@@ -241,6 +248,11 @@ actor BackgroundFeedRefreshService {
     private let downloader: any AutoDownloadEnqueueing
     private let settingsProvider: any DownloadsSettingsProviding
     private let taskScheduler: any BackgroundTaskScheduling
+    /// playhead-shpy: BG-task lifecycle telemetry. Defaults to a no-op
+    /// so existing tests that construct the service without explicitly
+    /// threading a logger keep working; production wiring in
+    /// `PlayheadApp.task` supplies the live `BGTaskTelemetryLogger`.
+    private let bgTelemetry: any BGTaskTelemetryLogging
 
     /// playhead-5uvz.4 (Gap-5): rearms the backfill BGProcessingTask
     /// when this fire enqueued at least one new download. nil-able so
@@ -280,7 +292,8 @@ actor BackgroundFeedRefreshService {
         downloader: any AutoDownloadEnqueueing,
         settingsProvider: any DownloadsSettingsProviding,
         taskScheduler: any BackgroundTaskScheduling = BGTaskScheduler.shared,
-        backfillScheduler: (any BackfillScheduling)? = nil
+        backfillScheduler: (any BackfillScheduling)? = nil,
+        bgTelemetry: any BGTaskTelemetryLogging = NoOpBGTaskTelemetryLogger()
     ) {
         self.enumerator = enumerator
         self.refresher = refresher
@@ -288,6 +301,7 @@ actor BackgroundFeedRefreshService {
         self.settingsProvider = settingsProvider
         self.taskScheduler = taskScheduler
         self.backfillScheduler = backfillScheduler
+        self.bgTelemetry = bgTelemetry
     }
 
     // MARK: - Start
@@ -317,11 +331,42 @@ actor BackgroundFeedRefreshService {
         request.earliestBeginDate = Date(
             timeIntervalSinceNow: Self.minimumRefreshInterval
         )
+        let earliestDelay = request.earliestBeginDate?.timeIntervalSinceNow
         do {
             try taskScheduler.submit(request)
             logger.info("Scheduled next feed refresh in \(Self.minimumRefreshInterval, privacy: .public)s")
+            let identifier = Self.taskIdentifier
+            let bgTelemetry = self.bgTelemetry
+            Task {
+                let phase = await BGTaskTelemetryScenePhase.current()
+                await bgTelemetry.record(
+                    .submit(
+                        identifier: identifier,
+                        succeeded: true,
+                        earliestBeginDelaySec: earliestDelay,
+                        scenePhase: phase,
+                        detail: "feed-refresh-reschedule"
+                    )
+                )
+            }
         } catch {
             logger.error("Failed to schedule feed refresh: \(String(describing: error), privacy: .public)")
+            let identifier = Self.taskIdentifier
+            let errString = String(describing: error)
+            let bgTelemetry = self.bgTelemetry
+            Task {
+                let phase = await BGTaskTelemetryScenePhase.current()
+                await bgTelemetry.record(
+                    .submit(
+                        identifier: identifier,
+                        succeeded: false,
+                        error: errString,
+                        earliestBeginDelaySec: earliestDelay,
+                        scenePhase: phase,
+                        detail: "feed-refresh-reschedule"
+                    )
+                )
+            }
         }
     }
 
@@ -343,6 +388,23 @@ actor BackgroundFeedRefreshService {
     ///   6. Mark the task complete (`success: !expired`).
     func handleFeedRefreshTask(_ task: any BackgroundProcessingTaskProtocol) async {
         logger.info("Feed refresh task started")
+
+        // playhead-shpy: emit `start` row before any work so the
+        // log captures the dispatch even if the handler crashes.
+        let identifier = Self.taskIdentifier
+        let instanceID = bgTaskInstanceID(for: task as AnyObject)
+        let bgTelemetry = self.bgTelemetry
+        Task {
+            let phase = await BGTaskTelemetryScenePhase.current()
+            await bgTelemetry.record(
+                .start(
+                    identifier: identifier,
+                    taskInstanceID: instanceID,
+                    timeSinceSubmitSec: nil,
+                    scenePhase: phase
+                )
+            )
+        }
 
         // Reset per-fire flags. A test or long-lived process may reuse
         // the service across fires; the flags must not leak state from
@@ -369,7 +431,19 @@ actor BackgroundFeedRefreshService {
         task.expirationHandler = { [weak self] in
             guard let self else { return }
             let taskBox = _UncheckedSendableBox(task)
-            Task { await self.markExpiredAndComplete(taskBox.value) }
+            Task {
+                let phase = await BGTaskTelemetryScenePhase.current()
+                await self.bgTelemetry.record(
+                    .expire(
+                        identifier: Self.taskIdentifier,
+                        taskInstanceID: instanceID,
+                        timeInTaskSec: nil,
+                        scenePhase: phase,
+                        detail: "feed-refresh-expired"
+                    )
+                )
+                await self.markExpiredAndComplete(taskBox.value)
+            }
         }
 
         await runRefreshOnce()
@@ -401,6 +475,24 @@ actor BackgroundFeedRefreshService {
         guard !taskCompleted else { return }
         taskCompleted = true
         task.setTaskCompleted(success: success)
+        // playhead-shpy: emit a `complete` row paired with the matching
+        // `start` instance ID so the log captures every terminal event,
+        // including the normal-exit + expiration-race path that goes
+        // through this idempotence guard.
+        let instanceID = bgTaskInstanceID(for: task as AnyObject)
+        let bgTelemetry = self.bgTelemetry
+        Task {
+            let phase = await BGTaskTelemetryScenePhase.current()
+            await bgTelemetry.record(
+                .complete(
+                    identifier: Self.taskIdentifier,
+                    taskInstanceID: instanceID,
+                    success: success,
+                    timeInTaskSec: nil,
+                    scenePhase: phase
+                )
+            )
+        }
     }
 
     /// Core work of a single fire. Factored out so a future test can

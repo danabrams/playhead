@@ -202,6 +202,11 @@ actor BackgroundProcessingService {
     private let capabilitiesService: CapabilitiesService
     private let taskScheduler: any BackgroundTaskScheduling
     private let batteryProvider: any BatteryStateProviding
+    /// playhead-shpy: BG-task lifecycle telemetry. Defaults to no-op so
+    /// existing tests that construct a BPS without explicitly threading
+    /// a logger keep working; production wiring in `PlayheadRuntime`
+    /// supplies the live `BGTaskTelemetryLogger`.
+    private let bgTelemetry: any BGTaskTelemetryLogging
 
     /// Pre-analysis services, injected after construction via
     /// ``setPreAnalysisServices(scheduler:reconciler:)``.
@@ -243,6 +248,15 @@ actor BackgroundProcessingService {
     /// unreported BGProcessingTask.
     private var completedTaskIDs = Set<ObjectIdentifier>()
 
+    /// playhead-shpy: BGTaskScheduler identifier per in-flight BG task,
+    /// keyed by `ObjectIdentifier`. Populated by `emitStart` and read by
+    /// `markComplete` / `handleExpiredProcessingTask` so the `complete`
+    /// and `expire` telemetry rows carry the right identifier even when
+    /// only the protocol type (`any BackgroundProcessingTaskProtocol`)
+    /// is in scope. Cleared on terminal events so the dict bounds with
+    /// the active-task lifetime.
+    private var identifiersByTaskID: [ObjectIdentifier: String] = [:]
+
     /// Current thermal state, cached for decision-making.
     private var currentThermalState: ThermalState = .nominal
 
@@ -261,12 +275,14 @@ actor BackgroundProcessingService {
         coordinator: any AnalysisCoordinating,
         capabilitiesService: CapabilitiesService,
         taskScheduler: any BackgroundTaskScheduling = BGTaskScheduler.shared,
-        batteryProvider: any BatteryStateProviding = UIDeviceBatteryProvider()
+        batteryProvider: any BatteryStateProviding = UIDeviceBatteryProvider(),
+        bgTelemetry: any BGTaskTelemetryLogging = NoOpBGTaskTelemetryLogger()
     ) {
         self.coordinator = coordinator
         self.capabilitiesService = capabilitiesService
         self.taskScheduler = taskScheduler
         self.batteryProvider = batteryProvider
+        self.bgTelemetry = bgTelemetry
     }
 
     /// Inject pre-analysis services after construction. Called once the
@@ -509,12 +525,7 @@ actor BackgroundProcessingService {
         request.requiresNetworkConnectivity = false
         request.requiresExternalPower = false
 
-        do {
-            try taskScheduler.submit(request)
-            logger.info("Backfill task scheduled")
-        } catch {
-            logger.error("Failed to schedule backfill task: \(error)")
-        }
+        submitWithTelemetry(request, reason: nil)
     }
 
     /// Schedule a BGContinuedProcessingTask for user-initiated long-running
@@ -524,11 +535,52 @@ actor BackgroundProcessingService {
         request.requiresNetworkConnectivity = true
         request.requiresExternalPower = false
 
+        submitWithTelemetry(request, reason: reason)
+    }
+
+    /// playhead-shpy: shared `BGTaskScheduler.submit` wrapper that emits
+    /// a `submit` telemetry row regardless of throw/non-throw. Logging
+    /// is fire-and-forget so a logger failure cannot cascade into the
+    /// scheduler call path. The `detail` field captures the
+    /// `reason` annotation passed by `scheduleContinuedProcessing` so
+    /// dogfood logs distinguish intent without grepping by identifier.
+    private func submitWithTelemetry(_ request: BGTaskRequest, reason: String?) {
+        let earliestDelay = request.earliestBeginDate?.timeIntervalSinceNow
         do {
             try taskScheduler.submit(request)
-            logger.info("Continued processing task scheduled: \(reason)")
+            logger.info("BGTask submitted: \(request.identifier, privacy: .public)\(reason.map { " (\($0))" } ?? "", privacy: .public)")
+            let identifier = request.identifier
+            let bgTelemetry = self.bgTelemetry
+            Task {
+                let phase = await BGTaskTelemetryScenePhase.current()
+                await bgTelemetry.record(
+                    .submit(
+                        identifier: identifier,
+                        succeeded: true,
+                        earliestBeginDelaySec: earliestDelay,
+                        scenePhase: phase,
+                        detail: reason
+                    )
+                )
+            }
         } catch {
-            logger.error("Failed to schedule continued processing: \(error)")
+            logger.error("BGTask submit failed for \(request.identifier, privacy: .public): \(error)")
+            let identifier = request.identifier
+            let errString = String(describing: error)
+            let bgTelemetry = self.bgTelemetry
+            Task {
+                let phase = await BGTaskTelemetryScenePhase.current()
+                await bgTelemetry.record(
+                    .submit(
+                        identifier: identifier,
+                        succeeded: false,
+                        error: errString,
+                        earliestBeginDelaySec: earliestDelay,
+                        scenePhase: phase,
+                        detail: reason
+                    )
+                )
+            }
         }
     }
 
@@ -555,7 +607,80 @@ actor BackgroundProcessingService {
         // Clean up the active-task entry for this BGProcessingTask, if any.
         activeBackgroundTasks.removeValue(forKey: id)
         task.setTaskCompleted(success: success)
+        // playhead-shpy: emit a `complete` row exactly once per BG task
+        // instance (gated by the same `completedTaskIDs` idempotence
+        // guard above). The taskInstanceID is the same string the
+        // matching `start` row used; the logger will fill
+        // `timeInTaskSec` from its in-memory start map.
+        let identifier = identifierForTask(task)
+        identifiersByTaskID.removeValue(forKey: id)
+        let instanceID = bgTaskInstanceID(for: task as AnyObject)
+        let bgTelemetry = self.bgTelemetry
+        Task {
+            let phase = await BGTaskTelemetryScenePhase.current()
+            await bgTelemetry.record(
+                .complete(
+                    identifier: identifier,
+                    taskInstanceID: instanceID,
+                    success: success,
+                    timeInTaskSec: nil,
+                    scenePhase: phase
+                )
+            )
+        }
         return true
+    }
+
+    /// playhead-shpy: best-effort identifier resolution for a BG task
+    /// instance, falling back to the per-instance map populated by
+    /// `emitStart` if the protocol layer does not surface it.
+    private func identifierForTask(_ task: any BackgroundProcessingTaskProtocol) -> String {
+        if let continued = task as? any ContinuedProcessingTaskProtocol {
+            return continued.identifier
+        }
+        let id = ObjectIdentifier(task as AnyObject)
+        return identifiersByTaskID[id] ?? "unknown"
+    }
+
+    /// playhead-shpy: emit an `expire` telemetry row. Called from each
+    /// `expirationHandler` closure before the handler runs the cleanup
+    /// work, so the on-disk log records the expiration even if the
+    /// subsequent cleanup throws or is preempted by the OS-forced
+    /// termination timer.
+    private func emitExpire(identifier: String, taskRef: AnyObject, detail: String?) async {
+        let instanceID = bgTaskInstanceID(for: taskRef)
+        let phase = await BGTaskTelemetryScenePhase.current()
+        await bgTelemetry.record(
+            .expire(
+                identifier: identifier,
+                taskInstanceID: instanceID,
+                timeInTaskSec: nil, // logger fills from in-memory start map
+                scenePhase: phase,
+                detail: detail
+            )
+        )
+    }
+
+    /// playhead-shpy: emit a `start` telemetry row for the given task
+    /// and record the identifier in the per-instance map so the eventual
+    /// `complete`/`expire` rows can resolve it without the protocol
+    /// surface needing an `identifier` accessor.
+    private func emitStart(identifier: String, taskRef: AnyObject) {
+        let id = ObjectIdentifier(taskRef)
+        identifiersByTaskID[id] = identifier
+        let instanceID = bgTaskInstanceID(for: taskRef)
+        let bgTelemetry = self.bgTelemetry
+        Task {
+            let phase = await BGTaskTelemetryScenePhase.current()
+            await bgTelemetry.record(
+                .start(
+                    identifier: identifier,
+                    taskInstanceID: instanceID,
+                    timeSinceSubmitSec: nil, // logger fills from in-memory submit map
+                    scenePhase: phase
+                )
+            )
+        }
     }
 
     // MARK: - Background Task Handlers
@@ -566,6 +691,7 @@ actor BackgroundProcessingService {
         logger.info("Backfill task started")
 
         let taskID = ObjectIdentifier(task as AnyObject)
+        emitStart(identifier: BackgroundTaskID.backfillProcessing, taskRef: task as AnyObject)
 
         // Schedule the next occurrence.
         scheduleBackfillIfNeeded()
@@ -641,6 +767,11 @@ actor BackgroundProcessingService {
         task.expirationHandler = { [weak self] in
             workTask.cancel()
             Task { [weak self] in
+                await self?.emitExpire(
+                    identifier: BackgroundTaskID.backfillProcessing,
+                    taskRef: task as AnyObject,
+                    detail: "backfill-task-expired"
+                )
                 await self?.handleExpiredProcessingTask(task)
             }
         }
@@ -695,6 +826,7 @@ actor BackgroundProcessingService {
         logger.info("Continued processing task started: identifier=\(task.identifier, privacy: .public)")
 
         let taskID = ObjectIdentifier(task as AnyObject)
+        emitStart(identifier: task.identifier, taskRef: task as AnyObject)
 
         guard let episodeId = Self.parseEpisodeId(from: task.identifier) else {
             logger.error("Continued processing task missing episode id suffix: \(task.identifier, privacy: .public)")
@@ -784,6 +916,11 @@ actor BackgroundProcessingService {
             guard let self else { return }
             Task { [weak self] in
                 guard let self else { return }
+                await self.emitExpire(
+                    identifier: task.identifier,
+                    taskRef: task as AnyObject,
+                    detail: "continued-processing-expired"
+                )
                 await self.coordinator.pauseAtNextCheckpoint(
                     episodeId: episodeId,
                     cause: .taskExpired
@@ -947,6 +1084,7 @@ actor BackgroundProcessingService {
         logger.info("Pre-analysis recovery task started")
 
         let taskID = ObjectIdentifier(task as AnyObject)
+        emitStart(identifier: BackgroundTaskID.preAnalysisRecovery, taskRef: task as AnyObject)
 
         // Schedule the next occurrence.
         schedulePreAnalysisRecovery()
@@ -968,6 +1106,11 @@ actor BackgroundProcessingService {
         task.expirationHandler = { [weak self] in
             workTask.cancel()
             Task { [weak self] in
+                await self?.emitExpire(
+                    identifier: BackgroundTaskID.preAnalysisRecovery,
+                    taskRef: task as AnyObject,
+                    detail: "preanalysis-recovery-expired"
+                )
                 // playhead-1nl6: surface the BGProcessingTask-reclaim
                 // signal through the scheduler's cancel path as the
                 // `.taskExpired` InternalMissCause so any live slice
@@ -985,11 +1128,6 @@ actor BackgroundProcessingService {
         let request = BGProcessingTaskRequest(identifier: BackgroundTaskID.preAnalysisRecovery)
         request.requiresExternalPower = true
         request.earliestBeginDate = Date(timeIntervalSinceNow: 60)
-        do {
-            try taskScheduler.submit(request)
-            logger.info("Scheduled pre-analysis recovery task")
-        } catch {
-            logger.error("Failed to schedule pre-analysis recovery: \(error)")
-        }
+        submitWithTelemetry(request, reason: "preanalysis-recovery")
     }
 }
