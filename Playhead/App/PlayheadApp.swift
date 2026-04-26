@@ -357,6 +357,67 @@ struct PlayheadApp: App {
 
 }
 
+// MARK: - Splash Controller
+
+/// playhead-5nwy: hard splash dismiss. Schedules a fixed main-runloop
+/// timer at construction so the splash flips off independent of any
+/// async work, runtime readiness, or `@Published` state. Uses
+/// `Timer.scheduledTimer` on the current (main) runloop — NOT a `Task`
+/// — because Tasks ride the cooperative thread pool and can be starved
+/// by saturated background work, which is exactly the failure mode
+/// this defense exists to neutralize.
+@MainActor
+@Observable
+final class SplashController {
+
+    /// Fixed dismissal delay. Pinned as a named constant so tests and
+    /// future reviewers can find the single source of truth for the
+    /// "splash never lingers past N seconds" invariant.
+    static let dismissDelay: TimeInterval = 1.2
+
+    private(set) var isVisible: Bool = true
+
+    @ObservationIgnored
+    private var timer: Timer?
+
+    init(dismissDelay: TimeInterval = SplashController.dismissDelay, autostart: Bool = true) {
+        if autostart {
+            scheduleDismissTimer(delay: dismissDelay)
+        }
+    }
+
+    // The Timer is invalidated explicitly via `forceDismiss()` from
+    // tests; in production the timer fires once and self-deallocates
+    // (`repeats: false`), so a deinit-time invalidate is unnecessary.
+    // Swift 6's nonisolated deinit cannot touch the MainActor-isolated
+    // `timer` property anyway — keeping the lifecycle simple sidesteps
+    // the isolation dance.
+
+    private func scheduleDismissTimer(delay: TimeInterval) {
+        // Timer.scheduledTimer attaches to the current runloop in
+        // `.default` mode. The splash MUST also dismiss while the
+        // runloop is in `.tracking` mode (e.g. user touch interaction)
+        // and during modal sheets that switch to `.modal`, so we add
+        // the timer to `.common` modes explicitly.
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                self.isVisible = false
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    /// Force-dismiss the splash synchronously. Intended for tests; the
+    /// production path always relies on the timer.
+    func forceDismiss() {
+        timer?.invalidate()
+        timer = nil
+        isVisible = false
+    }
+}
+
 // MARK: - Root View
 
 /// Switches between onboarding and main content based on first-launch state.
@@ -367,7 +428,12 @@ private struct RootView: View {
     private var hasSeenFirstSubscriptionOnboarding = false
     @Environment(PlayheadRuntime.self) private var runtime
     @Query private var podcasts: [Podcast]
-    @State private var showSplash = true
+    // playhead-5nwy: SplashController owns the fixed-timer dismiss path.
+    // Constructed inline as @State so the timer fires the moment the
+    // RootView struct is realized — the previous approach hung the
+    // dismiss off `.onAppear`, which itself can be delayed by slow body
+    // construction.
+    @State private var splash = SplashController()
     @State private var presentFirstSubscriptionOnboarding = false
 
     var body: some View {
@@ -378,16 +444,14 @@ private struct RootView: View {
                 ZStack {
                     ContentView()
 
-                    if showSplash {
+                    if splash.isVisible {
                         ReturningSplashView()
                             .transition(.opacity)
                             .zIndex(1)
                     }
                 }
+                .animation(.easeOut(duration: 0.4), value: splash.isVisible)
                 .onAppear {
-                    withAnimation(.easeOut(duration: 0.4).delay(0.3)) {
-                        showSplash = false
-                    }
                     evaluateFirstSubscriptionOnboarding()
                 }
                 .onChange(of: podcasts.count) { _, _ in

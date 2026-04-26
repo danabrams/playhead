@@ -180,6 +180,18 @@ enum ActivityFinishedOutcome: Sendable, Hashable {
 ///
 /// Pure aggregation lives in the `static func aggregate(...)` so unit
 /// tests can exercise bucketing without instantiating the VM.
+/// playhead-5nwy: tri-state load indicator the View consults to decide
+/// between blank, skeleton, and the populated snapshot. Encoded as an
+/// enum (rather than a single Bool) so the View can distinguish "first
+/// fetch hasn't started yet" from "first fetch is in flight". The
+/// 250ms threshold for promoting `.loading` → `showSkeleton` is
+/// applied in the View; this enum carries the truth, not the timing.
+enum ActivityLoadState: Sendable, Hashable {
+    case idle
+    case loading(startedAt: Date)
+    case loaded
+}
+
 @MainActor
 @Observable
 final class ActivityViewModel {
@@ -187,6 +199,14 @@ final class ActivityViewModel {
     /// Most-recently aggregated snapshot. SwiftUI observes mutations
     /// through `@Observable` and re-renders the four sections.
     private(set) var snapshot: ActivitySnapshot = .empty
+
+    /// playhead-5nwy: load-state signal the View renders the skeleton
+    /// off of. Starts in `.idle`; `beginLoad()` flips to `.loading`,
+    /// and `refresh(from:)` flips to `.loaded`. Once `.loaded`, a
+    /// subsequent `beginLoad()` is a no-op so the View doesn't flicker
+    /// back into a skeleton on every refresh tick. Repeat `refresh`
+    /// calls just replace the snapshot.
+    private(set) var loadState: ActivityLoadState = .idle
 
     /// Persistence callback invoked by `moveUpNext` to write the new
     /// `(episodeId, queuePosition)` ordering through to the SwiftData
@@ -228,6 +248,20 @@ final class ActivityViewModel {
     /// SwiftUI Previews to populate fixtures.
     func refresh(from inputs: [ActivityEpisodeInput], now: Date = Date()) {
         snapshot = Self.aggregate(inputs: inputs, now: now)
+        loadState = .loaded
+    }
+
+    /// playhead-5nwy: signal the start of an inputs fetch. View calls
+    /// this immediately before awaiting `inputProvider()` so the load
+    /// timer can begin ticking. Idempotent once `.loaded` — repeat
+    /// fetches don't reset the View into a skeleton.
+    func beginLoad(now: Date = Date()) {
+        switch loadState {
+        case .idle:
+            loadState = .loading(startedAt: now)
+        case .loading, .loaded:
+            break
+        }
     }
 
     /// Apply a user drag-to-reorder gesture to the Up Next section. The

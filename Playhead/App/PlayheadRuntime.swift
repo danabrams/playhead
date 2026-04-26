@@ -217,6 +217,101 @@ final class PlayheadRuntime {
     /// Error state flag for catastrophic initialization failures.
     var initializationError: String?
 
+    // playhead-5nwy synchronous-I/O audit (2026-04-26).
+    //
+    // PlayheadRuntime.init runs synchronously from the SwiftUI App's
+    // own init via `@State private var runtime = PlayheadRuntime()`, so
+    // every byte of work below extends the launch-screen storyboard
+    // window (the period BEFORE our SwiftUI `RootView` even gets to run).
+    // The fixed-timer splash defense in `SplashController` cannot help
+    // here — it only defends the period AFTER PlayheadApp.body has run.
+    // That makes a tight inventory of synchronous I/O in this init the
+    // single most important part of the launch-UX investigation.
+    //
+    // Inventory (in execution order):
+    //   1. AnalysisStore() — FileManager.createDirectory + sqlite3_open_v2.
+    //      Blocking but typically <5ms on warm disk; can stall when
+    //      Data Protection .complete is in effect (mitigated since
+    //      bd-zbhe by .completeUntilFirstUserAuthentication).
+    //   2. ModelInventory.loadBundledManifest() — Bundle resource read
+    //      + JSON decode. Single-digit ms.
+    //   3. PromptRedactor.loadDefault() — Bundle resource read + regex
+    //      compile. Single-digit ms.
+    //   4. FoundationModelsFeedbackStore() (DEBUG only) — FileManager
+    //      directory create.
+    //   5. RegionShadowObserver() (DEBUG) — pure object construction.
+    //   6. Phase5ProjectorObserver() (DEBUG) — pure object construction.
+    //   7. PersistentUserCorrectionStore(store:) — wraps the already-
+    //      open AnalysisStore handle; no I/O.
+    //   8. SurfaceStatusInvariantLogger() — FileManager directory create
+    //      and JSONL file open.
+    //   9. SkipOrchestrator(...) — pure object construction.
+    //   10. DecisionLogger() (DEBUG) — FileManager + file open.
+    //   11. AdCatalogStore(directoryURL:) — FileManager + sqlite3_open_v2.
+    //      Same risk profile as #1.
+    //   12. AdDetectionService(...) — actor; init only stores refs.
+    //   13. DownloadManager() — URLSession config + actor wiring; no
+    //       blocking I/O.
+    //   14. EpisodeSurfaceStatusObserver(...) — pure object construction.
+    //   15. AssetLifecycleLogger() — FileManager + file open.
+    //   16. AnalysisCoordinator(...) — pure object construction.
+    //   17. BGTaskTelemetryLogger() — FileManager + file open.
+    //   18. BackgroundProcessingService(...) — pure object construction;
+    //       BGTaskScheduler.register is a no-op until the OS calls back.
+    //   19. SkipCueMaterializer(store:) — pure object construction.
+    //   20. LanePreemptionCoordinator() — pure object construction.
+    //   21. AnalysisJobRunner(...) — pure object construction.
+    //   22. CandidateWindowCascade() — reads PreAnalysisConfig (Bundle).
+    //   23. AnalysisWorkScheduler(...) — pure object construction.
+    //   24. AnalysisJobReconciler(...) — pure object construction.
+    //   25. ShadowRetryObserver / shadow pipeline — pure object construction
+    //       in non-preview runtimes.
+    //
+    // What's already-deferred (in the Task at line ~810 below):
+    //   - analysisStore.migrate()
+    //   - analysisCoordinator.recoverCoverageGuardFailures()
+    //   - analysisStore.pruneOrphanedScansForCurrentCohort(...)
+    //   - shadowRetryObserver.start()
+    //   - downloadManager.setAnalysisWorkScheduler(...)
+    //   - backgroundProcessingService.setPreAnalysisServices(...)
+    //   - analysisCoordinator.recoverOrphans(...)
+    //   - analysisJobReconciler.reconcile()
+    //   - analysisWorkScheduler.startSchedulerLoop()
+    //
+    // What's NOT relocatable without a larger refactor: every entry in
+    // the inventory above is a stored property assignment. Moving the
+    // creation into a Task would require re-typing the property as
+    // optional + introducing a readiness signal across every consumer.
+    // That's a structural change explicitly out of scope per the bead
+    // ("Reworking the recovery pipeline itself" is out of scope) AND
+    // gated by the repo's "Decision Authority" rule against unilateral
+    // architectural swaps.
+    //
+    // The right next step (a separate bead) is to convert the
+    // FileManager/SQLite-touching loggers (#1, #4, #8, #10, #11, #15,
+    // #17) to construct lazily on first use. The slow path on Dan's
+    // device is most likely in #1 or #11 (SQLite open under contended
+    // disk + Data Protection); profiling on the frozen-launch sample
+    // (`com.playhead.app 2026-04-25 22:42.28.954.xcappdata/`) will
+    // confirm. None of those are reachable from a slow `@Query` or
+    // any UI path, so the splash defense + activity skeleton above
+    // are sufficient to keep the user from staring at an empty screen
+    // while the investigation completes.
+    //
+    // Launch-path @Query inventory:
+    //   - RootView (`PlayheadApp.swift`): @Query private var podcasts:
+    //     [Podcast] — used solely for the first-subscription onboarding
+    //     gate. Predicate is the trivial all-rows fetch on a small
+    //     table that is rarely written to outside subscribe/unsubscribe
+    //     flows. Not a likely contention source.
+    //   - LibraryView, EpisodeListView, SettingsView: NOT on the
+    //     launch path (rendered after the user taps a tab; Library is
+    //     the default but its query construction happens after
+    //     ContentView appears, which happens after RootView body
+    //     resolves, which is what the splash defense protects).
+    //
+    // Verdict: no @Query on the launch path needs to move in this
+    // bead. The splash + skeleton defenses are the scoped fix.
     init(isPreviewRuntime: Bool = false) {
         self.isPreviewRuntime = isPreviewRuntime
         self.playbackService = PlaybackService()
