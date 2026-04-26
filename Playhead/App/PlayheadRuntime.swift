@@ -218,6 +218,12 @@ final class PlayheadRuntime {
     var initializationError: String?
 
     // playhead-5nwy synchronous-I/O audit (2026-04-26).
+    // Updated by playhead-jndk (2026-04-26) — see deltas at items
+    // #11 and the new "What's been deferred since the original audit"
+    // section. The original audit missed two big-ticket sync paths
+    // (eager `PermissiveAdClassifier()` and `AdCatalogStore` DDL) which
+    // were jointly responsible for the multi-minute launch freeze on
+    // Dan's iPhone (snapshot 2026-04-25 22:42).
     //
     // PlayheadRuntime.init runs synchronously from the SwiftUI App's
     // own init via `@State private var runtime = PlayheadRuntime()`, so
@@ -227,6 +233,11 @@ final class PlayheadRuntime {
     // here — it only defends the period AFTER PlayheadApp.body has run.
     // That makes a tight inventory of synchronous I/O in this init the
     // single most important part of the launch-UX investigation.
+    //
+    // The init body is now wrapped in an `os_signpost` interval named
+    // "PlayheadRuntime.init" (playhead-jndk). Future regressions can be
+    // measured via Instruments → Points of Interest without
+    // re-instrumenting this site.
     //
     // Inventory (in execution order):
     //   1. AnalysisStore() — FileManager.createDirectory + sqlite3_open_v2.
@@ -247,8 +258,16 @@ final class PlayheadRuntime {
     //      and JSONL file open.
     //   9. SkipOrchestrator(...) — pure object construction.
     //   10. DecisionLogger() (DEBUG) — FileManager + file open.
-    //   11. AdCatalogStore(directoryURL:) — FileManager + sqlite3_open_v2.
-    //      Same risk profile as #1.
+    //   11. AdCatalogStore(directoryURL:) — FileManager.createDirectory
+    //       only. Since playhead-jndk this no longer opens SQLite or
+    //       runs PRAGMAs/migration in init; the database connection,
+    //       WAL/foreign-keys/secure-delete pragmas, and schema migration
+    //       are all deferred to first-use via `ensureOpen()`. Production
+    //       calls `await adCatalogStore.migrate()` from the deferred
+    //       Task below to warm the path off-main. The original eager
+    //       open path was responsible for replaying a stale 424 KB WAL
+    //       on the 2026-04-25 22:42 snapshot — minutes of main-thread
+    //       blocking on a cold disk.
     //   12. AdDetectionService(...) — actor; init only stores refs.
     //   13. DownloadManager() — URLSession config + actor wiring; no
     //       blocking I/O.
@@ -267,8 +286,20 @@ final class PlayheadRuntime {
     //   25. ShadowRetryObserver / shadow pipeline — pure object construction
     //       in non-preview runtimes.
     //
-    // What's already-deferred (in the Task at line ~810 below):
+    // Bead-jndk addition: the `bd1enPermissiveBox` factory closure that
+    // wraps `PermissiveAdClassifier()` is constructed below as a stored
+    // property of the runtime. The closure does NOT execute until the
+    // detection pipeline calls `box.classifier` for the first time — by
+    // construction (BackfillJobRunner is an actor; `runJob` is async),
+    // that first call lands off-main, well after launch. The original
+    // pre-jndk wiring eagerly invoked `PermissiveAdClassifier()`, which
+    // synchronously builds `SystemLanguageModel(guardrails:)` and
+    // probes the on-device FoundationModels framework — the dominant
+    // cause of the multi-minute launch freeze on iOS 26.
+    //
+    // What's already-deferred (in the deferred init Task below):
     //   - analysisStore.migrate()
+    //   - adCatalogStore.migrate() (added by playhead-jndk)
     //   - analysisCoordinator.recoverCoverageGuardFailures()
     //   - analysisStore.pruneOrphanedScansForCurrentCohort(...)
     //   - shadowRetryObserver.start()
@@ -287,16 +318,13 @@ final class PlayheadRuntime {
     // gated by the repo's "Decision Authority" rule against unilateral
     // architectural swaps.
     //
-    // The right next step (a separate bead) is to convert the
-    // FileManager/SQLite-touching loggers (#1, #4, #8, #10, #11, #15,
-    // #17) to construct lazily on first use. The slow path on Dan's
-    // device is most likely in #1 or #11 (SQLite open under contended
-    // disk + Data Protection); profiling on the frozen-launch sample
-    // (`com.playhead.app 2026-04-25 22:42.28.954.xcappdata/`) will
-    // confirm. None of those are reachable from a slow `@Query` or
-    // any UI path, so the splash defense + activity skeleton above
-    // are sufficient to keep the user from staring at an empty screen
-    // while the investigation completes.
+    // Remaining slow-path candidates (next bead): convert the
+    // FileManager/SQLite-touching loggers (#1, #4, #8, #10, #15, #17)
+    // to construct lazily on first use, mirroring the
+    // `AdCatalogStore.ensureOpen()` pattern landed by playhead-jndk.
+    // None of those are reachable from a slow `@Query` or any UI path,
+    // so the splash defense + activity skeleton above remain sufficient
+    // for the bridge period.
     //
     // Launch-path @Query inventory:
     //   - RootView (`PlayheadApp.swift`): @Query private var podcasts:
@@ -313,6 +341,19 @@ final class PlayheadRuntime {
     // Verdict: no @Query on the launch path needs to move in this
     // bead. The splash + skeleton defenses are the scoped fix.
     init(isPreviewRuntime: Bool = false) {
+        // playhead-jndk: wrap the init body in an `os_signpost` interval
+        // so future regressions in launch latency can be measured via
+        // Instruments → "Points of Interest" without re-instrumenting
+        // the runtime each time. Subsystem matches the runtime's
+        // existing logger so the signpost is filterable alongside the
+        // launch-path logs.
+        let initSignposter = OSSignposter(
+            subsystem: "com.playhead",
+            category: "Runtime"
+        )
+        let initSignpostState = initSignposter.beginInterval("PlayheadRuntime.init")
+        defer { initSignposter.endInterval("PlayheadRuntime.init", initSignpostState) }
+
         self.isPreviewRuntime = isPreviewRuntime
         self.playbackService = PlaybackService()
         self.capabilitiesService = CapabilitiesService()
@@ -462,9 +503,17 @@ final class PlayheadRuntime {
             preconditionFailure("PromptRedactor.loadDefault failed with unknown error: \(error)")
         }
         let bd1enRouter = SensitiveWindowRouter(redactor: bd1enRedactor)
+        // playhead-jndk: pass a factory closure rather than a pre-constructed
+        // `PermissiveAdClassifier`. The classifier's init synchronously builds
+        // `SystemLanguageModel(guardrails:)`, which on iOS 26 triggers a
+        // multi-minute FoundationModels framework probe on the first launch
+        // after install/upgrade. The box now defers the factory call to the
+        // first `box.classifier` access, which happens inside the actor-
+        // isolated `BackfillJobRunner.runPendingBackfill` flow — off the main
+        // thread, well after the splash defense has had its chance to dismiss.
         let bd1enPermissiveBox: BackfillJobRunner.PermissiveClassifierBox? = {
             if #available(iOS 26.0, *) {
-                return BackfillJobRunner.PermissiveClassifierBox(PermissiveAdClassifier())
+                return BackfillJobRunner.PermissiveClassifierBox { PermissiveAdClassifier() }
             }
             return nil
         }()
@@ -854,7 +903,7 @@ final class PlayheadRuntime {
         // — it's now constructed before AdDetectionService and passed via
         // init, so there's no race with the first backfill/hot-path run.
 
-        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator] in
+        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore] in
             // Migrate the analysis store before any component queries its tables.
             do {
                 try await analysisStore.migrate()
@@ -862,6 +911,27 @@ final class PlayheadRuntime {
                 Logger(subsystem: "com.playhead", category: "Runtime")
                     .fault("Analysis store migration failed — pre-analysis pipeline disabled: \(error)")
                 return  // Don't start the pipeline if tables don't exist
+            }
+
+            // playhead-jndk: warm `AdCatalogStore` off-main now that the
+            // analysis store migration has succeeded. The catalog's
+            // first-use lazy `ensureOpen()` is also called transparently
+            // from any subsequent public method, so a failure here is
+            // non-fatal — degrade gracefully to "no catalog ingress / no
+            // catalog egress" rather than blocking the pipeline. Mirrors
+            // the pre-jndk in-init failure handling that wrapped the
+            // synchronous open + migrate in a do/catch and set
+            // `adCatalogStore = nil`. Here we keep the store reference
+            // (so a transient open failure on a busy disk can still
+            // succeed on a later operation) but log the warning so
+            // diagnostics surface.
+            if let adCatalogStore {
+                do {
+                    try await adCatalogStore.migrate()
+                } catch {
+                    Logger(subsystem: "com.playhead", category: "Runtime")
+                        .warning("AdCatalogStore deferred migrate failed — first real op will retry: \(error.localizedDescription, privacy: .public)")
+                }
             }
 
             // Recover any sessions that the finalizeBackfill coverage guard

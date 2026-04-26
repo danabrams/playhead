@@ -6,6 +6,7 @@
 
 import CryptoKit
 import Foundation
+import os
 import OSLog
 
 actor BackfillJobRunner {
@@ -178,17 +179,84 @@ actor BackfillJobRunner {
     /// gated. The box hides the availability gate behind a non-gated
     /// reference; the runner only unwraps it from inside the iOS 26
     /// dispatch branch in `runJob`.
-    struct PermissiveClassifierBox: @unchecked Sendable {
-        let backing: AnyObject
+    ///
+    /// playhead-jndk: the box now stores a `@Sendable` factory closure
+    /// instead of a pre-constructed instance. `PermissiveAdClassifier()`
+    /// synchronously builds a `SystemLanguageModel(guardrails:)`, which
+    /// on iOS 26 triggers FoundationModels framework init + locale probe
+    /// + on-device model availability check — minutes of main-thread
+    /// blocking observed on a real-device snapshot from 2026-04-25.
+    /// Factory invocation is deferred until the first `classifier`
+    /// access from inside `BackfillJobRunner` (off-main, post-launch).
+    /// The `OSAllocatedUnfairLock` makes the lazy first-call cache
+    /// race-safe across concurrent runJob calls.
+    final class PermissiveClassifierBox: @unchecked Sendable {
+        /// Factory that synthesises a fresh `PermissiveAdClassifier`.
+        /// Stored as `AnyObject?`-returning to keep the property non-gated;
+        /// callers on iOS < 26 may still hold a box (because production
+        /// `PlayheadRuntime` constructs one only under `#available(iOS 26.0, *)`,
+        /// but tests and other call sites that build the box must see
+        /// the same shape across SDK versions). Tagged `@Sendable` so
+        /// the actor-isolated runner can observe the closure without a
+        /// data race.
+        private let factory: @Sendable () -> AnyObject
+
+        /// Lock that serializes the lazy first-use construction of the
+        /// classifier. `OSAllocatedUnfairLock<Void>` (with no protected
+        /// state) avoids the `Sendable` requirement on `AnyObject?`
+        /// while still giving us a fast, non-async mutex; the actual
+        /// cached reference lives in `cachedClassifier` below.
+        private let cacheLock: OSAllocatedUnfairLock<Void> = OSAllocatedUnfairLock(uncheckedState: ())
+
+        /// Lazy cache of the constructed classifier. Mutated only under
+        /// `cacheLock`. Marked `nonisolated(unsafe)` so the class can
+        /// remain `@unchecked Sendable` — the lock makes the access
+        /// pattern correct under Swift 6 strict concurrency.
+        nonisolated(unsafe) private var cachedClassifier: AnyObject?
+
         @available(iOS 26.0, *)
         var classifier: PermissiveAdClassifier {
+            cacheLock.lock()
+            defer { cacheLock.unlock() }
+            if let existing = cachedClassifier {
+                // swiftlint:disable:next force_cast
+                return existing as! PermissiveAdClassifier
+            }
+            let made = factory()
+            cachedClassifier = made
             // swiftlint:disable:next force_cast
-            backing as! PermissiveAdClassifier
+            return made as! PermissiveAdClassifier
         }
+
         @available(iOS 26.0, *)
-        init(_ classifier: PermissiveAdClassifier) {
-            self.backing = classifier
+        init(_ factory: @escaping @Sendable () -> PermissiveAdClassifier) {
+            self.factory = { factory() as AnyObject }
         }
+
+        /// Eager convenience initializer kept ONLY for tests that need to
+        /// inject a specific pre-built classifier instance (e.g. fault
+        /// injection via `installFaultInjectionForTesting`). Production
+        /// callers MUST use the factory-closure initializer above so the
+        /// classifier is constructed lazily off the main thread.
+        ///
+        /// playhead-jndk cross-review nit: gated behind `#if DEBUG` so
+        /// release builds physically cannot reach the eager-construction
+        /// path. `@_spi(Testing)` is the more idiomatic gate, but the
+        /// Playhead module's own production callers are in the same
+        /// module and SPI access controls don't apply to same-module
+        /// references — only `#if DEBUG` actually excludes the symbol
+        /// from release builds. (Tests run under Debug, so they still
+        /// see this initializer.)
+        #if DEBUG
+        @available(iOS 26.0, *)
+        convenience init(_ classifier: PermissiveAdClassifier) {
+            self.init({ classifier })
+            // Force the cache so this eager-injection path also pins the
+            // exact instance the caller passed in (tests rely on object
+            // identity for fault-injection installation).
+            _ = self.classifier
+        }
+        #endif
     }
 
     init(
