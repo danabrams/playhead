@@ -128,26 +128,18 @@ final class PlayheadRuntimeInitLazyClassifierSourceCanaryTests: XCTestCase {
     /// closure does NOT execute until first `classifier` access from
     /// inside the detection pipeline (off-main, post-launch).
     func testInitBodyDoesNotEagerlyConstructPermissiveClassifier() throws {
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent() // .../AdDetection/
-            .deletingLastPathComponent() // .../Services/
-            .deletingLastPathComponent() // .../PlayheadTests/
-            .deletingLastPathComponent() // .../<repo root>/
-            .appendingPathComponent("Playhead/App/PlayheadRuntime.swift")
-        let source = try String(contentsOf: url, encoding: .utf8)
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
 
-        // Locate the init signature.
-        guard let initRange = source.range(of: "init(isPreviewRuntime: Bool = false) {") else {
+        // Locate init's brace-delimited body.
+        guard let body = SwiftSourceInspector.firstBody(
+            in: source,
+            after: "init(isPreviewRuntime: Bool = false) {"
+        ) else {
             XCTFail("PlayheadRuntime.init(isPreviewRuntime:) signature not found — test must be updated alongside any rename.")
             return
         }
-
-        // Walk forward from init's opening brace to its matching close.
-        // The body is the byte range we audit. Anything outside the body
-        // (audit comment, properties, helpers) is allowed to mention
-        // `PermissiveAdClassifier()` in commentary.
-        let openBraceIdx = source.index(before: initRange.upperBound)
-        let body = Self.bracedBody(in: source, startingAt: openBraceIdx)
 
         // Allowed: `PermissiveClassifierBox { PermissiveAdClassifier() }`
         //          (factory closure — only fires lazily).
@@ -163,9 +155,18 @@ final class PlayheadRuntimeInitLazyClassifierSourceCanaryTests: XCTestCase {
         // future swift-format reflow that breaks the closure across
         // lines (e.g. `PermissiveClassifierBox {\n    PermissiveAdClassifier()\n}`)
         // still matches and doesn't cause a spurious failure here.
-        let totalCalls = Self.occurrences(of: "PermissiveAdClassifier()", in: body)
+        //
+        // Strip comments before counting: `bracedBody` returns the raw
+        // source slice including any comments inside init. The init
+        // currently carries multi-line audit comments that name
+        // `PermissiveAdClassifier()` (jndk discussion of the lazy
+        // wrapping) — a naïve grep on the raw body false-positives on
+        // those comments. Mirrors the pattern adopted in the
+        // launch-perf source canaries (PlayheadRuntimeLaunchPerfTests).
+        let scrubbed = SwiftSourceInspector.strippingComments(body)
+        let totalCalls = SwiftSourceInspector.occurrences(of: "PermissiveAdClassifier()", in: scrubbed)
         let lazyWrappedPattern = #"PermissiveClassifierBox\s*\{\s*PermissiveAdClassifier\s*\(\s*\)\s*\}"#
-        let lazyWrapped = Self.regexOccurrences(of: lazyWrappedPattern, in: body)
+        let lazyWrapped = SwiftSourceInspector.regexOccurrences(of: lazyWrappedPattern, in: scrubbed)
 
         XCTAssertEqual(
             totalCalls, lazyWrapped,
@@ -177,109 +178,5 @@ final class PlayheadRuntimeInitLazyClassifierSourceCanaryTests: XCTestCase {
             new mention in the factory closure, or delete the mention entirely.
             """
         )
-    }
-
-    // MARK: - Helpers
-
-    /// Returns the text of the brace-delimited block whose opening `{`
-    /// is at `startIndex`. Tracks nesting depth so inner braces don't
-    /// terminate the body early. Treats `//` line comments and `/* */`
-    /// block comments as opaque (their braces don't count).
-    private static func bracedBody(in source: String, startingAt startIndex: String.Index) -> String {
-        precondition(source[startIndex] == "{")
-        var depth = 0
-        var i = startIndex
-        var inLineComment = false
-        var inBlockComment = false
-        var inString = false
-        let endIdx = source.endIndex
-        var bodyStart: String.Index?
-
-        while i < endIdx {
-            let c = source[i]
-            let next = source.index(after: i) < endIdx ? source[source.index(after: i)] : Character("\0")
-
-            if inLineComment {
-                if c == "\n" { inLineComment = false }
-                i = source.index(after: i)
-                continue
-            }
-            if inBlockComment {
-                if c == "*" && next == "/" {
-                    inBlockComment = false
-                    i = source.index(i, offsetBy: 2)
-                    continue
-                }
-                i = source.index(after: i)
-                continue
-            }
-            if inString {
-                if c == "\\" && source.index(after: i) < endIdx {
-                    i = source.index(i, offsetBy: 2)
-                    continue
-                }
-                if c == "\"" { inString = false }
-                i = source.index(after: i)
-                continue
-            }
-
-            if c == "/" && next == "/" {
-                inLineComment = true
-                i = source.index(i, offsetBy: 2)
-                continue
-            }
-            if c == "/" && next == "*" {
-                inBlockComment = true
-                i = source.index(i, offsetBy: 2)
-                continue
-            }
-            if c == "\"" {
-                inString = true
-                i = source.index(after: i)
-                continue
-            }
-
-            if c == "{" {
-                depth += 1
-                if depth == 1 {
-                    bodyStart = source.index(after: i)
-                }
-            } else if c == "}" {
-                depth -= 1
-                if depth == 0 {
-                    if let start = bodyStart {
-                        return String(source[start..<i])
-                    }
-                    return ""
-                }
-            }
-            i = source.index(after: i)
-        }
-        return ""
-    }
-
-    /// Count non-overlapping occurrences of `needle` in `haystack`.
-    private static func occurrences(of needle: String, in haystack: String) -> Int {
-        var count = 0
-        var searchRange = haystack.startIndex..<haystack.endIndex
-        while let range = haystack.range(of: needle, range: searchRange) {
-            count += 1
-            searchRange = range.upperBound..<haystack.endIndex
-        }
-        return count
-    }
-
-    /// Count non-overlapping regex matches of `pattern` in `haystack`.
-    /// `.dotMatchesLineSeparators` lets a swift-format reflow that breaks
-    /// the wrapper across lines still match the same canary shape.
-    private static func regexOccurrences(of pattern: String, in haystack: String) -> Int {
-        guard let regex = try? NSRegularExpression(
-            pattern: pattern,
-            options: [.dotMatchesLineSeparators]
-        ) else {
-            return 0
-        }
-        let range = NSRange(haystack.startIndex..<haystack.endIndex, in: haystack)
-        return regex.numberOfMatches(in: haystack, options: [], range: range)
     }
 }
