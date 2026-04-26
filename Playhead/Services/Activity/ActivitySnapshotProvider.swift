@@ -105,6 +105,20 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         let eligibility = EpisodeSurfaceStatusObserver.eligibility(from: snapshot)
         let runningEpisodeId = await runningEpisodeIdProvider()
 
+        // playhead-6boz: AnalysisStore is now lazily-opened — the
+        // first call to a public method blocks while open + DDL
+        // complete. The Activity screen is reached during a
+        // launch-window race against `PlayheadRuntime`'s deferred
+        // `analysisStore.migrate()` Task. Refusing to drive that
+        // first-open from the UI path means the activity surface
+        // gracefully shows the empty state instead of stalling on the
+        // SQLite handshake — exactly the freeze pattern hkn1 took out
+        // of the loadInputs hot path. Once the deferred warmup
+        // completes a subsequent UI refresh observes `isOpen == true`
+        // and proceeds normally.
+        let storeIsOpen = await store.isOpen
+        guard storeIsOpen else { return [] }
+
         // playhead-hkn1: bulk-fetch every relevant analysis asset in a
         // single SQL round-trip. The pre-hkn1 path issued one
         // `fetchAssetByEpisodeId` per Episode row on the main actor;
