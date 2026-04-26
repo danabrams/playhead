@@ -4981,6 +4981,13 @@ actor AnalysisStore {
     /// restart from zero or penalize the row for an outage that wasn't its
     /// fault. `lastErrorCode` is cleared because any error code attached to
     /// the prior session is no longer informative for the new run.
+    /// `nextEligibleAt` is cleared so the row is immediately dispatchable —
+    /// any backoff window that may have been set by the prior session is
+    /// stale by the time the row is being recovered (the prior process is
+    /// gone), and leaving a future `nextEligibleAt` in place would defeat
+    /// the entire point of this recovery (the row would stay invisible to
+    /// the dispatcher until the timer expired, exactly the symptom this
+    /// sweep exists to fix).
     func recoverStrandedActiveJob(
         jobId: String,
         newSchedulerEpoch: Int,
@@ -4992,6 +4999,7 @@ actor AnalysisStore {
                 leaseOwner = NULL,
                 leaseExpiresAt = NULL,
                 lastErrorCode = NULL,
+                nextEligibleAt = NULL,
                 schedulerEpoch = ?,
                 updatedAt = ?
             WHERE jobId = ?

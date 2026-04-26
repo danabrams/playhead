@@ -288,29 +288,39 @@ struct ReconcilerRegressionTests {
     func testTierAdvancedWorkKeySuperseded() async throws {
         let store = try await makeTestStore()
 
+        // Stamp seed rows with the current scheduler epoch so the
+        // playhead-btwk stranded-session sweep doesn't reclaim the
+        // `paused` rows (it correctly recovers any active-state row
+        // whose epoch predates the current session).
+        let currentEpoch = try await store.fetchSchedulerEpoch() ?? 0
+
         // Base key with version 2 — current version is 1, so it should be superseded.
         let baseJob = makeAnalysisJob(
             jobId: "tier-base-v2",
             workKey: "fp:2:preAnalysis",
-            state: "queued"
+            state: "queued",
+            schedulerEpoch: currentEpoch
         )
         // Tier-advanced key with version 2 and coverage suffix.
         let tierJob = makeAnalysisJob(
             jobId: "tier-advanced-v2",
             workKey: "fp:2:preAnalysis:300",
-            state: "paused"
+            state: "paused",
+            schedulerEpoch: currentEpoch
         )
         // Base key with version 1 — current version, should NOT be superseded.
         let currentBase = makeAnalysisJob(
             jobId: "tier-base-v1",
             workKey: "fp-ok:1:preAnalysis",
-            state: "queued"
+            state: "queued",
+            schedulerEpoch: currentEpoch
         )
         // Tier-advanced key with version 1 — current, should NOT be superseded.
         let currentTier = makeAnalysisJob(
             jobId: "tier-advanced-v1",
             workKey: "fp-ok:1:preAnalysis:900",
-            state: "paused"
+            state: "paused",
+            schedulerEpoch: currentEpoch
         )
 
         try await store.insertJob(baseJob)

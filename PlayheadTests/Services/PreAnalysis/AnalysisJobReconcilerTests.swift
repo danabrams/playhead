@@ -305,6 +305,7 @@ struct AnalysisJobReconcilerTests {
         // Second pass should be all zeros.
         let second = try await reconciler.reconcile()
         #expect(second.expiredLeasesRecovered == 0)
+        #expect(second.recoveredStrandedSessionJobs == 0)
         #expect(second.missingFilesUnblocked == 0)
         #expect(second.missingFilesStillBlocked == 0)
         #expect(second.modelsUnblocked == 0)
