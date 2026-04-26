@@ -2308,7 +2308,21 @@ actor AdDetectionService {
     }
 
     /// Build acoustic ledger entries from FeatureWindows in the span's time range.
-    private func buildAcousticLedgerEntries(
+    ///
+    /// playhead-sqhj (2026-04-26 follow-up to gtt9.4): historically this
+    /// method only fired on RMS-drop boundaries, so a clean ad-read with
+    /// no boundary energy shift but a clear interior music bed produced
+    /// no `.acoustic` entry. The 2026-04-23 corpus eval found acoustic
+    /// firing at ~2% as a result. We now also factor in
+    /// `FeatureWindow.musicBedLevel` coverage — the same signal
+    /// `MusicBedLedgerEvaluator` uses for its distinct `.musicBed`
+    /// entry — and drop the unconditional early-exit when either signal
+    /// is present. The two paths are intentionally redundant: this entry
+    /// keeps `.acoustic` populated for that source's firing rate, while
+    /// `.musicBed` remains a separate kind so the quorum gate's
+    /// `distinctKinds.count` increments. Both share the `acousticCap`
+    /// weight budget so the family weight contribution is bounded.
+    func buildAcousticLedgerEntries(
         span: DecodedSpan,
         featureWindows: [FeatureWindow],
         fusionConfig: FusionWeightConfig
@@ -2319,14 +2333,36 @@ actor AdDetectionService {
         guard !spanWindows.isEmpty else { return [] }
 
         let breakStrength = RegionScoring.computeRmsDropScore(windows: spanWindows)
-        guard breakStrength > 0 else { return [] }
+        let musicBedFraction = musicBedPresenceFraction(spanWindows: spanWindows)
 
-        let weight = min(breakStrength * fusionConfig.acousticCap, fusionConfig.acousticCap)
+        // Combined acoustic strength: union of the two signals. Either
+        // an RMS drop at the boundary OR sustained interior music coverage
+        // is enough to fire. Bounded to [0, 1] like both inputs.
+        let combinedStrength = max(breakStrength, musicBedFraction)
+        guard combinedStrength > 0 else { return [] }
+
+        let weight = min(combinedStrength * fusionConfig.acousticCap, fusionConfig.acousticCap)
         return [EvidenceLedgerEntry(
             source: .acoustic,
             weight: weight,
-            detail: .acoustic(breakStrength: breakStrength)
+            detail: .acoustic(breakStrength: combinedStrength)
         )]
+    }
+
+    /// playhead-sqhj: presence fraction of non-`.none` `MusicBedLevel`
+    /// across the supplied windows, gated by the same minimum-window
+    /// floor that `MusicBedLedgerEvaluator` uses so a single
+    /// `.foreground` window in a 2-window span cannot lift the
+    /// acoustic entry on its own. Returns 0 when the floor is not met
+    /// or no music bed is present.
+    private func musicBedPresenceFraction(spanWindows: [FeatureWindow]) -> Double {
+        let total = spanWindows.count
+        guard total >= MusicBedLedgerEvaluator.minWindowsRequired else { return 0 }
+        let musicWindows = spanWindows.reduce(into: 0) { acc, fw in
+            if fw.musicBedLevel != .none { acc += 1 }
+        }
+        let fraction = Double(musicWindows) / Double(total)
+        return fraction >= MusicBedLedgerEvaluator.minPresenceFraction ? fraction : 0
     }
 
     /// playhead-gtt9.16: build a single aggregated `.acoustic` ledger entry
