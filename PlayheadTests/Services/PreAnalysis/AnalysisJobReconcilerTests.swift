@@ -437,4 +437,267 @@ struct AnalysisJobReconcilerTests {
         #expect(allEpisodeIds.contains("ep-evicted"),
                 "The superseded predecessor row still exists for GC's later sweep")
     }
+
+    // MARK: - playhead-btwk: recover stranded prior-session jobs
+    //
+    // Background: when a fresh build replaces an older one, jobs that were
+    // mid-flight in the prior process stay in `running` / `paused` state with
+    // either no lease or an unexpired lease that the prior process can never
+    // release. `recoverExpiredLeases` only catches expired-lease rows;
+    // `fetchNextEligibleJob` only picks `queued`/`paused`/`failed` for
+    // dispatch; `discoverUnEnqueuedDownloads` skips episodes that already have
+    // a non-terminal row. The combination means stranded `running` jobs are
+    // simultaneously "already covered" and "not pickable" — invisible.
+    //
+    // The new `recoverStrandedSessionJobs` step finds jobs that are in an
+    // active state (`running`, `paused`, `backfill`) but whose
+    // `schedulerEpoch` predates the current session, and flips them back to
+    // `queued` so the scheduler can pick them up. Coverage progress is
+    // preserved (we resume, we don't restart from zero).
+
+    @Test("recoverStrandedSessionJobs_resetsBackfillJobFromPriorSession_toQueued_preservingCoverage")
+    func testRecoverStrandedBackfillJobPreservesCoverage() async throws {
+        let store = try await makeTestStore()
+        let currentEpoch = try await store.fetchSchedulerEpoch() ?? 0
+        let priorEpoch = max(0, currentEpoch - 1)
+
+        let job = makeAnalysisJob(
+            jobId: "stranded-backfill",
+            episodeId: "ep-stranded-backfill",
+            featureCoverageSec: 120.5,
+            transcriptCoverageSec: 89.0,
+            cueCoverageSec: 30.0,
+            state: "backfill",
+            attemptCount: 2,
+            schedulerEpoch: priorEpoch
+        )
+        try await store.insertJob(job)
+
+        let reconciler = makeReconciler(store: store)
+        let report = try await reconciler.reconcile()
+
+        #expect(report.recoveredStrandedSessionJobs == 1)
+
+        let recovered = try await store.fetchJob(byId: "stranded-backfill")
+        #expect(recovered?.state == "queued",
+                "Stranded backfill row must be flipped to queued so the scheduler can pick it up")
+        #expect(recovered?.featureCoverageSec == 120.5,
+                "Feature coverage must survive the recovery so we resume, not restart")
+        #expect(recovered?.transcriptCoverageSec == 89.0,
+                "Transcript coverage must survive the recovery")
+        #expect(recovered?.cueCoverageSec == 30.0,
+                "Cue coverage must survive the recovery")
+        #expect(recovered?.leaseOwner == nil,
+                "Any residual lease must be cleared so a new worker can claim the row")
+        #expect(recovered?.leaseExpiresAt == nil)
+    }
+
+    @Test("recoverStrandedSessionJobs_resetsRunningJobFromPriorSession_toQueued")
+    func testRecoverStrandedRunningJob() async throws {
+        let store = try await makeTestStore()
+        let currentEpoch = try await store.fetchSchedulerEpoch() ?? 0
+        let priorEpoch = max(0, currentEpoch - 1)
+
+        // No live lease — represents a row whose worker died with the prior
+        // process before releasing. The reconciler's lease-expiry sweep
+        // would not see this because there is no `leaseOwner` set.
+        let job = makeAnalysisJob(
+            jobId: "stranded-running",
+            episodeId: "ep-stranded-running",
+            state: "running",
+            schedulerEpoch: priorEpoch
+        )
+        try await store.insertJob(job)
+
+        let reconciler = makeReconciler(store: store)
+        let report = try await reconciler.reconcile()
+
+        #expect(report.recoveredStrandedSessionJobs == 1)
+
+        let recovered = try await store.fetchJob(byId: "stranded-running")
+        #expect(recovered?.state == "queued")
+    }
+
+    @Test("recoverStrandedSessionJobs_resetsPausedJobFromPriorSession_toQueued")
+    func testRecoverStrandedPausedJob() async throws {
+        let store = try await makeTestStore()
+        let currentEpoch = try await store.fetchSchedulerEpoch() ?? 0
+        let priorEpoch = max(0, currentEpoch - 1)
+
+        let job = makeAnalysisJob(
+            jobId: "stranded-paused",
+            episodeId: "ep-stranded-paused",
+            state: "paused",
+            schedulerEpoch: priorEpoch
+        )
+        try await store.insertJob(job)
+
+        let reconciler = makeReconciler(store: store)
+        let report = try await reconciler.reconcile()
+
+        #expect(report.recoveredStrandedSessionJobs == 1)
+
+        let recovered = try await store.fetchJob(byId: "stranded-paused")
+        #expect(recovered?.state == "queued")
+    }
+
+    @Test("recoverStrandedSessionJobs_doesNotTouchRunningJobFromCurrentSession")
+    func testDoesNotTouchRunningJobFromCurrentSession() async throws {
+        let store = try await makeTestStore()
+        // Bump epoch so we have a deterministic "current session" value
+        // greater than zero (the default for `makeAnalysisJob`).
+        let currentEpoch = try await store.incrementSchedulerEpoch()
+
+        let now = Date().timeIntervalSince1970
+        // A live worker in the current process would have:
+        //   * `schedulerEpoch == currentEpoch` (acquired via the live lease
+        //     code-path which stamps the current epoch),
+        //   * a non-NULL `leaseOwner` and an unexpired `leaseExpiresAt`.
+        // The new sweep MUST NOT yank such rows: they are legitimate
+        // in-flight work.
+        let job = makeAnalysisJob(
+            jobId: "live-running",
+            episodeId: "ep-live-running",
+            state: "running",
+            leaseOwner: "live-worker",
+            leaseExpiresAt: now + 600,
+            schedulerEpoch: currentEpoch
+        )
+        try await store.insertJob(job)
+
+        let reconciler = makeReconciler(store: store)
+        let report = try await reconciler.reconcile()
+
+        #expect(report.recoveredStrandedSessionJobs == 0,
+                "A running row whose schedulerEpoch matches the current session must not be touched")
+
+        let preserved = try await store.fetchJob(byId: "live-running")
+        #expect(preserved?.state == "running")
+        #expect(preserved?.leaseOwner == "live-worker")
+        #expect(preserved?.leaseExpiresAt != nil)
+    }
+
+    @Test("recoverStrandedSessionJobs_doesNotTouchCompleteJob")
+    func testDoesNotTouchCompleteJob() async throws {
+        let store = try await makeTestStore()
+        let currentEpoch = try await store.fetchSchedulerEpoch() ?? 0
+        let priorEpoch = max(0, currentEpoch - 1)
+
+        // Even with a stale schedulerEpoch, a `complete` row is terminal
+        // and must remain so. The sweep is purely additive against
+        // active-state rows.
+        let job = makeAnalysisJob(
+            jobId: "terminal-complete",
+            episodeId: "ep-complete",
+            state: "complete",
+            schedulerEpoch: priorEpoch
+        )
+        try await store.insertJob(job)
+
+        let reconciler = makeReconciler(store: store)
+        let report = try await reconciler.reconcile()
+
+        #expect(report.recoveredStrandedSessionJobs == 0)
+        let preserved = try await store.fetchJob(byId: "terminal-complete")
+        #expect(preserved?.state == "complete",
+                "A complete row from any prior session must remain complete")
+    }
+
+    @Test("recoverStrandedSessionJobs_doesNotTouchSupersededJob")
+    func testDoesNotTouchSupersededJob() async throws {
+        let store = try await makeTestStore()
+        let currentEpoch = try await store.fetchSchedulerEpoch() ?? 0
+        let priorEpoch = max(0, currentEpoch - 1)
+
+        let job = makeAnalysisJob(
+            jobId: "terminal-superseded",
+            episodeId: "ep-superseded",
+            state: "superseded",
+            schedulerEpoch: priorEpoch
+        )
+        try await store.insertJob(job)
+
+        let reconciler = makeReconciler(store: store)
+        let report = try await reconciler.reconcile()
+
+        #expect(report.recoveredStrandedSessionJobs == 0)
+        let preserved = try await store.fetchJob(byId: "terminal-superseded")
+        #expect(preserved?.state == "superseded",
+                "A superseded row must remain superseded — replacement minted by step 4")
+    }
+
+    @Test("reconcile_runsRecoverStrandedSessionJobs_afterRecoverExpiredLeases_beforeUnblockMissingFiles")
+    func testStepOrdering() async throws {
+        let store = try await makeTestStore()
+        let currentEpoch = try await store.fetchSchedulerEpoch() ?? 0
+        let priorEpoch = max(0, currentEpoch - 1)
+        let now = Date().timeIntervalSince1970
+
+        // Job A: classic expired-lease row. Caught by step 1
+        // (`recoverExpiredLeases`). After step 1 it is `queued` with
+        // `attemptCount == 1`. The new sweep, running second, must NOT
+        // see it as stranded because step 1 already requeued it.
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "expired-lease",
+            episodeId: "ep-expired-lease",
+            workKey: "fp-A:1:playback",
+            state: "running",
+            attemptCount: 0,
+            leaseOwner: "dead-worker",
+            leaseExpiresAt: now - 600,
+            schedulerEpoch: priorEpoch
+        ))
+
+        // Job B: stranded prior-session row (no lease). Caught only by the
+        // new sweep.
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "stranded-no-lease",
+            episodeId: "ep-stranded-no-lease",
+            workKey: "fp-B:1:playback",
+            state: "running",
+            schedulerEpoch: priorEpoch
+        ))
+
+        // Job C: blocked-on-missing-file row whose download just landed.
+        // Caught by step 3 (`unblockMissingFiles`). The new sweep must
+        // NOT preempt step 3 — the new sweep only touches active states,
+        // never `blocked:missingFile`.
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "blocked-missing",
+            episodeId: "ep-blocked-missing",
+            workKey: "fp-C:1:playback",
+            state: "blocked:missingFile",
+            schedulerEpoch: priorEpoch
+        ))
+        let downloads = StubDownloadProvider()
+        downloads.cachedURLs["ep-blocked-missing"] = URL(
+            fileURLWithPath: "/tmp/ep-blocked-missing.mp3"
+        )
+
+        let reconciler = makeReconciler(store: store, downloads: downloads)
+        let report = try await reconciler.reconcile()
+
+        // Step 1 caught Job A.
+        #expect(report.expiredLeasesRecovered == 1,
+                "recoverExpiredLeases must run BEFORE recoverStrandedSessionJobs and claim the expired-lease row")
+        // The new sweep saw Job B (Job A was already queued by step 1).
+        #expect(report.recoveredStrandedSessionJobs == 1,
+                "recoverStrandedSessionJobs must run AFTER recoverExpiredLeases — and only Job B remains stranded")
+        // Step 2 saw Job C (the new sweep does not touch blocked rows).
+        #expect(report.missingFilesUnblocked == 1,
+                "unblockMissingFiles must run AFTER recoverStrandedSessionJobs and pick up the recached row")
+
+        // Verify the per-row outcomes line up with the ordering claim.
+        let a = try await store.fetchJob(byId: "expired-lease")
+        #expect(a?.state == "queued")
+        #expect(a?.attemptCount == 1,
+                "recoverExpiredLeases increments attemptCount; the new sweep does not — so the count proves which step ran")
+        #expect(a?.leaseOwner == nil)
+
+        let b = try await store.fetchJob(byId: "stranded-no-lease")
+        #expect(b?.state == "queued")
+
+        let c = try await store.fetchJob(byId: "blocked-missing")
+        #expect(c?.state == "queued")
+    }
 }
