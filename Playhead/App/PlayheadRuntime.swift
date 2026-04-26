@@ -253,10 +253,18 @@ final class PlayheadRuntime {
     // re-instrumenting this site.
     //
     // Inventory (in execution order):
-    //   1. AnalysisStore() — FileManager.createDirectory + sqlite3_open_v2.
-    //      Blocking but typically <5ms on warm disk; can stall when
-    //      Data Protection .complete is in effect (mitigated since
-    //      bd-zbhe by .completeUntilFirstUserAuthentication).
+    //   1. AnalysisStore() — since playhead-6boz the init body stores
+    //      the target directory only. The `FileManager.createDirectory`,
+    //      `sqlite3_open_v2`, file-protection `setAttributes`, and
+    //      schema-migration DDL are all deferred to `ensureOpen()` (run
+    //      off-main from the deferred Task below via
+    //      `await analysisStore.migrate()`, or transparently from the
+    //      first store call on the hot path). The previous in-init
+    //      open could stall when Data Protection `.complete` was in
+    //      effect (mitigated since bd-zbhe by
+    //      `.completeUntilFirstUserAuthentication`); even with that
+    //      fix the open + WAL replay was the largest sync I/O remaining
+    //      in init.
     //   2. ModelInventory.loadBundledManifest() — Bundle resource read
     //      + JSON decode. Single-digit ms.
     //   3. PromptRedactor.loadDefault() — Bundle resource read + regex
@@ -406,43 +414,29 @@ final class PlayheadRuntime {
         self.playbackService = PlaybackService()
         self.capabilitiesService = CapabilitiesService()
 
-        // AnalysisStore: attempt creation with graceful recovery.
-        // 1. Normal open  2. Delete + retry  3. Temp directory (ephemeral)
-        var resolvedStore: AnalysisStore
-        var storeError: String?
-        if let store = try? AnalysisStore() {
-            resolvedStore = store
-        } else {
-            // Delete corrupted store and retry
-            try? FileManager.default.removeItem(at: AnalysisStore.defaultDirectory())
-            if let store = try? AnalysisStore() {
-                resolvedStore = store
-            } else if let tmpStore = try? AnalysisStore(
-                directory: FileManager.default.temporaryDirectory
-                    .appendingPathComponent("PlayheadAnalysis-\(ProcessInfo.processInfo.globallyUniqueString)", isDirectory: true)
-            ) {
-                // Temp-dir fallback — analysis won't persist across launches.
-                resolvedStore = tmpStore
-                storeError = "Analysis database could not be opened. Ad detection may not persist across launches."
-            } else {
-                // Last-resort in-memory store: no file is written, so this
-                // path survives Data Protection and disk failures that
-                // brick both the Documents and tmp opens. The previous
-                // implementation used `try!` here, which crashed the
-                // process on background launches when the device was
-                // locked (Data Protection `.complete` made the SQLite
-                // file unreadable). Crashing the app before any work
-                // runs is strictly worse than running one in-memory
-                // session: the next launch that happens with the device
-                // unlocked will drop back to the default path cleanly.
-                // `:memory:` is a pure RAM open — it does not touch disk
-                // or Data Protection, so it cannot hit the failure mode
-                // that brought us here. If even this fails the device is
-                // in deep trouble and there is no useful work to do.
-                resolvedStore = try! AnalysisStore(path: ":memory:")
-                storeError = "Analysis database could not be opened. Using in-memory store for this launch."
-            }
-        }
+        // playhead-6boz: AnalysisStore is now lazily-opened. The init
+        // body just records the target directory; the actual
+        // `sqlite3_open_v2` + DDL run on first use (driven by the
+        // deferred `migrate()` call below or any later store method).
+        // The corruption-recovery cascade that used to live in this
+        // synchronous block now lives next to the deferred migrate —
+        // see the `analysisStore.migrate()` call site below.
+        //
+        // The init throws is preserved for API compatibility with the
+        // 36+ test sites that use `try AnalysisStore(directory: ...)`,
+        // even though the lightweight body cannot actually fail today.
+        // `try!` is safe — `dbURL.appendingPathComponent` and stored-
+        // property assignment cannot throw at runtime.
+        let resolvedStore = try! AnalysisStore()
+        // playhead-6boz: pre-6boz, this captured the user-facing
+        // recovery message ("Using in-memory store...") emitted when
+        // the in-init open cascade fell through to the temp/in-memory
+        // fallback. Those fallbacks no longer fire from init (they
+        // required swapping the `let`-bound store, out of scope), so
+        // this is permanently nil under the new contract. Preserved
+        // as `let nil` to keep the downstream `if let storeError`
+        // branch compilable and untouched.
+        let storeError: String? = nil
         self.analysisStore = resolvedStore
 
         let manifest: ModelManifest
@@ -952,14 +946,37 @@ final class PlayheadRuntime {
         // init, so there's no race with the first backfill/hot-path run.
 
         Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, lifecycleLogger, bgTaskTelemetry] in
-            // Migrate the analysis store before any component queries its tables.
+            // playhead-6boz: AnalysisStore.init is now lightweight —
+            // sqlite3_open_v2 + DDL run inside this `migrate()` via the
+            // lazy `ensureOpen()` path. The pre-6boz corruption recovery
+            // (delete-corrupted-dir + retry, tmp-dir fallback,
+            // in-memory last-resort) used to live in
+            // `PlayheadRuntime.init`'s synchronous block; with the open
+            // moved here we mirror the first half of that cascade —
+            // delete the corrupted directory and retry once on the same
+            // store reference. The temp-dir / `:memory:` fallbacks are
+            // dropped because they required swapping the `let`-bound
+            // store reference, which is structurally out of scope per
+            // the bead. A persistent open failure now disables the
+            // pre-analysis pipeline for this launch and surfaces a
+            // fault to Console; the next launch retries.
             do {
                 try await analysisStore.migrate()
             } catch {
                 Logger(subsystem: "com.playhead", category: "Runtime")
-                    .fault("Analysis store migration failed — pre-analysis pipeline disabled: \(error)")
-                return  // Don't start the pipeline if tables don't exist
+                    .warning("Analysis store first-open failed; attempting delete-corrupted-dir recovery: \(error.localizedDescription, privacy: .public)")
+                try? FileManager.default.removeItem(at: AnalysisStore.defaultDirectory())
+                do {
+                    try await analysisStore.migrate()
+                } catch {
+                    Logger(subsystem: "com.playhead", category: "Runtime")
+                        .fault("Analysis store migration failed after delete-corrupted-dir retry — pre-analysis pipeline disabled: \(error)")
+                    return  // Don't start the pipeline if tables don't exist
+                }
             }
+
+            // Wake any UI that hit AnalysisStore before isOpen flipped true.
+            AnalysisWorkScheduler.postActivityRefreshNotification()
 
             // playhead-jndk: warm `AdCatalogStore` off-main now that the
             // analysis store migration has succeeded. The catalog's
