@@ -192,52 +192,110 @@ actor AssetLifecycleLogger: AssetLifecycleLoggerProtocol {
     static let rotatedPrefix: String = "asset-lifecycle-log"
     static let rotatedSuffix: String = ".jsonl"
 
-    private let directory: URL
+    /// playhead-jncn: lazy-resolved directory. The convenience init
+    /// (no `directory:` arg) used to call
+    /// `FileManager.url(.documentDirectory, create: true)` synchronously
+    /// inside `PlayheadRuntime.init`; that lookup now defers to
+    /// `ensureBootstrapped()`.
+    private let directoryOverride: URL?
+    private var resolvedDirectory: URL?
+
     private let rotationThresholdBytes: Int
     private let encoder: JSONEncoder
     private let logger = Logger(subsystem: "com.playhead", category: "AssetLifecycleLogger")
 
-    private var nextRotationIndex: Int
+    /// Next rotation index; seeded from disk on first use. Optional
+    /// until then so we can distinguish "haven't bootstrapped" from
+    /// "no rotated files on disk" (which produces 1).
+    private var nextRotationIndex: Int?
     private var fileHandle: FileHandle?
 
     // MARK: - Init
 
     /// Convenience init targeting the app's Documents directory.
+    ///
+    /// playhead-jncn: the Documents lookup + directory create are
+    /// deferred to first use. Production callers
+    /// `await logger.migrate()` from `PlayheadRuntime`'s deferred init
+    /// Task to warm the path off-main.
     init(
         rotationThresholdBytes: Int = AssetLifecycleLogger.defaultRotationThresholdBytes
     ) throws {
-        let docs = try FileManager.default.url(
-            for: .documentDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        try self.init(directory: docs, rotationThresholdBytes: rotationThresholdBytes)
-    }
-
-    /// Designated init. Tests pass an arbitrary directory and a small
-    /// rotation threshold.
-    init(
-        directory: URL,
-        rotationThresholdBytes: Int = AssetLifecycleLogger.defaultRotationThresholdBytes
-    ) throws {
-        self.directory = directory
+        // playhead-jncn: store rotation threshold + encoder only; defer
+        // the Documents lookup, directory create, and rotation-index
+        // scan to `ensureBootstrapped()`. The `throws` on this init is
+        // preserved so the call-site shape stays compatible, but no
+        // failure path actually runs here today.
+        self.directoryOverride = nil
         self.rotationThresholdBytes = rotationThresholdBytes
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         self.encoder = encoder
+        self.resolvedDirectory = nil
+        self.nextRotationIndex = nil
+    }
 
-        try FileManager.default.createDirectory(
-            at: directory, withIntermediateDirectories: true
-        )
-        self.nextRotationIndex = Self.scanNextRotationIndex(in: directory)
+    /// Designated init. Tests pass an arbitrary directory and a small
+    /// rotation threshold.
+    ///
+    /// playhead-jncn: directory create + scanNextRotationIndex are
+    /// deferred to `ensureBootstrapped()`. Tests that read back the log
+    /// file pay the lazy bootstrap on their first `record(_:)` call,
+    /// matching the production path.
+    init(
+        directory: URL,
+        rotationThresholdBytes: Int = AssetLifecycleLogger.defaultRotationThresholdBytes
+    ) throws {
+        self.directoryOverride = directory
+        self.rotationThresholdBytes = rotationThresholdBytes
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        self.encoder = encoder
+        self.resolvedDirectory = nil
+        self.nextRotationIndex = nil
+    }
+
+    /// playhead-jncn: lazy first-use bootstrap. Resolves the directory
+    /// (Documents lookup for the convenience init), creates it, and
+    /// seeds `nextRotationIndex` from disk. Idempotent.
+    /// `PlayheadRuntime` calls this from the deferred init Task so the
+    /// expensive setup runs off-main.
+    func migrate() throws {
+        try ensureBootstrapped()
+    }
+
+    /// Lazy bootstrap shared by `migrate()` and the write path.
+    /// Idempotent on the (resolvedDirectory, nextRotationIndex) tuple.
+    private func ensureBootstrapped() throws {
+        if resolvedDirectory == nil {
+            let dir: URL
+            if let override = directoryOverride {
+                dir = override
+            } else {
+                dir = try FileManager.default.url(
+                    for: .documentDirectory,
+                    in: .userDomainMask,
+                    appropriateFor: nil,
+                    create: true
+                )
+            }
+            try FileManager.default.createDirectory(
+                at: dir, withIntermediateDirectories: true
+            )
+            self.resolvedDirectory = dir
+        }
+        if nextRotationIndex == nil, let dir = resolvedDirectory {
+            self.nextRotationIndex = Self.scanNextRotationIndex(in: dir)
+        }
     }
 
     // MARK: - Public API
 
     func record(_ entry: AssetLifecycleLogEntry) async {
         do {
+            try ensureBootstrapped()
             try appendEntry(entry)
             try rotateIfNeeded()
         } catch {
@@ -248,8 +306,11 @@ actor AssetLifecycleLogger: AssetLifecycleLoggerProtocol {
     // MARK: - Test hooks
 
     /// Returns the currently-scheduled rotation index. Tests only.
+    /// Triggers the lazy bootstrap so tests that probe pre-write
+    /// observe the seeded value.
     func currentNextRotationIndex() -> Int {
-        nextRotationIndex
+        try? ensureBootstrapped()
+        return nextRotationIndex ?? 1
     }
 
     /// Force-close the handle; tests call this before reading the file
@@ -258,14 +319,19 @@ actor AssetLifecycleLogger: AssetLifecycleLoggerProtocol {
         closeHandle()
     }
 
-    /// Absolute path to the currently-active log file.
+    /// Absolute path to the currently-active log file. Triggers the
+    /// lazy bootstrap on first call so callers can rely on the path.
     var activeLogURL: URL {
-        directory.appendingPathComponent(Self.activeLogFilename)
+        try? ensureBootstrapped()
+        let dir = resolvedDirectory ?? directoryOverride ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        return dir.appendingPathComponent(Self.activeLogFilename)
     }
 
     /// All rotated log URLs, ordered by numeric index.
     func rotatedLogURLs() -> [URL] {
-        Self.listRotatedLogs(in: directory)
+        try? ensureBootstrapped()
+        guard let dir = resolvedDirectory else { return [] }
+        return Self.listRotatedLogs(in: dir)
     }
 
     // MARK: - Internal
@@ -323,9 +389,15 @@ actor AssetLifecycleLogger: AssetLifecycleLoggerProtocol {
     }
 
     private func rotateNow() throws {
+        // playhead-jncn: callers come through `record(_:)` which always
+        // calls `ensureBootstrapped()` first, but re-run defensively.
+        try ensureBootstrapped()
+        guard let dir = resolvedDirectory, let idx = nextRotationIndex else {
+            return
+        }
         let src = activeLogURL
-        let dstName = "\(Self.rotatedPrefix).\(nextRotationIndex)\(Self.rotatedSuffix)"
-        let dst = directory.appendingPathComponent(dstName)
+        let dstName = "\(Self.rotatedPrefix).\(idx)\(Self.rotatedSuffix)"
+        let dst = dir.appendingPathComponent(dstName)
 
         closeHandle()
 
@@ -335,7 +407,7 @@ actor AssetLifecycleLogger: AssetLifecycleLoggerProtocol {
         } else {
             try fm.moveItem(at: src, to: dst)
         }
-        nextRotationIndex += 1
+        nextRotationIndex = idx + 1
         logger.info("AssetLifecycleLogger: rotated active log to \(dstName, privacy: .public)")
     }
 

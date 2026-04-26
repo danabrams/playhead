@@ -104,8 +104,24 @@ final class SurfaceStatusInvariantLogger: @unchecked Sendable {
     /// `Caches/Diagnostics/`. Tests typically pass a unique temp dir so
     /// each test owns its own session file, install-ID salt, and write
     /// queue with no overlap across tests.
+    ///
+    /// playhead-jncn: this init body holds zero synchronous FileManager
+    /// / FileHandle / `Data.write` calls. The directory create, the
+    /// install-ID salt load, and the session-file open all defer to
+    /// first use through `LoggerState`'s lazy bootstrap.
+    /// `PlayheadRuntime` calls `await migrate()` from its deferred init
+    /// Task to warm the bootstrap path off-main.
     init(directory: URL? = nil) {
         self.state = LoggerState(directory: directory)
+    }
+
+    /// playhead-jncn: lazy first-use bootstrap. Forces the install-ID
+    /// salt load and the diagnostics-directory create + eviction sweep
+    /// to run now (off-main, when called from the deferred init Task)
+    /// rather than at the next `record(_:)` / `hashEpisodeId(_:)` call
+    /// site. Idempotent — every subsequent call is a no-op.
+    func migrate() {
+        state.migrate()
     }
 
     // MARK: - Public API
@@ -228,10 +244,11 @@ private final class LoggerState: @unchecked Sendable {
     /// cannot collide. Immutable for the instance's lifetime.
     private let sessionId: UUID
 
-    /// Per-install salt for the episode-ID hasher. Loaded from (or
-    /// created in) the diagnostics directory at init time. Immutable
-    /// for the instance's lifetime.
-    private let installId: String
+    /// playhead-jncn: lazy-resolved per-install salt. Loaded under
+    /// `writeQueue` on first need (write or `hashEpisodeId`). The
+    /// salt's value is stable for the instance's lifetime once
+    /// resolved.
+    private var resolvedInstallId: String?
 
     /// The session file URL. Lazily realized on first write so that a
     /// process that never logs anything does not create empty files.
@@ -240,19 +257,62 @@ private final class LoggerState: @unchecked Sendable {
     /// File handle for the current session. Lazily opened.
     private var currentFileHandle: FileHandle?
 
-    /// Diagnostics directory the logger writes into.
-    private let diagnosticsDirectory: URL
+    /// playhead-jncn: lazy-resolved diagnostics directory. The
+    /// `Caches/Diagnostics/` lookup (`FileManager.url(... create: true)`)
+    /// runs on first write rather than at construction time so the
+    /// `PlayheadRuntime.init` synchronous flow stays off-disk.
+    private let directoryOverride: URL?
+    private var resolvedDiagnosticsDirectory: URL?
 
     init(directory: URL?) {
+        // playhead-jncn: store overrides only. Defer the
+        // `Caches/Diagnostics/` resolution + install-ID salt load to
+        // `migrate()` / `resolveDiagnosticsDirectoryLocked()` /
+        // `resolveInstallIdLocked()` so this init body holds no
+        // synchronous FileManager / FileHandle / Data write calls.
         self.writeQueue = DispatchQueue(
             label: "playhead.surface-status-invariant-logger",
             qos: .utility
         )
         self.sessionId = UUID()
-        self.diagnosticsDirectory = directory ?? LoggerState.defaultDiagnosticsDirectory()
-        self.installId = LoggerState.loadOrCreateInstallId(
-            in: self.diagnosticsDirectory
-        )
+        self.directoryOverride = directory
+        self.resolvedDiagnosticsDirectory = nil
+        self.resolvedInstallId = nil
+    }
+
+    /// playhead-jncn: bootstrap entry point. Forces the diagnostics
+    /// directory + install-ID salt load to run now (off-main, when
+    /// called from the deferred init Task) rather than at the next
+    /// write. Idempotent. Runs on `writeQueue` so it serializes against
+    /// every other reader/writer of the lazy state.
+    func migrate() {
+        writeQueue.sync {
+            _ = self.resolveDiagnosticsDirectoryLocked()
+            _ = self.resolveInstallIdLocked()
+        }
+    }
+
+    /// Must run on `writeQueue`. Resolves (and caches) the diagnostics
+    /// directory URL. Does NOT create the directory on disk — that is
+    /// `ensureSessionFileLocked()`'s job. The lookup itself
+    /// (`FileManager.url(.cachesDirectory, create: true)`) DOES create
+    /// `Caches/` if it does not exist, but that is unavoidable on iOS.
+    private func resolveDiagnosticsDirectoryLocked() -> URL {
+        if let resolved = resolvedDiagnosticsDirectory { return resolved }
+        let url = directoryOverride ?? LoggerState.defaultDiagnosticsDirectory()
+        resolvedDiagnosticsDirectory = url
+        return url
+    }
+
+    /// Must run on `writeQueue`. Resolves (and caches) the install-ID
+    /// salt. Reads from disk on first call; subsequent calls return
+    /// the cached value.
+    private func resolveInstallIdLocked() -> String {
+        if let resolved = resolvedInstallId { return resolved }
+        let dir = resolveDiagnosticsDirectoryLocked()
+        let id = LoggerState.loadOrCreateInstallId(in: dir)
+        resolvedInstallId = id
+        return id
     }
 
     // MARK: - Write path
@@ -431,6 +491,8 @@ private final class LoggerState: @unchecked Sendable {
     private func ensureSessionFileLocked() throws -> FileHandle {
         if let handle = currentFileHandle { return handle }
 
+        let diagnosticsDirectory = resolveDiagnosticsDirectoryLocked()
+
         try FileManager.default.createDirectory(
             at: diagnosticsDirectory,
             withIntermediateDirectories: true
@@ -458,6 +520,7 @@ private final class LoggerState: @unchecked Sendable {
     ///
     /// Must run on `writeQueue`.
     private func evictOldSessionFilesLocked() {
+        let diagnosticsDirectory = resolveDiagnosticsDirectoryLocked()
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(
             at: diagnosticsDirectory,
@@ -487,7 +550,14 @@ private final class LoggerState: @unchecked Sendable {
     /// SHA-256(installID || episodeId), hex-encoded. Matches the
     /// `playhead-ghon` contract — both implementations produce
     /// byte-identical output for the same (installID, episodeId) pair.
+    ///
+    /// playhead-jncn: the install-ID salt is loaded lazily under
+    /// `writeQueue.sync` so the synchronous call site contract
+    /// (`hashEpisodeId(_:) -> String`) is preserved while the
+    /// `LoggerState.init` body stays free of disk I/O. The first
+    /// caller pays the load; subsequent calls return the cached salt.
     func hashEpisodeId(_ episodeId: String) -> String {
+        let installId = writeQueue.sync { self.resolveInstallIdLocked() }
         return SurfaceStatusEpisodeIdHasher.hash(
             installId: installId,
             episodeId: episodeId

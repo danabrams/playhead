@@ -355,13 +355,22 @@ actor DecisionLogger: DecisionLoggerProtocol {
     static let rotatedPrefix: String = "decision-log"
     static let rotatedSuffix: String = ".jsonl"
 
-    private let directory: URL
+    /// playhead-jncn: lazy-resolved directory. The convenience init
+    /// (no `directory:` arg) used to call
+    /// `FileManager.url(.documentDirectory, create: true)` synchronously
+    /// inside `PlayheadRuntime.init`; that lookup now defers to
+    /// `ensureBootstrapped()`.
+    private let directoryOverride: URL?
+    private var resolvedDirectory: URL?
+
     private let rotationThresholdBytes: Int
     private let encoder: JSONEncoder
     private let logger = Logger(subsystem: "com.playhead", category: "DecisionLogger")
 
-    /// Next rotation index; seeded from disk at init.
-    private var nextRotationIndex: Int
+    /// Next rotation index; seeded from disk on first use. Optional
+    /// until then so we can tell "haven't bootstrapped" apart from
+    /// "no rotated files on disk" (which produces 1).
+    private var nextRotationIndex: Int?
 
     /// Lazily-opened handle for the active file. Reset after rotation.
     private var fileHandle: FileHandle?
@@ -370,25 +379,41 @@ actor DecisionLogger: DecisionLoggerProtocol {
 
     /// Convenience init that targets `FileManager.default
     /// .urls(for: .documentDirectory, in: .userDomainMask)[0]`.
+    ///
+    /// playhead-jncn: the Documents lookup + directory create are
+    /// deferred to first use. Production callers
+    /// `await logger.migrate()` from `PlayheadRuntime`'s deferred init
+    /// Task to warm the path off-main.
     init(
         rotationThresholdBytes: Int = DecisionLogger.defaultRotationThresholdBytes
     ) throws {
-        let docs = try FileManager.default.url(
-            for: .documentDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        try self.init(directory: docs, rotationThresholdBytes: rotationThresholdBytes)
+        // playhead-jncn: store rotation threshold + encoder only; defer
+        // the Documents lookup, directory create, and rotation-index
+        // scan to `ensureBootstrapped()`. The `throws` on this init is
+        // preserved so the call-site shape stays compatible, but no
+        // failure path actually runs here today.
+        self.directoryOverride = nil
+        self.rotationThresholdBytes = rotationThresholdBytes
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        self.encoder = encoder
+        self.resolvedDirectory = nil
+        self.nextRotationIndex = nil
     }
 
     /// Designated init for testing: points the logger at an arbitrary
-    /// directory. The directory is created if it doesn't exist.
+    /// directory. The directory is created on first use, not at init.
+    ///
+    /// playhead-jncn: directory create + scanNextRotationIndex are
+    /// deferred to `ensureBootstrapped()`. Tests that read back the log
+    /// file pay the lazy bootstrap on their first `record(_:)` call,
+    /// matching the production path.
     init(
         directory: URL,
         rotationThresholdBytes: Int = DecisionLogger.defaultRotationThresholdBytes
     ) throws {
-        self.directory = directory
+        self.directoryOverride = directory
         self.rotationThresholdBytes = rotationThresholdBytes
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]  // stable, line-diff-friendly
@@ -397,15 +422,42 @@ actor DecisionLogger: DecisionLoggerProtocol {
         // now prevents silent drift when one is added later.
         encoder.dateEncodingStrategy = .iso8601
         self.encoder = encoder
+        self.resolvedDirectory = nil
+        self.nextRotationIndex = nil
+    }
 
-        // Ensure directory exists.
-        try FileManager.default.createDirectory(
-            at: directory, withIntermediateDirectories: true
-        )
+    /// playhead-jncn: lazy first-use bootstrap. Resolves the directory
+    /// (Documents lookup for the convenience init), creates it, and
+    /// seeds `nextRotationIndex` from disk. Idempotent.
+    /// `PlayheadRuntime` calls this from the deferred init Task so the
+    /// expensive setup runs off-main.
+    func migrate() throws {
+        try ensureBootstrapped()
+    }
 
-        // Seed nextRotationIndex from the highest-numbered rotated file
-        // already on disk — ensures idempotency across warm starts.
-        self.nextRotationIndex = Self.scanNextRotationIndex(in: directory)
+    /// Lazy bootstrap shared by `migrate()` and the write path.
+    /// Idempotent on the (resolvedDirectory, nextRotationIndex) tuple.
+    private func ensureBootstrapped() throws {
+        if resolvedDirectory == nil {
+            let dir: URL
+            if let override = directoryOverride {
+                dir = override
+            } else {
+                dir = try FileManager.default.url(
+                    for: .documentDirectory,
+                    in: .userDomainMask,
+                    appropriateFor: nil,
+                    create: true
+                )
+            }
+            try FileManager.default.createDirectory(
+                at: dir, withIntermediateDirectories: true
+            )
+            self.resolvedDirectory = dir
+        }
+        if nextRotationIndex == nil, let dir = resolvedDirectory {
+            self.nextRotationIndex = Self.scanNextRotationIndex(in: dir)
+        }
     }
 
     // MARK: - Public API
@@ -414,6 +466,7 @@ actor DecisionLogger: DecisionLoggerProtocol {
     /// threshold after the write.
     func record(_ entry: DecisionLogEntry) async {
         do {
+            try ensureBootstrapped()
             try appendEntry(entry)
             try rotateIfNeeded()
         } catch {
@@ -424,8 +477,11 @@ actor DecisionLogger: DecisionLoggerProtocol {
     // MARK: - Test hooks
 
     /// Returns the currently-scheduled rotation index. For tests.
+    /// Triggers the lazy bootstrap so tests that probe this value
+    /// pre-write observe the seeded value rather than a zero.
     func currentNextRotationIndex() -> Int {
-        nextRotationIndex
+        try? ensureBootstrapped()
+        return nextRotationIndex ?? 1
     }
 
     /// Force-close the handle. Tests use this before reading the file
@@ -434,14 +490,20 @@ actor DecisionLogger: DecisionLoggerProtocol {
         closeHandle()
     }
 
-    /// Absolute path to the currently-active log file.
+    /// Absolute path to the currently-active log file. Triggers the
+    /// lazy bootstrap on first call so callers can rely on the path
+    /// being valid.
     var activeLogURL: URL {
-        directory.appendingPathComponent(Self.activeLogFilename)
+        try? ensureBootstrapped()
+        let dir = resolvedDirectory ?? directoryOverride ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        return dir.appendingPathComponent(Self.activeLogFilename)
     }
 
     /// All rotated log URLs, ordered by numeric index.
     func rotatedLogURLs() -> [URL] {
-        Self.listRotatedLogs(in: directory)
+        try? ensureBootstrapped()
+        guard let dir = resolvedDirectory else { return [] }
+        return Self.listRotatedLogs(in: dir)
     }
 
     // MARK: - Internal
@@ -510,9 +572,18 @@ actor DecisionLogger: DecisionLoggerProtocol {
     }
 
     private func rotateNow() throws {
+        // playhead-jncn: callers (rotateIfNeeded) come through `record(_:)`
+        // which always calls `ensureBootstrapped()` first. Bootstrap is
+        // therefore guaranteed by the time we reach here, but we re-run
+        // it defensively so a future direct caller doesn't crash.
+        try ensureBootstrapped()
+        guard let dir = resolvedDirectory, let idx = nextRotationIndex else {
+            // Bootstrap failed silently — skip rotation rather than crash.
+            return
+        }
         let src = activeLogURL
-        let dstName = "\(Self.rotatedPrefix).\(nextRotationIndex)\(Self.rotatedSuffix)"
-        let dst = directory.appendingPathComponent(dstName)
+        let dstName = "\(Self.rotatedPrefix).\(idx)\(Self.rotatedSuffix)"
+        let dst = dir.appendingPathComponent(dstName)
 
         closeHandle()
 
@@ -531,7 +602,7 @@ actor DecisionLogger: DecisionLoggerProtocol {
         } else {
             try fm.moveItem(at: src, to: dst)
         }
-        nextRotationIndex += 1
+        nextRotationIndex = idx + 1
         logger.info("DecisionLogger: rotated active log to \(dstName, privacy: .public)")
     }
 
