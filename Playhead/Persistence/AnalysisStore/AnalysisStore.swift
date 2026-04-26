@@ -770,82 +770,190 @@ actor AnalysisStore {
     /// Path to the SQLite database file.
     nonisolated let databaseURL: URL
 
+    /// playhead-6boz: when non-nil, the on-disk file at `databaseURL` is
+    /// expected to live inside an Application Support container that may
+    /// not exist yet on first launch. `ensureOpen()` performs the
+    /// `createDirectory` + Data Protection setattr work the first time.
+    /// `path:` initializers (e.g. `:memory:`, raw test paths) skip that
+    /// dance entirely (this is `nil` for them).
+    nonisolated private let containerDirectoryToCreate: URL?
+
+    /// playhead-6boz: the raw string handed to `sqlite3_open_v2` from
+    /// `ensureOpen()`. For the `directory:` initializer this is
+    /// `databaseURL.path`. For the `path:` initializer it's the literal
+    /// path string the caller supplied (preserving `:memory:`, which
+    /// `URL(fileURLWithPath:)` would mangle into a cwd-rooted path).
+    nonisolated private let sqliteOpenPath: String
+
+    /// playhead-6boz: schema-readiness flag. Flips to `true` after the
+    /// first successful `ensureOpen()` (open + pragmas + migration).
+    /// Public read surface is `isOpen` (async, actor-isolated).
+    private var didOpen: Bool = false
+
     // MARK: Lifecycle
 
-    /// Open (or create) the analysis database. Call ``migrate()`` after init
-    /// to set up tables. This two-step dance avoids calling actor-isolated
-    /// methods from the nonisolated initialiser (Swift 6 requirement).
+    /// playhead-6boz: lightweight initializer. Records the target sqlite
+    /// path only; defers `createDirectory`, `sqlite3_open_v2`, the Data
+    /// Protection setattr dance, and schema DDL to the first `ensureOpen()`
+    /// call (driven by any public method, or by an explicit
+    /// `await store.migrate()` / `await store.awaitReady()` from the
+    /// caller).
+    ///
+    /// Why lazy: `PlayheadRuntime.init` runs synchronously from
+    /// `PlayheadApp`'s init and extends the launch-storyboard window —
+    /// every byte of work in this constructor blocks the splash defense
+    /// that lives in SwiftUI-land (see jncn/jndk/hkn1 for the cohort of
+    /// fixes this completes). Moving open + DDL to first-use lands the
+    /// expense inside a deferred Task, off the main thread, after the
+    /// app's launch screen has already given way to a real surface.
+    ///
+    /// Source-canary
+    /// (`AnalysisStoreInitLazinessSourceCanaryTests`) pins this body
+    /// against accidentally re-introducing `sqlite3_open_*`,
+    /// `FileManager.default.createDirectory`, or `try .write(` calls.
     init(directory: URL? = nil) throws {
         let dir = directory ?? Self.defaultDirectory()
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: dir.path) {
-            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
-
-        // Why `.completeUntilFirstUserAuthentication` rather than `.complete`:
-        // the app is woken by `BGProcessingTask` and `BGAppRefreshTask` while
-        // the device may still be locked. `.complete` renders the SQLite file
-        // unreadable in that window, which previously triggered a 4× repro'd
-        // crash chain in `PlayheadRuntime.init` (open fails → retry fails →
-        // `try!` on the tmp fallback traps). `.completeUntilFirstUserAuthentication`
-        // keeps the file protected while the device is at rest pre-unlock and
-        // makes it accessible for the rest of the boot session once the user
-        // has authenticated at least once, which is the envelope every BGTask
-        // runs in.
-        // Applied unconditionally (not only on first create) so existing
-        // `.complete`-protected installs get migrated to the new class on the
-        // next launch.
-        try? fm.setAttributes(
-            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-            ofItemAtPath: dir.path
-        )
-
-        self.databaseURL = dir.appendingPathComponent("analysis.sqlite")
-
-        var handle: OpaquePointer?
-        // NOMUTEX: the enclosing actor already serializes all access, so the
-        // full-mutex threading mode is redundant overhead.
-        let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX
-        let rc = sqlite3_open_v2(databaseURL.path, &handle, flags, nil)
-        guard rc == SQLITE_OK, let handle else {
-            let msg = handle.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
-            throw AnalysisStoreError.openFailed(code: rc, message: msg)
-        }
-        self.db = handle
-
-        // Same migration note for the SQLite file itself — on installs that
-        // predate this change the file inherited `.complete` from the dir
-        // at creation time, so we re-stamp it alongside the dir.
-        try? fm.setAttributes(
-            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-            ofItemAtPath: databaseURL.path
-        )
+        let dbURL = dir.appendingPathComponent("analysis.sqlite")
+        self.containerDirectoryToCreate = dir
+        self.databaseURL = dbURL
+        self.sqliteOpenPath = dbURL.path
     }
 
-    /// Open a database at an explicit SQLite path, including `:memory:` for
-    /// ephemeral in-memory databases (useful in unit tests). Call ``migrate()``
-    /// after construction to create tables.
+    /// Lightweight initializer for an explicit SQLite path, including
+    /// `:memory:` for ephemeral in-memory databases (useful in unit
+    /// tests). The on-disk handle is opened lazily — see `init(directory:)`.
     init(path: String) throws {
-        // `:memory:` is a special SQLite URI handled by the C API directly (line below).
-        // databaseURL is metadata only; the DB opens via the raw path string.
+        // `:memory:` is a special SQLite URI handled by the C API
+        // directly (sqlite3_open_v2). `databaseURL` is metadata only;
+        // the DB opens via the literal path string preserved in
+        // `sqliteOpenPath`.
+        self.containerDirectoryToCreate = nil
         self.databaseURL = URL(fileURLWithPath: path)
-
-        var handle: OpaquePointer?
-        let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX
-        let rc = sqlite3_open_v2(path, &handle, flags, nil)
-        guard rc == SQLITE_OK, let handle else {
-            let msg = handle.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
-            throw AnalysisStoreError.openFailed(code: rc, message: msg)
-        }
-        self.db = handle
+        self.sqliteOpenPath = path
     }
 
-    /// Convenience factory that opens the database and runs migrations in one
-    /// call. Preferred entry point for production use.
+    /// Convenience factory that returns a lazily-initialized store and
+    /// eagerly runs migrations in one call. The eager `migrate()` here
+    /// is preserved for callers that want a fully-bootstrapped handle —
+    /// production launch paths now skip this and let `ensureOpen()` fire
+    /// at first use.
     static func open(directory: URL? = nil) async throws -> AnalysisStore {
         let store = try AnalysisStore(directory: directory)
         try await store.migrate()
         return store
+    }
+
+    /// playhead-6boz: schema-readiness signal for callers that should
+    /// treat an unopened store as "no data yet" rather than block. UI
+    /// providers (`ActivitySnapshotProvider`) read this to early-return
+    /// an empty list — opening DDL inside a `@MainActor` refresh is the
+    /// hkn1 freeze pattern this rail prevents.
+    var isOpen: Bool { didOpen }
+
+    /// playhead-6boz: schema-readiness signal for callers that genuinely
+    /// need to block until DDL is ready (`BackfillJobRunner` runs on a
+    /// background actor; waiting is fine). Idempotent: subsequent calls
+    /// observe the already-open handle and short-circuit.
+    func awaitReady() async throws {
+        try ensureOpen()
+    }
+
+    /// playhead-6boz: idempotent first-use bootstrap. Creates the
+    /// container directory, opens `sqlite3`, applies the
+    /// `.completeUntilFirstUserAuthentication` Data Protection class,
+    /// configures pragmas, and runs schema migration. After a successful
+    /// pass `didOpen` flips to `true` and the body short-circuits on
+    /// every subsequent call. All public actor methods funnel through
+    /// this guard (via `exec`/`prepare` and explicit `try ensureOpen()`
+    /// at the public-entry layer) so a caller racing `PlayheadRuntime`'s
+    /// deferred warmup never observes a half-built database.
+    ///
+    /// Re-entrancy: `runSchemaMigration()` calls `exec` / `prepare`,
+    /// which themselves call `ensureOpen()`. To break the cycle we flip
+    /// `didOpen = true` BEFORE invoking `runSchemaMigration` and roll
+    /// it back on error. This is safe because by that point the SQLite
+    /// handle has been opened, so the inner `exec` calls just observe
+    /// `didOpen == true` and pass straight through.
+    ///
+    /// On migration failure the handle is closed and `db` reset so a
+    /// subsequent `ensureOpen()` retries from the top. Production
+    /// callers should not retry — a DDL failure on the analysis store
+    /// is fatal for the pre-analysis pipeline — but tests that
+    /// intentionally seed a corrupt DB and then recover are supported.
+    private func ensureOpen() throws {
+        if didOpen { return }
+
+        // Step 1: directory + Data Protection. The path-form initializer
+        // sets `containerDirectoryToCreate` to `nil` so this step is a
+        // no-op for `:memory:` and raw-path test stores.
+        if let dir = containerDirectoryToCreate {
+            let fm = FileManager.default
+            if !fm.fileExists(atPath: dir.path) {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            }
+            // Why `.completeUntilFirstUserAuthentication` rather than
+            // `.complete`: the app is woken by `BGProcessingTask` and
+            // `BGAppRefreshTask` while the device may still be locked.
+            // `.complete` renders the SQLite file unreadable in that
+            // window, which previously triggered a 4× repro'd crash
+            // chain in `PlayheadRuntime.init` (open fails → retry fails
+            // → `try!` on the tmp fallback traps).
+            // `.completeUntilFirstUserAuthentication` keeps the file
+            // protected while the device is at rest pre-unlock and
+            // makes it accessible for the rest of the boot session once
+            // the user has authenticated at least once, which is the
+            // envelope every BGTask runs in.
+            // Applied unconditionally (not only on first create) so
+            // existing `.complete`-protected installs get migrated to
+            // the new class on the next launch.
+            try? fm.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: dir.path
+            )
+        }
+
+        // Step 2: open the SQLite handle.
+        var handle: OpaquePointer?
+        // NOMUTEX: the enclosing actor already serializes all access,
+        // so the full-mutex threading mode is redundant overhead.
+        let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX
+        let rc = sqlite3_open_v2(sqliteOpenPath, &handle, flags, nil)
+        guard rc == SQLITE_OK, let handle else {
+            let msg = handle.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
+            if let handle { sqlite3_close_v2(handle) }
+            throw AnalysisStoreError.openFailed(code: rc, message: msg)
+        }
+        self.db = handle
+
+        // Step 3: re-stamp the file's protection class. On installs that
+        // predate `.completeUntilFirstUserAuthentication` the file
+        // inherited `.complete` from the dir at creation time, so we
+        // re-stamp it alongside the dir on every `ensureOpen`.
+        if containerDirectoryToCreate != nil {
+            try? FileManager.default.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: databaseURL.path
+            )
+        }
+
+        // Step 4: schema migration (pragmas, CREATE TABLE, V*IfNeeded
+        // ladder). Flip `didOpen = true` BEFORE invoking the migration
+        // so the inner `exec` / `prepare` re-entrancy guards
+        // short-circuit. On any thrown error, roll `didOpen` back to
+        // false and close the handle so a retry path observes a clean
+        // slate. `runSchemaMigration` is internally transactional with
+        // ROLLBACK on error so the file itself is left consistent.
+        didOpen = true
+        do {
+            try runSchemaMigration()
+        } catch {
+            didOpen = false
+            if let h = self.db {
+                sqlite3_close_v2(h)
+                self.db = nil
+            }
+            throw error
+        }
     }
 
     /// Tracks which database paths have already been migrated in this process
@@ -853,12 +961,30 @@ actor AnalysisStore {
     private static let migratedLock = NSLock()
     nonisolated(unsafe) private static var migratedPaths: Set<String> = []
 
-    /// Run pragmas and create all tables / indexes / FTS triggers. Safe to call
-    /// more than once. Pragmas are always (re)applied since they live on the
-    /// per-connection state, not on the database file. The schema DDL itself
-    /// only runs once per database path per process — every DDL statement
-    /// uses IF NOT EXISTS so re-running is correct, just unnecessary work.
+    /// Public migration entry point. Idempotent. After playhead-6boz this
+    /// is a thin shim that funnels through the lazy `ensureOpen()` path —
+    /// the open + pragmas + DDL all run together on first call. Production
+    /// callers (`PlayheadRuntime`'s deferred init Task) `await` this once
+    /// off-main so the first hot-path query sees an already-bootstrapped
+    /// store. Tests and re-entrant callers are safe; subsequent calls
+    /// observe `didOpen == true` and short-circuit.
     func migrate() throws {
+        try ensureOpen()
+    }
+
+    /// playhead-6boz: the body of the original `migrate()`. Run pragmas
+    /// and create all tables / indexes / FTS triggers. Safe to call more
+    /// than once. Pragmas are always (re)applied since they live on the
+    /// per-connection state, not on the database file. The schema DDL
+    /// itself only runs once per database path per process — every DDL
+    /// statement uses IF NOT EXISTS so re-running is correct, just
+    /// unnecessary work.
+    ///
+    /// Privately invoked from `ensureOpen()` only. Callers MUST NOT call
+    /// this directly — `ensureOpen()` is the gate that guarantees the
+    /// SQLite handle has been created and that `didOpen` is set after a
+    /// clean run.
+    private func runSchemaMigration() throws {
         // M4 fix: pragmas must be applied to *every* connection. The previous
         // implementation short-circuited the entire migrate() call when the
         // path had already been seen, leaving second-instance connections with
@@ -7097,6 +7223,12 @@ actor AnalysisStore {
     // MARK: - SQLite helpers
 
     private func exec(_ sql: String) throws {
+        // playhead-6boz: every SQL surface routes through the lazy
+        // bootstrap. Once `didOpen == true` this is a single bool check;
+        // re-entrant calls from inside `runSchemaMigration` short-circuit
+        // here because `ensureOpen()` flipped the flag before invoking
+        // the migration body.
+        try ensureOpen()
         var errMsg: UnsafeMutablePointer<CChar>?
         let rc = sqlite3_exec(db, sql, nil, nil, &errMsg)
         if rc != SQLITE_OK {
@@ -7107,6 +7239,8 @@ actor AnalysisStore {
     }
 
     private func prepare(_ sql: String) throws -> OpaquePointer? {
+        // playhead-6boz: see `exec` above for the lazy-bootstrap rationale.
+        try ensureOpen()
         var stmt: OpaquePointer?
         let rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
         guard rc == SQLITE_OK else {
