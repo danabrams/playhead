@@ -427,7 +427,7 @@ final class PlayheadRuntime {
         // even though the lightweight body cannot actually fail today.
         // `try!` is safe — `dbURL.appendingPathComponent` and stored-
         // property assignment cannot throw at runtime.
-        let resolvedStore: AnalysisStore = try! AnalysisStore()
+        let resolvedStore = try! AnalysisStore()
         // playhead-6boz: pre-6boz, this captured the user-facing
         // recovery message ("Using in-memory store...") emitted when
         // the in-init open cascade fell through to the temp/in-memory
