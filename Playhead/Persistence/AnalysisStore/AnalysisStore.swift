@@ -3052,6 +3052,91 @@ actor AnalysisStore {
         return readAsset(stmt)
     }
 
+    /// playhead-hkn1: latest-per-episode map of every asset in the
+    /// store. Single SQL pass, no `IN`-clause variable count to worry
+    /// about. The provider uses this to filter its SwiftData
+    /// descriptor at the predicate level — only Episodes that already
+    /// have an `analysis_assets` row get materialized.
+    ///
+    /// "Latest" follows the same precedence as
+    /// `fetchAssetByEpisodeId`: `ORDER BY createdAt DESC, rowid DESC`,
+    /// keep the first row encountered per episodeId.
+    func fetchLatestAssetByEpisodeIdMap() throws -> [String: AnalysisAsset] {
+        let sql = """
+            SELECT \(assetSelectColumns)
+            FROM analysis_assets
+            ORDER BY createdAt DESC, rowid DESC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        var results: [String: AnalysisAsset] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let asset = readAsset(stmt)
+            if results[asset.episodeId] == nil {
+                results[asset.episodeId] = asset
+            }
+        }
+        return results
+    }
+
+    /// playhead-hkn1: bulk variant of ``fetchAssetByEpisodeId`` for hot
+    /// paths that would otherwise issue N actor-hops in a row (the
+    /// Activity-screen snapshot provider being the canonical case —
+    /// pre-hkn1 it serialized one round-trip per episode on the main
+    /// actor and froze the UI on Dan's dogfood device).
+    ///
+    /// Returns a `[episodeId: AnalysisAsset]` dictionary matching the
+    /// "latest asset per episode" semantic of the single-fetch sibling
+    /// (`ORDER BY createdAt DESC` then keep the first row encountered
+    /// per episodeId). Episodes with no row in `analysis_assets` are
+    /// simply absent from the dictionary; callers should treat absence
+    /// the same way the single-fetch path treats `nil`.
+    ///
+    /// Empty input returns an empty dictionary without touching SQLite.
+    /// Larger inputs are chunked at 500 placeholders per statement so
+    /// we stay well under SQLite's `SQLITE_MAX_VARIABLE_NUMBER` default
+    /// (999 historically; 32766 on recent builds — both are safe).
+    /// All bindings go through the prepared-statement bind helpers; we
+    /// never interpolate user values into the SQL string.
+    func fetchAssetsByEpisodeIds(_ episodeIds: Set<String>) throws -> [String: AnalysisAsset] {
+        guard !episodeIds.isEmpty else { return [:] }
+        let chunkSize = 500
+        var results: [String: AnalysisAsset] = [:]
+        results.reserveCapacity(episodeIds.count)
+
+        // Stable-order chunking so test-time iteration is deterministic
+        // and the bind indices below align with the chunk slice.
+        let allIds = Array(episodeIds)
+        var index = 0
+        while index < allIds.count {
+            let end = min(index + chunkSize, allIds.count)
+            let slice = Array(allIds[index..<end])
+            let placeholders = slice.map { _ in "?" }.joined(separator: ", ")
+            let sql = """
+                SELECT \(assetSelectColumns)
+                FROM analysis_assets
+                WHERE episodeId IN (\(placeholders))
+                ORDER BY createdAt DESC, rowid DESC
+                """
+            let stmt = try prepare(sql)
+            defer { sqlite3_finalize(stmt) }
+            for (i, id) in slice.enumerated() {
+                bind(stmt, Int32(i + 1), id)
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let asset = readAsset(stmt)
+                // First row wins per episodeId — matches the single-
+                // fetch's `LIMIT 1 ORDER BY createdAt DESC, rowid DESC`.
+                if results[asset.episodeId] == nil {
+                    results[asset.episodeId] = asset
+                }
+            }
+            index = end
+        }
+
+        return results
+    }
+
     func deleteAsset(id: String) throws {
         let sql = "DELETE FROM analysis_assets WHERE id = ?"
         let stmt = try prepare(sql)
