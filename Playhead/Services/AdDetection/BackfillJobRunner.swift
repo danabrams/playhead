@@ -238,6 +238,16 @@ actor BackfillJobRunner {
         /// injection via `installFaultInjectionForTesting`). Production
         /// callers MUST use the factory-closure initializer above so the
         /// classifier is constructed lazily off the main thread.
+        ///
+        /// playhead-jndk cross-review nit: gated behind `#if DEBUG` so
+        /// release builds physically cannot reach the eager-construction
+        /// path. `@_spi(Testing)` is the more idiomatic gate, but the
+        /// Playhead module's own production callers are in the same
+        /// module and SPI access controls don't apply to same-module
+        /// references — only `#if DEBUG` actually excludes the symbol
+        /// from release builds. (Tests run under Debug, so they still
+        /// see this initializer.)
+        #if DEBUG
         @available(iOS 26.0, *)
         convenience init(_ classifier: PermissiveAdClassifier) {
             self.init({ classifier })
@@ -246,6 +256,7 @@ actor BackfillJobRunner {
             // identity for fault-injection installation).
             _ = self.classifier
         }
+        #endif
     }
 
     init(

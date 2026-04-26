@@ -297,7 +297,7 @@ final class PlayheadRuntime {
     // probes the on-device FoundationModels framework — the dominant
     // cause of the multi-minute launch freeze on iOS 26.
     //
-    // What's already-deferred (in the Task at line ~810 below):
+    // What's already-deferred (in the deferred init Task below):
     //   - analysisStore.migrate()
     //   - adCatalogStore.migrate() (added by playhead-jndk)
     //   - analysisCoordinator.recoverCoverageGuardFailures()

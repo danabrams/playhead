@@ -158,11 +158,14 @@ final class PlayheadRuntimeInitLazyClassifierSourceCanaryTests: XCTestCase {
         // and count those that appear inside a `PermissiveClassifierBox {`
         // closure literal. The two counts must match — i.e. every
         // mention is wrapped by the lazy factory.
+        //
+        // The lazy-wrapped count uses a whitespace-tolerant regex so a
+        // future swift-format reflow that breaks the closure across
+        // lines (e.g. `PermissiveClassifierBox {\n    PermissiveAdClassifier()\n}`)
+        // still matches and doesn't cause a spurious failure here.
         let totalCalls = Self.occurrences(of: "PermissiveAdClassifier()", in: body)
-        let lazyWrapped = Self.occurrences(
-            of: "PermissiveClassifierBox { PermissiveAdClassifier() }",
-            in: body
-        )
+        let lazyWrappedPattern = #"PermissiveClassifierBox\s*\{\s*PermissiveAdClassifier\s*\(\s*\)\s*\}"#
+        let lazyWrapped = Self.regexOccurrences(of: lazyWrappedPattern, in: body)
 
         XCTAssertEqual(
             totalCalls, lazyWrapped,
@@ -264,5 +267,19 @@ final class PlayheadRuntimeInitLazyClassifierSourceCanaryTests: XCTestCase {
             searchRange = range.upperBound..<haystack.endIndex
         }
         return count
+    }
+
+    /// Count non-overlapping regex matches of `pattern` in `haystack`.
+    /// `.dotMatchesLineSeparators` lets a swift-format reflow that breaks
+    /// the wrapper across lines still match the same canary shape.
+    private static func regexOccurrences(of pattern: String, in haystack: String) -> Int {
+        guard let regex = try? NSRegularExpression(
+            pattern: pattern,
+            options: [.dotMatchesLineSeparators]
+        ) else {
+            return 0
+        }
+        let range = NSRange(haystack.startIndex..<haystack.endIndex, in: haystack)
+        return regex.numberOfMatches(in: haystack, options: [], range: range)
     }
 }
