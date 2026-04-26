@@ -975,6 +975,9 @@ final class PlayheadRuntime {
                 }
             }
 
+            // Wake any UI that hit AnalysisStore before isOpen flipped true.
+            AnalysisWorkScheduler.postActivityRefreshNotification()
+
             // playhead-jndk: warm `AdCatalogStore` off-main now that the
             // analysis store migration has succeeded. The catalog's
             // first-use lazy `ensureOpen()` is also called transparently
