@@ -720,6 +720,48 @@ struct ActivityViewModelTests {
                     "Episode \(id) at visual index \(i) should have queuePosition \(i)")
         }
     }
+
+    // MARK: - playhead-5nwy: load-state for activity skeleton
+
+    @Test("Initial loadState is .idle (no fetch attempted yet)")
+    @MainActor
+    func loadStateStartsIdle() {
+        let vm = ActivityViewModel()
+        #expect(vm.loadState == .idle)
+    }
+
+    @Test("beginLoad flips .idle → .loading")
+    @MainActor
+    func beginLoadEntersLoadingFromIdle() {
+        let vm = ActivityViewModel()
+        let started = Date(timeIntervalSince1970: 1_700_000_000)
+        vm.beginLoad(now: started)
+        if case let .loading(startedAt) = vm.loadState {
+            #expect(startedAt == started)
+        } else {
+            Issue.record("Expected .loading after beginLoad — got \(vm.loadState)")
+        }
+    }
+
+    @Test("refresh flips .loading → .loaded and exposes the snapshot")
+    @MainActor
+    func refreshEntersLoadedFromLoading() {
+        let vm = ActivityViewModel()
+        vm.beginLoad()
+        vm.refresh(from: [], now: Date())
+        #expect(vm.loadState == .loaded)
+    }
+
+    @Test("beginLoad after .loaded is a no-op — no flicker back into skeleton")
+    @MainActor
+    func beginLoadIdempotentOnceLoaded() {
+        let vm = ActivityViewModel()
+        vm.beginLoad()
+        vm.refresh(from: [], now: Date())
+        // Subsequent fetch tick should NOT roll the state back.
+        vm.beginLoad()
+        #expect(vm.loadState == .loaded)
+    }
 }
 
 /// Builds an in-memory `ModelContext` for the cjqq tests. Mirrors
