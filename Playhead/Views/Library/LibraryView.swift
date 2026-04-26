@@ -28,7 +28,17 @@ struct LibraryView: View {
     @State private var discoveryService = PodcastDiscoveryService()
 
     var body: some View {
-        NavigationStack {
+        // Precompute unplayed counts once per body evaluation so the
+        // grid's cells become pure pass-throughs (playhead-fijb). Pre-fix
+        // each cell ran `podcast.episodes.filter { !$0.isPlayed }.count`
+        // inside a computed property, so a 50-podcast library traversed
+        // every relationship on every cell redraw — visible jank during
+        // scroll. We still iterate episodes per body evaluation, but
+        // only once per body (not once per cell-redraw), and the
+        // dictionary lookup is O(1).
+        let unplayedCounts = Self.computeUnplayedCounts(for: podcasts)
+
+        return NavigationStack {
             ZStack {
                 AppColors.background
                     .ignoresSafeArea()
@@ -36,7 +46,7 @@ struct LibraryView: View {
                 if podcasts.isEmpty {
                     emptyState
                 } else {
-                    podcastGrid
+                    podcastGrid(unplayedCounts: unplayedCounts)
                 }
             }
             .navigationTitle("Library")
@@ -45,6 +55,21 @@ struct LibraryView: View {
                 EpisodeListView(podcast: podcast)
             }
         }
+    }
+
+    /// Builds a `[Podcast.ID: Int]` map of unplayed-episode counts for
+    /// every podcast in the supplied list. Called once per `body`
+    /// evaluation; result is read by `PodcastGridCell` via O(1) dictionary
+    /// lookup so no cell re-traverses the episodes relationship during
+    /// scroll. Exposed as `static` and `internal` so the
+    /// `LibraryViewUnplayedCountPerfTests` perf-budget test can call it
+    /// without rendering SwiftUI.
+    static func computeUnplayedCounts(
+        for podcasts: [Podcast]
+    ) -> [PersistentIdentifier: Int] {
+        Dictionary(uniqueKeysWithValues: podcasts.map { podcast in
+            (podcast.id, podcast.episodes.lazy.filter { !$0.isPlayed }.count)
+        })
     }
 }
 
@@ -75,12 +100,18 @@ private extension LibraryView {
 
     // MARK: Podcast Grid
 
-    var podcastGrid: some View {
+    func podcastGrid(
+        unplayedCounts: [PersistentIdentifier: Int]
+    ) -> some View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: Spacing.lg) {
                 ForEach(podcasts) { podcast in
+                    let unplayedCount = unplayedCounts[podcast.id, default: 0]
                     NavigationLink(value: podcast) {
-                        PodcastGridCell(podcast: podcast)
+                        PodcastGridCell(
+                            podcast: podcast,
+                            unplayedCount: unplayedCount
+                        )
                     }
                     .buttonStyle(.plain)
                     .contextMenu {
@@ -96,7 +127,7 @@ private extension LibraryView {
                             Label("Mark All Played", systemImage: "checkmark.circle")
                         }
                     }
-                    .accessibilityLabel("\(podcast.title), \(podcast.episodes.filter { !$0.isPlayed }.count) unplayed")
+                    .accessibilityLabel("\(podcast.title), \(unplayedCount) unplayed")
                 }
             }
             .padding(.horizontal, Spacing.md)
@@ -142,12 +173,14 @@ private extension LibraryView {
 private struct PodcastGridCell: View {
 
     let podcast: Podcast
+    /// Precomputed by the parent `LibraryView` once per body evaluation
+    /// (playhead-fijb). The cell never traverses `podcast.episodes` —
+    /// O(1) int read replaces the per-redraw `.filter` that caused the
+    /// Library-tab scroll jank flagged by the 2026-04-26 main-thread
+    /// audit.
+    let unplayedCount: Int
     @State private var artworkImage: UIImage?
     @State private var loadFailed = false
-
-    private var unplayedCount: Int {
-        podcast.episodes.filter { !$0.isPlayed }.count
-    }
 
     var body: some View {
         VStack(spacing: Spacing.xs) {
