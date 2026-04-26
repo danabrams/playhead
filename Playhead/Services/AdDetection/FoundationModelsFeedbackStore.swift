@@ -53,22 +53,58 @@ actor FoundationModelsFeedbackStore {
         case refinementRefusal = "refinement-refusal"
     }
 
-    /// Optional override of the on-disk directory used to store attachments.
-    /// Tests pass a temporary directory; production uses
-    /// `Application Support/FoundationModelsFeedback`.
-    private let directory: URL
+    /// playhead-jncn: lazily resolved on first write so the synchronous
+    /// `Application Support` lookup (which calls `FileManager.url(...,
+    /// create: true)` and triggers a directory create on first launch)
+    /// does not run inside `PlayheadRuntime.init`. `directoryOverride`
+    /// captures the test-supplied path; production paths defer the
+    /// resolution to `resolveDirectoryLocked()`.
+    private let directoryOverride: URL?
     private let fileManager: FileManager
     private let logger: Logger
+    private var resolvedDirectory: URL?
     private var capturedURLs: [URL] = []
     private var didEnsureDirectory = false
+
+    /// Read-only accessor used by tests and the in-actor write path.
+    /// The first call may pay the Application Support lookup cost; once
+    /// resolved the value is cached.
+    var directory: URL {
+        resolveDirectoryLocked()
+    }
 
     init(
         directory: URL? = nil,
         fileManager: FileManager = .default,
         logger: Logger = Logger(subsystem: "com.playhead", category: "FoundationModelsFeedback")
     ) {
-        if let directory {
-            self.directory = directory
+        // playhead-jncn: store overrides only. Defer the
+        // Application Support lookup + directory creation to first use
+        // via `migrate()` / `resolveDirectoryLocked()`. Mirrors the
+        // AdCatalogStore.ensureOpen() pattern.
+        self.directoryOverride = directory
+        self.fileManager = fileManager
+        self.logger = logger
+    }
+
+    /// playhead-jncn: lazy first-use bootstrap. Resolves the on-disk
+    /// directory (Application Support lookup) and creates it. Idempotent.
+    /// Production callers `await store.migrate()` from
+    /// `PlayheadRuntime`'s deferred init Task so the heavy work runs
+    /// off-main; tests that exercise `storeAttachment` directly hit the
+    /// same path lazily through `ensureDirectoryExists()`.
+    func migrate() {
+        _ = resolveDirectoryLocked()
+        try? ensureDirectoryExists()
+    }
+
+    /// Resolve the on-disk directory URL. First call resolves
+    /// Application Support; subsequent calls return the cached URL.
+    private func resolveDirectoryLocked() -> URL {
+        if let resolved = resolvedDirectory { return resolved }
+        let url: URL
+        if let override = directoryOverride {
+            url = override
         } else {
             let base = (try? fileManager.url(
                 for: .applicationSupportDirectory,
@@ -76,10 +112,10 @@ actor FoundationModelsFeedbackStore {
                 appropriateFor: nil,
                 create: true
             )) ?? fileManager.temporaryDirectory
-            self.directory = base.appendingPathComponent("FoundationModelsFeedback", isDirectory: true)
+            url = base.appendingPathComponent("FoundationModelsFeedback", isDirectory: true)
         }
-        self.fileManager = fileManager
-        self.logger = logger
+        resolvedDirectory = url
+        return url
     }
 
     /// Persist `data` (the return value of `LanguageModelSession.logFeedbackAttachment`)

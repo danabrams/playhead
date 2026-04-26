@@ -225,6 +225,19 @@ final class PlayheadRuntime {
     // were jointly responsible for the multi-minute launch freeze on
     // Dan's iPhone (snapshot 2026-04-25 22:42).
     //
+    // Updated by playhead-jncn (2026-04-26) — items #4, #8, #10, #15,
+    // and #17 (FoundationModelsFeedbackStore, SurfaceStatusInvariantLogger,
+    // DecisionLogger, AssetLifecycleLogger, BGTaskTelemetryLogger) are
+    // now lazy. Their inits store config only; the FileManager directory
+    // create, the JSONL handle open, and the rotation-index scan all
+    // defer to a `migrate()` (or first-use) entry point. Production
+    // wiring `await`s `migrate()` from the deferred init Task below so
+    // the work runs off-main without extending the launch-storyboard
+    // window. Source-canary tests in
+    // `PlayheadRuntimeLoggerLazinessSourceCanaryTests` enforce that
+    // each init body stays free of forbidden FileManager / FileHandle
+    // / `Data.write(to:)` tokens.
+    //
     // PlayheadRuntime.init runs synchronously from the SwiftUI App's
     // own init via `@State private var runtime = PlayheadRuntime()`, so
     // every byte of work below extends the launch-screen storyboard
@@ -248,16 +261,32 @@ final class PlayheadRuntime {
     //      + JSON decode. Single-digit ms.
     //   3. PromptRedactor.loadDefault() — Bundle resource read + regex
     //      compile. Single-digit ms.
-    //   4. FoundationModelsFeedbackStore() (DEBUG only) — FileManager
-    //      directory create.
+    //   4. FoundationModelsFeedbackStore() (DEBUG only) — since
+    //      playhead-jncn the init body stores overrides only; the
+    //      `Application Support/FoundationModelsFeedback/` lookup +
+    //      directory create are deferred to `migrate()` (run off-main
+    //      from the deferred Task below) or to first-use through
+    //      `ensureDirectoryExists()`.
     //   5. RegionShadowObserver() (DEBUG) — pure object construction.
     //   6. Phase5ProjectorObserver() (DEBUG) — pure object construction.
     //   7. PersistentUserCorrectionStore(store:) — wraps the already-
     //      open AnalysisStore handle; no I/O.
-    //   8. SurfaceStatusInvariantLogger() — FileManager directory create
-    //      and JSONL file open.
+    //   8. SurfaceStatusInvariantLogger() — since playhead-jncn the
+    //      init body stores overrides only. The `Caches/Diagnostics/`
+    //      lookup, the install-ID salt load, the eviction sweep, and
+    //      the per-session JSONL file open are all deferred to
+    //      `migrate()` (run off-main from the deferred Task) or to
+    //      first-write through `ensureSessionFileLocked()`. The
+    //      synchronous `hashEpisodeId(_:)` API loads the salt lazily
+    //      under the writeQueue lock so the call-site shape stays
+    //      compatible.
     //   9. SkipOrchestrator(...) — pure object construction.
-    //   10. DecisionLogger() (DEBUG) — FileManager + file open.
+    //   10. DecisionLogger() (DEBUG) — since playhead-jncn the init
+    //       body stores overrides only. The Documents lookup, the
+    //       directory create, and the rotation-index scan
+    //       (`scanNextRotationIndex(in:)`) are all deferred to
+    //       `migrate()` (run off-main from the deferred Task) or to
+    //       first-write through `ensureBootstrapped()`.
     //   11. AdCatalogStore(directoryURL:) — FileManager.createDirectory
     //       only. Since playhead-jndk this no longer opens SQLite or
     //       runs PRAGMAs/migration in init; the database connection,
@@ -272,9 +301,17 @@ final class PlayheadRuntime {
     //   13. DownloadManager() — URLSession config + actor wiring; no
     //       blocking I/O.
     //   14. EpisodeSurfaceStatusObserver(...) — pure object construction.
-    //   15. AssetLifecycleLogger() — FileManager + file open.
+    //   15. AssetLifecycleLogger() — since playhead-jncn the init
+    //       body stores overrides only. The Documents lookup, the
+    //       directory create, and the rotation-index scan are all
+    //       deferred to `migrate()` (run off-main from the deferred
+    //       Task) or to first-write through `ensureBootstrapped()`.
     //   16. AnalysisCoordinator(...) — pure object construction.
-    //   17. BGTaskTelemetryLogger() — FileManager + file open.
+    //   17. BGTaskTelemetryLogger() — since playhead-jncn the init
+    //       body stores overrides only. The Documents lookup, the
+    //       directory create, and the rotation-index scan are all
+    //       deferred to `migrate()` (run off-main from the deferred
+    //       Task) or to first-write through `ensureBootstrapped()`.
     //   18. BackgroundProcessingService(...) — pure object construction;
     //       BGTaskScheduler.register is a no-op until the OS calls back.
     //   19. SkipCueMaterializer(store:) — pure object construction.
@@ -300,6 +337,12 @@ final class PlayheadRuntime {
     // What's already-deferred (in the deferred init Task below):
     //   - analysisStore.migrate()
     //   - adCatalogStore.migrate() (added by playhead-jndk)
+    //   - feedbackStore?.migrate() (added by playhead-jncn, DEBUG only)
+    //   - surfaceStatusLogger.migrate() (added by playhead-jncn)
+    //   - preBuiltDecisionLogger?.migrate() (added by playhead-jncn,
+    //     DEBUG only)
+    //   - lifecycleLogger.migrate() (added by playhead-jncn)
+    //   - bgTaskTelemetry.migrate() (added by playhead-jncn)
     //   - analysisCoordinator.recoverCoverageGuardFailures()
     //   - analysisStore.pruneOrphanedScansForCurrentCohort(...)
     //   - shadowRetryObserver.start()
@@ -318,13 +361,18 @@ final class PlayheadRuntime {
     // gated by the repo's "Decision Authority" rule against unilateral
     // architectural swaps.
     //
-    // Remaining slow-path candidates (next bead): convert the
-    // FileManager/SQLite-touching loggers (#1, #4, #8, #10, #15, #17)
-    // to construct lazily on first use, mirroring the
-    // `AdCatalogStore.ensureOpen()` pattern landed by playhead-jndk.
-    // None of those are reachable from a slow `@Query` or any UI path,
-    // so the splash defense + activity skeleton above remain sufficient
-    // for the bridge period.
+    // Remaining slow-path candidates (next bead): #1 (AnalysisStore)
+    // is the last sync-FileManager/SQLite path in this init that has
+    // not been deferred. playhead-jncn took care of #4, #8, #10, #15,
+    // and #17 by mirroring the `AdCatalogStore.ensureOpen()` pattern
+    // (each logger now stores overrides only and migrates on first use
+    // / on the deferred init Task). The remaining #1 conversion is
+    // gated separately because moving the AnalysisStore handle requires
+    // every consumer (every async `await store.…` call site) to tolerate
+    // an in-flight `migrate()`. None of the remaining paths are
+    // reachable from a slow `@Query` or any UI path, so the splash
+    // defense + activity skeleton above remain sufficient for the
+    // bridge period.
     //
     // Launch-path @Query inventory:
     //   - RootView (`PlayheadApp.swift`): @Query private var podcasts:
@@ -903,7 +951,7 @@ final class PlayheadRuntime {
         // — it's now constructed before AdDetectionService and passed via
         // init, so there's no race with the first backfill/hot-path run.
 
-        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore] in
+        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, lifecycleLogger, bgTaskTelemetry] in
             // Migrate the analysis store before any component queries its tables.
             do {
                 try await analysisStore.migrate()
@@ -931,6 +979,47 @@ final class PlayheadRuntime {
                 } catch {
                     Logger(subsystem: "com.playhead", category: "Runtime")
                         .warning("AdCatalogStore deferred migrate failed — first real op will retry: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+
+            // playhead-jncn: warm the five sync-loggers off-main now that
+            // adCatalogStore.migrate has finished. Each migrate is best-
+            // effort: a failure here just defers the work to first-write
+            // through the logger's own `ensureBootstrapped()` lazy path.
+            // Order is irrelevant — each logger's bootstrap is local to
+            // its own directory.
+            //
+            // `feedbackStore` is `FoundationModelsFeedbackStore` (non-
+            // optional) in DEBUG and `FoundationModelsFeedbackStore? = nil`
+            // in release. Re-bind through an explicitly-typed optional
+            // so the same `if let` shape compiles in both configurations.
+            let optionalFeedbackStore: FoundationModelsFeedbackStore? = feedbackStore
+            if let store = optionalFeedbackStore {
+                await store.migrate()
+            }
+            await surfaceStatusLogger.migrate()
+            if let decisionLogger = preBuiltDecisionLogger as? DecisionLogger {
+                do {
+                    try await decisionLogger.migrate()
+                } catch {
+                    Logger(subsystem: "com.playhead", category: "Runtime")
+                        .warning("DecisionLogger deferred migrate failed — first record will retry: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+            if let assetLifecycleLogger = lifecycleLogger as? AssetLifecycleLogger {
+                do {
+                    try await assetLifecycleLogger.migrate()
+                } catch {
+                    Logger(subsystem: "com.playhead", category: "Runtime")
+                        .warning("AssetLifecycleLogger deferred migrate failed — first record will retry: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+            if let bgLogger = bgTaskTelemetry as? BGTaskTelemetryLogger {
+                do {
+                    try await bgLogger.migrate()
+                } catch {
+                    Logger(subsystem: "com.playhead", category: "Runtime")
+                        .warning("BGTaskTelemetryLogger deferred migrate failed — first record will retry: \(error.localizedDescription, privacy: .public)")
                 }
             }
 
