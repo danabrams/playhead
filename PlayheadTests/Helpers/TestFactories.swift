@@ -81,7 +81,9 @@ func makeAnalysisJob(
     leaseExpiresAt: Double? = nil,
     lastErrorCode: String? = nil,
     createdAt: Double = Date().timeIntervalSince1970,
-    updatedAt: Double = Date().timeIntervalSince1970
+    updatedAt: Double = Date().timeIntervalSince1970,
+    generationID: String = "",
+    schedulerEpoch: Int = 0
 ) -> AnalysisJob {
     let resolvedWorkKey = workKey ?? AnalysisJob.computeWorkKey(
         fingerprint: sourceFingerprint,
@@ -109,7 +111,9 @@ func makeAnalysisJob(
         leaseExpiresAt: leaseExpiresAt,
         lastErrorCode: lastErrorCode,
         createdAt: createdAt,
-        updatedAt: updatedAt
+        updatedAt: updatedAt,
+        generationID: generationID,
+        schedulerEpoch: schedulerEpoch
     )
 }
 

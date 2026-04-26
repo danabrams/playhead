@@ -4924,6 +4924,94 @@ actor AnalysisStore {
         return results
     }
 
+    /// playhead-btwk: returns rows that are in an active analysis-jobs state
+    /// (`running`, `paused`, `backfill`) and whose `schedulerEpoch` predates
+    /// the caller's `currentEpoch`, with no live lease (the lease slot is
+    /// either NULL or already expired).
+    ///
+    /// Stranding shape: a fresh build replaces an older one mid-flight. The
+    /// prior process's rows survive at `state='running'` (or `paused`, or —
+    /// defensively — `backfill`) but their owner is dead. `recoverExpiredLeases`
+    /// only catches rows whose lease is still set-but-expired; cleanly-paused
+    /// rows have no lease at all and slip past it. `fetchNextEligibleJob` only
+    /// dispatches `queued`/`paused`/`failed`, so a `running` row stays
+    /// invisible. This fetch backs the additive sweep that flips them to
+    /// `queued` so the scheduler can reclaim the work.
+    ///
+    /// Live in-flight rows in the current session are excluded by two clauses:
+    ///   1. `schedulerEpoch < ?` — the current session's lease acquisitions
+    ///      stamp the latest `_meta.scheduler_epoch` value, so an active row
+    ///      from this process always equals (never less than) `currentEpoch`.
+    ///   2. `(leaseOwner IS NULL OR leaseExpiresAt < ?)` — a live worker
+    ///      holds an unexpired lease; the row is its and the sweep cannot yank
+    ///      it. Rows whose lease has expired are recovered (the sweep is
+    ///      additive against `recoverExpiredLeases`, never destructive).
+    ///
+    /// `state='backfill'` is included defensively. The current `analysis_jobs`
+    /// state machine never writes that value (it is a `SessionState` on
+    /// `analysis_assets`), but the bead's spec lists it explicitly so any
+    /// future writer of that state — or a hand-edited DB — does not strand
+    /// the row.
+    func fetchStrandedActiveJobs(now: TimeInterval, currentEpoch: Int) throws -> [AnalysisJob] {
+        let sql = """
+            SELECT * FROM analysis_jobs
+            WHERE state IN ('running', 'paused', 'backfill')
+              AND schedulerEpoch < ?
+              AND (leaseOwner IS NULL OR leaseExpiresAt < ?)
+            ORDER BY priority DESC, createdAt ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, currentEpoch)
+        bind(stmt, 2, now)
+        var results: [AnalysisJob] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(readJob(stmt))
+        }
+        return results
+    }
+
+    /// playhead-btwk: flips a stranded row to `queued`, clears any residual
+    /// lease, and stamps the row with the caller-supplied epoch so a later
+    /// sweep does not see it as stranded again.
+    ///
+    /// Coverage fields (`featureCoverageSec`, `transcriptCoverageSec`,
+    /// `cueCoverageSec`) and `attemptCount` are intentionally untouched —
+    /// the sweep is meant to *resume* progress from the prior session, not
+    /// restart from zero or penalize the row for an outage that wasn't its
+    /// fault. `lastErrorCode` is cleared because any error code attached to
+    /// the prior session is no longer informative for the new run.
+    /// `nextEligibleAt` is cleared so the row is immediately dispatchable —
+    /// any backoff window that may have been set by the prior session is
+    /// stale by the time the row is being recovered (the prior process is
+    /// gone), and leaving a future `nextEligibleAt` in place would defeat
+    /// the entire point of this recovery (the row would stay invisible to
+    /// the dispatcher until the timer expired, exactly the symptom this
+    /// sweep exists to fix).
+    func recoverStrandedActiveJob(
+        jobId: String,
+        newSchedulerEpoch: Int,
+        now: Double
+    ) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET state = 'queued',
+                leaseOwner = NULL,
+                leaseExpiresAt = NULL,
+                lastErrorCode = NULL,
+                nextEligibleAt = NULL,
+                schedulerEpoch = ?,
+                updatedAt = ?
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, newSchedulerEpoch)
+        bind(stmt, 2, now)
+        bind(stmt, 3, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
     func deleteOldJobs(olderThan: TimeInterval, inStates: [String]) throws -> Int {
         guard !inStates.isEmpty else { return 0 }
         let placeholders = inStates.map { _ in "?" }.joined(separator: ", ")
