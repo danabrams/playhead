@@ -173,7 +173,13 @@ final class PlayheadRuntimeInitLaunchPathSourceCanaryTests: XCTestCase {
     /// fragment that does NOT itself contain `try` (which would mean
     /// we're spanning two unrelated `try` statements). This keeps the
     /// canary tight while staying whitespace-tolerant.
-    private static let tryWritePattern = #"\btry[!?]?\s+[^;{}\n]+?\.write\s*\("#
+    ///
+    /// Newlines are intentionally **allowed** in the gap between
+    /// `try` and `.write(` — a swift-format reflow that splits the
+    /// chain across lines (e.g. `try someValue\n    .write(to: …)`)
+    /// must still match. Statement separators (`;`, `{`, `}`) remain
+    /// excluded so we don't bridge two unrelated `try` statements.
+    private static let tryWritePattern = #"\btry[!?]?\s+[^;{}]+?\.write\s*\("#
 
     /// `SystemLanguageModel(` — direct construction of the iOS-26
     /// FoundationModels system model. This is the call that triggered
