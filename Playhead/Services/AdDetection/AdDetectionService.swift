@@ -2308,7 +2308,23 @@ actor AdDetectionService {
     }
 
     /// Build acoustic ledger entries from FeatureWindows in the span's time range.
-    private func buildAcousticLedgerEntries(
+    ///
+    /// `.acoustic` captures the audio-energy break (RMS-drop) signal at
+    /// span boundaries. MusicBed is captured separately by
+    /// `MusicBedLedgerEvaluator`'s `.musicBed` entry. Both can co-emit
+    /// on the same span when both signals are present, contributing as
+    /// physically independent evidence kinds (boundary energy shift vs.
+    /// sustained interior music coverage).
+    ///
+    /// playhead-sqhj history: a 2026-04-26 follow-up to gtt9.4 briefly
+    /// fused music-bed coverage into this method's combined strength.
+    /// Cross-review caught that the music-bed signal already reaches
+    /// production via `MusicBedLedgerEvaluator`, so emitting `.acoustic`
+    /// on a music-bed-only span double-counted the same physical
+    /// evidence into the quorum gate's `distinctKinds.count`. The fused
+    /// path was reverted; `.acoustic` once again fires only when
+    /// `breakStrength > 0`.
+    func buildAcousticLedgerEntries(
         span: DecodedSpan,
         featureWindows: [FeatureWindow],
         fusionConfig: FusionWeightConfig

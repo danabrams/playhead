@@ -63,7 +63,22 @@ struct MetadataActivationConfig: Sendable, Equatable {
 
     // MARK: - Defaults
 
-    /// Production default: all consumption points disabled pending counterfactual evaluation.
+    /// Production default: master `counterfactualGateOpen` is open, but
+    /// every per-gate flag below it remains off. The master gate is the
+    /// `(gateOpen && enabled)` short-circuit that the `is*Active`
+    /// computed properties use; with the gate closed, NO per-gate flag
+    /// can ever take effect regardless of how it's tuned.
+    ///
+    /// playhead-sqhj (2026-04-26 follow-up to gtt9.4): the spike found
+    /// that `counterfactualGateOpen=false` was a master kill on every
+    /// NARL metadata-activation knob. Flipping the master open allows
+    /// downstream gate-tuning beads (priorShift band, lexical
+    /// injection trust floor, FM seeded-region scheduling) to actually
+    /// land effects on the corpus. The per-gate flags below remain
+    /// off — flipping the master is a behaviour change ONLY for callers
+    /// that already enable a per-gate flag (today: tests using
+    /// `.allEnabled` and the DEBUG override path). Production behaviour
+    /// is unchanged until a future bead also flips a per-gate flag.
     static let `default` = MetadataActivationConfig(
         lexicalInjectionEnabled: false,
         lexicalInjectionMinTrust: 0.0,
@@ -74,7 +89,7 @@ struct MetadataActivationConfig: Sendable, Equatable {
         classifierBaselineMidpoint: 0.37,
         fmSchedulingEnabled: false,
         fmSchedulingMinTrust: 0.0,
-        counterfactualGateOpen: false
+        counterfactualGateOpen: true
     )
 
     /// All consumption points enabled (for testing and counterfactual-approved episodes).
