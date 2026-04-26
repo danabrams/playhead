@@ -469,9 +469,22 @@ struct CorpusExporterTests {
         // across machines. Milliseconds resolve the collision; pre-fix the
         // filename used second precision and the second file overwrote the
         // first.
+        //
+        // playhead-vnni: this test's intent is filename-precision, NOT
+        // identical-content dedup. We mutate the store between calls so the
+        // two exports have different content and both files are retained;
+        // dedup behavior is covered by `exportDeduplicatesRapidBackToBack...`
+        // below. Use an isolated memo to avoid cross-test state.
+        let memo = CorpusExportDedupMemo()
         let base = Date(timeIntervalSince1970: 1_700_000_000)
-        let a = try await CorpusExporter.export(store: store, documentsURL: docs, now: base)
-        let b = try await CorpusExporter.export(store: store, documentsURL: docs, now: base.addingTimeInterval(0.001))
+        let a = try await CorpusExporter.export(
+            store: store, documentsURL: docs, now: base, dedupMemo: memo
+        )
+        try await store.insertAsset(makeTestAsset(id: "asset-k2"))
+        let b = try await CorpusExporter.export(
+            store: store, documentsURL: docs,
+            now: base.addingTimeInterval(0.001), dedupMemo: memo
+        )
 
         #expect(a.fileURL != b.fileURL, "two exports produced the same filename: \(a.fileURL.lastPathComponent)")
         #expect(FileManager.default.fileExists(atPath: a.fileURL.path))
@@ -481,6 +494,126 @@ struct CorpusExporterTests {
         let contents = try FileManager.default.contentsOfDirectory(atPath: docs.path)
         let exports = contents.filter { $0.hasPrefix("corpus-export.") && $0.hasSuffix(".jsonl") }
         #expect(exports.count == 2, "expected 2 corpus-export files, got \(exports)")
+    }
+
+    // MARK: - vnni: idempotent emission across rapid back-to-back triggers
+
+    /// Regression for playhead-vnni. The 2026-04-25 device snapshot recorded
+    /// four byte-identical (md5 `432e1d7b362000175baa10802ba4e759`)
+    /// `corpus-export*.jsonl` files written within 1.8 seconds. Cause: the
+    /// debug-menu Button schedules a fresh `Task { … }` per tap, and the
+    /// `corpusExportInProgress` guard is set inside the function body — so
+    /// taps that arrive before the first Task body has run all enqueue and
+    /// each writes its own file with identical content.
+    ///
+    /// Fix layer: idempotency at the export sink. The exporter hashes the
+    /// streamed bytes inline; if the resulting digest matches a recent
+    /// successful export from the same `documentsURL`, the just-written
+    /// duplicate is removed and the prior file's URL is returned. Counts
+    /// reflect the current run (downstream summary UI still shows what
+    /// "would have been" exported), but only one physical file exists on
+    /// disk per content-identical trigger storm.
+    @Test("export: 4 rapid back-to-back triggers with identical store state produce exactly 1 corpus-export file")
+    func exportDeduplicatesRapidBackToBackTriggers() async throws {
+        let store = try await makeTestStore()
+        let docs = try makeTempDir(prefix: "CorpusExport-vnni-dedupe")
+        try await store.insertAsset(makeTestAsset(id: "asset-storm"))
+
+        // Use an isolated dedup memo so this test doesn't leak state across
+        // suite runs and doesn't observe state from other tests.
+        let memo = CorpusExportDedupMemo()
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+
+        var results: [CorpusExportResult] = []
+        for tick in 0..<4 {
+            let stamp = base.addingTimeInterval(0.6 * Double(tick))  // ~600ms apart, mirrors the device snapshot cadence
+            let r = try await CorpusExporter.export(
+                store: store,
+                documentsURL: docs,
+                now: stamp,
+                dedupMemo: memo
+            )
+            results.append(r)
+        }
+
+        // Only one physical file on disk — the storm collapsed.
+        let contents = try FileManager.default.contentsOfDirectory(atPath: docs.path)
+        let exportFiles = contents.filter { $0.hasPrefix("corpus-export.") && $0.hasSuffix(".jsonl") }
+        #expect(exportFiles.count == 1,
+                "expected 1 corpus-export file after 4 identical-content triggers, got \(exportFiles)")
+
+        // All 4 results must point at the same file URL — the first export's
+        // file is preserved, subsequent calls redirect to it.
+        let urls = Set(results.map { $0.fileURL })
+        #expect(urls.count == 1,
+                "all results must share one fileURL, got \(urls.map { $0.lastPathComponent })")
+        #expect(results.first?.fileURL == results.last?.fileURL)
+    }
+
+    /// Sibling proof: when the underlying content has *changed* between
+    /// triggers (a real user action that should produce a new export), the
+    /// dedup memo does NOT collapse the new file. This guards against the
+    /// "fix overshoots and now legit re-exports vanish" failure mode.
+    @Test("export: a second trigger with new content writes a distinct file (dedup must not eat real changes)")
+    func exportDoesNotDeduplicateWhenContentChanged() async throws {
+        let store = try await makeTestStore()
+        let docs = try makeTempDir(prefix: "CorpusExport-vnni-distinct")
+        try await store.insertAsset(makeTestAsset(id: "asset-first"))
+
+        let memo = CorpusExportDedupMemo()
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let first = try await CorpusExporter.export(
+            store: store,
+            documentsURL: docs,
+            now: base,
+            dedupMemo: memo
+        )
+
+        // Mutate the store between calls so the export bytes differ.
+        try await store.insertAsset(makeTestAsset(id: "asset-second"))
+        let second = try await CorpusExporter.export(
+            store: store,
+            documentsURL: docs,
+            now: base.addingTimeInterval(0.5),
+            dedupMemo: memo
+        )
+
+        #expect(first.fileURL != second.fileURL,
+                "different content within the dedup window must still produce a new file")
+        let contents = try FileManager.default.contentsOfDirectory(atPath: docs.path)
+        let exportFiles = contents.filter { $0.hasPrefix("corpus-export.") && $0.hasSuffix(".jsonl") }
+        #expect(exportFiles.count == 2)
+    }
+
+    /// Sibling proof: the dedup window is bounded. After it lapses, an
+    /// identical-content export still writes a fresh file — the memo is
+    /// for "near-simultaneous storm collapse," not "permanent suppression."
+    @Test("export: identical content past the dedup window writes a new file")
+    func exportRewritesIdenticalContentPastWindow() async throws {
+        let store = try await makeTestStore()
+        let docs = try makeTempDir(prefix: "CorpusExport-vnni-window")
+        try await store.insertAsset(makeTestAsset(id: "asset-w"))
+
+        let memo = CorpusExportDedupMemo()
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let first = try await CorpusExporter.export(
+            store: store,
+            documentsURL: docs,
+            now: base,
+            dedupMemo: memo,
+            dedupWindow: 5.0
+        )
+        // 6s later (past 5s window) — must NOT collapse onto the prior file.
+        let second = try await CorpusExporter.export(
+            store: store,
+            documentsURL: docs,
+            now: base.addingTimeInterval(6.0),
+            dedupMemo: memo,
+            dedupWindow: 5.0
+        )
+
+        #expect(first.fileURL != second.fileURL,
+                "identical content past the dedup window must produce a new file")
     }
 
     // MARK: - G3: anchorProvenance round-trip
