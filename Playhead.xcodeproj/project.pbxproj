@@ -455,6 +455,7 @@
 		B2B9C2EA0D55FA1670620A5D /* CorpusAnnotationTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4F834AF5018C5ACAF7F32CE /* CorpusAnnotationTypes.swift */; };
 		B2D8BBFA2E579B749E1B27B1 /* SpectralShift.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F19B235A4BA456A8E4C9272 /* SpectralShift.swift */; };
 		B2ECE49107E92780BABA30B8 /* PlayheadRuntimeLoggerLazinessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E9D64089FF0225D3FF0ABFE /* PlayheadRuntimeLoggerLazinessTests.swift */; };
+		FAE8A7F3AEB84415BD78D6D4 /* SwiftSourceInspector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16EF131E633D46548BE16C0B /* SwiftSourceInspector.swift */; };
 		B2FD0A86943C48E8551B59D3 /* BenchmarkBaselines.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80056D545B2231ED833673C /* BenchmarkBaselines.swift */; };
 		B306F36C9E8FE12418C7B5DA /* EVIScorerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EC1B68D77BE7F19A246AC36 /* EVIScorerTests.swift */; };
 		B30C6CEFFFBF864A1BAD7CAD /* EpisodeDurationPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AF2121B8F286635F2BB8BA9 /* EpisodeDurationPersistenceTests.swift */; };
@@ -985,6 +986,7 @@
 		7E7E3CDA43BEB521787CA57A /* PlayheadFMSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayheadFMSmokeTests.swift; sourceTree = "<group>"; };
 		7E812F678C71CCA324F4293F /* FrozenTrace-Conan-ep2.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "FrozenTrace-Conan-ep2.json"; sourceTree = "<group>"; };
 		7E9D64089FF0225D3FF0ABFE /* PlayheadRuntimeLoggerLazinessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayheadRuntimeLoggerLazinessTests.swift; sourceTree = "<group>"; };
+		16EF131E633D46548BE16C0B /* SwiftSourceInspector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftSourceInspector.swift; sourceTree = "<group>"; };
 		7EC7C59A5705E7C533B2B0E7 /* FIXTURES_LICENSING.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = FIXTURES_LICENSING.md; sourceTree = "<group>"; };
 		7ED471E586517339EA621BC2 /* SpeedSelectorCycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeedSelectorCycleTests.swift; sourceTree = "<group>"; };
 		7F13D5AB59788A6C37A7224E /* AnalysisJobStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisJobStoreTests.swift; sourceTree = "<group>"; };
@@ -1562,6 +1564,7 @@
 			isa = PBXGroup;
 			children = (
 				1E32DBCCC20CA5E4785411D9 /* Diagnostics */,
+				16EF131E633D46548BE16C0B /* SwiftSourceInspector.swift */,
 			);
 			path = Support;
 			sourceTree = "<group>";
@@ -3328,6 +3331,7 @@
 				67631F8E0DCE0ECD6D2B382B /* PlayheadFMSmokeTests.swift in Sources */,
 				CA72A22368BE90FC946A89E4 /* PlayheadRuntimeCandidateWindowCascadeTests.swift in Sources */,
 				B2ECE49107E92780BABA30B8 /* PlayheadRuntimeLoggerLazinessTests.swift in Sources */,
+				FAE8A7F3AEB84415BD78D6D4 /* SwiftSourceInspector.swift in Sources */,
 				CE89A01E0BE2A129AC147B7E /* PlayheadRuntimeNoteCommittedPlayheadTests.swift in Sources */,
 				4AA0A304CEAC94681BF0D296 /* PodcastFeedParserChaptersTests.swift in Sources */,
 				C61D43644B0878C9F7390CD2 /* PodcastPlannerStateTests.swift in Sources */,
