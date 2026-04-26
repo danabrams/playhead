@@ -1651,8 +1651,13 @@ final class PlayheadRuntime {
     /// context through because the SwiftData container is owned by the
     /// app's environment, not the runtime.
     func makeActivitySnapshotProvider(
-        modelContext: ModelContext
+        modelContainer: ModelContainer
     ) -> LiveActivitySnapshotProvider {
+        // playhead-hkn1: provider takes the `ModelContainer` (Sendable)
+        // rather than a main-actor `ModelContext`, so its `loadInputs()`
+        // can construct a fresh off-main `ModelContext` per call. This
+        // is what unblocks the Activity-screen UI on libraries with
+        // 50+ episodes (the pre-hkn1 path froze the UI for seconds).
         LiveActivitySnapshotProvider(
             store: analysisStore,
             capabilitySnapshotProvider: { [capabilitiesService] in
@@ -1662,7 +1667,7 @@ final class PlayheadRuntime {
             runningEpisodeIdProvider: { [analysisWorkScheduler] in
                 await analysisWorkScheduler.currentlyRunningEpisodeId()
             },
-            modelContext: modelContext
+            modelContainer: modelContainer
         )
     }
 

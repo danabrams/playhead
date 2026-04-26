@@ -45,8 +45,13 @@ struct ContentView: View {
             tabRoot {
                 ActivityView(
                     inputProvider: { [runtime, modelContext] in
+                        // playhead-hkn1: provider runs `loadInputs()`
+                        // off-main from a fresh `ModelContext` it
+                        // builds out of the container. We pass the
+                        // container (Sendable) rather than the view's
+                        // main-actor `modelContext`.
                         let provider = runtime.makeActivitySnapshotProvider(
-                            modelContext: modelContext
+                            modelContainer: modelContext.container
                         )
                         return await provider.loadInputs()
                     },
