@@ -63,6 +63,18 @@ struct ActivityView: View {
         )
     }
 
+    /// playhead-5nwy: skeleton-promotion threshold. If the first inputs
+    /// fetch has not resolved within this window the View renders a
+    /// neutral skeleton row instead of an empty list, so a slow store
+    /// read never looks like a frozen app.
+    static let skeletonPromotionDelay: TimeInterval = 0.25
+
+    /// playhead-5nwy: tracked separately from `viewModel.loadState`
+    /// because the promotion is a presentation concern (the VM knows
+    /// it's loading; only the View knows whether enough time has
+    /// elapsed to promote that into a visible skeleton).
+    @State private var showSkeleton: Bool = false
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -76,10 +88,14 @@ struct ActivityView: View {
                 // sections still read as bold-titled groups inside the
                 // app's dark surface.
                 List {
-                    nowSection
-                    upNextSection
-                    pausedSection
-                    recentlyFinishedSection
+                    if showSkeleton && viewModel.loadState != .loaded {
+                        skeletonSection
+                    } else {
+                        nowSection
+                        upNextSection
+                        pausedSection
+                        recentlyFinishedSection
+                    }
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
@@ -93,6 +109,8 @@ struct ActivityView: View {
         }
         .task {
             // Initial load.
+            viewModel.beginLoad()
+            await scheduleSkeletonPromotion()
             await refresh()
         }
         .onReceive(
@@ -107,12 +125,46 @@ struct ActivityView: View {
     private func refresh() async {
         let inputs = await inputProvider()
         viewModel.refresh(from: inputs)
+        showSkeleton = false
+    }
+
+    /// Spawn a delayed flip into the skeleton state. The timer races
+    /// the first `inputProvider()` call: if inputs arrive first the
+    /// flip is a no-op (`refresh()` clears `showSkeleton`); if the
+    /// store read stalls past the threshold the user sees a neutral
+    /// skeleton instead of an empty list.
+    private func scheduleSkeletonPromotion() async {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(Self.skeletonPromotionDelay * 1_000_000_000))
+            if viewModel.loadState != .loaded {
+                showSkeleton = true
+            }
+        }
     }
 }
 
 // MARK: - Sections
 
 private extension ActivityView {
+
+    /// playhead-5nwy: neutral placeholder shown while the initial inputs
+    /// fetch has been pending past the promotion threshold. Shape
+    /// mimics a row so the layout doesn't reflow when real data lands;
+    /// no spinner — a spinning indicator is the visual equivalent of
+    /// "frozen" and is exactly the impression we're defending against.
+    var skeletonSection: some View {
+        Section {
+            Text("Catching up\u{2026}")
+                .font(AppTypography.body)
+                .foregroundStyle(AppColors.textSecondary)
+                .accessibilityIdentifier("ActivityView.skeleton")
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+                .padding(.vertical, Spacing.xs)
+        } header: {
+            sectionHeader("Now")
+        }
+    }
 
     var nowSection: some View {
         Section {
