@@ -88,6 +88,54 @@ struct MetadataActivationConfigTests {
         let config = MetadataActivationConfig.default
         #expect(config.classifierBaselineMidpoint == 0.37)
     }
+
+    // MARK: - playhead-sqhj activation default pin
+    //
+    // The 2026-04-24 spike under gtt9.4 documented that
+    // `counterfactualGateOpen=false` was a master kill on every NARL
+    // metadata-activation knob — every per-gate flag (`lexicalInjectionEnabled`,
+    // `classifierPriorShiftEnabled`, `fmSchedulingEnabled`) goes through
+    // `(gateOpen && enabled)` in the corresponding `is*Active` computed
+    // property, so closing the master made all the per-gate tuning
+    // inert regardless of how it was set.
+    //
+    // The fix in playhead-sqhj is to flip the master open by default
+    // while leaving every per-gate flag off. That way:
+    //   - net production activation behaviour is unchanged today (the
+    //     per-gate flags are still false, so `is*Active` still returns
+    //     false everywhere);
+    //   - downstream gate-tuning beads in the gtt9 epic can flip a
+    //     single per-gate flag and immediately see effects, instead of
+    //     having to ALSO remember to flip the master.
+    //
+    // These two pins lock that posture in place. Future changes to the
+    // default must edit them deliberately so the activation default
+    // doesn't drift back to a master-killed state by accident.
+
+    @Test("Default master gate is OPEN (playhead-sqhj)")
+    func defaultMasterGateOpen() {
+        #expect(MetadataActivationConfig.default.counterfactualGateOpen == true,
+                "Master `counterfactualGateOpen` must default to true so per-gate tuning can take effect; flipping this back to false silently kills every NARL activation knob.")
+    }
+
+    @Test("Default per-gate flags remain OFF (playhead-sqhj)")
+    func defaultPerGateFlagsOff() {
+        // Net production behaviour is unchanged after sqhj: each
+        // `is*Active` is still false because the per-gate flags are
+        // still false. Pin all three so any change to a per-gate flag
+        // is intentional.
+        let config = MetadataActivationConfig.default
+        #expect(config.lexicalInjectionEnabled == false,
+                "lexicalInjectionEnabled must stay off in .default; flip in a dedicated bead with corpus delta")
+        #expect(config.classifierPriorShiftEnabled == false,
+                "classifierPriorShiftEnabled must stay off in .default; flip in a dedicated bead with corpus delta")
+        #expect(config.fmSchedulingEnabled == false,
+                "fmSchedulingEnabled must stay off in .default; flip in a dedicated bead with corpus delta")
+        // Sanity: net activation is still inert.
+        #expect(!config.isLexicalInjectionActive)
+        #expect(!config.isClassifierPriorShiftActive)
+        #expect(!config.isFMSchedulingActive)
+    }
 }
 
 // MARK: - MetadataLexiconInjector

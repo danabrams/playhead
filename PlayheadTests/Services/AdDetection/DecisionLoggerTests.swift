@@ -64,7 +64,9 @@ struct DecisionLogEntryCodableTests {
         #expect(snap.classifierPriorShiftMinTrust == 0.08)
 
         let defSnap = DecisionLogEntry.ActivationConfigSnapshot(.default)
-        #expect(defSnap.counterfactualGateOpen == false)
+        // playhead-sqhj: master gate is open in `.default`; per-gate
+        // flags remain off so net activation behaviour is unchanged.
+        #expect(defSnap.counterfactualGateOpen == true)
         #expect(defSnap.lexicalInjectionEnabled == false)
     }
 
@@ -421,7 +423,8 @@ struct DecisionLoggerPipelineTests {
         let service = makeService(store: analysisStore)
         await service.setDecisionLogger(spy)
 
-        // Default resolution: gate closed.
+        // Default resolution: master gate is open (playhead-sqhj),
+        // per-gate flags off — net activation unchanged.
         try await service.runBackfill(
             chunks: makeAdChunks(assetId: assetId),
             analysisAssetId: assetId,
@@ -434,8 +437,8 @@ struct DecisionLoggerPipelineTests {
             Issue.record("Expected at least one entry")
             return
         }
-        #expect(first.activationConfig.counterfactualGateOpen == false,
-                "Without override, snapshot must report default (gate closed).")
+        #expect(first.activationConfig.counterfactualGateOpen == true,
+                "Without override, snapshot must report default (master gate open per sqhj).")
     }
 
     @Test("runHotPath emits a DecisionLogEntry for every classifier result")
