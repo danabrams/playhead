@@ -34,6 +34,11 @@ final class PlayheadRuntime {
     let skipOrchestrator: SkipOrchestrator
     let analysisCoordinator: AnalysisCoordinator
     let backgroundProcessingService: BackgroundProcessingService
+    /// playhead-shpy: BG-task lifecycle telemetry logger. Exposed so the
+    /// App-scope wiring in `PlayheadApp.task` can thread it into the
+    /// `BackgroundFeedRefreshService` it constructs separately. Test
+    /// hosts and preview runtimes get a no-op instance.
+    let bgTaskTelemetryLogger: any BGTaskTelemetryLogging
     let downloadManager: DownloadManager
     let analysisJobRunner: AnalysisJobRunner
     let analysisWorkScheduler: AnalysisWorkScheduler
@@ -577,9 +582,25 @@ final class PlayheadRuntime {
             surfaceStatusObserver: surfaceStatusObserver,
             lifecycleLogger: lifecycleLogger
         )
+        // playhead-shpy: shared BG-task lifecycle telemetry logger.
+        // Constructed once and threaded into every actor that calls
+        // BGTaskScheduler.submit / sets up a launch handler. A
+        // FileManager failure (e.g. read-only Documents in the test
+        // host) demotes to the no-op logger so the service path stays
+        // alive — observability is additive, never load-bearing.
+        let bgTaskTelemetry: any BGTaskTelemetryLogging
+        do {
+            bgTaskTelemetry = try BGTaskTelemetryLogger()
+        } catch {
+            Logger(subsystem: "com.playhead", category: "Runtime")
+                .warning("BGTaskTelemetryLogger init failed — telemetry disabled: \(error.localizedDescription, privacy: .public)")
+            bgTaskTelemetry = NoOpBGTaskTelemetryLogger()
+        }
+        self.bgTaskTelemetryLogger = bgTaskTelemetry
         self.backgroundProcessingService = BackgroundProcessingService(
             coordinator: analysisCoordinator,
-            capabilitiesService: capabilitiesService
+            capabilitiesService: capabilitiesService,
+            bgTelemetry: bgTaskTelemetry
         )
 
         let cueMaterializer = SkipCueMaterializer(store: analysisStore)

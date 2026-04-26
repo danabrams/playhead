@@ -159,7 +159,12 @@ struct PlayheadApp: App {
                         // even when the user never presses play.
                         backfillScheduler: ProductionBackfillScheduler(
                             backgroundProcessingService: runtime.backgroundProcessingService
-                        )
+                        ),
+                        // playhead-shpy: share the BPS-owned telemetry
+                        // logger so feed-refresh and backfill events
+                        // land in the same `bg-task-log.jsonl` and a
+                        // jq query can correlate by ts.
+                        bgTelemetry: runtime.bgTaskTelemetryLogger
                     )
                     BackgroundFeedRefreshService.attachSharedService(feedRefreshService)
                     feedRefreshService.start()
@@ -217,6 +222,23 @@ struct PlayheadApp: App {
                 await runtime.analysisWorkScheduler.updateScenePhase(mappedPhase)
             }
 
+            // playhead-shpy: stamp the phase transition into the
+            // BG-task telemetry stream so jq queries can correlate
+            // `submit` / `start` / `complete` rows against the
+            // foreground/background boundary that immediately preceded
+            // them. The from→to pair is captured here (not from
+            // UIApplication.applicationState) because SwiftUI's
+            // `scenePhase` is the canonical signal — the UIKit phase
+            // can lag by one runloop tick around the transition.
+            let bgTelemetry = runtime.bgTaskTelemetryLogger
+            let oldPhaseString = Self.scenePhaseString(oldPhase)
+            let newPhaseString = Self.scenePhaseString(newPhase)
+            Task {
+                await bgTelemetry.record(
+                    .appPhase(from: oldPhaseString, to: newPhaseString)
+                )
+            }
+
             switch newPhase {
             case .background:
                 Self.logger.info("Scene phase: background — persisting playback position")
@@ -247,6 +269,18 @@ struct PlayheadApp: App {
             @unknown default:
                 break
             }
+        }
+    }
+
+    /// playhead-shpy: stable string encoding for SwiftUI's `ScenePhase`
+    /// so the BG-task telemetry log uses a consistent vocabulary across
+    /// every event regardless of which surface produced it.
+    private static func scenePhaseString(_ phase: ScenePhase) -> String {
+        switch phase {
+        case .active:     return "active"
+        case .inactive:   return "inactive"
+        case .background: return "background"
+        @unknown default: return "unknown"
         }
     }
 
