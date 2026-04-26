@@ -151,14 +151,38 @@ actor AdCatalogStore {
 
     /// Open or create the catalog database at `directoryURL`, creating
     /// the directory if needed. The file is named `ad_catalog.sqlite`.
-    /// Migration runs synchronously on init; any failure throws and the
-    /// store is not usable.
+    ///
+    /// playhead-jndk: init is now lightweight — it stores `dbURL` and
+    /// creates the parent directory but defers `sqlite3_open_v2`, PRAGMA
+    /// setup, and schema migration to the first call into a public
+    /// method. The previous synchronous-DDL-in-init path was on the main
+    /// thread of `PlayheadRuntime.init`, extending the launch-storyboard
+    /// window during cold launches with a stale WAL (424 KB observed on
+    /// the 2026-04-25 22:42 snapshot, requiring full WAL replay before
+    /// the first PRAGMA could complete). Mirrors the pattern in
+    /// `AnalysisStore.init` + `AnalysisStore.migrate()`.
+    ///
+    /// Throwing is preserved on `createDirectory` failure so callers
+    /// can detect a fundamentally broken filesystem at construction
+    /// time. Open / pragma / migration errors surface on the first
+    /// real operation through `AdCatalogStoreError`.
     init(directoryURL: URL) throws {
         try FileManager.default.createDirectory(
             at: directoryURL,
             withIntermediateDirectories: true
         )
         self.dbURL = directoryURL.appendingPathComponent("ad_catalog.sqlite")
+    }
+
+    /// playhead-jndk: lazy first-use bootstrap. Opens the database
+    /// connection (`sqlite3_open_v2`), applies WAL/foreign-key/secure-
+    /// delete PRAGMAs, and runs schema migration. Idempotent: subsequent
+    /// calls observe the already-open handle and short-circuit. All
+    /// public read/write methods call this before touching `db`, so the
+    /// expensive setup happens off the main thread, inside the first
+    /// caller's actor task.
+    private func ensureOpen() throws {
+        if db != nil { return }
 
         var handle: OpaquePointer?
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
@@ -168,17 +192,31 @@ actor AdCatalogStore {
             if let handle { sqlite3_close(handle) }
             throw AdCatalogStoreError.openFailed(msg)
         }
+
+        do {
+            // WAL for durable single-writer concurrency; FOREIGN_KEYS for
+            // future joins; SECURE_DELETE so overwritten rows don't leave
+            // fingerprint bytes lying around (legal: on-device-only mandate
+            // implies we treat these bytes as sensitive).
+            try Self.exec(handle, "PRAGMA journal_mode=WAL")
+            try Self.exec(handle, "PRAGMA foreign_keys=ON")
+            try Self.exec(handle, "PRAGMA secure_delete=ON")
+            try Self.migrate(handle: handle, logger: logger)
+        } catch {
+            sqlite3_close(handle)
+            throw error
+        }
+
         self.db = handle
+    }
 
-        // WAL for durable single-writer concurrency; FOREIGN_KEYS for
-        // future joins; SECURE_DELETE so overwritten rows don't leave
-        // fingerprint bytes lying around (legal: on-device-only mandate
-        // implies we treat these bytes as sensitive).
-        try Self.exec(handle, "PRAGMA journal_mode=WAL")
-        try Self.exec(handle, "PRAGMA foreign_keys=ON")
-        try Self.exec(handle, "PRAGMA secure_delete=ON")
-
-        try Self.migrate(handle: handle, logger: logger)
+    /// Public migration entry point. Idempotent. Production callers
+    /// (`PlayheadRuntime`) `await` this once during deferred startup so
+    /// the first hot-path query sees an already-bootstrapped store.
+    /// Tests that exercise public methods directly may skip this — every
+    /// public method calls `ensureOpen()` internally.
+    func migrate() throws {
+        try ensureOpen()
     }
 
     deinit {
@@ -221,6 +259,7 @@ actor AdCatalogStore {
     /// the same id is already present, the row is replaced (used by the
     /// rare "user re-marks the exact same span" path).
     func insert(entry: CatalogEntry) throws {
+        try ensureOpen()
         guard let db else {
             throw AdCatalogStoreError.insertFailed("database closed")
         }
@@ -313,6 +352,7 @@ actor AdCatalogStore {
 
     /// Return all catalog entries (diagnostic / test use).
     func allEntries() throws -> [CatalogEntry] {
+        try ensureOpen()
         guard db != nil else { throw AdCatalogStoreError.queryFailed("database closed") }
         let sql = """
         SELECT id, created_at, show_id, episode_position, duration_sec,
@@ -333,6 +373,16 @@ actor AdCatalogStore {
         show: String?,
         similarityFloor: Float = AdCatalogStore.defaultSimilarityFloor
     ) -> [CatalogMatch] {
+        // playhead-jndk: lazy first-use bootstrap. Failures here are
+        // logged and swallowed so the hot-path detector keeps running
+        // without catalog signal — same defensive posture the prior
+        // `guard db != nil` had.
+        do {
+            try ensureOpen()
+        } catch {
+            logger.error("matches: ensureOpen failed: \(String(describing: error), privacy: .public)")
+            return []
+        }
         guard db != nil else { return [] }
         if fingerprint.isZero { return [] }
 
@@ -388,6 +438,7 @@ actor AdCatalogStore {
     /// Number of rows currently in the catalog. Useful for telemetry /
     /// firing-rate diagnostics.
     func count() throws -> Int {
+        try ensureOpen()
         guard let db else { throw AdCatalogStoreError.queryFailed("database closed") }
         let sql = "SELECT COUNT(*) FROM ad_catalog_entries"
         var stmt: OpaquePointer?
@@ -402,6 +453,7 @@ actor AdCatalogStore {
     /// Delete all entries. Test helper (exposed intentionally so the
     /// production app can also offer a "reset catalog" debug action).
     func clear() throws {
+        try ensureOpen()
         guard let db else { throw AdCatalogStoreError.queryFailed("database closed") }
         try Self.exec(db, "DELETE FROM ad_catalog_entries")
     }
