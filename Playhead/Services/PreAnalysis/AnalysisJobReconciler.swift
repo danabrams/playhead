@@ -9,6 +9,14 @@ import OSLog
 
 struct ReconciliationReport: Sendable {
     let expiredLeasesRecovered: Int
+    /// playhead-btwk: rows in active analysis-jobs states (`running`,
+    /// `paused`, `backfill`) whose `schedulerEpoch` predates the current
+    /// session were flipped back to `queued` so the scheduler can dispatch
+    /// them. Counted distinctly from `expiredLeasesRecovered` because the
+    /// stranding shape is different — those rows have no live lease at all
+    /// (build replacement; cleanly-paused row from a dead process), and
+    /// `recoverExpiredLeases` cannot see them.
+    let recoveredStrandedSessionJobs: Int
     let missingFilesUnblocked: Int
     let missingFilesStillBlocked: Int
     let modelsUnblocked: Int
@@ -56,7 +64,9 @@ actor AnalysisJobReconciler {
         guard !isReconciling else {
             logger.info("Reconciliation already in progress, skipping")
             return ReconciliationReport(
-                expiredLeasesRecovered: 0, missingFilesUnblocked: 0,
+                expiredLeasesRecovered: 0,
+                recoveredStrandedSessionJobs: 0,
+                missingFilesUnblocked: 0,
                 missingFilesStillBlocked: 0, modelsUnblocked: 0,
                 staleVersionsSuperseded: 0, staleVersionsReenqueued: 0,
                 completedJobsGarbageCollected: 0,
@@ -67,6 +77,14 @@ actor AnalysisJobReconciler {
         defer { isReconciling = false }
 
         let step1 = try await recoverExpiredLeases()
+        // playhead-btwk: must run AFTER `recoverExpiredLeases` so that the
+        // expired-lease sweep gets first dibs on rows it can claim (and
+        // increments `attemptCount` along the way) — and BEFORE
+        // `unblockMissingFiles` so that `state='blocked:missingFile'` rows
+        // continue to be handled by step 3 only. The new sweep operates on
+        // disjoint state values (`running`/`paused`/`backfill`), so it
+        // cannot accidentally collide with either neighbor.
+        let stepStranded = try await recoverStrandedSessionJobs()
         let step2 = try await unblockMissingFiles()
         let step3 = try await unblockModelUnavailable()
         let step4 = try await supersedeStaleVersions()
@@ -76,6 +94,7 @@ actor AnalysisJobReconciler {
 
         let report = ReconciliationReport(
             expiredLeasesRecovered: step1,
+            recoveredStrandedSessionJobs: stepStranded,
             missingFilesUnblocked: step2.unblocked,
             missingFilesStillBlocked: step2.stillBlocked,
             modelsUnblocked: step3,
@@ -89,6 +108,7 @@ actor AnalysisJobReconciler {
         logger.info("""
         Reconciliation complete: \
         expiredLeases=\(report.expiredLeasesRecovered), \
+        strandedSessionJobs=\(report.recoveredStrandedSessionJobs), \
         missingFilesUnblocked=\(report.missingFilesUnblocked), \
         missingFilesStillBlocked=\(report.missingFilesStillBlocked), \
         modelsUnblocked=\(report.modelsUnblocked), \
@@ -137,6 +157,86 @@ actor AnalysisJobReconciler {
             logger.info("Recovered \(recoverable.count) expired lease(s)")
         }
         return recoverable.count
+    }
+
+    // MARK: - Step 1.5: Recover stranded prior-session jobs (playhead-btwk)
+
+    /// Sweeps rows that survived a prior process in an active analysis-jobs
+    /// state (`running`, `paused`, or — defensively — `backfill`) without a
+    /// live lease. Stranded rows are flipped back to `queued` so the
+    /// scheduler's `fetchNextEligibleJob` can pick them up.
+    ///
+    /// Stranding shape this catches (and that the existing reconciler steps
+    /// missed before this bead landed):
+    ///   - **Build replacement.** A fresh build replaces the running app.
+    ///     Rows that were `state='running'` in the prior process are still
+    ///     `running` after launch, but their lease — if it was set at all —
+    ///     is owned by a process that no longer exists. `recoverExpiredLeases`
+    ///     only sees rows whose lease is set-but-expired; rows whose lease was
+    ///     released cleanly during a graceful pause have `leaseOwner IS NULL`
+    ///     and slip past it. `fetchNextEligibleJob` only dispatches
+    ///     `queued`/`paused`/`failed`, so a `running` row stays invisible.
+    ///   - **Cleanly-paused row from a dead session.** `paused` rows are
+    ///     dispatch-eligible in principle, but the schedule loop has to
+    ///     actually be running to pick them up. After a build replacement
+    ///     the rows that were waiting on a tier advance never get touched —
+    ///     this sweep flips them to `queued` so they re-enter the dispatch
+    ///     queue with a clean slate.
+    ///
+    /// Why it sits between `recoverExpiredLeases` and `unblockMissingFiles`:
+    ///   - **After step 1**: step 1 is the lease-aware path and increments
+    ///     `attemptCount` to feed exponential backoff. Letting it run first
+    ///     keeps the attempt-count semantics intact for rows whose lease was
+    ///     genuinely held until the process died. The new sweep then picks
+    ///     up only the remaining "no live lease" survivors, which is the
+    ///     additive case that needs handling.
+    ///   - **Before step 2**: `unblockMissingFiles` operates on
+    ///     `state='blocked:missingFile'` only, so the order is structurally
+    ///     non-interacting. We sit ahead of it so the report counters land
+    ///     in launch order and any future per-row logging in step 2 sees a
+    ///     row set already cleaned of stranded `running` outliers.
+    ///
+    /// Coverage progress (`featureCoverageSec`, `transcriptCoverageSec`,
+    /// `cueCoverageSec`) and `attemptCount` are intentionally preserved — we
+    /// resume from where the prior session left off rather than re-running
+    /// already-completed work or penalizing the row for an outage.
+    /// `lastErrorCode` is cleared because any error code from the prior
+    /// session is no longer informative.
+    ///
+    /// Telemetry: one `logger.info` per recovered row plus a summary line.
+    /// The reconciler uses OSLog throughout (matches `recoverExpiredLeases`,
+    /// `unblockMissingFiles`, etc.), so callers diagnosing a stranded fleet
+    /// can grep `JobReconciler` in Console for `stranded_session_recovered`
+    /// markers.
+    private func recoverStrandedSessionJobs() async throws -> Int {
+        let now = Date().timeIntervalSince1970
+        let currentEpoch = (try await store.fetchSchedulerEpoch()) ?? 0
+        let stranded = try await store.fetchStrandedActiveJobs(
+            now: now,
+            currentEpoch: currentEpoch
+        )
+        guard !stranded.isEmpty else { return 0 }
+
+        for job in stranded {
+            try await store.recoverStrandedActiveJob(
+                jobId: job.jobId,
+                newSchedulerEpoch: currentEpoch,
+                now: now
+            )
+            logger.info("""
+            stranded_session_recovered \
+            jobId=\(job.jobId) \
+            episodeId=\(job.episodeId) \
+            jobType=\(job.jobType) \
+            fromState=\(job.state) \
+            priorEpoch=\(job.schedulerEpoch) \
+            currentEpoch=\(currentEpoch) \
+            featureCoverageSec=\(job.featureCoverageSec) \
+            transcriptCoverageSec=\(job.transcriptCoverageSec)
+            """)
+        }
+        logger.info("Recovered \(stranded.count) stranded prior-session job(s)")
+        return stranded.count
     }
 
     // MARK: - Step 2: Unblock missingFile jobs
