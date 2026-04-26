@@ -24,6 +24,7 @@
 
 #if DEBUG
 
+import CryptoKit
 import Foundation
 import OSLog
 
@@ -107,6 +108,70 @@ extension AnalysisStore: CorpusExportSource {
     /// is `async` so non-isolated callers can hop onto the actor.
     nonisolated func fetchPodcastProfile(podcastId: String) async throws -> PodcastProfile? {
         try await fetchProfile(podcastId: podcastId)
+    }
+}
+
+// MARK: - CorpusExportDedupMemo
+
+/// playhead-vnni: per-`documentsURL` memo of the most recent successful
+/// export's content digest, so a rapid-fire trigger storm (debug Button
+/// repeat-tapped before the first Task body sets `corpusExportInProgress
+/// = true`) collapses into a single physical file instead of N
+/// byte-identical artifacts. The 2026-04-25 device snapshot recorded 4
+/// duplicates within 1.8s — see `CorpusExporterTests.exportDeduplicates...`.
+///
+/// Keyed by the `documentsURL.path` so that two separate sinks (a debug
+/// export to Documents/ and a hypothetical eval-export to a sibling dir)
+/// don't cross-suppress. Default lifetime is process-shared via `.shared`;
+/// tests construct an isolated memo so they neither leak into nor observe
+/// state from each other.
+actor CorpusExportDedupMemo {
+    private struct Entry {
+        let digestHex: String
+        let fileURL: URL
+        let writtenAt: Date
+    }
+
+    private var entries: [String: Entry] = [:]
+
+    /// Process-shared memo for production callers. Tests create an isolated
+    /// instance via `CorpusExportDedupMemo()` to avoid cross-test pollution.
+    static let shared = CorpusExportDedupMemo()
+
+    init() {}
+
+    /// Returns the prior file URL if `digestHex` was last recorded for
+    /// `documentsURL` within `window` seconds of `now`. Otherwise `nil`.
+    func recentMatch(
+        documentsURL: URL,
+        digestHex: String,
+        window: TimeInterval,
+        now: Date
+    ) -> URL? {
+        let key = documentsURL.path
+        guard let entry = entries[key] else { return nil }
+        guard entry.digestHex == digestHex else { return nil }
+        let age = now.timeIntervalSince(entry.writtenAt)
+        guard age >= 0, age <= window else { return nil }
+        // Verify the prior file still exists; a user who manually deleted
+        // the file via Files.app should be able to re-export.
+        guard FileManager.default.fileExists(atPath: entry.fileURL.path) else {
+            entries.removeValue(forKey: key)
+            return nil
+        }
+        return entry.fileURL
+    }
+
+    /// Record a successful export so the next near-simultaneous identical
+    /// trigger can be deduplicated.
+    func record(
+        documentsURL: URL,
+        digestHex: String,
+        fileURL: URL,
+        now: Date
+    ) {
+        let key = documentsURL.path
+        entries[key] = Entry(digestHex: digestHex, fileURL: fileURL, writtenAt: now)
     }
 }
 
@@ -292,16 +357,32 @@ enum CorpusExporter {
 
     // MARK: - Export
 
+    /// Default suppression window for `dedupMemo`. 10 seconds comfortably
+    /// covers the 1.8 s storm captured in the 2026-04-25 snapshot while
+    /// staying short enough that a deliberate "export, inspect Files.app,
+    /// re-export" loop is not throttled.
+    static let defaultDedupWindow: TimeInterval = 10.0
+
     /// Perform the full export against `store`, writing into `documentsURL`
     /// as `corpus-export.<timestamp>.jsonl`. Returns a summary result.
     ///
     /// Streams records to disk via `FileHandle.write` — no Array-in-memory
     /// accumulation of the full corpus. Memory use is bounded by the largest
     /// single asset's span or correction count.
+    ///
+    /// playhead-vnni: a SHA-256 digest of the streamed bytes is computed
+    /// inline. After the file is closed, the exporter consults
+    /// `dedupMemo`: if an identical-content export to the same
+    /// `documentsURL` was recorded within `dedupWindow`, the
+    /// just-written file is removed and the prior file's URL is
+    /// returned. Counts in the result still reflect the rows the
+    /// current call observed; only the on-disk artifact is collapsed.
     static func export(
         store: some CorpusExportSource,
         documentsURL: URL,
-        now: Date = Date()
+        now: Date = Date(),
+        dedupMemo: CorpusExportDedupMemo = .shared,
+        dedupWindow: TimeInterval = defaultDedupWindow
     ) async throws -> CorpusExportResult {
         let fm = FileManager.default
         if !fm.fileExists(atPath: documentsURL.path) {
@@ -324,6 +405,13 @@ enum CorpusExporter {
                 try? fm.removeItem(at: fileURL)
             }
         }
+
+        // playhead-vnni: tee the streamed bytes into a SHA-256 digest so we
+        // can compare this export's content to the previous one in the same
+        // sink. The hasher is updated by `write(line:to:hasher:)` for every
+        // record body and trailing newline, so the final digest matches the
+        // file's contents exactly without a re-read.
+        var hasher = SHA256()
 
         var assetCount = 0
         var spanCount = 0
@@ -378,7 +466,7 @@ enum CorpusExporter {
 
             // asset record
             let assetData = try assetLine(asset, podcastId: podcastId, podcastTitle: podcastTitle)
-            try write(line: assetData, to: handle)
+            try write(line: assetData, to: handle, hasher: &hasher)
             assetCount += 1
 
             // decision (DecodedSpan) records for this asset
@@ -396,7 +484,7 @@ enum CorpusExporter {
             }
             for span in spans {
                 let spanData = try spanLine(span)
-                try write(line: spanData, to: handle)
+                try write(line: spanData, to: handle, hasher: &hasher)
                 spanCount += 1
             }
 
@@ -418,7 +506,7 @@ enum CorpusExporter {
             }
             for window in adWindows {
                 let windowData = try adWindowLine(window)
-                try write(line: windowData, to: handle)
+                try write(line: windowData, to: handle, hasher: &hasher)
                 adWindowCount += 1
             }
 
@@ -443,9 +531,42 @@ enum CorpusExporter {
                     )
                     continue
                 }
-                try write(line: data, to: handle)
+                try write(line: data, to: handle, hasher: &hasher)
                 correctionCount += 1
             }
+        }
+
+        // playhead-vnni: finalize the streamed-bytes digest and consult the
+        // dedup memo. If a same-content export landed in the same sink
+        // within `dedupWindow`, remove the just-written file and redirect
+        // the result's `fileURL` at the prior file. Close the handle now so
+        // the file's bytes are flushed before the FileManager.removeItem
+        // call. The `defer` block above will additionally try to close the
+        // handle on exit; closing twice is a harmless no-op via `try?`.
+        try? handle.close()
+        let digestHex = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        let resolvedFileURL: URL
+        if let priorURL = await dedupMemo.recentMatch(
+            documentsURL: documentsURL,
+            digestHex: digestHex,
+            window: dedupWindow,
+            now: now
+        ) {
+            // Suppress the duplicate. The defer would otherwise leave it on
+            // disk because `didSucceed = true` skips the cleanup branch.
+            try? fm.removeItem(at: fileURL)
+            logger.info(
+                "export: dedup-suppressed identical-content corpus export at \(documentsURL.path, privacy: .public) — reusing \(priorURL.lastPathComponent, privacy: .public)"
+            )
+            resolvedFileURL = priorURL
+        } else {
+            await dedupMemo.record(
+                documentsURL: documentsURL,
+                digestHex: digestHex,
+                fileURL: fileURL,
+                now: now
+            )
+            resolvedFileURL = fileURL
         }
 
         // Optional narL pairing: if decision-log.jsonl exists in the same
@@ -482,7 +603,7 @@ enum CorpusExporter {
 
         didSucceed = true
         return CorpusExportResult(
-            fileURL: fileURL,
+            fileURL: resolvedFileURL,
             assetCount: assetCount,
             spanCount: spanCount,
             correctionCount: correctionCount,
@@ -496,21 +617,29 @@ enum CorpusExporter {
 
     // MARK: - Private helpers
 
-    /// Encode a dictionary as compact JSON (no pretty-printing, no sorted keys
-    /// required — downstream tooling parses line-by-line).
+    /// Encode a dictionary as compact JSON. playhead-vnni: `.sortedKeys`
+    /// makes the byte output deterministic for a given input — Swift's
+    /// `[String: Any]` literals do not preserve insertion order and use a
+    /// per-instance randomized hash seed, so JSONSerialization without
+    /// `.sortedKeys` produces non-deterministic byte sequences across calls
+    /// in the same process. Determinism is required for the streamed-bytes
+    /// digest the dedup memo compares.
     private static func jsonLineData(from obj: [String: Any]) throws -> Data {
-        // .fragmentsAllowed is not needed here (always objects), and
-        // .withoutEscapingSlashes keeps sourceURL and fingerprint paths readable.
         return try JSONSerialization.data(
             withJSONObject: obj,
-            options: [.withoutEscapingSlashes]
+            options: [.withoutEscapingSlashes, .sortedKeys]
         )
     }
 
-    /// Write a single JSONL line (record body + LF) to the handle.
-    private static func write(line data: Data, to handle: FileHandle) throws {
+    /// Write a single JSONL line (record body + LF) to the handle. The same
+    /// bytes are folded into `hasher` so the caller can fingerprint the
+    /// stream without re-reading the file (playhead-vnni dedup).
+    private static func write(line data: Data, to handle: FileHandle, hasher: inout SHA256) throws {
         try handle.write(contentsOf: data)
-        try handle.write(contentsOf: Data([0x0A]))  // '\n'
+        hasher.update(data: data)
+        let lf = Data([0x0A])  // '\n'
+        try handle.write(contentsOf: lf)
+        hasher.update(data: lf)
     }
 }
 
