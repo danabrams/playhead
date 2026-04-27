@@ -66,7 +66,10 @@ enum AudioFileDurationProbe {
             }
             return seconds
         } catch {
-            logger.debug("probeDuration failed for \(fileURL.lastPathComponent, privacy: .public): \(String(describing: error), privacy: .public)")
+            // File exists and is local — a load(.duration) throw here is a
+            // real probe failure (not the expected nil for non-audio /
+            // missing-file paths), so surface it in default field logs.
+            logger.warning("probeDuration failed for \(fileURL.lastPathComponent, privacy: .public): \(String(describing: error), privacy: .public)")
             return nil
         }
     }

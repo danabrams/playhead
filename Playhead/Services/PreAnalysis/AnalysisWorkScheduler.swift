@@ -730,6 +730,10 @@ actor AnalysisWorkScheduler {
                         episodeDurationSec: probedDuration
                     )
                 } else {
+                    // Same potential-leak shape as `pendingEpisodeTitles`: a
+                    // racing concurrent insert could leave this entry
+                    // unconsumed. Intentional parity with the existing
+                    // pattern — `resolveAnalysisAssetId` drains both stashes.
                     pendingProbedEpisodeDurations[episodeId] = probedDuration
                 }
             } catch {

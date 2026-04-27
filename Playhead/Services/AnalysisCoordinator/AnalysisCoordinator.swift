@@ -2554,7 +2554,11 @@ actor AnalysisCoordinator {
                     episodeDurationSec: probed
                 )
                 summary.rewritten += 1
-                logger.info("Duration backfill: asset \(asset.id, privacy: .public) rewritten \(dur, privacy: .public) -> \(probed, privacy: .public)s")
+                // Log the source value as "nil" vs an actual number so the
+                // libsyn pattern (small > 0 → big) is distinguishable from
+                // genuine nil-was-rewritten entries when reading post-mortem.
+                let sourceDesc = asset.episodeDurationSec.map { "\($0)" } ?? "nil"
+                logger.info("Duration backfill: asset \(asset.id, privacy: .public) rewritten \(sourceDesc, privacy: .public) -> \(probed, privacy: .public)s")
             } catch {
                 logger.warning("Duration backfill: write failed for asset \(asset.id, privacy: .public): \(String(describing: error), privacy: .public)")
             }
