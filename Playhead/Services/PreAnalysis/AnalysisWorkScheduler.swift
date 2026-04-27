@@ -566,6 +566,20 @@ actor AnalysisWorkScheduler {
     /// it is purely best-effort and never blocks enqueue or processing.
     private var pendingEpisodeTitles: [String: String] = [:]
 
+    /// playhead-gyvb.2: stash audio-file durations probed at `enqueue(...)`
+    /// time so `resolveAnalysisAssetId` can populate `episodeDurationSec`
+    /// on the `analysis_assets` row at first insert.
+    ///
+    /// Mirrors the `pendingEpisodeTitles` shape. The probe runs once per
+    /// download against the cached file; the result is written to an
+    /// existing asset row immediately and otherwise stashed here so the
+    /// new asset row created by `resolveAnalysisAssetId` carries the
+    /// measured duration without waiting for the spool/decode pass.
+    ///
+    /// Cleared per-episode at materialization time. Best-effort: a probe
+    /// failure simply leaves the dictionary entry absent.
+    private var pendingProbedEpisodeDurations: [String: Double] = [:]
+
     init(
         store: AnalysisStore,
         jobRunner: AnalysisJobRunner,
@@ -691,6 +705,36 @@ actor AnalysisWorkScheduler {
         // until the second observation rewrites it.
         if let episodeTitle {
             pendingEpisodeTitles[episodeId] = episodeTitle
+        }
+
+        // playhead-gyvb.2: measure-on-download. Real-world incident
+        // (2026-04-27) — feed metadata `<itunes:duration>` was off by
+        // up to 13.8× on libsyn/flightcast feeds. Once the file is on
+        // disk, AVURLAsset reads its container header and tells us the
+        // truth. Per the bead: "Once we have the real runtime from the
+        // file that should be the source of truth."
+        //
+        // Best-effort:
+        //   - missing cached file (download not yet landed) → skip
+        //   - probe returns nil (non-audio, indeterminate) → skip
+        //   - probe returns a positive duration → overwrite an
+        //     existing asset row, OR stash for the lazy
+        //     `resolveAnalysisAssetId` path so the freshly-inserted
+        //     row carries the probed value at first insert.
+        if let cachedURL = await downloadManager.cachedFileURL(for: episodeId),
+           let probedDuration = await AudioFileDurationProbe.probeDuration(at: cachedURL) {
+            do {
+                if let asset = try await store.fetchAssetByEpisodeId(episodeId) {
+                    try await store.updateEpisodeDuration(
+                        id: asset.id,
+                        episodeDurationSec: probedDuration
+                    )
+                } else {
+                    pendingProbedEpisodeDurations[episodeId] = probedDuration
+                }
+            } catch {
+                logger.warning("Failed to persist probed duration for \(episodeId): \(error)")
+            }
         }
 
         wakeSchedulerLoop()
@@ -2911,6 +2955,13 @@ actor AnalysisWorkScheduler {
         // insert. The stash is cleared regardless — a missing entry simply
         // means no title was observed yet (lazy backfill on next enqueue).
         let stashedEpisodeTitle = pendingEpisodeTitles.removeValue(forKey: job.episodeId)
+        // playhead-gyvb.2: consume any stashed duration probed at
+        // `enqueue(...)` time. Same lazy-backfill semantics as the title
+        // stash — a missing entry simply means the file wasn't on disk
+        // (or wasn't an audio container) at enqueue time, in which case
+        // the column stays nil until spool / the launch-time backfill
+        // sweep heals it.
+        let stashedDuration = pendingProbedEpisodeDurations.removeValue(forKey: job.episodeId)
         let asset = AnalysisAsset(
             id: assetId,
             episodeId: job.episodeId,
@@ -2923,6 +2974,7 @@ actor AnalysisWorkScheduler {
             analysisState: "queued",
             analysisVersion: PreAnalysisConfig.analysisVersion,
             capabilitySnapshot: capabilityJSON,
+            episodeDurationSec: stashedDuration,
             episodeTitle: stashedEpisodeTitle
         )
         guard !lostOwnership else { throw CancellationError() }

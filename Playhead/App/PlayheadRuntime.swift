@@ -1072,6 +1072,20 @@ final class PlayheadRuntime {
             // recovery work.
             _ = await analysisCoordinator.recoverCoverageGuardFailures()
 
+            // playhead-gyvb.2: one-shot launch-time sweep that re-probes
+            // the actual duration of every cached audio file whose
+            // persisted `analysis_assets.episodeDurationSec` is missing
+            // or contradicted by a coverage watermark. Heals rows
+            // poisoned by the 2026-04-27 libsyn/flightcast incident
+            // (declared 704s, actual 9700s — a 13.8× error). Idempotent
+            // via `_meta.did_duration_backfill_v1`; runs exactly once
+            // per install. Errors inside are logged and swallowed.
+            _ = await analysisCoordinator.runEpisodeDurationBackfillIfNeeded(
+                cachedFileURL: { episodeId in
+                    await downloadManager.cachedFileURL(for: episodeId)
+                }
+            )
+
             // bd-200: prune scan rows under stale cohort hashes (locale change,
             // app upgrade, prompt/schema/plan/normalization revs). Best-effort —
             // failures are logged but don't block app launch. Must run AFTER

@@ -5387,6 +5387,34 @@ actor AnalysisStore {
         }
     }
 
+    // MARK: - Generic _meta key/value (playhead-gyvb.2)
+
+    /// Read a free-form `_meta` value by key. Returns `nil` if the row is
+    /// absent. Used by one-shot launch-time backfill markers (e.g.
+    /// `did_duration_backfill_v1`) so feature flags don't have to live
+    /// in the schema-version ladder.
+    func fetchMetaValue(forKey key: String) throws -> String? {
+        let stmt = try prepare("SELECT value FROM _meta WHERE key = ?")
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, key)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return optionalText(stmt, 0)
+    }
+
+    /// Upsert a free-form `_meta` value. Counterpart to
+    /// `fetchMetaValue(forKey:)`. Treats `_meta` as a key/value store
+    /// for one-shot install-time markers.
+    func setMetaValue(forKey key: String, value: String) throws {
+        let stmt = try prepare("""
+            INSERT INTO _meta (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, key)
+        bind(stmt, 2, value)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
     /// Executes `body` inside a BEGIN IMMEDIATE transaction so every
     /// `analysis_jobs` update, `work_journal` append, and optional
     /// `_meta.scheduler_epoch` bump that belongs to a single scheduling
