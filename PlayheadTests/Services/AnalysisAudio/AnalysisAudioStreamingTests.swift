@@ -564,4 +564,105 @@ struct AnalysisAudioStreamingTests {
 
         await service.evictCache(episodeID: episodeID)
     }
+
+    /// Encodes a CAF source to AAC-in-m4a using AVAssetExportSession.
+    /// Used to materialize a compressed test fixture at runtime so we can
+    /// exercise the production codec path without committing a binary
+    /// fixture to the repo. Returns the m4a URL on success.
+    private func reencodeCAFToM4A(_ source: URL) async throws -> URL {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        let outURL = tempDir.appendingPathComponent("s8dq-aac-\(UUID().uuidString).m4a")
+
+        let asset = AVURLAsset(url: source)
+        guard let session = AVAssetExportSession(
+            asset: asset,
+            presetName: AVAssetExportPresetAppleM4A
+        ) else {
+            throw NSError(domain: "test", code: -10, userInfo: [
+                NSLocalizedDescriptionKey: "Could not create AVAssetExportSession"
+            ])
+        }
+        // iOS 18 async export(to:as:) replaces the closure-based export()
+        // + status/error pair. Throws on failure; clean termination on
+        // success (test won't hang waiting for a status update loop).
+        try await session.export(to: outURL, as: .m4a)
+        return outURL
+    }
+
+    /// Cycle-3 M-2 follow-up: round-trip test against the production
+    /// codec path. All other tests use uncompressed `.caf`. Production
+    /// decodes mp3 / m4a (AAC). The fix is codec-agnostic — the chunk
+    /// loop treats CMSampleBuffer payloads opaquely — but the residual
+    /// coverage gap is real. This test materializes a small AAC-in-m4a
+    /// fixture at runtime via AVAssetExportSession (so we don't commit
+    /// a binary blob), then asserts the streaming decode produces the
+    /// expected sample count and bounded peak shard accumulator on
+    /// the compressed input.
+    ///
+    /// We don't assert content fidelity against the source signal here:
+    /// AAC is lossy and re-encoding through the iOS codec stack is a
+    /// black box. The point is to prove the *streaming property* and
+    /// the *sample-count contract* on a real codec, not a pristine
+    /// uncompressed source.
+    @Test("Compressed (m4a/AAC) round-trip: streaming property holds on production codec")
+    func m4a_aac_round_trip() async throws {
+        let assetSeconds: TimeInterval = 60
+        let cafURL = try writeSynthFile(seconds: assetSeconds, sampleRate: 44_100, frequency: 440)
+        defer { try? FileManager.default.removeItem(at: cafURL) }
+
+        let m4aURL: URL
+        do {
+            m4aURL = try await reencodeCAFToM4A(cafURL)
+        } catch {
+            // iOS Simulator occasionally fails AVAssetExportSession with
+            // codec-availability issues (especially on first boot). A
+            // skipped test is more useful than a flaky failure when the
+            // signal we want is "does our decoder handle compressed
+            // input", not "is the simulator's encoder working".
+            Issue.record("Could not encode test m4a fixture: \(error). Skipping compressed-codec round-trip.")
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: m4aURL) }
+
+        guard let local = LocalAudioURL(m4aURL) else {
+            Issue.record("Could not wrap m4a fixture in LocalAudioURL")
+            return
+        }
+        let service = AnalysisAudioService()
+        let episodeID = "s8dq-m4a-\(UUID().uuidString)"
+        let shards = try await service.decode(
+            fileURL: local,
+            episodeID: episodeID,
+            shardDuration: 30
+        )
+
+        // Sample-count contract holds on the compressed path. AAC adds
+        // ~2048 frames of priming silence at the head and a similar
+        // amount of padding at the tail; tolerate ±2% on the cumulative
+        // count instead of the ±0.5% we use for uncompressed CAF.
+        let totalSamples = shards.reduce(0) { $0 + $1.sampleCount }
+        let expected = Int(assetSeconds * AnalysisAudioService.targetSampleRate)
+        let tol = expected / 50  // ±2%
+        #expect(abs(totalSamples - expected) <= tol,
+                "m4a decoded samples=\(totalSamples) expected=\(expected) (±\(tol)) — codec adds priming/padding but not >2%")
+
+        // Streaming property holds: peak shard accumulator bounded to
+        // one shard regardless of codec.
+        let peakShard = await service.peakShardAccumulatorBytes
+        let oneShardBytes = 30 * 16_000 * MemoryLayout<Float>.size
+        #expect(peakShard <= oneShardBytes + (oneShardBytes / 100),
+                "m4a peak shard accumulator = \(peakShard) bytes; must be ≤ \(oneShardBytes) + 1%")
+
+        // CMSampleBuffer batches from an AAC-in-m4a track are typically
+        // a few KB each (AAC packetizes at ~1024 samples per frame). The
+        // 50 MB ceiling is far above any plausible value here; assert a
+        // tight 1 MB to detect future codec changes that might balloon
+        // batch sizes.
+        let peakBatch = await service.peakSourceBatchBytes
+        #expect(peakBatch < 1 * 1024 * 1024,
+                "m4a peak source batch = \(peakBatch) bytes (must be < 1 MB)")
+        #expect(peakBatch > 0, "m4a peak source batch should be > 0 if any decode occurred")
+
+        await service.evictCache(episodeID: episodeID)
+    }
 }
