@@ -123,6 +123,52 @@ enum AcousticLikelihoodScorer {
         return clampUnit(raw)
     }
 
+    /// Compute the maximum per-window likelihood among the feature
+    /// windows that overlap the half-open span `[startTime, endTime)`.
+    /// Returns `nil` when no feature window overlaps the span — the
+    /// caller treats `nil` as "score unknown" and never gates on it.
+    ///
+    /// Used by the gtt9.1 transcript-gate (`AnalysisJobRunner`) to
+    /// reduce a shard's worth of feature windows to a single per-shard
+    /// likelihood: a shard inherits its strongest acoustic-ad signal,
+    /// which keeps a high-likelihood onset window from being washed out
+    /// by surrounding low-likelihood quiet windows that share the same
+    /// shard. Max-take-all is the right shape here (unlike `combine` in
+    /// `AcousticFeatureFusion`) because a shard that *contains* an ad
+    /// transition should be scheduled even if most of the shard is host
+    /// conversation — we transcribe the whole shard anyway, so the max
+    /// is what governs scheduler value.
+    ///
+    /// - Parameters:
+    ///   - windows: Per-asset persisted feature windows in any order.
+    ///   - startTime: Span start in episode-relative seconds (inclusive).
+    ///   - endTime: Span end in episode-relative seconds (exclusive).
+    ///     Half-open intervals match the shard convention used by
+    ///     `AnalysisShard` (`startTime`, `startTime + duration`).
+    ///   - weights: Score weights (default priors).
+    /// - Returns: The maximum scored likelihood over overlapping
+    ///   windows, or `nil` if no window overlaps the span.
+    static func maxLikelihoodInSpan(
+        windows: [FeatureWindow],
+        startTime: Double,
+        endTime: Double,
+        weights: Weights = .defaultPriors
+    ) -> Double? {
+        var best: Double?
+        for window in windows {
+            // Half-open overlap: [w.start, w.end) ∩ [startTime, endTime) ≠ ∅
+            // iff w.start < endTime && w.end > startTime.
+            guard window.startTime < endTime, window.endTime > startTime else {
+                continue
+            }
+            let s = scoreOne(window, weights: weights)
+            if best == nil || s > (best ?? 0) {
+                best = s
+            }
+        }
+        return best
+    }
+
     /// Find the highest-likelihood region in the windows that lies
     /// strictly *beyond* `currentCoverageSec`. Returns the region's
     /// `(start, end, score)` triple, or `nil` when no window past the
