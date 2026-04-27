@@ -83,6 +83,34 @@ The workflow will:
 - export an `.ipa`
 - upload it to TestFlight
 
+## 6. Local Mac Mini Fallback
+
+If GitHub Actions minutes or budget are exhausted, the repo also ships a
+local upload script that uses the Mac's logged-in Xcode account instead of
+GitHub secrets:
+
+```bash
+./scripts/upload-testflight.sh
+```
+
+By default it builds from a clean temporary worktree at local `main`, archives
+the app, and uploads directly to TestFlight. It leaves artifacts under
+`build/testflight-*`.
+
+To build the latest fetched remote main instead:
+
+```bash
+git fetch origin main
+./scripts/upload-testflight.sh --ref origin/main
+```
+
+Prerequisites:
+
+- `xcodegen` installed locally
+- Xcode signed into the correct Apple account on the Mac
+- a working `Apple Distribution` certificate/private key in the login keychain
+- a matching `Playhead App Store` provisioning profile installed locally
+
 ## Notes
 
 - The workflows assume bundle ID `com.playhead.app`.

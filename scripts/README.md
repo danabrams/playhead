@@ -2,6 +2,37 @@
 
 Helpers for the playhead-ym57 device-lab fixture substrate.
 
+## `upload-testflight.sh`
+
+Builds Playhead from a clean temporary git worktree rooted at `main` by
+default, then uploads the archive to TestFlight using the local Xcode
+account/signing state on the Mac.
+
+This is the local-Mac fallback when GitHub Actions budget is exhausted. The
+script does not touch your current checkout, so it is safe to run even when
+your working tree is dirty.
+
+```sh
+# Build local `main` and upload to TestFlight
+./scripts/upload-testflight.sh
+
+# Build the latest fetched remote main instead
+git fetch origin main
+./scripts/upload-testflight.sh --ref origin/main
+```
+
+Prerequisites:
+
+- `xcodegen` installed locally
+- Xcode signed into the correct Apple account
+- A usable `Apple Distribution` signing identity in the login keychain
+- A matching `Playhead App Store` provisioning profile installed in Xcode's
+  provisioning-profile cache
+
+The script keeps its archive and upload metadata under `build/testflight-*`
+and removes the temporary worktree automatically unless `--keep-worktree` or
+`PLAYHEAD_TESTFLIGHT_KEEP_WORKTREE=1` is used.
+
 ## `download-fixtures.sh`
 
 Verifies every fixture under `PlayheadTests/Fixtures/Corpus/Media/` against
