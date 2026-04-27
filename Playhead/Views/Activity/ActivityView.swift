@@ -276,7 +276,7 @@ private struct NowRowView: View {
     /// playhead-btoa.4: debug strip toggle. When `false` (default) the
     /// `if` short-circuits and the row renders byte-identically to the
     /// pre-btoa baseline.
-    @AppStorage("debug.showPipelineStrip") private var showPipelineStrip = false
+    @AppStorage(DebugFlagKeys.showPipelineStrip) private var showPipelineStrip = false
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(row.title)
@@ -304,9 +304,8 @@ private struct NowRowView: View {
 
 private struct UpNextRowView: View {
     let row: ActivityUpNextRow
-    /// playhead-btoa.4: debug strip toggle. Off-by-default; same key as
-    /// the other row views and the Settings toggle.
-    @AppStorage("debug.showPipelineStrip") private var showPipelineStrip = false
+    // Same key as NowRowView; SwiftUI auto-invalidates each view independently.
+    @AppStorage(DebugFlagKeys.showPipelineStrip) private var showPipelineStrip = false
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(row.title)
@@ -332,9 +331,8 @@ private struct UpNextRowView: View {
 /// inline.
 private struct PausedRowView: View {
     let row: ActivityPausedRow
-    /// playhead-btoa.4: debug strip toggle. Off-by-default; same key as
-    /// the other row views and the Settings toggle.
-    @AppStorage("debug.showPipelineStrip") private var showPipelineStrip = false
+    // Same key as NowRowView; SwiftUI auto-invalidates each view independently.
+    @AppStorage(DebugFlagKeys.showPipelineStrip) private var showPipelineStrip = false
     var body: some View {
         let reasonCopy = SurfaceReasonCopyTemplates.template(for: row.reason)
         let hintCopy = EpisodeStatusLineCopy.hintCopy(row.hint)

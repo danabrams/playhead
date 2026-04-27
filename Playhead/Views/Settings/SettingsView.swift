@@ -90,7 +90,7 @@ struct SettingsView: View {
     /// is read by `NowRowView` / `UpNextRowView` / `PausedRowView`. The
     /// toggle row is intentionally NOT `#if DEBUG`-gated so it is
     /// flippable in TestFlight builds for dogfood-only debugging.
-    @AppStorage("debug.showPipelineStrip") private var showPipelineStrip = false
+    @AppStorage(DebugFlagKeys.showPipelineStrip) private var showPipelineStrip = false
 
     var body: some View {
         NavigationStack {

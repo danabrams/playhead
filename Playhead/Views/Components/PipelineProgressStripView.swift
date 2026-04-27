@@ -57,6 +57,9 @@ struct PipelineProgressStripView: View {
         Text(line)
             .font(AppTypography.mono(size: 11, weight: .regular))
             .foregroundStyle(AppColors.textSecondary)
+            // 2pt literal: the design doc pinned this exact value to
+            // sit one tick under the row's primary copy. The Spacing
+            // tokens start at `xxs = 4`, so no token matches.
             .padding(.top, 2)
             .accessibilityIdentifier("ActivityView.\(sectionId).pipelineStrip")
     }
@@ -64,9 +67,7 @@ struct PipelineProgressStripView: View {
     /// Rendered one-liner. Centralised here so the body stays a single
     /// `Text(line)` and the formatter can be exercised directly.
     private var line: String {
-        "DL \(Self.format(downloadFraction))"
-        + " · TX \(Self.format(transcriptFraction))"
-        + " · AN \(Self.format(analysisFraction))"
+        "DL \(Self.format(downloadFraction)) · TX \(Self.format(transcriptFraction)) · AN \(Self.format(analysisFraction))"
     }
 
     /// Formatter contract pinned by `PipelineProgressStripViewTests`:

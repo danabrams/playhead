@@ -245,6 +245,7 @@
 		58B3BB1E5DCA02BB60D89F21 /* ActivitySnapshotProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69F6E321702BE4389A710AD1 /* ActivitySnapshotProvider.swift */; };
 		58FDCCC8A7D420CC8E2BBD5C /* SyntheticAnchorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2480A8CF1E4F600EDFC8D8CF /* SyntheticAnchorTests.swift */; };
 		593E682F2D3CADEC802939B8 /* DebugEpisodeExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23EA028C30A4B8BD1CEBF552 /* DebugEpisodeExporter.swift */; };
+		BD0FAA5DE6BFC04F12345678 /* DebugFlags.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD0FAA5DE6BFC04F87654321 /* DebugFlags.swift */; };
 		5957C29F921AD152E875315A /* NarlApprovalPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DC1520CEAF1A2015ACB4D29 /* NarlApprovalPolicy.swift */; };
 		59A99F7B77C3CEE72A48C33A /* SelfDescribingTitlesV15MigrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9EE3B301A104F02BA1DE6C2 /* SelfDescribingTitlesV15MigrationTests.swift */; };
 		59D9CB9FC8F5483D734F5699 /* RegionProposalBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE85F2B16E01EDBE3FFF4D33 /* RegionProposalBuilder.swift */; };
@@ -772,6 +773,7 @@
 		21FC75C2BFC7BC682E7F3B50 /* SpanDecisionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpanDecisionTests.swift; sourceTree = "<group>"; };
 		23AC81662CAD17DEB7C73FE5 /* AcousticFeatureFusion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcousticFeatureFusion.swift; sourceTree = "<group>"; };
 		23EA028C30A4B8BD1CEBF552 /* DebugEpisodeExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugEpisodeExporter.swift; sourceTree = "<group>"; };
+		BD0FAA5DE6BFC04F87654321 /* DebugFlags.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugFlags.swift; sourceTree = "<group>"; };
 		244FFBBBA9AFD5B49BF1C2DB /* AcousticBreakDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcousticBreakDetector.swift; sourceTree = "<group>"; };
 		245B19FFC45DC9DF4A7A515E /* CorpusExporterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CorpusExporterTests.swift; sourceTree = "<group>"; };
 		245F689066F10F22F3FFAFCE /* AnalysisStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisStore.swift; sourceTree = "<group>"; };
@@ -1396,6 +1398,7 @@
 			isa = PBXGroup;
 			children = (
 				69F4DFB4E81926A74E29FEA9 /* BuildInfo.swift */,
+				BD0FAA5DE6BFC04F87654321 /* DebugFlags.swift */,
 				8D88AFE1E7856E852263579E /* Info.plist */,
 				1ADB61C06D2AA996C3FE5356 /* Diagnostics */,
 			);
@@ -2963,6 +2966,7 @@
 				88726EC69AA43DADD0ADE2A7 /* CoverageSummary.swift in Sources */,
 				275B57D131603FA57B5F5D9C /* DebugDiagnosticsHatch.swift in Sources */,
 				593E682F2D3CADEC802939B8 /* DebugEpisodeExporter.swift in Sources */,
+				BD0FAA5DE6BFC04F12345678 /* DebugFlags.swift in Sources */,
 				04BFBF283D5CC28DB492D476 /* DecisionLogger.swift in Sources */,
 				39D68DB0B37DEA27C5BA5170 /* DecodedSpan.swift in Sources */,
 				D57E6E7BC7D9BBA4BE955376 /* DesignTokenCatalog.swift in Sources */,
