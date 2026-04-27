@@ -2515,53 +2515,65 @@ actor AnalysisCoordinator {
             logger.warning("Duration backfill: meta read failed (\(String(describing: error), privacy: .public)); proceeding without idempotence guard")
         }
 
-        let assets: [AnalysisAsset]
-        do {
-            assets = try await store.fetchAllAssets()
-        } catch {
-            logger.warning("Duration backfill: fetchAllAssets failed (\(String(describing: error), privacy: .public)); aborting sweep")
-            return summary
-        }
-
-        for asset in assets {
-            // Decide whether this row is a candidate. Candidates:
-            // - persisted duration is nil OR <= 0
-            // - persisted duration is positive but a coverage watermark
-            //   already exceeds it (the libsyn/flightcast bug)
-            let dur = asset.episodeDurationSec ?? 0
-            let featureEnd = asset.featureCoverageEndTime ?? 0
-            let transcriptEnd = asset.fastTranscriptCoverageEndTime ?? 0
-            let watermarkExceedsDur = (featureEnd > dur) || (transcriptEnd > dur)
-            let needsProbe = (dur <= 0) || watermarkExceedsDur
-            guard needsProbe else { continue }
-
-            guard let fileURL = await cachedFileURL(asset.episodeId) else {
-                continue
-            }
-            summary.inspected += 1
-
-            guard let probed = await AudioFileDurationProbe.probeDuration(at: fileURL) else {
-                summary.probeFailed += 1
-                continue
-            }
-
-            // Per the bead: measured > feed. Write unconditionally on a
-            // valid probe. `updateEpisodeDuration` overwrites whatever
-            // was previously persisted.
+        // Paginate so we never hold the whole table in memory at once.
+        // ORDER BY in `fetchAssets` matches `fetchAllAssets`, so paging
+        // is stable across calls within this sweep.
+        let pageSize = 200
+        var offset = 0
+        pageLoop: while true {
+            let page: [AnalysisAsset]
             do {
-                try await store.updateEpisodeDuration(
-                    id: asset.id,
-                    episodeDurationSec: probed
-                )
-                summary.rewritten += 1
-                // Log the source value as "nil" vs an actual number so the
-                // libsyn pattern (small > 0 → big) is distinguishable from
-                // genuine nil-was-rewritten entries when reading post-mortem.
-                let sourceDesc = asset.episodeDurationSec.map { "\($0)" } ?? "nil"
-                logger.info("Duration backfill: asset \(asset.id, privacy: .public) rewritten \(sourceDesc, privacy: .public) -> \(probed, privacy: .public)s")
+                page = try await store.fetchAssets(limit: pageSize, offset: offset)
             } catch {
-                logger.warning("Duration backfill: write failed for asset \(asset.id, privacy: .public): \(String(describing: error), privacy: .public)")
+                logger.warning("Duration backfill: fetchAssets(limit:\(pageSize),offset:\(offset)) failed (\(String(describing: error), privacy: .public)); aborting sweep")
+                return summary
             }
+            if page.isEmpty { break pageLoop }
+
+            for asset in page {
+                // Decide whether this row is a candidate. Candidates:
+                // - persisted duration is nil OR <= 0
+                // - persisted duration is positive but a coverage watermark
+                //   already exceeds it (the libsyn/flightcast bug)
+                let dur = asset.episodeDurationSec ?? 0
+                let featureEnd = asset.featureCoverageEndTime ?? 0
+                let transcriptEnd = asset.fastTranscriptCoverageEndTime ?? 0
+                let watermarkExceedsDur = (featureEnd > dur) || (transcriptEnd > dur)
+                let needsProbe = (dur <= 0) || watermarkExceedsDur
+                guard needsProbe else { continue }
+
+                guard let fileURL = await cachedFileURL(asset.episodeId) else {
+                    continue
+                }
+                summary.inspected += 1
+
+                guard let probed = await AudioFileDurationProbe.probeDuration(at: fileURL) else {
+                    summary.probeFailed += 1
+                    continue
+                }
+
+                // Per the bead: measured > feed. Write unconditionally on a
+                // valid probe. `updateEpisodeDuration` overwrites whatever
+                // was previously persisted.
+                do {
+                    try await store.updateEpisodeDuration(
+                        id: asset.id,
+                        episodeDurationSec: probed
+                    )
+                    summary.rewritten += 1
+                    // Log the source value as "nil" vs an actual number so the
+                    // libsyn pattern (small > 0 → big) is distinguishable from
+                    // genuine nil-was-rewritten entries when reading post-mortem.
+                    let sourceDesc = asset.episodeDurationSec.map { "\($0)" } ?? "nil"
+                    logger.info("Duration backfill: asset \(asset.id, privacy: .public) rewritten \(sourceDesc, privacy: .public) -> \(probed, privacy: .public)s")
+                } catch {
+                    logger.warning("Duration backfill: write failed for asset \(asset.id, privacy: .public): \(String(describing: error), privacy: .public)")
+                }
+            }
+
+            // Short page → drained the table.
+            if page.count < pageSize { break pageLoop }
+            offset += pageSize
         }
 
         // Idempotence marker — set even if zero rows were rewritten so

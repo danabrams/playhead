@@ -3050,6 +3050,36 @@ actor AnalysisStore {
         return readAsset(stmt)
     }
 
+    /// Production-safe paginated read of `analysis_assets`. Returns rows
+    /// ordered by `createdAt DESC, rowid DESC` (matching `fetchAllAssets`),
+    /// starting at `offset`, capped at `limit`. Callers iterate until a
+    /// short page returns to drain the whole table without ever holding
+    /// more than `limit` rows in memory at once.
+    ///
+    /// `limit` and `offset` are both clamped to `>= 0`; a `limit` of `0`
+    /// returns an empty array.
+    func fetchAssets(limit: Int, offset: Int) throws -> [AnalysisAsset] {
+        let safeLimit = max(0, limit)
+        let safeOffset = max(0, offset)
+        guard safeLimit > 0 else { return [] }
+        let sql = """
+            SELECT \(assetSelectColumns)
+            FROM analysis_assets
+            ORDER BY createdAt DESC, rowid DESC
+            LIMIT ? OFFSET ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, Int64(safeLimit))
+        sqlite3_bind_int64(stmt, 2, Int64(safeOffset))
+        var results: [AnalysisAsset] = []
+        results.reserveCapacity(safeLimit)
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(readAsset(stmt))
+        }
+        return results
+    }
+
 #if DEBUG
     /// Fetch every analysis asset in the store, ordered by creation time (newest first).
     ///
@@ -3059,9 +3089,7 @@ actor AnalysisStore {
     /// `#if DEBUG`-gated. It is not safe for production callers — on a real
     /// listener's library this can OOM or stall the actor for seconds.
     ///
-    /// If you find yourself wanting to call this from production code: STOP and
-    /// add a paginated/streaming variant instead. Do not remove this `#if DEBUG`
-    /// gate without first thinking through the scale implications.
+    /// Production callers should use `fetchAssets(limit:offset:)` and iterate.
     func fetchAllAssets() throws -> [AnalysisAsset] {
         let sql = """
             SELECT \(assetSelectColumns)
