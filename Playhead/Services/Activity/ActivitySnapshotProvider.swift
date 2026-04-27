@@ -185,6 +185,16 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         var inputs: [ActivityEpisodeInput] = []
         inputs.reserveCapacity(episodes.count)
 
+        // playhead-btoa.3: hoisted out of the per-episode loop so we
+        // don't reconstruct the closure on every iteration. Returns
+        // `nil` when either the watermark is missing or the duration
+        // is non-positive (legacy / placeholder rows pre-decode); a
+        // non-nil result is already clamped into `[0, 1]`.
+        func fraction(_ watermark: Double?, durationSec: Double) -> Double? {
+            guard let watermark, durationSec > 0 else { return nil }
+            return min(1.0, max(0.0, watermark / durationSec))
+        }
+
         for episode in episodes {
             let episodeId = episode.canonicalEpisodeKey
 
@@ -235,12 +245,8 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             // `nil` rather than synthesising a fake 0% bar from a
             // divide-by-zero.
             let durationSec = asset.episodeDurationSec ?? 0
-            func fraction(_ watermark: Double?) -> Double? {
-                guard let watermark, durationSec > 0 else { return nil }
-                return min(1.0, max(0.0, watermark / durationSec))
-            }
-            let transcriptFraction = fraction(asset.fastTranscriptCoverageEndTime)
-            let analysisFraction = fraction(asset.confirmedAdCoverageEndTime)
+            let transcriptFraction = fraction(asset.fastTranscriptCoverageEndTime, durationSec: durationSec)
+            let analysisFraction = fraction(asset.confirmedAdCoverageEndTime, durationSec: durationSec)
             // Download fraction comes from the (already-snapshotted)
             // `DownloadManager` map. Clamp to `[0, 1]` defensively —
             // the manager's own arithmetic is bounded by `bytesWritten

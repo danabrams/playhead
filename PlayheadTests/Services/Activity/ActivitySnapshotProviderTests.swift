@@ -168,7 +168,7 @@ private final class ManagedCounter {
 /// analysis fractions, look up the download fraction from the injected
 /// snapshot closure, and clamp to `[0, 1]` so the row contract is
 /// "already in range if non-nil".
-@Suite("LiveActivitySnapshotProvider — pipeline fractions (playhead-btoa.3)")
+@Suite("LiveActivitySnapshotProvider — pipeline fractions")
 struct LiveActivitySnapshotProviderFractionTests {
 
     /// Helper: seeds a single Podcast + N Episodes (one per `episodeId`)
@@ -193,6 +193,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let episodeIds: [String]
     }
 
+    // Returns a Fixture seeded with one Episode + AnalysisAsset per AssetSeed.
     private func makeFixture(assetSeeds: [AssetSeed]) async throws -> Fixture {
         let schema = Schema([Podcast.self, Episode.self, UserPreferences.self])
         let config = ModelConfiguration(isStoredInMemoryOnly: true)
