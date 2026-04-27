@@ -2458,6 +2458,15 @@ actor AnalysisWorkScheduler {
                 // `fetchNextEligibleJob` (queued|paused|failed only) and
                 // to `recoverExpiredLease` (leaseOwner IS NOT NULL
                 // only). Revert to 'queued' before releasing the lease.
+                //
+                // Intentionally NOT bumping `attemptCount` here: this
+                // arm fires only when the cancel arrived BEFORE
+                // `runTask` started, so no decode work was performed.
+                // Preserving the attempt budget keeps the job's
+                // remaining retries available for actual work attempts
+                // — bumping on every preempt-before-start would burn
+                // through `maxAttemptCount` from churn rather than from
+                // genuine failures.
                 await writeIfStillOwned("cancelRace.revertQueued") {
                     try await store.updateJobState(jobId: job.jobId, state: "queued")
                 }
