@@ -40,6 +40,26 @@ actor AnalysisJobRunner {
     /// behaves exactly as it did pre-01t8.
     private let preemptionCoordinator: LanePreemptionCoordinator?
 
+    /// playhead-gtt9.1: shadow-mode acoustic-likelihood gate for the
+    /// transcript scheduler. The default ships with `enabled = true,
+    /// skipEnabled = false` (shadow logging on, production skip off);
+    /// callers that want the pre-gtt9.1 byte-identical behavior pass
+    /// `.disabled` to short-circuit both scoring and logging.
+    private let acousticGateConfig: AcousticTranscriptGateConfig
+
+    /// playhead-gtt9.1: structured-event sink for shadow-gate decisions.
+    /// `NoOpTranscriptShadowGateLogger` is the production default — it
+    /// ignores every record call. Tests inject `RecordingTranscriptShadowGateLogger`
+    /// to assert the runner emits the expected per-shard rows.
+    private let transcriptShadowGateLogger: TranscriptShadowGateLogging
+
+    /// playhead-gtt9.1: deterministic seed source for the safety-sample
+    /// coin flip. Production uses `SystemRandomNumberGenerator()` so the
+    /// 10% sampling is genuinely random across runs; tests inject a
+    /// fixed-seed generator so the would-skip / safety-sample-keep
+    /// outcome is reproducible.
+    private let safetySampleRNG: @Sendable () -> Double
+
     // MARK: - Init
 
     init(
@@ -53,7 +73,10 @@ actor AnalysisJobRunner {
             ProcessInfo.processInfo.thermalState
         },
         preemptionCoordinator: LanePreemptionCoordinator? = nil,
-        clock: @escaping @Sendable () -> Date = { Date() }
+        clock: @escaping @Sendable () -> Date = { Date() },
+        acousticGateConfig: AcousticTranscriptGateConfig = .default,
+        transcriptShadowGateLogger: TranscriptShadowGateLogging = NoOpTranscriptShadowGateLogger(),
+        safetySampleRNG: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) }
     ) {
         self.store = store
         self.audioProvider = audioProvider
@@ -64,6 +87,9 @@ actor AnalysisJobRunner {
         self.thermalStateProvider = thermalStateProvider
         self.preemptionCoordinator = preemptionCoordinator
         self.clock = clock
+        self.acousticGateConfig = acousticGateConfig
+        self.transcriptShadowGateLogger = transcriptShadowGateLogger
+        self.safetySampleRNG = safetySampleRNG
     }
 
     // MARK: - Run
@@ -222,6 +248,35 @@ actor AnalysisJobRunner {
             )
         }
 
+        // playhead-gtt9.1 — Acoustic transcript gate (shadow mode by default):
+        //
+        // Evaluate per-shard acoustic likelihood from the feature windows
+        // we just persisted in stage 2. Each shard is tagged
+        // `wouldGate=true` when its likelihood is below
+        // `likelihoodThreshold`, with a `safetySampleFraction` of those
+        // would-skip shards re-tagged `safety-sample-keep`. Shards
+        // covered by an existing fast-transcript watermark (i.e., we're
+        // re-running over good transcript) bypass the gate entirely
+        // (`quality-precondition-keep`). Decisions are emitted to
+        // `transcriptShadowGateLogger`. The default config ships
+        // `enabled=true, skipEnabled=false`, so the gate logs but never
+        // affects which shards reach the engine — production behavior
+        // is unchanged until a follow-up bead flips `skipEnabled` to
+        // true with sufficient shadow-eval evidence.
+        let gatedShards: [AnalysisShard]
+        if acousticGateConfig.isShadowLoggingActive {
+            gatedShards = await evaluateAcousticTranscriptGate(
+                shards: shards,
+                assetId: assetId,
+                request: request
+            )
+        } else {
+            // Master kill: no scoring, no logging — pre-gtt9.1 behavior
+            // exactly. Hand the full shard list to the transcript engine
+            // unchanged.
+            gatedShards = shards
+        }
+
         // -- Stage 3: Transcription --
 
         let transcriptSignpost = PreAnalysisInstrumentation.beginStage("transcription")
@@ -235,8 +290,10 @@ actor AnalysisJobRunner {
         let transcriptStageStart = clock()
 
         // Fire-and-forget: startTranscription kicks off work internally.
+        // `gatedShards` equals `shards` unless `skipEnabled` is also
+        // active in `acousticGateConfig`; see the gate evaluator above.
         await transcriptEngine.startTranscription(
-            shards: shards,
+            shards: gatedShards,
             analysisAssetId: assetId,
             snapshot: snapshot,
             podcastId: request.podcastId,
@@ -536,6 +593,167 @@ actor AnalysisJobRunner {
         }
 
         return nil
+    }
+
+    // MARK: - Acoustic transcript gate (playhead-gtt9.1)
+
+    /// Evaluate the acoustic-likelihood transcript gate over `shards` and
+    /// emit one shadow-log row per shard. Returns the shard list to actually
+    /// hand to the transcript engine — equal to `shards` unless
+    /// `acousticGateConfig.isProductionSkipActive` is true, in which case
+    /// `would-skip`-tagged shards are filtered out (production behavior;
+    /// not the default).
+    ///
+    /// Caller invariants:
+    ///   * Only invoked when `acousticGateConfig.isShadowLoggingActive` —
+    ///     the master-disabled path short-circuits without ever calling
+    ///     this method.
+    ///   * `shards` is the post-coverage-filter list (already trimmed to
+    ///     `[0, desiredCoverageSec]`); we don't re-apply that filter.
+    ///
+    /// Decision categories per shard:
+    ///   * `.qualityPreconditionKeep` — shard is fully covered by an
+    ///     existing fast-transcript watermark, i.e. we're re-running over
+    ///     good transcript. M1 mitigation: the gate never withdraws shards
+    ///     mid-stream from an already-running transcription.
+    ///   * `.scoreUnknown` — no overlapping `feature_windows` row exists
+    ///     for this shard. We refuse to gate out unknowns.
+    ///   * `.aboveThreshold` — likelihood ≥ `likelihoodThreshold`.
+    ///     Transcribe.
+    ///   * `.safetySampleKeep` — likelihood < threshold but the safety-
+    ///     sample coin came up heads. Transcribe so we keep a calibration
+    ///     stream of low-likelihood ground truth even after `skipEnabled`
+    ///     flips.
+    ///   * `.wouldSkip` — likelihood < threshold and the safety-sample
+    ///     coin came up tails. In shadow mode we still transcribe; in
+    ///     production-skip mode this shard is dropped from the engine
+    ///     input.
+    private func evaluateAcousticTranscriptGate(
+        shards: [AnalysisShard],
+        assetId: String,
+        request: AnalysisRangeRequest
+    ) async -> [AnalysisShard] {
+        // Fetch all feature windows that could overlap any shard. We pull
+        // from the union span [minStart, maxEnd] in a single query so the
+        // per-shard `maxLikelihoodInSpan` walk runs in memory.
+        let spanStart = shards.map(\.startTime).min() ?? 0
+        let spanEnd = shards.map { $0.startTime + $0.duration }.max() ?? 0
+        let featureWindows: [FeatureWindow]
+        if spanEnd > spanStart {
+            featureWindows = (try? await store.fetchFeatureWindows(
+                assetId: assetId,
+                from: spanStart,
+                to: spanEnd
+            )) ?? []
+        } else {
+            featureWindows = []
+        }
+
+        // Resolve M1 mitigation precondition: the asset's persisted
+        // fast-transcript watermark. A shard is "already covered by good
+        // transcript" iff its end time ≤ that watermark (and the
+        // watermark is non-nil). On a fresh run the watermark is nil and
+        // every shard is gate-eligible.
+        let priorTranscriptCoverage: Double?
+        if let asset = try? await store.fetchAsset(id: assetId) {
+            priorTranscriptCoverage = asset.fastTranscriptCoverageEndTime
+        } else {
+            priorTranscriptCoverage = nil
+        }
+
+        var keptShards: [AnalysisShard] = []
+        keptShards.reserveCapacity(shards.count)
+        let now = clock()
+
+        for shard in shards {
+            let shardEnd = shard.startTime + shard.duration
+
+            // M1: quality precondition. If the shard's end time falls at
+            // or below the persisted fast-transcript watermark, transcript
+            // already exists for this region — bypass scoring entirely.
+            // Tag the row so the eval side can confirm M1 fired as
+            // designed.
+            if let cov = priorTranscriptCoverage, cov >= shardEnd, shardEnd > 0 {
+                let entry = TranscriptShadowGateEntry(
+                    schemaVersion: TranscriptShadowGateEntry.currentSchemaVersion,
+                    timestamp: now.timeIntervalSince1970,
+                    analysisAssetID: assetId,
+                    episodeID: request.episodeId,
+                    shardID: shard.id,
+                    shardStart: shard.startTime,
+                    shardEnd: shardEnd,
+                    likelihood: nil,
+                    threshold: acousticGateConfig.likelihoodThreshold,
+                    decision: .qualityPreconditionKeep,
+                    wouldGate: false,
+                    transcribed: true
+                )
+                await transcriptShadowGateLogger.record(entry)
+                keptShards.append(shard)
+                continue
+            }
+
+            // Score the shard. `nil` means no overlapping feature window
+            // is persisted yet — treat as unknown and never gate out.
+            let likelihood = AcousticLikelihoodScorer.maxLikelihoodInSpan(
+                windows: featureWindows,
+                startTime: shard.startTime,
+                endTime: shardEnd
+            )
+
+            let decision: TranscriptShadowGateEntry.Decision
+            let wouldGate: Bool
+            let transcribed: Bool
+            if let s = likelihood {
+                if s >= acousticGateConfig.likelihoodThreshold {
+                    decision = .aboveThreshold
+                    wouldGate = false
+                    transcribed = true
+                } else {
+                    // Below threshold — would-skip candidate. Apply the
+                    // safety-sample coin flip. With sample fraction = 0.10
+                    // a uniform draw on `[0, 1)` < 0.10 is the keep arm.
+                    let coin = safetySampleRNG()
+                    if coin < acousticGateConfig.safetySampleFraction {
+                        decision = .safetySampleKeep
+                        wouldGate = true
+                        transcribed = true
+                    } else {
+                        decision = .wouldSkip
+                        wouldGate = true
+                        // In production-skip mode the shard is dropped
+                        // from the engine input. In shadow mode (default)
+                        // we still transcribe.
+                        transcribed = !acousticGateConfig.isProductionSkipActive
+                    }
+                }
+            } else {
+                decision = .scoreUnknown
+                wouldGate = false
+                transcribed = true
+            }
+
+            let entry = TranscriptShadowGateEntry(
+                schemaVersion: TranscriptShadowGateEntry.currentSchemaVersion,
+                timestamp: now.timeIntervalSince1970,
+                analysisAssetID: assetId,
+                episodeID: request.episodeId,
+                shardID: shard.id,
+                shardStart: shard.startTime,
+                shardEnd: shardEnd,
+                likelihood: likelihood,
+                threshold: acousticGateConfig.likelihoodThreshold,
+                decision: decision,
+                wouldGate: wouldGate,
+                transcribed: transcribed
+            )
+            await transcriptShadowGateLogger.record(entry)
+
+            if transcribed {
+                keptShards.append(shard)
+            }
+        }
+        return keptShards
     }
 
     // MARK: - Preemption helpers (playhead-01t8)
