@@ -85,6 +85,7 @@ actor FoundationModelsFeedbackStore {
         self.directoryOverride = directory
         self.fileManager = fileManager
         self.logger = logger
+        self.resolvedDirectory = nil
     }
 
     /// playhead-jncn: lazy first-use bootstrap. Resolves the on-disk
