@@ -45,10 +45,14 @@ struct SkipOrchestratorRevertTests {
         await orchestrator.receiveAdWindows([ad])
 
         // Should have a skip cue before revert.
+        // playhead-vn7n.2: cue end is pulled in by `adTrailingCushionSec`
+        // (default 1.0 s) so the player lands slightly inside the ad rather
+        // than risking a clip into program audio.
+        let cushion = SkipPolicyConfig.default.adTrailingCushionSec
         #expect(!pushedCues.isEmpty)
         if let cue = pushedCues.first {
             #expect(CMTimeGetSeconds(cue.start) == 60)
-            #expect(CMTimeGetSeconds(cue.end) == 120)
+            #expect(CMTimeGetSeconds(cue.end) == 120 - cushion)
         } else {
             Issue.record("Expected the pre-revert cue to preserve the finalized window boundaries")
         }

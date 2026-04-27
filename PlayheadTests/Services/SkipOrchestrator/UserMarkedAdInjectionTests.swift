@@ -78,8 +78,11 @@ struct UserMarkedAdInjectionTests {
         let cue = lastCues.first!
         let cueStart = CMTimeGetSeconds(cue.start)
         let cueEnd = CMTimeGetSeconds(cue.end)
+        // playhead-vn7n.2: trailing cushion subtracts `adTrailingCushionSec`
+        // from the pod end so the player stops just shy of program audio.
+        let cushion = SkipPolicyConfig.default.adTrailingCushionSec
         #expect(cueStart == 60.0)
-        #expect(cueEnd == 120.0)
+        #expect(cueEnd == 120.0 - cushion)
     }
 
     @Test("injectUserMarkedAd emits banner item")

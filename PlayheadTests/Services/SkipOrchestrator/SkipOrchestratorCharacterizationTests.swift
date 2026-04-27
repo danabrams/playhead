@@ -396,10 +396,12 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
         await orchestrator.receiveAdWindows([firstWindow, secondWindow])
 
         let currentCues = pushedCues
+        // playhead-vn7n.2: pod-end is pulled in by the trailing cushion.
+        let cushion = SkipPolicyConfig.default.adTrailingCushionSec
         #expect(currentCues.count == 1)
         if let mergedCue = currentCues.first {
             #expect(CMTimeGetSeconds(mergedCue.start) == 60)
-            #expect(CMTimeGetSeconds(mergedCue.start + mergedCue.duration) == 120)
+            #expect(CMTimeGetSeconds(mergedCue.start + mergedCue.duration) == 120 - cushion)
         } else {
             Issue.record("Expected a merged skip cue for adjacent windows inside the merge gap")
         }
@@ -443,12 +445,14 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
         await orchestrator.receiveAdWindows([firstWindow, secondWindow])
 
         let currentCues = pushedCues
+        // playhead-vn7n.2: each pod gets its own trailing cushion.
+        let cushion = SkipPolicyConfig.default.adTrailingCushionSec
         #expect(currentCues.count == 2)
         if currentCues.count == 2 {
             #expect(CMTimeGetSeconds(currentCues[0].start) == 60)
-            #expect(CMTimeGetSeconds(currentCues[0].start + currentCues[0].duration) == 90)
+            #expect(CMTimeGetSeconds(currentCues[0].start + currentCues[0].duration) == 90 - cushion)
             #expect(CMTimeGetSeconds(currentCues[1].start) == 95)
-            #expect(CMTimeGetSeconds(currentCues[1].start + currentCues[1].duration) == 120)
+            #expect(CMTimeGetSeconds(currentCues[1].start + currentCues[1].duration) == 120 - cushion)
         }
     }
 }

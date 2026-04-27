@@ -79,6 +79,13 @@ struct SkipPolicyConfig: Sendable {
     let seekStabilitySeconds: TimeInterval
     /// Policy version tag for idempotency keys.
     let policyVersion: String
+    /// Cushion (seconds) subtracted from the trailing edge of an ad pod when
+    /// the next thing is program audio (or end-of-episode). Trades a small
+    /// sliver of ad-tail for protection against program-start clipping.
+    /// Applied per merged pod, not per individual ad — internal seams between
+    /// ads in the same pod do not receive a cushion. Clamped at the pod start
+    /// so the skip end can never precede the skip start.
+    let adTrailingCushionSec: TimeInterval
 
     static let `default` = SkipPolicyConfig(
         enterThreshold: 0.65,
@@ -88,7 +95,8 @@ struct SkipPolicyConfig: Sendable {
         shortSpanOverrideConfidence: 0.85,
         seekSuppressionSeconds: 3.0,
         seekStabilitySeconds: 2.0,
-        policyVersion: "skip-policy-v1"
+        policyVersion: "skip-policy-v1",
+        adTrailingCushionSec: 1.0
     )
 }
 
@@ -1226,10 +1234,23 @@ actor SkipOrchestrator {
     // MARK: - Cue Pushing
 
     /// Convert merged ranges to CMTimeRanges and push to PlaybackService.
+    ///
+    /// playhead-vn7n.2: each merged range's trailing edge is pulled in by
+    /// `adTrailingCushionSec`, ceding a small sliver of ad-tail rather than
+    /// risking a clip into program-start audio. Cushion is applied per pod
+    /// (per merged range), not per individual ad — by construction of
+    /// `mergeAdjacentWindows`, anything beyond a merged range is either
+    /// program audio (gap > `mergeGapSeconds`) or end-of-episode, so it is
+    /// safe to apply the cushion uniformly to every range end. End is
+    /// clamped at the pod's start so the skip end never precedes the skip
+    /// start (e.g., a 5 s ad with a 10 s cushion collapses to a zero-length
+    /// cue at `adStart`).
     private func pushMergedCues(_ ranges: [(start: Double, end: Double)]) {
-        let cues = ranges.map { range in
+        let cushion = max(0.0, config.adTrailingCushionSec)
+        let cues = ranges.map { range -> CMTimeRange in
+            let cushionedEnd = max(range.start, range.end - cushion)
             let start = CMTime(seconds: range.start, preferredTimescale: 600)
-            let duration = CMTime(seconds: range.end - range.start, preferredTimescale: 600)
+            let duration = CMTime(seconds: cushionedEnd - range.start, preferredTimescale: 600)
             return CMTimeRange(start: start, duration: duration)
         }
         pushSkipCues(cues)
