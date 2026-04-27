@@ -1753,6 +1753,58 @@ struct StreamingAudioDecoderTests {
         await decoder.cleanup()
     }
 
+    @Test("Peak accumulator stays bounded across many shard-emit cycles")
+    func peakAccumulatorBoundedAcrossManyShards() async throws {
+        // 5-minute synthetic at shardDuration=1.0s exercises ~300 emit cycles.
+        // The bug bound is duration-independent, so 300 cycles proves the same
+        // invariant a literal 5-hour run would (without the 576 MB temp file).
+        let seconds: UInt32 = 300
+        let wavData = Self.makeWAVData(seconds: seconds)
+
+        let decoder = StreamingAudioDecoder(
+            episodeID: "test",
+            shardDuration: 1.0,
+            contentType: "wav"
+        )
+        let stream = await decoder.shards()
+
+        // Drain shards on a child task so the AsyncStream's internal buffer
+        // doesn't grow without bound while we feed.
+        let drain = Task<Int, Never> {
+            var count = 0
+            for await _ in stream { count += 1 }
+            return count
+        }
+
+        // Bulk-feed the entire WAV in one call. This matches the production
+        // seed path in AnalysisCoordinator (`feedData(existingData)` after
+        // reading the whole downloaded file from disk) and is the codepath
+        // where the unbounded-accumulator bug manifests: a single
+        // `decodeAvailableFrames()` call chews through the entire episode's
+        // frames before `emitFullShards()` runs. Smaller per-call feeds drain
+        // the accumulator naturally and would mask the bug.
+        await decoder.feedData(wavData)
+        await decoder.finish()
+
+        let shardCount = await drain.value
+
+        // 5 minutes at shardDuration=1.0s yields >= ~290 shards (resampler
+        // can drop a frame or two at the boundary).
+        #expect(shardCount >= 290, "Expected >=290 shards from 5-min WAV at 1s shards, got \(shardCount)")
+
+        // Bound: samplesPerShard (1.0s x 16_000 = 16_000) + at most one
+        // converter chunk (8192 frames x ratio=1.0 for 16 kHz source = 8192).
+        // Allow 4x slack for converter framing variance and the final flush.
+        let peak = await decoder.peakAccumulatedSampleCountForTesting()
+        let allowedMax = 16_000 + 8_192 * 4
+        #expect(
+            peak <= allowedMax,
+            "Peak accumulator was \(peak) samples, expected <= \(allowedMax) (~\(allowedMax * 4 / 1024) KB)"
+        )
+
+        await decoder.cleanup()
+    }
+
     // MARK: - WAV Helper
 
     /// Builds a minimal 16kHz mono 16-bit PCM WAV in memory.

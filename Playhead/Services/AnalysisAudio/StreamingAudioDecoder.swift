@@ -54,6 +54,17 @@ actor StreamingAudioDecoder {
     // MARK: - PCM accumulator
 
     private var accumulatedSamples: [Float] = []
+    #if DEBUG
+    /// Test-only watermark of the largest `accumulatedSamples.count` ever
+    /// observed across the lifetime of this decoder. Used by
+    /// `StreamingAudioDecoderTests` to pin the bounded-accumulator invariant.
+    private var _peakAccumulatedSampleCountForTesting: Int = 0
+
+    /// Test-only accessor for the peak watermark.
+    func peakAccumulatedSampleCountForTesting() -> Int {
+        _peakAccumulatedSampleCountForTesting
+    }
+    #endif
     private var nextShardID: Int = 0
     private var totalSamplesEmitted: Int = 0
 
@@ -260,6 +271,11 @@ actor StreamingAudioDecoder {
             let converted = convertBuffer(readBuffer, using: chunkConverter)
             if !converted.isEmpty {
                 accumulatedSamples.append(contentsOf: converted)
+                #if DEBUG
+                if accumulatedSamples.count > _peakAccumulatedSampleCountForTesting {
+                    _peakAccumulatedSampleCountForTesting = accumulatedSamples.count
+                }
+                #endif
             }
         }
 
