@@ -14,8 +14,19 @@ import OSLog
 // MARK: - StreamingAudioDecoder
 
 /// Incrementally decodes compressed audio bytes into 16 kHz mono Float32
-/// AnalysisShards. Feed it chunks of compressed audio data as they arrive
-/// from a download; it emits a shard every ~30 seconds of accumulated audio.
+/// `AnalysisShard`s. Feed it chunks via `feedData(_:)` and emits a shard
+/// every ~`shardDuration` seconds of accumulated audio.
+///
+/// **Streaming contract.** Internal PCM accumulation is bounded:
+/// `accumulatedSamples.count` peaks at roughly
+/// `samplesPerShard + readFramesPerCycle × (16_000 / sourceSampleRate)`.
+/// For a 30 s shard at a 16 kHz source that's ≈488 KB; the buffer never
+/// scales with total episode duration. (The downstream `AsyncStream`'s
+/// queue is the consumer's concern — bound that on the consumer side
+/// by draining promptly.)
+///
+/// Compressed bytes are appended to a temp file on disk; only the
+/// in-progress shard's PCM lives in memory.
 actor StreamingAudioDecoder {
 
     // MARK: - Configuration
@@ -276,11 +287,13 @@ actor StreamingAudioDecoder {
                     _peakAccumulatedSampleCountForTesting = accumulatedSamples.count
                 }
                 #endif
+                // Drain inline so peak `accumulatedSamples.count` stays
+                // bounded by `samplesPerShard + readFramesPerCycle × ratio`
+                // regardless of episode duration. See the streaming
+                // contract on the type-level docstring.
+                emitFullShards()
             }
         }
-
-        // Emit full shards from accumulated samples.
-        emitFullShards()
     }
 
     // MARK: - Sample rate conversion
