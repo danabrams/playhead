@@ -2512,19 +2512,10 @@ actor AnalysisWorkScheduler {
                     pendingCancelCause = nil
                     return
                 }
-                // playhead-gyvb.1: the cancel-mid-decode cleanup must
-                // bump `attemptCount` so a job that is repeatedly
-                // cancelled mid-run (e.g. `cancelCurrentJob(.taskExpired)`
-                // from BackgroundProcessingService's expirationHandler
-                // every time the BG task budget elapses) eventually
-                // reaches `maxAttemptsReached` and supersedes — freeing
-                // the lease slot for queued work behind it. Prior to
-                // this fix the arm wrote `state='queued'` + released the
-                // lease without an attempt bump, so the 2026-04-27
-                // incident's poisoned asset cycled forever (51 lease
-                // acquisitions, attemptCount stuck at 0). On the
-                // terminal supersede branch, drop `nextEligibleAt` so
-                // the job is no longer dispatchable.
+                // Bump `attemptCount`: repeated mid-decode cancellation
+                // must eventually reach `maxAttemptsReached` so a poisoned
+                // job supersedes and frees the lease slot. Terminal branch
+                // also drops `nextEligibleAt` to make the job non-dispatchable.
                 let attempts = job.attemptCount + 1
                 if attempts >= Self.maxAttemptCount {
                     await commitOutcomeArm(
