@@ -38,7 +38,6 @@
 		0A9A15459F9A045064D77DD0 /* ShowTraitProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21E319F52631904CBCA63F0B /* ShowTraitProfile.swift */; };
 		0B04861A42DCCDDEB5DC7FF3 /* InterruptionMocks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6665EE41820179B7BD79B186 /* InterruptionMocks.swift */; };
 		0BC67279D71DB9A63EEB9DA2 /* InstallIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 969E47E27FE98F3A50D41A16 /* InstallIdentity.swift */; };
-		0DAB31A0D8A939BBF66D489C /* AnalysisAudioStreamingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DA32B9F49A2795CFD15C0A4 /* AnalysisAudioStreamingTests.swift */; };
 		0DAC2472D8BA0EDE81902A08 /* Phase6ComprehensiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39EDB3ADD05EFFBC1053A447 /* Phase6ComprehensiveTests.swift */; };
 		0DB7C527C6970C075E1192A6 /* SkipOrchestratorRevertTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1852B4D706BB1B4813AB5EA5 /* SkipOrchestratorRevertTests.swift */; };
 		0E85A37F2DC6B52AD266FBA0 /* QualityProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = E72723DD3FB388DB79118836 /* QualityProfile.swift */; };
@@ -706,7 +705,6 @@
 		0C8BBF44C045B759B9843C2B /* Capabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Capabilities.swift; sourceTree = "<group>"; };
 		0CF1DA7B24F73A15707905F3 /* FeatureExtractionSignalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeatureExtractionSignalTests.swift; sourceTree = "<group>"; };
 		0D5F7B8ED66A153BCA010DEE /* ChapterEvidencePipelineRegressionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChapterEvidencePipelineRegressionTests.swift; sourceTree = "<group>"; };
-		0DA32B9F49A2795CFD15C0A4 /* AnalysisAudioStreamingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AnalysisAudioStreamingTests.swift; sourceTree = "<group>"; };
 		0E287166EF996DC95C9A4398 /* CorpusVerificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CorpusVerificationTests.swift; sourceTree = "<group>"; };
 		0FFE1D6297B023C8B12CC94E /* TranscriptQualityEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptQualityEstimator.swift; sourceTree = "<group>"; };
 		104A431669814AE2F9BD67A2 /* CorpusLoaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CorpusLoaderTests.swift; sourceTree = "<group>"; };
@@ -2195,7 +2193,6 @@
 			isa = PBXGroup;
 			children = (
 				B65128A621D0AC279FAC726B /* AnalysisAudioStreamingTests.swift */,
-				0DA32B9F49A2795CFD15C0A4 /* AnalysisAudioStreamingTests.swift */,
 			);
 			path = AnalysisAudio;
 			sourceTree = "<group>";
@@ -3474,7 +3471,6 @@
 				2934CB0BDEFD261C285BD3AC /* WithTestRuntime.swift in Sources */,
 				E517D642282F2FF5DD23A010 /* WorkJournalReadCorruptionTests.swift in Sources */,
 				885C8E3A4D8E7A1BF24135C6 /* WorkJournalTailFetchTests.swift in Sources */,
-				0DAB31A0D8A939BBF66D489C /* AnalysisAudioStreamingTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

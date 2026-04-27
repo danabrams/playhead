@@ -1,8 +1,16 @@
 // Streaming-decode regression tests for playhead-s8dq.
 //
 // Covers the bead's acceptance criteria:
-//   - peak source buffer stays bounded (<<50 MB) regardless of asset duration
+//   - peak source CMSampleBuffer batch stays bounded (<<50 MB) regardless
+//     of asset duration
+//   - peak per-shard accumulator stays bounded to one shard's worth,
+//     proving total in-flight Float32 output RAM does not scale with
+//     episode duration
 //   - decoded sample count matches expected duration × 16 kHz within tolerance
+//   - decoded content is preserved (RMS + zero-crossing equivalence on
+//     a known sine input — there is no longer a one-shot reference path
+//     to byte-compare against, so content equivalence is asserted via
+//     signal properties of the synthetic input)
 //   - the actor's instrumentation seam reports plausible values
 
 @preconcurrency import AVFoundation
@@ -20,7 +28,8 @@ struct AnalysisAudioStreamingTests {
     private func writeSynthFile(
         seconds: TimeInterval,
         sampleRate: Double = 44_100,
-        frequency: Double = 440
+        frequency: Double = 440,
+        amplitude: Double = 0.25
     ) throws -> URL {
         let tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
         let fileURL = tempDir.appendingPathComponent("s8dq-\(UUID().uuidString).caf")
@@ -58,7 +67,7 @@ struct AnalysisAudioStreamingTests {
             let phaseStep = 2.0 * .pi * frequency / sampleRate
             for i in 0..<Int(frames) {
                 let phase = phaseStep * Double(Int(totalFrames) + i)
-                channel[i] = Float(sin(phase) * 0.25)
+                channel[i] = Float(sin(phase) * amplitude)
             }
 
             try file.write(from: buffer)
@@ -68,7 +77,7 @@ struct AnalysisAudioStreamingTests {
         return fileURL
     }
 
-    @Test("60s synth file: peak source buffer stays under ceiling, output sample count matches duration")
+    @Test("60s synth file: peak source batch + peak shard accumulator stay bounded; sample count matches duration")
     func bounded_peak_for_one_minute_synth() async throws {
         let assetSeconds: TimeInterval = 60
         let url = try writeSynthFile(seconds: assetSeconds)
@@ -95,14 +104,23 @@ struct AnalysisAudioStreamingTests {
         #expect(abs(totalSamples - expected) <= tol,
                 "decoded samples=\(totalSamples) expected=\(expected) (±\(tol))")
 
-        // Peak in-flight source buffer must be far below the 50 MB ceiling.
+        // Peak source CMSampleBuffer batch must be far below the 50 MB ceiling.
         // For a 60s 44.1kHz mono Float32 file, one CMSampleBuffer is typically
         // 4096–8192 frames (~16–32 KB). We assert a generous 1 MB upper bound
         // to leave room for codec quirks while still proving streaming works.
-        let peak = await service.peakSourceBufferBytes
-        #expect(peak < 1 * 1024 * 1024,
-                "peak source buffer = \(peak) bytes (must be < 1 MB to prove streaming)")
-        #expect(peak > 0, "peak source buffer should be > 0 if any decode occurred")
+        let peakBatch = await service.peakSourceBatchBytes
+        #expect(peakBatch < 1 * 1024 * 1024,
+                "peak source batch = \(peakBatch) bytes (must be < 1 MB to prove streaming)")
+        #expect(peakBatch > 0, "peak source batch should be > 0 if any decode occurred")
+
+        // Peak per-shard accumulator must be bounded to one shard's worth
+        // (~1.92 MB). This is the C1 acceptance — total in-flight Float32
+        // output RAM scales with shard duration, NOT episode duration.
+        let peakShard = await service.peakShardAccumulatorBytes
+        let oneShardBytes = 30 * 16_000 * MemoryLayout<Float>.size  // 1_920_000
+        #expect(peakShard <= oneShardBytes + (oneShardBytes / 100),  // +1% slack
+                "peak shard accumulator = \(peakShard) bytes (must be ≤ \(oneShardBytes) + 1% to prove bounded)")
+        #expect(peakShard > 0, "peak shard accumulator should be > 0 if any decode occurred")
 
         // cumulativeOutputSamples mirrors what we counted in shards.
         let cumulative = await service.cumulativeOutputSamples
@@ -138,6 +156,134 @@ struct AnalysisAudioStreamingTests {
             #expect(last.sampleCount > 200_000 && last.sampleCount < 260_000,
                     "tail shard sampleCount = \(last.sampleCount), expected ~240k")
         }
+
+        await service.evictCache(episodeID: episodeID)
+    }
+
+    /// Long-fixture regression for C1: the per-shard accumulator must
+    /// remain bounded as episode length grows. We use 10 minutes (≈40 MB
+    /// on disk at 44.1 kHz Float32) instead of a literal 5-hour fixture
+    /// to avoid 3+ GB of disk during CI runs — but the assertion is the
+    /// same: peak shard accumulator ≤ one shard, regardless of asset
+    /// duration. 10 min is 20× the default shard, which would have been
+    /// 1.5× the prior fix's leak ceiling for a 5-hour asset.
+    @Test("Long fixture: peak shard accumulator stays bounded as episode length grows")
+    func bounded_for_long_synth() async throws {
+        let assetSeconds: TimeInterval = 600  // 10 minutes
+        let url = try writeSynthFile(seconds: assetSeconds, sampleRate: 22_050)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        guard let local = LocalAudioURL(url) else {
+            Issue.record("Could not wrap test fixture in LocalAudioURL")
+            return
+        }
+        let service = AnalysisAudioService()
+        let episodeID = "s8dq-long-\(UUID().uuidString)"
+        let shards = try await service.decode(
+            fileURL: local,
+            episodeID: episodeID,
+            shardDuration: 30
+        )
+
+        // 600s / 30s = 20 shards expected.
+        #expect(shards.count == 20 || shards.count == 21,
+                "expected ~20 shards for 600s @30s, got \(shards.count)")
+
+        // Peak shard accumulator MUST stay bounded — this is the C1
+        // assertion that distinguishes streaming-shard-emission from the
+        // prior half-fix where allSamples grew linearly.
+        let peakShard = await service.peakShardAccumulatorBytes
+        let oneShardBytes = 30 * 16_000 * MemoryLayout<Float>.size  // 1_920_000
+        #expect(peakShard <= oneShardBytes + (oneShardBytes / 100),
+                "peak shard accumulator = \(peakShard) bytes (must be ≤ \(oneShardBytes) + 1%); a leak would scale with duration")
+
+        // Cumulative output ≈ 600 × 16 000 = 9.6M samples (FIR slack ±0.5%).
+        let cumulative = await service.cumulativeOutputSamples
+        let expected = Int(assetSeconds * AnalysisAudioService.targetSampleRate)
+        let tol = expected / 200
+        #expect(abs(cumulative - expected) <= tol,
+                "cumulativeOutputSamples=\(cumulative) expected=\(expected) (±\(tol))")
+
+        await service.evictCache(episodeID: episodeID)
+    }
+
+    /// Content-equivalence regression for C3/H1: prove the streaming
+    /// converter preserves the input signal. We can't byte-compare to a
+    /// one-shot reference (that path no longer exists), so we instead
+    /// verify the decoded output retains the known properties of the
+    /// synthetic input:
+    ///   - RMS within ±5% of expected (amplitude/√2)
+    ///   - dominant frequency within ±2 Hz via zero-crossing count
+    /// A leaky/buggy converter would produce DC bias, attenuation, or
+    /// frequency drift across shard boundaries that this catches.
+    @Test("Content equivalence: 5-min sine input preserves RMS and frequency through shard boundaries")
+    func content_equivalence_sine() async throws {
+        let assetSeconds: TimeInterval = 300  // 5 minutes — many shard boundaries
+        let frequency = 440.0
+        let amplitude = 0.25
+        let url = try writeSynthFile(
+            seconds: assetSeconds,
+            sampleRate: 44_100,
+            frequency: frequency,
+            amplitude: amplitude
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        guard let local = LocalAudioURL(url) else {
+            Issue.record("Could not wrap test fixture")
+            return
+        }
+        let service = AnalysisAudioService()
+        let episodeID = "s8dq-content-\(UUID().uuidString)"
+        let shards = try await service.decode(
+            fileURL: local,
+            episodeID: episodeID,
+            shardDuration: 30
+        )
+
+        // Concatenate ALL shard samples to verify shard boundaries didn't
+        // introduce discontinuities. NOTE: we tolerate this whole-file
+        // assemble in the TEST (where bounded test fixtures are fine);
+        // production code must not.
+        var all: [Float] = []
+        all.reserveCapacity(shards.reduce(0) { $0 + $1.sampleCount })
+        for shard in shards { all.append(contentsOf: shard.samples) }
+
+        // Skip the first/last 1024 samples to avoid FIR-tap ramp.
+        let head = 1024
+        let tail = all.count - 1024
+        guard tail > head else {
+            Issue.record("Decoded output too short for content check")
+            return
+        }
+        let region = all[head..<tail]
+
+        // RMS check.
+        var sumSq: Double = 0
+        for s in region { sumSq += Double(s) * Double(s) }
+        let rms = sqrt(sumSq / Double(region.count))
+        let expectedRMS = amplitude / sqrt(2.0)
+        let rmsErr = abs(rms - expectedRMS) / expectedRMS
+        #expect(rmsErr < 0.05,
+                "RMS=\(rms) expected≈\(expectedRMS), error=\(rmsErr * 100)%")
+
+        // Frequency via zero-crossing count.
+        var zc = 0
+        var prev = region[region.startIndex]
+        for s in region.dropFirst() {
+            if (prev <= 0 && s > 0) || (prev >= 0 && s < 0) { zc += 1 }
+            prev = s
+        }
+        let regionDuration = Double(region.count) / AnalysisAudioService.targetSampleRate
+        let measuredFreq = Double(zc) / 2.0 / regionDuration
+        #expect(abs(measuredFreq - frequency) < 2.0,
+                "measured freq=\(measuredFreq) Hz expected≈\(frequency) Hz")
+
+        // And the shard accumulator was still bounded.
+        let peakShard = await service.peakShardAccumulatorBytes
+        let oneShardBytes = 30 * 16_000 * MemoryLayout<Float>.size
+        #expect(peakShard <= oneShardBytes + (oneShardBytes / 100),
+                "peak shard accumulator = \(peakShard) bytes; must be ≤ \(oneShardBytes)")
 
         await service.evictCache(episodeID: episodeID)
     }

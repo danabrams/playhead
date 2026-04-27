@@ -214,12 +214,12 @@ actor AnalysisAudioService {
     /// output in memory.
     private static let converterFramesPerCycle: AVAudioFrameCount = 480_000
 
-    /// Hard cap on the in-flight source buffer (one CMSampleBuffer's worth
-    /// of source-rate Float32 samples). 5 s of 48 kHz Float32 mono ≈ 0.96 MB,
-    /// and CMSampleBuffers from AVAssetReader are typically much smaller.
-    /// `peakSourceBufferBytes` must stay well under this; the 50 MB ceiling
-    /// in the bead is therefore comfortably satisfied.
-    static let peakSourceBufferBytesCeiling: Int = 50 * 1024 * 1024
+    /// Hard cap on a single source CMSampleBuffer batch in bytes. AVAssetReader
+    /// typically delivers tens of KB per fetch; a single batch above 50 MB is
+    /// pathological and surfaced as `decodingFailed` rather than swallowed
+    /// silently. Note: this bounds *per-batch* source RAM, not total decode
+    /// RAM — total in-flight is bounded separately by per-shard emission.
+    static let peakSourceBatchBytesCeiling: Int = 50 * 1024 * 1024
 
     // MARK: - Output format
 
@@ -234,10 +234,16 @@ actor AnalysisAudioService {
 
     // MARK: - Instrumentation (test seam)
 
-    /// Peak observed in-flight source-buffer size in bytes for the most
+    /// Peak observed source CMSampleBuffer batch size in bytes for the most
     /// recent `performDecode` invocation. Updated per CMSampleBuffer fetch.
     /// Exposed for memory-budget regression tests.
-    private(set) var peakSourceBufferBytes: Int = 0
+    private(set) var peakSourceBatchBytes: Int = 0
+
+    /// Peak observed per-shard accumulator size in bytes for the most recent
+    /// `performDecode` invocation. Bounds total in-flight Float32 output RAM:
+    /// at most one full shard plus the pre-allocated 30 s converter output
+    /// buffer. Exposed for memory-budget regression tests.
+    private(set) var peakShardAccumulatorBytes: Int = 0
 
     /// Cumulative count of converted output samples produced by the most
     /// recent `performDecode` invocation. Exposed for tests.
@@ -415,7 +421,8 @@ actor AnalysisAudioService {
             throw AnalysisAudioError.converterSetupFailed
         }
 
-        // 6. Stream-decode the asset through AVAudioConverter.
+        // 6. Stream-decode the asset through AVAudioConverter and emit
+        //    shards as samples are produced.
         //
         //    Pre-fix shape (playhead-s8dq): the loop appended every
         //    CMSampleBuffer's worth of source-rate Float32 into a single
@@ -426,24 +433,60 @@ actor AnalysisAudioService {
         //    `convertSamples` then allocated a matching-size AVAudioPCMBuffer,
         //    so peak in-flight was ~6 GiB.
         //
-        //    Streaming shape: a single outer `converter.convert(...)` call
-        //    is driven by an `inputBlock` that pulls one CMSampleBuffer at
-        //    a time and decodes it into a per-batch source AVAudioPCMBuffer.
-        //    The output buffer is pre-allocated once (`converterFramesPerCycle`
-        //    frames ≈ 30 s of 16 kHz Float32 ≈ 1.92 MB) and reused. Converter
-        //    state — including sample-rate FIR taps — carries across calls,
-        //    so the result matches the pre-fix decode within fp tolerance.
+        //    Streaming shape:
+        //    * A single outer `converter.convert(...)` call is driven by an
+        //      `inputBlock` that pulls one CMSampleBuffer at a time and
+        //      decodes it into a per-batch source AVAudioPCMBuffer.
+        //    * The converter output buffer is pre-allocated once
+        //      (`converterFramesPerCycle` frames ≈ 30 s of 16 kHz Float32
+        //      ≈ 1.92 MB) and reused.
+        //    * Each cycle's produced frames are appended to a per-shard
+        //      accumulator. When the accumulator hits `samplesPerShard`,
+        //      the shard is sealed, persistently appended, and the
+        //      accumulator reset. This is the change vs. the prior
+        //      half-fix: total in-flight Float32 output is now bounded to
+        //      one shard's worth (~1.92 MB at 30 s / 16 kHz) instead of
+        //      growing linearly with episode duration.
+        //    * Converter state — including sample-rate FIR taps — carries
+        //      across calls, so the result matches a one-shot decode
+        //      within fp tolerance.
         //    See comparable streaming uses of AVAudioConverter in
         //    StreamingAudioDecoder.swift.
-        var allSamples: [Float] = []
-        allSamples.reserveCapacity(Int(assetDuration * Self.targetSampleRate))
+        let samplesPerShard = Int(shardDuration * Self.targetSampleRate)
+        var shards: [AnalysisShard] = []
+        var shardSamples: [Float] = []
+        shardSamples.reserveCapacity(samplesPerShard)
+        var shardIndex = 0
+        var shardStartSampleOffset = 0
+        var peakShardBytes = 0
 
         // Reset per-decode instrumentation. Updated inside the inputBlock
-        // and the convert-loop body; surfaced via `peakSourceBufferBytes`
-        // and `cumulativeOutputSamples` for the streaming-RAM regression
-        // tests (PlayheadTests/Services/AnalysisAudio/AnalysisAudioStreamingTests).
-        peakSourceBufferBytes = 0
+        // and the convert-loop body; surfaced via `peakSourceBatchBytes`,
+        // `peakShardAccumulatorBytes`, and `cumulativeOutputSamples` for
+        // the streaming-RAM regression tests
+        // (PlayheadTests/Services/AnalysisAudio/AnalysisAudioStreamingTests).
+        peakSourceBatchBytes = 0
+        peakShardAccumulatorBytes = 0
         cumulativeOutputSamples = 0
+
+        // Seal the current `shardSamples` into an AnalysisShard, append it
+        // to `shards`, and reset the accumulator. Inlined as a closure so
+        // the streaming convert loop and the post-loop tail can share it.
+        func emitShard() {
+            let count = shardSamples.count
+            guard count > 0 else { return }
+            let shard = AnalysisShard(
+                id: shardIndex,
+                episodeID: episodeID,
+                startTime: Double(shardStartSampleOffset) / Self.targetSampleRate,
+                duration: Double(count) / Self.targetSampleRate,
+                samples: shardSamples
+            )
+            shards.append(shard)
+            shardIndex += 1
+            shardStartSampleOffset += count
+            shardSamples.removeAll(keepingCapacity: true)
+        }
 
         // Pre-allocate the single output buffer reused across every
         // converter.convert(...) call. ~1.92 MB at 16 kHz Float32 mono.
@@ -460,7 +503,7 @@ actor AnalysisAudioService {
         // `converter.convert(...)`; there is no concurrent access.
         nonisolated(unsafe) var inputAborted = false
         nonisolated(unsafe) var lastInputBlockError: Error?
-        nonisolated(unsafe) var peakBytes: Int = 0
+        nonisolated(unsafe) var peakBatchBytes: Int = 0
 
         // Pull the next CMSampleBuffer-backed AVAudioPCMBuffer.
         // - Returns `.buffer(b)` with a freshly-allocated PCM buffer.
@@ -520,10 +563,10 @@ actor AnalysisAudioService {
             // unboundedly, we'd surface that as an error rather than
             // silently OOM again.
             let batchBytes = totalLength
-            if batchBytes > peakBytes { peakBytes = batchBytes }
-            if batchBytes > Self.peakSourceBufferBytesCeiling {
+            if batchBytes > peakBatchBytes { peakBatchBytes = batchBytes }
+            if batchBytes > Self.peakSourceBatchBytesCeiling {
                 lastInputBlockError = AnalysisAudioError.decodingFailed(
-                    "Source CMSampleBuffer exceeded \(Self.peakSourceBufferBytesCeiling) bytes"
+                    "Source CMSampleBuffer exceeded \(Self.peakSourceBatchBytesCeiling) bytes"
                 )
                 inputAborted = true
                 return .endOfStream
@@ -603,28 +646,64 @@ actor AnalysisAudioService {
             case .haveData:
                 break
             case .inputRanDry:
-                // Spurious — our inputBlock always returns either a
-                // buffer or endOfStream. Treat as a no-op spin.
-                break
+                // Per Apple docs `.inputRanDry` shouldn't surface when the
+                // inputBlock returns endOfStream itself — but if it does,
+                // and the converter produced no frames this cycle, advance
+                // to end-of-stream rather than spinning. Combined with the
+                // 0-frame guard below, this prevents the convert loop from
+                // looping forever on a misbehaving converter.
+                if outputBuffer.frameLength == 0 || inputAborted {
+                    done = true
+                }
             case .endOfStream:
                 done = true
             case .error:
+                // Prefer the more specific inputBlock error if one was set
+                // — the generic converter error is typically a downstream
+                // symptom of the inputBlock failure.
+                if let inputError = lastInputBlockError {
+                    throw inputError
+                }
                 throw AnalysisAudioError.decodingFailed(
                     conversionError?.localizedDescription ?? "AVAudioConverter error"
                 )
             @unknown default:
-                done = true
+                throw AnalysisAudioError.decodingFailed(
+                    "AVAudioConverter returned unknown status"
+                )
             }
 
-            // Drain whatever the converter produced this cycle.
+            // Drain whatever the converter produced this cycle into the
+            // active shard accumulator. Emit shards as soon as they hit
+            // `samplesPerShard` so the in-flight Float32 output is bounded
+            // to one shard's worth (~1.92 MB at 30 s / 16 kHz) regardless
+            // of how long the source episode is.
             let producedFrames = Int(outputBuffer.frameLength)
             if producedFrames > 0, let outData = outputBuffer.floatChannelData {
-                let buf = UnsafeBufferPointer(start: outData[0], count: producedFrames)
-                allSamples.append(contentsOf: buf)
+                let basePtr = outData[0]
+                var copied = 0
+                while copied < producedFrames {
+                    try Task.checkCancellation()
+                    let room = max(samplesPerShard - shardSamples.count, 0)
+                    let chunk = min(producedFrames - copied, room)
+                    if chunk > 0 {
+                        let slice = UnsafeBufferPointer(
+                            start: basePtr.advanced(by: copied),
+                            count: chunk
+                        )
+                        shardSamples.append(contentsOf: slice)
+                        copied += chunk
+                    }
+                    let shardBytes = shardSamples.count * MemoryLayout<Float>.size
+                    if shardBytes > peakShardBytes { peakShardBytes = shardBytes }
+                    if shardSamples.count >= samplesPerShard {
+                        emitShard()
+                    }
+                }
                 cumulativeOutputSamples += producedFrames
                 signposter.emitEvent(
                     "decode-batch",
-                    "source_bytes=\(peakBytes) cumulative_out=\(self.cumulativeOutputSamples)"
+                    "source_bytes=\(peakBatchBytes) cumulative_out=\(self.cumulativeOutputSamples)"
                 )
             } else if status == .haveData {
                 // Defensive: `.haveData` with zero frames would otherwise
@@ -633,10 +712,16 @@ actor AnalysisAudioService {
             }
         }
 
-        // Surface the final peak to the actor's instrumentation seam.
-        peakSourceBufferBytes = peakBytes
+        // Emit the tail shard (anything < samplesPerShard left over).
+        emitShard()
 
-        // 7. Check inputBlock-side errors and reader status.
+        // Surface the final peaks to the actor's instrumentation seam.
+        peakSourceBatchBytes = peakBatchBytes
+        peakShardAccumulatorBytes = peakShardBytes
+
+        // 7. Check inputBlock-side errors and reader status. inputBlock
+        //    error wins over reader.status — the input block sees the
+        //    failure first.
         if let inputError = lastInputBlockError {
             throw inputError
         }
@@ -657,35 +742,12 @@ actor AnalysisAudioService {
         }
 
         // 8. Check for truncation — log but still return partial shards.
-        let decodedDuration = Double(allSamples.count) / Self.targetSampleRate
+        //    `cumulativeOutputSamples` is the streaming-equivalent of the
+        //    pre-fix `allSamples.count` and is the source of truth for
+        //    decoded duration now that no whole-episode buffer exists.
+        let decodedDuration = Double(cumulativeOutputSamples) / Self.targetSampleRate
         let isTruncated = assetDuration > 0
             && decodedDuration < assetDuration * (1.0 - Self.truncationTolerance)
-
-        // 9. Slice into shards.
-        let samplesPerShard = Int(shardDuration * Self.targetSampleRate)
-        var shards: [AnalysisShard] = []
-        var offset = 0
-        var shardIndex = 0
-
-        while offset < allSamples.count {
-            try Task.checkCancellation()
-
-            let remaining = allSamples.count - offset
-            let count = min(samplesPerShard, remaining)
-            let slice = Array(allSamples[offset..<(offset + count)])
-
-            let shard = AnalysisShard(
-                id: shardIndex,
-                episodeID: episodeID,
-                startTime: Double(offset) / Self.targetSampleRate,
-                duration: Double(count) / Self.targetSampleRate,
-                samples: slice
-            )
-            shards.append(shard)
-
-            offset += count
-            shardIndex += 1
-        }
 
         // 10. Persist shards for reuse — but only when the file was fully decoded.
         //     Truncated files (still downloading) must not be cached, otherwise
