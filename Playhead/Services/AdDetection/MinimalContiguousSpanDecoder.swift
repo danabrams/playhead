@@ -365,6 +365,17 @@ struct MinimalContiguousSpanDecoder {
             result.endTime = snapAtom.endTime
         }
 
+        // playhead-vn7n.1: diagnostic — log the per-edge end snap so we can
+        // confirm whether Use A is responsible for user-perceived overshoot
+        // at ad boundaries. Numeric fields are .public so they appear in
+        // default field logs (Console.app / sysdiagnose).
+        let atomEnd = span.endTime
+        let snappedEnd = result.endTime
+        let endDelta = snappedEnd - atomEnd
+        Self.logger.info(
+            "applyBoundarySnap: firstOrdinal=\(span.firstOrdinal, privacy: .public) lastOrdinal=\(span.lastOrdinal, privacy: .public) atomEnd=\(atomEnd, privacy: .public) snappedEnd=\(snappedEnd, privacy: .public) endDelta=\(endDelta, privacy: .public)"
+        )
+
         return result
     }
 
