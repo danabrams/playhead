@@ -1561,6 +1561,32 @@ actor DownloadManager {
 
 extension DownloadManager: DownloadProviding {}
 
+// MARK: - Progress Snapshot (playhead-btoa.2)
+
+extension DownloadManager {
+    /// Snapshot of the per-episode foreground download fraction for
+    /// in-flight transfers. Episodes not currently downloading are absent
+    /// from the map. Computed from the same `ForegroundAssistProgress`
+    /// state that drives `progressUpdates()`. Per-call: O(N) over active
+    /// downloads (typically tiny — single-digit episodes).
+    ///
+    /// Entries with `totalBytes == 0` (size-unknown transfers) are
+    /// skipped to avoid divide-by-zero. Background-session transfers are
+    /// out of scope here — see `bgInFlightEpisodes` for that lane.
+    ///
+    /// Used by the Activity provider once per refresh tick to populate
+    /// `ActivityEpisodeInput.downloadFraction`.
+    func progressSnapshot() -> [String: Double] {
+        var result: [String: Double] = [:]
+        for (episodeId, progress) in foregroundAssistProgress {
+            guard progress.totalBytes > 0 else { continue }
+            result[episodeId] =
+                Double(progress.bytesWritten) / Double(progress.totalBytes)
+        }
+        return result
+    }
+}
+
 // MARK: - Shared Reference Plumbing (playhead-24cm)
 
 extension DownloadManager {
