@@ -574,6 +574,44 @@ struct PreAnalysisRecoveryRaceTests {
         #expect(task.completedSuccess == false,
                 "Timed-out injection wait must fall through to the original fail path")
     }
+
+    @Test("Late injection arriving after timeout is a no-op for the timed-out waiter",
+          .timeLimit(.minutes(1)))
+    func lateInjectionAfterTimeoutDoesNotDoubleResume() async throws {
+        // Belt-and-suspenders pin against a continuation double-resume.
+        // Sequence: the injection-wait timeout fires first (parking-side
+        // resumes with `false` and the slot's continuation is consumed),
+        // then `setPreAnalysisServices` is called. The drain loop must
+        // observe the slot's continuation as `nil` and skip it; resuming
+        // a consumed continuation would crash the test runner.
+        let (bps, _, _, _) = makeBPS()
+        await bps.setInjectionWaitTimeoutSecondsForTesting(0.1)
+        let task = StubBackgroundTask()
+        let (reconciler, store) = try await makeReconciler()
+        let workScheduler = makeWorkScheduler(store: store)
+
+        // Run the handler to completion. With injection never landing
+        // before the 100ms timeout, the handler exits the fail path
+        // with success=false.
+        await bps.handlePreAnalysisRecovery(task)
+        #expect(task.completedSuccess == false,
+                "Pre-injection timeout must complete the task with success=false")
+
+        // Inject AFTER the timeout. If the actor's drain loop tries to
+        // resume the timed-out slot's continuation, the process crashes
+        // here. A clean run proves the slot was already removed from
+        // `pendingInjectionWaiters` by `timeoutInjectionWaiter`.
+        await bps.setPreAnalysisServices(scheduler: workScheduler, reconciler: reconciler)
+
+        // Sanity tail: a fresh handler now completes via the immediate
+        // early-return path (`analysisJobReconciler != nil`), confirming
+        // the actor is still healthy after the late injection.
+        let warmTask = StubBackgroundTask()
+        await bps.handlePreAnalysisRecovery(warmTask)
+        try await waitForCompletion(of: warmTask)
+        #expect(warmTask.completedSuccess == true,
+                "After injection, a follow-up handler must complete success=true via the warm path")
+    }
 }
 
 // MARK: - Double-Completion Guard
