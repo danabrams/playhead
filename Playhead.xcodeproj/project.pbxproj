@@ -181,6 +181,7 @@
 		3F0F8160121BFC0FAE15C14A /* EpisodeListViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B192A170335F238D45F67 /* EpisodeListViewTests.swift */; };
 		3F8D54D99433CCDAB017DC82 /* SpanDecisionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21FC75C2BFC7BC682E7F3B50 /* SpanDecisionTests.swift */; };
 		3FEA8B2D3DE188957955981F /* DownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 842382A1A5369363A4D358F3 /* DownloadManager.swift */; };
+		4178F0AB6C4BC5C95E7E9926 /* AnalysisAudioStreamingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B65128A621D0AC279FAC726B /* AnalysisAudioStreamingTests.swift */; };
 		41D85ACE045588A287DDF164 /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9002A6E69AE43C9F38CAB4A /* LibraryView.swift */; };
 		423F31BE200E18A24E1BBCC7 /* AnalysisWorkSchedulerCascadeOrderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFED86CF004D90387FB61B0A /* AnalysisWorkSchedulerCascadeOrderingTests.swift */; };
 		433A679B634C3FAF182B3A69 /* Phase5IntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76D998C8CBEF22C28839F6FE /* Phase5IntegrationTests.swift */; };
@@ -1135,6 +1136,7 @@
 		B4E0357D75C0C693154820C8 /* BackfillFusionPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackfillFusionPipelineTests.swift; sourceTree = "<group>"; };
 		B4EF478F6703172C462A0057 /* DownloadManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadManagerTests.swift; sourceTree = "<group>"; };
 		B540ECDE12AFC60BBC272DC8 /* TrustScoringService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrustScoringService.swift; sourceTree = "<group>"; };
+		B65128A621D0AC279FAC726B /* AnalysisAudioStreamingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisAudioStreamingTests.swift; sourceTree = "<group>"; };
 		B69E7EB497F0338A3F777192 /* NowPlayingViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingViewModelTests.swift; sourceTree = "<group>"; };
 		B6BCF945EF6DF46BF4270AD9 /* SemanticScanStatusTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticScanStatusTests.swift; sourceTree = "<group>"; };
 		B6F7C4B1A4F52F7446BB07BC /* Tier1FeatureOnlyScoringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tier1FeatureOnlyScoringTests.swift; sourceTree = "<group>"; };
@@ -1467,6 +1469,7 @@
 				D32B071AEFF7831785C2EEAD /* TranscriptIdentityTests.swift */,
 				BAF26BAA9D443CB00BF9ECD0 /* Activity */,
 				AAA974B13A24ABEE1AAD5AEE /* AdDetection */,
+				9BE021F87B858662B04B3143 /* AnalysisAudio */,
 				CE2B2C9E2FC8625A4373838D /* AnalysisCoordinator */,
 				0ACA679978C79CE7917BDB81 /* AnalysisJobRunner */,
 				5B690F9FF697EE4DD8086FC7 /* Capabilities */,
@@ -2186,6 +2189,14 @@
 			path = "2026-04-25";
 			sourceTree = "<group>";
 		};
+		9BE021F87B858662B04B3143 /* AnalysisAudio */ = {
+			isa = PBXGroup;
+			children = (
+				B65128A621D0AC279FAC726B /* AnalysisAudioStreamingTests.swift */,
+			);
+			path = AnalysisAudio;
+			sourceTree = "<group>";
+		};
 		9C0E9816F207942BEF585B33 /* Entitlements */ = {
 			isa = PBXGroup;
 			children = (
@@ -2702,8 +2713,6 @@
 			dependencies = (
 			);
 			name = Playhead;
-			packageProductDependencies = (
-			);
 			productName = Playhead;
 			productReference = 5753B081F06174EAC07D0CA3 /* Playhead.app */;
 			productType = "com.apple.product-type.application";
@@ -2721,8 +2730,6 @@
 				EA248C0B4E17DD6BC0ADF05C /* PBXTargetDependency */,
 			);
 			name = PlayheadTests;
-			packageProductDependencies = (
-			);
 			productName = PlayheadTests;
 			productReference = 523CE28ACD413C43542AB8FF /* PlayheadTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
@@ -3135,6 +3142,7 @@
 				B4F7A58DDC21F3215ED15F7F /* AdDetectionServiceShadowModeTests.swift in Sources */,
 				ED5557A6EED1D94DA1726472 /* AdmissionControllerTests.swift in Sources */,
 				51B95154ED51B8D2BE2816B7 /* AdmissionGateTests.swift in Sources */,
+				4178F0AB6C4BC5C95E7E9926 /* AnalysisAudioStreamingTests.swift in Sources */,
 				31C6E18D0D991984D42FBBCF /* AnalysisEligibilityTests.swift in Sources */,
 				56FDC181CF26095DB127683C /* AnalysisJobReconcilerTests.swift in Sources */,
 				A9653FAAE6906B7023563235 /* AnalysisJobRunnerTests.swift in Sources */,
