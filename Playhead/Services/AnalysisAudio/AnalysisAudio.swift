@@ -7,6 +7,7 @@
 
 @preconcurrency import AVFoundation
 import Foundation
+import os
 import OSLog
 
 // MARK: - AnalysisShard
@@ -207,7 +208,18 @@ actor AnalysisAudioService {
     private static let truncationTolerance: Double = 0.05
 
     /// Converter output buffer size in frames per conversion cycle.
-    private static let converterFramesPerCycle: AVAudioFrameCount = 8192
+    /// 30 s of 16 kHz Float32 mono = 480 000 frames ≈ 1.92 MB. Pre-allocated
+    /// once and reused across `converter.convert(...)` calls so the converter
+    /// can stream a 5-hour episode without ever holding more than this much
+    /// output in memory.
+    private static let converterFramesPerCycle: AVAudioFrameCount = 480_000
+
+    /// Hard cap on the in-flight source buffer (one CMSampleBuffer's worth
+    /// of source-rate Float32 samples). 5 s of 48 kHz Float32 mono ≈ 0.96 MB,
+    /// and CMSampleBuffers from AVAssetReader are typically much smaller.
+    /// `peakSourceBufferBytes` must stay well under this; the 50 MB ceiling
+    /// in the bead is therefore comfortably satisfied.
+    static let peakSourceBufferBytesCeiling: Int = 50 * 1024 * 1024
 
     // MARK: - Output format
 
@@ -217,7 +229,19 @@ actor AnalysisAudioService {
     // MARK: - State
 
     private let logger = Logger(subsystem: "com.playhead", category: "AnalysisAudio")
+    private let signposter = OSSignposter(subsystem: "com.playhead", category: "AnalysisAudio")
     private var activeTasks: [String: Task<[AnalysisShard], Error>] = [:]
+
+    // MARK: - Instrumentation (test seam)
+
+    /// Peak observed in-flight source-buffer size in bytes for the most
+    /// recent `performDecode` invocation. Updated per CMSampleBuffer fetch.
+    /// Exposed for memory-budget regression tests.
+    private(set) var peakSourceBufferBytes: Int = 0
+
+    /// Cumulative count of converted output samples produced by the most
+    /// recent `performDecode` invocation. Exposed for tests.
+    private(set) var cumulativeOutputSamples: Int = 0
 
     // MARK: - Init
 
@@ -391,18 +415,85 @@ actor AnalysisAudioService {
             throw AnalysisAudioError.converterSetupFailed
         }
 
-        // 6. Read and convert all samples.
+        // 6. Stream-decode the asset through AVAudioConverter.
+        //
+        //    Pre-fix shape (playhead-s8dq): the loop appended every
+        //    CMSampleBuffer's worth of source-rate Float32 into a single
+        //    `[Float]` array, then handed the entire array to a one-shot
+        //    `convertSamples` after the loop. On a 5-hour 44.1 kHz episode
+        //    that array is 3.18 GiB — exact match to the production OOM
+        //    `failed to allocate 3221225440 bytes of memory with alignment 8`.
+        //    `convertSamples` then allocated a matching-size AVAudioPCMBuffer,
+        //    so peak in-flight was ~6 GiB.
+        //
+        //    Streaming shape: a single outer `converter.convert(...)` call
+        //    is driven by an `inputBlock` that pulls one CMSampleBuffer at
+        //    a time and decodes it into a per-batch source AVAudioPCMBuffer.
+        //    The output buffer is pre-allocated once (`converterFramesPerCycle`
+        //    frames ≈ 30 s of 16 kHz Float32 ≈ 1.92 MB) and reused. Converter
+        //    state — including sample-rate FIR taps — carries across calls,
+        //    so the result matches the pre-fix decode within fp tolerance.
+        //    See comparable streaming uses of AVAudioConverter in
+        //    StreamingAudioDecoder.swift.
         var allSamples: [Float] = []
         allSamples.reserveCapacity(Int(assetDuration * Self.targetSampleRate))
 
-        // Accumulated source samples waiting for conversion.
-        var sourceSampleBuffer: [Float] = []
+        // Reset per-decode instrumentation. Updated inside the inputBlock
+        // and the convert-loop body; surfaced via `peakSourceBufferBytes`
+        // and `cumulativeOutputSamples` for the streaming-RAM regression
+        // tests (PlayheadTests/Services/AnalysisAudio/AnalysisAudioStreamingTests).
+        peakSourceBufferBytes = 0
+        cumulativeOutputSamples = 0
 
-        while let sampleBuffer = trackOutput.copyNextSampleBuffer() {
-            try Task.checkCancellation()
+        // Pre-allocate the single output buffer reused across every
+        // converter.convert(...) call. ~1.92 MB at 16 kHz Float32 mono.
+        guard let outputBuffer = AVAudioPCMBuffer(
+            pcmFormat: outputFormat,
+            frameCapacity: Self.converterFramesPerCycle
+        ) else {
+            throw AnalysisAudioError.converterSetupFailed
+        }
+
+        // The inputBlock and the convert-loop both need to read/write
+        // these. `nonisolated(unsafe)` is safe because AVAudioConverter
+        // calls the inputBlock synchronously from the same call as
+        // `converter.convert(...)`; there is no concurrent access.
+        nonisolated(unsafe) var inputAborted = false
+        nonisolated(unsafe) var lastInputBlockError: Error?
+        nonisolated(unsafe) var peakBytes: Int = 0
+
+        // Pull the next CMSampleBuffer-backed AVAudioPCMBuffer.
+        // - Returns `.buffer(b)` with a freshly-allocated PCM buffer.
+        // - Returns `.skip` on a transient/empty CMSampleBuffer the
+        //   converter should ignore (caller should retry the next one).
+        // - Returns `.endOfStream` once the reader is exhausted or the
+        //   decode has been aborted (cancellation / error / size cap).
+        enum PullResult {
+            case buffer(AVAudioPCMBuffer)
+            case skip
+            case endOfStream
+        }
+
+        // Per-CMSampleBuffer fetch + decode. Only the inputBlock calls
+        // this; isolated to keep the convert loop body small.
+        let pullNextBuffer: @Sendable () -> PullResult = {
+            // Cancellation check — the inputBlock cannot throw, so we
+            // surface cancellation by signalling end-of-stream and
+            // re-throwing in the post-convert path below.
+            if Task.isCancelled {
+                inputAborted = true
+                return .endOfStream
+            }
+
+            guard let sampleBuffer = trackOutput.copyNextSampleBuffer() else {
+                // Reader is either exhausted (.completed) or failed —
+                // disambiguated in the post-convert reader.status check.
+                return .endOfStream
+            }
 
             guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
-                continue
+                // Skip empty sample buffers — same behaviour as pre-fix.
+                return .skip
             }
 
             var lengthAtOffset: Int = 0
@@ -418,28 +509,140 @@ actor AnalysisAudioService {
             )
 
             guard status == kCMBlockBufferNoErr, let ptr = dataPointer else {
-                continue
+                return .skip
             }
 
             let floatCount = totalLength / MemoryLayout<Float>.size
+            guard floatCount > 0 else { return .skip }
+
+            // Track per-batch in-flight size. Cap at the configured
+            // ceiling — defensive: if a single CMSampleBuffer ever grew
+            // unboundedly, we'd surface that as an error rather than
+            // silently OOM again.
+            let batchBytes = totalLength
+            if batchBytes > peakBytes { peakBytes = batchBytes }
+            if batchBytes > Self.peakSourceBufferBytesCeiling {
+                lastInputBlockError = AnalysisAudioError.decodingFailed(
+                    "Source CMSampleBuffer exceeded \(Self.peakSourceBufferBytesCeiling) bytes"
+                )
+                inputAborted = true
+                return .endOfStream
+            }
+
+            // Allocate a per-batch source PCM buffer the converter can
+            // consume. AVAudioConverter does not retain the buffer past
+            // the next inputBlock call, so a fresh allocation per batch
+            // is the cheapest correct shape. ~tens of KB per batch.
+            guard let pcm = AVAudioPCMBuffer(
+                pcmFormat: sourceFormat,
+                frameCapacity: AVAudioFrameCount(floatCount)
+            ) else {
+                lastInputBlockError = AnalysisAudioError.converterSetupFailed
+                inputAborted = true
+                return .endOfStream
+            }
+            pcm.frameLength = AVAudioFrameCount(floatCount)
             let floatPtr = UnsafeRawPointer(ptr).bindMemory(
                 to: Float.self, capacity: floatCount
             )
-            let buffer = UnsafeBufferPointer(start: floatPtr, count: floatCount)
-            sourceSampleBuffer.append(contentsOf: buffer)
+            pcm.floatChannelData![0].update(from: floatPtr, count: floatCount)
+            return .buffer(pcm)
         }
 
-        // Convert accumulated source samples through AVAudioConverter.
-        if !sourceSampleBuffer.isEmpty {
-            let converted = try convertSamples(
-                sourceSampleBuffer,
-                using: converter,
-                sourceFormat: sourceFormat
+        let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
+            if inputAborted {
+                outStatus.pointee = .endOfStream
+                return nil
+            }
+
+            // Loop past skippable (transient/empty) sample buffers so
+            // they don't terminate the stream prematurely — same intent
+            // as the pre-fix `continue` in the read loop. Each call to
+            // the inputBlock returns at most one PCM buffer; the previous
+            // one's strong ref is owned by the converter until its next
+            // inputBlock invocation, then released — bounding in-flight
+            // source RAM to ~one CMSampleBuffer batch.
+            while true {
+                switch pullNextBuffer() {
+                case .buffer(let pcm):
+                    outStatus.pointee = .haveData
+                    return pcm
+                case .skip:
+                    continue
+                case .endOfStream:
+                    outStatus.pointee = .endOfStream
+                    return nil
+                }
+            }
+        }
+
+        // Wrap the streaming decode in an os_signpost interval so future
+        // regressions in decode latency or memory can be measured in
+        // Instruments without re-instrumenting. Per-batch events are
+        // emitted from the convert loop below.
+        let signpostState = signposter.beginInterval("decode-streaming", "\(episodeID)")
+        defer { signposter.endInterval("decode-streaming", signpostState) }
+
+        // Drive the converter: each call fills (or partially fills) the
+        // pre-allocated output buffer, then we copy out and continue. The
+        // converter signals `.endOfStream` only when our inputBlock has
+        // returned nil + `.endOfStream`.
+        var conversionError: NSError?
+        var done = false
+        while !done {
+            try Task.checkCancellation()
+
+            outputBuffer.frameLength = 0
+            let status = converter.convert(
+                to: outputBuffer,
+                error: &conversionError,
+                withInputFrom: inputBlock
             )
-            allSamples.append(contentsOf: converted)
+
+            switch status {
+            case .haveData:
+                break
+            case .inputRanDry:
+                // Spurious — our inputBlock always returns either a
+                // buffer or endOfStream. Treat as a no-op spin.
+                break
+            case .endOfStream:
+                done = true
+            case .error:
+                throw AnalysisAudioError.decodingFailed(
+                    conversionError?.localizedDescription ?? "AVAudioConverter error"
+                )
+            @unknown default:
+                done = true
+            }
+
+            // Drain whatever the converter produced this cycle.
+            let producedFrames = Int(outputBuffer.frameLength)
+            if producedFrames > 0, let outData = outputBuffer.floatChannelData {
+                let buf = UnsafeBufferPointer(start: outData[0], count: producedFrames)
+                allSamples.append(contentsOf: buf)
+                cumulativeOutputSamples += producedFrames
+                signposter.emitEvent(
+                    "decode-batch",
+                    "source_bytes=\(peakBytes) cumulative_out=\(self.cumulativeOutputSamples)"
+                )
+            } else if status == .haveData {
+                // Defensive: `.haveData` with zero frames would otherwise
+                // spin forever. Treat as effective end-of-stream.
+                done = true
+            }
         }
 
-        // 7. Check reader status.
+        // Surface the final peak to the actor's instrumentation seam.
+        peakSourceBufferBytes = peakBytes
+
+        // 7. Check inputBlock-side errors and reader status.
+        if let inputError = lastInputBlockError {
+            throw inputError
+        }
+        if Task.isCancelled {
+            throw AnalysisAudioError.cancelled
+        }
         switch reader.status {
         case .completed:
             break
@@ -504,79 +707,15 @@ actor AnalysisAudioService {
     }
 
     // MARK: - Sample rate conversion
-
-    /// Convert source-rate Float32 samples to 16 kHz using AVAudioConverter.
-    private func convertSamples(
-        _ sourceSamples: [Float],
-        using converter: AVAudioConverter,
-        sourceFormat: AVAudioFormat
-    ) throws -> [Float] {
-        let frameCount = AVAudioFrameCount(sourceSamples.count)
-        guard let inputBuffer = AVAudioPCMBuffer(
-            pcmFormat: sourceFormat,
-            frameCapacity: frameCount
-        ) else {
-            throw AnalysisAudioError.converterSetupFailed
-        }
-
-        // Copy source samples into the input buffer.
-        inputBuffer.frameLength = frameCount
-        let channelData = inputBuffer.floatChannelData!
-        sourceSamples.withUnsafeBufferPointer { src in
-            channelData[0].update(from: src.baseAddress!, count: sourceSamples.count)
-        }
-
-        // Estimate output size based on sample rate ratio.
-        let ratio = Self.targetSampleRate / sourceFormat.sampleRate
-        let estimatedOutputFrames = AVAudioFrameCount(
-            Double(frameCount) * ratio + Double(Self.converterFramesPerCycle)
-        )
-        guard let outputBuffer = AVAudioPCMBuffer(
-            pcmFormat: outputFormat,
-            frameCapacity: estimatedOutputFrames
-        ) else {
-            throw AnalysisAudioError.converterSetupFailed
-        }
-
-        // nonisolated(unsafe) needed because AVAudioConverterInputBlock is
-        // @Sendable but we know conversion is synchronous and single-shot.
-        nonisolated(unsafe) var inputConsumed = false
-        nonisolated(unsafe) let capturedInput = inputBuffer
-        let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
-            if inputConsumed {
-                outStatus.pointee = .endOfStream
-                return nil
-            }
-            inputConsumed = true
-            outStatus.pointee = .haveData
-            return capturedInput
-        }
-
-        var conversionError: NSError?
-        let status = converter.convert(
-            to: outputBuffer,
-            error: &conversionError,
-            withInputFrom: inputBlock
-        )
-
-        switch status {
-        case .haveData, .endOfStream, .inputRanDry:
-            break
-        case .error:
-            throw AnalysisAudioError.decodingFailed(
-                conversionError?.localizedDescription ?? "AVAudioConverter error"
-            )
-        @unknown default:
-            break
-        }
-
-        let outputCount = Int(outputBuffer.frameLength)
-        guard outputCount > 0, let outData = outputBuffer.floatChannelData else {
-            return []
-        }
-
-        return Array(UnsafeBufferPointer(start: outData[0], count: outputCount))
-    }
+    //
+    // The previous one-shot `convertSamples(_:using:sourceFormat:)` helper
+    // was removed in playhead-s8dq. Streaming conversion is now inlined
+    // in `performDecode` step 6, where a single outer `converter.convert`
+    // call is driven by an `inputBlock` that pulls one CMSampleBuffer at
+    // a time. Inlining keeps the per-batch source/output buffers visible
+    // alongside the cancellation + reader-status checks, and makes the
+    // peak-RAM budget explicit (one source batch + one ~1.92 MB output
+    // buffer in flight at a time).
 }
 
 // MARK: - AnalysisAudioProviding Conformance
