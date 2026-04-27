@@ -273,6 +273,10 @@ private extension ActivityView {
 
 private struct NowRowView: View {
     let row: ActivityNowRow
+    /// playhead-btoa.4: debug strip toggle. When `false` (default) the
+    /// `if` short-circuits and the row renders byte-identically to the
+    /// pre-btoa baseline.
+    @AppStorage("debug.showPipelineStrip") private var showPipelineStrip = false
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(row.title)
@@ -283,6 +287,14 @@ private struct NowRowView: View {
                 .font(AppTypography.mono(size: 12, weight: .regular))
                 .foregroundStyle(AppColors.textSecondary)
                 .accessibilityIdentifier("ActivityView.now.progress")
+            if showPipelineStrip {
+                PipelineProgressStripView(
+                    downloadFraction: row.downloadFraction,
+                    transcriptFraction: row.transcriptFraction,
+                    analysisFraction: row.analysisFraction,
+                    sectionId: "now"
+                )
+            }
         }
         .padding(.vertical, Spacing.xs)
         .accessibilityElement(children: .combine)
@@ -292,12 +304,25 @@ private struct NowRowView: View {
 
 private struct UpNextRowView: View {
     let row: ActivityUpNextRow
+    /// playhead-btoa.4: debug strip toggle. Off-by-default; same key as
+    /// the other row views and the Settings toggle.
+    @AppStorage("debug.showPipelineStrip") private var showPipelineStrip = false
     var body: some View {
-        Text(row.title)
-            .font(AppTypography.body)
-            .foregroundStyle(AppColors.textPrimary)
-            .lineLimit(2)
-            .padding(.vertical, Spacing.xs)
+        VStack(alignment: .leading, spacing: 2) {
+            Text(row.title)
+                .font(AppTypography.body)
+                .foregroundStyle(AppColors.textPrimary)
+                .lineLimit(2)
+            if showPipelineStrip {
+                PipelineProgressStripView(
+                    downloadFraction: row.downloadFraction,
+                    transcriptFraction: row.transcriptFraction,
+                    analysisFraction: row.analysisFraction,
+                    sectionId: "upNext"
+                )
+            }
+        }
+        .padding(.vertical, Spacing.xs)
     }
 }
 
@@ -307,6 +332,9 @@ private struct UpNextRowView: View {
 /// inline.
 private struct PausedRowView: View {
     let row: ActivityPausedRow
+    /// playhead-btoa.4: debug strip toggle. Off-by-default; same key as
+    /// the other row views and the Settings toggle.
+    @AppStorage("debug.showPipelineStrip") private var showPipelineStrip = false
     var body: some View {
         let reasonCopy = SurfaceReasonCopyTemplates.template(for: row.reason)
         let hintCopy = EpisodeStatusLineCopy.hintCopy(row.hint)
@@ -319,6 +347,14 @@ private struct PausedRowView: View {
                 .font(AppTypography.mono(size: 12, weight: .regular))
                 .foregroundStyle(AppColors.textSecondary)
                 .accessibilityIdentifier("ActivityView.paused.reason")
+            if showPipelineStrip {
+                PipelineProgressStripView(
+                    downloadFraction: row.downloadFraction,
+                    transcriptFraction: row.transcriptFraction,
+                    analysisFraction: row.analysisFraction,
+                    sectionId: "paused"
+                )
+            }
         }
         .padding(.vertical, Spacing.xs)
         .accessibilityElement(children: .combine)
