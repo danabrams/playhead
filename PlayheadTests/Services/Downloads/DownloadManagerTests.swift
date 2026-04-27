@@ -632,8 +632,10 @@ struct DownloadManagerForegroundAssistHandoffTests {
 
 // MARK: - Progress Snapshot (playhead-btoa.2)
 
-@Suite("DownloadManager – progressSnapshot (playhead-btoa.2)")
+@Suite("DownloadManager – progressSnapshot")
 struct DownloadManagerProgressSnapshotTests {
+
+    // Uses shared makeTempDir() from TestHelpers.swift
 
     @Test("Empty foreground-assist state → empty snapshot")
     func emptySnapshot() async throws {
