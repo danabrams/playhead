@@ -1246,6 +1246,22 @@ actor SkipOrchestrator {
     /// start (e.g., a 5 s ad with a 10 s cushion collapses to a zero-length
     /// cue at `adStart`).
     private func pushMergedCues(_ ranges: [(start: Double, end: Double)]) {
+        // playhead-vn7n.1: diagnostic — log each cue we are about to push so we
+        // can compare cue.end against the underlying detection AdWindow.endTime
+        // (which has not been snap-expanded). The closest managed ad window
+        // covering the cue range is selected as the underlying detection
+        // reference (lookup is a single linear scan; cue lists are tiny).
+        let sortedRanges = ranges.sorted { $0.start < $1.start }
+        for (i, range) in sortedRanges.enumerated() {
+            let underlyingEnd = nearestAdWindowEnd(forCueStart: range.start, cueEnd: range.end)
+            let nextDistance: Double = i + 1 < sortedRanges.count
+                ? sortedRanges[i + 1].start - range.end
+                : -1.0
+            logger.info(
+                "pushMergedCues: cueStart=\(range.start, privacy: .public) cueEnd=\(range.end, privacy: .public) adWindowEnd=\(underlyingEnd, privacy: .public) distanceToNextCue=\(nextDistance, privacy: .public)"
+            )
+        }
+
         // Defensive: clamp to non-negative so a future misconfigured caller
         // can't invert the cushion (skip-end before ad-end).
         let cushion = max(0.0, config.adTrailingCushionSeconds)
@@ -1256,6 +1272,26 @@ actor SkipOrchestrator {
             return CMTimeRange(start: start, duration: duration)
         }
         pushSkipCues(cues)
+    }
+
+    /// Look up the underlying detection-side AdWindow.endTime for a merged
+    /// cue range. Picks the managed window whose snapped range overlaps the
+    /// cue and whose snappedEnd is closest to the cue end. Returns -1.0
+    /// when no overlap is found (logged as a sentinel rather than NaN to
+    /// keep the field log line shape stable).
+    private func nearestAdWindowEnd(forCueStart cueStart: Double, cueEnd: Double) -> Double {
+        var bestEnd: Double = -1.0
+        var bestGap: Double = .infinity
+        for managed in windows.values {
+            let overlaps = managed.snappedStart < cueEnd && managed.snappedEnd > cueStart
+            guard overlaps else { continue }
+            let gap = abs(managed.snappedEnd - cueEnd)
+            if gap < bestGap {
+                bestGap = gap
+                bestEnd = managed.adWindow.endTime
+            }
+        }
+        return bestEnd
     }
 
     /// Push skip cues to PlaybackService via the handler. Defaults to empty.

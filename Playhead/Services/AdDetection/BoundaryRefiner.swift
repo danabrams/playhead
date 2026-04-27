@@ -10,10 +10,16 @@
 // preserving bit-identical behaviour for every existing call site.
 
 import Foundation
+import OSLog
 
 enum BoundaryRefiner {
     static let maxBoundaryAdjust: Double = 3.0
     private static let resolver = TimeBoundaryResolver()
+
+    private static let logger = Logger(
+        subsystem: "com.playhead",
+        category: "BoundaryRefiner"
+    )
 
     /// Legacy resolver config: 90% pauseVAD, 10% spectralChange. Used
     /// whenever `transcriptHits` is empty so we never regress existing
@@ -140,7 +146,7 @@ enum BoundaryRefiner {
         transcriptHits: [TranscriptBoundaryHit],
         config: BoundarySnappingConfig
     ) -> Double {
-        resolver.snap(
+        let resolved = resolver.snap(
             candidateTime: candidateTime,
             boundaryType: boundaryType,
             anchorType: .fmPositive,
@@ -149,5 +155,21 @@ enum BoundaryRefiner {
             transcriptHits: transcriptHits,
             config: config
         )
+
+        // playhead-vn7n.1: diagnostic — log every boundary resolution so we
+        // can attribute end-side overshoot to BoundaryRefiner. Both start
+        // and end boundaries are logged; reviewers can grep on
+        // boundaryType=end for the overshoot triage.
+        let adjustment = resolved - candidateTime
+        let typeTag: String
+        switch boundaryType {
+        case .start: typeTag = "start"
+        case .end: typeTag = "end"
+        }
+        logger.info(
+            "resolveBoundary: boundaryType=\(typeTag, privacy: .public) candidateTime=\(candidateTime, privacy: .public) resolvedTime=\(resolved, privacy: .public) adjustment=\(adjustment, privacy: .public)"
+        )
+
+        return resolved
     }
 }
