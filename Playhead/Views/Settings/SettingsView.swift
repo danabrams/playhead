@@ -84,6 +84,14 @@ struct SettingsView: View {
     /// Diagnostics group. Loaded lazily on section appearance.
     @State private var schedulerEvents: [WorkJournalEntry] = []
 
+    /// playhead-btoa.4: persisted toggle that drives the per-row
+    /// `PipelineProgressStripView` on the Activity screen. Default is
+    /// `false`; the same `@AppStorage` key (`debug.showPipelineStrip`)
+    /// is read by `NowRowView` / `UpNextRowView` / `PausedRowView`. The
+    /// toggle row is intentionally NOT `#if DEBUG`-gated so it is
+    /// flippable in TestFlight builds for dogfood-only debugging.
+    @AppStorage(DebugFlagKeys.showPipelineStrip) private var showPipelineStrip = false
+
     var body: some View {
         NavigationStack {
             ScrollViewReader { proxy in
@@ -117,6 +125,11 @@ struct SettingsView: View {
                         backgroundSection(prefs)
                         storageSection
                         purchasesSection
+                        // playhead-btoa.4: always-visible debug-toggles
+                        // section. Currently holds only the Activity
+                        // pipeline-strip flag; new always-on debug
+                        // toggles should land here too.
+                        debugTogglesSection
                         #if DEBUG
                         debugSection
                         sendDiagnosticsSection
@@ -654,6 +667,36 @@ private extension SettingsView {
             }
         } header: {
             sectionHeader("Purchases")
+        }
+    }
+}
+
+// MARK: - Debug Toggles Section (always visible)
+
+private extension SettingsView {
+
+    /// playhead-btoa.4: always-visible debug-toggles section. Lives
+    /// outside the `#if DEBUG` block so dogfood TestFlight builds can
+    /// flip these flags without a custom build. Currently exposes a
+    /// single toggle: `debug.showPipelineStrip`, which lights up the
+    /// per-row `PipelineProgressStripView` on the Activity screen.
+    /// Wrap a future toggle in `#if DEBUG` only when it must not ship.
+    var debugTogglesSection: some View {
+        Section {
+            Toggle(isOn: $showPipelineStrip) {
+                Text("Show pipeline progress on Activity")
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textPrimary)
+            }
+            .tint(AppColors.accent)
+            .listRowBackground(AppColors.surface)
+            .accessibilityIdentifier("Settings.debug.showPipelineStrip")
+        } header: {
+            sectionHeader("Debug Overlays")
+        } footer: {
+            Text("Renders DL / TX / AN per-episode progress under each Activity row.")
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.textTertiary)
         }
     }
 }
