@@ -2383,17 +2383,44 @@ actor AnalysisWorkScheduler {
                 logger.warning("Skipping asset-resolution failure writes for job \(job.jobId): lease reclaimed by orphan recovery")
                 return
             }
-            let backoff = Self.exponentialBackoffSeconds(attempt: job.attemptCount + 1)
-            await writeIfStillOwned("assetResolution.markFailed") {
-                try await store.updateJobState(
-                    jobId: job.jobId,
-                    state: "failed",
-                    nextEligibleAt: clock().timeIntervalSince1970 + backoff,
-                    lastErrorCode: "assetResolution: \(error)"
+            // playhead-gyvb.1: route the asset-resolution failure
+            // through `commitOutcomeArm(... incrementAttempt: true ...)`
+            // so attemptCount climbs toward `maxAttemptCount`. Without
+            // the increment, an asset-resolution error that recurs
+            // every cycle (e.g. a SQLite-side fault while inserting
+            // the placeholder asset row) would cycle forever — same
+            // failure shape as the cancel-path bug fixed alongside
+            // this arm. On `maxAttemptsReached`, supersede so the
+            // slot frees for queued work behind it.
+            let attempts = job.attemptCount + 1
+            if attempts >= Self.maxAttemptCount {
+                await commitOutcomeArm(
+                    "assetResolution.supersede",
+                    AnalysisStore.ProcessJobOutcomeArmCommit(
+                        jobId: job.jobId,
+                        incrementAttempt: true,
+                        stateUpdate: .init(
+                            state: "superseded",
+                            nextEligibleAt: nil,
+                            lastErrorCode: "maxAttemptsReached:assetResolution: \(error)"
+                        )
+                    )
                 )
-            }
-            await writeIfStillOwned("assetResolution.releaseLease") {
-                try await store.releaseLease(jobId: job.jobId)
+                logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: assetResolution: \(error)")
+            } else {
+                let backoff = Self.exponentialBackoffSeconds(attempt: attempts)
+                await commitOutcomeArm(
+                    "assetResolution.requeue",
+                    AnalysisStore.ProcessJobOutcomeArmCommit(
+                        jobId: job.jobId,
+                        incrementAttempt: true,
+                        stateUpdate: .init(
+                            state: "failed",
+                            nextEligibleAt: clock().timeIntervalSince1970 + backoff,
+                            lastErrorCode: "assetResolution: \(error)"
+                        )
+                    )
+                )
             }
             return
         }
@@ -2431,6 +2458,15 @@ actor AnalysisWorkScheduler {
                 // `fetchNextEligibleJob` (queued|paused|failed only) and
                 // to `recoverExpiredLease` (leaseOwner IS NOT NULL
                 // only). Revert to 'queued' before releasing the lease.
+                //
+                // Intentionally NOT bumping `attemptCount` here: this
+                // arm fires only when the cancel arrived BEFORE
+                // `runTask` started, so no decode work was performed.
+                // Preserving the attempt budget keeps the job's
+                // remaining retries available for actual work attempts
+                // — bumping on every preempt-before-start would burn
+                // through `maxAttemptCount` from churn rather than from
+                // genuine failures.
                 await writeIfStillOwned("cancelRace.revertQueued") {
                     try await store.updateJobState(jobId: job.jobId, state: "queued")
                 }
@@ -2476,11 +2512,38 @@ actor AnalysisWorkScheduler {
                     pendingCancelCause = nil
                     return
                 }
-                await writeIfStillOwned("cancelCatch.revertQueued") {
-                    try await store.updateJobState(jobId: job.jobId, state: "queued")
-                }
-                await writeIfStillOwned("cancelCatch.releaseLease") {
-                    try await store.releaseLease(jobId: job.jobId)
+                // Bump `attemptCount`: repeated mid-decode cancellation
+                // must eventually reach `maxAttemptsReached` so a poisoned
+                // job supersedes and frees the lease slot. Terminal branch
+                // also drops `nextEligibleAt` to make the job non-dispatchable.
+                let attempts = job.attemptCount + 1
+                if attempts >= Self.maxAttemptCount {
+                    await commitOutcomeArm(
+                        "cancelCatch.supersede",
+                        AnalysisStore.ProcessJobOutcomeArmCommit(
+                            jobId: job.jobId,
+                            incrementAttempt: true,
+                            stateUpdate: .init(
+                                state: "superseded",
+                                nextEligibleAt: nil,
+                                lastErrorCode: "maxAttemptsReached:cancelMidRun"
+                            )
+                        )
+                    )
+                    logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: cancelMidRun")
+                } else {
+                    await commitOutcomeArm(
+                        "cancelCatch.revertQueued",
+                        AnalysisStore.ProcessJobOutcomeArmCommit(
+                            jobId: job.jobId,
+                            incrementAttempt: true,
+                            stateUpdate: .init(
+                                state: "queued",
+                                nextEligibleAt: nil,
+                                lastErrorCode: nil
+                            )
+                        )
+                    )
                 }
                 // playhead-1nl6: emit the cause that accompanied the
                 // cancel into the WorkJournal via the injected recorder.
