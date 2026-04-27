@@ -2383,17 +2383,44 @@ actor AnalysisWorkScheduler {
                 logger.warning("Skipping asset-resolution failure writes for job \(job.jobId): lease reclaimed by orphan recovery")
                 return
             }
-            let backoff = Self.exponentialBackoffSeconds(attempt: job.attemptCount + 1)
-            await writeIfStillOwned("assetResolution.markFailed") {
-                try await store.updateJobState(
-                    jobId: job.jobId,
-                    state: "failed",
-                    nextEligibleAt: clock().timeIntervalSince1970 + backoff,
-                    lastErrorCode: "assetResolution: \(error)"
+            // playhead-gyvb.1: route the asset-resolution failure
+            // through `commitOutcomeArm(... incrementAttempt: true ...)`
+            // so attemptCount climbs toward `maxAttemptCount`. Without
+            // the increment, an asset-resolution error that recurs
+            // every cycle (e.g. a SQLite-side fault while inserting
+            // the placeholder asset row) would cycle forever — same
+            // failure shape as the cancel-path bug fixed alongside
+            // this arm. On `maxAttemptsReached`, supersede so the
+            // slot frees for queued work behind it.
+            let attempts = job.attemptCount + 1
+            if attempts >= Self.maxAttemptCount {
+                await commitOutcomeArm(
+                    "assetResolution.supersede",
+                    AnalysisStore.ProcessJobOutcomeArmCommit(
+                        jobId: job.jobId,
+                        incrementAttempt: true,
+                        stateUpdate: .init(
+                            state: "superseded",
+                            nextEligibleAt: nil,
+                            lastErrorCode: "maxAttemptsReached:assetResolution: \(error)"
+                        )
+                    )
                 )
-            }
-            await writeIfStillOwned("assetResolution.releaseLease") {
-                try await store.releaseLease(jobId: job.jobId)
+                logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: assetResolution: \(error)")
+            } else {
+                let backoff = Self.exponentialBackoffSeconds(attempt: attempts)
+                await commitOutcomeArm(
+                    "assetResolution.requeue",
+                    AnalysisStore.ProcessJobOutcomeArmCommit(
+                        jobId: job.jobId,
+                        incrementAttempt: true,
+                        stateUpdate: .init(
+                            state: "failed",
+                            nextEligibleAt: clock().timeIntervalSince1970 + backoff,
+                            lastErrorCode: "assetResolution: \(error)"
+                        )
+                    )
+                )
             }
             return
         }
@@ -2476,11 +2503,47 @@ actor AnalysisWorkScheduler {
                     pendingCancelCause = nil
                     return
                 }
-                await writeIfStillOwned("cancelCatch.revertQueued") {
-                    try await store.updateJobState(jobId: job.jobId, state: "queued")
-                }
-                await writeIfStillOwned("cancelCatch.releaseLease") {
-                    try await store.releaseLease(jobId: job.jobId)
+                // playhead-gyvb.1: the cancel-mid-decode cleanup must
+                // bump `attemptCount` so a job that is repeatedly
+                // cancelled mid-run (e.g. `cancelCurrentJob(.taskExpired)`
+                // from BackgroundProcessingService's expirationHandler
+                // every time the BG task budget elapses) eventually
+                // reaches `maxAttemptsReached` and supersedes — freeing
+                // the lease slot for queued work behind it. Prior to
+                // this fix the arm wrote `state='queued'` + released the
+                // lease without an attempt bump, so the 2026-04-27
+                // incident's poisoned asset cycled forever (51 lease
+                // acquisitions, attemptCount stuck at 0). On the
+                // terminal supersede branch, drop `nextEligibleAt` so
+                // the job is no longer dispatchable.
+                let attempts = job.attemptCount + 1
+                if attempts >= Self.maxAttemptCount {
+                    await commitOutcomeArm(
+                        "cancelCatch.supersede",
+                        AnalysisStore.ProcessJobOutcomeArmCommit(
+                            jobId: job.jobId,
+                            incrementAttempt: true,
+                            stateUpdate: .init(
+                                state: "superseded",
+                                nextEligibleAt: nil,
+                                lastErrorCode: "maxAttemptsReached:cancelMidRun"
+                            )
+                        )
+                    )
+                    logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: cancelMidRun")
+                } else {
+                    await commitOutcomeArm(
+                        "cancelCatch.revertQueued",
+                        AnalysisStore.ProcessJobOutcomeArmCommit(
+                            jobId: job.jobId,
+                            incrementAttempt: true,
+                            stateUpdate: .init(
+                                state: "queued",
+                                nextEligibleAt: nil,
+                                lastErrorCode: nil
+                            )
+                        )
+                    )
                 }
                 // playhead-1nl6: emit the cause that accompanied the
                 // cancel into the WorkJournal via the injected recorder.
