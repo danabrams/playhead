@@ -289,17 +289,16 @@ enum DebugEpisodeExporter {
 
         // Per-episode summary table
         out += sectionHeader("EPISODE SUMMARY")
-        out += String(format: "%-36s  %-10s  %-7s  %-7s  %s\n", "Asset ID", "State", "Chunks", "Ads", "Coverage")
+        out += pad("Asset ID", 36) + "  " + pad("State", 10) + "  " + pad("Chunks", 7) + "  " + pad("Ads", 7) + "  Coverage\n"
         out += String(repeating: "-", count: 80) + "\n"
         for (asset, chunks, ads) in perAsset {
             let shortId = String(asset.id.prefix(36))
             let cov = asset.fastTranscriptCoverageEndTime.map { formatTime($0) } ?? "-"
-            out += String(format: "%-36s  %-10s  %-7d  %-7d  %s\n",
-                          shortId,
-                          String(asset.analysisState.prefix(10)),
-                          chunks.count,
-                          ads.count,
-                          cov)
+            out += pad(shortId, 36) + "  "
+                + pad(String(asset.analysisState.prefix(10)), 10) + "  "
+                + pad("\(chunks.count)", 7) + "  "
+                + pad("\(ads.count)", 7) + "  "
+                + cov + "\n"
         }
         out += "\n"
 
@@ -371,6 +370,10 @@ enum DebugEpisodeExporter {
         let m = total / 60
         let s = total % 60
         return String(format: "%d:%02d", m, s)
+    }
+
+    private static func pad(_ s: String, _ width: Int) -> String {
+        s.count >= width ? s : s + String(repeating: " ", count: width - s.count)
     }
 
     private static func formatDuration(_ seconds: Double) -> String {
