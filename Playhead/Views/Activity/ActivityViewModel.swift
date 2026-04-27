@@ -65,6 +65,22 @@ struct ActivityEpisodeInput: Sendable, Hashable {
     /// Up Next bucket only; Now / Paused / Recently-Finished ordering
     /// is unaffected.
     let queuePosition: Int?
+    /// playhead-btoa.1: optional pipeline-progress fractions plumbed
+    /// through to the in-flight row types (Now / Up Next / Paused) so
+    /// the Activity screen can render a debug DL/TX/AN strip without
+    /// re-querying state from the View. Sibling beads handle provider
+    /// population (bd 3) and UI render (bd 4); this slot only carries.
+    ///
+    /// `downloadFraction`: 0.0...1.0. `nil` when no in-flight or
+    /// recorded download exists for this episode this refresh.
+    let downloadFraction: Double?
+    /// `transcriptFraction`: clamped 0.0...1.0. `nil` when either the
+    /// transcript watermark or duration is unknown / <= 0.
+    let transcriptFraction: Double?
+    /// `analysisFraction`: clamped 0.0...1.0. Same nil rules as
+    /// transcriptFraction. Bead 3 (provider population) computes and
+    /// clamps; this bead only carries.
+    let analysisFraction: Double?
 
     init(
         episodeId: String,
@@ -73,7 +89,10 @@ struct ActivityEpisodeInput: Sendable, Hashable {
         status: EpisodeSurfaceStatus,
         isRunning: Bool,
         finishedAt: Date?,
-        queuePosition: Int? = nil
+        queuePosition: Int? = nil,
+        downloadFraction: Double? = nil,
+        transcriptFraction: Double? = nil,
+        analysisFraction: Double? = nil
     ) {
         self.episodeId = episodeId
         self.episodeTitle = episodeTitle
@@ -82,6 +101,9 @@ struct ActivityEpisodeInput: Sendable, Hashable {
         self.isRunning = isRunning
         self.finishedAt = finishedAt
         self.queuePosition = queuePosition
+        self.downloadFraction = downloadFraction
+        self.transcriptFraction = transcriptFraction
+        self.analysisFraction = analysisFraction
     }
 }
 
@@ -115,6 +137,13 @@ struct ActivityNowRow: Sendable, Hashable, Identifiable {
     /// the spec example "Analyzing next 15m" is a Phase 3 concern that
     /// requires plumbing the lookahead window into the row builder.
     let progressPhrase: String
+    /// playhead-btoa.1: pipeline-progress fractions for the optional
+    /// debug DL/TX/AN strip. `nil` until bead 3 wires the provider; the
+    /// View renders the strip only when at least one fraction is
+    /// non-nil and the user has the debug toggle enabled (bead 4).
+    let downloadFraction: Double?
+    let transcriptFraction: Double?
+    let analysisFraction: Double?
     var id: String { episodeId }
 }
 
@@ -124,6 +153,11 @@ struct ActivityUpNextRow: Sendable, Hashable, Identifiable {
     let episodeId: String
     let title: String
     let podcastTitle: String?
+    /// playhead-btoa.1: pipeline-progress fractions. See
+    /// `ActivityNowRow.downloadFraction` for contract.
+    let downloadFraction: Double?
+    let transcriptFraction: Double?
+    let analysisFraction: Double?
     var id: String { episodeId }
 }
 
@@ -138,6 +172,11 @@ struct ActivityPausedRow: Sendable, Hashable, Identifiable {
     let podcastTitle: String?
     let reason: SurfaceReason
     let hint: ResolutionHint
+    /// playhead-btoa.1: pipeline-progress fractions. See
+    /// `ActivityNowRow.downloadFraction` for contract.
+    let downloadFraction: Double?
+    let transcriptFraction: Double?
+    let analysisFraction: Double?
     var id: String { episodeId }
 }
 
@@ -391,7 +430,10 @@ final class ActivityViewModel {
                         title: input.episodeTitle,
                         podcastTitle: input.podcastTitle,
                         reason: input.status.reason,
-                        hint: input.status.hint
+                        hint: input.status.hint,
+                        downloadFraction: input.downloadFraction,
+                        transcriptFraction: input.transcriptFraction,
+                        analysisFraction: input.analysisFraction
                     )
                 )
 
@@ -402,14 +444,20 @@ final class ActivityViewModel {
                             episodeId: input.episodeId,
                             title: input.episodeTitle,
                             podcastTitle: input.podcastTitle,
-                            progressPhrase: progressPhrase(for: input.status)
+                            progressPhrase: progressPhrase(for: input.status),
+                            downloadFraction: input.downloadFraction,
+                            transcriptFraction: input.transcriptFraction,
+                            analysisFraction: input.analysisFraction
                         )
                     )
                 } else {
                     let row = ActivityUpNextRow(
                         episodeId: input.episodeId,
                         title: input.episodeTitle,
-                        podcastTitle: input.podcastTitle
+                        podcastTitle: input.podcastTitle,
+                        downloadFraction: input.downloadFraction,
+                        transcriptFraction: input.transcriptFraction,
+                        analysisFraction: input.analysisFraction
                     )
                     upNextRowsWithKeys.append((
                         row: row,
