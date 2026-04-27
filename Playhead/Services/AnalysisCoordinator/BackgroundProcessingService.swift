@@ -213,6 +213,22 @@ actor BackgroundProcessingService {
     private var analysisWorkScheduler: AnalysisWorkScheduler?
     private var analysisJobReconciler: AnalysisJobReconciler?
 
+    /// playhead-8u3i: continuations parked by handlers that ran before
+    /// pre-analysis services were injected. Drained and resumed from
+    /// `setPreAnalysisServices`. List-typed because multiple BG handlers
+    /// (e.g. concurrent preanalysis.recovery fires) can be waiting at
+    /// the same time and all must wake together when injection lands.
+    private var pendingInjectionWaiters: [WaiterEntry] = []
+
+    /// playhead-8u3i: timeout (seconds) that
+    /// `awaitPreAnalysisServicesInjected` will wait for a missing
+    /// reconciler to be injected before falling through to the original
+    /// fail path. Defaults to 20s — BGProcessingTask has roughly 30s
+    /// before iOS reclaims it, so we leave a margin for the actual
+    /// reconcile work after we wake. Tests override this with a small
+    /// value to keep wall time bounded.
+    var injectionWaitTimeoutSeconds: TimeInterval = 20
+
     // MARK: - State
 
     /// Whether the hot-path is currently active (audio playing in foreground).
@@ -287,13 +303,111 @@ actor BackgroundProcessingService {
 
     /// Inject pre-analysis services after construction. Called once the
     /// scheduler and reconciler are built during app setup.
+    ///
+    /// playhead-8u3i: also drains any continuations parked by BG-task
+    /// handlers that fired before injection landed. Resuming inside the
+    /// actor method is safe: the actor's reentrant scheduling will pick
+    /// up the resumed handlers' continuations once we suspend or return.
     func setPreAnalysisServices(
         scheduler: AnalysisWorkScheduler,
         reconciler: AnalysisJobReconciler
     ) {
         self.analysisWorkScheduler = scheduler
         self.analysisJobReconciler = reconciler
-        logger.info("Pre-analysis services injected")
+        let waiters = self.pendingInjectionWaiters
+        self.pendingInjectionWaiters.removeAll()
+        var resumed = 0
+        for entry in waiters {
+            // The timeout path may have already won and cleared the slot.
+            // Skip those — the timeout-side `removeAll` should have purged
+            // them, but defensive nil-check is cheap insurance against a
+            // future scheduling change.
+            guard let continuation = entry.slot.continuation else { continue }
+            entry.slot.continuation = nil
+            continuation.resume(returning: true)
+            resumed += 1
+        }
+        if resumed > 0 {
+            logger.info("Pre-analysis services injected; resumed \(resumed, privacy: .public) waiting handler(s)")
+        } else {
+            logger.info("Pre-analysis services injected")
+        }
+    }
+
+    /// playhead-8u3i: holder for a single waiter's continuation. Reference
+    /// type so the timeout-side and the injection-side can race for
+    /// ownership of the resume — the loser sees `continuation == nil` and
+    /// becomes a no-op. Marked `@unchecked Sendable` because the actor
+    /// owns all reads/writes and external touchers (the timeout `Task`)
+    /// only mutate via actor-isolated methods.
+    final class WaiterSlot: @unchecked Sendable {
+        var continuation: CheckedContinuation<Bool, Never>?
+    }
+
+    /// Wrapper so `pendingInjectionWaiters` can hold reference-typed
+    /// slots without forcing Optional<WaiterSlot> elsewhere.
+    struct WaiterEntry {
+        let slot: WaiterSlot
+    }
+
+    /// playhead-8u3i: suspend the caller until pre-analysis services are
+    /// injected, or until `injectionWaitTimeoutSeconds` elapses. Returns
+    /// `true` if injection landed, `false` on timeout. Returns `true`
+    /// immediately when the reconciler is already non-nil.
+    ///
+    /// Belt-and-suspenders against a race that the Part 1 reorder in
+    /// `PlayheadRuntime.swift` already closes — if a future refactor ever
+    /// reintroduces work above the injection call, this buffer keeps the
+    /// preanalysis.recovery handler from instant-failing. Multiple
+    /// concurrent waiters share one wake when injection lands, with each
+    /// caller running its own timeout race independently.
+    private func awaitPreAnalysisServicesInjected() async -> Bool {
+        if analysisJobReconciler != nil {
+            return true
+        }
+
+        // Track this caller's slot in the waiters list so a timeout can
+        // remove its own continuation without disturbing siblings. The
+        // mutable holder is captured by both the timeout task and the
+        // continuation-resume path so whichever fires first wins; the
+        // loser becomes a no-op.
+        let slot = WaiterSlot()
+
+        let timeoutSeconds = injectionWaitTimeoutSeconds
+        let timeoutNanos = UInt64(max(0, timeoutSeconds) * 1_000_000_000)
+
+        let timedOutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: timeoutNanos)
+            await self?.timeoutInjectionWaiter(slot: slot)
+        }
+
+        let injected: Bool = await withCheckedContinuation { continuation in
+            // Re-check under actor isolation: an injection that landed
+            // between the early-return check at the top of this method
+            // and our continuation creation must not strand us.
+            if self.analysisJobReconciler != nil {
+                continuation.resume(returning: true)
+                return
+            }
+            slot.continuation = continuation
+            self.pendingInjectionWaiters.append(WaiterEntry(slot: slot))
+        }
+
+        timedOutTask.cancel()
+        return injected
+    }
+
+    /// playhead-8u3i: timeout-side resume for a parked waiter. If the
+    /// slot still owns a live continuation, drop the entry from the
+    /// pending list and resume it with `false`. If injection already
+    /// fired, this is a no-op.
+    private func timeoutInjectionWaiter(slot: WaiterSlot) {
+        guard let continuation = slot.continuation else { return }
+        slot.continuation = nil
+        pendingInjectionWaiters.removeAll { entry in
+            entry.slot === slot
+        }
+        continuation.resume(returning: false)
     }
 
     // MARK: - Registration
@@ -1089,8 +1203,15 @@ actor BackgroundProcessingService {
         // Schedule the next occurrence.
         schedulePreAnalysisRecovery()
 
-        guard let reconciler = analysisJobReconciler else {
-            logger.warning("Pre-analysis recovery: no reconciler available")
+        // playhead-8u3i: cold-launch wakes can fire this handler before
+        // `PlayheadRuntime.init`'s deferred Task injects the reconciler.
+        // Wait up to `injectionWaitTimeoutSeconds` for injection to land
+        // before falling through to the original fail path. Returns true
+        // immediately if the reconciler is already set (warm launch /
+        // re-fire after start-up).
+        let injected = await awaitPreAnalysisServicesInjected()
+        guard injected, let reconciler = analysisJobReconciler else {
+            logger.warning("Pre-analysis recovery: no reconciler available (timeout=\(!injected, privacy: .public))")
             markComplete(task, success: false)
             return
         }
