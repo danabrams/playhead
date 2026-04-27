@@ -453,6 +453,11 @@ actor AnalysisAudioService {
         //    See comparable streaming uses of AVAudioConverter in
         //    StreamingAudioDecoder.swift.
         let samplesPerShard = Int(shardDuration * Self.targetSampleRate)
+        guard samplesPerShard > 0 else {
+            throw AnalysisAudioError.decodingFailed(
+                "shardDuration must be > 0 (got \(shardDuration))"
+            )
+        }
         var shards: [AnalysisShard] = []
         var shardSamples: [Float] = []
         shardSamples.reserveCapacity(samplesPerShard)
@@ -485,7 +490,14 @@ actor AnalysisAudioService {
             shards.append(shard)
             shardIndex += 1
             shardStartSampleOffset += count
-            shardSamples.removeAll(keepingCapacity: true)
+            // Replace rather than `removeAll(keepingCapacity:)` — the
+            // newly-constructed AnalysisShard now shares the buffer with
+            // `shardSamples` via Array's COW, so keeping the old buffer
+            // would force a copy on the next append. A fresh buffer with
+            // re-reserved capacity gives steady-state amortized O(1)
+            // appends across the whole decode.
+            shardSamples = []
+            shardSamples.reserveCapacity(samplesPerShard)
         }
 
         // Pre-allocate the single output buffer reused across every
@@ -703,7 +715,7 @@ actor AnalysisAudioService {
                 cumulativeOutputSamples += producedFrames
                 signposter.emitEvent(
                     "decode-batch",
-                    "source_bytes=\(peakBatchBytes) cumulative_out=\(self.cumulativeOutputSamples)"
+                    "produced_frames=\(producedFrames) peak_source_bytes=\(peakBatchBytes) cumulative_out=\(self.cumulativeOutputSamples)"
                 )
             } else if status == .haveData {
                 // Defensive: `.haveData` with zero frames would otherwise
@@ -749,14 +761,14 @@ actor AnalysisAudioService {
         let isTruncated = assetDuration > 0
             && decodedDuration < assetDuration * (1.0 - Self.truncationTolerance)
 
-        // 10. Persist shards for reuse — but only when the file was fully decoded.
+        // 9. Persist shards for reuse — but only when the file was fully decoded.
         //     Truncated files (still downloading) must not be cached, otherwise
         //     the partial result is returned permanently even after download completes.
         if !isTruncated {
             ShardCache.saveShards(shards, episodeID: episodeID)
         }
 
-        // 11. Log truncation warning but return partial shards — throwing here
+        // 10. Log truncation warning but return partial shards — throwing here
         //     causes the coordinator to treat it as noAudioAvailable and retry-loop.
         if isTruncated {
             let pct = assetDuration > 0
