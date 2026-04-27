@@ -69,17 +69,18 @@ struct ActivityEpisodeInput: Sendable, Hashable {
     /// through to the in-flight row types (Now / Up Next / Paused) so
     /// the Activity screen can render a debug DL/TX/AN strip without
     /// re-querying state from the View. Sibling beads handle provider
-    /// population (bd 3) and UI render (bd 4); this slot only carries.
+    /// population (playhead-btoa.3) and UI render (playhead-btoa.4);
+    /// this slot only carries.
     ///
-    /// `downloadFraction`: 0.0...1.0. `nil` when no in-flight or
-    /// recorded download exists for this episode this refresh.
+    /// Fraction in `[0, 1]` of bytes downloaded for this episode this
+    /// refresh; `nil` when no in-flight download is recorded.
     let downloadFraction: Double?
-    /// `transcriptFraction`: clamped 0.0...1.0. `nil` when either the
-    /// transcript watermark or duration is unknown / <= 0.
+    /// Fraction in `[0, 1]` of episode duration covered by fast
+    /// transcript watermark; `nil` when watermark or duration is
+    /// unknown.
     let transcriptFraction: Double?
-    /// `analysisFraction`: clamped 0.0...1.0. Same nil rules as
-    /// transcriptFraction. Bead 3 (provider population) computes and
-    /// clamps; this bead only carries.
+    /// Fraction in `[0, 1]` of episode duration covered by confirmed-ad
+    /// watermark; `nil` when watermark or duration is unknown.
     let analysisFraction: Double?
 
     init(
@@ -137,12 +138,15 @@ struct ActivityNowRow: Sendable, Hashable, Identifiable {
     /// the spec example "Analyzing next 15m" is a Phase 3 concern that
     /// requires plumbing the lookahead window into the row builder.
     let progressPhrase: String
-    /// playhead-btoa.1: pipeline-progress fractions for the optional
-    /// debug DL/TX/AN strip. `nil` until bead 3 wires the provider; the
-    /// View renders the strip only when at least one fraction is
-    /// non-nil and the user has the debug toggle enabled (bead 4).
+    /// Fraction in `[0, 1]` of bytes downloaded for this episode this
+    /// refresh; `nil` when no in-flight download is recorded.
     let downloadFraction: Double?
+    /// Fraction in `[0, 1]` of episode duration covered by fast
+    /// transcript watermark; `nil` when watermark or duration is
+    /// unknown.
     let transcriptFraction: Double?
+    /// Fraction in `[0, 1]` of episode duration covered by confirmed-ad
+    /// watermark; `nil` when watermark or duration is unknown.
     let analysisFraction: Double?
     var id: String { episodeId }
 }
@@ -153,10 +157,15 @@ struct ActivityUpNextRow: Sendable, Hashable, Identifiable {
     let episodeId: String
     let title: String
     let podcastTitle: String?
-    /// playhead-btoa.1: pipeline-progress fractions. See
-    /// `ActivityNowRow.downloadFraction` for contract.
+    /// Fraction in `[0, 1]` of bytes downloaded for this episode this
+    /// refresh; `nil` when no in-flight download is recorded.
     let downloadFraction: Double?
+    /// Fraction in `[0, 1]` of episode duration covered by fast
+    /// transcript watermark; `nil` when watermark or duration is
+    /// unknown.
     let transcriptFraction: Double?
+    /// Fraction in `[0, 1]` of episode duration covered by confirmed-ad
+    /// watermark; `nil` when watermark or duration is unknown.
     let analysisFraction: Double?
     var id: String { episodeId }
 }
@@ -172,10 +181,15 @@ struct ActivityPausedRow: Sendable, Hashable, Identifiable {
     let podcastTitle: String?
     let reason: SurfaceReason
     let hint: ResolutionHint
-    /// playhead-btoa.1: pipeline-progress fractions. See
-    /// `ActivityNowRow.downloadFraction` for contract.
+    /// Fraction in `[0, 1]` of bytes downloaded for this episode this
+    /// refresh; `nil` when no in-flight download is recorded.
     let downloadFraction: Double?
+    /// Fraction in `[0, 1]` of episode duration covered by fast
+    /// transcript watermark; `nil` when watermark or duration is
+    /// unknown.
     let transcriptFraction: Double?
+    /// Fraction in `[0, 1]` of episode duration covered by confirmed-ad
+    /// watermark; `nil` when watermark or duration is unknown.
     let analysisFraction: Double?
     var id: String { episodeId }
 }

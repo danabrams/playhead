@@ -777,9 +777,9 @@ struct ActivityViewModelTests {
         isRunning: Bool = false,
         finishedAt: Date? = nil,
         queuePosition: Int? = nil,
-        downloadFraction: Double?,
-        transcriptFraction: Double?,
-        analysisFraction: Double?
+        downloadFraction: Double? = nil,
+        transcriptFraction: Double? = nil,
+        analysisFraction: Double? = nil
     ) -> ActivityEpisodeInput {
         ActivityEpisodeInput(
             episodeId: id,
@@ -859,10 +859,9 @@ struct ActivityViewModelTests {
     @Test("ActivityRecentlyFinishedRow has no slot for pipeline fractions (structural)")
     func recentlyFinishedRowHasNoPipelineFractionSlots() {
         // Structural assertion: terminal rows do not surface the strip
-        // per design. We assert the type itself does not expose the
-        // three properties — at compile time, dynamic member lookup on
-        // the row resolves to optional<Any> only when the property
-        // exists. Mirror's children list is the runtime equivalent.
+        // per design. Mirror's child labels expose stored properties at
+        // runtime; we assert the three fraction labels are absent on
+        // ActivityRecentlyFinishedRow.
         let row = ActivityRecentlyFinishedRow(
             episodeId: "ep-done",
             title: "Done Episode",
