@@ -85,7 +85,7 @@ struct SkipPolicyConfig: Sendable {
     /// Applied per merged pod, not per individual ad — internal seams between
     /// ads in the same pod do not receive a cushion. Clamped at the pod start
     /// so the skip end can never precede the skip start.
-    let adTrailingCushionSec: TimeInterval
+    let adTrailingCushionSeconds: TimeInterval
 
     static let `default` = SkipPolicyConfig(
         enterThreshold: 0.65,
@@ -96,7 +96,7 @@ struct SkipPolicyConfig: Sendable {
         seekSuppressionSeconds: 3.0,
         seekStabilitySeconds: 2.0,
         policyVersion: "skip-policy-v1",
-        adTrailingCushionSec: 1.0
+        adTrailingCushionSeconds: 1.0
     )
 }
 
@@ -1236,7 +1236,7 @@ actor SkipOrchestrator {
     /// Convert merged ranges to CMTimeRanges and push to PlaybackService.
     ///
     /// playhead-vn7n.2: each merged range's trailing edge is pulled in by
-    /// `adTrailingCushionSec`, ceding a small sliver of ad-tail rather than
+    /// `adTrailingCushionSeconds`, ceding a small sliver of ad-tail rather than
     /// risking a clip into program-start audio. Cushion is applied per pod
     /// (per merged range), not per individual ad — by construction of
     /// `mergeAdjacentWindows`, anything beyond a merged range is either
@@ -1246,7 +1246,9 @@ actor SkipOrchestrator {
     /// start (e.g., a 5 s ad with a 10 s cushion collapses to a zero-length
     /// cue at `adStart`).
     private func pushMergedCues(_ ranges: [(start: Double, end: Double)]) {
-        let cushion = max(0.0, config.adTrailingCushionSec)
+        // Defensive: clamp to non-negative so a future misconfigured caller
+        // can't invert the cushion (skip-end before ad-end).
+        let cushion = max(0.0, config.adTrailingCushionSeconds)
         let cues = ranges.map { range -> CMTimeRange in
             let cushionedEnd = max(range.start, range.end - cushion)
             let start = CMTime(seconds: range.start, preferredTimescale: 600)

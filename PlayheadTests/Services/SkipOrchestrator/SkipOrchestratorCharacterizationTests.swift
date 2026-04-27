@@ -397,7 +397,7 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
 
         let currentCues = pushedCues
         // playhead-vn7n.2: pod-end is pulled in by the trailing cushion.
-        let cushion = SkipPolicyConfig.default.adTrailingCushionSec
+        let cushion = SkipPolicyConfig.default.adTrailingCushionSeconds
         #expect(currentCues.count == 1)
         if let mergedCue = currentCues.first {
             #expect(CMTimeGetSeconds(mergedCue.start) == 60)
@@ -446,7 +446,7 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
 
         let currentCues = pushedCues
         // playhead-vn7n.2: each pod gets its own trailing cushion.
-        let cushion = SkipPolicyConfig.default.adTrailingCushionSec
+        let cushion = SkipPolicyConfig.default.adTrailingCushionSeconds
         #expect(currentCues.count == 2)
         if currentCues.count == 2 {
             #expect(CMTimeGetSeconds(currentCues[0].start) == 60)

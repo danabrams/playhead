@@ -31,7 +31,7 @@ struct SkipOrchestratorTrailingCushionTests {
             seekSuppressionSeconds: 3.0,
             seekStabilitySeconds: 2.0,
             policyVersion: "skip-policy-v1",
-            adTrailingCushionSec: cushion
+            adTrailingCushionSeconds: cushion
         )
     }
 
@@ -265,6 +265,6 @@ struct SkipOrchestratorTrailingCushionTests {
     func defaultConfigCushionMatchesSpec() {
         // The constant is intentionally exposed on SkipPolicyConfig.default so
         // production callers and tests share the same source of truth.
-        #expect(SkipPolicyConfig.default.adTrailingCushionSec == 1.0)
+        #expect(SkipPolicyConfig.default.adTrailingCushionSeconds == 1.0)
     }
 }
