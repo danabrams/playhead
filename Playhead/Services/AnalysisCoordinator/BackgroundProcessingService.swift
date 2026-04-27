@@ -227,7 +227,16 @@ actor BackgroundProcessingService {
     /// before iOS reclaims it, so we leave a margin for the actual
     /// reconcile work after we wake. Tests override this with a small
     /// value to keep wall time bounded.
-    var injectionWaitTimeoutSeconds: TimeInterval = 20
+    private var injectionWaitTimeoutSeconds: TimeInterval = 20
+
+    /// Test seam: override the injection-wait timeout used by
+    /// `awaitPreAnalysisServicesInjected`. Production code never calls
+    /// this; tests use it to keep race-coverage wall time bounded. Lives
+    /// on the actor so concurrent reads observe the new value through
+    /// actor isolation.
+    func setInjectionWaitTimeoutSecondsForTesting(_ seconds: TimeInterval) {
+        self.injectionWaitTimeoutSeconds = seconds
+    }
 
     // MARK: - State
 
