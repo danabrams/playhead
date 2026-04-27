@@ -65,6 +65,23 @@ struct ActivityEpisodeInput: Sendable, Hashable {
     /// Up Next bucket only; Now / Paused / Recently-Finished ordering
     /// is unaffected.
     let queuePosition: Int?
+    /// playhead-btoa.1: optional pipeline-progress fractions plumbed
+    /// through to the in-flight row types (Now / Up Next / Paused) so
+    /// the Activity screen can render a debug DL/TX/AN strip without
+    /// re-querying state from the View. Sibling beads handle provider
+    /// population (playhead-btoa.3) and UI render (playhead-btoa.4);
+    /// this slot only carries.
+    ///
+    /// Fraction in `[0, 1]` of bytes downloaded for this episode this
+    /// refresh; `nil` when no in-flight download is recorded.
+    let downloadFraction: Double?
+    /// Fraction in `[0, 1]` of episode duration covered by fast
+    /// transcript watermark; `nil` when watermark or duration is
+    /// unknown.
+    let transcriptFraction: Double?
+    /// Fraction in `[0, 1]` of episode duration covered by confirmed-ad
+    /// watermark; `nil` when watermark or duration is unknown.
+    let analysisFraction: Double?
 
     init(
         episodeId: String,
@@ -73,7 +90,10 @@ struct ActivityEpisodeInput: Sendable, Hashable {
         status: EpisodeSurfaceStatus,
         isRunning: Bool,
         finishedAt: Date?,
-        queuePosition: Int? = nil
+        queuePosition: Int? = nil,
+        downloadFraction: Double? = nil,
+        transcriptFraction: Double? = nil,
+        analysisFraction: Double? = nil
     ) {
         self.episodeId = episodeId
         self.episodeTitle = episodeTitle
@@ -82,6 +102,9 @@ struct ActivityEpisodeInput: Sendable, Hashable {
         self.isRunning = isRunning
         self.finishedAt = finishedAt
         self.queuePosition = queuePosition
+        self.downloadFraction = downloadFraction
+        self.transcriptFraction = transcriptFraction
+        self.analysisFraction = analysisFraction
     }
 }
 
@@ -115,6 +138,16 @@ struct ActivityNowRow: Sendable, Hashable, Identifiable {
     /// the spec example "Analyzing next 15m" is a Phase 3 concern that
     /// requires plumbing the lookahead window into the row builder.
     let progressPhrase: String
+    /// Fraction in `[0, 1]` of bytes downloaded for this episode this
+    /// refresh; `nil` when no in-flight download is recorded.
+    let downloadFraction: Double?
+    /// Fraction in `[0, 1]` of episode duration covered by fast
+    /// transcript watermark; `nil` when watermark or duration is
+    /// unknown.
+    let transcriptFraction: Double?
+    /// Fraction in `[0, 1]` of episode duration covered by confirmed-ad
+    /// watermark; `nil` when watermark or duration is unknown.
+    let analysisFraction: Double?
     var id: String { episodeId }
 }
 
@@ -124,6 +157,16 @@ struct ActivityUpNextRow: Sendable, Hashable, Identifiable {
     let episodeId: String
     let title: String
     let podcastTitle: String?
+    /// Fraction in `[0, 1]` of bytes downloaded for this episode this
+    /// refresh; `nil` when no in-flight download is recorded.
+    let downloadFraction: Double?
+    /// Fraction in `[0, 1]` of episode duration covered by fast
+    /// transcript watermark; `nil` when watermark or duration is
+    /// unknown.
+    let transcriptFraction: Double?
+    /// Fraction in `[0, 1]` of episode duration covered by confirmed-ad
+    /// watermark; `nil` when watermark or duration is unknown.
+    let analysisFraction: Double?
     var id: String { episodeId }
 }
 
@@ -138,6 +181,16 @@ struct ActivityPausedRow: Sendable, Hashable, Identifiable {
     let podcastTitle: String?
     let reason: SurfaceReason
     let hint: ResolutionHint
+    /// Fraction in `[0, 1]` of bytes downloaded for this episode this
+    /// refresh; `nil` when no in-flight download is recorded.
+    let downloadFraction: Double?
+    /// Fraction in `[0, 1]` of episode duration covered by fast
+    /// transcript watermark; `nil` when watermark or duration is
+    /// unknown.
+    let transcriptFraction: Double?
+    /// Fraction in `[0, 1]` of episode duration covered by confirmed-ad
+    /// watermark; `nil` when watermark or duration is unknown.
+    let analysisFraction: Double?
     var id: String { episodeId }
 }
 
@@ -391,7 +444,10 @@ final class ActivityViewModel {
                         title: input.episodeTitle,
                         podcastTitle: input.podcastTitle,
                         reason: input.status.reason,
-                        hint: input.status.hint
+                        hint: input.status.hint,
+                        downloadFraction: input.downloadFraction,
+                        transcriptFraction: input.transcriptFraction,
+                        analysisFraction: input.analysisFraction
                     )
                 )
 
@@ -402,14 +458,20 @@ final class ActivityViewModel {
                             episodeId: input.episodeId,
                             title: input.episodeTitle,
                             podcastTitle: input.podcastTitle,
-                            progressPhrase: progressPhrase(for: input.status)
+                            progressPhrase: progressPhrase(for: input.status),
+                            downloadFraction: input.downloadFraction,
+                            transcriptFraction: input.transcriptFraction,
+                            analysisFraction: input.analysisFraction
                         )
                     )
                 } else {
                     let row = ActivityUpNextRow(
                         episodeId: input.episodeId,
                         title: input.episodeTitle,
-                        podcastTitle: input.podcastTitle
+                        podcastTitle: input.podcastTitle,
+                        downloadFraction: input.downloadFraction,
+                        transcriptFraction: input.transcriptFraction,
+                        analysisFraction: input.analysisFraction
                     )
                     upNextRowsWithKeys.append((
                         row: row,

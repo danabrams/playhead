@@ -762,6 +762,118 @@ struct ActivityViewModelTests {
         vm.beginLoad()
         #expect(vm.loadState == .loaded)
     }
+
+    // MARK: - playhead-btoa.1: DL/TX/AN fraction plumbing
+
+    /// Variant of `makeInput` that exposes the three pipeline fraction
+    /// fields plumbed through in playhead-btoa.1. Defaults match the
+    /// production input contract: all three are `nil` unless the
+    /// provider has a value to forward.
+    static func makeInput(
+        id: String,
+        title: String = "Some Episode",
+        podcast: String? = "Some Show",
+        status: EpisodeSurfaceStatus,
+        isRunning: Bool = false,
+        finishedAt: Date? = nil,
+        queuePosition: Int? = nil,
+        downloadFraction: Double? = nil,
+        transcriptFraction: Double? = nil,
+        analysisFraction: Double? = nil
+    ) -> ActivityEpisodeInput {
+        ActivityEpisodeInput(
+            episodeId: id,
+            episodeTitle: title,
+            podcastTitle: podcast,
+            status: status,
+            isRunning: isRunning,
+            finishedAt: finishedAt,
+            queuePosition: queuePosition,
+            downloadFraction: downloadFraction,
+            transcriptFraction: transcriptFraction,
+            analysisFraction: analysisFraction
+        )
+    }
+
+    @Test("DL/TX/AN fractions land on ActivityNowRow (queued + isRunning)")
+    func nowRowCarriesPipelineFractions() {
+        let input = Self.makeInput(
+            id: "ep-now",
+            status: Self.makeStatus(
+                disposition: .queued,
+                reason: .waitingForTime
+            ),
+            isRunning: true,
+            downloadFraction: 0.42,
+            transcriptFraction: 0.33,
+            analysisFraction: 0.10
+        )
+        let snapshot = ActivityViewModel.aggregate(inputs: [input], now: Date())
+        let row = try! #require(snapshot.now.first)
+        #expect(row.downloadFraction == 0.42)
+        #expect(row.transcriptFraction == 0.33)
+        #expect(row.analysisFraction == 0.10)
+    }
+
+    @Test("DL/TX/AN fractions land on ActivityUpNextRow (queued + !isRunning)")
+    func upNextRowCarriesPipelineFractions() {
+        let input = Self.makeInput(
+            id: "ep-up-next",
+            status: Self.makeStatus(
+                disposition: .queued,
+                reason: .waitingForTime
+            ),
+            isRunning: false,
+            downloadFraction: 1.0,
+            transcriptFraction: 0.5,
+            analysisFraction: 0.0
+        )
+        let snapshot = ActivityViewModel.aggregate(inputs: [input], now: Date())
+        let row = try! #require(snapshot.upNext.first)
+        #expect(row.downloadFraction == 1.0)
+        #expect(row.transcriptFraction == 0.5)
+        #expect(row.analysisFraction == 0.0)
+    }
+
+    @Test("DL/TX/AN fractions land on ActivityPausedRow (disposition .paused)")
+    func pausedRowCarriesPipelineFractions() {
+        let input = Self.makeInput(
+            id: "ep-paused",
+            status: Self.makeStatus(
+                disposition: .paused,
+                reason: .phoneIsHot,
+                hint: .wait
+            ),
+            isRunning: false,
+            downloadFraction: 0.85,
+            transcriptFraction: 0.60,
+            analysisFraction: 0.25
+        )
+        let snapshot = ActivityViewModel.aggregate(inputs: [input], now: Date())
+        let row = try! #require(snapshot.paused.first)
+        #expect(row.downloadFraction == 0.85)
+        #expect(row.transcriptFraction == 0.60)
+        #expect(row.analysisFraction == 0.25)
+    }
+
+    @Test("ActivityRecentlyFinishedRow has no slot for pipeline fractions (structural)")
+    func recentlyFinishedRowHasNoPipelineFractionSlots() {
+        // Structural assertion: terminal rows do not surface the strip
+        // per design. Mirror's child labels expose stored properties at
+        // runtime; we assert the three fraction labels are absent on
+        // ActivityRecentlyFinishedRow.
+        let row = ActivityRecentlyFinishedRow(
+            episodeId: "ep-done",
+            title: "Done Episode",
+            podcastTitle: nil,
+            outcome: .success,
+            finishedAt: Date()
+        )
+        let mirrorLabels = Set(Mirror(reflecting: row).children.compactMap(\.label))
+        #expect(!mirrorLabels.contains("downloadFraction"))
+        #expect(!mirrorLabels.contains("transcriptFraction"))
+        #expect(!mirrorLabels.contains("analysisFraction"))
+    }
 }
 
 /// Builds an in-memory `ModelContext` for the cjqq tests. Mirrors
