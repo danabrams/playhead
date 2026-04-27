@@ -245,6 +245,16 @@ struct AnalysisAudioStreamingTests {
         #expect(shards.count == 20 || shards.count == 21,
                 "expected ~20 shards for 600s @30s, got \(shards.count)")
 
+        // M-1 invariant: every non-tail shard must have exactly
+        // `samplesPerShard` samples — the chunk loop never appends past
+        // that. Catches single-sample drops the cumulative tolerance
+        // would miss.
+        let samplesPerShard = 30 * 16_000
+        for shard in shards.dropLast() {
+            #expect(shard.sampleCount == samplesPerShard,
+                    "non-tail shard \(shard.id) sampleCount=\(shard.sampleCount); expected exactly \(samplesPerShard)")
+        }
+
         // Peak shard accumulator MUST stay bounded — this is the C1
         // assertion that distinguishes streaming-shard-emission from the
         // prior half-fix where allSamples grew linearly.
@@ -372,6 +382,16 @@ struct AnalysisAudioStreamingTests {
         // 3600 / 30 = 120 shards.
         #expect(shards.count == 120 || shards.count == 121,
                 "expected ~120 shards for 3600s @30s, got \(shards.count)")
+
+        // M-1: every non-tail shard must have *exactly* samplesPerShard
+        // samples by construction (the chunk loop never appends past the
+        // ceiling). A subtle off-by-one or single-sample-drop bug would
+        // surface here as some non-tail shard with sampleCount != 480_000.
+        let samplesPerShard = 30 * 16_000
+        for shard in shards.dropLast() {
+            #expect(shard.sampleCount == samplesPerShard,
+                    "non-tail shard \(shard.id) sampleCount=\(shard.sampleCount); expected exactly \(samplesPerShard)")
+        }
 
         let peakShard = await service.peakShardAccumulatorBytes
         let oneShardBytes = 30 * 16_000 * MemoryLayout<Float>.size
