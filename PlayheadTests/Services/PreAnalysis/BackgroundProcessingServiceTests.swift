@@ -152,6 +152,9 @@ struct BackfillTaskHandlerTests {
         let coordinator = StubAnalysisCoordinator()
         coordinator.runPendingBackfillDuration = .milliseconds(300)
         let (bps, _, _, _) = makeBPS(coordinator: coordinator)
+        // playhead-8u3i: shrink the injection-wait timeout so the no-
+        // reconciler path falls through quickly instead of blocking 20s.
+        await bps.setInjectionWaitTimeoutSecondsForTesting(0.1)
 
         let backfillTask = StubBackgroundTask()
         let recoveryTask = StubBackgroundTask()
@@ -164,9 +167,10 @@ struct BackfillTaskHandlerTests {
         try await Task.sleep(for: .milliseconds(30))
 
         // Kick off recovery while backfill is still suspended. Recovery
-        // has no reconciler (none injected), so it marks complete
-        // immediately — that is fine for this test: we just need to verify
-        // the recovery completion doesn't clobber the in-flight backfill.
+        // has no reconciler (none injected); the playhead-8u3i buffer
+        // times out fast (set above) and falls through to the original
+        // fail path. We just need to verify the recovery completion
+        // doesn't clobber the in-flight backfill.
         await bps.handlePreAnalysisRecovery(recoveryTask)
 
         #expect(recoveryTask.completedSuccess != nil,
@@ -397,6 +401,11 @@ struct PreAnalysisRecoveryHandlerTests {
     @Test("Recovery without reconciler completes with failure")
     func recoveryWithoutReconciler() async throws {
         let (bps, _, _, _) = makeBPS()
+        // playhead-8u3i: shrink the injection-wait timeout so this test
+        // exercises the timeout->fail path quickly. Production keeps the
+        // 20s default; the timeout-fired race-coverage test below pins
+        // that the path exists at all.
+        await bps.setInjectionWaitTimeoutSecondsForTesting(0.1)
         let task = StubBackgroundTask()
 
         // No pre-analysis services injected, so reconciler is nil.
@@ -408,6 +417,11 @@ struct PreAnalysisRecoveryHandlerTests {
     @Test("Recovery schedules next occurrence")
     func recoverySchedulesNextOccurrence() async throws {
         let (bps, _, scheduler, _) = makeBPS()
+        // playhead-8u3i: schedulePreAnalysisRecovery() runs before the
+        // injection wait, so the request lands in the scheduler before
+        // the buffer hits its timeout. Shrink the timeout anyway so the
+        // test method itself returns quickly.
+        await bps.setInjectionWaitTimeoutSecondsForTesting(0.1)
         let task = StubBackgroundTask()
 
         await bps.handlePreAnalysisRecovery(task)
@@ -416,6 +430,149 @@ struct PreAnalysisRecoveryHandlerTests {
             $0.identifier == BackgroundTaskID.preAnalysisRecovery
         }
         #expect(!recoveryRequests.isEmpty)
+    }
+}
+
+// MARK: - Pre-Analysis Recovery Race (playhead-8u3i)
+
+/// Tests covering the cold-launch race where iOS fires the
+/// preanalysis.recovery handler before `PlayheadRuntime`'s deferred Task
+/// has injected the reconciler. Pins both halves of the two-part fix:
+/// the in-actor buffer (handler suspends on a continuation) and the
+/// timeout fall-through (timeout completes with success=false).
+@Suite("Pre-Analysis Recovery Race")
+struct PreAnalysisRecoveryRaceTests {
+
+    /// Build a real reconciler with stub deps so the success path can
+    /// run all the way through `reconcile()`. Empty store → reconcile
+    /// returns a zero-row report and the handler marks success=true.
+    private func makeReconciler() async throws -> (AnalysisJobReconciler, AnalysisStore) {
+        let store = try await makeTestStore()
+        let reconciler = AnalysisJobReconciler(
+            store: store,
+            downloadManager: StubDownloadProvider(),
+            capabilitiesService: StubCapabilitiesProvider()
+        )
+        return (reconciler, store)
+    }
+
+    /// Build a real `AnalysisWorkScheduler` that the actor wiring is happy
+    /// to receive. The handler success path doesn't tick the scheduler;
+    /// the only requirement is a live instance, so we wire it with the
+    /// same shape used by other scheduler tests.
+    private func makeWorkScheduler(store: AnalysisStore) -> AnalysisWorkScheduler {
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: StubAnalysisAudioProvider(),
+            featureService: FeatureExtractionService(store: store),
+            transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
+            adDetection: StubAdDetectionProvider(),
+            cueMaterializer: SkipCueMaterializer(store: store)
+        )
+        return AnalysisWorkScheduler(
+            store: store,
+            jobRunner: runner,
+            capabilitiesService: StubCapabilitiesProvider(),
+            downloadManager: StubDownloadProvider()
+        )
+    }
+
+    /// Wait for a stub task to complete, with a deadline.
+    private func waitForCompletion(
+        of task: StubBackgroundTask,
+        timeout: Duration = .seconds(5)
+    ) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while task.completedSuccess == nil && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    @Test("Handler fired before injection completes success once injection lands",
+          .timeLimit(.minutes(1)))
+    func handlerFiredBeforeInjectionSucceedsAfterLateInjection() async throws {
+        // Reproduces the cold-launch shape: BPS is constructed (and the
+        // handler closure is registered with iOS) but
+        // `setPreAnalysisServices` has not yet been called when iOS wakes
+        // the app and fires the BG task. The handler must suspend and
+        // pick up the reconciler once injection lands.
+        let (bps, _, _, _) = makeBPS()
+        // Long enough for the late injection to race ahead of the
+        // timeout but short enough that an accidental no-resume hangs
+        // the test on its own deadline rather than the actor.
+        await bps.setInjectionWaitTimeoutSecondsForTesting(2.0)
+        let task = StubBackgroundTask()
+        let (reconciler, store) = try await makeReconciler()
+        let workScheduler = makeWorkScheduler(store: store)
+
+        // Fire the handler before injection.
+        let handlerTask = Task { await bps.handlePreAnalysisRecovery(task) }
+
+        // Hand the handler a moment to park its continuation.
+        try await Task.sleep(for: .milliseconds(50))
+
+        // Inject; this must drain the parked continuation and let the
+        // handler run reconcile() on the (empty) store.
+        await bps.setPreAnalysisServices(scheduler: workScheduler, reconciler: reconciler)
+
+        try await waitForCompletion(of: task)
+        await handlerTask.value
+
+        #expect(task.completedSuccess == true,
+                "Handler must complete success=true once the late-injected reconciler is available")
+    }
+
+    @Test("Multiple concurrent waiters all wake on injection",
+          .timeLimit(.minutes(1)))
+    func concurrentWaitersAllWakeOnInjection() async throws {
+        // Confirms the list-of-continuations design: three handlers
+        // suspended before injection must all be resumed when injection
+        // lands, not just the first one.
+        let (bps, _, _, _) = makeBPS()
+        await bps.setInjectionWaitTimeoutSecondsForTesting(2.0)
+        let tasks = (0..<3).map { _ in StubBackgroundTask() }
+        let (reconciler, store) = try await makeReconciler()
+        let workScheduler = makeWorkScheduler(store: store)
+
+        let handlerTasks = tasks.map { task in
+            Task { await bps.handlePreAnalysisRecovery(task) }
+        }
+
+        // Let all three park their continuations.
+        try await Task.sleep(for: .milliseconds(50))
+
+        await bps.setPreAnalysisServices(scheduler: workScheduler, reconciler: reconciler)
+
+        for task in tasks {
+            try await waitForCompletion(of: task)
+        }
+        for handlerTask in handlerTasks {
+            await handlerTask.value
+        }
+
+        for (index, task) in tasks.enumerated() {
+            #expect(task.completedSuccess == true,
+                    "Concurrent waiter #\(index) must wake and complete success=true")
+        }
+    }
+
+    @Test("Handler fired with no injection times out and completes failure",
+          .timeLimit(.minutes(1)))
+    func handlerFiredWithoutInjectionTimesOut() async throws {
+        // Pins the original fail path: when injection never lands, the
+        // handler must still complete success=false instead of hanging
+        // iOS's BGProcessingTask. We use a short test-only timeout
+        // (200ms) so the test itself completes well under the file's
+        // 1-minute time limit.
+        let (bps, _, _, _) = makeBPS()
+        await bps.setInjectionWaitTimeoutSecondsForTesting(0.2)
+        let task = StubBackgroundTask()
+
+        await bps.handlePreAnalysisRecovery(task)
+
+        #expect(task.completedSuccess == false,
+                "Timed-out injection wait must fall through to the original fail path")
     }
 }
 

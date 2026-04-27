@@ -946,6 +946,27 @@ final class PlayheadRuntime {
         // init, so there's no race with the first backfill/hot-path run.
 
         Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, lifecycleLogger, bgTaskTelemetry] in
+            // playhead-8u3i: inject pre-analysis services FIRST, before any
+            // migrate calls. The BG-task handlers registered in
+            // `BackgroundProcessingService.registerBackgroundTasks()` race
+            // this deferred Task body — when iOS wakes the app cold for a
+            // BGProcessingTask (e.g. `preanalysis.recovery`), the handler
+            // fires before the migrate chain below has finished. The
+            // handler reads `analysisJobReconciler` and silently fails
+            // with `success=false` if it is still nil. The reconciler is
+            // already constructed in init body (PlayheadRuntime.swift:850)
+            // and depends only on services that exist by the time this
+            // Task runs; AnalysisStore opens lazily via `ensureOpen()`
+            // (post-6boz) so the reconciler can use the store before
+            // `migrate()` explicitly runs. Sibling injection
+            // (`downloadManager.setAnalysisWorkScheduler`) moves up too
+            // so the scheduler wiring lands in the same critical section.
+            await downloadManager.setAnalysisWorkScheduler(analysisWorkScheduler)
+            await backgroundProcessingService.setPreAnalysisServices(
+                scheduler: analysisWorkScheduler,
+                reconciler: analysisJobReconciler
+            )
+
             // playhead-6boz: AnalysisStore.init is now lightweight —
             // sqlite3_open_v2 + DDL run inside this `migrate()` via the
             // lazy `ensureOpen()` path. The pre-6boz corruption recovery
@@ -1078,11 +1099,9 @@ final class PlayheadRuntime {
                 await self.startShadowRetryObserverIfNeeded(observer: shadowRetryObserver)
             }
 
-            await downloadManager.setAnalysisWorkScheduler(analysisWorkScheduler)
-            await backgroundProcessingService.setPreAnalysisServices(
-                scheduler: analysisWorkScheduler,
-                reconciler: analysisJobReconciler
-            )
+            // playhead-8u3i: pre-analysis service injection moved to the top
+            // of this Task (above the migrate chain) to fix the cold-launch
+            // BG-task race. See the long comment at the start of this Task.
             // playhead-01t8: install the preemption coordinator as the
             // scheduler's `LanePreemptionHandler` before the loop
             // starts. The runner is already wired with the same
