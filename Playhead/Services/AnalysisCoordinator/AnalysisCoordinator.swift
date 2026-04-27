@@ -2475,6 +2475,115 @@ actor AnalysisCoordinator {
         return summary
     }
 
+    // MARK: - Episode duration backfill (playhead-gyvb.2)
+
+    /// `_meta.key` flag. Once set, subsequent calls short-circuit.
+    static let durationBackfillV1MetaKey = "did_duration_backfill_v1"
+
+    /// One-shot launch-time sweep that re-probes the actual duration of
+    /// every cached audio file whose persisted
+    /// `analysis_assets.episodeDurationSec` is missing or contradicted by
+    /// a later watermark, and rewrites the column with the probed value.
+    ///
+    /// Why a sweep:
+    /// Real-world incident, 2026-04-27 — feed-metadata
+    /// `<itunes:duration>` was off by up to 13.8× on some
+    /// libsyn/flightcast feeds (declared 704s, actual 9700s). Pre-existing
+    /// rows on disk carry the bad value even after a future fix to the
+    /// write path. This sweep heals those rows on the next launch.
+    ///
+    /// - Parameter cachedFileURL: closure that returns the local file URL
+    ///   for an episodeId, or `nil` if the file isn't on disk. In
+    ///   production this is `await downloadManager.cachedFileURL(for:)`.
+    ///
+    /// Idempotent: marks the run via `_meta.did_duration_backfill_v1='1'`
+    /// inside the same logical pass. A second invocation returns
+    /// `alreadyDone=true` immediately without touching the disk.
+    func runEpisodeDurationBackfillIfNeeded(
+        cachedFileURL: @escaping @Sendable (String) async -> URL?
+    ) async -> EpisodeDurationBackfillSummary {
+        var summary = EpisodeDurationBackfillSummary()
+
+        // Idempotence gate.
+        do {
+            if let flag = try await store.fetchMetaValue(forKey: Self.durationBackfillV1MetaKey),
+               flag == "1" {
+                summary.alreadyDone = true
+                return summary
+            }
+        } catch {
+            logger.warning("Duration backfill: meta read failed (\(String(describing: error), privacy: .public)); proceeding without idempotence guard")
+        }
+
+        let assets: [AnalysisAsset]
+        do {
+            assets = try await store.fetchAllAssets()
+        } catch {
+            logger.warning("Duration backfill: fetchAllAssets failed (\(String(describing: error), privacy: .public)); aborting sweep")
+            return summary
+        }
+
+        for asset in assets {
+            // Decide whether this row is a candidate. Candidates:
+            // - persisted duration is nil OR <= 0
+            // - persisted duration is positive but a coverage watermark
+            //   already exceeds it (the libsyn/flightcast bug)
+            let dur = asset.episodeDurationSec ?? 0
+            let featureEnd = asset.featureCoverageEndTime ?? 0
+            let transcriptEnd = asset.fastTranscriptCoverageEndTime ?? 0
+            let watermarkExceedsDur = (featureEnd > dur) || (transcriptEnd > dur)
+            let needsProbe = (dur <= 0) || watermarkExceedsDur
+            guard needsProbe else { continue }
+
+            guard let fileURL = await cachedFileURL(asset.episodeId) else {
+                continue
+            }
+            summary.inspected += 1
+
+            guard let probed = await AudioFileDurationProbe.probeDuration(at: fileURL) else {
+                summary.probeFailed += 1
+                continue
+            }
+
+            // Per the bead: measured > feed. Write unconditionally on a
+            // valid probe. `updateEpisodeDuration` overwrites whatever
+            // was previously persisted.
+            do {
+                try await store.updateEpisodeDuration(
+                    id: asset.id,
+                    episodeDurationSec: probed
+                )
+                summary.rewritten += 1
+                // Log the source value as "nil" vs an actual number so the
+                // libsyn pattern (small > 0 → big) is distinguishable from
+                // genuine nil-was-rewritten entries when reading post-mortem.
+                let sourceDesc = asset.episodeDurationSec.map { "\($0)" } ?? "nil"
+                logger.info("Duration backfill: asset \(asset.id, privacy: .public) rewritten \(sourceDesc, privacy: .public) -> \(probed, privacy: .public)s")
+            } catch {
+                logger.warning("Duration backfill: write failed for asset \(asset.id, privacy: .public): \(String(describing: error), privacy: .public)")
+            }
+        }
+
+        // Idempotence marker — set even if zero rows were rewritten so
+        // that a future identical call short-circuits.
+        do {
+            try await store.setMetaValue(
+                forKey: Self.durationBackfillV1MetaKey,
+                value: "1"
+            )
+        } catch {
+            logger.warning("Duration backfill: failed to set idempotence marker: \(String(describing: error), privacy: .public)")
+        }
+
+        if summary.rewritten > 0 || summary.inspected > 0 {
+            logger.info(
+                "Duration backfill: inspected \(summary.inspected) row(s), rewrote \(summary.rewritten), probe-failed \(summary.probeFailed)"
+            )
+        }
+
+        return summary
+    }
+
     // MARK: - Test seams (playhead-gtt9.1.1)
 
     #if DEBUG
@@ -2528,4 +2637,19 @@ actor AnalysisCoordinator {
         }
     }
     #endif
+}
+
+// MARK: - EpisodeDurationBackfillSummary (playhead-gyvb.2)
+
+/// Result of one duration-backfill sweep — see
+/// `AnalysisCoordinator.runEpisodeDurationBackfillIfNeeded`.
+struct EpisodeDurationBackfillSummary: Sendable, Equatable {
+    /// Number of rows whose `episodeDurationSec` was rewritten.
+    var rewritten: Int = 0
+    /// Number of rows the sweep inspected (file existed, read attempted).
+    var inspected: Int = 0
+    /// Number of rows whose probe returned nil (left untouched).
+    var probeFailed: Int = 0
+    /// `true` when the sweep had already run on this install and was a no-op.
+    var alreadyDone: Bool = false
 }
