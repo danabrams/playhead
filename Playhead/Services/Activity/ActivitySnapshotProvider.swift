@@ -84,17 +84,27 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
     private let store: AnalysisStore
     private let capabilitySnapshotProvider: @Sendable () async -> CapabilitySnapshot?
     private let runningEpisodeIdProvider: @Sendable () async -> String?
+    /// playhead-btoa.3: per-episode foreground-download fraction map for
+    /// the current refresh tick. Production wires
+    /// `DownloadManager.progressSnapshot()` (an actor hop returning
+    /// `episodeId → fractionCompleted` for in-flight foreground
+    /// transfers); tests inject a stub returning whatever map they need.
+    /// Episodes absent from the map have no in-flight download and the
+    /// provider emits `downloadFraction == nil` for them.
+    private let downloadProgressProvider: @Sendable () async -> [String: Double]
     private let modelContainer: ModelContainer
 
     init(
         store: AnalysisStore,
         capabilitySnapshotProvider: @escaping @Sendable () async -> CapabilitySnapshot?,
         runningEpisodeIdProvider: @escaping @Sendable () async -> String?,
+        downloadProgressProvider: @escaping @Sendable () async -> [String: Double],
         modelContainer: ModelContainer
     ) {
         self.store = store
         self.capabilitySnapshotProvider = capabilitySnapshotProvider
         self.runningEpisodeIdProvider = runningEpisodeIdProvider
+        self.downloadProgressProvider = downloadProgressProvider
         self.modelContainer = modelContainer
     }
 
@@ -141,6 +151,15 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         if allAssets.isEmpty { return [] }
         let eligibleEpisodeIds = Set(allAssets.keys)
 
+        // playhead-btoa.3: snapshot the download manager's per-episode
+        // foreground fraction map once per refresh. The closure is
+        // injected so tests can drive the provider with arbitrary
+        // states; production wires `DownloadManager.progressSnapshot()`
+        // which only contains episodes with an in-flight foreground
+        // transfer (size-known, non-zero `totalBytes`). Episodes absent
+        // from this map land with `downloadFraction == nil`.
+        let downloadFractions = await downloadProgressProvider()
+
         // playhead-hkn1: SwiftData fetch on a freshly-constructed
         // `ModelContext` so this work runs off the main actor. The
         // `relationshipKeyPathsForPrefetching = [\.podcast]` directive
@@ -165,6 +184,16 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
 
         var inputs: [ActivityEpisodeInput] = []
         inputs.reserveCapacity(episodes.count)
+
+        // playhead-btoa.3: hoisted out of the per-episode loop so we
+        // don't reconstruct the closure on every iteration. Returns
+        // `nil` when either the watermark is missing or the duration
+        // is non-positive (legacy / placeholder rows pre-decode); a
+        // non-nil result is already clamped into `[0, 1]`.
+        func fraction(_ watermark: Double?, durationSec: Double) -> Double? {
+            guard let watermark, durationSec > 0 else { return nil }
+            return min(1.0, max(0.0, watermark / durationSec))
+        }
 
         for episode in episodes {
             let episodeId = episode.canonicalEpisodeKey
@@ -203,6 +232,30 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             // finishedAt column is a follow-up bead.
             let finishedAt: Date? = isTerminal(status: status) ? Date() : nil
 
+            // playhead-btoa.3: compute the three pipeline-progress
+            // fractions for the row payload. Clamping happens here (in
+            // the provider) so the row struct's contract can be
+            // "already in `[0, 1]` if non-nil" — the strip view never
+            // has to defend against overflow.
+            //
+            // Transcript / analysis fractions are watermark / duration
+            // ratios derived from the persisted `AnalysisAsset`. A
+            // missing or non-positive `episodeDurationSec` (legacy
+            // rows, placeholder rows pre-decode) collapses both to
+            // `nil` rather than synthesising a fake 0% bar from a
+            // divide-by-zero.
+            let durationSec = asset.episodeDurationSec ?? 0
+            let transcriptFraction = fraction(asset.fastTranscriptCoverageEndTime, durationSec: durationSec)
+            let analysisFraction = fraction(asset.confirmedAdCoverageEndTime, durationSec: durationSec)
+            // Download fraction comes from the (already-snapshotted)
+            // `DownloadManager` map. Clamp to `[0, 1]` defensively —
+            // the manager's own arithmetic is bounded by `bytesWritten
+            // / totalBytes` but a brief race where `totalBytes` falls
+            // back to a smaller value than `bytesWritten` could in
+            // principle yield > 1 mid-tick.
+            let downloadFraction = downloadFractions[episodeId]
+                .map { min(1.0, max(0.0, $0)) }
+
             inputs.append(
                 ActivityEpisodeInput(
                     episodeId: episodeId,
@@ -217,7 +270,10 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
                     // tiebreak) reflects the user's drag-reorder
                     // history. The aggregator owns the sort comparator
                     // — this provider is purely a forwarder.
-                    queuePosition: episode.queuePosition
+                    queuePosition: episode.queuePosition,
+                    downloadFraction: downloadFraction,
+                    transcriptFraction: transcriptFraction,
+                    analysisFraction: analysisFraction
                 )
             )
         }

@@ -1792,6 +1792,16 @@ final class PlayheadRuntime {
             runningEpisodeIdProvider: { [analysisWorkScheduler] in
                 await analysisWorkScheduler.currentlyRunningEpisodeId()
             },
+            // playhead-btoa.3: forward the live `DownloadManager`'s
+            // foreground in-flight progress map so each Activity
+            // refresh tick captures whatever transfers are running at
+            // that instant. The closure hops onto the manager's actor
+            // for the snapshot read; the resulting `[String: Double]`
+            // is `Sendable` and crosses back to the provider's caller
+            // context cleanly.
+            downloadProgressProvider: { [downloadManager] in
+                await downloadManager.progressSnapshot()
+            },
             modelContainer: modelContainer
         )
     }

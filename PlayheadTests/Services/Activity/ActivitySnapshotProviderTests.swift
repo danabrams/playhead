@@ -92,6 +92,12 @@ struct LiveActivitySnapshotProviderPerfTests {
             store: store,
             capabilitySnapshotProvider: { nil },
             runningEpisodeIdProvider: { nil },
+            // playhead-btoa.3: perf path doesn't care about download
+            // fractions — empty stub keeps every input's
+            // `downloadFraction == nil` and exercises the no-overhead
+            // dictionary lookup branch the production loop runs when
+            // there are zero in-flight foreground downloads.
+            downloadProgressProvider: { [:] },
             modelContainer: container
         )
 
@@ -149,4 +155,254 @@ struct LiveActivitySnapshotProviderPerfTests {
 private final class ManagedCounter {
     private(set) var value: Int = 0
     func increment() { value += 1 }
+}
+
+// MARK: - playhead-btoa.3 — pipeline-progress fractions
+
+/// Fraction-population coverage for `LiveActivitySnapshotProvider`.
+///
+/// Bead .1 plumbed `downloadFraction` / `transcriptFraction` /
+/// `analysisFraction` through the row payloads; bead .2 added
+/// `DownloadManager.progressSnapshot()`. This bead (.3) is the
+/// provider-side wiring: divide watermark by duration for the two
+/// analysis fractions, look up the download fraction from the injected
+/// snapshot closure, and clamp to `[0, 1]` so the row contract is
+/// "already in range if non-nil".
+@Suite("LiveActivitySnapshotProvider — pipeline fractions")
+struct LiveActivitySnapshotProviderFractionTests {
+
+    /// Helper: seeds a single Podcast + N Episodes (one per `episodeId`)
+    /// into a fresh in-memory SwiftData container, paired with N
+    /// `AnalysisAsset` rows in a fresh `AnalysisStore`. Returns both
+    /// alongside the canonical episode-key list (in seed order) so each
+    /// test can drive `loadInputs()` and assert on the resulting
+    /// `ActivityEpisodeInput` fields.
+    ///
+    /// `assetSeeds` carries the per-asset coverage watermarks +
+    /// duration; the provider divides watermark by duration to produce
+    /// the fractions under test.
+    private struct AssetSeed {
+        let fastTranscriptCoverageEndTime: Double?
+        let confirmedAdCoverageEndTime: Double?
+        let episodeDurationSec: Double?
+    }
+
+    private struct Fixture {
+        let store: AnalysisStore
+        let container: ModelContainer
+        let episodeIds: [String]
+    }
+
+    // Returns a Fixture seeded with one Episode + AnalysisAsset per AssetSeed.
+    private func makeFixture(assetSeeds: [AssetSeed]) async throws -> Fixture {
+        let schema = Schema([Podcast.self, Episode.self, UserPreferences.self])
+        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let container = try ModelContainer(for: schema, configurations: [config])
+        let context = ModelContext(container)
+
+        let feedURL = URL(string: "https://example.com/btoa3-fractions.rss")!
+        let podcast = Podcast(
+            feedURL: feedURL,
+            title: "Fractions Show",
+            author: "Author",
+            artworkURL: nil,
+            episodes: [],
+            subscribedAt: .now
+        )
+        context.insert(podcast)
+
+        let store = try await makeTestStore()
+        var episodeIds: [String] = []
+        episodeIds.reserveCapacity(assetSeeds.count)
+        for (i, seed) in assetSeeds.enumerated() {
+            let episode = Episode(
+                feedItemGUID: "guid-\(i)",
+                feedURL: feedURL,
+                podcast: podcast,
+                title: "Episode \(i)",
+                audioURL: URL(string: "https://example.com/a\(i).mp3")!
+            )
+            context.insert(episode)
+            episodeIds.append(episode.canonicalEpisodeKey)
+
+            let asset = AnalysisAsset(
+                id: "asset-\(i)",
+                episodeId: episode.canonicalEpisodeKey,
+                assetFingerprint: "fp-\(i)",
+                weakFingerprint: nil,
+                sourceURL: "https://example.com/a\(i).mp3",
+                featureCoverageEndTime: nil,
+                fastTranscriptCoverageEndTime: seed.fastTranscriptCoverageEndTime,
+                confirmedAdCoverageEndTime: seed.confirmedAdCoverageEndTime,
+                analysisState: "queued",
+                analysisVersion: 1,
+                capabilitySnapshot: nil,
+                episodeDurationSec: seed.episodeDurationSec
+            )
+            try await store.insertAsset(asset)
+        }
+        try context.save()
+
+        return Fixture(store: store, container: container, episodeIds: episodeIds)
+    }
+
+    /// Watermark / duration → simple ratio in `[0, 1]` (no overflow).
+    @Test("transcript watermark 60s of 300s episode → fraction 0.2")
+    func transcriptFractionUnderfull() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                fastTranscriptCoverageEndTime: 60,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 300
+            )
+        ])
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdProvider: { nil },
+            downloadProgressProvider: { [:] },
+            modelContainer: fixture.container
+        )
+
+        let inputs = await provider.loadInputs()
+
+        #expect(inputs.count == 1)
+        let input = try #require(inputs.first)
+        #expect(input.transcriptFraction == 0.2)
+    }
+
+    /// Overflow watermark (e.g. confirmed-ad watermark briefly past the
+    /// asset's `episodeDurationSec` because of decoder/duration drift)
+    /// must clamp to `1.0` rather than leaking a >1 fraction into the
+    /// row's strip view.
+    @Test("confirmed-ad watermark > duration → analysisFraction clamps to 1.0")
+    func analysisFractionClampsOnOverflow() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: 600,
+                episodeDurationSec: 300
+            )
+        ])
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdProvider: { nil },
+            downloadProgressProvider: { [:] },
+            modelContainer: fixture.container
+        )
+
+        let inputs = await provider.loadInputs()
+
+        #expect(inputs.count == 1)
+        let input = try #require(inputs.first)
+        #expect(input.analysisFraction == 1.0)
+    }
+
+    /// Missing or non-positive duration must produce `nil` for both
+    /// analysis-derived fractions — there is no meaningful denominator,
+    /// so the row renders as "fraction unknown" rather than synthesising
+    /// a fake 0% bar from a divide-by-zero.
+    @Test("episodeDurationSec == 0 or nil → transcript & analysis fractions nil")
+    func zeroOrNilDurationProducesNilFractions() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            // Row 0: duration nil entirely.
+            AssetSeed(
+                fastTranscriptCoverageEndTime: 30,
+                confirmedAdCoverageEndTime: 45,
+                episodeDurationSec: nil
+            ),
+            // Row 1: duration zero.
+            AssetSeed(
+                fastTranscriptCoverageEndTime: 30,
+                confirmedAdCoverageEndTime: 45,
+                episodeDurationSec: 0
+            )
+        ])
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdProvider: { nil },
+            downloadProgressProvider: { [:] },
+            modelContainer: fixture.container
+        )
+
+        let inputs = await provider.loadInputs()
+
+        #expect(inputs.count == 2)
+        for input in inputs {
+            #expect(input.transcriptFraction == nil)
+            #expect(input.analysisFraction == nil)
+        }
+    }
+
+    /// Download snapshot is keyed by `episodeId`; only matching episodes
+    /// carry a `downloadFraction`. Non-matching episodes (no in-flight
+    /// foreground download) keep `downloadFraction == nil`.
+    @Test("download snapshot { ep-1: 0.42 } → only ep-1 carries 0.42")
+    func downloadFractionPopulatesOnlyMatchingEpisode() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 300
+            ),
+            AssetSeed(
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 300
+            )
+        ])
+        let downloadingId = fixture.episodeIds[0]
+        let otherId = fixture.episodeIds[1]
+        let snapshot: [String: Double] = [downloadingId: 0.42]
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdProvider: { nil },
+            downloadProgressProvider: { snapshot },
+            modelContainer: fixture.container
+        )
+
+        let inputs = await provider.loadInputs()
+
+        #expect(inputs.count == 2)
+        let byId = Dictionary(uniqueKeysWithValues: inputs.map { ($0.episodeId, $0) })
+        let downloading = try #require(byId[downloadingId])
+        let other = try #require(byId[otherId])
+        #expect(downloading.downloadFraction == 0.42)
+        #expect(other.downloadFraction == nil)
+    }
+
+    /// Empty download snapshot (the dominant production case once
+    /// transfers settle) leaves every input's `downloadFraction == nil`.
+    @Test("empty download snapshot → every input has downloadFraction == nil")
+    func emptyDownloadSnapshotProducesNilEverywhere() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 300
+            ),
+            AssetSeed(
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 300
+            )
+        ])
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdProvider: { nil },
+            downloadProgressProvider: { [:] },
+            modelContainer: fixture.container
+        )
+
+        let inputs = await provider.loadInputs()
+
+        #expect(inputs.count == 2)
+        for input in inputs {
+            #expect(input.downloadFraction == nil)
+        }
+    }
 }
