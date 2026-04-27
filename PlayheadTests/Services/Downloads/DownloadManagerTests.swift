@@ -629,3 +629,93 @@ struct DownloadManagerForegroundAssistHandoffTests {
                 "Observer-driven submission must use the episode-id-suffixed identifier")
     }
 }
+
+// MARK: - Progress Snapshot (playhead-btoa.2)
+
+@Suite("DownloadManager – progressSnapshot")
+struct DownloadManagerProgressSnapshotTests {
+
+    // Uses shared makeTempDir() from TestHelpers.swift
+
+    @Test("Empty foreground-assist state → empty snapshot")
+    func emptySnapshot() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = DownloadManager(cacheDirectory: dir)
+
+        let snapshot = await manager.progressSnapshot()
+        #expect(snapshot.isEmpty,
+                "No active downloads must yield an empty snapshot map")
+    }
+
+    @Test("Single in-flight transfer → snapshot reports its fraction")
+    func singleInFlightFraction() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = DownloadManager(cacheDirectory: dir)
+
+        let episodeId = "ep-btoa-half"
+        await manager.seedForegroundAssistProgressForTesting(
+            episodeId: episodeId,
+            bytesWritten: 50,
+            totalBytes: 100,
+            firstObservedAt: Date(timeIntervalSinceNow: -1),
+            firstObservedBytes: 0
+        )
+
+        let snapshot = await manager.progressSnapshot()
+        #expect(snapshot.count == 1)
+        #expect(snapshot[episodeId] == 0.5)
+    }
+
+    @Test("totalBytes == 0 entries are skipped (no divide-by-zero)")
+    func zeroTotalBytesSkipped() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = DownloadManager(cacheDirectory: dir)
+
+        let episodeId = "ep-btoa-unknown-total"
+        await manager.seedForegroundAssistProgressForTesting(
+            episodeId: episodeId,
+            bytesWritten: 0,
+            totalBytes: 0,
+            firstObservedAt: Date(timeIntervalSinceNow: -1),
+            firstObservedBytes: 0
+        )
+
+        let snapshot = await manager.progressSnapshot()
+        #expect(snapshot[episodeId] == nil,
+                "Unknown total (totalBytes == 0) must not appear in the snapshot")
+        #expect(snapshot.isEmpty,
+                "Only entry was the zero-total stub, so snapshot must be empty")
+    }
+
+    @Test("Two in-flight transfers each appear with their own fraction")
+    func twoInFlightFractions() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = DownloadManager(cacheDirectory: dir)
+
+        let firstId = "ep-btoa-quarter"
+        let secondId = "ep-btoa-three-quarters"
+        await manager.seedForegroundAssistProgressForTesting(
+            episodeId: firstId,
+            bytesWritten: 25,
+            totalBytes: 100,
+            firstObservedAt: Date(timeIntervalSinceNow: -2),
+            firstObservedBytes: 0
+        )
+        await manager.seedForegroundAssistProgressForTesting(
+            episodeId: secondId,
+            bytesWritten: 750,
+            totalBytes: 1000,
+            firstObservedAt: Date(timeIntervalSinceNow: -2),
+            firstObservedBytes: 0
+        )
+
+        let snapshot = await manager.progressSnapshot()
+        #expect(snapshot.count == 2)
+        #expect(snapshot[firstId] == 0.25)
+        #expect(snapshot[secondId] == 0.75)
+    }
+}
