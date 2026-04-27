@@ -20,10 +20,10 @@ import OSLog
 /// **Streaming contract.** Internal PCM accumulation is bounded:
 /// `accumulatedSamples.count` peaks at roughly
 /// `samplesPerShard + readFramesPerCycle × (16_000 / sourceSampleRate)`.
-/// For a 30 s shard at a 16 kHz source that's ≈488 KB; the buffer never
-/// scales with total episode duration. (The downstream `AsyncStream`'s
-/// queue is the consumer's concern — bound that on the consumer side
-/// by draining promptly.)
+/// For a 30 s shard at a 16 kHz source that's ≈488 K samples ≈ 1.9 MB at
+/// Float32; the buffer never scales with total episode duration. (The
+/// downstream `AsyncStream`'s queue is the consumer's concern — bound
+/// that on the consumer side by draining promptly.)
 ///
 /// Compressed bytes are appended to a temp file on disk; only the
 /// in-progress shard's PCM lives in memory.
