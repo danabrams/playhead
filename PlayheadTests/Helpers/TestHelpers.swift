@@ -57,6 +57,32 @@ func makeTestStore() async throws -> AnalysisStore {
     return store
 }
 
+// MARK: - ScanCohort test helpers
+
+/// Returns a sorted-keys JSON encoding of a `ScanCohort` whose only varying
+/// field is `promptLabel`. Lets tests construct distinct-but-canonical cohort
+/// strings without hand-rolling the JSON shape — important because the
+/// AnalysisStore validates `scanCohortJSON` by decoding it into a real
+/// `ScanCohort`. Used by training-data tests that want to verify cohort
+/// provenance without depending on `ScanCohort.productionJSON()` (which is
+/// constant per build). (playhead-4my.10.2)
+func makeCohortJSON(promptLabel: String) -> String {
+    let cohort = ScanCohort(
+        promptLabel: promptLabel,
+        promptHash: "phase3-prompt-2026-04-06",
+        schemaHash: "phase3-schema-2026-04-06",
+        scanPlanHash: "phase3-plan-2026-04-06",
+        normalizationHash: "phase3-norm-2026-04-06",
+        osBuild: "26.0.0",
+        locale: "en_US",
+        appBuild: "1"
+    )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let data = (try? encoder.encode(cohort)) ?? Data()
+    return String(data: data, encoding: .utf8) ?? "{}"
+}
+
 // MARK: - Async polling helper
 
 /// Polls an async predicate until it returns true or the deadline expires.
