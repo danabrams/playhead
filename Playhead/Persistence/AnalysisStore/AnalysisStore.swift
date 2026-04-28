@@ -3413,6 +3413,19 @@ actor AnalysisStore {
     /// "Latest" follows the same precedence as
     /// `fetchAssetByEpisodeId`: `ORDER BY createdAt DESC, rowid DESC`,
     /// keep the first row encountered per episodeId.
+    ///
+    /// TODO (review-followup csp / persistence L1): unbounded scan
+    /// against `analysis_assets`, ordered by `createdAt DESC`. Today
+    /// the table size stays small (one row per episode under normal
+    /// flow), but the query plan is `SCAN analysis_assets USE
+    /// TEMP B-TREE FOR ORDER BY` — large libraries pay an O(N log N)
+    /// sort on every Activity-screen snapshot refresh. A composite
+    /// index on `(episodeId, createdAt DESC, rowid DESC)` would let
+    /// SQLite stream results in order without the temp B-tree, at
+    /// the cost of a one-time migration. Not done in this branch
+    /// because it requires a schema-version bump and the tradeoff
+    /// hasn't been measured against the current observed library
+    /// sizes.
     func fetchLatestAssetByEpisodeIdMap() throws -> [String: AnalysisAsset] {
         let sql = """
             SELECT \(assetSelectColumns)
