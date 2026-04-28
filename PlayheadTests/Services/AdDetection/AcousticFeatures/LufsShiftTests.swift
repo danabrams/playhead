@@ -66,4 +66,34 @@ struct LufsShiftTests {
         #expect(scores.isEmpty)
         #expect(funnel.count(.computed, .lufsShift) == 0)
     }
+
+    @Test("baseline is robust to a sustained-loud insertion (median, not mean)")
+    func sustainedLoudInsertionStillDetected() {
+        // 30 host-baseline windows at rms 0.15 plus 20 sustained-loud
+        // windows at rms 0.60 (≈12 dB louder). With the prior
+        // arithmetic-mean baseline, the loud insertion biased the
+        // baseline toward itself and the per-window delta shrank. The
+        // median baseline is unmoved by an insertion that occupies less
+        // than half of the episode (20/50 = 0.4 here), so the loud block
+        // should still produce a clear elevated score.
+        var windows: [FeatureWindow] = []
+        for i in 0..<30 {
+            windows.append(AcousticFeatureFixtures.window(
+                startTime: Double(i) * 2, endTime: Double(i + 1) * 2, rms: 0.15
+            ))
+        }
+        for i in 30..<50 {
+            windows.append(AcousticFeatureFixtures.window(
+                startTime: Double(i) * 2, endTime: Double(i + 1) * 2, rms: 0.60
+            ))
+        }
+        var funnel = AcousticFeatureFunnel()
+        let scores = LufsShift.scores(for: windows, funnel: &funnel)
+        let loudBlockMaxRaw = scores[30..<50].map(\.rawMetric).max() ?? 0
+        let loudBlockDb: Double = 20 * (log10(0.60) - log10(0.15))  // ≈12.04 dB
+        // The detector observes a delta within ~0.5 dB of the true
+        // 12 dB step — i.e. the baseline is unmoved by the insertion.
+        #expect(loudBlockMaxRaw > loudBlockDb - 0.5)
+        #expect(funnel.count(.passedGate, .lufsShift) >= 5)
+    }
 }
