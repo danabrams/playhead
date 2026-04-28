@@ -68,7 +68,12 @@ struct TrainingExample: Sendable, Equatable, Codable {
     /// the region (uncertain bucket).
     let eligibilityGate: String?
     let scanCohortJSON: String
-    let decisionCohortJSON: String
+    /// Decision-time cohort JSON. **Nullable** because not every scan has
+    /// a corresponding decision (editorial regions, uncertain scans, and
+    /// scans that pre-date the decision-events ledger). Emitting `nil`
+    /// here distinguishes "no decision joined" from "buggy serializer
+    /// produced empty string" (L4).
+    let decisionCohortJSON: String?
     let transcriptQuality: String
     let createdAt: Double
 
@@ -91,7 +96,7 @@ struct TrainingExample: Sendable, Equatable, Codable {
         userAction: String?,
         eligibilityGate: String?,
         scanCohortJSON: String,
-        decisionCohortJSON: String,
+        decisionCohortJSON: String?,
         transcriptQuality: String,
         createdAt: Double
     ) {
@@ -169,7 +174,7 @@ struct TrainingExample: Sendable, Equatable, Codable {
         self.userAction = try c.decodeIfPresent(String.self, forKey: .userAction)
         self.eligibilityGate = try c.decodeIfPresent(String.self, forKey: .eligibilityGate)
         self.scanCohortJSON = try c.decode(String.self, forKey: .scanCohortJSON)
-        self.decisionCohortJSON = try c.decode(String.self, forKey: .decisionCohortJSON)
+        self.decisionCohortJSON = try c.decodeIfPresent(String.self, forKey: .decisionCohortJSON)
         self.transcriptQuality = try c.decode(String.self, forKey: .transcriptQuality)
         self.createdAt = try c.decode(Double.self, forKey: .createdAt)
     }

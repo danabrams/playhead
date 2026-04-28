@@ -671,6 +671,12 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
     /// silently preserving the stored body; callers that truly collide on
     /// id but with different content now get a loud failure.
     case evidenceEventBodyMismatch(id: String)
+    /// playhead-4my.10.1 (L5): a JSON encoder produced bytes we could not
+    /// decode. Foundation's `JSONEncoder` should never produce non-UTF8
+    /// output, so this is structural — we surface it instead of
+    /// fall-through-defaulting the persisted column to `"[]"` (which
+    /// would silently mask future regressions).
+    case encodingFailure(String)
 
     var description: String {
         switch self {
@@ -687,6 +693,8 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
             "Invalid backfill job state transition for \(id): \(from ?? "<missing>") -> \(to)"
         case .evidenceEventBodyMismatch(let id):
             "Evidence event id '\(id)' already persisted with a different body"
+        case .encodingFailure(let msg):
+            "Encoding failure: \(msg)"
         }
     }
 }
@@ -2492,10 +2500,20 @@ actor AnalysisStore {
     private func migrateTrainingExamplesV16IfNeeded() throws {
         guard (try schemaVersion() ?? 1) < 16 else { return }
 
+        // M4: FK is `ON DELETE RESTRICT` — not CASCADE. The bead's
+        // cohort-survival contract is incompatible with cascading
+        // deletes: future bead wires up `deleteAsset(id:)` would
+        // silently wipe every prior cohort's training rows the moment an
+        // asset is removed. RESTRICT forces the caller to explicitly
+        // reckon with the training data first (export, archive, or
+        // delete via a deliberate path) before deleting the asset.
+        // `decisionCohortJSON` is nullable (L4) — emit JSON null when no
+        // decision overlapped this scan; an empty string was
+        // indistinguishable from a buggy serializer.
         try exec("""
             CREATE TABLE IF NOT EXISTS training_examples (
                 id                    TEXT PRIMARY KEY,
-                analysisAssetId       TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                analysisAssetId       TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE RESTRICT,
                 startAtomOrdinal      INTEGER NOT NULL,
                 endAtomOrdinal        INTEGER NOT NULL,
                 transcriptVersion     TEXT NOT NULL,
@@ -2512,7 +2530,7 @@ actor AnalysisStore {
                 userAction            TEXT,
                 eligibilityGate       TEXT,
                 scanCohortJSON        TEXT NOT NULL,
-                decisionCohortJSON    TEXT NOT NULL,
+                decisionCohortJSON    TEXT,
                 transcriptQuality     TEXT NOT NULL,
                 createdAt             REAL NOT NULL
             )
@@ -7828,22 +7846,27 @@ actor AnalysisStore {
         }
     }
 
-    /// Replace every prior training example for `analysisAssetId` with
-    /// the supplied set. Used by the materializer so re-running does
-    /// not double up. Runs inside a single transaction; on failure the
-    /// pre-existing rows are preserved.
+    /// Upsert each supplied training example for `analysisAssetId`.
+    ///
+    /// **Cohort-survival contract**: we deliberately do *not* DELETE the
+    /// asset-scoped rows before inserting. Each `TrainingExample.id` is
+    /// deterministic (`"te-\(scan.id)"`), so re-running the materializer on
+    /// the same scan-result spine is naturally idempotent via
+    /// `INSERT OR REPLACE`. Crucially, this means rows materialized under a
+    /// previous cohort survive when the current cohort produces a smaller
+    /// (or empty) spine — exactly the durability guarantee the bead is
+    /// about. A blanket asset-scoped DELETE would wipe those prior-cohort
+    /// rows on every re-run.
+    ///
+    /// Runs inside a single transaction so a partial failure rolls back
+    /// cleanly.
     func replaceTrainingExamples(
         forAsset analysisAssetId: String,
         with examples: [TrainingExample]
     ) throws {
+        guard !examples.isEmpty else { return }
         try exec("BEGIN IMMEDIATE")
         do {
-            let deleteSQL = "DELETE FROM training_examples WHERE analysisAssetId = ?"
-            let deleteStmt = try prepare(deleteSQL)
-            bind(deleteStmt, 1, analysisAssetId)
-            try step(deleteStmt, expecting: SQLITE_DONE)
-            sqlite3_finalize(deleteStmt)
-
             for example in examples {
                 try insertTrainingExampleRow(example)
             }
@@ -7895,8 +7918,17 @@ actor AnalysisStore {
         bind(stmt, 11, example.commercialIntent)
         bind(stmt, 12, example.ownership)
         // evidenceSources persisted as JSON array of strings.
-        let evidenceJSON = (try? JSONEncoder().encode(example.evidenceSources))
-            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        // L5: propagate encoder failure. `[String]` JSON encoding cannot
+        // realistically fail; if it ever does, that's a Foundation
+        // regression we want to see, not paper over with `"[]"`.
+        let evidenceData = try JSONEncoder().encode(example.evidenceSources)
+        guard let evidenceJSON = String(data: evidenceData, encoding: .utf8) else {
+            // JSONEncoder always emits valid UTF-8; this is unreachable
+            // unless Foundation breaks.
+            throw AnalysisStoreError.encodingFailure(
+                "training_examples.evidenceSourcesJSON: encoder returned non-UTF8 bytes"
+            )
+        }
         bind(stmt, 13, evidenceJSON)
         bind(stmt, 14, example.fmCertainty)
         bind(stmt, 15, example.classifierConfidence)
@@ -7937,7 +7969,7 @@ actor AnalysisStore {
             userAction: optionalText(stmt, 15),
             eligibilityGate: optionalText(stmt, 16),
             scanCohortJSON: text(stmt, 17),
-            decisionCohortJSON: text(stmt, 18),
+            decisionCohortJSON: optionalText(stmt, 18),
             transcriptQuality: text(stmt, 19),
             createdAt: sqlite3_column_double(stmt, 20)
         )

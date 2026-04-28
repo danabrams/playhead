@@ -2789,8 +2789,10 @@ actor AdDetectionService {
             // playhead-4my.10.1: snapshot the evidence + decision +
             // correction ledger into `training_examples` while the
             // cohort is still warm. The materializer's failures are
-            // logged but never propagated — shadow-mode invariant
-            // applies (the FM phase must not affect cue computation).
+            // surfaced via `logger.error` (so SQLite write failures are
+            // visible in production) but NEVER propagated — shadow-mode
+            // invariant applies (the FM phase must not affect cue
+            // computation, even when materialization explodes).
             await materializeTrainingExamples(forAsset: analysisAssetId)
             if result.deferredJobIds.isEmpty {
                 return wrap(.ranSucceeded, result.fmRefinementWindows)
@@ -2803,9 +2805,16 @@ actor AdDetectionService {
     }
 
     /// playhead-4my.10.1: post-fusion materialization hook. Called from
-    /// `runShadowFMPhase` after each successful backfill run, before the
-    /// shadow phase returns. Failures are caught and logged so the
-    /// shadow phase's no-side-effects contract is preserved.
+    /// `runShadowFMPhase` after a backfill run completes (regardless of
+    /// `fmBackfillMode` — `runShadowFMPhase` runs in production whenever
+    /// the mode is not `.off`).
+    ///
+    /// Failures must NOT propagate (the shadow-mode contract is that the
+    /// FM phase never affects cue computation), but they also must not be
+    /// silently dropped. The materializer touches SQLite directly — a
+    /// disk-full / FK-violation / migration-mismatch is exactly the kind
+    /// of error we need a server-visible log line for. We log at `error`
+    /// level (not `warning`) so the line surfaces in production telemetry.
     private func materializeTrainingExamples(forAsset analysisAssetId: String) async {
         let materializer = TrainingExampleMaterializer()
         do {
@@ -2814,7 +2823,11 @@ actor AdDetectionService {
                 store: store
             )
         } catch {
-            logger.warning("TrainingExample materialization failed (suppressed): \(error.localizedDescription)")
+            // Persistence failure: log loudly. Suppression is the
+            // shadow-contract requirement; silence is not.
+            logger.error(
+                "TrainingExample materialization failed for asset \(analysisAssetId, privacy: .public) — error suppressed by shadow invariant: \(error.localizedDescription, privacy: .public)"
+            )
         }
     }
 

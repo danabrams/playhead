@@ -1772,6 +1772,7 @@ actor BackfillJobRunner {
         case .invalidScanCohortJSON: return "invalidScanCohortJSON"
         case .invalidStateTransition: return "invalidStateTransition"
         case .evidenceEventBodyMismatch: return "evidenceEventBodyMismatch"
+        case .encodingFailure: return "encodingFailure"
         }
     }
 
@@ -1780,7 +1781,11 @@ actor BackfillJobRunner {
         case .invalidEvidenceEvent,
              .evidenceEventBodyMismatch,
              .invalidScanCohortJSON,
-             .invalidRow:
+             .invalidRow,
+             // playhead-4my.10.1 (L5): structural — Foundation's
+             // JSONEncoder produced bytes we couldn't decode. Retrying
+             // would just reproduce the failure.
+             .encodingFailure:
             return true
         case .insertFailed(let message):
             return message.hasPrefix("payloadTooLarge:")

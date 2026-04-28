@@ -16,9 +16,14 @@
 //  scanCohortJSON) tuple the spec requires. Decision + evidence +
 // correction ledgers are joined in by interval-overlap.
 //
-// Idempotency: `replaceTrainingExamples(forAsset:with:)` deletes any
-// prior examples for the asset before re-inserting. Re-running across
-// the same set of source rows is a no-op (modulo timestamps).
+// Idempotency / cohort-durability: `replaceTrainingExamples(forAsset:with:)`
+// performs a per-row id-keyed upsert (`INSERT OR REPLACE`). Each example's
+// id is deterministic (`"te-\(scan.id)"`), so re-running the materializer
+// over the same spine overwrites the matching rows in place. Crucially,
+// rows previously materialized under a *different* scan-result spine (e.g.
+// an earlier cohort whose spine was pruned) survive — they remain useful
+// training data for downstream evaluation regardless of the current
+// cohort, which is the durability guarantee this bead delivers.
 
 import CryptoKit
 import Foundation
@@ -81,6 +86,12 @@ struct TrainingExampleMaterializer: Sendable {
         examples.reserveCapacity(scanResults.count)
 
         for scan in scanResults {
+            // M5: Filter the spine to successful scans. Failed/refusal/
+            // decoding-failure rows carry no usable signals, so they would
+            // produce empty/garbage training examples that pollute the
+            // corpus.
+            guard scan.status == .success else { continue }
+
             let evidenceForScan = prepared.filter {
                 Self.intervalOverlaps(
                     aFirst: $0.firstOrdinal, aLast: $0.lastOrdinal,
@@ -94,27 +105,32 @@ struct TrainingExampleMaterializer: Sendable {
             // decision events whose `windowId` matches one of those.
             // Falls back to nil when no overlapping window exists, so
             // editorial regions don't inherit a paid-ad decision.
+            let overlappingAdWindows = adWindows.filter { aw in
+                Self.timeIntervalOverlaps(
+                    aStart: aw.startTime, aEnd: aw.endTime,
+                    bStart: scan.windowStartTime,
+                    bEnd: scan.windowEndTime
+                )
+            }
             let overlappingWindowIds: Set<String> = Set(
-                adWindows
-                    .filter { aw in
-                        Self.timeIntervalOverlaps(
-                            aStart: aw.startTime, aEnd: aw.endTime,
-                            bStart: scan.windowStartTime,
-                            bEnd: scan.windowEndTime
-                        )
-                    }
-                    .map { $0.id }
+                overlappingAdWindows.map { $0.id }
             )
             let decisionForScan = Self.bestDecision(
                 for: scan,
                 in: decisionEvents,
                 overlappingWindowIds: overlappingWindowIds
             )
+            // M2: actual skip execution comes from `AdWindow.wasSkipped`,
+            // not from the policy's eligibility gate. Eligible-but-not-
+            // executed windows must NOT be labelled as skipped.
+            let scanWasSkipped = overlappingAdWindows.contains { $0.wasSkipped }
             let corrections = correctionEvents.filter {
                 Self.correctionOverlaps(
                     correctionScope: $0.scope,
                     scanStart: scan.windowStartTime,
-                    scanEnd: scan.windowEndTime
+                    scanEnd: scan.windowEndTime,
+                    scanFirstOrdinal: scan.windowFirstAtomOrdinal,
+                    scanLastOrdinal: scan.windowLastAtomOrdinal
                 )
             }
 
@@ -123,6 +139,7 @@ struct TrainingExampleMaterializer: Sendable {
                 evidence: evidenceForScan,
                 decision: decisionForScan,
                 corrections: corrections,
+                wasSkipped: scanWasSkipped,
                 now: now
             )
             examples.append(example)
@@ -141,6 +158,7 @@ struct TrainingExampleMaterializer: Sendable {
         evidence: [PreparedEvidence],
         decision: DecisionEvent?,
         corrections: [CorrectionEvent],
+        wasSkipped: Bool,
         now: Double
     ) -> TrainingExample {
         let fmEvidence = evidence.filter { $0.event.sourceType == .fm }
@@ -148,7 +166,16 @@ struct TrainingExampleMaterializer: Sendable {
 
         let fmPositive = !fmEvidence.isEmpty || scan.disposition == .containsAd
         let fmCertainty = fmEvidence.map { $0.certainty }.max() ?? 0.0
-        let lexicalPositive = !lexEvidence.isEmpty
+        // M1: split "lexical fired" from "lexical positive". The lexical
+        // scanner only persists evidence when it produces a positive
+        // finding (it does not write rows for "no hit"). So
+        // `lexicalFired = !lexEvidence.isEmpty` means "the lexicon
+        // matched"; absence is silence, not negative testimony. The
+        // bucketer needs both signals to distinguish a true
+        // lexical-vs-FM disagreement from a normal "lexicon was quiet"
+        // case.
+        let lexicalFired = !lexEvidence.isEmpty
+        let lexicalPositive = lexicalFired
         let classifierConfidence = decision?.skipConfidence ?? 0.0
         let decisionWasSkipEligible =
             decision?.policyAction == "autoSkipEligible" ||
@@ -164,6 +191,7 @@ struct TrainingExampleMaterializer: Sendable {
         let signals = TrainingExampleBucketerSignals(
             fmPositive: fmPositive,
             fmCertainty: fmCertainty,
+            lexicalFired: lexicalFired,
             lexicalPositive: lexicalPositive,
             classifierConfidence: classifierConfidence,
             decisionWasSkipEligible: decisionWasSkipEligible,
@@ -175,10 +203,17 @@ struct TrainingExampleMaterializer: Sendable {
 
         let evidenceSourceNames = Self.distinctSourceNames(from: evidence)
 
+        // M2: only label the example as `"skipped"` when the policy
+        // actually executed a skip. Eligibility-without-execution is
+        // recorded as `"eligibleNotSkipped"` so the corpus distinguishes
+        // policy intent from playback-time outcome. We do not invent a
+        // `"skipped"` label on eligibility alone — that would mislabel
+        // every banner the user ignored as a successful skip.
         let userAction: String? = {
             if userReverted { return "reverted" }
             if userReportedFalseNegative { return "reportedAd" }
-            if decisionWasSkipEligible { return "skipped" }
+            if wasSkipped { return "skipped" }
+            if decisionWasSkipEligible { return "eligibleNotSkipped" }
             return nil
         }()
 
@@ -225,7 +260,9 @@ struct TrainingExampleMaterializer: Sendable {
             userAction: userAction,
             eligibilityGate: decision?.eligibilityGate,
             scanCohortJSON: scan.scanCohortJSON,
-            decisionCohortJSON: decision?.decisionCohortJSON ?? "",
+            // L4: emit `nil` when no decision overlapped this scan.
+            // Empty string was indistinguishable from a buggy serializer.
+            decisionCohortJSON: decision?.decisionCohortJSON,
             transcriptQuality: scan.transcriptQuality.rawValue,
             createdAt: now
         )
@@ -260,25 +297,56 @@ struct TrainingExampleMaterializer: Sendable {
         aStart < bEnd && bStart < aEnd
     }
 
-    /// Correction scopes are encoded as "exactSpan:<assetId>:<start>:<end>"
-    /// (or wider scopes that aren't span-bound). We do a tolerant numeric
-    /// parse for span-bound scopes; non-span scopes fall through and
-    /// match every region of the asset.
+    /// Correction scopes are serialized via `CorrectionScope.serialized`.
+    /// The two span-bound forms have *different* coordinate systems:
+    ///
+    ///   * `.exactSpan`        — `"exactSpan:<assetId>:<lowerOrdinal>:<upperOrdinal>"`
+    ///                           (atom **ordinals**, integers)
+    ///   * `.exactTimeSpan`    — `"exactTimeSpan:<assetId>:<startTime>:<endTime>"`
+    ///                           (seconds, doubles)
+    ///
+    /// For span-bound scopes we route through `CorrectionScope.deserialize(_:)`
+    /// so the canonical parser handles asset IDs that contain colons and the
+    /// fixed-precision time format. We then compare each scope to the *right*
+    /// scan field: ordinals to `scan.windowFirstAtomOrdinal/windowLastAtomOrdinal`,
+    /// times to `scan.windowStartTime/windowEndTime`.
+    ///
+    /// Wider scopes (`sponsorOnShow`, `phraseOnShow`, `campaignOnShow`,
+    /// `domainOwnershipOnShow`, `jingleOnShow`) are not span-bound and match
+    /// every scan region of the asset.
     private static func correctionOverlaps(
         correctionScope: String,
         scanStart: Double,
-        scanEnd: Double
+        scanEnd: Double,
+        scanFirstOrdinal: Int,
+        scanLastOrdinal: Int
     ) -> Bool {
-        let parts = correctionScope.split(separator: ":")
-        guard parts.count >= 4, parts[0] == "exactSpan" else {
-            // Wider scopes (e.g. sponsorAcrossPodcast) match any region.
+        guard let parsed = CorrectionScope.deserialize(correctionScope) else {
+            // Unrecognized prefix: fail closed. A correction we can't
+            // localize must not contaminate every scan with userReverted.
+            return false
+        }
+        switch parsed {
+        case .exactSpan(_, let ordinalRange):
+            return intervalOverlaps(
+                aFirst: ordinalRange.lowerBound,
+                aLast: ordinalRange.upperBound,
+                bFirst: scanFirstOrdinal,
+                bLast: scanLastOrdinal
+            )
+        case .exactTimeSpan(_, let cStart, let cEnd):
+            // Closed-interval overlap on time ranges. (We use a closed
+            // comparison here, not the half-open `timeIntervalOverlaps`,
+            // because correction time spans are user-supplied and may share
+            // an endpoint with an adjacent scan; we'd rather over-attribute
+            // than miss.)
+            return cStart <= scanEnd && scanStart <= cEnd
+        case .sponsorOnShow, .phraseOnShow, .campaignOnShow,
+             .domainOwnershipOnShow, .jingleOnShow:
+            // Wider, non-span-bound scopes. They apply to every region of
+            // the asset by construction.
             return true
         }
-        guard let cStart = Double(parts[2]),
-              let cEnd = Double(parts[3]) else {
-            return true
-        }
-        return cStart <= scanEnd && scanStart <= cEnd
     }
 
     /// Picks the strongest decision whose `windowId` matches one of the
@@ -301,13 +369,46 @@ struct TrainingExampleMaterializer: Sendable {
         return candidates.max { $0.skipConfidence < $1.skipConfidence }
     }
 
-    private static func parseCertainty(_ json: String) -> Double {
+    /// Parses the `certainty` field out of a persisted `EvidencePayload`-style
+    /// JSON blob. The on-disk shape stores the value as a `CertaintyBand` raw
+    /// string (`"weak"` | `"moderate"` | `"strong"`) — see
+    /// `BackfillJobRunner.EvidencePayload.certainty`. We map each band to a
+    /// representative midpoint so downstream gates (e.g. the bucketer's
+    /// `fmCertainty >= 0.7` positive gate) operate against the correct
+    /// magnitude. Numeric forms are still accepted for forward/test
+    /// compatibility — useful when ad-hoc fixtures or future producers stamp
+    /// a numeric certainty directly.
+    static func parseCertainty(_ json: String) -> Double {
         guard let data = json.data(using: .utf8),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return 0.0 }
+        // Preferred shape: string band.
+        if let band = dict["certainty"] as? String,
+           let value = certaintyBandToDouble(band) {
+            return value
+        }
+        // Fallback: numeric form (Double or Int) — fixtures, future shapes.
         if let v = dict["certainty"] as? Double { return v }
         if let v = dict["certainty"] as? Int { return Double(v) }
         return 0.0
+    }
+
+    /// Maps a `CertaintyBand` raw string to a representative double.
+    ///
+    /// Midpoints chosen so that:
+    ///   * `weak`     → 0.3 (clearly below the bucketer's 0.5 evidence floor)
+    ///   * `moderate` → 0.6 (above the 0.5 floor but below the 0.7 positive gate)
+    ///   * `strong`   → 0.9 (well above the 0.7 positive gate)
+    ///
+    /// Returns `nil` for unknown raw values so callers can distinguish
+    /// "string but unrecognized" from "numeric form" if they care.
+    static func certaintyBandToDouble(_ raw: String) -> Double? {
+        switch raw {
+        case "weak":     return 0.3
+        case "moderate": return 0.6
+        case "strong":   return 0.9
+        default:         return nil
+        }
     }
 
     private static func distinctSourceNames(from evidence: [PreparedEvidence]) -> [String] {
@@ -322,9 +423,17 @@ struct TrainingExampleMaterializer: Sendable {
         return ordered
     }
 
+    /// Coarse `commercialIntent` inference from bucket label only. The
+    /// `fmPositive` parameter is preserved on the signature for symmetry
+    /// with `inferOwnership` — and for any future caller that wants to
+    /// distinguish positive-but-uncertain from negative-but-uncertain —
+    /// but is intentionally unused: without proper domain confidence we
+    /// cannot honestly differentiate `.paid` from `.unknown` on the
+    /// uncertain/disagreement legs, and a ternary that returns the same
+    /// value on both arms is dead code (L1).
     private static func inferCommercialIntent(
         bucket: TrainingExampleBucket,
-        fmPositive: Bool
+        fmPositive _: Bool
     ) -> String {
         switch bucket {
         case .positive:
@@ -332,9 +441,7 @@ struct TrainingExampleMaterializer: Sendable {
         case .negative:
             return CommercialIntent.organic.rawValue
         case .uncertain, .disagreement:
-            return fmPositive
-                ? CommercialIntent.unknown.rawValue
-                : CommercialIntent.unknown.rawValue
+            return CommercialIntent.unknown.rawValue
         }
     }
 

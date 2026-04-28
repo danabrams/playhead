@@ -17,8 +17,16 @@ struct TrainingExampleBucketerSignals: Sendable, Equatable {
     let fmPositive: Bool
     /// Highest FM certainty observed in the region. `0..1`.
     let fmCertainty: Double
-    /// True when at least one lexical evidence event in the region
-    /// flagged the region as ad-like.
+    /// True when the lexical scanner produced any evidence for the
+    /// region. The lexicon only emits rows for matches, so silence
+    /// does NOT mean negative — it means "no opinion". M1: required
+    /// to separate genuine lexical-vs-FM disagreement (both fired,
+    /// disagreed) from "lexicon happened to be quiet".
+    let lexicalFired: Bool
+    /// True when the lexical scanner's emitted evidence (if any)
+    /// flagged the region as ad-like. Implies `lexicalFired`. When
+    /// `lexicalFired == false`, this field is unused and should be
+    /// `false` by convention.
     let lexicalPositive: Bool
     /// Best (post-fusion) classifier confidence stamped on the decision
     /// for the region. `0..1`.
@@ -33,6 +41,28 @@ struct TrainingExampleBucketerSignals: Sendable, Equatable {
     /// Persistence-layer transcript quality string
     /// ("good" | "degraded" | "unusable").
     let transcriptQuality: String
+
+    init(
+        fmPositive: Bool,
+        fmCertainty: Double,
+        lexicalFired: Bool,
+        lexicalPositive: Bool,
+        classifierConfidence: Double,
+        decisionWasSkipEligible: Bool,
+        userReverted: Bool,
+        userReportedFalseNegative: Bool,
+        transcriptQuality: String
+    ) {
+        self.fmPositive = fmPositive
+        self.fmCertainty = fmCertainty
+        self.lexicalFired = lexicalFired
+        self.lexicalPositive = lexicalPositive
+        self.classifierConfidence = classifierConfidence
+        self.decisionWasSkipEligible = decisionWasSkipEligible
+        self.userReverted = userReverted
+        self.userReportedFalseNegative = userReportedFalseNegative
+        self.transcriptQuality = transcriptQuality
+    }
 }
 
 /// Pure bucket classifier. Branches in priority order so the most
@@ -68,8 +98,18 @@ enum TrainingExampleBucketer {
         // 1b. Lexical-vs-FM: only on good transcripts. On unusable
         // transcripts the disagreement is more likely an ASR artifact
         // than a real conflict, so we'd rather emit .uncertain.
-        if signals.transcriptQuality == "good" &&
-            signals.fmPositive != signals.lexicalPositive {
+        //
+        // M1: require that BOTH systems actually fired. The lexical
+        // scanner only emits evidence for positive matches — silence
+        // is "no opinion", not a negative verdict. Treating "FM said
+        // ad, lexicon was quiet" as a disagreement floods the bucket
+        // with the most common case (many real ads don't trip the
+        // lexicon) and dilutes its training value. We only flag a
+        // genuine disagreement when both systems produced an opinion
+        // and those opinions conflict.
+        if signals.transcriptQuality == "good"
+            && signals.lexicalFired
+            && signals.fmPositive != signals.lexicalPositive {
             return .disagreement
         }
 
