@@ -407,6 +407,21 @@ actor AnalysisAudioService {
             throw AnalysisAudioError.readerSetupFailed(msg)
         }
 
+        // playhead-rfu-aac H4: ensure the reader is torn down on every exit
+        // path — cancellation, conversion error, inputBlock failure, or
+        // normal completion. A successfully-completed reader is a no-op
+        // here (`cancelReading` on `.completed` is documented as harmless),
+        // but a thrown error mid-decode previously left the reader (and
+        // its CMSampleBufferPool / decoder workqueue threads) live until
+        // ARC reclaimed it asynchronously. Deterministic cleanup matters
+        // for test stability and for keeping per-decode resources bounded
+        // during back-to-back retries.
+        defer {
+            if reader.status == .reading {
+                reader.cancelReading()
+            }
+        }
+
         // 5. Set up AVAudioConverter for sample-rate conversion to 16 kHz mono.
         guard let sourceFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
