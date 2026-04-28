@@ -1448,6 +1448,61 @@ struct AppleSpeechResultMapperOffsetTests {
         #expect(offset == [segment])
     }
 
+    @Test("offsetSegments shifts segment, word, and weak-anchor times by negative delta")
+    func offsetSegmentsShiftsAllTimesByNegativeDelta() throws {
+        let metadata = TranscriptWeakAnchorMetadata(
+            averageConfidence: 0.46,
+            minimumConfidence: 0.19,
+            alternativeTexts: ["sponsored by betterhelp"],
+            lowConfidencePhrases: [
+                WeakAnchorPhrase(
+                    text: "better help",
+                    startTime: 5.2,
+                    endTime: 5.4,
+                    confidence: 0.19
+                )
+            ]
+        )
+        let segment = TranscriptSegment(
+            id: 7,
+            words: [
+                TranscriptWord(text: "visit", startTime: 5.0, endTime: 5.2, confidence: 0.95),
+                TranscriptWord(text: "betterhelp", startTime: 5.2, endTime: 5.6, confidence: 0.30),
+            ],
+            text: "visit betterhelp",
+            startTime: 5.0,
+            endTime: 5.6,
+            avgConfidence: 0.625,
+            passType: .fast,
+            weakAnchorMetadata: metadata
+        )
+
+        let offset = AppleSpeechResultMapper.offsetSegments([segment], by: -3.0)
+
+        #expect(offset.count == 1)
+        let shifted = try #require(offset.first)
+        #expect(shifted.id == 7)
+        #expect(shifted.text == "visit betterhelp")
+        #expect(shifted.passType == .fast)
+        #expect(abs(shifted.avgConfidence - 0.625) < 0.000_001)
+        #expect(abs(shifted.startTime - 2.0) < 0.000_001)
+        #expect(abs(shifted.endTime - 2.6) < 0.000_001)
+        #expect(shifted.words.count == 2)
+        #expect(abs(shifted.words[0].startTime - 2.0) < 0.000_001)
+        #expect(abs(shifted.words[0].endTime - 2.2) < 0.000_001)
+        #expect(abs(shifted.words[1].startTime - 2.2) < 0.000_001)
+        #expect(abs(shifted.words[1].endTime - 2.6) < 0.000_001)
+        #expect(shifted.words[0].text == "visit")
+        #expect(shifted.words[1].text == "betterhelp")
+        #expect(abs(shifted.words[1].confidence - 0.30) < 0.000_001)
+
+        let shiftedMeta = try #require(shifted.weakAnchorMetadata)
+        let phrase = try #require(shiftedMeta.lowConfidencePhrases.first)
+        #expect(abs(phrase.startTime - 2.2) < 0.000_001)
+        #expect(abs(phrase.endTime - 2.4) < 0.000_001)
+        #expect(shiftedMeta.alternativeTexts == metadata.alternativeTexts)
+    }
+
     @Test("offsetSegments preserves nil weakAnchorMetadata")
     func offsetSegmentsPreservesNilMetadata() throws {
         let segment = TranscriptSegment(
@@ -1550,8 +1605,11 @@ struct AppleSpeechAudioBridgeHappyPathTests {
             targetFormat: targetFormat
         )
 
+        // Source is 16,000 Float32 samples at 16 kHz; converted Int16 buffer at
+        // 16 kHz target should preserve the exact frame count (no rate change).
+        // A broken converter emitting a single frame must fail this assertion.
         #expect(buffer.format == targetFormat)
-        #expect(buffer.frameLength > 0)
+        #expect(buffer.frameLength == 16_000)
     }
 
     @Test("makeAnalyzerBuffer passes Float32 16 kHz audio through when source matches target")
@@ -1566,8 +1624,16 @@ struct AppleSpeechAudioBridgeHappyPathTests {
             return
         }
 
+        // Sentinel pattern: a recognizable alternating sequence at known
+        // indices so a broken implementation returning a zero-filled or
+        // garbage buffer of the right shape can't pass.
         let frameCount = 16_000
-        let samples = (0..<frameCount).map { Float(sin(Double($0) * 0.05)) * 0.5 }
+        var samples = (0..<frameCount).map { Float(sin(Double($0) * 0.05)) * 0.5 }
+        let sentinelIndices = [0, 1, 2, 3, 100, 1_000, 8_000, 15_999]
+        let sentinelValues: [Float] = [0.125, -0.25, 0.375, -0.5, 0.625, -0.75, 0.875, -0.9375]
+        for (i, index) in sentinelIndices.enumerated() {
+            samples[index] = sentinelValues[i]
+        }
         let shard = AnalysisShard(
             id: 0,
             episodeID: "test-ep",
@@ -1584,6 +1650,17 @@ struct AppleSpeechAudioBridgeHappyPathTests {
         // Source already matches target → no resampling, exact frame count preserved.
         #expect(buffer.format == targetFormat)
         #expect(Int(buffer.frameLength) == frameCount)
+
+        // Pin passthrough fidelity: the sentinel values must round-trip
+        // verbatim through the bridge. A zero-filled or otherwise garbage
+        // buffer would diverge here.
+        let channelData = try #require(buffer.floatChannelData?.pointee)
+        for (i, index) in sentinelIndices.enumerated() {
+            #expect(
+                abs(channelData[index] - sentinelValues[i]) < 0.000_001,
+                "Sample at index \(index) should pass through verbatim (expected \(sentinelValues[i]), got \(channelData[index]))"
+            )
+        }
     }
 }
 
