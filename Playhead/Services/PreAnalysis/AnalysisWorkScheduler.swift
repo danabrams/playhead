@@ -2580,6 +2580,17 @@ actor AnalysisWorkScheduler {
                     )
                     logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: cancelMidRun")
                 } else {
+                    // Mirror the `.failed.requeue` arm and apply
+                    // exponential backoff: a user pause/play loop on a
+                    // poison-content episode used to hammer through
+                    // `maxAttemptCount` instantly because the requeue
+                    // dropped `nextEligibleAt`. With backoff, the Nth
+                    // cancel pushes `nextEligibleAt` to
+                    // `now + min(2^N * 60, 3600)s`, matching how the
+                    // `.failed` arm paces unhealthy jobs and giving
+                    // queued work behind it a chance to dispatch.
+                    let backoff = Self.exponentialBackoffSeconds(attempt: attempts)
+                    let nextEligible = clock().timeIntervalSince1970 + backoff
                     await commitOutcomeArm(
                         "cancelCatch.revertQueued",
                         AnalysisStore.ProcessJobOutcomeArmCommit(
@@ -2587,7 +2598,7 @@ actor AnalysisWorkScheduler {
                             incrementAttempt: true,
                             stateUpdate: .init(
                                 state: "queued",
-                                nextEligibleAt: nil,
+                                nextEligibleAt: nextEligible,
                                 lastErrorCode: nil
                             )
                         )

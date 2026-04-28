@@ -234,6 +234,103 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
         #expect(after?.leaseOwner == nil)
     }
 
+    @Test("cancel-mid-decode requeue applies exponential backoff to nextEligibleAt")
+    func cancelMidDecodeRequeueAppliesExponentialBackoff() async throws {
+        // Review-followup (csp / H1): the `cancelCatch.revertQueued`
+        // arm previously cleared `nextEligibleAt`, so a user
+        // pause/play-loop on a poison-content episode could burn
+        // through `maxAttemptCount` instantly. Mirror the
+        // `.failed.requeue` arm: each cancel must push
+        // `nextEligibleAt` forward by `min(2^attempts * 60, 3600)s`
+        // so backoff actually paces the retries.
+        //
+        // Strategy: drive three separate jobs that begin at
+        // attemptCount = 0, 1, 2. Cancel each mid-decode and capture
+        // the resulting `nextEligibleAt`. Backoff after one cancel
+        // must equal min(2^(attemptCount+1) * 60, 3600), so the three
+        // observed backoffs must double per step (120s → 240s → 480s).
+        //
+        // We can't drive three cancels on the same job because the
+        // first cancel installs a future `nextEligibleAt`, which the
+        // dispatcher honors — the second decode never starts. Three
+        // independent jobs side-step that without monkey-patching the
+        // clock seam.
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+
+        var observedBackoffs: [Double] = []
+
+        for startingAttempts in [0, 1, 2] {
+            let jobId = "cancel-backoff-\(startingAttempts)"
+            let episodeId = "ep-cancel-backoff-\(startingAttempts)"
+            downloads.cachedURLs[episodeId] = URL(fileURLWithPath: "/tmp/\(episodeId).mp3")
+
+            let job = makeAnalysisJob(
+                jobId: jobId,
+                jobType: "preAnalysis",
+                episodeId: episodeId,
+                analysisAssetId: "asset-\(startingAttempts)",
+                workKey: "fp-\(startingAttempts):1:preAnalysis",
+                sourceFingerprint: "fp-\(startingAttempts)",
+                priority: 10,
+                desiredCoverageSec: 90,
+                state: "queued",
+                attemptCount: startingAttempts
+            )
+            try await store.insertJob(job)
+
+            let audioStub = CancellableAudioStub()
+            let scheduler = makeScheduler(
+                store: store,
+                audioProvider: audioStub,
+                downloads: downloads
+            )
+            await scheduler.startSchedulerLoop()
+
+            let entered = await pollUntil(timeout: .seconds(15)) {
+                audioStub.decodeCallCount >= 1
+            }
+            #expect(entered, "Decode never started (startingAttempts=\(startingAttempts))")
+
+            // Capture wall-clock around the cancel so we can subtract
+            // the scheduler's `clock()` reading to recover the chosen
+            // backoff value with bounded jitter.
+            let beforeCancel = Date().timeIntervalSince1970
+            await scheduler.cancelCurrentJob(cause: .taskExpired)
+
+            let landed = await pollUntil(timeout: .seconds(10)) {
+                let j = try? await store.fetchJob(byId: jobId)
+                guard let j else { return false }
+                return j.attemptCount == startingAttempts + 1
+                    && (j.nextEligibleAt ?? 0) > beforeCancel
+            }
+            #expect(landed, "attempt \(startingAttempts + 1) did not commit a future nextEligibleAt")
+
+            let after = try await store.fetchJob(byId: jobId)
+            let backoff = (after?.nextEligibleAt ?? 0) - beforeCancel
+            observedBackoffs.append(backoff)
+
+            await scheduler.stop()
+        }
+
+        // Exponential helper: min(2^attempt * 60, 3600). Attempts here
+        // are 1, 2, 3 → 120s, 240s, 480s. Use a 30-second jitter
+        // margin around each expected target to absorb test-host
+        // scheduling jitter while still pinning the doubling.
+        #expect(observedBackoffs.count == 3)
+        let expected: [Double] = [120, 240, 480]
+        for (i, target) in expected.enumerated() {
+            #expect(abs(observedBackoffs[i] - target) < 30,
+                    "attempt \(i + 1) backoff was \(observedBackoffs[i])s, expected ~\(target)s")
+        }
+        // Strictly increasing too — defends against a future regression
+        // that happens to land each value inside the same 30s window.
+        #expect(observedBackoffs[1] > observedBackoffs[0],
+                "backoff must grow attempt-over-attempt; got \(observedBackoffs)")
+        #expect(observedBackoffs[2] > observedBackoffs[1],
+                "backoff must grow attempt-over-attempt; got \(observedBackoffs)")
+    }
+
     @Test("repeated mid-decode cancellation reaches maxAttemptsReached and supersedes the job")
     func cancelLoopSupersedesAfterMaxAttempts() async throws {
         // The 2026-04-27 incident: a job is repeatedly cancelled
