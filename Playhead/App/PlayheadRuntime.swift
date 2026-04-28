@@ -676,6 +676,27 @@ final class PlayheadRuntime {
         preBuiltDecisionLogger = nil
         #endif
 
+        // playhead-b58j.3: DEBUG-only transcript shadow-gate JSONL sink.
+        // Mirrors `preBuiltDecisionLogger` exactly: try-construct in DEBUG
+        // so the very first backfill observes the installed logger; any
+        // FileManager failure logs and falls back to the no-op default.
+        // Release builds never compile this branch — the
+        // `NoOpTranscriptShadowGateLogger()` substitution happens at the
+        // `AnalysisJobRunner(...)` construction site below, so shipping
+        // binaries do zero shadow-gate disk I/O.
+        let preBuiltShadowGateLogger: TranscriptShadowGateLogger?
+        #if DEBUG
+        do {
+            preBuiltShadowGateLogger = try TranscriptShadowGateLogger()
+        } catch {
+            Logger(subsystem: "com.playhead", category: "Runtime")
+                .warning("TranscriptShadowGateLogger init failed — shadow-gate logging disabled: \(error.localizedDescription, privacy: .public)")
+            preBuiltShadowGateLogger = nil
+        }
+        #else
+        preBuiltShadowGateLogger = nil
+        #endif
+
         // playhead-gtt9.17: on-device ad catalog. Opened synchronously at
         // startup so the first `runBackfill` observes an initialized store.
         // A failure to open (e.g. read-only disk) falls back to `nil`,
@@ -799,7 +820,8 @@ final class PlayheadRuntime {
             transcriptEngine: transcriptEngine,
             adDetection: adDetectionService,
             cueMaterializer: cueMaterializer,
-            preemptionCoordinator: lanePreemptionCoordinator
+            preemptionCoordinator: lanePreemptionCoordinator,
+            transcriptShadowGateLogger: preBuiltShadowGateLogger ?? NoOpTranscriptShadowGateLogger()
         )
         // playhead-xiz6: wire a real `CandidateWindowCascade` into the
         // scheduler so the c3pi entry points (`seedCandidateWindows`,
@@ -945,7 +967,7 @@ final class PlayheadRuntime {
         // — it's now constructed before AdDetectionService and passed via
         // init, so there's no race with the first backfill/hot-path run.
 
-        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, lifecycleLogger, bgTaskTelemetry] in
+        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry] in
             // playhead-8u3i: inject pre-analysis services FIRST, before any
             // migrate calls. The BG-task handlers registered in
             // `BackgroundProcessingService.registerBackgroundTasks()` race
@@ -1042,6 +1064,17 @@ final class PlayheadRuntime {
                 } catch {
                     Logger(subsystem: "com.playhead", category: "Runtime")
                         .warning("DecisionLogger deferred migrate failed — first record will retry: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+            // playhead-b58j.3: warm the shadow-gate JSONL writer off-main.
+            // Best-effort — a failure here defers directory resolution to
+            // first-write through the actor's lazy `ensureBootstrapped()`.
+            if let shadowGateLogger = preBuiltShadowGateLogger {
+                do {
+                    try await shadowGateLogger.migrate()
+                } catch {
+                    Logger(subsystem: "com.playhead", category: "Runtime")
+                        .warning("TranscriptShadowGateLogger deferred migrate failed — first record will retry: \(error.localizedDescription, privacy: .public)")
                 }
             }
             if let assetLifecycleLogger = lifecycleLogger as? AssetLifecycleLogger {
