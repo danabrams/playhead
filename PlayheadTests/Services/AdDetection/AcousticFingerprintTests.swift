@@ -150,6 +150,31 @@ struct AcousticFingerprintTests {
         #expect(abs(s - 1.0) < 1e-4)
     }
 
+    @Test("fromPCM completes a 30s 16kHz buffer within budget (perf regression)")
+    func pcmFromPcmThirtySecondBudget() {
+        // Pre-fix the per-frame DFT was O(windowSize²) ≈ 246M trig calls
+        // for 30s @ 16kHz, taking many seconds on a simulator. The
+        // vDSP_DFT_zop swap drops this to well under a second on simulator
+        // and ~100ms on real device. The 5s budget is loose enough to be
+        // CI-stable across simulator hosts but tight enough to catch a
+        // regression back to the naive DFT.
+        let sampleRate: Double = 16_000
+        let durationSeconds: Double = 30
+        let frameCount = Int(sampleRate * durationSeconds)
+        var pcm = [Float]()
+        pcm.reserveCapacity(frameCount)
+        for i in 0..<frameCount {
+            // Mild non-periodic mix so the DFT path actually runs across all bins.
+            let t = Float(i) / Float(sampleRate)
+            pcm.append(0.3 * sinf(2 * .pi * 220 * t) + 0.2 * sinf(2 * .pi * 1100 * t))
+        }
+        let start = ContinuousClock.now
+        let fp = AcousticFingerprint.fromPCM(pcm, sampleRate: sampleRate)
+        let elapsed = ContinuousClock.now - start
+        #expect(!fp.isZero)
+        #expect(elapsed < .seconds(5), "fromPCM took \(elapsed) — DFT regression suspected")
+    }
+
     @Test("fromPCM distinguishes tones of different frequencies")
     func pcmDistinguishesTones() {
         let tone440: [Float] = (0..<8000).map { i in

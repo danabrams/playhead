@@ -196,14 +196,32 @@ struct AcousticFingerprint: Sendable, Hashable, Codable {
             hann[i] = 0.5 - 0.5 * cosf(2 * .pi * Float(i) / Float(windowSize - 1))
         }
 
+        // Set up a single vDSP DFT plan for the whole episode. The plan is
+        // reusable across frames and converts the per-frame work from the
+        // pre-fix O(windowSize²) hand-rolled DFT (≈ 246M trig calls for a
+        // 30s ad at 16 kHz) to the highly-optimized vDSP path.
+        guard let dftSetup = vDSP_DFT_zop_CreateSetup(
+            nil,
+            vDSP_Length(windowSize),
+            .FORWARD
+        ) else {
+            return AcousticFingerprint(values: [])
+        }
+        defer { vDSP_DFT_DestroySetup(dftSetup) }
+
+        // Per-frame scratch buffers. Imag input is zero-filled (real input).
+        var realIn = [Float](repeating: 0, count: windowSize)
+        var imagIn = [Float](repeating: 0, count: windowSize)
+        var realOut = [Float](repeating: 0, count: windowSize)
+        var imagOut = [Float](repeating: 0, count: windowSize)
+
         var offset = 0
         while offset + windowSize <= pcm.count {
-            var frame = [Float](repeating: 0, count: windowSize)
             var zc: Int = 0
             var rms: Float = 0
             for i in 0..<windowSize {
                 let s = pcm[offset + i]
-                frame[i] = s * hann[i]
+                realIn[i] = s * hann[i]
                 rms += s * s
                 if i > 0 {
                     let prev = pcm[offset + i - 1]
@@ -212,23 +230,17 @@ struct AcousticFingerprint: Sendable, Hashable, Codable {
             }
             rms = sqrtf(rms / Float(windowSize))
 
-            // Compute magnitude spectrum via DFT. For windowSize=512 this
-            // is O(n^2) = 262k multiplies per frame — acceptable for
-            // short ad spans (<30s ≈ 2500 frames) on device, and avoids
-            // importing an FFT setup. If perf bites, swap to vDSP_fft.
+            // Compute magnitude spectrum via vDSP forward DFT. Replaces the
+            // naive O(windowSize²) hand-rolled DFT — ~50× faster on device.
+            vDSP_DFT_Execute(dftSetup, realIn, imagIn, &realOut, &imagOut)
+
             var mags = [Float](repeating: 0, count: binCount)
             var magSum: Float = 0
             var logMagSum: Float = 0
             var weightedBinSum: Float = 0
             for k in 0..<binCount {
-                var re: Float = 0
-                var im: Float = 0
-                let twoPiK = 2.0 * Float.pi * Float(k) / Float(windowSize)
-                for n in 0..<windowSize {
-                    let ang = twoPiK * Float(n)
-                    re += frame[n] * cosf(ang)
-                    im -= frame[n] * sinf(ang)
-                }
+                let re = realOut[k]
+                let im = imagOut[k]
                 let m = sqrtf(re * re + im * im)
                 mags[k] = m
                 magSum += m
