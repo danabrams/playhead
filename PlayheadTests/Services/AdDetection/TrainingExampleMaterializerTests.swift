@@ -118,7 +118,8 @@ struct TrainingExampleMaterializerTests {
         windowId: String,
         skipConfidence: Double,
         gate: String,
-        policy: String
+        policy: String,
+        createdAt: Double = 1_700_000_001
     ) -> DecisionEvent {
         DecisionEvent(
             id: id,
@@ -130,7 +131,7 @@ struct TrainingExampleMaterializerTests {
             eligibilityGate: gate,
             policyAction: policy,
             decisionCohortJSON: decisionCohortJSON,
-            createdAt: 1_700_000_001,
+            createdAt: createdAt,
             explanationJSON: nil
         )
     }
@@ -949,6 +950,153 @@ struct TrainingExampleMaterializerTests {
         // picker selected (win-A, wasSkipped=false), not the union.
         #expect(row.userAction == "eligibleNotSkipped",
                 "userAction must follow the picked window, not the union")
+    }
+
+    /// cycle-3 L5: inverse of the cycle-2 M-C test above. The other test
+    /// pinned that the picker correctly carries `wasSkipped=false` from
+    /// the picked (higher-confidence, not-skipped) window. This one pins
+    /// the symmetric case: the higher-confidence decision belongs to the
+    /// SKIPPED window, so the example must report `wasSkipped=true`
+    /// (`userAction="skipped"`). Without both directions, a future bug
+    /// that hard-coded `wasSkipped=false` would still pass the original
+    /// M-C assertion.
+    @Test("cycle-3 L5: scanWasSkipped follows the picked window when the picked window is the skipped one")
+    func skipAttributionFollowsPickedWindowInverseCase() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-A", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .containsAd
+        ))
+        // Two AdWindows, both overlapping the scan in time. Mirror the
+        // M-C topology but flip which window was actually skipped: the
+        // higher-confidence window IS the skipped one this time.
+        let windowA = AdWindow(
+            id: "win-A",
+            analysisAssetId: assetId,
+            startTime: 0, endTime: 5,
+            confidence: 0.9,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: AdDetectionConfig.default.detectorVersion,
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: nil,
+            metadataSource: "none", metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            // Higher-confidence window AND the skipped one. Picker must
+            // select this one → userAction must be "skipped".
+            wasSkipped: true,
+            userDismissedBanner: false
+        )
+        let windowB = AdWindow(
+            id: "win-B",
+            analysisAssetId: assetId,
+            startTime: 5, endTime: 10,
+            confidence: 0.5,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: AdDetectionConfig.default.detectorVersion,
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: nil,
+            metadataSource: "none", metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            // Lower-confidence window, NOT skipped. A buggy union-based
+            // picker could either over-attribute (still skipped via win-A)
+            // or under-attribute (mask the skip with win-B's false). The
+            // post-fix picker reads off the SAME window it selected.
+            wasSkipped: false,
+            userDismissedBanner: false
+        )
+        try await store.insertAdWindow(windowA)
+        try await store.insertAdWindow(windowB)
+        try await store.appendDecisionEvent(decisionEvent(
+            id: "dec-A", windowId: "win-A",
+            skipConfidence: 0.9, gate: "eligible", policy: "autoSkipEligible"
+        ))
+        try await store.appendDecisionEvent(decisionEvent(
+            id: "dec-B", windowId: "win-B",
+            skipConfidence: 0.5, gate: "eligible", policy: "autoSkipEligible"
+        ))
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_100
+        )
+
+        let row = try #require(
+            (try await store.loadTrainingExamples(forAsset: assetId)).first
+        )
+        // Picker chose win-A (skipConfidence 0.9 > 0.5).
+        #expect(row.eligibilityGate == "eligible")
+        // win-A.wasSkipped == true → userAction must be "skipped".
+        #expect(row.userAction == "skipped",
+                "userAction must follow the picked window's wasSkipped (true here)")
+    }
+
+    /// cycle-3 L2: deterministic tiebreak on equal `skipConfidence`. With
+    /// two decisions tied at the same confidence, the picker must
+    /// consistently pick the same one across runs. Pre-fix
+    /// `loadDecisionEvents` ordered by `createdAt` only — equal
+    /// `createdAt` produced whatever rowid order SQLite returned,
+    /// which is undefined. Post-fix the SQL is `ORDER BY createdAt
+    /// ASC, rowid ASC` and the picker walks candidates with strict
+    /// inequality so the first equal-confidence row wins.
+    @Test("cycle-3 L2: equal-skipConfidence decisions resolve deterministically across runs")
+    func equalSkipConfidenceResolvesDeterministically() async throws {
+        // Run the materialization twice over an identical seed and
+        // assert both runs converge on the same picked decision. (We
+        // also assert the FIRST-inserted candidate wins, which is the
+        // contract `(createdAt ASC, rowid ASC)` enforces.)
+        var pickedGates: [String] = []
+        for runIndex in 0..<2 {
+            let store = try await makeTestStore()
+            try await store.insertAsset(makeAsset())
+            try await store.insertSemanticScanResult(scanResult(
+                id: "scan-tie-\(runIndex)", firstOrdinal: 0, lastOrdinal: 10,
+                startTime: 0, endTime: 10, disposition: .containsAd
+            ))
+            // Two AdWindows that both overlap the scan in time, distinct
+            // ids, distinct eligibilityGates so we can identify which
+            // decision the picker took.
+            try await store.insertAdWindow(adWindow(
+                id: "win-first", startTime: 0, endTime: 5
+            ))
+            try await store.insertAdWindow(adWindow(
+                id: "win-second", startTime: 5, endTime: 10
+            ))
+            // Two decisions tied at exactly equal skipConfidence. Use
+            // identical createdAt timestamps to force the rowid
+            // tiebreaker to engage. Insert "win-first" FIRST so its
+            // rowid is lower — the deterministic contract says the
+            // first-inserted equal-confidence row wins.
+            try await store.appendDecisionEvent(decisionEvent(
+                id: "dec-first", windowId: "win-first",
+                skipConfidence: 0.75,
+                gate: "eligible-first", policy: "autoSkipEligible",
+                createdAt: 1_700_000_000
+            ))
+            try await store.appendDecisionEvent(decisionEvent(
+                id: "dec-second", windowId: "win-second",
+                skipConfidence: 0.75,
+                gate: "eligible-second", policy: "autoSkipEligible",
+                createdAt: 1_700_000_000
+            ))
+
+            let materializer = TrainingExampleMaterializer()
+            try await materializer.materialize(
+                forAsset: assetId, store: store, now: 1_700_000_100
+            )
+            let row = try #require(
+                (try await store.loadTrainingExamples(forAsset: assetId)).first
+            )
+            pickedGates.append(row.eligibilityGate ?? "<nil>")
+        }
+        // Both runs must have picked the same decision.
+        #expect(pickedGates[0] == pickedGates[1],
+                "two identical seeds picked different decisions (\(pickedGates[0]) vs \(pickedGates[1])) — picker is non-deterministic on ties")
+        // And the first-inserted row should win (lower rowid).
+        #expect(pickedGates[0] == "eligible-first",
+                "first-inserted equal-confidence candidate must win the tie, got \(pickedGates[0])")
     }
 
     // MARK: - cycle-2 L-B: FM-emitted commercialIntent / ownership wired through

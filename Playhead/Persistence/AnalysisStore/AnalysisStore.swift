@@ -7762,7 +7762,15 @@ actor AnalysisStore {
     }
 
     func loadDecisionEvents(for analysisAssetId: String) throws -> [DecisionEvent] {
-        let sql = "SELECT id, analysisAssetId, eventType, windowId, proposalConfidence, skipConfidence, eligibilityGate, policyAction, decisionCohortJSON, createdAt, explanationJSON FROM decision_events WHERE analysisAssetId = ? ORDER BY createdAt"
+        // cycle-3 L2: include `rowid` as the final tiebreaker so two rows
+        // sharing the same `createdAt` return in a deterministic order
+        // (insertion order, since `rowid` is monotonically assigned for
+        // INTEGER PRIMARY KEY-less tables). Downstream pickers in
+        // `TrainingExampleMaterializer.bestDecision` break ties on
+        // `skipConfidence` by taking the first match — without a stable
+        // load order the choice was whatever the SQLite query planner
+        // returned, which is not a contract we can rely on.
+        let sql = "SELECT id, analysisAssetId, eventType, windowId, proposalConfidence, skipConfidence, eligibilityGate, policyAction, decisionCohortJSON, createdAt, explanationJSON FROM decision_events WHERE analysisAssetId = ? ORDER BY createdAt ASC, rowid ASC"
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, analysisAssetId)

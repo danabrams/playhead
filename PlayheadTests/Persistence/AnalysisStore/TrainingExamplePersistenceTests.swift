@@ -113,6 +113,51 @@ struct TrainingExamplePersistenceTests {
         #expect(loaded[0] == example)
     }
 
+    /// cycle-3 L4: focused round-trip for `decisionCohortJSON == nil`.
+    /// The cycle-1 fix made the column nullable (it was previously
+    /// `NOT NULL`, which prevented the materializer from honestly
+    /// representing "no decision overlapped this scan"). The pre-fix
+    /// shape gave a NOT NULL constraint failure on the INSERT path.
+    /// Pin nullability explicitly so a future schema reverter can't
+    /// quietly tighten it back to NOT NULL without breaking a test.
+    @Test("L4: decisionCohortJSON round-trips as nil when nil")
+    func decisionCohortJSONRoundTripsAsNil() async throws {
+        let store = try await makeTestStore()
+        let asset = makeAsset(id: "asset-decision-null")
+        try await store.insertAsset(asset)
+
+        let example = TrainingExample(
+            id: "te-decision-null",
+            analysisAssetId: asset.id,
+            startAtomOrdinal: 0,
+            endAtomOrdinal: 10,
+            transcriptVersion: "tv-1",
+            startTime: 0,
+            endTime: 5,
+            textSnapshotHash: "h-1",
+            textSnapshot: nil,
+            bucket: .negative,
+            commercialIntent: "organic",
+            ownership: "unknown",
+            evidenceSources: [],
+            fmCertainty: 0,
+            classifierConfidence: 0,
+            userAction: nil,
+            eligibilityGate: nil,
+            scanCohortJSON: "{}",
+            // The whole point of this test: nil must persist + load as nil.
+            decisionCohortJSON: nil,
+            transcriptQuality: "good",
+            createdAt: 1_700_000_000
+        )
+        try await store.createTrainingExample(example)
+
+        let loaded = try await store.loadTrainingExamples(forAsset: asset.id)
+        try #require(loaded.count == 1)
+        #expect(loaded[0].decisionCohortJSON == nil,
+                "decisionCohortJSON must round-trip as nil, not collapse to empty string or default")
+    }
+
     @Test("nullable fields round-trip as nil when absent")
     func nullableFieldsRoundTripAsNil() async throws {
         let store = try await makeTestStore()

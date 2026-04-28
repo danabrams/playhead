@@ -611,4 +611,209 @@ struct MigrationLadderTests {
         let runModes = Set(fetched.map(\.runMode))
         #expect(runModes == [.shadow, .targeted])
     }
+
+    // MARK: - cycle-3 M1: v16 → v17 rebuild from a broken v16 on-disk shape
+
+    /// cycle-3 M1: pin the v16 → v17 rebuild against a real broken-v16
+    /// DB shape, not a no-op rebuild against an already-correct table.
+    /// The pre-cycle-2 v16 migration shipped `training_examples` with
+    /// `ON DELETE CASCADE` (a corpus that disappears with the asset is
+    /// useless training data) and `decisionCohortJSON NOT NULL` (no way
+    /// to encode "no decision overlapped this scan" — the bucketer's
+    /// editorial-region case). v17 drops the table and rebuilds with
+    /// `ON DELETE RESTRICT` and a nullable `decisionCohortJSON`.
+    ///
+    /// Strategy: bootstrap a real v17 DB, then surgically replace the
+    /// `training_examples` table with the broken v16 shape and rewind
+    /// `_meta.schema_version` to 16. Insert a parent `analysis_assets`
+    /// row plus one broken-v16 `training_examples` row so the rebuild
+    /// path is genuinely exercised — a no-op rebuild against an empty
+    /// table would still pass even if the migrator silently failed to
+    /// run. The pre-existing row is destroyed by the rebuild — that's
+    /// fine and documented by the migrator's contract: rebuild is
+    /// destructive by design, pre-fix data is unrecoverable, and any
+    /// real cohort can re-materialize from the still-warm upstream
+    /// ledgers on the next backfill.
+    @Test("cycle-3 M1: broken-v16 training_examples DB rebuilds to v17 shape")
+    func brokenV16TrainingExamplesRebuildsToV17() async throws {
+        let dir = try freshTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // First: a real migrate to build the full v17 DB shape.
+        AnalysisStore.resetMigratedPathsForTesting()
+        let bootstrap = try AnalysisStore(directory: dir)
+        try await bootstrap.migrate()
+        #expect(try await bootstrap.schemaVersion() == 17)
+
+        // Now rip out the v17 training_examples table and rebuild it with
+        // the broken v16 shape: ON DELETE CASCADE on the FK, NOT NULL on
+        // decisionCohortJSON. Rewind _meta.schema_version to '16' so the
+        // v17 migrator runs on the next open.
+        let dbURL = dir.appendingPathComponent("analysis.sqlite")
+        var db: OpaquePointer?
+        #expect(sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+        let regress = """
+            DROP INDEX IF EXISTS idx_training_examples_asset_created;
+            DROP INDEX IF EXISTS idx_training_examples_bucket;
+            DROP TABLE IF EXISTS training_examples;
+            CREATE TABLE training_examples (
+                id                    TEXT PRIMARY KEY,
+                analysisAssetId       TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                startAtomOrdinal      INTEGER NOT NULL,
+                endAtomOrdinal        INTEGER NOT NULL,
+                transcriptVersion     TEXT NOT NULL,
+                startTime             REAL NOT NULL,
+                endTime               REAL NOT NULL,
+                textSnapshotHash      TEXT NOT NULL,
+                textSnapshot          TEXT,
+                bucket                TEXT NOT NULL,
+                commercialIntent      TEXT NOT NULL,
+                ownership             TEXT NOT NULL,
+                evidenceSourcesJSON   TEXT NOT NULL,
+                fmCertainty           REAL NOT NULL,
+                classifierConfidence  REAL NOT NULL,
+                userAction            TEXT,
+                eligibilityGate       TEXT,
+                scanCohortJSON        TEXT NOT NULL,
+                decisionCohortJSON    TEXT NOT NULL,
+                transcriptQuality     TEXT NOT NULL,
+                createdAt             REAL NOT NULL
+            );
+            CREATE INDEX idx_training_examples_asset_created
+                ON training_examples(analysisAssetId, createdAt ASC);
+            CREATE INDEX idx_training_examples_bucket
+                ON training_examples(bucket);
+            UPDATE _meta SET value = '16' WHERE key = 'schema_version';
+            INSERT INTO analysis_assets (
+                id, episodeId, assetFingerprint, weakFingerprint, sourceURL,
+                featureCoverageEndTime, fastTranscriptCoverageEndTime,
+                confirmedAdCoverageEndTime, analysisState, analysisVersion,
+                capabilitySnapshot, createdAt
+            ) VALUES (
+                'asset-broken-v16', 'ep-broken-v16', 'fp-broken-v16', NULL,
+                'file:///tmp/broken.m4a', NULL, NULL, NULL, 'new', 1, NULL, 0
+            );
+            INSERT INTO training_examples (
+                id, analysisAssetId, startAtomOrdinal, endAtomOrdinal,
+                transcriptVersion, startTime, endTime, textSnapshotHash,
+                textSnapshot, bucket, commercialIntent, ownership,
+                evidenceSourcesJSON, fmCertainty, classifierConfidence,
+                userAction, eligibilityGate, scanCohortJSON,
+                decisionCohortJSON, transcriptQuality, createdAt
+            ) VALUES (
+                'te-broken-v16', 'asset-broken-v16', 0, 10,
+                'tv-1', 0, 5, 'h-broken',
+                NULL, 'positive', 'paid', 'thirdParty',
+                '[]', 0.0, 0.0,
+                NULL, NULL, '{}',
+                '{}', 'good', 1700000000.0
+            );
+            """
+        let regressErr: Int32 = sqlite3_exec(db, regress, nil, nil, nil)
+        if regressErr != SQLITE_OK {
+            let msg = sqlite3_errmsg(db).map { String(cString: $0) } ?? "unknown"
+            Issue.record("regress to v16 failed: \(msg)")
+        }
+        sqlite3_close_v2(db)
+
+        // Sanity: the seeded row is there pre-rebuild. (Lost on rebuild —
+        // rebuild is destructive by design, pre-fix data is unrecoverable.
+        // The presence of a row is what makes the rebuild path observable
+        // rather than a vacuous no-op.)
+        var preCountDb: OpaquePointer?
+        #expect(sqlite3_open_v2(dbURL.path, &preCountDb, SQLITE_OPEN_READONLY, nil) == SQLITE_OK)
+        var preCountStmt: OpaquePointer?
+        #expect(sqlite3_prepare_v2(preCountDb, "SELECT COUNT(*) FROM training_examples", -1, &preCountStmt, nil) == SQLITE_OK)
+        #expect(sqlite3_step(preCountStmt) == SQLITE_ROW)
+        let preCount = sqlite3_column_int(preCountStmt, 0)
+        #expect(preCount == 1, "broken-v16 row must be present pre-rebuild to make this a real test")
+        sqlite3_finalize(preCountStmt)
+        sqlite3_close_v2(preCountDb)
+
+        // Re-migrate via a fresh store. The v16 → v17 block must drop +
+        // recreate the table with the corrected shape.
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+
+        // Schema bumped to 17.
+        #expect(try await store.schemaVersion() == 17)
+
+        // FK is now ON DELETE RESTRICT, not CASCADE. PRAGMA foreign_key_list
+        // returns one row per FK; column 6 is `on_delete`.
+        var fkDb: OpaquePointer?
+        #expect(sqlite3_open_v2(dbURL.path, &fkDb, SQLITE_OPEN_READONLY, nil) == SQLITE_OK)
+        defer { sqlite3_close_v2(fkDb) }
+        var fkStmt: OpaquePointer?
+        #expect(sqlite3_prepare_v2(fkDb, "PRAGMA foreign_key_list('training_examples')", -1, &fkStmt, nil) == SQLITE_OK)
+        defer { sqlite3_finalize(fkStmt) }
+        var sawAnalysisAssetsFK = false
+        var onDelete: String?
+        while sqlite3_step(fkStmt) == SQLITE_ROW {
+            // Columns: 0=id, 1=seq, 2=table, 3=from, 4=to, 5=on_update,
+            //          6=on_delete, 7=match.
+            let toTable = sqlite3_column_text(fkStmt, 2).map { String(cString: $0) }
+            if toTable == "analysis_assets" {
+                sawAnalysisAssetsFK = true
+                onDelete = sqlite3_column_text(fkStmt, 6).map { String(cString: $0) }
+            }
+        }
+        #expect(sawAnalysisAssetsFK, "FK to analysis_assets must exist post-rebuild")
+        #expect(onDelete == "RESTRICT", "ON DELETE must be RESTRICT after v17 rebuild, was \(onDelete ?? "nil")")
+
+        // decisionCohortJSON is now nullable: inserting NULL succeeds.
+        // (The asset row was destroyed too — re-insert to satisfy the
+        // surviving FK on the rebuilt table.)
+        try await store.insertAsset(
+            AnalysisAsset(
+                id: "asset-post-rebuild",
+                episodeId: "ep-post-rebuild",
+                assetFingerprint: "fp-post-rebuild",
+                weakFingerprint: nil,
+                sourceURL: "file:///tmp/post.m4a",
+                featureCoverageEndTime: nil,
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil,
+                analysisState: "new",
+                analysisVersion: 1,
+                capabilitySnapshot: nil
+            )
+        )
+        let example = TrainingExample(
+            id: "te-post-rebuild",
+            analysisAssetId: "asset-post-rebuild",
+            startAtomOrdinal: 0,
+            endAtomOrdinal: 10,
+            transcriptVersion: "tv-1",
+            startTime: 0,
+            endTime: 5,
+            textSnapshotHash: "h-post",
+            textSnapshot: nil,
+            bucket: .positive,
+            commercialIntent: "paid",
+            ownership: "thirdParty",
+            evidenceSources: [],
+            fmCertainty: 0,
+            classifierConfidence: 0,
+            userAction: nil,
+            eligibilityGate: nil,
+            scanCohortJSON: "{}",
+            // L4: nullable post-v17. Pre-fix this would have raised a
+            // NOT NULL constraint failure.
+            decisionCohortJSON: nil,
+            transcriptQuality: "good",
+            createdAt: 1
+        )
+        try await store.createTrainingExample(example)
+        let loaded = try await store.loadTrainingExamples(forAsset: "asset-post-rebuild")
+        try #require(loaded.count == 1)
+        #expect(loaded[0].decisionCohortJSON == nil)
+
+        // The pre-rebuild row was destroyed by the v17 drop+recreate.
+        // Confirm the broken-v16 asset still exists (FK target preserved
+        // — the rebuild only nukes training_examples) but its training
+        // rows are gone.
+        let lostRows = try await store.loadTrainingExamples(forAsset: "asset-broken-v16")
+        #expect(lostRows.isEmpty, "pre-fix v16 rows are unrecoverable by design")
+    }
 }

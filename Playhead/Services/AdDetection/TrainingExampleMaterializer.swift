@@ -270,9 +270,9 @@ struct TrainingExampleMaterializer: Sendable {
         let fmOwnership = strongestFM
             .flatMap { Self.parsePayloadStringField($0.event.evidenceJSON, key: "ownership") }
         let commercialIntent = fmCommercialIntent
-            ?? Self.inferCommercialIntent(bucket: bucket, fmPositive: fmPositive)
+            ?? Self.inferCommercialIntent(bucket: bucket)
         let ownership = fmOwnership
-            ?? Self.inferOwnership(bucket: bucket, fmPositive: fmPositive)
+            ?? Self.inferOwnership(bucket: bucket)
 
         let textSnapshotHash = Self.stableHash(
             assetId: scan.analysisAssetId,
@@ -421,10 +421,25 @@ struct TrainingExampleMaterializer: Sendable {
         let candidates = events.filter {
             overlappingWindowIds.contains($0.windowId)
         }
-        guard let best = candidates.max(by: { $0.skipConfidence < $1.skipConfidence }) else {
-            return nil
+        // cycle-3 L2: deterministic tiebreak on equal `skipConfidence`.
+        // Swift's `Sequence.max(by:)` resolves equality by returning the
+        // LAST equal-weight element, which means two decisions with the
+        // same `skipConfidence` (e.g. both at the cap) would pick whichever
+        // SQLite returned last — and SQLite's order is undefined absent a
+        // stable `ORDER BY`. `loadDecisionEvents` now sorts by
+        // `(createdAt ASC, rowid ASC)`, so the first equal-confidence
+        // candidate in the input is the oldest insertion. Walk the
+        // candidates and keep only strictly-greater confidences so the
+        // first match wins. Equal-confidence later rows are ignored by
+        // construction.
+        var best: DecisionEvent?
+        for candidate in candidates {
+            if best == nil || candidate.skipConfidence > best!.skipConfidence {
+                best = candidate
+            }
         }
-        return DecisionPick(event: best, windowId: best.windowId)
+        guard let chosen = best else { return nil }
+        return DecisionPick(event: chosen, windowId: chosen.windowId)
     }
 
     /// Parses the `certainty` field out of a persisted `EvidencePayload`-style
@@ -514,17 +529,18 @@ struct TrainingExampleMaterializer: Sendable {
         return ordered
     }
 
-    /// Coarse `commercialIntent` inference from bucket label only. The
-    /// `fmPositive` parameter is preserved on the signature for symmetry
-    /// with `inferOwnership` — and for any future caller that wants to
-    /// distinguish positive-but-uncertain from negative-but-uncertain —
-    /// but is intentionally unused: without proper domain confidence we
-    /// cannot honestly differentiate `.paid` from `.unknown` on the
-    /// uncertain/disagreement legs, and a ternary that returns the same
-    /// value on both arms is dead code (L1).
+    /// Coarse `commercialIntent` inference from bucket label only.
+    ///
+    /// cycle-3 L1: previously this signature carried an unused `fmPositive`
+    /// parameter "preserved for symmetry with `inferOwnership`". That
+    /// symmetry argument doesn't survive: `inferOwnership` also doesn't
+    /// use `fmPositive` (the switch only branches on bucket). Both
+    /// helpers now derive purely from the bucket label, so the parameter
+    /// is gone from both signatures — and all callers — to make the
+    /// "this is bucket-driven, not signal-driven" contract obvious at
+    /// the call site.
     private static func inferCommercialIntent(
-        bucket: TrainingExampleBucket,
-        fmPositive _: Bool
+        bucket: TrainingExampleBucket
     ) -> String {
         switch bucket {
         case .positive:
@@ -537,8 +553,7 @@ struct TrainingExampleMaterializer: Sendable {
     }
 
     private static func inferOwnership(
-        bucket: TrainingExampleBucket,
-        fmPositive: Bool
+        bucket: TrainingExampleBucket
     ) -> String {
         switch bucket {
         case .positive:

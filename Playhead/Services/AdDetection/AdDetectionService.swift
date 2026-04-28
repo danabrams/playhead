@@ -2799,7 +2799,15 @@ actor AdDetectionService {
             }
             return wrap(.ranNeedsRetry, result.fmRefinementWindows)
         } catch {
-            logger.warning("Shadow FM phase failed (suppressed by invariant): \(error.localizedDescription)")
+            // cycle-3 L3: `AnalysisStoreError` (and most other errors thrown
+            // off the runner path) does NOT conform to `LocalizedError`, so
+            // `error.localizedDescription` returns the bridged-NSError
+            // boilerplate ("The operation couldn't be completed. (X error
+            // N.)") with no detail. Use `String(describing:)` (which calls
+            // `description`) to surface the actual case + payload, mirroring
+            // the inner catch in `materializeTrainingExamples` ~25 lines
+            // below.
+            logger.warning("Shadow FM phase failed (suppressed by invariant): \(String(describing: error))")
             return wrap(.ranFailed)
         }
     }
