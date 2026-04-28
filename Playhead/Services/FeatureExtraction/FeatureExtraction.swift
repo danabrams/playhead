@@ -102,12 +102,23 @@ enum FeatureSignalExtraction {
         }
 
         private let observations: [Observation]
+        // playhead-rfu-aac M5: precomputed at init so probability(...)
+        // can use it as a backwards-scan termination bound and avoid the
+        // O(n) full-sweep `.filter` from the prior implementation. Equal
+        // to the longest observation duration in the corpus, so any
+        // observation with `startTime <= windowStart - maxObservationDuration`
+        // cannot overlap a query window starting at windowStart.
+        private let maxObservationDuration: Double
 
         init(observations: [Observation]) {
-            self.observations = observations.sorted {
+            let sorted = observations.sorted {
                 if $0.startTime != $1.startTime { return $0.startTime < $1.startTime }
                 if $0.endTime != $1.endTime { return $0.endTime < $1.endTime }
                 return $0.probability > $1.probability
+            }
+            self.observations = sorted
+            self.maxObservationDuration = sorted.reduce(0.0) { acc, obs in
+                max(acc, obs.endTime - obs.startTime)
             }
         }
 
@@ -126,14 +137,36 @@ enum FeatureSignalExtraction {
         func probability(forWindowStart windowStartTime: Double, end windowEndTime: Double) -> Double? {
             guard !observations.isEmpty else { return nil }
 
-            let overlapping = observations.filter { observation in
-                observation.endTime > windowStartTime && observation.startTime < windowEndTime
+            // playhead-rfu-aac M5: prior shape `.filter { ... }` swept all
+            // observations every call. With per-shard observation counts in
+            // the thousands and one query per analysis window, that became
+            // visible in CPU profiles. Replace with a binary-search-bounded
+            // backwards scan: observations are sorted by startTime, so the
+            // upper bound at `startTime >= windowEndTime` caps the search
+            // forward, and `maxObservationDuration` caps it backward (no
+            // observation starting earlier than `windowStart - maxDuration`
+            // can possibly overlap because its endTime <= startTime + maxDuration).
+            let upperBound = upperBoundIndex(forStartTime: windowEndTime)
+            let lowerCutoff = windowStartTime - maxObservationDuration
+            var bestOverlapProbability: Double? = nil
+            var idx = upperBound - 1
+            while idx >= 0 {
+                let obs = observations[idx]
+                if obs.startTime <= lowerCutoff { break }
+                if obs.endTime > windowStartTime && obs.startTime < windowEndTime {
+                    if bestOverlapProbability == nil || obs.probability > bestOverlapProbability! {
+                        bestOverlapProbability = obs.probability
+                    }
+                }
+                idx -= 1
+            }
+            if let best = bestOverlapProbability {
+                return best
             }
 
-            if let bestOverlap = overlapping.max(by: { $0.probability < $1.probability }) {
-                return bestOverlap.probability
-            }
-
+            // No overlap: fall back to the nearest-by-center neighbor.
+            // This branch is rare (only when the query falls in a gap)
+            // so the linear scan here is acceptable.
             let windowCenter = (windowStartTime + windowEndTime) / 2.0
             guard let nearest = observations.min(by: {
                 abs($0.centerTime - windowCenter) < abs($1.centerTime - windowCenter)
@@ -141,6 +174,23 @@ enum FeatureSignalExtraction {
                 return nil
             }
             return nearest.probability
+        }
+
+        /// First index `i` such that `observations[i].startTime >= startTime`,
+        /// or `observations.count` when no such index exists. Standard
+        /// half-open upper-bound shape.
+        private func upperBoundIndex(forStartTime startTime: Double) -> Int {
+            var lo = 0
+            var hi = observations.count
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if observations[mid].startTime < startTime {
+                    lo = mid + 1
+                } else {
+                    hi = mid
+                }
+            }
+            return lo
         }
     }
 
