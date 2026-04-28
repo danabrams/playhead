@@ -223,11 +223,21 @@ actor BackgroundProcessingService {
     /// playhead-8u3i: timeout (seconds) that
     /// `awaitPreAnalysisServicesInjected` will wait for a missing
     /// reconciler to be injected before falling through to the original
-    /// fail path. Defaults to 20s — BGProcessingTask has roughly 30s
-    /// before iOS reclaims it, so we leave a margin for the actual
-    /// reconcile work after we wake. Tests override this with a small
-    /// value to keep wall time bounded.
-    private var injectionWaitTimeoutSeconds: TimeInterval = 20
+    /// fail path.
+    ///
+    /// Defaults to 15s (review-followup csp / L2). BGProcessingTask has
+    /// roughly 30s before iOS reclaims it, and the reconcile work that
+    /// runs AFTER injection completes still needs to land inside the
+    /// same budget — recovering expired leases, sweeping stranded
+    /// session jobs, and re-enqueuing missing-file rows can each take
+    /// several hundred milliseconds and run sequentially. The earlier
+    /// 20s default left the post-wake half of the budget at 10s,
+    /// which is uncomfortably tight; 15s leaves a 15s margin for the
+    /// actual work and is still well above the worst observed
+    /// injection latency (sub-second under normal cold launch).
+    /// Tests override this with a small value to keep wall time
+    /// bounded.
+    private var injectionWaitTimeoutSeconds: TimeInterval = 15
 
     /// Test seam: override the injection-wait timeout used by
     /// `awaitPreAnalysisServicesInjected`. Production code never calls
