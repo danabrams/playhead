@@ -3450,8 +3450,15 @@ actor AnalysisStore {
                 WHERE episodeId IN (\(placeholders))
                 ORDER BY createdAt DESC, rowid DESC
                 """
+            // Review-followup (csp / persistence M1): finalize the
+            // prepared statement explicitly at the end of each
+            // iteration rather than via `defer` inside the loop. A
+            // `defer` inside a `while` body does fire at the end of
+            // each iteration in Swift, but the explicit form removes
+            // the doubt for future readers and makes the per-iteration
+            // lifecycle obvious — every prepared statement is paired
+            // with a finalize on the same line of the loop body.
             let stmt = try prepare(sql)
-            defer { sqlite3_finalize(stmt) }
             for (i, id) in slice.enumerated() {
                 bind(stmt, Int32(i + 1), id)
             }
@@ -3463,6 +3470,7 @@ actor AnalysisStore {
                     results[asset.episodeId] = asset
                 }
             }
+            sqlite3_finalize(stmt)
             index = end
         }
 
