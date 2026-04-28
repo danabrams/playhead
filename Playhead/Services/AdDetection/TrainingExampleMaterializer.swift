@@ -422,16 +422,14 @@ struct TrainingExampleMaterializer: Sendable {
             overlappingWindowIds.contains($0.windowId)
         }
         // cycle-3 L2: deterministic tiebreak on equal `skipConfidence`.
-        // Swift's `Sequence.max(by:)` resolves equality by returning the
-        // LAST equal-weight element, which means two decisions with the
-        // same `skipConfidence` (e.g. both at the cap) would pick whichever
-        // SQLite returned last — and SQLite's order is undefined absent a
-        // stable `ORDER BY`. `loadDecisionEvents` now sorts by
-        // `(createdAt ASC, rowid ASC)`, so the first equal-confidence
-        // candidate in the input is the oldest insertion. Walk the
-        // candidates and keep only strictly-greater confidences so the
-        // first match wins. Equal-confidence later rows are ignored by
-        // construction.
+        // The previous nondeterminism was on the SQL side: without a stable
+        // `ORDER BY`, SQLite could return equal-confidence rows in any order.
+        // `loadDecisionEvents` now sorts by `(createdAt ASC, rowid ASC)`, so
+        // the first equal-confidence candidate in the input is the oldest
+        // insertion. Walk the candidates with strict-greater-than so the
+        // first match wins; later equal-confidence rows are ignored by
+        // construction. (Functionally equivalent to `max(by:)`, which also
+        // retains the first equal element, but more legible about intent.)
         var best: DecisionEvent?
         for candidate in candidates {
             if best == nil || candidate.skipConfidence > best!.skipConfidence {
