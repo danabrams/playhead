@@ -6825,6 +6825,22 @@ actor AnalysisStore {
     /// divergent cohort states. Returns the total number of rows deleted
     /// across both tables, as reported by `sqlite3_changes`.
     ///
+    /// **Tables NOT pruned by this sweep** (review-followup csp /
+    /// persistence M3):
+    ///   - `training_examples` — durability contract. The materializer
+    ///     populates this table specifically as a long-lived training
+    ///     ledger that must survive cohort flips (an example written
+    ///     under cohort A is still a useful training datum after the
+    ///     cohort moves to B; the asset-level `analysisAssetId` and
+    ///     `scanCohortJSON` columns let downstream readers filter by
+    ///     cohort if they need to).
+    ///   - `analysis_assets`, `analysis_jobs`, `download_blobs`, etc. —
+    ///     not cohort-scoped.
+    ///
+    /// Anyone adding a new cohort-scoped table MUST decide explicitly
+    /// whether it joins this sweep (transient evidence) or stays out
+    /// (durable training data) and document the reason here.
+    ///
     /// NOTE: this method is exposed but NOT called by `migrate()`
     /// automatically. Wiring the production call in `PlayheadRuntime.init`
     /// is intentionally out of scope here (architectural; runtime changes
