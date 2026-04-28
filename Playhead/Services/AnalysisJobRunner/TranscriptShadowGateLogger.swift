@@ -244,6 +244,15 @@ struct NoOpTranscriptShadowGateLogger: TranscriptShadowGateLogging {
 /// tooling can correlate captures with the exact binary that produced
 /// them. Callers pass `buildCommitSHA: nil`; the actor overwrites in
 /// `appendEntry` before encoding.
+///
+/// Durability: best-effort, **not crash-durable**. We don't fsync after
+/// every record (the eval pipeline tolerates loss of the final
+/// in-flight rows on a crash, and a per-shard fsync would dominate
+/// shadow-mode CPU on cold caches). The handle is closed on
+/// `flushAndClose()` and on rotation, both of which trigger an
+/// implicit flush of any user-space buffering. Callers needing
+/// stronger guarantees should call `flushAndClose()` and reopen
+/// (review playhead-rfu-aac M3).
 actor TranscriptShadowGateLogger: TranscriptShadowGateLogging {
 
     static let defaultRotationThresholdBytes: Int = 10 * 1024 * 1024
@@ -276,9 +285,14 @@ actor TranscriptShadowGateLogger: TranscriptShadowGateLogging {
         // we overwrite in `appendEntry`. Reading at init avoids hot-path
         // repeats and keeps the eval pipeline correlation deterministic.
         self.buildCommitSHA = BuildInfo.commitSHA
+        // playhead-rfu-aac L2: no field on TranscriptShadowGateEntry is a
+        // Date — `timestamp` is a `Double`. The previous `.iso8601`
+        // dateEncodingStrategy was load-bearing only by accident (it set a
+        // policy that no encoder path ever invoked). Drop it to remove the
+        // dead config and avoid confusing future maintainers who might
+        // expect schema fields to round-trip as ISO-8601 strings.
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
         self.encoder = encoder
         self.resolvedDirectory = nil
         self.nextRotationIndex = nil
@@ -293,9 +307,14 @@ actor TranscriptShadowGateLogger: TranscriptShadowGateLogging {
         self.directoryOverride = directory
         self.rotationThresholdBytes = rotationThresholdBytes
         self.buildCommitSHA = BuildInfo.commitSHA
+        // playhead-rfu-aac L2: no field on TranscriptShadowGateEntry is a
+        // Date — `timestamp` is a `Double`. The previous `.iso8601`
+        // dateEncodingStrategy was load-bearing only by accident (it set a
+        // policy that no encoder path ever invoked). Drop it to remove the
+        // dead config and avoid confusing future maintainers who might
+        // expect schema fields to round-trip as ISO-8601 strings.
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
         self.encoder = encoder
         self.resolvedDirectory = nil
         self.nextRotationIndex = nil
@@ -421,6 +440,13 @@ actor TranscriptShadowGateLogger: TranscriptShadowGateLogging {
     }
 
     private func rotateIfNeeded() throws {
+        // playhead-rfu-aac M2: `attributesOfItem(atPath:)` reads kernel
+        // attributes which can lag the FileHandle's user-space write
+        // buffer. Without a flush, a record large enough to push the
+        // file past `rotationThresholdBytes` could fall under the
+        // pre-flush size attribute and we'd skip rotation for the next
+        // record (or worse, several). Synchronize before measuring.
+        try? fileHandle?.synchronize()
         let url = activeLogURL
         let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
         let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
