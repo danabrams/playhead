@@ -815,9 +815,18 @@ struct AppleSpeechAnalyzerRunner {
             } else {
                 try await analyzer.finalizeAndFinishThroughEndOfInput()
             }
-            needsCleanup = false
             withExtendedLifetime(buffer) {}
-            return try await collector!.value
+            // playhead-rfu-aac M4: only mark "no cleanup needed" once the
+            // collector's `.value` has resolved without throwing. Setting
+            // it pre-await meant a thrown collector error fell into the
+            // catch with `needsCleanup == false`, skipping
+            // `cancelAndFinishNow()` and leaving the analyzer hung on
+            // its result stream. The order matters because the result
+            // stream is what the collector is awaiting — if results never
+            // resolve we still need the explicit cancel-and-finish.
+            let segments = try await collector!.value
+            needsCleanup = false
+            return segments
         } catch {
             if needsCleanup {
                 await analyzer.cancelAndFinishNow()
@@ -850,9 +859,13 @@ struct AppleSpeechAnalyzerRunner {
             } else {
                 try await analyzer.finalizeAndFinishThroughEndOfInput()
             }
-            needsCleanup = false
             withExtendedLifetime(buffer) {}
-            return try await collector!.value
+            // playhead-rfu-aac M4: see the matching note in `transcribe`.
+            // Hold `needsCleanup = true` until the collector resolves so
+            // a result-stream failure still triggers cancelAndFinishNow.
+            let vadResults = try await collector!.value
+            needsCleanup = false
+            return vadResults
         } catch {
             if needsCleanup {
                 await analyzer.cancelAndFinishNow()
