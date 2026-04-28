@@ -2971,6 +2971,36 @@ actor AnalysisWorkScheduler {
     /// where a process kill between separate transactions could leave
     /// the `analysis_jobs` row at `state='running'` with progress
     /// recorded but no terminal mark.
+    ///
+    /// Arms that route through this helper (review-followup csp / M3):
+    ///   1. `assetResolution.{supersede,requeue}` — pre-runner asset
+    ///      lookup failed; row is requeued or terminated.
+    ///   2. `cancelCatch.{supersede,revertQueued}` — `CancellationError`
+    ///      caught with `lostOwnership == false` (mid-decode cancel).
+    ///   3. `tierAdvance` / `allTiersDone` — `.reachedTarget` outcome
+    ///      with coverage met.
+    ///   4. `coverageInsufficient.{noProgress,maxAttempts,requeue}` —
+    ///      `.reachedTarget` outcome that did not actually clear the
+    ///      desired tier.
+    ///   5. `blockedByModel` — `.blockedByModel` outcome.
+    ///   6. `pausedThermalOrMemory` — `.pausedForThermal` /
+    ///      `.memoryPressure` outcome.
+    ///   7. `failed.{supersede,requeue}` /
+    ///      `backgroundExpired.requeue` / `cancelledByPlayback.requeue`
+    ///      / `preempted.requeue` — explicit non-fatal outcomes.
+    ///   8. `outerCatch.{supersede,requeue}` — outer-try catch arm
+    ///      that catches anything the runner rethrew.
+    ///
+    /// **Lease leakage invariant.**
+    /// `ProcessJobOutcomeArmCommit.releaseLease` defaults to `true`,
+    /// so every arm's transaction terminates with `releaseLease(jobId:)`
+    /// unless the call site explicitly sets it to `false`. Each arm
+    /// MUST honor that default unless it has a specific, documented
+    /// reason to keep the lease (today, no arm above sets
+    /// `releaseLease: false`). A leaked lease is silently corrosive:
+    /// the row stays invisible to the dispatcher until the lease
+    /// expires (300s), and the lane counter never decrements, so a
+    /// repeating leak burns out lane capacity over the session.
     private func commitOutcomeArm(
         _ what: String,
         _ commit: AnalysisStore.ProcessJobOutcomeArmCommit
