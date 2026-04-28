@@ -311,76 +311,78 @@ struct TrainingExampleMaterializerTests {
     func eachScenarioMapsToExpectedBucket() async throws {
         // Stronger contract than `allFourBucketsReachable`: that test only
         // asserts every bucket is *reachable* from the fixture (a smoke
-        // signal). This one pins scan-A → .positive, scan-B → .negative,
-        // scan-C → .uncertain, scan-D → .disagreement, so a bucketer
-        // regression that swaps two scenarios would fail loudly. (playhead-4my.10.2)
+        // signal). This one pins each scan id directly to its expected
+        // bucket, so a bucketer regression that swaps two scenarios would
+        // fail with a self-explanatory message — the scan ids name the
+        // bucket they're meant to land in, so the assertion message reads
+        // "te-scan-positive bucket should be .positive". (playhead-4my.10.2)
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
 
-        // Window A: confirmed paid ad — FM containsAd, lexical hit, decision
-        // skip-eligible -> .positive
+        // scan-positive: confirmed paid ad — FM containsAd, lexical hit,
+        // decision skip-eligible -> .positive
         try await store.insertSemanticScanResult(scanResult(
-            id: "scan-A", firstOrdinal: 0, lastOrdinal: 10,
+            id: "scan-positive", firstOrdinal: 0, lastOrdinal: 10,
             startTime: 0, endTime: 10, disposition: .containsAd
         ))
         try await store.insertAdWindow(
-            adWindow(id: "win-A", startTime: 0, endTime: 10)
+            adWindow(id: "win-positive", startTime: 0, endTime: 10)
         )
         _ = try await store.insertEvidenceEvent(
-            evidenceEvent(id: "ev-A-fm", sourceType: .fm,
+            evidenceEvent(id: "ev-positive-fm", sourceType: .fm,
                           firstOrdinal: 0, lastOrdinal: 10, certainty: 0.95),
             transcriptVersion: transcriptVersion
         )
         _ = try await store.insertEvidenceEvent(
-            evidenceEvent(id: "ev-A-lex", sourceType: .lexical,
+            evidenceEvent(id: "ev-positive-lex", sourceType: .lexical,
                           firstOrdinal: 0, lastOrdinal: 10, certainty: 0.8),
             transcriptVersion: transcriptVersion
         )
         try await store.appendDecisionEvent(decisionEvent(
-            id: "dec-A", windowId: "win-A",
+            id: "dec-positive", windowId: "win-positive",
             skipConfidence: 0.9, gate: "eligible", policy: "autoSkipEligible"
         ))
 
-        // Window B: editorial mention — FM noAds, decision not skip-eligible
-        // -> .negative
+        // scan-negative: editorial mention — FM noAds, decision not
+        // skip-eligible -> .negative
         try await store.insertSemanticScanResult(scanResult(
-            id: "scan-B", firstOrdinal: 11, lastOrdinal: 20,
+            id: "scan-negative", firstOrdinal: 11, lastOrdinal: 20,
             startTime: 10, endTime: 20, disposition: .noAds
         ))
         try await store.insertAdWindow(
-            adWindow(id: "win-B", startTime: 10, endTime: 20)
+            adWindow(id: "win-negative", startTime: 10, endTime: 20)
         )
         try await store.appendDecisionEvent(decisionEvent(
-            id: "dec-B", windowId: "win-B",
+            id: "dec-negative", windowId: "win-negative",
             skipConfidence: 0.05, gate: "ineligible", policy: "noAction"
         ))
 
-        // Window C: unusable transcript -> .uncertain
+        // scan-uncertain: unusable transcript -> .uncertain
         try await store.insertSemanticScanResult(scanResult(
-            id: "scan-C", firstOrdinal: 21, lastOrdinal: 30,
+            id: "scan-uncertain", firstOrdinal: 21, lastOrdinal: 30,
             startTime: 20, endTime: 30, disposition: .abstain,
             quality: .unusable
         ))
 
-        // Window D: FM-positive but user reverted -> .disagreement
+        // scan-disagreement: FM-positive but user reverted -> .disagreement
         try await store.insertSemanticScanResult(scanResult(
-            id: "scan-D", firstOrdinal: 31, lastOrdinal: 40,
+            id: "scan-disagreement", firstOrdinal: 31, lastOrdinal: 40,
             startTime: 30, endTime: 40, disposition: .containsAd
         ))
         try await store.insertAdWindow(
-            adWindow(id: "win-D", startTime: 30, endTime: 40)
+            adWindow(id: "win-disagreement", startTime: 30, endTime: 40)
         )
         _ = try await store.insertEvidenceEvent(
-            evidenceEvent(id: "ev-D-fm", sourceType: .fm,
+            evidenceEvent(id: "ev-disagreement-fm", sourceType: .fm,
                           firstOrdinal: 31, lastOrdinal: 40, certainty: 0.93),
             transcriptVersion: transcriptVersion
         )
         try await store.appendDecisionEvent(decisionEvent(
-            id: "dec-D", windowId: "win-D",
+            id: "dec-disagreement", windowId: "win-disagreement",
             skipConfidence: 0.85, gate: "eligible", policy: "autoSkipEligible"
         ))
         try await store.appendCorrectionEvent(correctionEvent(
-            id: "corr-D",
+            id: "corr-disagreement",
             scope: CorrectionScope.exactTimeSpan(
                 assetId: assetId, startTime: 30.0, endTime: 40.0
             ).serialized,
@@ -394,12 +396,12 @@ struct TrainingExampleMaterializerTests {
 
         let loaded = try await store.loadTrainingExamples(forAsset: assetId)
         let byId = Dictionary(uniqueKeysWithValues: loaded.map { ($0.id, $0) })
-        // Per-scenario assertions: each scan id maps to exactly its
-        // expected bucket. A regression that flipped any pair would fail.
-        #expect(try #require(byId["te-scan-A"]).bucket == .positive)
-        #expect(try #require(byId["te-scan-B"]).bucket == .negative)
-        #expect(try #require(byId["te-scan-C"]).bucket == .uncertain)
-        #expect(try #require(byId["te-scan-D"]).bucket == .disagreement)
+        // Per-scenario assertions: each scan id names its expected bucket,
+        // so a swap regression fails with a self-explanatory message.
+        #expect(try #require(byId["te-scan-positive"]).bucket == .positive)
+        #expect(try #require(byId["te-scan-negative"]).bucket == .negative)
+        #expect(try #require(byId["te-scan-uncertain"]).bucket == .uncertain)
+        #expect(try #require(byId["te-scan-disagreement"]).bucket == .disagreement)
     }
 
     @Test("materialization is idempotent: re-running replaces, doesn't append")
@@ -453,25 +455,13 @@ struct TrainingExampleMaterializerTests {
 
     // MARK: - playhead-4my.10.2 gaps
 
-    /// A second canonical cohort that differs from `production()` by
+    /// A second canonical cohort that differs from production by
     /// promptLabel only — exercises mixed-cohort assets without
-    /// changing any persistence-validation semantics. Encoded with
-    /// sorted keys to match `productionJSON()`'s convention.
+    /// changing any persistence-validation semantics. Built via the
+    /// shared `makeCohortJSON(promptLabel:)` helper in TestHelpers
+    /// (L3 dedup) so we encode the cohort in exactly one place.
     private func altCohortJSON() -> String {
-        let alt = ScanCohort(
-            promptLabel: "phase3-shadow-v2-alt",
-            promptHash: "phase3-prompt-2026-04-06",
-            schemaHash: "phase3-schema-2026-04-06",
-            scanPlanHash: "phase3-plan-2026-04-06",
-            normalizationHash: "phase3-norm-2026-04-06",
-            osBuild: "26.0.0",
-            locale: "en_US",
-            appBuild: "1"
-        )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let data = (try? encoder.encode(alt)) ?? Data()
-        return String(data: data, encoding: .utf8) ?? "{}"
+        makeCohortJSON(promptLabel: "phase3-shadow-v2-alt")
     }
 
     private func scanResult(
@@ -535,16 +525,76 @@ struct TrainingExampleMaterializerTests {
             forAsset: assetId, store: store, now: 1_700_000_100
         )
 
-        let prod = try await store.loadTrainingExamples(
-            forAsset: assetId, scanCohortJSON: scanCohortJSON
-        )
-        let alt = try await store.loadTrainingExamples(
-            forAsset: assetId, scanCohortJSON: cohortAlt
-        )
+        // Cohort-bound subsets are derived consumer-side via Swift filter.
+        // The cohort overload that briefly existed on AnalysisStore was
+        // removed in cycle 2 of playhead-4my.10.2 (tests-only scope).
+        let loaded = try await store.loadTrainingExamples(forAsset: assetId)
+        let prod = loaded.filter { $0.scanCohortJSON == scanCohortJSON }
+        let alt = loaded.filter { $0.scanCohortJSON == cohortAlt }
         #expect(prod.map { $0.id } == ["te-scan-prod"])
         #expect(alt.map { $0.id } == ["te-scan-alt"])
         #expect(prod.first?.scanCohortJSON == scanCohortJSON)
         #expect(alt.first?.scanCohortJSON == cohortAlt)
+    }
+
+    @Test("materialization stays cohort-filterable after a cohort flip prune")
+    func materializationProvenanceSurvivesCohortFlip() async throws {
+        // End-to-end provenance: after a cohort flip, the unfiltered load
+        // returns BOTH the surviving prior-cohort row and the new-cohort
+        // row, AND consumer-side cohort filtering continues to partition
+        // them cleanly. This composes durability (H2) with consumer-side
+        // provenance filtering (the layer that replaced the deleted
+        // SQL overload). Pre-fix paths that wiped prior-cohort rows on
+        // re-materialization would fail the durability half; paths that
+        // canonicalize cohort strings would fail the filter half.
+        // (playhead-4my.10.2)
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        let cohortA = scanCohortJSON  // ScanCohort.productionJSON()
+        let cohortB = altCohortJSON()
+
+        // Cohort A: two scans on the spine.
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-A1", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .containsAd
+        ))
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-A2", firstOrdinal: 11, lastOrdinal: 20,
+            startTime: 10, endTime: 20, disposition: .noAds
+        ))
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_100
+        )
+
+        // Cohort flip: prune cohort-A scans, insert a cohort-B scan,
+        // re-materialize. H2 guarantees the cohort-A training rows
+        // survive even though their upstream scan rows are gone.
+        let prunedCount = try await store.pruneOrphanedScansForCurrentCohort(
+            currentScanCohortJSON: cohortB
+        )
+        #expect(prunedCount >= 2)
+
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-B1", firstOrdinal: 100, lastOrdinal: 110,
+            startTime: 50, endTime: 55, disposition: .containsAd,
+            scanCohortJSON: cohortB
+        ))
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_200
+        )
+
+        let loaded = try await store.loadTrainingExamples(forAsset: assetId)
+        let underA = loaded.filter { $0.scanCohortJSON == cohortA }
+        let underB = loaded.filter { $0.scanCohortJSON == cohortB }
+        #expect(Set(underA.map(\.id)) == ["te-scan-A1", "te-scan-A2"],
+                "prior-cohort training rows survive the cohort flip")
+        #expect(underB.map(\.id) == ["te-scan-B1"],
+                "new-cohort row appears in the new partition")
+        // Sanity: the union accounts for every row in the load.
+        #expect(underA.count + underB.count == loaded.count)
     }
 
     @Test("re-materializing with extra evidence on the same span produces no duplicate rows")
