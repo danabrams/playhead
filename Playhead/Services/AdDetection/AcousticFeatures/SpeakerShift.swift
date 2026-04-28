@@ -83,8 +83,19 @@ enum SpeakerShift {
         return clampUnit((proxy - config.proxyFloor) / span)
     }
 
-    /// 1.0 when the current window's cluster id differs from the majority
-    /// id in the preceding `historyRadius` windows, else 0.
+    /// `clusterShiftCertainty` (default 0.7) when the current window's
+    /// cluster id differs from the majority id in the preceding
+    /// `historyRadius` windows, else 0.
+    ///
+    /// The 0.7 (rather than 1.0) reflects that a cluster-id flip is a
+    /// strong-but-not-certain signal: our cluster assignment is itself a
+    /// proxy (gtt9.3 will swap in real diarization). Returning 1.0 here
+    /// conflated the binary cluster-flip signal with the proxy-component's
+    /// continuous 0..1 probability when the two were combined via `max`.
+    /// Documenting the heuristic explicitly so calibration (gtt9.3) can
+    /// promote it to a learned scalar later.
+    static let clusterShiftCertainty: Double = 0.7
+
     static func clusterShiftComponent(index: Int, windows: [FeatureWindow], config: Config) -> Double {
         guard index > 0 else { return 0 }
         guard let currentCluster = windows[index].speakerClusterId else { return 0 }
@@ -97,6 +108,6 @@ enum SpeakerShift {
             }
         }
         guard let (dominant, _) = counts.max(by: { $0.value < $1.value }) else { return 0 }
-        return dominant == currentCluster ? 0 : 1
+        return dominant == currentCluster ? 0 : clusterShiftCertainty
     }
 }

@@ -65,7 +65,10 @@ struct SpeakerShiftTests {
         }
         var funnel = AcousticFeatureFunnel()
         let scores = SpeakerShift.scores(for: windows, funnel: &funnel)
-        #expect(scores[10].score == 1.0)
+        // Cluster flip emits the documented `clusterShiftCertainty`
+        // (0.7 — strong-but-not-certain), not 1.0; mixing it with the
+        // continuous proxy component on the same `[0, 1]` scale.
+        #expect(scores[10].score == SpeakerShift.clusterShiftCertainty)
         #expect(funnel.count(.passedGate, .speakerShift) >= 1)
     }
 }
