@@ -2570,13 +2570,33 @@ actor AnalysisStore {
     /// early-returns once `schemaVersion >= 16`.
     ///
     /// The v17 migrator drops and recreates the table with the corrected
-    /// shape. This is safe because, by the bead's contract, the cohort-scoped
-    /// upstream ledgers are wiped on cohort flips and `training_examples` is
-    /// only populated by the materializer post-rebuild — there is no real
-    /// production data on a v16 row that survives a cohort transition. Any
-    /// rows that do exist locally on a developer DB will be re-materialized
-    /// on the next backfill from the still-warm cohort, so the drop is
-    /// recoverable.
+    /// shape.
+    ///
+    /// **Data loss is intentional and total** (review-followup csp /
+    /// persistence M2). The `DROP TABLE` deletes every row that
+    /// existed at v16. There is no copy-and-restore step, no
+    /// archival, and no per-row recovery path — ANY rows that
+    /// happened to be present at v16 are unrecoverable after this
+    /// migration runs. We accept that trade-off because:
+    ///
+    ///   1. By the bead's cohort contract, the upstream evidence
+    ///      ledgers (`scans`, `evidence`, …) are wiped on cohort
+    ///      flips, so a row written under one cohort cannot be
+    ///      meaningfully reused under the next one regardless.
+    ///   2. The materializer that populates `training_examples`
+    ///      always re-runs on the next backfill, so the rows
+    ///      destroyed here are reconstructible from primary
+    ///      sources still on disk.
+    ///   3. Authoring a copy-and-rewrite path against the broken
+    ///      v16 schema (NOT NULL `decisionCohortJSON`, CASCADE FK)
+    ///      would have to fabricate cohort JSON for rows that
+    ///      pre-date the cohort field, expanding the surface for
+    ///      bad data to leak forward.
+    ///
+    /// Anyone tempted to make this migrator "safer" by preserving
+    /// rows MUST first reconcile points 1–3 above with the new
+    /// preservation strategy. The naive `INSERT INTO new SELECT *
+    /// FROM old` will not work — the column constraints differ.
     ///
     /// Rollback: same as any DDL drop — there is no automatic downgrade. A
     /// user pinned to an earlier app build would see a v16 DB with the new
