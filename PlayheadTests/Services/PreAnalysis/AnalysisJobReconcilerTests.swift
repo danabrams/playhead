@@ -542,6 +542,52 @@ struct AnalysisJobReconcilerTests {
         #expect(recovered?.state == "queued")
     }
 
+    @Test("recoverStrandedSessionJobs_preservesNextEligibleAtAndLastErrorCode")
+    func testRecoverStrandedJobPreservesBackoffAndError() async throws {
+        // Review-followup (csp / H2): the recovery sweep used to clear
+        // `nextEligibleAt` and `lastErrorCode`. That defeated
+        // exponential backoff on cold launch — a row that crashed the
+        // prior process became immediately dispatchable, contradicting
+        // the H1 cancel-mid-decode pacing fix. Pin the new contract:
+        // both columns survive the recovery untouched.
+        let store = try await makeTestStore()
+        let currentEpoch = try await store.fetchSchedulerEpoch() ?? 0
+        let priorEpoch = max(0, currentEpoch - 1)
+
+        let now = Date().timeIntervalSince1970
+        let futureEligible = now + 600 // 10 minutes of earned backoff
+        let job = makeAnalysisJob(
+            jobId: "stranded-with-backoff",
+            episodeId: "ep-stranded-with-backoff",
+            state: "running",
+            attemptCount: 3,
+            nextEligibleAt: futureEligible,
+            lastErrorCode: "decodingFailed:OperationInterrupted",
+            schedulerEpoch: priorEpoch
+        )
+        try await store.insertJob(job)
+
+        let reconciler = makeReconciler(store: store)
+        let report = try await reconciler.reconcile()
+
+        #expect(report.recoveredStrandedSessionJobs == 1)
+
+        let recovered = try await store.fetchJob(byId: "stranded-with-backoff")
+        #expect(recovered?.state == "queued",
+                "Stranded row must still flip to queued for dispatcher visibility")
+        #expect(recovered?.leaseOwner == nil,
+                "Residual lease must still be cleared")
+        #expect(recovered?.leaseExpiresAt == nil)
+        // Core invariant the followup adds: backoff + last-error-code
+        // survive the cold-launch recovery.
+        #expect(recovered?.nextEligibleAt == futureEligible,
+                "nextEligibleAt must survive — it represents earned exponential backoff")
+        #expect(recovered?.lastErrorCode == "decodingFailed:OperationInterrupted",
+                "lastErrorCode must survive — it's the most informative diagnostic on a stranded row")
+        #expect(recovered?.attemptCount == 3,
+                "attemptCount preservation is a sibling invariant; sanity-check it didn't regress")
+    }
+
     @Test("recoverStrandedSessionJobs_doesNotTouchRunningJobFromCurrentSession")
     func testDoesNotTouchRunningJobFromCurrentSession() async throws {
         let store = try await makeTestStore()
