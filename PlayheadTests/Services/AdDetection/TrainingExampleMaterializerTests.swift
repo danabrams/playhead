@@ -307,6 +307,103 @@ struct TrainingExampleMaterializerTests {
         #expect(buckets.contains(.disagreement))
     }
 
+    @Test("each bucket-fixture scenario maps to its expected bucket")
+    func eachScenarioMapsToExpectedBucket() async throws {
+        // Stronger contract than `allFourBucketsReachable`: that test only
+        // asserts every bucket is *reachable* from the fixture (a smoke
+        // signal). This one pins each scan id directly to its expected
+        // bucket, so a bucketer regression that swaps two scenarios would
+        // fail with a self-explanatory message — the scan ids name the
+        // bucket they're meant to land in, so the assertion message reads
+        // "te-scan-positive bucket should be .positive". (playhead-4my.10.2)
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        // scan-positive: confirmed paid ad — FM containsAd, lexical hit,
+        // decision skip-eligible -> .positive
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-positive", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .containsAd
+        ))
+        try await store.insertAdWindow(
+            adWindow(id: "win-positive", startTime: 0, endTime: 10)
+        )
+        _ = try await store.insertEvidenceEvent(
+            evidenceEvent(id: "ev-positive-fm", sourceType: .fm,
+                          firstOrdinal: 0, lastOrdinal: 10, certainty: 0.95),
+            transcriptVersion: transcriptVersion
+        )
+        _ = try await store.insertEvidenceEvent(
+            evidenceEvent(id: "ev-positive-lex", sourceType: .lexical,
+                          firstOrdinal: 0, lastOrdinal: 10, certainty: 0.8),
+            transcriptVersion: transcriptVersion
+        )
+        try await store.appendDecisionEvent(decisionEvent(
+            id: "dec-positive", windowId: "win-positive",
+            skipConfidence: 0.9, gate: "eligible", policy: "autoSkipEligible"
+        ))
+
+        // scan-negative: editorial mention — FM noAds, decision not
+        // skip-eligible -> .negative
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-negative", firstOrdinal: 11, lastOrdinal: 20,
+            startTime: 10, endTime: 20, disposition: .noAds
+        ))
+        try await store.insertAdWindow(
+            adWindow(id: "win-negative", startTime: 10, endTime: 20)
+        )
+        try await store.appendDecisionEvent(decisionEvent(
+            id: "dec-negative", windowId: "win-negative",
+            skipConfidence: 0.05, gate: "ineligible", policy: "noAction"
+        ))
+
+        // scan-uncertain: unusable transcript -> .uncertain
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-uncertain", firstOrdinal: 21, lastOrdinal: 30,
+            startTime: 20, endTime: 30, disposition: .abstain,
+            quality: .unusable
+        ))
+
+        // scan-disagreement: FM-positive but user reverted -> .disagreement
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-disagreement", firstOrdinal: 31, lastOrdinal: 40,
+            startTime: 30, endTime: 40, disposition: .containsAd
+        ))
+        try await store.insertAdWindow(
+            adWindow(id: "win-disagreement", startTime: 30, endTime: 40)
+        )
+        _ = try await store.insertEvidenceEvent(
+            evidenceEvent(id: "ev-disagreement-fm", sourceType: .fm,
+                          firstOrdinal: 31, lastOrdinal: 40, certainty: 0.93),
+            transcriptVersion: transcriptVersion
+        )
+        try await store.appendDecisionEvent(decisionEvent(
+            id: "dec-disagreement", windowId: "win-disagreement",
+            skipConfidence: 0.85, gate: "eligible", policy: "autoSkipEligible"
+        ))
+        try await store.appendCorrectionEvent(correctionEvent(
+            id: "corr-disagreement",
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: assetId, startTime: 30.0, endTime: 40.0
+            ).serialized,
+            source: .listenRevert
+        ))
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_100
+        )
+
+        let loaded = try await store.loadTrainingExamples(forAsset: assetId)
+        let byId = Dictionary(uniqueKeysWithValues: loaded.map { ($0.id, $0) })
+        // Per-scenario assertions: each scan id names its expected bucket,
+        // so a swap regression fails with a self-explanatory message.
+        #expect(try #require(byId["te-scan-positive"]).bucket == .positive)
+        #expect(try #require(byId["te-scan-negative"]).bucket == .negative)
+        #expect(try #require(byId["te-scan-uncertain"]).bucket == .uncertain)
+        #expect(try #require(byId["te-scan-disagreement"]).bucket == .disagreement)
+    }
+
     @Test("materialization is idempotent: re-running replaces, doesn't append")
     func materializationIsIdempotent() async throws {
         let store = try await makeTestStore()
@@ -354,6 +451,249 @@ struct TrainingExampleMaterializerTests {
         #expect(row.scanCohortJSON == scanCohortJSON)
         #expect(row.decisionCohortJSON == decisionCohortJSON)
         #expect(row.transcriptVersion == transcriptVersion)
+    }
+
+    // MARK: - playhead-4my.10.2 gaps
+
+    /// A second canonical cohort that differs from production by
+    /// promptLabel only — exercises mixed-cohort assets without
+    /// changing any persistence-validation semantics. Built via the
+    /// shared `makeCohortJSON(promptLabel:)` helper in TestHelpers
+    /// (L3 dedup) so we encode the cohort in exactly one place.
+    private func altCohortJSON() -> String {
+        makeCohortJSON(promptLabel: "phase3-shadow-v2-alt")
+    }
+
+    private func scanResult(
+        id: String,
+        firstOrdinal: Int,
+        lastOrdinal: Int,
+        startTime: Double,
+        endTime: Double,
+        disposition: CoarseDisposition,
+        scanCohortJSON cohort: String,
+        quality: TranscriptQuality = .good
+    ) -> SemanticScanResult {
+        SemanticScanResult(
+            id: id,
+            analysisAssetId: assetId,
+            windowFirstAtomOrdinal: firstOrdinal,
+            windowLastAtomOrdinal: lastOrdinal,
+            windowStartTime: startTime,
+            windowEndTime: endTime,
+            scanPass: "coarse",
+            transcriptQuality: quality,
+            disposition: disposition,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: 100,
+            outputTokenCount: 20,
+            latencyMs: 50,
+            prewarmHit: false,
+            scanCohortJSON: cohort,
+            transcriptVersion: transcriptVersion,
+            reuseScope: nil,
+            runMode: .targeted,
+            jobPhase: BackfillJobPhase.fullEpisodeScan.rawValue
+        )
+    }
+
+    @Test("materializer stamps each example with its scan-row's cohort")
+    func materializerPreservesPerScanCohort() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        let cohortAlt = altCohortJSON()
+        // Two scans on disjoint spans, under two different cohorts. The
+        // materializer must carry each scan's cohort through into the
+        // emitted training example — the cohort is the spine row's, not
+        // a constant captured at materialization time.
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-prod", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .containsAd
+        ))
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-alt", firstOrdinal: 11, lastOrdinal: 20,
+            startTime: 10, endTime: 20, disposition: .noAds,
+            scanCohortJSON: cohortAlt
+        ))
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_100
+        )
+
+        // Cohort-bound subsets are derived consumer-side via Swift filter.
+        // The cohort overload that briefly existed on AnalysisStore was
+        // removed in cycle 2 of playhead-4my.10.2 (tests-only scope).
+        let loaded = try await store.loadTrainingExamples(forAsset: assetId)
+        let prod = loaded.filter { $0.scanCohortJSON == scanCohortJSON }
+        let alt = loaded.filter { $0.scanCohortJSON == cohortAlt }
+        #expect(prod.map { $0.id } == ["te-scan-prod"])
+        #expect(alt.map { $0.id } == ["te-scan-alt"])
+        #expect(prod.first?.scanCohortJSON == scanCohortJSON)
+        #expect(alt.first?.scanCohortJSON == cohortAlt)
+    }
+
+    @Test("materialization stays cohort-filterable after a cohort flip prune")
+    func materializationProvenanceSurvivesCohortFlip() async throws {
+        // End-to-end provenance: after a cohort flip, the unfiltered load
+        // returns BOTH the surviving prior-cohort row and the new-cohort
+        // row, AND consumer-side cohort filtering continues to partition
+        // them cleanly. This composes durability (H2) with consumer-side
+        // provenance filtering (the layer that replaced the deleted
+        // SQL overload). Pre-fix paths that wiped prior-cohort rows on
+        // re-materialization would fail the durability half; paths that
+        // canonicalize cohort strings would fail the filter half.
+        // (playhead-4my.10.2)
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        let cohortA = scanCohortJSON  // ScanCohort.productionJSON()
+        let cohortB = altCohortJSON()
+
+        // Cohort A: two scans on the spine.
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-A1", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .containsAd
+        ))
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-A2", firstOrdinal: 11, lastOrdinal: 20,
+            startTime: 10, endTime: 20, disposition: .noAds
+        ))
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_100
+        )
+
+        // Pin the pre-flip baseline: exactly the two cohort-A rows exist.
+        // Without this, the surviving-row assertion at the end could in
+        // principle be satisfied by rows produced by some other source.
+        let preFlip = try await store.loadTrainingExamples(forAsset: assetId)
+        #expect(preFlip.count == 2)
+
+        // Cohort flip: prune cohort-A scans, insert a cohort-B scan,
+        // re-materialize. H2 guarantees the cohort-A training rows
+        // survive even though their upstream scan rows are gone.
+        let prunedCount = try await store.pruneOrphanedScansForCurrentCohort(
+            currentScanCohortJSON: cohortB
+        )
+        #expect(prunedCount >= 2)
+
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-B1", firstOrdinal: 100, lastOrdinal: 110,
+            startTime: 50, endTime: 55, disposition: .containsAd,
+            scanCohortJSON: cohortB
+        ))
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_200
+        )
+
+        let loaded = try await store.loadTrainingExamples(forAsset: assetId)
+        let underA = loaded.filter { $0.scanCohortJSON == cohortA }
+        let underB = loaded.filter { $0.scanCohortJSON == cohortB }
+        #expect(Set(underA.map(\.id)) == ["te-scan-A1", "te-scan-A2"],
+                "prior-cohort training rows survive the cohort flip")
+        #expect(underB.map(\.id) == ["te-scan-B1"],
+                "new-cohort row appears in the new partition")
+        // Sanity: the union accounts for every row in the load.
+        #expect(underA.count + underB.count == loaded.count)
+    }
+
+    @Test("re-materializing with extra evidence on the same span produces no duplicate rows")
+    func noDuplicatesOnExtraEvidenceForSameSpan() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        // One scan-row spine — therefore exactly one training example.
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-A", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .containsAd
+        ))
+        try await store.insertAdWindow(
+            adWindow(id: "win-A", startTime: 0, endTime: 10)
+        )
+        _ = try await store.insertEvidenceEvent(
+            evidenceEvent(id: "ev-A-fm", sourceType: .fm,
+                          firstOrdinal: 0, lastOrdinal: 10, certainty: 0.9),
+            transcriptVersion: transcriptVersion
+        )
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_100
+        )
+        let firstPass = try await store.loadTrainingExamples(forAsset: assetId)
+        try #require(firstPass.count == 1)
+
+        // Add a second evidence event on the same span — different source
+        // type, same ordinal range. Re-materialize.
+        _ = try await store.insertEvidenceEvent(
+            evidenceEvent(id: "ev-A-lex", sourceType: .lexical,
+                          firstOrdinal: 0, lastOrdinal: 10, certainty: 0.7),
+            transcriptVersion: transcriptVersion
+        )
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_200
+        )
+
+        let secondPass = try await store.loadTrainingExamples(forAsset: assetId)
+        // No duplicates — still exactly one row, and ids are unique.
+        #expect(secondPass.count == 1)
+        #expect(Set(secondPass.map { $0.id }).count == secondPass.count)
+        // The single row should have absorbed the new evidence source.
+        #expect(secondPass.first?.evidenceSources.sorted() == ["fm", "lexical"])
+        // Snapshot-rewritten semantic: the row's `createdAt` must reflect
+        // the SECOND materialization's `now`, not the first. Pre-fix this
+        // could silently regress to "first-write-wins" and the corpus
+        // would show stale timestamps after evidence updates. (playhead-4my.10.2)
+        #expect(secondPass.first?.createdAt == 1_700_000_200)
+    }
+
+    @Test("re-materializing after adding a new scan span produces N+1 rows with no duplicates")
+    func noDuplicatesOnNewScanRow() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-A", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .containsAd
+        ))
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-B", firstOrdinal: 11, lastOrdinal: 20,
+            startTime: 10, endTime: 20, disposition: .noAds
+        ))
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_100
+        )
+        let firstPass = try await store.loadTrainingExamples(forAsset: assetId)
+        try #require(firstPass.count == 2)
+        let firstIds = Set(firstPass.map { $0.id })
+
+        // Add a third disjoint scan-row and re-materialize.
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-C", firstOrdinal: 21, lastOrdinal: 30,
+            startTime: 20, endTime: 30, disposition: .uncertain
+        ))
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_200
+        )
+
+        let secondPass = try await store.loadTrainingExamples(forAsset: assetId)
+        let secondIds = Set(secondPass.map { $0.id })
+        #expect(secondPass.count == 3)
+        // Every id is unique (the deterministic id construction
+        // `te-<scanId>` is the dedup key).
+        #expect(secondIds.count == secondPass.count)
+        // The two ids from the first pass are still present.
+        #expect(firstIds.isSubset(of: secondIds))
+        // And exactly one new id was added.
+        #expect(secondIds.subtracting(firstIds).count == 1)
     }
 
     @Test("materializer no-ops when the asset has no scan-result spine")

@@ -324,6 +324,364 @@ struct TrainingExamplePersistenceTests {
         #expect(loaded.map(\.id) == ["te-fk-1"])
     }
 
+    // MARK: - playhead-4my.10.2: cohort-bound provenance via Swift filter
+    //
+    // playhead-4my.10.2 originally landed a SQL-backed
+    // `loadTrainingExamples(forAsset:scanCohortJSON:)` overload, but cycle-2
+    // review flagged that as a production-source change in a tests-only
+    // bead. The overload was deleted; the contract it pinned —
+    // "downstream consumers can derive a cohort-bound subset from the
+    // unfiltered load" — is now exercised by filtering in Swift via
+    // `.filter { $0.scanCohortJSON == cohort }`. Each test below is the
+    // same characterization at the consumer layer; the contract
+    // (byte-exact, asset-scoped, ordering-preserving) is unchanged.
+
+    @Test("filter-by-cohort: rows partition cleanly across two cohorts on the same asset")
+    func loadFiltersByScanCohort() async throws {
+        let store = try await makeTestStore()
+        let asset = makeAsset(id: "asset-cohort-filter")
+        try await store.insertAsset(asset)
+
+        // Two examples on the same asset under two distinct scan cohorts.
+        // Provenance filtering is what lets a downstream consumer say
+        // "give me only the rows produced under cohort X" — essential
+        // for cross-cohort comparisons and cohort-bound exports.
+        let cohortA = makeCohortJSON(promptLabel: "cohort-A")
+        let cohortB = makeCohortJSON(promptLabel: "cohort-B")
+        let exampleA = TrainingExample(
+            id: "te-A", analysisAssetId: asset.id,
+            startAtomOrdinal: 0, endAtomOrdinal: 10,
+            transcriptVersion: "tv", startTime: 0, endTime: 5,
+            textSnapshotHash: "hA", textSnapshot: nil,
+            bucket: .positive, commercialIntent: "paid",
+            ownership: "thirdParty", evidenceSources: ["fm"],
+            fmCertainty: 0.9, classifierConfidence: 0.8,
+            userAction: nil, eligibilityGate: nil,
+            scanCohortJSON: cohortA, decisionCohortJSON: "{}",
+            transcriptQuality: "good", createdAt: 1
+        )
+        let exampleB = TrainingExample(
+            id: "te-B", analysisAssetId: asset.id,
+            startAtomOrdinal: 11, endAtomOrdinal: 20,
+            transcriptVersion: "tv", startTime: 5, endTime: 10,
+            textSnapshotHash: "hB", textSnapshot: nil,
+            bucket: .negative, commercialIntent: "organic",
+            ownership: "unknown", evidenceSources: [],
+            fmCertainty: 0.0, classifierConfidence: 0.0,
+            userAction: nil, eligibilityGate: nil,
+            scanCohortJSON: cohortB, decisionCohortJSON: "{}",
+            transcriptQuality: "good", createdAt: 2
+        )
+        try await store.createTrainingExamples([exampleA, exampleB])
+
+        let loaded = try await store.loadTrainingExamples(forAsset: asset.id)
+        // Pin the fixture size: exactly the two seeded rows are present.
+        // Without this, a regression that drops one row could let the
+        // partition assertions below pass trivially (one filter empty,
+        // the other matching its sole survivor).
+        #expect(loaded.count == 2)
+        let filteredA = loaded.filter { $0.scanCohortJSON == cohortA }
+        let filteredB = loaded.filter { $0.scanCohortJSON == cohortB }
+        #expect(filteredA.map { $0.id } == ["te-A"])
+        #expect(filteredB.map { $0.id } == ["te-B"])
+    }
+
+    @Test("filter-by-cohort: returns empty when no row matches a well-formed but unused cohort")
+    func loadFilterEmptyForUnknownCohort() async throws {
+        // M2 fix: BOTH the seeded row and the query string are well-formed
+        // canonical ScanCohort JSON — they just differ on `promptLabel`.
+        // The empty result therefore proves the filter discriminates by
+        // cohort identity, not by malformed-JSON happenstance. The
+        // unfiltered load is asserted to contain the row, so we know
+        // "empty result" really means "no match" rather than "no rows".
+        let store = try await makeTestStore()
+        let asset = makeAsset(id: "asset-unknown-cohort")
+        try await store.insertAsset(asset)
+
+        let storedCohort = makeCohortJSON(promptLabel: "stored")
+        let queriedCohort = makeCohortJSON(promptLabel: "queried")
+        try await store.createTrainingExample(
+            TrainingExample(
+                id: "te-only", analysisAssetId: asset.id,
+                startAtomOrdinal: 0, endAtomOrdinal: 10,
+                transcriptVersion: "tv", startTime: 0, endTime: 5,
+                textSnapshotHash: "h", textSnapshot: nil,
+                bucket: .positive, commercialIntent: "paid",
+                ownership: "thirdParty", evidenceSources: [],
+                fmCertainty: 0, classifierConfidence: 0,
+                userAction: nil, eligibilityGate: nil,
+                scanCohortJSON: storedCohort, decisionCohortJSON: "{}",
+                transcriptQuality: "good", createdAt: 1
+            )
+        )
+
+        let loaded = try await store.loadTrainingExamples(forAsset: asset.id)
+        let filteredByQueried = loaded.filter { $0.scanCohortJSON == queriedCohort }
+        let filteredByStored = loaded.filter { $0.scanCohortJSON == storedCohort }
+        #expect(filteredByQueried.isEmpty,
+                "filter must reject a well-formed but distinct cohort")
+        #expect(filteredByStored.map(\.id) == ["te-only"],
+                "same store filtered by stored cohort must surface the row")
+    }
+
+    @Test("filter-by-cohort: multi-asset multi-cohort 2x2 matrix isolates each cell")
+    func loadFilterMultiAssetMultiCohortMatrix() async throws {
+        // Pin the (asset × cohort) matrix: two assets × two cohorts = 4 rows.
+        // Both halves of the contract are exercised:
+        //   - asset scoping: filtering on assetA's load never returns assetB's
+        //     row (and vice versa) — this subsumes the standalone
+        //     `loadFilterIsAssetScoped` test that was deleted.
+        //   - cohort scoping: filtering by cohort within an asset returns
+        //     exactly the (asset, cohort) cell.
+        // (playhead-4my.10.2)
+        let store = try await makeTestStore()
+        let assetA = makeAsset(id: "asset-matrix-A")
+        let assetB = makeAsset(id: "asset-matrix-B")
+        try await store.insertAsset(assetA)
+        try await store.insertAsset(assetB)
+
+        let cohortX = makeCohortJSON(promptLabel: "matrix-X")
+        let cohortY = makeCohortJSON(promptLabel: "matrix-Y")
+
+        func row(id: String, asset: String, cohort: String) -> TrainingExample {
+            TrainingExample(
+                id: id, analysisAssetId: asset,
+                startAtomOrdinal: 0, endAtomOrdinal: 10,
+                transcriptVersion: "tv", startTime: 0, endTime: 5,
+                textSnapshotHash: "h-\(id)", textSnapshot: nil,
+                bucket: .positive, commercialIntent: "paid",
+                ownership: "thirdParty", evidenceSources: [],
+                fmCertainty: 0, classifierConfidence: 0,
+                userAction: nil, eligibilityGate: nil,
+                scanCohortJSON: cohort, decisionCohortJSON: "{}",
+                transcriptQuality: "good", createdAt: 1
+            )
+        }
+        try await store.createTrainingExamples([
+            row(id: "te-AX", asset: assetA.id, cohort: cohortX),
+            row(id: "te-AY", asset: assetA.id, cohort: cohortY),
+            row(id: "te-BX", asset: assetB.id, cohort: cohortX),
+            row(id: "te-BY", asset: assetB.id, cohort: cohortY),
+        ])
+
+        // Per-asset loads must NOT see the sibling asset's rows — the asset
+        // scope is enforced by the underlying load, not by the in-Swift
+        // filter. (Symmetric assertion: both A and B confined.)
+        let loadedA = try await store.loadTrainingExamples(forAsset: assetA.id)
+        let loadedB = try await store.loadTrainingExamples(forAsset: assetB.id)
+        #expect(Set(loadedA.map(\.id)) == ["te-AX", "te-AY"])
+        #expect(Set(loadedB.map(\.id)) == ["te-BX", "te-BY"])
+
+        // Each (asset, cohort) cell of the matrix returns exactly its row.
+        let ax = loadedA.filter { $0.scanCohortJSON == cohortX }
+        let ay = loadedA.filter { $0.scanCohortJSON == cohortY }
+        let bx = loadedB.filter { $0.scanCohortJSON == cohortX }
+        let by = loadedB.filter { $0.scanCohortJSON == cohortY }
+        #expect(ax.map(\.id) == ["te-AX"])
+        #expect(ay.map(\.id) == ["te-AY"])
+        #expect(bx.map(\.id) == ["te-BX"])
+        #expect(by.map(\.id) == ["te-BY"])
+    }
+
+    @Test("filter-by-cohort: empty-string only matches literal empty-cohort rows")
+    func loadFilterEmptyStringSemantics() async throws {
+        // Document the empty-string filter behavior: it does NOT mean
+        // "no filter". An empty string matches rows whose stored cohort
+        // is literally the empty string (a degenerate state that can't
+        // occur with `ScanCohort.productionJSON()` but might appear in
+        // a fixture). Locking this in keeps the byte-exact-equality
+        // contract honest.
+        //
+        // Two phases:
+        //   (1) mixed corpus: empty cohort + real cohort coexist; ""
+        //       picks only the empty row.
+        //   (2) negative case (L1): with NO empty-cohort rows, "" yields
+        //       empty — proves "" doesn't fall through to "all rows".
+        // (playhead-4my.10.2)
+        let realCohort = makeCohortJSON(promptLabel: "real")
+
+        // Phase 1: mixed corpus.
+        do {
+            let store = try await makeTestStore()
+            let asset = makeAsset(id: "asset-empty-cohort-mixed")
+            try await store.insertAsset(asset)
+
+            let withRealCohort = TrainingExample(
+                id: "te-real", analysisAssetId: asset.id,
+                startAtomOrdinal: 0, endAtomOrdinal: 10,
+                transcriptVersion: "tv", startTime: 0, endTime: 5,
+                textSnapshotHash: "h-real", textSnapshot: nil,
+                bucket: .positive, commercialIntent: "paid",
+                ownership: "thirdParty", evidenceSources: [],
+                fmCertainty: 0, classifierConfidence: 0,
+                userAction: nil, eligibilityGate: nil,
+                scanCohortJSON: realCohort, decisionCohortJSON: "{}",
+                transcriptQuality: "good", createdAt: 1
+            )
+            let withEmptyCohort = TrainingExample(
+                id: "te-empty", analysisAssetId: asset.id,
+                startAtomOrdinal: 11, endAtomOrdinal: 20,
+                transcriptVersion: "tv", startTime: 5, endTime: 10,
+                textSnapshotHash: "h-empty", textSnapshot: nil,
+                bucket: .negative, commercialIntent: "organic",
+                ownership: "unknown", evidenceSources: [],
+                fmCertainty: 0, classifierConfidence: 0,
+                userAction: nil, eligibilityGate: nil,
+                scanCohortJSON: "", decisionCohortJSON: "{}",
+                transcriptQuality: "good", createdAt: 2
+            )
+            try await store.createTrainingExamples([withRealCohort, withEmptyCohort])
+
+            let loaded = try await store.loadTrainingExamples(forAsset: asset.id)
+            let emptyMatch = loaded.filter { $0.scanCohortJSON == "" }
+            #expect(emptyMatch.map(\.id) == ["te-empty"],
+                    "empty-string filter matches only the literal-empty row")
+            let realMatch = loaded.filter { $0.scanCohortJSON == realCohort }
+            #expect(realMatch.map(\.id) == ["te-real"])
+        }
+
+        // Phase 2: corpus with NO empty-cohort rows. Empty filter must
+        // return empty — definitively NOT "match everything".
+        do {
+            let store = try await makeTestStore()
+            let asset = makeAsset(id: "asset-empty-cohort-only-real")
+            try await store.insertAsset(asset)
+
+            try await store.createTrainingExample(
+                TrainingExample(
+                    id: "te-only-real", analysisAssetId: asset.id,
+                    startAtomOrdinal: 0, endAtomOrdinal: 10,
+                    transcriptVersion: "tv", startTime: 0, endTime: 5,
+                    textSnapshotHash: "h", textSnapshot: nil,
+                    bucket: .positive, commercialIntent: "paid",
+                    ownership: "thirdParty", evidenceSources: [],
+                    fmCertainty: 0, classifierConfidence: 0,
+                    userAction: nil, eligibilityGate: nil,
+                    scanCohortJSON: realCohort, decisionCohortJSON: "{}",
+                    transcriptQuality: "good", createdAt: 1
+                )
+            )
+
+            let loaded = try await store.loadTrainingExamples(forAsset: asset.id)
+            let emptyMatch = loaded.filter { $0.scanCohortJSON == "" }
+            #expect(emptyMatch.isEmpty,
+                    "empty-string filter does NOT degrade to 'no filter'")
+        }
+    }
+
+    @Test("byte-exact cohort matching: same content, unsorted keys is NOT equal")
+    func loadFilterIsByteExactNotCanonicalized() async throws {
+        // The cohort-equality contract is documented as byte-exact on the
+        // stored JSON string — no canonicalization is attempted at the
+        // filter layer because the writer always uses
+        // `ScanCohort.productionJSON()` (sorted-keys). This test pins
+        // that contract: a string with the same KEYS+VALUES but in a
+        // different (unsorted) key order must NOT be considered equal.
+        // After H1 the filter is `==`, which is intrinsically byte-exact
+        // — but locking the test in still pins the consumer-layer contract
+        // so a future "be helpful and canonicalize" regression fails loudly.
+        // (playhead-4my.10.2)
+        let store = try await makeTestStore()
+        let asset = makeAsset(id: "asset-byte-exact")
+        try await store.insertAsset(asset)
+
+        let sortedCohort = makeCohortJSON(promptLabel: "byte-exact")
+        // Hand-roll an unsorted-keys re-encoding of the same content.
+        // Decoding sortedCohort and re-encoding without `.sortedKeys`
+        // gives a permutation Swift's encoder happens to emit; on Apple
+        // platforms that's typically stored-property declaration order,
+        // which differs from sorted-keys. The exact ordering is not
+        // important — only that the resulting string is non-empty,
+        // semantically equal, and byte-different from the sorted form.
+        let decoder = JSONDecoder()
+        let cohort = try decoder.decode(ScanCohort.self,
+                                        from: Data(sortedCohort.utf8))
+        let encoder = JSONEncoder()
+        // Intentionally NO .sortedKeys here.
+        let unsortedData = try encoder.encode(cohort)
+        let unsortedCohort = String(data: unsortedData, encoding: .utf8) ?? ""
+        try #require(!unsortedCohort.isEmpty)
+        // Pre-condition: the two strings differ byte-wise. If they don't
+        // (encoder happens to emit sorted), the test silently degrades —
+        // require it to ensure we're really exercising the non-canonical
+        // path.
+        try #require(unsortedCohort != sortedCohort,
+                     "encoder without .sortedKeys must produce a byte-different string")
+
+        try await store.createTrainingExample(
+            TrainingExample(
+                id: "te-sorted", analysisAssetId: asset.id,
+                startAtomOrdinal: 0, endAtomOrdinal: 10,
+                transcriptVersion: "tv", startTime: 0, endTime: 5,
+                textSnapshotHash: "h", textSnapshot: nil,
+                bucket: .positive, commercialIntent: "paid",
+                ownership: "thirdParty", evidenceSources: [],
+                fmCertainty: 0, classifierConfidence: 0,
+                userAction: nil, eligibilityGate: nil,
+                scanCohortJSON: sortedCohort, decisionCohortJSON: "{}",
+                transcriptQuality: "good", createdAt: 1
+            )
+        )
+
+        let loaded = try await store.loadTrainingExamples(forAsset: asset.id)
+        // Byte-exact: the unsorted-keys query is NOT a match.
+        let unsortedMatch = loaded.filter { $0.scanCohortJSON == unsortedCohort }
+        #expect(unsortedMatch.isEmpty,
+                "filter must NOT canonicalize JSON before comparing")
+        // Sanity: the sorted form does match — so the row is queryable.
+        let sortedMatch = loaded.filter { $0.scanCohortJSON == sortedCohort }
+        #expect(sortedMatch.map(\.id) == ["te-sorted"])
+    }
+
+    @Test("filter-by-cohort preserves createdAt ordering within the cohort")
+    func loadFilterPreservesCreatedAtOrdering() async throws {
+        // Order preservation is a property of the underlying load
+        // (`ORDER BY createdAt ASC, rowid ASC`); after H1 the cohort
+        // filter is a stable Swift `.filter`, so ordering carries
+        // through. Pin both halves: the unfiltered load is ordered
+        // by createdAt, AND that order is preserved through the
+        // cohort filter. Two rows in the same (asset, cohort) cell
+        // with different createdAt values, inserted out of order,
+        // and cross-cohort interleaved so the filter actually exercises
+        // pruning — not just identity.
+        // (playhead-4my.10.2)
+        let store = try await makeTestStore()
+        let asset = makeAsset(id: "asset-order-cohort")
+        try await store.insertAsset(asset)
+
+        let cohort = makeCohortJSON(promptLabel: "ordered")
+        let otherCohort = makeCohortJSON(promptLabel: "other")
+
+        func row(id: String, cohort: String, createdAt: Double) -> TrainingExample {
+            TrainingExample(
+                id: id, analysisAssetId: asset.id,
+                startAtomOrdinal: 0, endAtomOrdinal: 10,
+                transcriptVersion: "tv", startTime: 0, endTime: 5,
+                textSnapshotHash: "h-\(id)", textSnapshot: nil,
+                bucket: .positive, commercialIntent: "paid",
+                ownership: "thirdParty", evidenceSources: [],
+                fmCertainty: 0, classifierConfidence: 0,
+                userAction: nil, eligibilityGate: nil,
+                scanCohortJSON: cohort, decisionCohortJSON: "{}",
+                transcriptQuality: "good", createdAt: createdAt
+            )
+        }
+        // Insert out of write-order to prove load orders by createdAt,
+        // not by insertion order. Interleave a row from another cohort
+        // between the two target rows so the cohort filter has to
+        // actually exclude something.
+        try await store.createTrainingExample(row(id: "te-late", cohort: cohort, createdAt: 300))
+        try await store.createTrainingExample(row(id: "te-other", cohort: otherCohort, createdAt: 200))
+        try await store.createTrainingExample(row(id: "te-early", cohort: cohort, createdAt: 100))
+
+        let loaded = try await store.loadTrainingExamples(forAsset: asset.id)
+        // Underlying load is createdAt-ascending across cohorts.
+        #expect(loaded.map(\.id) == ["te-early", "te-other", "te-late"])
+        // Filter preserves that ordering and excludes the other cohort.
+        let filtered = loaded.filter { $0.scanCohortJSON == cohort }
+        #expect(filtered.map(\.id) == ["te-early", "te-late"])
+    }
+
     @Test("evidenceSources round-trips as ordered array")
     func evidenceSourcesRoundTrips() async throws {
         let store = try await makeTestStore()
