@@ -33,7 +33,9 @@ struct AcousticFeatureScore: Sendable, Equatable {
         self.feature = feature
         self.windowStart = windowStart
         self.windowEnd = windowEnd
-        self.score = max(0, min(1, score))
+        // Mirror `clampUnit`'s NaN guard: a NaN score upstream becomes a
+        // zero score here rather than poisoning fusion arithmetic.
+        self.score = clampUnit(score)
         self.rawMetric = rawMetric
     }
 }

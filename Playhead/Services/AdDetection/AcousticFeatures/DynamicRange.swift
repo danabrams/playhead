@@ -8,12 +8,21 @@
 //
 // We approximate crest factor from feature windows using:
 //
-//   crest ≈ rms_local_peak / rms
+//   ratio = rms_local / rms_local_peak    (so 0 < ratio ≤ 1)
 //
-// where `rms_local_peak` is the max RMS observed in a trailing short window.
-// A proper crest factor needs sample-peak, but this proxy correlates well
-// enough at window granularity for evidence fusion; real peak tracking is
-// deferred to gtt9.3.
+// where `rms_local_peak` is the max RMS observed in a short window around
+// the current frame. Note this is INVERTED relative to a textbook crest
+// factor (`peak / rms`, which is ≥ 1).
+//
+// playhead-rfu-aac (review L5): what actually fires here is "this window's
+// rms is far below the local peak", i.e. quiet-near-peak windows — NOT
+// uniformly-loud-and-flat windows. The DynamicRangeTests admission at
+// `compressedBlockScoresHigh` reflects that: a sustained-loud block has
+// every window ≈ its own local peak, so ratio ≈ 1 → score 0. The signal
+// fires on a quiet window that sits next to a peak (which is closer to a
+// "transient onset" than "compression"). Calibration (gtt9.3) will revisit
+// the metric shape; we keep the math today and document the inversion
+// honestly here rather than silently misnaming it.
 //
 // Pure function on `FeatureWindow` arrays.
 
