@@ -2141,6 +2141,53 @@ struct StreamingAudioDecoderTests {
         await decoder.cleanup()  // Triple-cleanup also fine.
     }
 
+    @Test("Peak accumulator pins the docstring's stated bound (L1)")
+    func peakAccumulatorPinsDocstringBound() async throws {
+        // playhead-rfu-aac L1: the StreamingAudioDecoder docstring claims
+        //   accumulatedSamples.count peaks at roughly
+        //   samplesPerShard + readFramesPerCycle × (16_000 / sourceSampleRate).
+        // The pre-existing peakAccumulatorBoundedAcrossManyShards test allows
+        // 4x slack to absorb converter framing variance. This test pins the
+        // tighter docstring claim — a regression that loosened the
+        // accumulator behavior would still pass that earlier test but
+        // should fail this one, surfacing the drift to whoever bumps
+        // readFramesPerCycle or the converter chunking.
+        //
+        // For a 16 kHz mono source feeding a 16 kHz target, the ratio
+        // collapses to 1.0 so the docstring formula reduces to
+        // `samplesPerShard + readFramesPerCycle`.
+        let seconds: UInt32 = 60
+        let wavData = Self.makeWAVData(seconds: seconds)
+        let decoder = StreamingAudioDecoder(
+            episodeID: "test",
+            shardDuration: 1.0,
+            contentType: "wav"
+        )
+        let stream = await decoder.shards()
+        let drain = Task<Int, Never> {
+            var count = 0
+            for await _ in stream { count += 1 }
+            return count
+        }
+        await decoder.feedData(wavData)
+        await decoder.finish()
+        _ = await drain.value
+
+        let peak = await decoder.peakAccumulatedSampleCountForTesting()
+        // samplesPerShard = 1.0s × 16_000 = 16_000.
+        // readFramesPerCycle = 8_192. Source/target ratio = 1.0.
+        // Allow a small +1 cycle epsilon for partial-frame boundary slop.
+        let docstringBound = 16_000 + 8_192
+        let epsilon = 8_192   // one extra cycle of slop is the absolute ceiling
+        let allowedMax = docstringBound + epsilon
+        #expect(
+            peak <= allowedMax,
+            "Peak \(peak) violated docstring-pinned bound \(allowedMax) (samplesPerShard+readFramesPerCycle+1cycle)"
+        )
+
+        await decoder.cleanup()
+    }
+
     // MARK: - WAV Helper
 
     /// Builds a minimal 16kHz mono 16-bit PCM WAV in memory.
