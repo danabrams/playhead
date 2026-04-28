@@ -265,6 +265,57 @@ struct EpisodeDurationBackfillSweepTests {
         #expect(after?.episodeDurationSec == 100, "probe failure must not blank the column")
     }
 
+    @Test("paginates correctly across >200 rows so every needs-backfill asset is rewritten")
+    func paginationCoversAllRowsBeyondPageSize() async throws {
+        // Review-followup (csp / M1): the sweep paginates with
+        // pageSize=200; there's no on-machine test that proves the
+        // pagination loop actually visits rows past the first page.
+        // Seed 350 rows that all need backfill, run the sweep, and
+        // assert every row gets a duration written.
+        let store = try await makeStore()
+        let coordinator = makeCoordinator(store: store)
+
+        // Generate one synth audio file and reuse for every asset —
+        // the sweep only needs `cachedFileURL(episodeId)` to return
+        // SOMETHING that probes to a positive duration. Cuts setup
+        // time from minutes to seconds compared to per-asset writes.
+        let url = try writeSynthAudio(seconds: 5.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let totalRows = 350
+        var seededIds: [String] = []
+        seededIds.reserveCapacity(totalRows)
+        for i in 0..<totalRows {
+            let assetId = String(format: "asset-page-%04d", i)
+            let episodeId = String(format: "ep-page-%04d", i)
+            seededIds.append(assetId)
+            try await store.insertAsset(makeAsset(
+                id: assetId,
+                episodeId: episodeId,
+                episodeDurationSec: 100, // declared
+                featureCoverageEndTime: 9000 // watermark exceeds → needs backfill
+            ))
+        }
+
+        let summary = await coordinator.runEpisodeDurationBackfillIfNeeded { _ in url }
+
+        #expect(summary.alreadyDone == false)
+        #expect(summary.inspected == totalRows,
+                "every seeded row must be inspected — pagination must cover all pages")
+        #expect(summary.rewritten == totalRows,
+                "every seeded row must be rewritten with the probed duration")
+
+        // Confirm row-by-row that the persisted column changed away
+        // from the bad declared value. If the loop bailed at offset
+        // 200 we'd see the back half still pinned at 100s.
+        for assetId in seededIds {
+            let after = try await store.fetchAsset(id: assetId)
+            try #require(after?.episodeDurationSec != nil, "asset \(assetId) lost its duration")
+            #expect(after?.episodeDurationSec != 100,
+                    "asset \(assetId) was not rewritten — pagination missed its row")
+        }
+    }
+
     @Test("idempotent — second invocation reports alreadyDone and does not re-probe")
     func idempotenceShortCircuit() async throws {
         let store = try await makeStore()

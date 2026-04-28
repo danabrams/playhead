@@ -2518,9 +2518,25 @@ actor AnalysisCoordinator {
         // Paginate so we never hold the whole table in memory at once.
         // ORDER BY in `fetchAssets` matches `fetchAllAssets`, so paging
         // is stable across calls within this sweep.
+        //
+        // Concurrency contract (review-followup csp / M2): the
+        // OFFSET/LIMIT cursor is only stable while no concurrent
+        // INSERT or DELETE shifts the underlying row order. The
+        // production caller (`PlayheadRuntime.startSchedulerLoop`)
+        // invokes this sweep at launch BEFORE it boots the
+        // analysis-jobs scheduler or the download-completion enqueue
+        // path, so during the sweep window no new asset rows can
+        // land and no cohort prune is in flight. If we ever move
+        // this sweep off the launch path, the cursor must be
+        // converted to a deterministic key (e.g. `WHERE id > ?
+        // ORDER BY id`) to remain race-free. This sweep is also
+        // gated by a one-shot `_meta` marker, so the entire window
+        // exists at most once per install — second launches
+        // short-circuit before the loop runs.
         let pageSize = 200
         var offset = 0
         pageLoop: while true {
+            assert(offset >= 0, "duration-backfill page offset went negative")
             let page: [AnalysisAsset]
             do {
                 page = try await store.fetchAssets(limit: pageSize, offset: offset)
