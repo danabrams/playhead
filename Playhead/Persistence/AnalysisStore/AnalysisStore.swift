@@ -695,7 +695,7 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 15
+    nonisolated private static let currentSchemaVersion = 16
 
     /// bd-m8k / Cycle 2 C4: Maximum number of recent full-rescan **recall**
     /// samples retained for the `stable_recall_flag` ring. Must match the
@@ -1133,6 +1133,11 @@ actor AnalysisStore {
             // SwiftData side. Adds `analysis_assets.episodeTitle` and
             // `podcast_profiles.title` (both nullable; lazily populated).
             try migrateSelfDescribingTitlesV15IfNeeded()
+            // playhead-4my.10.1: training_examples table — durable
+            // snapshot of materialized training rows that survives
+            // future cohort prunes. See `migrateTrainingExamplesV16IfNeeded`
+            // for the table layout and rationale.
+            try migrateTrainingExamplesV16IfNeeded()
             // ef2.5.1: ShowTraitProfile JSON on podcast_profiles.
             try addColumnIfNeeded(
                 table: "podcast_profiles",
@@ -1276,6 +1281,11 @@ actor AnalysisStore {
         if assetsExist || profilesExist {
             try migrateSelfDescribingTitlesV15IfNeeded()
         }
+        // playhead-4my.10.1: training_examples — ladder-only seam mirrors
+        // `migrate()` so schema-version tests lock at v16. The table has
+        // no dependencies on legacy seeded fixtures so we can apply
+        // unconditionally.
+        try migrateTrainingExamplesV16IfNeeded()
         // H1 fix: mirror the addColumnIfNeeded calls from migrate() that
         // follow the versioned ladder steps. Without these, the isolated-
         // ladder test seam cannot catch regressions in column additions.
@@ -2451,6 +2461,72 @@ actor AnalysisStore {
         }
 
         try setSchemaVersion(15)
+    }
+
+    /// playhead-4my.10.1: durable training examples materialized once
+    /// per backfill from the evidence + decision + correction ledger.
+    ///
+    /// **Why a separate table** (vs. a view over the existing ledgers):
+    /// the ledger tables are cohort-scoped — `pruneOrphanedScansForCurrentCohort`
+    /// wipes `evidence_events` and `semantic_scan_results` whose
+    /// `scanCohortJSON` doesn't match the current cohort. Once a label has
+    /// been assigned the bucket should outlive the cohort that produced
+    /// it, so this table is intentionally NOT cohort-scoped and not
+    /// touched by the prune sweep.
+    ///
+    /// **Foreign key**: `analysisAssetId` references `analysis_assets(id)`
+    /// with `ON DELETE CASCADE` so removing an asset still reaps its
+    /// training rows. The asset row is guaranteed to exist by the time
+    /// the materializer runs (the backfill that produced the ledger
+    /// entries created it).
+    ///
+    /// **Schema columns** mirror the bead spec field-for-field. The
+    /// `evidenceSourcesJSON` column carries a JSON array (encoded by the
+    /// store on insert) so distinct source orderings round-trip
+    /// losslessly. `textSnapshot` is nullable because retention policy
+    /// may elect to keep only the hash.
+    ///
+    /// **Indexes**: per-asset lookups are the only access pattern at
+    /// HEAD, so a single composite index on `(analysisAssetId, createdAt)`
+    /// covers the materializer's read path.
+    private func migrateTrainingExamplesV16IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 16 else { return }
+
+        try exec("""
+            CREATE TABLE IF NOT EXISTS training_examples (
+                id                    TEXT PRIMARY KEY,
+                analysisAssetId       TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                startAtomOrdinal      INTEGER NOT NULL,
+                endAtomOrdinal        INTEGER NOT NULL,
+                transcriptVersion     TEXT NOT NULL,
+                startTime             REAL NOT NULL,
+                endTime               REAL NOT NULL,
+                textSnapshotHash      TEXT NOT NULL,
+                textSnapshot          TEXT,
+                bucket                TEXT NOT NULL,
+                commercialIntent      TEXT NOT NULL,
+                ownership             TEXT NOT NULL,
+                evidenceSourcesJSON   TEXT NOT NULL,
+                fmCertainty           REAL NOT NULL,
+                classifierConfidence  REAL NOT NULL,
+                userAction            TEXT,
+                eligibilityGate       TEXT,
+                scanCohortJSON        TEXT NOT NULL,
+                decisionCohortJSON    TEXT NOT NULL,
+                transcriptQuality     TEXT NOT NULL,
+                createdAt             REAL NOT NULL
+            )
+            """)
+        try exec("""
+            CREATE INDEX IF NOT EXISTS idx_training_examples_asset_created
+            ON training_examples(analysisAssetId, createdAt ASC)
+            """)
+        try exec("""
+            CREATE INDEX IF NOT EXISTS idx_training_examples_bucket
+            ON training_examples(bucket)
+            """)
+
+        try setSchemaVersion(16)
     }
 
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
@@ -7713,6 +7789,158 @@ actor AnalysisStore {
             result.insert(text(stmt, 0))
         }
         return result
+    }
+
+    // MARK: - CRUD: training_examples (playhead-4my.10.1)
+
+    /// Canonical column order shared by all `training_examples` readers.
+    /// Mirrors the table DDL exactly so positional binds and reads stay
+    /// in sync without a `SELECT *` ordering hazard.
+    private static let trainingExampleColumns = """
+        id, analysisAssetId, startAtomOrdinal, endAtomOrdinal,
+        transcriptVersion, startTime, endTime, textSnapshotHash,
+        textSnapshot, bucket, commercialIntent, ownership,
+        evidenceSourcesJSON, fmCertainty, classifierConfidence,
+        userAction, eligibilityGate, scanCohortJSON,
+        decisionCohortJSON, transcriptQuality, createdAt
+        """
+
+    /// Insert a single training example. Idempotent on `id` via
+    /// `INSERT OR REPLACE` so re-materialization writes do not collide.
+    func createTrainingExample(_ example: TrainingExample) throws {
+        try insertTrainingExampleRow(example)
+    }
+
+    /// Batch insert. Wraps the inserts in a single transaction so a
+    /// large materialization pass commits atomically (one fsync, one
+    /// rollback boundary).
+    func createTrainingExamples(_ examples: [TrainingExample]) throws {
+        guard !examples.isEmpty else { return }
+        try exec("BEGIN IMMEDIATE")
+        do {
+            for example in examples {
+                try insertTrainingExampleRow(example)
+            }
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Replace every prior training example for `analysisAssetId` with
+    /// the supplied set. Used by the materializer so re-running does
+    /// not double up. Runs inside a single transaction; on failure the
+    /// pre-existing rows are preserved.
+    func replaceTrainingExamples(
+        forAsset analysisAssetId: String,
+        with examples: [TrainingExample]
+    ) throws {
+        try exec("BEGIN IMMEDIATE")
+        do {
+            let deleteSQL = "DELETE FROM training_examples WHERE analysisAssetId = ?"
+            let deleteStmt = try prepare(deleteSQL)
+            bind(deleteStmt, 1, analysisAssetId)
+            try step(deleteStmt, expecting: SQLITE_DONE)
+            sqlite3_finalize(deleteStmt)
+
+            for example in examples {
+                try insertTrainingExampleRow(example)
+            }
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Load all training examples for an asset, ordered by createdAt
+    /// ascending (then by row id for determinism on equal timestamps).
+    func loadTrainingExamples(forAsset analysisAssetId: String) throws -> [TrainingExample] {
+        let sql = """
+            SELECT \(Self.trainingExampleColumns) FROM training_examples
+            WHERE analysisAssetId = ?
+            ORDER BY createdAt ASC, rowid ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+
+        var results: [TrainingExample] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let example = readTrainingExample(stmt) else { continue }
+            results.append(example)
+        }
+        return results
+    }
+
+    private func insertTrainingExampleRow(_ example: TrainingExample) throws {
+        let sql = """
+            INSERT OR REPLACE INTO training_examples
+            (\(Self.trainingExampleColumns))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, example.id)
+        bind(stmt, 2, example.analysisAssetId)
+        bind(stmt, 3, example.startAtomOrdinal)
+        bind(stmt, 4, example.endAtomOrdinal)
+        bind(stmt, 5, example.transcriptVersion)
+        bind(stmt, 6, example.startTime)
+        bind(stmt, 7, example.endTime)
+        bind(stmt, 8, example.textSnapshotHash)
+        bind(stmt, 9, example.textSnapshot)
+        bind(stmt, 10, example.bucket.rawValue)
+        bind(stmt, 11, example.commercialIntent)
+        bind(stmt, 12, example.ownership)
+        // evidenceSources persisted as JSON array of strings.
+        let evidenceJSON = (try? JSONEncoder().encode(example.evidenceSources))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        bind(stmt, 13, evidenceJSON)
+        bind(stmt, 14, example.fmCertainty)
+        bind(stmt, 15, example.classifierConfidence)
+        bind(stmt, 16, example.userAction)
+        bind(stmt, 17, example.eligibilityGate)
+        bind(stmt, 18, example.scanCohortJSON)
+        bind(stmt, 19, example.decisionCohortJSON)
+        bind(stmt, 20, example.transcriptQuality)
+        bind(stmt, 21, example.createdAt)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    private func readTrainingExample(_ stmt: OpaquePointer?) -> TrainingExample? {
+        guard let bucketRaw = optionalText(stmt, 9),
+              let bucket = TrainingExampleBucket(rawValue: bucketRaw)
+        else { return nil }
+        let evidenceJSON = optionalText(stmt, 12) ?? "[]"
+        let evidenceSources: [String] = {
+            guard let data = evidenceJSON.data(using: .utf8) else { return [] }
+            return (try? JSONDecoder().decode([String].self, from: data)) ?? []
+        }()
+        return TrainingExample(
+            id: text(stmt, 0),
+            analysisAssetId: text(stmt, 1),
+            startAtomOrdinal: Int(sqlite3_column_int(stmt, 2)),
+            endAtomOrdinal: Int(sqlite3_column_int(stmt, 3)),
+            transcriptVersion: text(stmt, 4),
+            startTime: sqlite3_column_double(stmt, 5),
+            endTime: sqlite3_column_double(stmt, 6),
+            textSnapshotHash: text(stmt, 7),
+            textSnapshot: optionalText(stmt, 8),
+            bucket: bucket,
+            commercialIntent: text(stmt, 10),
+            ownership: text(stmt, 11),
+            evidenceSources: evidenceSources,
+            fmCertainty: sqlite3_column_double(stmt, 13),
+            classifierConfidence: sqlite3_column_double(stmt, 14),
+            userAction: optionalText(stmt, 15),
+            eligibilityGate: optionalText(stmt, 16),
+            scanCohortJSON: text(stmt, 17),
+            decisionCohortJSON: text(stmt, 18),
+            transcriptQuality: text(stmt, 19),
+            createdAt: sqlite3_column_double(stmt, 20)
+        )
     }
 
     // MARK: - CRUD: boundary_priors (ef2.3.5)

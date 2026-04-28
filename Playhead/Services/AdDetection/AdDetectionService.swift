@@ -2786,6 +2786,12 @@ actor AdDetectionService {
         do {
             let result = try await runner.runPendingBackfill(for: inputs)
             logger.info("Shadow FM phase: admitted=\(result.admittedJobIds.count) scans=\(result.scanResultIds.count) deferred=\(result.deferredJobIds.count) fmWindows=\(result.fmRefinementWindows.count)")
+            // playhead-4my.10.1: snapshot the evidence + decision +
+            // correction ledger into `training_examples` while the
+            // cohort is still warm. The materializer's failures are
+            // logged but never propagated — shadow-mode invariant
+            // applies (the FM phase must not affect cue computation).
+            await materializeTrainingExamples(forAsset: analysisAssetId)
             if result.deferredJobIds.isEmpty {
                 return wrap(.ranSucceeded, result.fmRefinementWindows)
             }
@@ -2793,6 +2799,22 @@ actor AdDetectionService {
         } catch {
             logger.warning("Shadow FM phase failed (suppressed by invariant): \(error.localizedDescription)")
             return wrap(.ranFailed)
+        }
+    }
+
+    /// playhead-4my.10.1: post-fusion materialization hook. Called from
+    /// `runShadowFMPhase` after each successful backfill run, before the
+    /// shadow phase returns. Failures are caught and logged so the
+    /// shadow phase's no-side-effects contract is preserved.
+    private func materializeTrainingExamples(forAsset analysisAssetId: String) async {
+        let materializer = TrainingExampleMaterializer()
+        do {
+            try await materializer.materialize(
+                forAsset: analysisAssetId,
+                store: store
+            )
+        } catch {
+            logger.warning("TrainingExample materialization failed (suppressed): \(error.localizedDescription)")
         }
     }
 

@@ -239,10 +239,10 @@ struct BackfillJobStoreTests {
     func testSchemaVersionRecorded() async throws {
         let store = try await makeTestStore()
         let version = try await store.schemaVersion()
-        // Current schema is v15 after playhead-i9dj added the
-        // self-describing title columns (`analysis_assets.episodeTitle`
-        // and `podcast_profiles.title`).
-        #expect(version == 15)
+        // Current schema is v16 after playhead-4my.10.1 added the
+        // `training_examples` table for durable bucket-balanced
+        // training-example materialization.
+        #expect(version == 16)
     }
 
     @Test("M8: deleting an asset cascades to its backfill_jobs rows")
