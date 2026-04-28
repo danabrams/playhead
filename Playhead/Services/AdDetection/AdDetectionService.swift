@@ -2786,13 +2786,72 @@ actor AdDetectionService {
         do {
             let result = try await runner.runPendingBackfill(for: inputs)
             logger.info("Shadow FM phase: admitted=\(result.admittedJobIds.count) scans=\(result.scanResultIds.count) deferred=\(result.deferredJobIds.count) fmWindows=\(result.fmRefinementWindows.count)")
+            // playhead-4my.10.1: snapshot the evidence + decision +
+            // correction ledger into `training_examples` while the
+            // cohort is still warm. The materializer's failures are
+            // surfaced via `logger.error` (so SQLite write failures are
+            // visible in production) but NEVER propagated — shadow-mode
+            // invariant applies (the FM phase must not affect cue
+            // computation, even when materialization explodes).
+            await materializeTrainingExamples(forAsset: analysisAssetId)
             if result.deferredJobIds.isEmpty {
                 return wrap(.ranSucceeded, result.fmRefinementWindows)
             }
             return wrap(.ranNeedsRetry, result.fmRefinementWindows)
         } catch {
-            logger.warning("Shadow FM phase failed (suppressed by invariant): \(error.localizedDescription)")
+            // cycle-3 L3: `AnalysisStoreError` (and most other errors thrown
+            // off the runner path) does NOT conform to `LocalizedError`, so
+            // `error.localizedDescription` returns the bridged-NSError
+            // boilerplate ("The operation couldn't be completed. (X error
+            // N.)") with no detail. Use `String(describing:)` (which calls
+            // `description`) to surface the actual case + payload, mirroring
+            // the inner catch in `materializeTrainingExamples` ~25 lines
+            // below.
+            logger.warning("Shadow FM phase failed (suppressed by invariant): \(String(describing: error))")
             return wrap(.ranFailed)
+        }
+    }
+
+    /// playhead-4my.10.1: post-fusion materialization hook. Called from
+    /// `runShadowFMPhase` after a backfill run completes (regardless of
+    /// `fmBackfillMode` — `runShadowFMPhase` runs in production whenever
+    /// the mode is not `.off`).
+    ///
+    /// Failures must NOT propagate (the shadow-mode contract is that the
+    /// FM phase never affects cue computation), but they also must not be
+    /// silently dropped. The materializer touches SQLite directly — a
+    /// disk-full / FK-violation / migration-mismatch is exactly the kind
+    /// of error we need a server-visible log line for. We log at `error`
+    /// level (not `warning`) so the line surfaces in production telemetry.
+    private func materializeTrainingExamples(forAsset analysisAssetId: String) async {
+        let materializer = TrainingExampleMaterializer()
+        do {
+            try await materializer.materialize(
+                forAsset: analysisAssetId,
+                store: store
+            )
+        } catch {
+            // Persistence failure: log loudly. Suppression is the
+            // shadow-contract requirement; silence is not.
+            //
+            // playhead-4my.10.1 (cycle-2 H-A): `AnalysisStoreError` conforms to
+            // `Error`/`CustomStringConvertible` but NOT `LocalizedError`, so
+            // `error.localizedDescription` returns the useless bridged string
+            // ("The operation couldn't be completed. (Playhead.AnalysisStoreError
+            // error N.)"). Use `String(describing:)` (which calls `description`)
+            // and surface a stable case-name token when the error is one of
+            // ours, mirroring the `BackfillJobRunner` pattern at line ~608.
+            let detail = String(describing: error)
+            if let storeError = error as? AnalysisStoreError {
+                let caseName = BackfillJobRunner.caseName(of: storeError)
+                logger.error(
+                    "TrainingExample materialization failed for asset \(analysisAssetId, privacy: .public) — error suppressed by shadow invariant: case=\(caseName, privacy: .public) detail=\(detail, privacy: .public)"
+                )
+            } else {
+                logger.error(
+                    "TrainingExample materialization failed for asset \(analysisAssetId, privacy: .public) — error suppressed by shadow invariant: detail=\(detail, privacy: .public)"
+                )
+            }
         }
     }
 
