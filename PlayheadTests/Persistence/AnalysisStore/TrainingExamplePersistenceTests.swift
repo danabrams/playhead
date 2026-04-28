@@ -73,11 +73,14 @@ struct TrainingExamplePersistenceTests {
         )
     }
 
-    @Test("schema version is at least 16 after migration")
-    func schemaVersionBumpedToSixteen() async throws {
+    @Test("schema version is at least 17 after migration")
+    func schemaVersionBumpedToSeventeen() async throws {
+        // cycle-2 M-A: v17 rebuilds `training_examples` with the post-fix
+        // shape (FK RESTRICT, nullable decisionCohortJSON) so any DB that
+        // already opened at v16 picks up the corrected schema.
         let store = try await makeTestStore()
         let version = try await store.schemaVersion() ?? 0
-        #expect(version >= 16)
+        #expect(version >= 17)
     }
 
     @Test("training_examples table exists after migration")

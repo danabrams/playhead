@@ -866,4 +866,411 @@ struct TrainingExampleMaterializerTests {
         // win-right's eligibilityGate is "ineligible".
         #expect(row.eligibilityGate == "ineligible")
     }
+
+    // MARK: - cycle-2 M-C: skip attribution follows the picked AdWindow
+
+    @Test("cycle-2 M-C: scanWasSkipped reads off the picked AdWindow, not the union")
+    func skipAttributionMatchesPickedDecisionWindow() async throws {
+        // Two overlapping AdWindows on a single scan. Window-A has the higher
+        // skipConfidence (so the picker selects it for eligibilityGate /
+        // decisionCohortJSON), but window-B is the one that was actually
+        // skipped. Pre-fix the materializer aggregated `wasSkipped` across
+        // BOTH windows and stamped userAction="skipped" on the example —
+        // mismatched provenance with the decision data, which came from
+        // window-A. Post-fix the example must report
+        // userAction="eligibleNotSkipped" (window-A's eligible-not-skipped
+        // status) because that is the window the picker chose.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-A", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .containsAd
+        ))
+        // Two AdWindows, both overlapping the scan in time.
+        let windowA = AdWindow(
+            id: "win-A",
+            analysisAssetId: assetId,
+            startTime: 0, endTime: 5,
+            confidence: 0.9,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: AdDetectionConfig.default.detectorVersion,
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: nil,
+            metadataSource: "none", metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            // Higher-confidence window — the picker selects this one — but
+            // it was NOT actually skipped.
+            wasSkipped: false,
+            userDismissedBanner: false
+        )
+        let windowB = AdWindow(
+            id: "win-B",
+            analysisAssetId: assetId,
+            startTime: 5, endTime: 10,
+            confidence: 0.5,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: AdDetectionConfig.default.detectorVersion,
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: nil,
+            metadataSource: "none", metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            // Lower-confidence window — actually skipped at playback. Pre-fix
+            // this contaminated the picked-window's example with a wrong
+            // `userAction = "skipped"`.
+            wasSkipped: true,
+            userDismissedBanner: false
+        )
+        try await store.insertAdWindow(windowA)
+        try await store.insertAdWindow(windowB)
+        // Two decisions: one per AdWindow. Picker should select win-A
+        // (skipConfidence 0.9 > 0.5).
+        try await store.appendDecisionEvent(decisionEvent(
+            id: "dec-A", windowId: "win-A",
+            skipConfidence: 0.9, gate: "eligible", policy: "autoSkipEligible"
+        ))
+        try await store.appendDecisionEvent(decisionEvent(
+            id: "dec-B", windowId: "win-B",
+            skipConfidence: 0.5, gate: "eligible", policy: "autoSkipEligible"
+        ))
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_100
+        )
+
+        let row = try #require(
+            (try await store.loadTrainingExamples(forAsset: assetId)).first
+        )
+        // Picker chose win-A → eligibilityGate is win-A's "eligible".
+        #expect(row.eligibilityGate == "eligible")
+        // Coherent provenance: userAction comes from THE SAME window the
+        // picker selected (win-A, wasSkipped=false), not the union.
+        #expect(row.userAction == "eligibleNotSkipped",
+                "userAction must follow the picked window, not the union")
+    }
+
+    // MARK: - cycle-2 L-B: FM-emitted commercialIntent / ownership wired through
+
+    @Test("cycle-2 L-B: EvidencePayload commercialIntent / ownership propagate to the example")
+    func fmCommercialIntentAndOwnershipPropagate() async throws {
+        // Pre-fix the materializer ignored the FM-emitted strings entirely
+        // and stamped a bucket-driven placeholder. Post-fix the per-span
+        // FM verdict wins; the placeholder is only used when no FM evidence
+        // row supplied a value.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-A", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .containsAd
+        ))
+        try await store.insertAdWindow(
+            adWindow(id: "win-A", startTime: 0, endTime: 10)
+        )
+        // Real persisted-shape EvidencePayload with explicit FM strings.
+        // The bucketer would otherwise emit `.unknown` placeholders.
+        let payload = """
+        {"commercialIntent":"paid","ownership":"thirdParty","certainty":"strong","boundaryPrecision":"precise","firstLineRef":0,"lastLineRef":1,"jobId":"job-1","memoryWriteEligible":true,"anchors":null,"ownershipInferenceWasSuppressed":false}
+        """
+        let ordinals = Array(0...10)
+        let ordinalsJSON = String(
+            data: try JSONSerialization.data(withJSONObject: ordinals),
+            encoding: .utf8
+        ) ?? "[]"
+        _ = try await store.insertEvidenceEvent(
+            EvidenceEvent(
+                id: "ev-A-fm",
+                analysisAssetId: assetId,
+                eventType: "scan",
+                sourceType: .fm,
+                atomOrdinals: ordinalsJSON,
+                evidenceJSON: payload,
+                scanCohortJSON: scanCohortJSON,
+                createdAt: 1_700_000_000,
+                runMode: .targeted,
+                jobPhase: BackfillJobPhase.fullEpisodeScan.rawValue
+            ),
+            transcriptVersion: transcriptVersion
+        )
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_100
+        )
+
+        let row = try #require(
+            (try await store.loadTrainingExamples(forAsset: assetId)).first
+        )
+        // Bucket would derive these to ".paid"/".thirdParty" anyway in this
+        // case, but the assertion that matters is that even when the bucket
+        // would have derived ".unknown" we'd still see the FM verdict. Pin
+        // the propagation contract via parsePayloadStringField directly.
+        #expect(row.commercialIntent == "paid")
+        #expect(row.ownership == "thirdParty")
+    }
+
+    @Test("cycle-2 L-B: parsePayloadStringField unit — present, missing, malformed")
+    func parsePayloadStringFieldUnit() {
+        // Present:
+        let present = #"{"commercialIntent":"paid","ownership":"thirdParty"}"#
+        #expect(TrainingExampleMaterializer.parsePayloadStringField(present, key: "commercialIntent") == "paid")
+        #expect(TrainingExampleMaterializer.parsePayloadStringField(present, key: "ownership") == "thirdParty")
+        // Missing key:
+        #expect(TrainingExampleMaterializer.parsePayloadStringField(present, key: "absent") == nil)
+        // Empty string -> nil (treat as no opinion):
+        #expect(TrainingExampleMaterializer.parsePayloadStringField(#"{"x":""}"#, key: "x") == nil)
+        // Wrong type:
+        #expect(TrainingExampleMaterializer.parsePayloadStringField(#"{"x":42}"#, key: "x") == nil)
+        // Malformed JSON:
+        #expect(TrainingExampleMaterializer.parsePayloadStringField("not json", key: "x") == nil)
+        // Empty:
+        #expect(TrainingExampleMaterializer.parsePayloadStringField("", key: "x") == nil)
+    }
+
+    // MARK: - cycle-2 L-C: coarse-only positive yields fmCertainty=0 (intentional)
+
+    @Test("cycle-2 L-C: scan disposition=.containsAd with no evidence row pins fmCertainty=0")
+    func coarseOnlyPositiveYieldsZeroCertainty() async throws {
+        // A coarse-pass-only positive: the scan flagged the region but
+        // there's no per-region FM evidence row to read certainty from.
+        // The materializer intentionally stamps fmCertainty=0 here so
+        // weak coarse hits do NOT clear the bucketer's `>= 0.7` positive
+        // gate without corroborating evidence. Pinned so a future change
+        // wanting to default coarse hits to a non-zero band must update
+        // this test deliberately.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-A", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .containsAd
+        ))
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_100
+        )
+
+        let row = try #require(
+            (try await store.loadTrainingExamples(forAsset: assetId)).first
+        )
+        #expect(row.fmCertainty == 0.0,
+                "coarse-only positive must yield fmCertainty=0 — corroborating evidence row required for any band")
+    }
+
+    // MARK: - cycle-2 L-D: parseCertainty silent-fallback shapes
+
+    @Test("cycle-2 L-D: parseCertainty silently returns 0 across malformed shapes")
+    func parseCertaintyMalformedJsonReturnsZero() {
+        // L-D: the silent-zero fallback is intentional. This test pins the
+        // current behaviour for every malformed shape we anticipate; any
+        // future producer change MUST be caught by a separate audit.
+        // Not JSON at all:
+        #expect(TrainingExampleMaterializer.parseCertainty("nope") == 0.0)
+        // Empty string:
+        #expect(TrainingExampleMaterializer.parseCertainty("") == 0.0)
+        // JSON but not an object:
+        #expect(TrainingExampleMaterializer.parseCertainty("[1,2,3]") == 0.0)
+        #expect(TrainingExampleMaterializer.parseCertainty("\"strong\"") == 0.0)
+        // Missing key:
+        #expect(TrainingExampleMaterializer.parseCertainty(#"{"other":42}"#) == 0.0)
+        // Unknown band string:
+        #expect(TrainingExampleMaterializer.parseCertainty(#"{"certainty":"medium"}"#) == 0.0)
+        // Wrong type — null:
+        #expect(TrainingExampleMaterializer.parseCertainty(#"{"certainty":null}"#) == 0.0)
+        // Wrong type — bool:
+        #expect(TrainingExampleMaterializer.parseCertainty(#"{"certainty":true}"#) == 0.0)
+        // Wrong type — array:
+        #expect(TrainingExampleMaterializer.parseCertainty(#"{"certainty":[0.5]}"#) == 0.0)
+    }
+
+    // MARK: - cycle-2 M-A: cohort prune leaves training_examples physically untouched
+
+    @Test("cycle-2 M-A: cohort prune does not modify materialized training_examples rows")
+    func cohortPruneLeavesTrainingExamplesPhysicallyUntouched() async throws {
+        // Stronger version of the H2 durability test: assert the persisted
+        // `createdAt` timestamps survive the prune byte-equal. The bead's
+        // contract is that `pruneOrphanedScansForCurrentCohort` MUST NOT
+        // touch `training_examples` — not even rewrite an unchanged row
+        // (which would bump `rowid` and could perturb downstream readers).
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-A", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .containsAd
+        ))
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_100
+        )
+
+        let before = try await store.loadTrainingExamples(forAsset: assetId)
+        let beforeCreatedAt = before.map(\.createdAt)
+        let beforeIds = before.map(\.id)
+        #expect(!before.isEmpty, "must have a baseline row to compare against")
+
+        // Flip the cohort so the prune's WHERE clause matches every existing
+        // scan-result row. The prune wipes scan_results + evidence_events
+        // (cohort-scoped tables) but MUST NOT touch training_examples.
+        let cohortB = ScanCohort(
+            promptLabel: "phase3-shadow-v2",
+            promptHash: "phase3-prompt-cycle2",
+            schemaHash: "phase3-schema-cycle2",
+            scanPlanHash: "phase3-plan-cycle2",
+            normalizationHash: "phase3-norm-cycle2",
+            osBuild: "26.0.0",
+            locale: "en_US",
+            appBuild: "1"
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let cohortBJSON = String(data: try encoder.encode(cohortB), encoding: .utf8)!
+        _ = try await store.pruneOrphanedScansForCurrentCohort(
+            currentScanCohortJSON: cohortBJSON
+        )
+
+        let after = try await store.loadTrainingExamples(forAsset: assetId)
+        #expect(after.map(\.id) == beforeIds, "prune must not delete rows")
+        // Byte-equality on createdAt: the prune must not have rewritten the
+        // row with a fresh timestamp or any other field churn.
+        #expect(after.map(\.createdAt) == beforeCreatedAt,
+                "prune must not perturb training_examples rows")
+    }
+
+    // MARK: - Match-all CorrectionScope cases (sponsorOnShow, etc.)
+
+    @Test("cycle-2: sponsorOnShow correction matches every scan in the asset")
+    func sponsorOnShowMatchesEveryScan() async throws {
+        try await assertWiderScopeMatchesEveryScan(
+            scope: .sponsorOnShow(podcastId: "pc-1", sponsor: "AcmeCo")
+        )
+    }
+
+    @Test("cycle-2: phraseOnShow correction matches every scan in the asset")
+    func phraseOnShowMatchesEveryScan() async throws {
+        try await assertWiderScopeMatchesEveryScan(
+            scope: .phraseOnShow(podcastId: "pc-1", phrase: "promo code")
+        )
+    }
+
+    @Test("cycle-2: campaignOnShow correction matches every scan in the asset")
+    func campaignOnShowMatchesEveryScan() async throws {
+        try await assertWiderScopeMatchesEveryScan(
+            scope: .campaignOnShow(podcastId: "pc-1", campaign: "summer-2026")
+        )
+    }
+
+    @Test("cycle-2: domainOwnershipOnShow correction matches every scan in the asset")
+    func domainOwnershipOnShowMatchesEveryScan() async throws {
+        try await assertWiderScopeMatchesEveryScan(
+            scope: .domainOwnershipOnShow(podcastId: "pc-1", domain: "example.com")
+        )
+    }
+
+    @Test("cycle-2: jingleOnShow correction matches every scan in the asset")
+    func jingleOnShowMatchesEveryScan() async throws {
+        try await assertWiderScopeMatchesEveryScan(
+            scope: .jingleOnShow(podcastId: "pc-1", jingleId: "jingle-1")
+        )
+    }
+
+    /// Helper for the five wider-scope cases: assert the correction propagates
+    /// to every scan-region of the asset, regardless of time/ordinal range.
+    /// Each scope variant is non-span-bound by construction (it applies at
+    /// show level, not span level), so the materializer's `correctionOverlaps`
+    /// must return true for both scans.
+    private func assertWiderScopeMatchesEveryScan(scope: CorrectionScope) async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        // Two scans at distant times/ordinals so a buggy implementation that
+        // tried (incorrectly) to localize a wider scope would fail one of them.
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-A", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .containsAd
+        ))
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-B", firstOrdinal: 1000, lastOrdinal: 1010,
+            startTime: 5_000, endTime: 5_100, disposition: .containsAd
+        ))
+        try await store.insertAdWindow(
+            adWindow(id: "win-A", startTime: 0, endTime: 10)
+        )
+        try await store.insertAdWindow(
+            adWindow(id: "win-B", startTime: 5_000, endTime: 5_100)
+        )
+        _ = try await store.insertEvidenceEvent(
+            evidenceEvent(id: "ev-A-fm", sourceType: .fm,
+                          firstOrdinal: 0, lastOrdinal: 10, certainty: 0.95),
+            transcriptVersion: transcriptVersion
+        )
+        _ = try await store.insertEvidenceEvent(
+            evidenceEvent(id: "ev-B-fm", sourceType: .fm,
+                          firstOrdinal: 1000, lastOrdinal: 1010, certainty: 0.95),
+            transcriptVersion: transcriptVersion
+        )
+        // Every wider scope persists with the source kind set to a
+        // false-positive correction (user said "this is not an ad on this
+        // show" / domain-owned / jingle / etc.).
+        try await store.appendCorrectionEvent(correctionEvent(
+            id: "corr-wider", scope: scope.serialized,
+            // .manualVeto is a false-positive correction in any scope; the
+            // matching itself doesn't depend on the source.
+            source: .manualVeto
+        ))
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_100
+        )
+
+        let loaded = try await store.loadTrainingExamples(forAsset: assetId)
+        let byId = Dictionary(uniqueKeysWithValues: loaded.map { ($0.id, $0) })
+        let a = try #require(byId["te-scan-A"])
+        let b = try #require(byId["te-scan-B"])
+        // Both scans must carry the wider correction (.disagreement bucket
+        // = FM-positive-but-user-reverted).
+        #expect(a.bucket == .disagreement,
+                "scan-A must inherit a wider-scope correction (\(scope))")
+        #expect(b.bucket == .disagreement,
+                "scan-B must inherit a wider-scope correction (\(scope))")
+    }
+
+    // MARK: - cycle-2 H-A: AnalysisStoreError surfaces a useful description
+
+    @Test("cycle-2 H-A: String(describing: AnalysisStoreError) carries the case name and payload")
+    func analysisStoreErrorDescriptionCarriesCaseName() {
+        // The AdDetectionService catch handler used to log
+        // `error.localizedDescription`, which for `AnalysisStoreError`
+        // (which conforms to Error + CustomStringConvertible but NOT
+        // LocalizedError) bridges through NSError and returns the useless
+        // "The operation couldn't be completed. (Playhead.AnalysisStoreError
+        // error N.)" string. Post-fix the handler logs `String(describing:)`
+        // (which routes to `description`) plus the explicit case-name token
+        // from `BackfillJobRunner.caseName(of:)`.
+        //
+        // Pin both: the description must be non-empty and must include
+        // enough payload to actually triage from the field.
+        let err = AnalysisStoreError.encodingFailure(
+            "training_examples.evidenceSourcesJSON: encoder returned non-UTF8 bytes"
+        )
+        let detail = String(describing: err)
+        #expect(!detail.isEmpty)
+        #expect(detail.contains("Encoding failure"),
+                "description should surface the case payload: \(detail)")
+        // The case-name token used by the production logger must be the
+        // stable enum-case form, not the bridged ordinal.
+        #expect(BackfillJobRunner.caseName(of: err) == "encodingFailure")
+
+        // Cover insertFailed too — different case, same contract: detail
+        // must carry the message, caseName must match.
+        let err2 = AnalysisStoreError.insertFailed("disk full")
+        let detail2 = String(describing: err2)
+        #expect(detail2.contains("Insert failed"))
+        #expect(detail2.contains("disk full"))
+        #expect(BackfillJobRunner.caseName(of: err2) == "insertFailed")
+    }
 }

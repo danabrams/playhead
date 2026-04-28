@@ -112,18 +112,33 @@ struct TrainingExampleMaterializer: Sendable {
                     bEnd: scan.windowEndTime
                 )
             }
-            let overlappingWindowIds: Set<String> = Set(
-                overlappingAdWindows.map { $0.id }
+            let overlappingWindowsById: [String: AdWindow] = Dictionary(
+                uniqueKeysWithValues: overlappingAdWindows.map { ($0.id, $0) }
             )
-            let decisionForScan = Self.bestDecision(
+            // cycle-2 M-C: route the picked AdWindow alongside the picked
+            // decision so downstream attribution (eligibility gate, skip
+            // execution) reads from a single, coherent source. Pre-fix the
+            // decision picker chose the highest-`skipConfidence` window but
+            // `scanWasSkipped` aggregated across ALL overlapping windows —
+            // a low-confidence skipped window would override a
+            // high-confidence not-skipped window and the example would
+            // carry mismatched provenance (decision data from window-A,
+            // userAction from window-B).
+            let decisionPick = Self.bestDecision(
                 for: scan,
                 in: decisionEvents,
-                overlappingWindowIds: overlappingWindowIds
+                overlappingWindowIds: Set(overlappingWindowsById.keys)
             )
-            // M2: actual skip execution comes from `AdWindow.wasSkipped`,
-            // not from the policy's eligibility gate. Eligible-but-not-
-            // executed windows must NOT be labelled as skipped.
-            let scanWasSkipped = overlappingAdWindows.contains { $0.wasSkipped }
+            let decisionForScan = decisionPick?.event
+            // M2 + cycle-2 M-C: read `wasSkipped` off the SAME AdWindow that
+            // produced the picked decision. Falls back to `false` when no
+            // decision overlapped (no AdWindow → nothing to attribute).
+            let scanWasSkipped: Bool = {
+                guard let windowId = decisionPick?.windowId,
+                      let window = overlappingWindowsById[windowId]
+                else { return false }
+                return window.wasSkipped
+            }()
             let corrections = correctionEvents.filter {
                 Self.correctionOverlaps(
                     correctionScope: $0.scope,
@@ -164,6 +179,18 @@ struct TrainingExampleMaterializer: Sendable {
         let fmEvidence = evidence.filter { $0.event.sourceType == .fm }
         let lexEvidence = evidence.filter { $0.event.sourceType == .lexical }
 
+        // cycle-2 L-C: `fmPositive` accepts BOTH a coarse-pass-only
+        // `disposition == .containsAd` AND any FM evidence row. But
+        // `fmCertainty` is sourced ONLY from evidence rows — coarse-pass
+        // scans don't emit a per-region certainty band, so a coarse-only
+        // positive intentionally yields `fmPositive=true, fmCertainty=0`
+        // and falls through the bucketer's `>= 0.7` gate. This is by
+        // design: coarse hits are weak signals, the bucketer should not
+        // promote them to `.positive` without an evidence row to
+        // corroborate. Pinned by `coarseOnlyPositiveYieldsZeroCertainty`
+        // in `TrainingExampleMaterializerTests` so a future producer
+        // change that wants coarse scans to count must update both this
+        // comment and the test.
         let fmPositive = !fmEvidence.isEmpty || scan.disposition == .containsAd
         let fmCertainty = fmEvidence.map { $0.certainty }.max() ?? 0.0
         // M1: split "lexical fired" from "lexical positive". The lexical
@@ -175,6 +202,18 @@ struct TrainingExampleMaterializer: Sendable {
         // lexical-vs-FM disagreement from a normal "lexicon was quiet"
         // case.
         let lexicalFired = !lexEvidence.isEmpty
+        // cycle-2 L-A: we alias `lexicalPositive = lexicalFired` because
+        // the current lexicon only writes evidence for *positive* findings
+        // (matched cue) — there is no `kind=.notAd` row shape on the
+        // persistence path. If a future lexicon emits negative findings
+        // (e.g. an explicit "host disclaimer this is NOT an ad" hit), the
+        // bucketer would silently treat each one as a positive vote. When
+        // that lands, parse the disposition out of `EvidencePayload.kind`
+        // (or whatever new field the producer adds) and split the two
+        // booleans here. The bucketer ALREADY consumes them as independent
+        // signals — only the materializer-side derivation is conservative.
+        // TODO(playhead-4my-future): split lexicalPositive from lexicalFired
+        //                            once the lexicon emits negative findings.
         let lexicalPositive = lexicalFired
         let classifierConfidence = decision?.skipConfidence ?? 0.0
         let decisionWasSkipEligible =
@@ -217,16 +256,23 @@ struct TrainingExampleMaterializer: Sendable {
             return nil
         }()
 
-        // commercialIntent / ownership: not directly carried on the scan
-        // row, but we can infer a coarse value from disposition + bucket.
-        // Phase-10.x will replace this with the FM refinement output once
-        // it's persisted in a queryable shape.
-        let commercialIntent = Self.inferCommercialIntent(
-            bucket: bucket, fmPositive: fmPositive
-        )
-        let ownership = Self.inferOwnership(
-            bucket: bucket, fmPositive: fmPositive
-        )
+        // cycle-2 L-B: prefer the per-span FM-emitted `commercialIntent` /
+        // `ownership` strings (carried in `EvidencePayload.commercialIntent`
+        // / `EvidencePayload.ownership`) over the bucket-derived
+        // placeholders. Fall back to the placeholder only when no FM
+        // evidence row supplied a usable value (coarse-pass-only positives,
+        // editorial regions, etc.). We pick from the highest-certainty FM
+        // row to match the rest of the picker behavior — when multiple FM
+        // spans landed in a single scan window, the strongest signal wins.
+        let strongestFM = fmEvidence.max { $0.certainty < $1.certainty }
+        let fmCommercialIntent = strongestFM
+            .flatMap { Self.parsePayloadStringField($0.event.evidenceJSON, key: "commercialIntent") }
+        let fmOwnership = strongestFM
+            .flatMap { Self.parsePayloadStringField($0.event.evidenceJSON, key: "ownership") }
+        let commercialIntent = fmCommercialIntent
+            ?? Self.inferCommercialIntent(bucket: bucket, fmPositive: fmPositive)
+        let ownership = fmOwnership
+            ?? Self.inferOwnership(bucket: bucket, fmPositive: fmPositive)
 
         let textSnapshotHash = Self.stableHash(
             assetId: scan.analysisAssetId,
@@ -357,16 +403,28 @@ struct TrainingExampleMaterializer: Sendable {
     /// the model rejected), returns `nil` rather than inheriting a
     /// neighbouring window's decision — that would mislabel negatives
     /// as positives.
+    ///
+    /// cycle-2 M-C: returns the picked decision *and* its windowId so the
+    /// caller can read `wasSkipped` off the SAME `AdWindow` rather than
+    /// aggregating across every overlapping window.
+    struct DecisionPick {
+        let event: DecisionEvent
+        let windowId: String
+    }
+
     private static func bestDecision(
         for scan: SemanticScanResult,
         in events: [DecisionEvent],
         overlappingWindowIds: Set<String>
-    ) -> DecisionEvent? {
+    ) -> DecisionPick? {
         guard !overlappingWindowIds.isEmpty else { return nil }
         let candidates = events.filter {
             overlappingWindowIds.contains($0.windowId)
         }
-        return candidates.max { $0.skipConfidence < $1.skipConfidence }
+        guard let best = candidates.max(by: { $0.skipConfidence < $1.skipConfidence }) else {
+            return nil
+        }
+        return DecisionPick(event: best, windowId: best.windowId)
     }
 
     /// Parses the `certainty` field out of a persisted `EvidencePayload`-style
@@ -378,6 +436,19 @@ struct TrainingExampleMaterializer: Sendable {
     /// magnitude. Numeric forms are still accepted for forward/test
     /// compatibility — useful when ad-hoc fixtures or future producers stamp
     /// a numeric certainty directly.
+    ///
+    /// cycle-2 L-D: silent fallback to `0.0` is INTENTIONAL. Any of:
+    ///   * blob is not UTF-8 / not valid JSON,
+    ///   * blob is JSON but not an object,
+    ///   * `certainty` key is absent,
+    ///   * `certainty` is a string but not one of the three known bands,
+    ///   * `certainty` is some other JSON type (array, bool, null),
+    /// all collapse to 0.0. This is acceptable because the materializer is
+    /// shadow-mode (cannot impede playback) and a future producer-side
+    /// schema change MUST be caught by a separate audit (decoder round-trip
+    /// or contract test) — this helper is too lossy to function as a
+    /// regression guard. Pinned by `parseCertaintyMalformedJsonReturnsZero`
+    /// in `TrainingExampleMaterializerTests`.
     static func parseCertainty(_ json: String) -> Double {
         guard let data = json.data(using: .utf8),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -391,6 +462,21 @@ struct TrainingExampleMaterializer: Sendable {
         if let v = dict["certainty"] as? Double { return v }
         if let v = dict["certainty"] as? Int { return Double(v) }
         return 0.0
+    }
+
+    /// cycle-2 L-B: extracts a top-level string field from a persisted
+    /// `EvidencePayload` JSON blob (e.g. `"commercialIntent"` /
+    /// `"ownership"`). Returns `nil` when the blob is malformed, the key
+    /// is absent, or the value is a non-string. The materializer prefers
+    /// real FM-emitted values over bucket-derived placeholders; the `nil`
+    /// return signals "no FM verdict — fall back to the placeholder".
+    static func parsePayloadStringField(_ json: String, key: String) -> String? {
+        guard let data = json.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let value = dict[key] as? String,
+              !value.isEmpty
+        else { return nil }
+        return value
     }
 
     /// Maps a `CertaintyBand` raw string to a representative double.

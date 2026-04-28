@@ -2825,9 +2825,25 @@ actor AdDetectionService {
         } catch {
             // Persistence failure: log loudly. Suppression is the
             // shadow-contract requirement; silence is not.
-            logger.error(
-                "TrainingExample materialization failed for asset \(analysisAssetId, privacy: .public) — error suppressed by shadow invariant: \(error.localizedDescription, privacy: .public)"
-            )
+            //
+            // playhead-4my.10.1 (cycle-2 H-A): `AnalysisStoreError` conforms to
+            // `Error`/`CustomStringConvertible` but NOT `LocalizedError`, so
+            // `error.localizedDescription` returns the useless bridged string
+            // ("The operation couldn't be completed. (Playhead.AnalysisStoreError
+            // error N.)"). Use `String(describing:)` (which calls `description`)
+            // and surface a stable case-name token when the error is one of
+            // ours, mirroring the `BackfillJobRunner` pattern at line ~608.
+            let detail = String(describing: error)
+            if let storeError = error as? AnalysisStoreError {
+                let caseName = BackfillJobRunner.caseName(of: storeError)
+                logger.error(
+                    "TrainingExample materialization failed for asset \(analysisAssetId, privacy: .public) — error suppressed by shadow invariant: case=\(caseName, privacy: .public) detail=\(detail, privacy: .public)"
+                )
+            } else {
+                logger.error(
+                    "TrainingExample materialization failed for asset \(analysisAssetId, privacy: .public) — error suppressed by shadow invariant: detail=\(detail, privacy: .public)"
+                )
+            }
         }
     }
 
