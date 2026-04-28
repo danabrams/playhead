@@ -26,6 +26,7 @@ struct TrainingExampleBucketerTests {
         let signals = TrainingExampleBucketerSignals(
             fmPositive: true,
             fmCertainty: 0.95,
+            lexicalFired: true,
             lexicalPositive: true,
             classifierConfidence: 0.85,
             decisionWasSkipEligible: true,
@@ -38,11 +39,12 @@ struct TrainingExampleBucketerTests {
 
     // MARK: - .negative
 
-    @Test("FM-negative + lexical-negative + no correction -> .negative")
+    @Test("FM-negative + lexical silent + no correction -> .negative")
     func confirmedNonAd() {
         let signals = TrainingExampleBucketerSignals(
             fmPositive: false,
             fmCertainty: 0.05,
+            lexicalFired: false,
             lexicalPositive: false,
             classifierConfidence: 0.1,
             decisionWasSkipEligible: false,
@@ -60,6 +62,7 @@ struct TrainingExampleBucketerTests {
         let signals = TrainingExampleBucketerSignals(
             fmPositive: true,
             fmCertainty: 0.6,
+            lexicalFired: true,
             lexicalPositive: true,
             classifierConfidence: 0.5,
             decisionWasSkipEligible: false,
@@ -75,6 +78,7 @@ struct TrainingExampleBucketerTests {
         let signals = TrainingExampleBucketerSignals(
             fmPositive: false,
             fmCertainty: 0.4,
+            lexicalFired: false,
             lexicalPositive: false,
             classifierConfidence: 0.4,
             decisionWasSkipEligible: false,
@@ -88,11 +92,12 @@ struct TrainingExampleBucketerTests {
 
     // MARK: - .disagreement
 
-    @Test("lexical-positive but FM-negative -> .disagreement (lexical-vs-FM)")
+    @Test("lexical fired positive but FM-negative -> .disagreement (lexical-vs-FM)")
     func lexicalVsFMDisagreement() {
         let signals = TrainingExampleBucketerSignals(
             fmPositive: false,
             fmCertainty: 0.2,
+            lexicalFired: true,
             lexicalPositive: true,
             classifierConfidence: 0.6,
             decisionWasSkipEligible: false,
@@ -108,6 +113,7 @@ struct TrainingExampleBucketerTests {
         let signals = TrainingExampleBucketerSignals(
             fmPositive: true,
             fmCertainty: 0.95,
+            lexicalFired: true,
             lexicalPositive: true,
             classifierConfidence: 0.8,
             decisionWasSkipEligible: true,
@@ -123,6 +129,7 @@ struct TrainingExampleBucketerTests {
         let signals = TrainingExampleBucketerSignals(
             fmPositive: false,
             fmCertainty: 0.1,
+            lexicalFired: false,
             lexicalPositive: false,
             classifierConfidence: 0.2,
             decisionWasSkipEligible: false,
@@ -133,18 +140,42 @@ struct TrainingExampleBucketerTests {
         #expect(TrainingExampleBucketer.bucket(for: signals) == .disagreement)
     }
 
-    @Test("FM-positive, lexical-negative -> .disagreement (lexical-vs-FM)")
-    func fmPositiveLexicalNegativeIsDisagreement() {
+    // MARK: - M1: lexicon silence is NOT a disagreement
+
+    @Test("FM-positive, lexicon silent -> NOT .disagreement (lexicon was quiet, not negative)")
+    func fmPositiveLexiconSilentIsNotDisagreement() {
+        // Common case: many real ads don't trip the lexicon. Pre-M1 this
+        // produced a flood of false-disagreement entries; post-M1 we
+        // require the lexicon to have actually fired before declaring a
+        // lexical-vs-FM disagreement.
         let signals = TrainingExampleBucketerSignals(
             fmPositive: true,
-            fmCertainty: 0.7,
+            fmCertainty: 0.85,
+            lexicalFired: false,
             lexicalPositive: false,
-            classifierConfidence: 0.4,
+            classifierConfidence: 0.7,
+            decisionWasSkipEligible: true,
+            userReverted: false,
+            userReportedFalseNegative: false,
+            transcriptQuality: "good"
+        )
+        // Should be .positive (FM strong + skip-eligible), not .disagreement.
+        #expect(TrainingExampleBucketer.bucket(for: signals) == .positive)
+    }
+
+    @Test("FM-negative, lexicon silent -> .negative (no disagreement when both quiet)")
+    func fmNegativeLexiconSilentIsNegative() {
+        let signals = TrainingExampleBucketerSignals(
+            fmPositive: false,
+            fmCertainty: 0.0,
+            lexicalFired: false,
+            lexicalPositive: false,
+            classifierConfidence: 0.1,
             decisionWasSkipEligible: false,
             userReverted: false,
             userReportedFalseNegative: false,
             transcriptQuality: "good"
         )
-        #expect(TrainingExampleBucketer.bucket(for: signals) == .disagreement)
+        #expect(TrainingExampleBucketer.bucket(for: signals) == .negative)
     }
 }

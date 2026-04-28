@@ -1813,6 +1813,10 @@ struct BackfillJobRunnerTests {
             (.invalidScanCohortJSON("x"), true),
             (.invalidStateTransition(jobId: "j", fromStatus: nil, toStatus: "running"), false),
             (.evidenceEventBodyMismatch(id: "x"), true),
+            // playhead-4my.10.1 L5: encoder failures while persisting a
+            // training example are permanent — the row will fail again on
+            // identical input.
+            (.encodingFailure("x"), true),
         ]
         // Force the switch to be exhaustive against the enum so a new
         // case fails compilation here.
@@ -1828,7 +1832,8 @@ struct BackfillJobRunnerTests {
                  .invalidEvidenceEvent,
                  .invalidScanCohortJSON,
                  .invalidStateTransition,
-                 .evidenceEventBodyMismatch:
+                 .evidenceEventBodyMismatch,
+                 .encodingFailure:
                 continue
             }
         }
@@ -1841,7 +1846,7 @@ struct BackfillJobRunnerTests {
                 "isPermanent(\(error)) expected \(expected) got \(actual)"
             )
         }
-        #expect(cases.count == 12)
+        #expect(cases.count == 13)
     }
 
     @Test("bd-1tl: caseName covers every AnalysisStoreError case with a stable token")
@@ -1865,6 +1870,7 @@ struct BackfillJobRunnerTests {
             (.invalidScanCohortJSON("x"), "invalidScanCohortJSON"),
             (.invalidStateTransition(jobId: "j", fromStatus: nil, toStatus: "running"), "invalidStateTransition"),
             (.evidenceEventBodyMismatch(id: "x"), "evidenceEventBodyMismatch"),
+            (.encodingFailure("x"), "encodingFailure"),
         ]
         for (error, expected) in cases {
             #expect(BackfillJobRunner.caseName(of: error) == expected,

@@ -6,9 +6,14 @@
 //   - createTrainingExample(_:)              — single insert
 //   - createTrainingExamples(_:)             — batch insert
 //   - loadTrainingExamples(forAsset:)        — ordered fetch by createdAt
-//   - replaceTrainingExamples(forAsset:_:)   — per-asset replace (for
+//   - replaceTrainingExamples(forAsset:_:)   — per-row id-keyed upsert (for
 //                                               idempotent re-materialization
-//                                               on repeat backfills)
+//                                               on repeat backfills). Per
+//                                               the cohort-survival contract,
+//                                               this does NOT wipe prior rows
+//                                               for the asset — only rows
+//                                               whose `id` is in the supplied
+//                                               batch are overwritten.
 
 import Foundation
 import Testing
@@ -166,16 +171,24 @@ struct TrainingExamplePersistenceTests {
         #expect(loadedB.map { $0.id } == ["te-B1"])
     }
 
-    @Test("replaceTrainingExamples deletes prior rows for the asset")
-    func replaceTrainingExamplesIsIdempotent() async throws {
+    @Test("replaceTrainingExamples upserts rows by id without wiping prior rows for the asset")
+    func replaceTrainingExamplesIsIdempotentByRowId() async throws {
         let store = try await makeTestStore()
         let asset = makeAsset(id: "asset-replace")
         try await store.insertAsset(asset)
 
+        // Pre-existing rows from a prior materialization (e.g. an older
+        // cohort). These must SURVIVE a subsequent `replaceTrainingExamples`
+        // call that doesn't touch their ids — that's the cohort-durability
+        // guarantee the bead is about.
         let first = makeExample(id: "te-old-1", analysisAssetId: asset.id, bucket: .positive)
         let second = makeExample(id: "te-old-2", analysisAssetId: asset.id, bucket: .negative)
         try await store.createTrainingExamples([first, second])
 
+        // A new run upserts a different id. Prior rows stay; the new row is
+        // added. If the same id reappears in a later batch, it overwrites
+        // (because each TrainingExample.id is deterministic from scan id,
+        // re-materializing the same scan produces the same id).
         let replacement = makeExample(id: "te-new-1", analysisAssetId: asset.id, bucket: .disagreement)
         try await store.replaceTrainingExamples(
             forAsset: asset.id,
@@ -183,8 +196,84 @@ struct TrainingExamplePersistenceTests {
         )
 
         let loaded = try await store.loadTrainingExamples(forAsset: asset.id)
-        #expect(loaded.map { $0.id } == ["te-new-1"])
-        #expect(loaded.first?.bucket == .disagreement)
+        let ids = Set(loaded.map(\.id))
+        #expect(ids == ["te-old-1", "te-old-2", "te-new-1"])
+    }
+
+    @Test("replaceTrainingExamples preserves prior cohort rows when the new batch is empty")
+    func replaceTrainingExamplesEmptyBatchIsNoop() async throws {
+        let store = try await makeTestStore()
+        let asset = makeAsset(id: "asset-empty-batch")
+        try await store.insertAsset(asset)
+
+        let prior = makeExample(id: "te-prior-1", analysisAssetId: asset.id, bucket: .positive)
+        try await store.createTrainingExamples([prior])
+
+        // Empty batch (e.g. a cohort flip wiped the spine, materializer
+        // produced 0 examples). Must NOT wipe the prior cohort's row.
+        try await store.replaceTrainingExamples(
+            forAsset: asset.id,
+            with: []
+        )
+
+        let loaded = try await store.loadTrainingExamples(forAsset: asset.id)
+        #expect(loaded.map(\.id) == ["te-prior-1"])
+    }
+
+    @Test("replaceTrainingExamples overwrites a prior row with the same id")
+    func replaceTrainingExamplesOverwritesById() async throws {
+        let store = try await makeTestStore()
+        let asset = makeAsset(id: "asset-overwrite")
+        try await store.insertAsset(asset)
+
+        let original = makeExample(
+            id: "te-shared-id", analysisAssetId: asset.id,
+            bucket: .uncertain, createdAt: 100
+        )
+        try await store.createTrainingExample(original)
+
+        // Same id, different content (e.g. signals improved on re-materialization).
+        let updated = makeExample(
+            id: "te-shared-id", analysisAssetId: asset.id,
+            bucket: .positive, createdAt: 200
+        )
+        try await store.replaceTrainingExamples(
+            forAsset: asset.id,
+            with: [updated]
+        )
+
+        let loaded = try await store.loadTrainingExamples(forAsset: asset.id)
+        #expect(loaded.count == 1)
+        #expect(loaded.first?.bucket == .positive)
+        #expect(loaded.first?.createdAt == 200)
+    }
+
+    @Test("M4: training_examples FK is ON DELETE RESTRICT — cannot delete an asset with examples")
+    func deletingAssetWithTrainingExamplesIsBlocked() async throws {
+        // The whole point of materialized training data is to outlast
+        // upstream cohort prunes; ON DELETE RESTRICT on the analysisAssetId
+        // FK enforces that contract at the storage layer. Deleting an asset
+        // that still has training examples should raise — pre-fix the FK was
+        // ON DELETE CASCADE and the corpus would silently disappear.
+        let store = try await makeTestStore()
+        let asset = makeAsset(id: "asset-fk-restrict")
+        try await store.insertAsset(asset)
+
+        let example = makeExample(id: "te-fk-1", analysisAssetId: asset.id)
+        try await store.createTrainingExample(example)
+
+        // Attempting to delete the parent must throw (FK constraint).
+        var didThrow = false
+        do {
+            try await store.deleteAsset(id: asset.id)
+        } catch {
+            didThrow = true
+        }
+        #expect(didThrow, "delete should fail with FK constraint")
+
+        // The training example must still be there.
+        let loaded = try await store.loadTrainingExamples(forAsset: asset.id)
+        #expect(loaded.map(\.id) == ["te-fk-1"])
     }
 
     @Test("evidenceSources round-trips as ordered array")
