@@ -31,10 +31,15 @@ enum SilenceBoundary {
         /// Fusion gate threshold.
         let gateScore: Double
 
+        // playhead-rfu-aac (review M1): the prior `maxSilentWindows: 8`
+        // (≈16 s of silence at 2 s/window) credited long conversational
+        // pauses at the same 1.0 score as a true ad bumper. Tighter
+        // `maxSilentWindows: 4` (≈8 s) is still wide enough for the
+        // typical 1–4 s ad-bracket bumper plus a half-window margin.
         static let `default` = Config(
             silenceRmsCeiling: 0.02,
             minSilentWindows: 1,
-            maxSilentWindows: 8,
+            maxSilentWindows: 4,
             creditRadius: 2,
             gateScore: 0.30
         )
