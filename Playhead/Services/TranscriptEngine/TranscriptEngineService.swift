@@ -494,21 +494,13 @@ actor TranscriptEngineService {
             return
         }
 
-        // Load existing coverage to skip already-transcribed regions.
-        let existingCoverage: Double
-        do {
-            let asset = try await store.fetchAsset(id: analysisAssetId)
-            existingCoverage = asset?.fastTranscriptCoverageEndTime ?? 0
-        } catch {
-            logger.error("Failed to fetch asset coverage: \(error)")
-            existingCoverage = 0
-        }
-
         // Prioritize shards by proximity to the playhead.
-        let prioritized = prioritizeShards(
-            shards,
-            existingCoverage: existingCoverage
-        )
+        // Coverage filtering is intentionally NOT applied here — per-shard
+        // fingerprint dedup in `transcribeShard` handles already-transcribed
+        // regions, including behind-playhead shards that fall within the
+        // coverage watermark but were never actually transcribed.
+        // See review playhead-rfu-aac H3 for the rationale.
+        let prioritized = prioritizeShards(shards)
 
         for shard in prioritized {
             guard !Task.isCancelled else {
@@ -563,10 +555,7 @@ actor TranscriptEngineService {
                 let newBatch = appendedShards
                 appendedShards = []
 
-                let newPrioritized = prioritizeShards(
-                    newBatch,
-                    existingCoverage: existingCoverage
-                )
+                let newPrioritized = prioritizeShards(newBatch)
 
                 for shard in newPrioritized {
                     guard !Task.isCancelled else {
@@ -812,9 +801,14 @@ actor TranscriptEngineService {
 
     /// Order shards so that those nearest the playhead (and ahead of it)
     /// are processed first. Shards behind the playhead are deprioritized.
+    /// Wraps the static `prioritizeShards` with the latest playback
+    /// snapshot. Coverage filtering is deliberately not applied here —
+    /// see the comment in `runTranscriptionLoop` next to the per-shard
+    /// fingerprint dedup. The parameter that previously accepted
+    /// `existingCoverage` was never read; it has been removed (review
+    /// playhead-rfu-aac H3) so callers can no longer be misled by it.
     private func prioritizeShards(
-        _ shards: [AnalysisShard],
-        existingCoverage: Double
+        _ shards: [AnalysisShard]
     ) -> [AnalysisShard] {
         guard let snapshot = latestSnapshot else {
             return shards
