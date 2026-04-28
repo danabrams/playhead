@@ -569,6 +569,12 @@ struct TrainingExampleMaterializerTests {
             forAsset: assetId, store: store, now: 1_700_000_100
         )
 
+        // Pin the pre-flip baseline: exactly the two cohort-A rows exist.
+        // Without this, the surviving-row assertion at the end could in
+        // principle be satisfied by rows produced by some other source.
+        let preFlip = try await store.loadTrainingExamples(forAsset: assetId)
+        #expect(preFlip.count == 2)
+
         // Cohort flip: prune cohort-A scans, insert a cohort-B scan,
         // re-materialize. H2 guarantees the cohort-A training rows
         // survive even though their upstream scan rows are gone.

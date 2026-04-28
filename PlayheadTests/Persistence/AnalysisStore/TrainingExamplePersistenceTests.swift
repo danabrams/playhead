@@ -375,6 +375,11 @@ struct TrainingExamplePersistenceTests {
         try await store.createTrainingExamples([exampleA, exampleB])
 
         let loaded = try await store.loadTrainingExamples(forAsset: asset.id)
+        // Pin the fixture size: exactly the two seeded rows are present.
+        // Without this, a regression that drops one row could let the
+        // partition assertions below pass trivially (one filter empty,
+        // the other matching its sole survivor).
+        #expect(loaded.count == 2)
         let filteredA = loaded.filter { $0.scanCohortJSON == cohortA }
         let filteredB = loaded.filter { $0.scanCohortJSON == cohortB }
         #expect(filteredA.map { $0.id } == ["te-A"])
