@@ -85,15 +85,40 @@ enum AcousticFeatureFusion {
 
         // Use the longest score array (any feature's output; they're all
         // aligned by construction) to source the (start, end) pairs.
-        let reference = featureScores.values.max(by: { $0.count < $1.count }) ?? []
+        // Dictionary iteration order is unstable across runs, so use an
+        // explicit feature priority (largest scoring buckets first) to
+        // pick the reference deterministically. Two `combine` calls over
+        // identical input must produce identical (start, end) pairs.
+        let referencePriority: [AcousticFeatureKind] = [
+            .musicBed,
+            .lufsShift,
+            .spectralShift,
+            .speakerShift,
+            .silenceBoundary,
+            .dynamicRange,
+            .tempoOnset,
+            .repetitionFingerprint
+        ]
+        let reference: [AcousticFeatureScore] = referencePriority
+            .lazy
+            .compactMap { featureScores[$0] }
+            .first(where: { !$0.isEmpty })
+            ?? []
 
         var out: [WindowFusion] = []
         out.reserveCapacity(maxCount)
 
+        // Iterate features in stable enum order (rawValue) so the
+        // per-window combined sum is reproducible across runs. Float
+        // addition is mostly associative but `Dictionary` iteration is
+        // explicitly unstable, so we never trust it for determinism.
+        let stableKinds = featureScores.keys.sorted { $0.rawValue < $1.rawValue }
+
         for idx in 0..<maxCount {
             var combined = 0.0
             var contributing: [AcousticFeatureKind] = []
-            for (kind, arr) in featureScores where idx < arr.count {
+            for kind in stableKinds {
+                guard let arr = featureScores[kind], idx < arr.count else { continue }
                 let s = arr[idx].score
                 guard s >= gateFloor else { continue }
                 combined += weights.weight(for: kind) * s

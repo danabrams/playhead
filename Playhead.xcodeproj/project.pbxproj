@@ -360,6 +360,7 @@
 		88C32773ECD807EF6770F6BB /* FMSuppressionGuard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B9A85968EE5AFE341D12A22 /* FMSuppressionGuard.swift */; };
 		891370A22405251234FF9434 /* DurationPrior.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A59BB174DB2FBA01FE87751 /* DurationPrior.swift */; };
 		894824D673FA68A706C220CE /* SilenceBoundaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84AF30B946A51A3346EF9726 /* SilenceBoundaryTests.swift */; };
+		62C920BD0C002A8801C3040C /* AcousticFeatureFusionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 570DE44DFFF1EA1BB671A6C1 /* AcousticFeatureFusionTests.swift */; };
 		8976D630612A0BAD05C5FB4B /* StorageBudgetSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9240A2473F7E1AB1EC8935B /* StorageBudgetSettings.swift */; };
 		89935D515B979DFEB5E6AC8C /* InstallIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03691312EE8A1AB9AC1F5748 /* InstallIdentityTests.swift */; };
 		8A1B8029DF29AEAD7719F5B5 /* DiagnosticsBundleBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = F143D4967A85389D6D50D4B2 /* DiagnosticsBundleBuilder.swift */; };
@@ -1048,6 +1049,7 @@
 		8402BA8379CC649522667AB1 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		842382A1A5369363A4D358F3 /* DownloadManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadManager.swift; sourceTree = "<group>"; };
 		84AF30B946A51A3346EF9726 /* SilenceBoundaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SilenceBoundaryTests.swift; sourceTree = "<group>"; };
+		570DE44DFFF1EA1BB671A6C1 /* AcousticFeatureFusionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcousticFeatureFusionTests.swift; sourceTree = "<group>"; };
 		85361C153508BAB634696458 /* ReplayMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayMetrics.swift; sourceTree = "<group>"; };
 		858BBD6C21F9850E0297E56C /* ClassifierService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassifierService.swift; sourceTree = "<group>"; };
 		85F12F12E30159A0FDC9D5E9 /* NarlReplayPredictor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NarlReplayPredictor.swift; sourceTree = "<group>"; };
@@ -1835,6 +1837,7 @@
 			isa = PBXGroup;
 			children = (
 				2ED1E7C0DFB625E4A1915DA3 /* AcousticFeatureFunnelTests.swift */,
+				570DE44DFFF1EA1BB671A6C1 /* AcousticFeatureFusionTests.swift */,
 				0202F5DFECD9537C81B24D5C /* AcousticFeaturePipelineTests.swift */,
 				41D8208DA7BD5967BA000673 /* AcousticFeaturePipelineWiringTests.swift */,
 				013CA23055E7320D8A4A5FA9 /* AcousticFeatureTestSupport.swift */,
@@ -3498,6 +3501,7 @@
 				6E3E4C9F6F758F32454AE7B3 /* ShadowRetryTests.swift in Sources */,
 				979EB6335525FD8A24C5FB57 /* ShowTraitProfileTests.swift in Sources */,
 				894824D673FA68A706C220CE /* SilenceBoundaryTests.swift in Sources */,
+				62C920BD0C002A8801C3040C /* AcousticFeatureFusionTests.swift in Sources */,
 				CADF916D0F395B5DE0C10A49 /* SimulatedPlaybackDriver.swift in Sources */,
 				2CCC78185D7F60CB7116F230 /* SkipCueMaterializerTests.swift in Sources */,
 				05E1039B5BEBCF3AAEB7D578 /* SkipOrchestratorAutoSkipFiredEmissionTests.swift in Sources */,
