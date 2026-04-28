@@ -326,6 +326,28 @@ struct TrainingExamplePersistenceTests {
 
     // MARK: - playhead-4my.10.2 gaps
 
+    /// Two canonically-encoded cohorts (sorted-keys JSON) that differ only
+    /// in `promptLabel`. Using the real `ScanCohort` encoder rather than
+    /// hand-rolled `{"label":"…"}` strings exercises the actual production
+    /// shape — same path the materializer takes when stamping cohort onto
+    /// a row. (playhead-4my.10.2)
+    private static func cohortJSON(promptLabel: String) -> String {
+        let cohort = ScanCohort(
+            promptLabel: promptLabel,
+            promptHash: "phase3-prompt-2026-04-06",
+            schemaHash: "phase3-schema-2026-04-06",
+            scanPlanHash: "phase3-plan-2026-04-06",
+            normalizationHash: "phase3-norm-2026-04-06",
+            osBuild: "26.0.0",
+            locale: "en_US",
+            appBuild: "1"
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = (try? encoder.encode(cohort)) ?? Data()
+        return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
     @Test("loadTrainingExamples(forAsset:scanCohortJSON:) filters by cohort")
     func loadFiltersByScanCohort() async throws {
         let store = try await makeTestStore()
@@ -336,8 +358,8 @@ struct TrainingExamplePersistenceTests {
         // Provenance filtering is what lets a downstream consumer say
         // "give me only the rows produced under cohort X" — essential
         // for cross-cohort comparisons and cohort-bound exports.
-        let cohortA = "{\"label\":\"cohort-A\"}"
-        let cohortB = "{\"label\":\"cohort-B\"}"
+        let cohortA = Self.cohortJSON(promptLabel: "cohort-A")
+        let cohortB = Self.cohortJSON(promptLabel: "cohort-B")
         let exampleA = TrainingExample(
             id: "te-A", analysisAssetId: asset.id,
             startAtomOrdinal: 0, endAtomOrdinal: 10,
@@ -382,7 +404,7 @@ struct TrainingExamplePersistenceTests {
         try await store.insertAsset(assetA)
         try await store.insertAsset(assetB)
 
-        let cohort = "{\"label\":\"shared\"}"
+        let cohort = Self.cohortJSON(promptLabel: "shared")
         let onA = TrainingExample(
             id: "te-onA", analysisAssetId: assetA.id,
             startAtomOrdinal: 0, endAtomOrdinal: 10,
@@ -427,9 +449,115 @@ struct TrainingExamplePersistenceTests {
 
         let loaded = try await store.loadTrainingExamples(
             forAsset: asset.id,
-            scanCohortJSON: "{\"label\":\"never-existed\"}"
+            scanCohortJSON: Self.cohortJSON(promptLabel: "never-existed")
         )
         #expect(loaded.isEmpty)
+    }
+
+    @Test("loadTrainingExamples(forAsset:scanCohortJSON:) — multi-asset multi-cohort 2x2 matrix")
+    func loadFilterMultiAssetMultiCohortMatrix() async throws {
+        // Pin the (asset × cohort) matrix: two assets × two cohorts = 4 rows.
+        // The combined filter must isolate exactly ONE row per (asset, cohort)
+        // pair — neither the asset nor the cohort filter alone is sufficient.
+        // (playhead-4my.10.2)
+        let store = try await makeTestStore()
+        let assetA = makeAsset(id: "asset-matrix-A")
+        let assetB = makeAsset(id: "asset-matrix-B")
+        try await store.insertAsset(assetA)
+        try await store.insertAsset(assetB)
+
+        let cohortX = Self.cohortJSON(promptLabel: "matrix-X")
+        let cohortY = Self.cohortJSON(promptLabel: "matrix-Y")
+
+        func row(id: String, asset: String, cohort: String) -> TrainingExample {
+            TrainingExample(
+                id: id, analysisAssetId: asset,
+                startAtomOrdinal: 0, endAtomOrdinal: 10,
+                transcriptVersion: "tv", startTime: 0, endTime: 5,
+                textSnapshotHash: "h-\(id)", textSnapshot: nil,
+                bucket: .positive, commercialIntent: "paid",
+                ownership: "thirdParty", evidenceSources: [],
+                fmCertainty: 0, classifierConfidence: 0,
+                userAction: nil, eligibilityGate: nil,
+                scanCohortJSON: cohort, decisionCohortJSON: "{}",
+                transcriptQuality: "good", createdAt: 1
+            )
+        }
+        try await store.createTrainingExamples([
+            row(id: "te-AX", asset: assetA.id, cohort: cohortX),
+            row(id: "te-AY", asset: assetA.id, cohort: cohortY),
+            row(id: "te-BX", asset: assetB.id, cohort: cohortX),
+            row(id: "te-BY", asset: assetB.id, cohort: cohortY),
+        ])
+
+        // Each (asset, cohort) cell of the matrix must return exactly its row.
+        let ax = try await store.loadTrainingExamples(
+            forAsset: assetA.id, scanCohortJSON: cohortX
+        )
+        let ay = try await store.loadTrainingExamples(
+            forAsset: assetA.id, scanCohortJSON: cohortY
+        )
+        let bx = try await store.loadTrainingExamples(
+            forAsset: assetB.id, scanCohortJSON: cohortX
+        )
+        let by = try await store.loadTrainingExamples(
+            forAsset: assetB.id, scanCohortJSON: cohortY
+        )
+        #expect(ax.map(\.id) == ["te-AX"])
+        #expect(ay.map(\.id) == ["te-AY"])
+        #expect(bx.map(\.id) == ["te-BX"])
+        #expect(by.map(\.id) == ["te-BY"])
+    }
+
+    @Test("loadTrainingExamples(forAsset:scanCohortJSON:) empty-string only matches literal empty cohort")
+    func loadFilterEmptyStringSemantics() async throws {
+        // Document the helper's empty-string behavior: it does NOT mean
+        // "no filter". An empty string matches rows whose stored cohort
+        // is literally the empty string (a degenerate state that can't
+        // occur with `ScanCohort.productionJSON()` but might appear in
+        // a fixture). Locking this in keeps the byte-exact-equality
+        // contract honest. (playhead-4my.10.2)
+        let store = try await makeTestStore()
+        let asset = makeAsset(id: "asset-empty-cohort")
+        try await store.insertAsset(asset)
+
+        let realCohort = Self.cohortJSON(promptLabel: "real")
+        let withRealCohort = TrainingExample(
+            id: "te-real", analysisAssetId: asset.id,
+            startAtomOrdinal: 0, endAtomOrdinal: 10,
+            transcriptVersion: "tv", startTime: 0, endTime: 5,
+            textSnapshotHash: "h-real", textSnapshot: nil,
+            bucket: .positive, commercialIntent: "paid",
+            ownership: "thirdParty", evidenceSources: [],
+            fmCertainty: 0, classifierConfidence: 0,
+            userAction: nil, eligibilityGate: nil,
+            scanCohortJSON: realCohort, decisionCohortJSON: "{}",
+            transcriptQuality: "good", createdAt: 1
+        )
+        let withEmptyCohort = TrainingExample(
+            id: "te-empty", analysisAssetId: asset.id,
+            startAtomOrdinal: 11, endAtomOrdinal: 20,
+            transcriptVersion: "tv", startTime: 5, endTime: 10,
+            textSnapshotHash: "h-empty", textSnapshot: nil,
+            bucket: .negative, commercialIntent: "organic",
+            ownership: "unknown", evidenceSources: [],
+            fmCertainty: 0, classifierConfidence: 0,
+            userAction: nil, eligibilityGate: nil,
+            scanCohortJSON: "", decisionCohortJSON: "{}",
+            transcriptQuality: "good", createdAt: 2
+        )
+        try await store.createTrainingExamples([withRealCohort, withEmptyCohort])
+
+        // Empty string matches the literal-empty row only — not "all rows".
+        let emptyMatch = try await store.loadTrainingExamples(
+            forAsset: asset.id, scanCohortJSON: ""
+        )
+        #expect(emptyMatch.map(\.id) == ["te-empty"])
+        // And the real cohort still finds only its row.
+        let realMatch = try await store.loadTrainingExamples(
+            forAsset: asset.id, scanCohortJSON: realCohort
+        )
+        #expect(realMatch.map(\.id) == ["te-real"])
     }
 
     @Test("evidenceSources round-trips as ordered array")

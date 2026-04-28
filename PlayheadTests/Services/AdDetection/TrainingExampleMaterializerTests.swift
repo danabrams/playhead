@@ -307,6 +307,101 @@ struct TrainingExampleMaterializerTests {
         #expect(buckets.contains(.disagreement))
     }
 
+    @Test("each bucket-fixture scenario maps to its expected bucket")
+    func eachScenarioMapsToExpectedBucket() async throws {
+        // Stronger contract than `allFourBucketsReachable`: that test only
+        // asserts every bucket is *reachable* from the fixture (a smoke
+        // signal). This one pins scan-A → .positive, scan-B → .negative,
+        // scan-C → .uncertain, scan-D → .disagreement, so a bucketer
+        // regression that swaps two scenarios would fail loudly. (playhead-4my.10.2)
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        // Window A: confirmed paid ad — FM containsAd, lexical hit, decision
+        // skip-eligible -> .positive
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-A", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .containsAd
+        ))
+        try await store.insertAdWindow(
+            adWindow(id: "win-A", startTime: 0, endTime: 10)
+        )
+        _ = try await store.insertEvidenceEvent(
+            evidenceEvent(id: "ev-A-fm", sourceType: .fm,
+                          firstOrdinal: 0, lastOrdinal: 10, certainty: 0.95),
+            transcriptVersion: transcriptVersion
+        )
+        _ = try await store.insertEvidenceEvent(
+            evidenceEvent(id: "ev-A-lex", sourceType: .lexical,
+                          firstOrdinal: 0, lastOrdinal: 10, certainty: 0.8),
+            transcriptVersion: transcriptVersion
+        )
+        try await store.appendDecisionEvent(decisionEvent(
+            id: "dec-A", windowId: "win-A",
+            skipConfidence: 0.9, gate: "eligible", policy: "autoSkipEligible"
+        ))
+
+        // Window B: editorial mention — FM noAds, decision not skip-eligible
+        // -> .negative
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-B", firstOrdinal: 11, lastOrdinal: 20,
+            startTime: 10, endTime: 20, disposition: .noAds
+        ))
+        try await store.insertAdWindow(
+            adWindow(id: "win-B", startTime: 10, endTime: 20)
+        )
+        try await store.appendDecisionEvent(decisionEvent(
+            id: "dec-B", windowId: "win-B",
+            skipConfidence: 0.05, gate: "ineligible", policy: "noAction"
+        ))
+
+        // Window C: unusable transcript -> .uncertain
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-C", firstOrdinal: 21, lastOrdinal: 30,
+            startTime: 20, endTime: 30, disposition: .abstain,
+            quality: .unusable
+        ))
+
+        // Window D: FM-positive but user reverted -> .disagreement
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-D", firstOrdinal: 31, lastOrdinal: 40,
+            startTime: 30, endTime: 40, disposition: .containsAd
+        ))
+        try await store.insertAdWindow(
+            adWindow(id: "win-D", startTime: 30, endTime: 40)
+        )
+        _ = try await store.insertEvidenceEvent(
+            evidenceEvent(id: "ev-D-fm", sourceType: .fm,
+                          firstOrdinal: 31, lastOrdinal: 40, certainty: 0.93),
+            transcriptVersion: transcriptVersion
+        )
+        try await store.appendDecisionEvent(decisionEvent(
+            id: "dec-D", windowId: "win-D",
+            skipConfidence: 0.85, gate: "eligible", policy: "autoSkipEligible"
+        ))
+        try await store.appendCorrectionEvent(correctionEvent(
+            id: "corr-D",
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: assetId, startTime: 30.0, endTime: 40.0
+            ).serialized,
+            source: .listenRevert
+        ))
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_100
+        )
+
+        let loaded = try await store.loadTrainingExamples(forAsset: assetId)
+        let byId = Dictionary(uniqueKeysWithValues: loaded.map { ($0.id, $0) })
+        // Per-scenario assertions: each scan id maps to exactly its
+        // expected bucket. A regression that flipped any pair would fail.
+        #expect(try #require(byId["te-scan-A"]).bucket == .positive)
+        #expect(try #require(byId["te-scan-B"]).bucket == .negative)
+        #expect(try #require(byId["te-scan-C"]).bucket == .uncertain)
+        #expect(try #require(byId["te-scan-D"]).bucket == .disagreement)
+    }
+
     @Test("materialization is idempotent: re-running replaces, doesn't append")
     func materializationIsIdempotent() async throws {
         let store = try await makeTestStore()
@@ -495,6 +590,11 @@ struct TrainingExampleMaterializerTests {
         #expect(Set(secondPass.map { $0.id }).count == secondPass.count)
         // The single row should have absorbed the new evidence source.
         #expect(secondPass.first?.evidenceSources.sorted() == ["fm", "lexical"])
+        // Snapshot-rewritten semantic: the row's `createdAt` must reflect
+        // the SECOND materialization's `now`, not the first. Pre-fix this
+        // could silently regress to "first-write-wins" and the corpus
+        // would show stale timestamps after evidence updates. (playhead-4my.10.2)
+        #expect(secondPass.first?.createdAt == 1_700_000_200)
     }
 
     @Test("re-materializing after adding a new scan span produces N+1 rows with no duplicates")
