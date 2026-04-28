@@ -324,6 +324,114 @@ struct TrainingExamplePersistenceTests {
         #expect(loaded.map(\.id) == ["te-fk-1"])
     }
 
+    // MARK: - playhead-4my.10.2 gaps
+
+    @Test("loadTrainingExamples(forAsset:scanCohortJSON:) filters by cohort")
+    func loadFiltersByScanCohort() async throws {
+        let store = try await makeTestStore()
+        let asset = makeAsset(id: "asset-cohort-filter")
+        try await store.insertAsset(asset)
+
+        // Two examples on the same asset under two distinct scan cohorts.
+        // Provenance filtering is what lets a downstream consumer say
+        // "give me only the rows produced under cohort X" — essential
+        // for cross-cohort comparisons and cohort-bound exports.
+        let cohortA = "{\"label\":\"cohort-A\"}"
+        let cohortB = "{\"label\":\"cohort-B\"}"
+        let exampleA = TrainingExample(
+            id: "te-A", analysisAssetId: asset.id,
+            startAtomOrdinal: 0, endAtomOrdinal: 10,
+            transcriptVersion: "tv", startTime: 0, endTime: 5,
+            textSnapshotHash: "hA", textSnapshot: nil,
+            bucket: .positive, commercialIntent: "paid",
+            ownership: "thirdParty", evidenceSources: ["fm"],
+            fmCertainty: 0.9, classifierConfidence: 0.8,
+            userAction: nil, eligibilityGate: nil,
+            scanCohortJSON: cohortA, decisionCohortJSON: "{}",
+            transcriptQuality: "good", createdAt: 1
+        )
+        let exampleB = TrainingExample(
+            id: "te-B", analysisAssetId: asset.id,
+            startAtomOrdinal: 11, endAtomOrdinal: 20,
+            transcriptVersion: "tv", startTime: 5, endTime: 10,
+            textSnapshotHash: "hB", textSnapshot: nil,
+            bucket: .negative, commercialIntent: "organic",
+            ownership: "unknown", evidenceSources: [],
+            fmCertainty: 0.0, classifierConfidence: 0.0,
+            userAction: nil, eligibilityGate: nil,
+            scanCohortJSON: cohortB, decisionCohortJSON: "{}",
+            transcriptQuality: "good", createdAt: 2
+        )
+        try await store.createTrainingExamples([exampleA, exampleB])
+
+        let filteredA = try await store.loadTrainingExamples(
+            forAsset: asset.id, scanCohortJSON: cohortA
+        )
+        let filteredB = try await store.loadTrainingExamples(
+            forAsset: asset.id, scanCohortJSON: cohortB
+        )
+        #expect(filteredA.map { $0.id } == ["te-A"])
+        #expect(filteredB.map { $0.id } == ["te-B"])
+    }
+
+    @Test("loadTrainingExamples(forAsset:scanCohortJSON:) scopes to asset and cohort")
+    func loadFilterIsAssetScoped() async throws {
+        let store = try await makeTestStore()
+        let assetA = makeAsset(id: "asset-scope-A")
+        let assetB = makeAsset(id: "asset-scope-B")
+        try await store.insertAsset(assetA)
+        try await store.insertAsset(assetB)
+
+        let cohort = "{\"label\":\"shared\"}"
+        let onA = TrainingExample(
+            id: "te-onA", analysisAssetId: assetA.id,
+            startAtomOrdinal: 0, endAtomOrdinal: 10,
+            transcriptVersion: "tv", startTime: 0, endTime: 5,
+            textSnapshotHash: "h", textSnapshot: nil,
+            bucket: .positive, commercialIntent: "paid",
+            ownership: "thirdParty", evidenceSources: [],
+            fmCertainty: 0, classifierConfidence: 0,
+            userAction: nil, eligibilityGate: nil,
+            scanCohortJSON: cohort, decisionCohortJSON: "{}",
+            transcriptQuality: "good", createdAt: 1
+        )
+        let onB = TrainingExample(
+            id: "te-onB", analysisAssetId: assetB.id,
+            startAtomOrdinal: 0, endAtomOrdinal: 10,
+            transcriptVersion: "tv", startTime: 0, endTime: 5,
+            textSnapshotHash: "h", textSnapshot: nil,
+            bucket: .positive, commercialIntent: "paid",
+            ownership: "thirdParty", evidenceSources: [],
+            fmCertainty: 0, classifierConfidence: 0,
+            userAction: nil, eligibilityGate: nil,
+            scanCohortJSON: cohort, decisionCohortJSON: "{}",
+            transcriptQuality: "good", createdAt: 1
+        )
+        try await store.createTrainingExamples([onA, onB])
+
+        let loadedA = try await store.loadTrainingExamples(
+            forAsset: assetA.id, scanCohortJSON: cohort
+        )
+        #expect(loadedA.map { $0.id } == ["te-onA"])
+    }
+
+    @Test("loadTrainingExamples(forAsset:scanCohortJSON:) returns empty for unknown cohort")
+    func loadFilterEmptyForUnknownCohort() async throws {
+        let store = try await makeTestStore()
+        let asset = makeAsset(id: "asset-unknown-cohort")
+        try await store.insertAsset(asset)
+
+        try await store.createTrainingExample(
+            makeExample(id: "te-only", analysisAssetId: asset.id)
+        )
+
+        let loaded = try await store.loadTrainingExamples(
+            forAsset: asset.id,
+            scanCohortJSON: "{\"label\":\"never-existed\"}"
+        )
+        #expect(loaded.isEmpty)
+    }
+
     @Test("evidenceSources round-trips as ordered array")
     func evidenceSourcesRoundTrips() async throws {
         let store = try await makeTestStore()

@@ -7989,6 +7989,37 @@ actor AnalysisStore {
         return results
     }
 
+    /// Load training examples scoped to (asset, scanCohortJSON). Used by
+    /// downstream consumers that need provenance-bound exports — e.g.
+    /// "give me only the rows produced under cohort X" so a cross-cohort
+    /// comparison stays apples-to-apples. Equality is byte-exact on the
+    /// stored JSON string; no canonicalization is attempted because the
+    /// writer (materializer) always uses the value carried on the
+    /// originating `semantic_scan_results` row, which itself was written
+    /// by `ScanCohort.productionJSON()` (sorted-keys JSON).
+    /// (playhead-4my.10.2)
+    func loadTrainingExamples(
+        forAsset analysisAssetId: String,
+        scanCohortJSON: String
+    ) throws -> [TrainingExample] {
+        let sql = """
+            SELECT \(Self.trainingExampleColumns) FROM training_examples
+            WHERE analysisAssetId = ? AND scanCohortJSON = ?
+            ORDER BY createdAt ASC, rowid ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        bind(stmt, 2, scanCohortJSON)
+
+        var results: [TrainingExample] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let example = readTrainingExample(stmt) else { continue }
+            results.append(example)
+        }
+        return results
+    }
+
     private func insertTrainingExampleRow(_ example: TrainingExample) throws {
         let sql = """
             INSERT OR REPLACE INTO training_examples
