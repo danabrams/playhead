@@ -71,3 +71,147 @@ struct TranscriptShadowGateEntryCodableTests {
         #expect(decoded.decision == .wouldSkip)
     }
 }
+
+// MARK: - Logger (file I/O)
+
+@Suite("TranscriptShadowGateLogger — append + rotation", .serialized)
+struct TranscriptShadowGateLoggerFileIOTests {
+
+    private func makeTempDir(function: String = #function) throws -> URL {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("transcript-shadow-gate-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
+    }
+
+    private func sampleEntry(asset: String = "asset-a",
+                             timestamp: Double = 1_745_000_000.0) -> TranscriptShadowGateEntry {
+        TranscriptShadowGateEntry(
+            schemaVersion: TranscriptShadowGateEntry.currentSchemaVersion,
+            timestamp: timestamp,
+            analysisAssetID: asset,
+            episodeID: "ep-\(asset)",
+            shardID: 1,
+            shardStart: 0.0,
+            shardEnd: 30.0,
+            likelihood: 0.42,
+            threshold: 0.55,
+            decision: .wouldSkip,
+            wouldGate: true,
+            transcribed: true,
+            buildCommitSHA: nil  // logger overwrites with BuildInfo.commitSHA
+        )
+    }
+
+    @Test("record(_:) appends one JSON line per call to transcript-shadow-gate.jsonl")
+    func appendsJSONL() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let logger = try TranscriptShadowGateLogger(directory: dir)
+        await logger.record(sampleEntry(asset: "a"))
+        await logger.record(sampleEntry(asset: "b"))
+        await logger.flushAndClose()
+
+        let url = dir.appendingPathComponent(TranscriptShadowGateLogger.activeLogFilename)
+        let data = try Data(contentsOf: url)
+        let lines = String(decoding: data, as: UTF8.self)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+        #expect(lines.count == 2)
+
+        let decoder = JSONDecoder()
+        let first = try decoder.decode(TranscriptShadowGateEntry.self, from: Data(lines[0].utf8))
+        let second = try decoder.decode(TranscriptShadowGateEntry.self, from: Data(lines[1].utf8))
+        #expect(first.analysisAssetID == "a")
+        #expect(second.analysisAssetID == "b")
+    }
+
+    @Test("Every encoded row carries the logger's buildCommitSHA stamp")
+    func everyEntryStampedWithBuildCommitSHA() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let logger = try TranscriptShadowGateLogger(directory: dir)
+        // Caller passes nil; logger must overwrite with BuildInfo.commitSHA.
+        await logger.record(sampleEntry(asset: "a"))
+        await logger.flushAndClose()
+
+        let url = dir.appendingPathComponent(TranscriptShadowGateLogger.activeLogFilename)
+        let data = try Data(contentsOf: url)
+        let line = String(decoding: data, as: UTF8.self)
+            .split(separator: "\n").first.map(String.init) ?? ""
+        let decoded = try JSONDecoder().decode(
+            TranscriptShadowGateEntry.self, from: Data(line.utf8)
+        )
+        #expect(decoded.buildCommitSHA == BuildInfo.commitSHA)
+        #expect(decoded.buildCommitSHA?.isEmpty == false,
+                "BuildInfo.commitSHA contract: never empty (falls back to 'unknown')")
+    }
+
+    @Test("Exceeding threshold rotates active file to transcript-shadow-gate.1.jsonl")
+    func rotatesOnThreshold() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Threshold of 1 byte triggers rotation as soon as the active file
+        // has >= 2 lines (livelock guard requires >1 line before rotating).
+        let logger = try TranscriptShadowGateLogger(directory: dir, rotationThresholdBytes: 1)
+        await logger.record(sampleEntry(asset: "a"))
+        await logger.record(sampleEntry(asset: "b"))
+        await logger.flushAndClose()
+
+        let rotated = dir.appendingPathComponent("transcript-shadow-gate.1.jsonl")
+        #expect(FileManager.default.fileExists(atPath: rotated.path))
+    }
+
+    @Test("Warm start seeds next rotation index from highest existing rotated file")
+    func warmStartSeedsFromDisk() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Pre-seed a synthetic rotated file at index 5.
+        let preExisting = dir.appendingPathComponent("transcript-shadow-gate.5.jsonl")
+        try "pre-seeded\n".data(using: .utf8)!.write(to: preExisting)
+
+        let logger = try TranscriptShadowGateLogger(directory: dir, rotationThresholdBytes: 1)
+        let seed = await logger.currentNextRotationIndex()
+        #expect(seed == 6)
+
+        await logger.record(sampleEntry(asset: "warm-a"))
+        await logger.record(sampleEntry(asset: "warm-b"))
+        await logger.flushAndClose()
+
+        let r6 = dir.appendingPathComponent("transcript-shadow-gate.6.jsonl")
+        #expect(FileManager.default.fileExists(atPath: r6.path))
+        #expect(FileManager.default.fileExists(atPath: preExisting.path),
+                "Pre-existing rotated file must be preserved across warm start")
+    }
+
+    @Test("Livelock guard skips rotation when active file has only one line")
+    func livelockGuardSkipsRotation() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let logger = try TranscriptShadowGateLogger(directory: dir, rotationThresholdBytes: 1)
+        await logger.record(sampleEntry(asset: "lone"))
+        await logger.flushAndClose()
+
+        let rotated = dir.appendingPathComponent("transcript-shadow-gate.1.jsonl")
+        #expect(!FileManager.default.fileExists(atPath: rotated.path),
+                "Single-line file must NOT rotate — would loop forever on a >threshold record")
+        let active = dir.appendingPathComponent(TranscriptShadowGateLogger.activeLogFilename)
+        #expect(FileManager.default.fileExists(atPath: active.path))
+    }
+
+    @Test("No-op TranscriptShadowGateLogger writes no files")
+    func noOpWritesNothing() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let noop: TranscriptShadowGateLogging = NoOpTranscriptShadowGateLogger()
+        await noop.record(sampleEntry())
+
+        let contents = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        #expect(contents.isEmpty, "NoOp logger must not write any files")
+    }
+}

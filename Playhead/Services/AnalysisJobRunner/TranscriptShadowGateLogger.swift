@@ -228,3 +228,297 @@ struct NoOpTranscriptShadowGateLogger: TranscriptShadowGateLogging {
         // intentionally blank
     }
 }
+
+// MARK: - TranscriptShadowGateLogger (actor-backed JSONL writer)
+
+/// Actor-backed JSONL writer for shadow-mode transcript-gate decisions.
+/// DEBUG-only by convention — `PlayheadRuntime` gates construction
+/// behind `#if DEBUG` so release builds never write to disk.
+///
+/// Mechanical clone of `DecisionLogger`: lazy `migrate()` bootstrap,
+/// 10 MB rotation with crash-safe `replaceItemAt` swap, livelock guard
+/// for >threshold single-line records, idempotent rotation-index scan.
+/// See `DecisionLogger.swift` for the canonical design notes.
+///
+/// Every encoded row is stamped with `BuildInfo.commitSHA` so eval
+/// tooling can correlate captures with the exact binary that produced
+/// them. Callers pass `buildCommitSHA: nil`; the actor overwrites in
+/// `appendEntry` before encoding.
+actor TranscriptShadowGateLogger: TranscriptShadowGateLogging {
+
+    static let defaultRotationThresholdBytes: Int = 10 * 1024 * 1024
+    static let activeLogFilename: String = "transcript-shadow-gate.jsonl"
+    static let rotatedPrefix: String = "transcript-shadow-gate"
+    static let rotatedSuffix: String = ".jsonl"
+
+    private let directoryOverride: URL?
+    private var resolvedDirectory: URL?
+
+    private let rotationThresholdBytes: Int
+    private let buildCommitSHA: String
+    private let encoder: JSONEncoder
+    private let logger = Logger(subsystem: "com.playhead", category: "TranscriptShadowGateLogger")
+
+    private var nextRotationIndex: Int?
+    private var fileHandle: FileHandle?
+
+    // MARK: - Init
+
+    /// Convenience init that targets `FileManager.default
+    /// .urls(for: .documentDirectory, in: .userDomainMask)[0]`.
+    /// Documents lookup + directory create are deferred to first use;
+    /// production callers `await logger.migrate()` from `PlayheadRuntime`'s
+    /// deferred init Task to warm the path off-main.
+    init(rotationThresholdBytes: Int = TranscriptShadowGateLogger.defaultRotationThresholdBytes) throws {
+        self.directoryOverride = nil
+        self.rotationThresholdBytes = rotationThresholdBytes
+        // Capture the build SHA once at actor init — callers pass `nil` and
+        // we overwrite in `appendEntry`. Reading at init avoids hot-path
+        // repeats and keeps the eval pipeline correlation deterministic.
+        self.buildCommitSHA = BuildInfo.commitSHA
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        self.encoder = encoder
+        self.resolvedDirectory = nil
+        self.nextRotationIndex = nil
+    }
+
+    /// Designated init for testing: points the logger at an arbitrary
+    /// directory. The directory is created on first use, not at init.
+    init(
+        directory: URL,
+        rotationThresholdBytes: Int = TranscriptShadowGateLogger.defaultRotationThresholdBytes
+    ) throws {
+        self.directoryOverride = directory
+        self.rotationThresholdBytes = rotationThresholdBytes
+        self.buildCommitSHA = BuildInfo.commitSHA
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        self.encoder = encoder
+        self.resolvedDirectory = nil
+        self.nextRotationIndex = nil
+    }
+
+    /// Lazy first-use bootstrap. Resolves the directory (Documents lookup
+    /// for the convenience init), creates it, seeds `nextRotationIndex`
+    /// from disk. Idempotent.
+    func migrate() throws {
+        try ensureBootstrapped()
+    }
+
+    /// Lazy bootstrap shared by `migrate()` and the write path.
+    /// Idempotent on the (resolvedDirectory, nextRotationIndex) tuple.
+    private func ensureBootstrapped() throws {
+        if resolvedDirectory == nil {
+            let dir: URL
+            if let override = directoryOverride {
+                dir = override
+            } else {
+                dir = try FileManager.default.url(
+                    for: .documentDirectory,
+                    in: .userDomainMask,
+                    appropriateFor: nil,
+                    create: true
+                )
+            }
+            try FileManager.default.createDirectory(
+                at: dir, withIntermediateDirectories: true
+            )
+            self.resolvedDirectory = dir
+        }
+        if nextRotationIndex == nil, let dir = resolvedDirectory {
+            self.nextRotationIndex = Self.scanNextRotationIndex(in: dir)
+        }
+    }
+
+    // MARK: - Public API
+
+    /// Append one record to the log. Rotates if the active file exceeds the
+    /// threshold after the write.
+    func record(_ entry: TranscriptShadowGateEntry) async {
+        do {
+            try ensureBootstrapped()
+            try appendEntry(entry)
+            try rotateIfNeeded()
+        } catch {
+            logger.warning("TranscriptShadowGateLogger.record failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    // MARK: - Test hooks
+
+    /// Returns the currently-scheduled rotation index. For tests.
+    /// Triggers the lazy bootstrap so tests that probe this value
+    /// pre-write observe the seeded value rather than a zero.
+    func currentNextRotationIndex() -> Int {
+        try? ensureBootstrapped()
+        return nextRotationIndex ?? 1
+    }
+
+    /// Force-close the handle. Tests use this before reading the file
+    /// back through `Data(contentsOf:)` to make sure pending writes flushed.
+    func flushAndClose() {
+        closeHandle()
+    }
+
+    /// Absolute path to the currently-active log file. Triggers the
+    /// lazy bootstrap on first call so callers can rely on the path
+    /// being valid.
+    var activeLogURL: URL {
+        try? ensureBootstrapped()
+        let dir = resolvedDirectory ?? directoryOverride ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        return dir.appendingPathComponent(Self.activeLogFilename)
+    }
+
+    /// All rotated log URLs, ordered by numeric index.
+    func rotatedLogURLs() -> [URL] {
+        try? ensureBootstrapped()
+        guard let dir = resolvedDirectory else { return [] }
+        return Self.listRotatedLogs(in: dir)
+    }
+
+    // MARK: - Internal
+
+    private func appendEntry(_ entry: TranscriptShadowGateEntry) throws {
+        // Stamp every encoded row with the build SHA captured at init.
+        // Callers pass `nil`; we own the stamp here so the eval pipeline
+        // can correlate captures to the binary that produced them.
+        let stamped = TranscriptShadowGateEntry(
+            schemaVersion: entry.schemaVersion,
+            timestamp: entry.timestamp,
+            analysisAssetID: entry.analysisAssetID,
+            episodeID: entry.episodeID,
+            shardID: entry.shardID,
+            shardStart: entry.shardStart,
+            shardEnd: entry.shardEnd,
+            likelihood: entry.likelihood,
+            threshold: entry.threshold,
+            decision: entry.decision,
+            wouldGate: entry.wouldGate,
+            transcribed: entry.transcribed,
+            buildCommitSHA: buildCommitSHA
+        )
+        let data = try encoder.encode(stamped)
+        var line = Data()
+        line.reserveCapacity(data.count + 1)
+        line.append(data)
+        line.append(0x0A)  // newline
+        try write(line)
+    }
+
+    private func write(_ data: Data) throws {
+        let url = activeLogURL
+        if fileHandle == nil {
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            }
+            fileHandle = try FileHandle(forWritingTo: url)
+            try fileHandle?.seekToEnd()
+        }
+        try fileHandle?.write(contentsOf: data)
+    }
+
+    private func rotateIfNeeded() throws {
+        let url = activeLogURL
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+        guard size >= rotationThresholdBytes else { return }
+        // Livelock guard: a single record larger than the threshold would
+        // produce a fresh active file that is itself still oversized,
+        // looping the rotation forever. Skip rotation when the active
+        // file has only one line. Mirrors DecisionLogger.
+        if try lineCount(at: url) <= 1 {
+            logger.warning(
+                "TranscriptShadowGateLogger: active log exceeds threshold but has \u{2264}1 line; skipping rotation to avoid livelock"
+            )
+            return
+        }
+        try rotateNow()
+    }
+
+    /// Count newlines in `url` up to a small budget. Stops after seeing a
+    /// second newline because the livelock guard only needs to distinguish
+    /// "one record" from "more than one record."
+    private func lineCount(at url: URL) throws -> Int {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var count = 0
+        while let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
+            for byte in chunk where byte == 0x0A {
+                count += 1
+                if count >= 2 { return count }
+            }
+        }
+        return count
+    }
+
+    private func rotateNow() throws {
+        try ensureBootstrapped()
+        guard let dir = resolvedDirectory, let idx = nextRotationIndex else {
+            return
+        }
+        let src = activeLogURL
+        let dstName = "\(Self.rotatedPrefix).\(idx)\(Self.rotatedSuffix)"
+        let dst = dir.appendingPathComponent(dstName)
+
+        closeHandle()
+
+        // Crash-safe: atomic `replaceItemAt` when destination exists,
+        // else `moveItem`. Mirrors DecisionLogger.
+        let fm = FileManager.default
+        if fm.fileExists(atPath: dst.path) {
+            _ = try fm.replaceItemAt(dst, withItemAt: src)
+        } else {
+            try fm.moveItem(at: src, to: dst)
+        }
+        nextRotationIndex = idx + 1
+        logger.info("TranscriptShadowGateLogger: rotated active log to \(dstName, privacy: .public)")
+    }
+
+    private func closeHandle() {
+        if let handle = fileHandle {
+            try? handle.close()
+            fileHandle = nil
+        }
+    }
+
+    // MARK: - Static helpers
+
+    /// Scan the directory for existing `transcript-shadow-gate.N.jsonl`
+    /// files and return the next index to use. Idempotent across launches.
+    fileprivate static func scanNextRotationIndex(in directory: URL) -> Int {
+        listRotatedLogs(in: directory)
+            .compactMap { extractRotationIndex(from: $0.lastPathComponent) }
+            .max()
+            .map { $0 + 1 } ?? 1
+    }
+
+    fileprivate static func listRotatedLogs(in directory: URL) -> [URL] {
+        guard let items = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        let matches = items.filter { url in
+            extractRotationIndex(from: url.lastPathComponent) != nil
+        }
+        return matches.sorted { lhs, rhs in
+            let li = extractRotationIndex(from: lhs.lastPathComponent) ?? 0
+            let ri = extractRotationIndex(from: rhs.lastPathComponent) ?? 0
+            return li < ri
+        }
+    }
+
+    /// Returns the rotation index embedded in a filename like
+    /// `transcript-shadow-gate.7.jsonl`, or nil if the name is the active
+    /// file or doesn't match the pattern.
+    fileprivate static func extractRotationIndex(from name: String) -> Int? {
+        let prefix = rotatedPrefix + "."
+        let suffix = rotatedSuffix
+        guard name.hasPrefix(prefix), name.hasSuffix(suffix) else { return nil }
+        let middle = name.dropFirst(prefix.count).dropLast(suffix.count)
+        return Int(middle)  // nil when middle is "jsonl" (active file)
+    }
+}
