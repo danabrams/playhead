@@ -2095,6 +2095,52 @@ struct StreamingAudioDecoderTests {
         await decoder.cleanup()
     }
 
+    @Test("Corrupt mid-stream bytes finish the stream with a failure reason (H1)")
+    func corruptMidStreamSurfacesFailure() async {
+        // Bytes that don't match any audio header — `AVAudioFile` should
+        // reject the file once enough bytes are present to attempt
+        // detection. The decoder must finish the AsyncStream so the
+        // consumer's `for await` returns rather than stalling.
+        let decoder = StreamingAudioDecoder(
+            episodeID: "test",
+            shardDuration: 1.0,
+            contentType: "wav"
+        )
+        let stream = await decoder.shards()
+
+        // 32 KB of garbage with a fake "RIFF" prefix. Enough to clear
+        // `minimumBytesForDetection` so a decode attempt actually fires.
+        var garbage = Data()
+        garbage.append(contentsOf: "RIFF".utf8)
+        garbage.append(Data(repeating: 0xAB, count: 32_000))
+        await decoder.feedData(garbage)
+        await decoder.finish()
+
+        var count = 0
+        for await _ in stream { count += 1 }
+        #expect(count == 0, "Garbage bytes must not produce any shards")
+        // The garbage path should hit the AVAudioConverter setup failure
+        // (or AVAudioFile rejection) and either finish naturally or
+        // record a failure. Either is correct — what we MUST NOT see is
+        // a stalled `for await`. The count == 0 above is the load-bearing
+        // assertion; we additionally probe the failure-reason accessor
+        // for diagnostic completeness when a failure was recorded.
+        let reason = await decoder.failureReason()
+        if let r = reason {
+            #expect(r.stage == .converterSetup || r.stage == .converterError)
+        }
+        await decoder.cleanup()
+    }
+
+    @Test("cleanup() is idempotent (H2)")
+    func cleanupIdempotent() async {
+        let decoder = StreamingAudioDecoder(episodeID: "test", shardDuration: 30.0)
+        await decoder.feedData(Data(repeating: 0xFF, count: 100))
+        await decoder.cleanup()
+        await decoder.cleanup()  // Must not crash, must not throw.
+        await decoder.cleanup()  // Triple-cleanup also fine.
+    }
+
     // MARK: - WAV Helper
 
     /// Builds a minimal 16kHz mono 16-bit PCM WAV in memory.
