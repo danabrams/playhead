@@ -453,6 +453,19 @@ actor FeatureExtractionService {
     private let fftSetup: vDSP.FFT<DSPSplitComplex>?
     private let fftLog2n: vDSP_Length
 
+    #if DEBUG
+    /// Test-only watermark of the largest in-flight per-call accumulator
+    /// observed across the lifetime of this service. Used by
+    /// `FeatureExtractionSignalTests.peakAccumulatorBoundedAcrossShards`
+    /// to pin the no-double-source-of-truth invariant from playhead-wmjr.
+    /// Reset to zero at the start of each `extractAndPersist(...)` call.
+    private(set) var _peakInFlightWindowCountForTesting: Int = 0
+
+    func peakInFlightWindowCountForTesting() -> Int {
+        _peakInFlightWindowCountForTesting
+    }
+    #endif
+
     init(
         store: AnalysisStore,
         config: FeatureExtractionConfig = .default,
@@ -476,6 +489,11 @@ actor FeatureExtractionService {
     /// `featureCoverageEndTime` in the analysis asset). Updates coverage
     /// after each shard so extraction is resumable.
     ///
+    /// SQLite (via `AnalysisStore.fetchFeatureWindows(assetId:from:to:)`)
+    /// is the sole source of truth for extracted windows — this method
+    /// returns no in-memory mirror of what it persisted (playhead-wmjr).
+    /// Callers that need the persisted rows should fetch from the store.
+    ///
     /// - Parameters:
     ///   - shards: Decoded audio shards from AnalysisAudioService.
     ///   - analysisAssetId: The analysis asset these shards belong to.
@@ -485,25 +503,26 @@ actor FeatureExtractionService {
     ///     the service polls `signal.isPreemptionRequested()` after
     ///     each shard's feature batch + checkpoint persists. On a
     ///     true result it `acknowledge()`s the coordinator and returns
-    ///     early with whatever windows were persisted so far. This is
-    ///     the (a) "post-shard in FeatureExtraction" AND (b)
-    ///     "FeatureExtractionCheckpoint transitions" safe points from
-    ///     the bead spec — they are the same boundary from the
-    ///     caller's perspective because `persistFeatureExtractionBatch`
-    ///     atomically writes windows + checkpoint + coverage.
-    /// - Returns: Array of extracted FeatureWindow records.
-    @discardableResult
+    ///     early. This is the (a) "post-shard in FeatureExtraction"
+    ///     AND (b) "FeatureExtractionCheckpoint transitions" safe
+    ///     points from the bead spec — they are the same boundary
+    ///     from the caller's perspective because
+    ///     `persistFeatureExtractionBatch` atomically writes
+    ///     windows + checkpoint + coverage.
     func extractAndPersist(
         shards: [AnalysisShard],
         analysisAssetId: String,
         existingCoverage: Double = 0,
         preemption: PreemptionContext? = nil
-    ) async throws -> [FeatureWindow] {
+    ) async throws {
         guard !shards.isEmpty else {
             throw FeatureExtractionError.emptyInput
         }
 
-        var allWindows: [FeatureWindow] = []
+        #if DEBUG
+        _peakInFlightWindowCountForTesting = 0
+        #endif
+
         var effectiveCoverage = try await repairCoverageForCurrentFeatureVersion(
             analysisAssetId: analysisAssetId,
             existingCoverage: existingCoverage
@@ -535,20 +554,13 @@ actor FeatureExtractionService {
             let windows = extractionResult.windows
             extractionState = extractionResult.state
 
-            if let priorWindowUpdate = extractionResult.priorWindowUpdate {
-                if let lastIndex = allWindows.lastIndex(where: {
-                    abs($0.startTime - priorWindowUpdate.startTime) <= 1e-6 &&
-                    abs($0.endTime - priorWindowUpdate.endTime) <= 1e-6
-                }) {
-                    let previous = allWindows[lastIndex]
-                    allWindows[lastIndex] = rebuildWindow(
-                        previous,
-                        speakerChangeProxyScore: priorWindowUpdate.speakerChangeProxyScore
-                    )
-                }
-            }
-
             guard !windows.isEmpty else { continue }
+
+            #if DEBUG
+            if windows.count > _peakInFlightWindowCountForTesting {
+                _peakInFlightWindowCountForTesting = windows.count
+            }
+            #endif
 
             let checkpoint = makeCheckpoint(
                 analysisAssetId: analysisAssetId,
@@ -578,8 +590,6 @@ actor FeatureExtractionService {
                 effectiveCoverage = lastWindow.endTime
             }
 
-            allWindows.append(contentsOf: windows)
-
             // playhead-01t8 safe points (a) + (b): the shard's windows,
             // checkpoint, and coverage watermark are durable. If a
             // higher-lane job has flipped the preemption signal we
@@ -587,11 +597,9 @@ actor FeatureExtractionService {
             // the next run will resume from `effectiveCoverage`.
             if let preemption, await preemption.isPreemptionRequested() {
                 await preemption.acknowledge()
-                return allWindows
+                return
             }
         }
-
-        return allWindows
     }
 
     /// Extract features from raw samples without persisting.

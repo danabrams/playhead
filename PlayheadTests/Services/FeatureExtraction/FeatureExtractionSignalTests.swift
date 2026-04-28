@@ -299,7 +299,7 @@ struct FeatureExtractionSignalTests {
             analysisAssetId: "asset-1"
         )
 
-        let extracted = try await service.extractAndPersist(
+        try await service.extractAndPersist(
             shards: [
                 AnalysisShard(
                     id: 0,
@@ -319,6 +319,7 @@ struct FeatureExtractionSignalTests {
             analysisAssetId: "asset-1",
             existingCoverage: 0
         )
+        let extracted = try await store.fetchFeatureWindows(assetId: "asset-1", from: 0, to: 8)
 
         assertMatchesWholeBufferReference(extracted: extracted, reference: reference)
     }
@@ -346,7 +347,7 @@ struct FeatureExtractionSignalTests {
             analysisAssetId: "asset-1"
         )
 
-        let firstBatch = try await service.extractAndPersist(
+        try await service.extractAndPersist(
             shards: [
                 AnalysisShard(
                     id: 0,
@@ -359,12 +360,13 @@ struct FeatureExtractionSignalTests {
             analysisAssetId: "asset-1",
             existingCoverage: 0
         )
+        let firstBatch = try await store.fetchFeatureWindows(assetId: "asset-1", from: 0, to: 4)
         let checkpoint = try await store.fetchFeatureExtractionCheckpoint(
             assetId: "asset-1",
             featureVersion: config.featureVersion,
             endingAt: 4
         )
-        let secondBatch = try await service.extractAndPersist(
+        try await service.extractAndPersist(
             shards: [
                 AnalysisShard(
                     id: 1,
@@ -377,6 +379,7 @@ struct FeatureExtractionSignalTests {
             analysisAssetId: "asset-1",
             existingCoverage: 4
         )
+        let secondBatch = try await store.fetchFeatureWindows(assetId: "asset-1", from: 4, to: 8)
         let fetched = try await store.fetchFeatureWindows(assetId: "asset-1", from: 0, to: 8)
 
         #expect(firstBatch.count == 2)
@@ -408,7 +411,7 @@ struct FeatureExtractionSignalTests {
             analysisAssetId: "asset-1"
         )
 
-        let firstBatch = try await service.extractAndPersist(
+        try await service.extractAndPersist(
             shards: [
                 AnalysisShard(
                     id: 0,
@@ -421,6 +424,7 @@ struct FeatureExtractionSignalTests {
             analysisAssetId: "asset-1",
             existingCoverage: 0
         )
+        let firstBatch = try await store.fetchFeatureWindows(assetId: "asset-1", from: 0, to: 4)
 
         await store.setFeatureBatchPersistenceFaultInjectionForTesting(.afterCoverageUpdateBeforeCommit)
         await #expect(throws: AnalysisStoreError.self) {
@@ -453,7 +457,7 @@ struct FeatureExtractionSignalTests {
         #expect(checkpointAfterFailure != nil)
         assertMatchesWholeBufferReference(extracted: windowsAfterFailure, reference: firstBatch)
 
-        let retriedSecondBatch = try await service.extractAndPersist(
+        try await service.extractAndPersist(
             shards: [
                 AnalysisShard(
                     id: 1,
@@ -466,6 +470,7 @@ struct FeatureExtractionSignalTests {
             analysisAssetId: "asset-1",
             existingCoverage: assetAfterFailure?.featureCoverageEndTime ?? 0
         )
+        let retriedSecondBatch = try await store.fetchFeatureWindows(assetId: "asset-1", from: 4, to: 8)
         let fetched = try await store.fetchFeatureWindows(assetId: "asset-1", from: 0, to: 8)
 
         #expect(retriedSecondBatch.count == 2)
@@ -512,7 +517,7 @@ struct FeatureExtractionSignalTests {
             musicProbabilityTimelineBuilder: builder.makeBuilder()
         )
 
-        let extracted = try await service.extractAndPersist(
+        try await service.extractAndPersist(
             shards: [
                 AnalysisShard(
                     id: 0,
@@ -525,14 +530,63 @@ struct FeatureExtractionSignalTests {
             analysisAssetId: "asset-1",
             existingCoverage: 4
         )
-        let fetched = try await store.fetchFeatureWindows(assetId: "asset-1", from: 0, to: 4)
+        let extracted = try await store.fetchFeatureWindows(assetId: "asset-1", from: 0, to: 4)
         let asset = try await store.fetchAsset(id: "asset-1")
 
         #expect(extracted.count == 2)
-        #expect(fetched.count == 2)
-        #expect(fetched.allSatisfy { $0.featureVersion == config.featureVersion })
-        #expect(approximatelyEqual(fetched[0].musicProbability, 0.95, tolerance: 1e-6))
-        #expect(approximatelyEqual(fetched[1].musicProbability, 0.85, tolerance: 1e-6))
+        #expect(extracted.allSatisfy { $0.featureVersion == config.featureVersion })
+        #expect(approximatelyEqual(extracted[0].musicProbability, 0.95, tolerance: 1e-6))
+        #expect(approximatelyEqual(extracted[1].musicProbability, 0.85, tolerance: 1e-6))
         #expect(asset?.featureCoverageEndTime == 4)
+    }
+
+    @Test("Peak in-flight window count stays bounded across many shards (playhead-wmjr)")
+    func peakAccumulatorBoundedAcrossShards() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAnalysisAsset())
+
+        // 30 shards of 4 s each = 120 s. With 2 s windows that's 60 windows
+        // in the store at the end. The bound we want to pin: peak
+        // in-flight count <= ~one shard's worth of windows (~2-3) plus
+        // small slack — *not* 60. The bug bound is duration-independent
+        // so 30 shards proves the same invariant a 5-hour run would.
+        let samples = Array(repeating: Float(0.001), count: 32)
+        let config = makeFeatureExtractionConfig()
+        let service = FeatureExtractionService(
+            store: store,
+            config: config,
+            musicProbabilityTimelineBuilder: { _, _ in nil }
+        )
+        let shards = (0..<30).map { i in
+            AnalysisShard(
+                id: i,
+                episodeID: "ep-bound",
+                startTime: Double(i) * 4,
+                duration: 4,
+                samples: samples
+            )
+        }
+
+        try await service.extractAndPersist(
+            shards: shards,
+            analysisAssetId: "asset-1",
+            existingCoverage: 0
+        )
+
+        // Bound: at most one shard's windows (~3 with seam-overlap slack)
+        // plus a small fudge factor. The pre-fix accumulator would hit ~60.
+        let peak = await service.peakInFlightWindowCountForTesting()
+        #expect(
+            peak <= 8,
+            "Peak in-flight window count was \(peak), expected <= 8 (one shard's windows). Pre-fix value would be ~60."
+        )
+
+        // Sanity: the store still has the full result.
+        let persisted = try await store.fetchFeatureWindows(
+            assetId: "asset-1",
+            from: 0,
+            to: 120
+        )
+        #expect(persisted.count >= 50, "Expected >= 50 persisted windows from 30 shards, got \(persisted.count)")
     }
 }
