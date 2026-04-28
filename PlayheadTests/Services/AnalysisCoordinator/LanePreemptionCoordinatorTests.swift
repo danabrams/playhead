@@ -668,7 +668,7 @@ struct LanePreemptionFeatureExtractionRoundTripTests {
 
         // Kick off extraction on its own task so we can flip the signal
         // mid-flight.
-        let extractionTask = Task<[FeatureWindow], Error> {
+        let extractionTask = Task<Void, Error> {
             try await featureService.extractAndPersist(
                 shards: shards,
                 analysisAssetId: assetId,
@@ -705,7 +705,8 @@ struct LanePreemptionFeatureExtractionRoundTripTests {
         )
         let elapsed = clock.now - admissionAt
 
-        let windows = try await extractionTask.value
+        try await extractionTask.value
+        let windows = try await store.fetchFeatureWindows(assetId: assetId, from: 0, to: .infinity)
 
         #expect(acked, "Extractor must acknowledge within the 5 s HARD GATE")
         #expect(elapsed < LanePreemptionCoordinator.preemptionLatencyBudget,
