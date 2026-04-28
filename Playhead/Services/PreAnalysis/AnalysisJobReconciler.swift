@@ -209,6 +209,20 @@ actor AnalysisJobReconciler {
     /// can grep `JobReconciler` in Console for `stranded_session_recovered`
     /// markers.
     private func recoverStrandedSessionJobs() async throws -> Int {
+        // Sequential-ordering invariant (review-followup csp / L3):
+        // this step reads `_meta.scheduler_epoch` once at entry. Any
+        // upstream call that mutates the epoch (today: only the
+        // `incrementSchedulerEpoch` that happens before
+        // `PlayheadRuntime.startSchedulerLoop` boots the reconciler)
+        // MUST have completed before we are invoked. The reconciler
+        // sequencing in `reconcile()` above honors this — step 1
+        // (`recoverExpiredLeases`) does not touch the epoch, and the
+        // bead-btwk wiring guarantees we run after the runtime's
+        // launch-time epoch bump. If a future caller drives this
+        // function from a path that lets the epoch race the read,
+        // the stranded-detection predicate
+        // (`schedulerEpoch < currentEpoch`) will momentarily
+        // misclassify rows minted in the new epoch as stranded.
         let now = Date().timeIntervalSince1970
         let currentEpoch = (try await store.fetchSchedulerEpoch()) ?? 0
         let stranded = try await store.fetchStrandedActiveJobs(

@@ -188,6 +188,29 @@ actor AnalysisWorkScheduler {
     /// Admission decision the scheduler derives from the current QualityProfile
     /// and applies to every loop iteration. Consolidates thermal/battery/
     /// low-power gating into a single surface — see `QualityProfile.derive`.
+    ///
+    /// **Foreground-aggressive relaxation surface** (review-followup
+    /// csp / L4). When the scheduler is in foreground-aggressive mode
+    /// (see `isForegroundAggressiveMode()`), `relaxedPolicy(for:profile:foregroundAggressive:)`
+    /// rewrites the baseline `SchedulerPolicy` derived from the
+    /// QualityProfile to widen Soon-lane admission. The relaxation is
+    /// deliberately narrow:
+    ///
+    /// - Triggers ONLY when `profile == .serious`. `.nominal`,
+    ///   `.fair`, and `.critical` pass through untouched. In
+    ///   particular `.critical` is never relaxed because
+    ///   `pauseAllWork` is dominant in every state and the device is
+    ///   too hot to pile on more work safely.
+    /// - Reopens ONLY `allowSoonLane`. `allowBackgroundLane` and
+    ///   `pauseAllWork` keep the baseline policy's values, so deep
+    ///   T2 backfill stays gated and global pause is honored.
+    /// - `sliceFraction` is forwarded unchanged — slice sizing is
+    ///   the QualityProfile's responsibility and not part of the
+    ///   relaxation surface.
+    ///
+    /// Anyone widening this relaxation MUST keep the
+    /// foreground-aggressive precondition and the
+    /// `pauseAllWork`-dominant safety property intact.
     struct LaneAdmission: Sendable, Equatable {
         let qualityProfile: QualityProfile
         let policy: QualityProfile.SchedulerPolicy
