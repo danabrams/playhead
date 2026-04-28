@@ -19,7 +19,7 @@ struct AdCatalogStoreTests {
 
     private func sampleFingerprint(seed: Int = 1) -> AcousticFingerprint {
         let values = (0..<64).map { Float(($0 + seed) % 17) + 0.5 }
-        return AcousticFingerprint(values: values)
+        return AcousticFingerprint(values: values)!
     }
 
     /// Build an orthogonal-ish fingerprint distinct from `sampleFingerprint(seed:)`.
@@ -31,7 +31,7 @@ struct AdCatalogStoreTests {
         for i in 32..<64 {
             values[i] = Float((i + seed) % 13) + 1.0
         }
-        return AcousticFingerprint(values: values)
+        return AcousticFingerprint(values: values)!
     }
 
     // MARK: - Insert + query roundtrip
@@ -83,7 +83,7 @@ struct AdCatalogStoreTests {
         // Build an orthogonal fingerprint for the query.
         var other = [Float](repeating: 0, count: 64)
         for i in 0..<32 { other[i] = Float(i + 1) }
-        let orthogonalFP = AcousticFingerprint(values: other)
+        let orthogonalFP = AcousticFingerprint(values: other)!
 
         let matches = await store.matches(
             fingerprint: orthogonalFP,
@@ -109,7 +109,7 @@ struct AdCatalogStoreTests {
         // Close-but-not-identical query fingerprint.
         var closeValues = fp.values
         for i in 0..<8 { closeValues[i] = closeValues[i] * 0.7 }
-        let closeFP = AcousticFingerprint(values: closeValues)
+        let closeFP = AcousticFingerprint(values: closeValues)!
 
         let strict = await store.matches(fingerprint: closeFP, show: "show-1", similarityFloor: 0.999)
         let permissive = await store.matches(fingerprint: closeFP, show: "show-1", similarityFloor: 0.50)
@@ -174,7 +174,7 @@ struct AdCatalogStoreTests {
         let dir = try makeTempDir()
         let store = try AdCatalogStore(directoryURL: dir)
 
-        let zero = AcousticFingerprint(values: [])
+        let zero = AcousticFingerprint(values: [])!
         _ = try await store.insert(
             showId: "show-1",
             episodePosition: .preRoll,
@@ -198,7 +198,7 @@ struct AdCatalogStoreTests {
             acousticFingerprint: sampleFingerprint(seed: 1)
         )
 
-        let zero = AcousticFingerprint(values: [])
+        let zero = AcousticFingerprint(values: [])!
         let matches = await store.matches(fingerprint: zero, show: "show-1", similarityFloor: 0.80)
         #expect(matches.isEmpty)
     }
@@ -261,10 +261,10 @@ struct AdCatalogStoreTests {
         let fpHi = sampleFingerprint(seed: 1)
         var closerValues = fpHi.values
         for i in 0..<4 { closerValues[i] *= 0.9 }
-        let fpMid = AcousticFingerprint(values: closerValues)
+        let fpMid = AcousticFingerprint(values: closerValues)!
         var furtherValues = fpHi.values
         for i in 0..<16 { furtherValues[i] *= 0.3 }
-        let fpLo = AcousticFingerprint(values: furtherValues)
+        let fpLo = AcousticFingerprint(values: furtherValues)!
 
         _ = try await store.insert(
             showId: "show-1", episodePosition: .preRoll,
@@ -327,7 +327,7 @@ struct AdCatalogStoreTests {
         // 2) A future episode produces a candidate with a near-identical fp.
         var slightlyDifferent = correctionFP.values
         for i in 0..<4 { slightlyDifferent[i] *= 0.95 }
-        let futureFP = AcousticFingerprint(values: slightlyDifferent)
+        let futureFP = AcousticFingerprint(values: slightlyDifferent)!
 
         let matches = await store.matches(
             fingerprint: futureFP,

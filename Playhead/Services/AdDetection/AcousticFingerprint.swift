@@ -48,12 +48,19 @@ struct AcousticFingerprint: Sendable, Hashable, Codable {
     /// `vectorLength`; constructor guards this.
     let values: [Float]
 
-    /// Construct from an arbitrary-length feature vector. The input is
-    /// padded or truncated to `vectorLength`, then L2-normalized so
-    /// `similarity(a, b)` is a cosine. Throws nothing — zero-length or
-    /// all-zero inputs produce a canonical zero fingerprint that compares
+    /// Construct from a non-negative feature vector. The input is padded
+    /// or truncated to `vectorLength`, then L2-normalized so
+    /// `similarity(a, b)` is a cosine in `[0, 1]`.
+    ///
+    /// Returns `nil` if any input element is negative — the
+    /// `similarity(_:_:)` contract assumes non-negative fingerprints
+    /// (clamps negative dot products to 0), and accepting negatives here
+    /// would silently invalidate that. Zero-length or all-zero inputs are
+    /// valid and produce a canonical zero fingerprint that compares
     /// similarity 0 against everything (including itself).
-    init(values: [Float]) {
+    init?(values: [Float]) {
+        for v in values where v < 0 { return nil }
+
         let clipped: [Float]
         if values.count >= Self.vectorLength {
             clipped = Array(values.prefix(Self.vectorLength))
@@ -81,6 +88,13 @@ struct AcousticFingerprint: Sendable, Hashable, Codable {
     var isZero: Bool {
         for v in values where v != 0 { return false }
         return true
+    }
+
+    /// Canonical zero fingerprint, equivalent to `AcousticFingerprint(values: [])!`.
+    /// Used by internal builders that want to bail out without forcing
+    /// the failable init's unwrap at every site.
+    static var zero: AcousticFingerprint {
+        AcousticFingerprint(rawNormalizedValues: [Float](repeating: 0, count: vectorLength))
     }
 
     // MARK: - Serialization
@@ -125,6 +139,11 @@ struct AcousticFingerprint: Sendable, Hashable, Codable {
 
     /// Cosine similarity in `[0, 1]` for non-negative fingerprints.
     /// Symmetric; bounded; identity = 1.0 (modulo zero-vector edge case).
+    ///
+    /// `init?(values:)` rejects negative inputs so the dot product of two
+    /// L2-normalized non-negative vectors is mathematically non-negative;
+    /// any sub-zero value is FP drift and is asserted in DEBUG. A second
+    /// clamp at `1.0` guards the upper end against the same drift.
     static func similarity(
         _ a: AcousticFingerprint,
         _ b: AcousticFingerprint
@@ -136,7 +155,8 @@ struct AcousticFingerprint: Sendable, Hashable, Codable {
         for i in 0..<vectorLength {
             dot += a.values[i] * b.values[i]
         }
-        // Clamp to guard against tiny FP drift above 1.0.
+        assert(dot >= -.ulpOfOne, "AcousticFingerprint.similarity dot=\(dot) negative — non-negative invariant broken")
+        // Clamp to guard against tiny FP drift above 1.0 / below 0.0.
         if dot > 1.0 { return 1.0 }
         if dot < 0.0 { return 0.0 }
         return dot
@@ -157,7 +177,7 @@ struct AcousticFingerprint: Sendable, Hashable, Codable {
     /// (too short to be a reliable match). Callers should check `isZero`.
     static func fromPCM(_ pcm: [Float], sampleRate: Double) -> AcousticFingerprint {
         guard sampleRate > 0, pcm.count >= Int(sampleRate * 0.25) else {
-            return AcousticFingerprint(values: [])
+            return AcousticFingerprint.zero
         }
 
         let bandCount = 60
@@ -169,7 +189,7 @@ struct AcousticFingerprint: Sendable, Hashable, Codable {
         let windowSize = 512
         let hopSize = 256
         guard pcm.count >= windowSize else {
-            return AcousticFingerprint(values: [])
+            return AcousticFingerprint.zero
         }
 
         let binCount = windowSize / 2
@@ -205,7 +225,7 @@ struct AcousticFingerprint: Sendable, Hashable, Codable {
             vDSP_Length(windowSize),
             .FORWARD
         ) else {
-            return AcousticFingerprint(values: [])
+            return AcousticFingerprint.zero
         }
         defer { vDSP_DFT_DestroySetup(dftSetup) }
 
@@ -272,7 +292,7 @@ struct AcousticFingerprint: Sendable, Hashable, Codable {
         }
 
         guard frameCount > 0 else {
-            return AcousticFingerprint(values: [])
+            return AcousticFingerprint.zero
         }
 
         let fc = Float(frameCount)
@@ -284,7 +304,10 @@ struct AcousticFingerprint: Sendable, Hashable, Codable {
         vector.append(centroidSum / fc)
         vector.append(flatnessSum / fc)
 
-        return AcousticFingerprint(values: vector)
+        // Vector is non-negative by construction (log energies, |zcr|,
+        // rms, centroid as fraction, flatness as positive ratio). The
+        // `?? .zero` is belt-and-suspenders against FP edge cases.
+        return AcousticFingerprint(values: vector) ?? .zero
     }
 
     // MARK: - FeatureWindow → fingerprint (gtt9.17)
@@ -333,7 +356,7 @@ struct AcousticFingerprint: Sendable, Hashable, Codable {
     /// returns a zero fingerprint (filtered out by the catalog insert path).
     static func fromFeatureWindows(_ windows: [FeatureWindow]) -> AcousticFingerprint {
         guard !windows.isEmpty else {
-            return AcousticFingerprint(values: [])
+            return AcousticFingerprint.zero
         }
 
         let streams: [[Double]] = [
@@ -399,7 +422,10 @@ struct AcousticFingerprint: Sendable, Hashable, Codable {
             vector.append(Float(max(0, activeFraction)))
         }
 
-        return AcousticFingerprint(values: vector)
+        // All entries are explicitly clamped non-negative above; the
+        // `?? .zero` guards against the failable init contract change
+        // without requiring the caller to handle an optional.
+        return AcousticFingerprint(values: vector) ?? .zero
     }
 }
 
