@@ -103,6 +103,13 @@ struct AnalysisStoreReviewFollowupTests {
         // `featureCoverageEndTime` and `fastTranscriptCoverageEndTime`
         // were transposed, the original test that left
         // fastTranscript=nil would be silently green.)
+        // NOTE: `insertAsset` does NOT write `terminalReason` — that
+        // column is populated separately by `markAssetTerminal`. So we
+        // exercise the ordering contract for the 14 columns that DO go
+        // through the insert path. `terminalReason` round-trips on a
+        // separate column index path that the SELECT decode also has
+        // to keep aligned, but proving _that_ would require a separate
+        // markAssetTerminal call in the test.
         let store = try await makeTestStore()
         let original = AnalysisAsset(
             id: "asset-roundtrip",
@@ -118,7 +125,6 @@ struct AnalysisStoreReviewFollowupTests {
             capabilitySnapshot: "{\"thermal\":\"nominal\"}",
             artifactClass: .media,
             episodeDurationSec: 999.5,
-            terminalReason: "completeFull",
             episodeTitle: "Roundtrip Episode"
         )
         try await store.insertAsset(original)
@@ -139,7 +145,6 @@ struct AnalysisStoreReviewFollowupTests {
         #expect(fetched.capabilitySnapshot == original.capabilitySnapshot)
         #expect(fetched.artifactClass == original.artifactClass)
         #expect(fetched.episodeDurationSec == original.episodeDurationSec)
-        #expect(fetched.terminalReason == original.terminalReason)
         #expect(fetched.episodeTitle == original.episodeTitle)
     }
 }
