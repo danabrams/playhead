@@ -151,18 +151,29 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
     /// The canary asserts that:
     ///   • the literal `try TranscriptShadowGateLogger()` appears in
     ///     `PlayheadRuntime.swift`
-    ///   • the literal sits inside a `#if DEBUG` … `#else` window
-    ///     (nearest enclosing `#if DEBUG` precedes the literal, and
-    ///     the matching `#else` of that arm follows the literal)
+    ///   • the literal sits inside a `#if DEBUG` … `#else` window —
+    ///     specifically: the nearest enclosing `#if DEBUG` precedes the
+    ///     literal, and that *same* arm's matching `#else` (or
+    ///     `#elseif`) appears AFTER the literal but BEFORE the arm
+    ///     closes (i.e. before the enclosing depth pops).
     ///
     /// A regression that hoists the construction outside the DEBUG arm
     /// — or replaces the `#if DEBUG` with a non-DEBUG flag — fails this
     /// test and blocks the merge before the file-system code reaches a
     /// shipping build.
     func testShadowGateLoggerIsConstructedInDebug() throws {
-        let source = try SwiftSourceInspector.loadSource(
+        let rawSource = try SwiftSourceInspector.loadSource(
             repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
         )
+
+        // Run all searches and the directive walk against a comment- and
+        // string-stripped projection of the file. Without this, a future
+        // doc comment that quotes `try TranscriptShadowGateLogger()` (or
+        // a log-line string that prints it) could become the canary's
+        // anchor and lock the assertions onto comment text instead of
+        // real code. `strippingCommentsAndStrings(_:)` preserves newlines
+        // so line indices line up with the raw source.
+        let source = SwiftSourceInspector.strippingCommentsAndStrings(rawSource)
 
         let literal = "try TranscriptShadowGateLogger()"
         guard let literalRange = source.range(of: literal) else {
@@ -192,20 +203,32 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
         // scanning prefix lengths.
         var literalLineIndex = 0
         var consumed = 0
+        var foundLiteralLine = false
         for (idx, line) in lines.enumerated() {
             // +1 accounts for the '\n' that `split` consumed between lines.
             let lineLen = line.count + 1
             if consumed + lineLen > literalOffset {
                 literalLineIndex = idx
+                foundLiteralLine = true
                 break
             }
             consumed += lineLen
         }
+        if !foundLiteralLine {
+            // The literal lives in the final line of the file (after the
+            // last `\n`, or if the file has no trailing newline). Without
+            // this fallback the index defaults to 0, which would silently
+            // mis-anchor the directive walk.
+            literalLineIndex = max(0, lines.count - 1)
+        }
 
         // Stack of "active branch is the DEBUG arm of an `#if DEBUG`?".
-        // Push true on `#if DEBUG`, false on any other `#if`. Flip to
-        // false on `#elseif`/`#else` (those arms are by definition NOT
-        // the DEBUG branch). Pop on `#endif`.
+        // Push true on `#if DEBUG` (strict `==` is intentional — any
+        // compound expression like `#if DEBUG || FOO` risks accidentally
+        // relaxing the gate; require an explicit canary update if the
+        // gate intentionally widens). Push false on any other `#if`.
+        // Flip the top of the stack to false on `#elseif`/`#else` (those
+        // arms are by definition NOT the DEBUG branch). Pop on `#endif`.
         var stack: [Bool] = []
         // After we have processed the line containing the literal we
         // capture whether the literal was inside a DEBUG arm AND that
@@ -214,6 +237,12 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
         var inDebugAtLiteral = false
         var sawElseAfterLiteral = false
         var literalDebugDepthAtSighting = 0
+        // Once the enclosing arm of the literal closes (its depth pops
+        // below the depth we captured at the sighting), any further
+        // `#else`/`#elseif` at that depth belongs to a *different*,
+        // unrelated `#if` block and must NOT count as the matching else.
+        // Latching this flag lets us ignore those late siblings.
+        var enclosingArmClosed = false
 
         for (idx, line) in lines.enumerated() {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -228,11 +257,15 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
                 stack.append(trimmed == "#if DEBUG")
             } else if trimmed.hasPrefix("#elseif ") {
                 if !stack.isEmpty {
-                    // Detect the `#else`/`#elseif` that closes the
-                    // arm enclosing the literal — only counts as
-                    // "matching" if we're still at the same depth the
-                    // literal observed.
+                    // Only counts as the "matching" else for the
+                    // literal's enclosing arm iff (a) we're past the
+                    // literal, (b) we're still at the same depth the
+                    // literal observed, (c) the enclosing arm has not
+                    // already closed (so this isn't an unrelated later
+                    // sibling), and (d) the current arm is still the
+                    // DEBUG branch.
                     if idx > literalLineIndex,
+                       !enclosingArmClosed,
                        stack.count == literalDebugDepthAtSighting,
                        stack.last == true {
                         sawElseAfterLiteral = true
@@ -242,6 +275,7 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
             } else if trimmed.hasPrefix("#else") {
                 if !stack.isEmpty {
                     if idx > literalLineIndex,
+                       !enclosingArmClosed,
                        stack.count == literalDebugDepthAtSighting,
                        stack.last == true {
                         sawElseAfterLiteral = true
@@ -250,6 +284,15 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
                 }
             } else if trimmed.hasPrefix("#endif") {
                 if !stack.isEmpty { stack.removeLast() }
+                // If the pop drops us below the depth captured at the
+                // literal sighting AND we're past the literal, the
+                // enclosing arm has officially closed. Any subsequent
+                // `#else`/`#elseif` at that depth belongs to a new,
+                // unrelated block and must be ignored.
+                if idx > literalLineIndex,
+                   stack.count < literalDebugDepthAtSighting {
+                    enclosingArmClosed = true
+                }
             }
         }
 
