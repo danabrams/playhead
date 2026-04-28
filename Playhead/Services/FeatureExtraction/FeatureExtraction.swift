@@ -686,6 +686,16 @@ actor FeatureExtractionService {
             return ([], initialState, nil)
         }
 
+        // playhead-rfu-aac L3: bail early when the input shard is shorter
+        // than a single window. The body's `while` already short-circuits
+        // in this case, but the music-probability timeline builder above
+        // it runs SoundAnalysis end-to-end on the input and is the
+        // expensive step. With sub-window inputs we'd produce an empty
+        // result anyway; skip the work outright.
+        guard samples.count >= samplesPerWindow else {
+            return ([], initialState, nil)
+        }
+
         var windows: [FeatureWindow] = []
         var rawSpeakerChangeProxyScores: [Double] = []
         var offset = 0
