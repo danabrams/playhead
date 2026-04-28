@@ -686,7 +686,8 @@ actor AnalysisJobRunner {
                     threshold: acousticGateConfig.likelihoodThreshold,
                     decision: .qualityPreconditionKeep,
                     wouldGate: false,
-                    transcribed: true
+                    transcribed: true,
+                    buildCommitSHA: nil
                 )
                 await transcriptShadowGateLogger.record(entry)
                 keptShards.append(shard)
@@ -745,7 +746,8 @@ actor AnalysisJobRunner {
                 threshold: acousticGateConfig.likelihoodThreshold,
                 decision: decision,
                 wouldGate: wouldGate,
-                transcribed: transcribed
+                transcribed: transcribed,
+                buildCommitSHA: nil
             )
             await transcriptShadowGateLogger.record(entry)
 

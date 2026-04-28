@@ -45,7 +45,7 @@ import OSLog
 ///     under default config).
 struct TranscriptShadowGateEntry: Codable, Equatable, Sendable {
 
-    /// Schema version; increment on breaking changes. Current: 1.
+    /// Schema version; increment on breaking changes. Current: 2.
     let schemaVersion: Int
 
     /// Unix time at which the decision was emitted (seconds since epoch).
@@ -93,7 +93,91 @@ struct TranscriptShadowGateEntry: Codable, Equatable, Sendable {
     /// production-skip rows carry `transcribed=false` only for `.wouldSkip`.
     let transcribed: Bool
 
-    static let currentSchemaVersion: Int = 1
+    /// Short git SHA stamped at logger init from `BuildInfo.commitSHA`.
+    /// Always set on v2 rows (falls back to `"unknown"` outside a git
+    /// context per the `BuildInfo` contract). Decodes as `nil` on v1
+    /// rows so pre-bump captures round-trip cleanly.
+    let buildCommitSHA: String?
+
+    static let currentSchemaVersion: Int = 2
+
+    // playhead-b58j: explicit Codable so v1 rows (no buildCommitSHA key)
+    // decode cleanly with `buildCommitSHA = nil`. v2 always emits the
+    // key (even when nil → JSON null) so consumers self-identify the
+    // capture cohort. Mirrors the DecisionLogEntry.LedgerEntry pattern
+    // from playhead-epfk.
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, timestamp, analysisAssetID, episodeID,
+             shardID, shardStart, shardEnd, likelihood, threshold,
+             decision, wouldGate, transcribed, buildCommitSHA
+    }
+
+    init(
+        schemaVersion: Int,
+        timestamp: Double,
+        analysisAssetID: String,
+        episodeID: String,
+        shardID: Int,
+        shardStart: Double,
+        shardEnd: Double,
+        likelihood: Double?,
+        threshold: Double,
+        decision: Decision,
+        wouldGate: Bool,
+        transcribed: Bool,
+        buildCommitSHA: String?
+    ) {
+        self.schemaVersion = schemaVersion
+        self.timestamp = timestamp
+        self.analysisAssetID = analysisAssetID
+        self.episodeID = episodeID
+        self.shardID = shardID
+        self.shardStart = shardStart
+        self.shardEnd = shardEnd
+        self.likelihood = likelihood
+        self.threshold = threshold
+        self.decision = decision
+        self.wouldGate = wouldGate
+        self.transcribed = transcribed
+        self.buildCommitSHA = buildCommitSHA
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.schemaVersion = try c.decode(Int.self, forKey: .schemaVersion)
+        self.timestamp = try c.decode(Double.self, forKey: .timestamp)
+        self.analysisAssetID = try c.decode(String.self, forKey: .analysisAssetID)
+        self.episodeID = try c.decode(String.self, forKey: .episodeID)
+        self.shardID = try c.decode(Int.self, forKey: .shardID)
+        self.shardStart = try c.decode(Double.self, forKey: .shardStart)
+        self.shardEnd = try c.decode(Double.self, forKey: .shardEnd)
+        self.likelihood = try c.decodeIfPresent(Double.self, forKey: .likelihood)
+        self.threshold = try c.decode(Double.self, forKey: .threshold)
+        self.decision = try c.decode(Decision.self, forKey: .decision)
+        self.wouldGate = try c.decode(Bool.self, forKey: .wouldGate)
+        self.transcribed = try c.decode(Bool.self, forKey: .transcribed)
+        // playhead-b58j: pre-bump (v1) rows omit the key → nil.
+        self.buildCommitSHA = try c.decodeIfPresent(String.self, forKey: .buildCommitSHA)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(schemaVersion, forKey: .schemaVersion)
+        try c.encode(timestamp, forKey: .timestamp)
+        try c.encode(analysisAssetID, forKey: .analysisAssetID)
+        try c.encode(episodeID, forKey: .episodeID)
+        try c.encode(shardID, forKey: .shardID)
+        try c.encode(shardStart, forKey: .shardStart)
+        try c.encode(shardEnd, forKey: .shardEnd)
+        try c.encode(likelihood, forKey: .likelihood)
+        try c.encode(threshold, forKey: .threshold)
+        try c.encode(decision, forKey: .decision)
+        try c.encode(wouldGate, forKey: .wouldGate)
+        try c.encode(transcribed, forKey: .transcribed)
+        // Always emit (even when nil → JSON null) so v2 rows are wire-
+        // distinguishable from v1.
+        try c.encode(buildCommitSHA, forKey: .buildCommitSHA)
+    }
 
     /// Categorical decision for a shadow-gate evaluation.
     enum Decision: String, Codable, Equatable, Sendable {
