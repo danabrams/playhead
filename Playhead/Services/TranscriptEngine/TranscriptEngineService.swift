@@ -606,19 +606,47 @@ actor TranscriptEngineService {
 
         // Verify the first shard was transcribed. If the first 30s is missing,
         // transcribe shard 0 explicitly.
+        //
+        // playhead-rfu-aac M1: previously these store + transcribe calls used
+        // `try?`, which silently absorbed both real persistence errors AND
+        // TranscriptEngineStopped (the gate signal that drains the loop on
+        // `stopTranscription`). The result was that a stop landing exactly
+        // at this seam would emit `.completed` instead of bailing. Use
+        // explicit do/catch so:
+        //   - TranscriptEngineStopped exits the loop without emitting completed
+        //   - CancellationError exits the loop without emitting completed
+        //   - real errors are logged loudly but the backfill is best-effort,
+        //     so we still let the loop emit completed (matching prior intent)
         if let firstShard = shards.first(where: { $0.id == 0 }) {
-            let hasFirst = try? await store.hasTranscriptChunk(
-                analysisAssetId: analysisAssetId,
-                segmentFingerprint: computeFingerprint(
-                    text: "", startTime: 0, endTime: 0 // won't match — check by time range instead
-                )
-            )
-            // Simpler: check if any chunk starts before 30s.
-            let allChunks = (try? await store.fetchTranscriptChunks(assetId: analysisAssetId)) ?? []
+            let allChunks: [TranscriptChunk]
+            do {
+                allChunks = try await store.fetchTranscriptChunks(assetId: analysisAssetId)
+            } catch is CancellationError {
+                logger.info("Transcript chunk fetch cancelled — exiting before shard-0 backfill")
+                return
+            } catch {
+                logger.error("Failed to fetch transcript chunks for shard-0 backfill check: \(error)")
+                allChunks = []
+            }
             let hasEarlyChunk = allChunks.contains { $0.startTime < 30 }
             if !hasEarlyChunk {
                 logger.warning("First 30s missing — transcribing shard 0")
-                try? await transcribeShard(firstShard, analysisAssetId: analysisAssetId)
+                do {
+                    try await transcribeShard(firstShard, analysisAssetId: analysisAssetId)
+                } catch is CancellationError {
+                    logger.info("Shard-0 backfill cancelled — exiting without .completed")
+                    return
+                } catch is TranscriptEnginePreempted {
+                    logger.info("Shard-0 backfill preempted — exiting without .completed")
+                    return
+                } catch is TranscriptEngineStopped {
+                    logger.info("Shard-0 backfill stopped for asset \(analysisAssetId) — exiting without .completed")
+                    return
+                } catch {
+                    logger.error("Shard-0 backfill failed: \(error)")
+                    // Best-effort: continue to .completed below since the
+                    // rest of the transcript is already persisted.
+                }
             }
         }
 
