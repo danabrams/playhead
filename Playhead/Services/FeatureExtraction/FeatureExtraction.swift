@@ -453,6 +453,19 @@ actor FeatureExtractionService {
     private let fftSetup: vDSP.FFT<DSPSplitComplex>?
     private let fftLog2n: vDSP_Length
 
+    #if DEBUG
+    /// Test-only watermark of the largest in-flight per-call accumulator
+    /// observed across the lifetime of this service. Used by
+    /// `FeatureExtractionSignalTests.peakAccumulatorBoundedAcrossShards`
+    /// to pin the no-double-source-of-truth invariant from playhead-wmjr.
+    /// Reset to zero at the start of each `extractAndPersist(...)` call.
+    private(set) var _peakInFlightWindowCountForTesting: Int = 0
+
+    func peakInFlightWindowCountForTesting() -> Int {
+        _peakInFlightWindowCountForTesting
+    }
+    #endif
+
     init(
         store: AnalysisStore,
         config: FeatureExtractionConfig = .default,
@@ -502,6 +515,10 @@ actor FeatureExtractionService {
         guard !shards.isEmpty else {
             throw FeatureExtractionError.emptyInput
         }
+
+        #if DEBUG
+        _peakInFlightWindowCountForTesting = 0
+        #endif
 
         var allWindows: [FeatureWindow] = []
         var effectiveCoverage = try await repairCoverageForCurrentFeatureVersion(
@@ -579,6 +596,12 @@ actor FeatureExtractionService {
             }
 
             allWindows.append(contentsOf: windows)
+
+            #if DEBUG
+            if allWindows.count > _peakInFlightWindowCountForTesting {
+                _peakInFlightWindowCountForTesting = allWindows.count
+            }
+            #endif
 
             // playhead-01t8 safe points (a) + (b): the shard's windows,
             // checkpoint, and coverage watermark are durable. If a
