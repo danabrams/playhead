@@ -356,6 +356,190 @@ struct TrainingExampleMaterializerTests {
         #expect(row.transcriptVersion == transcriptVersion)
     }
 
+    // MARK: - playhead-4my.10.2 gaps
+
+    /// A second canonical cohort that differs from `production()` by
+    /// promptLabel only — exercises mixed-cohort assets without
+    /// changing any persistence-validation semantics. Encoded with
+    /// sorted keys to match `productionJSON()`'s convention.
+    private func altCohortJSON() -> String {
+        let alt = ScanCohort(
+            promptLabel: "phase3-shadow-v2-alt",
+            promptHash: "phase3-prompt-2026-04-06",
+            schemaHash: "phase3-schema-2026-04-06",
+            scanPlanHash: "phase3-plan-2026-04-06",
+            normalizationHash: "phase3-norm-2026-04-06",
+            osBuild: "26.0.0",
+            locale: "en_US",
+            appBuild: "1"
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = (try? encoder.encode(alt)) ?? Data()
+        return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
+    private func scanResult(
+        id: String,
+        firstOrdinal: Int,
+        lastOrdinal: Int,
+        startTime: Double,
+        endTime: Double,
+        disposition: CoarseDisposition,
+        scanCohortJSON cohort: String,
+        quality: TranscriptQuality = .good
+    ) -> SemanticScanResult {
+        SemanticScanResult(
+            id: id,
+            analysisAssetId: assetId,
+            windowFirstAtomOrdinal: firstOrdinal,
+            windowLastAtomOrdinal: lastOrdinal,
+            windowStartTime: startTime,
+            windowEndTime: endTime,
+            scanPass: "coarse",
+            transcriptQuality: quality,
+            disposition: disposition,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: 100,
+            outputTokenCount: 20,
+            latencyMs: 50,
+            prewarmHit: false,
+            scanCohortJSON: cohort,
+            transcriptVersion: transcriptVersion,
+            reuseScope: nil,
+            runMode: .targeted,
+            jobPhase: BackfillJobPhase.fullEpisodeScan.rawValue
+        )
+    }
+
+    @Test("materializer stamps each example with its scan-row's cohort")
+    func materializerPreservesPerScanCohort() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        let cohortAlt = altCohortJSON()
+        // Two scans on disjoint spans, under two different cohorts. The
+        // materializer must carry each scan's cohort through into the
+        // emitted training example — the cohort is the spine row's, not
+        // a constant captured at materialization time.
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-prod", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .containsAd
+        ))
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-alt", firstOrdinal: 11, lastOrdinal: 20,
+            startTime: 10, endTime: 20, disposition: .noAds,
+            scanCohortJSON: cohortAlt
+        ))
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_100
+        )
+
+        let prod = try await store.loadTrainingExamples(
+            forAsset: assetId, scanCohortJSON: scanCohortJSON
+        )
+        let alt = try await store.loadTrainingExamples(
+            forAsset: assetId, scanCohortJSON: cohortAlt
+        )
+        #expect(prod.map { $0.id } == ["te-scan-prod"])
+        #expect(alt.map { $0.id } == ["te-scan-alt"])
+        #expect(prod.first?.scanCohortJSON == scanCohortJSON)
+        #expect(alt.first?.scanCohortJSON == cohortAlt)
+    }
+
+    @Test("re-materializing with extra evidence on the same span produces no duplicate rows")
+    func noDuplicatesOnExtraEvidenceForSameSpan() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        // One scan-row spine — therefore exactly one training example.
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-A", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .containsAd
+        ))
+        try await store.insertAdWindow(
+            adWindow(id: "win-A", startTime: 0, endTime: 10)
+        )
+        _ = try await store.insertEvidenceEvent(
+            evidenceEvent(id: "ev-A-fm", sourceType: .fm,
+                          firstOrdinal: 0, lastOrdinal: 10, certainty: 0.9),
+            transcriptVersion: transcriptVersion
+        )
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_100
+        )
+        let firstPass = try await store.loadTrainingExamples(forAsset: assetId)
+        try #require(firstPass.count == 1)
+
+        // Add a second evidence event on the same span — different source
+        // type, same ordinal range. Re-materialize.
+        _ = try await store.insertEvidenceEvent(
+            evidenceEvent(id: "ev-A-lex", sourceType: .lexical,
+                          firstOrdinal: 0, lastOrdinal: 10, certainty: 0.7),
+            transcriptVersion: transcriptVersion
+        )
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_200
+        )
+
+        let secondPass = try await store.loadTrainingExamples(forAsset: assetId)
+        // No duplicates — still exactly one row, and ids are unique.
+        #expect(secondPass.count == 1)
+        #expect(Set(secondPass.map { $0.id }).count == secondPass.count)
+        // The single row should have absorbed the new evidence source.
+        #expect(secondPass.first?.evidenceSources.sorted() == ["fm", "lexical"])
+    }
+
+    @Test("re-materializing after adding a new scan span produces N+1 rows with no duplicates")
+    func noDuplicatesOnNewScanRow() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-A", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .containsAd
+        ))
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-B", firstOrdinal: 11, lastOrdinal: 20,
+            startTime: 10, endTime: 20, disposition: .noAds
+        ))
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_100
+        )
+        let firstPass = try await store.loadTrainingExamples(forAsset: assetId)
+        try #require(firstPass.count == 2)
+        let firstIds = Set(firstPass.map { $0.id })
+
+        // Add a third disjoint scan-row and re-materialize.
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-C", firstOrdinal: 21, lastOrdinal: 30,
+            startTime: 20, endTime: 30, disposition: .uncertain
+        ))
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_200
+        )
+
+        let secondPass = try await store.loadTrainingExamples(forAsset: assetId)
+        let secondIds = Set(secondPass.map { $0.id })
+        #expect(secondPass.count == 3)
+        // Every id is unique (the deterministic id construction
+        // `te-<scanId>` is the dedup key).
+        #expect(secondIds.count == secondPass.count)
+        // The two ids from the first pass are still present.
+        #expect(firstIds.isSubset(of: secondIds))
+        // And exactly one new id was added.
+        #expect(secondIds.subtracting(firstIds).count == 1)
+    }
+
     @Test("materializer no-ops when the asset has no scan-result spine")
     func emptyAssetDoesNotCrash() async throws {
         let store = try await makeTestStore()
