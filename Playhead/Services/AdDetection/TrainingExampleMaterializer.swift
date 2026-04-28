@@ -459,8 +459,13 @@ struct TrainingExampleMaterializer: Sendable {
             return value
         }
         // Fallback: numeric form (Double or Int) — fixtures, future shapes.
-        if let v = dict["certainty"] as? Double { return v }
-        if let v = dict["certainty"] as? Int { return Double(v) }
+        // NSNumber bridging treats JSON booleans as CFBoolean which casts to
+        // Double 1.0 / 0.0 — explicitly reject those before the numeric cast
+        // so `{"certainty":true}` returns 0 (malformed shape) rather than 1.
+        if let n = dict["certainty"] as? NSNumber,
+           CFGetTypeID(n) != CFBooleanGetTypeID() {
+            return n.doubleValue
+        }
         return 0.0
     }
 
