@@ -615,14 +615,63 @@ enum AppleSpeechBoundaryError: Error, CustomStringConvertible {
     }
 }
 
+// playhead-sw69: injection seams so AppleSpeechAssetBootstrapper can be unit
+// tested without touching the live AssetInventory/SpeechAnalyzer statics.
+// Mirrors the seam style used elsewhere in this file (small protocol + a
+// default struct that forwards to the framework call).
+
+/// Minimal seam over `Speech.AssetInventory` covering only what the
+/// bootstrapper actually consults: the per-module status query and the
+/// download-and-install side effect for the supported/downloading branches.
+protocol AppleSpeechAssetStatusProviding: Sendable {
+    func status(forModules modules: [any SpeechModule]) async -> AssetInventory.Status
+    func installAssets(supporting modules: [any SpeechModule]) async throws
+}
+
+/// Production implementation forwarding to the live `AssetInventory` statics.
+struct DefaultAppleSpeechAssetStatusProvider: AppleSpeechAssetStatusProviding {
+    func status(forModules modules: [any SpeechModule]) async -> AssetInventory.Status {
+        await AssetInventory.status(forModules: modules)
+    }
+
+    func installAssets(supporting modules: [any SpeechModule]) async throws {
+        if let request = try await AssetInventory.assetInstallationRequest(supporting: modules) {
+            try await request.downloadAndInstall()
+        }
+    }
+}
+
+/// Minimal seam over `SpeechAnalyzer.bestAvailableAudioFormat(...)`. The
+/// bootstrapper only ever consults the unconditional, single-argument variant.
+protocol AppleSpeechAnalyzerFormatProviding: Sendable {
+    func bestAvailableAudioFormat(compatibleWith modules: [any SpeechModule]) async -> AVAudioFormat?
+}
+
+/// Production implementation forwarding to the live `SpeechAnalyzer` static.
+struct DefaultAppleSpeechAnalyzerFormatProvider: AppleSpeechAnalyzerFormatProviding {
+    func bestAvailableAudioFormat(compatibleWith modules: [any SpeechModule]) async -> AVAudioFormat? {
+        await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: modules)
+    }
+}
+
 struct AppleSpeechAssetBootstrapper {
     private let logger = Logger(subsystem: "com.playhead", category: "AppleSpeechBootstrapper")
+    private let assetStatusProvider: any AppleSpeechAssetStatusProviding
+    private let analyzerFormatProvider: any AppleSpeechAnalyzerFormatProviding
+
+    init(
+        assetStatusProvider: any AppleSpeechAssetStatusProviding = DefaultAppleSpeechAssetStatusProvider(),
+        analyzerFormatProvider: any AppleSpeechAnalyzerFormatProviding = DefaultAppleSpeechAnalyzerFormatProvider()
+    ) {
+        self.assetStatusProvider = assetStatusProvider
+        self.analyzerFormatProvider = analyzerFormatProvider
+    }
 
     func prepare(localeIdentifier: String = "en-US") async throws -> AppleSpeechPreparedModel {
         let locale = Locale(identifier: localeIdentifier)
         let transcriber = AppleSpeechResultMapper.makeSpeechTranscriber(locale: locale)
         let modules: [any SpeechModule] = [transcriber]
-        let status = await AssetInventory.status(forModules: modules)
+        let status = await assetStatusProvider.status(forModules: modules)
         logger.info("Speech asset status: \(String(describing: status), privacy: .public)")
 
         switch status {
@@ -631,9 +680,7 @@ struct AppleSpeechAssetBootstrapper {
         case .supported, .downloading:
             logger.info("Downloading Speech assets…")
             let start = ContinuousClock.now
-            if let request = try await AssetInventory.assetInstallationRequest(supporting: modules) {
-                try await request.downloadAndInstall()
-            }
+            try await assetStatusProvider.installAssets(supporting: modules)
             logger.info("Speech assets downloaded in \(ContinuousClock.now - start)")
         case .installed:
             logger.info("Speech assets already installed")
@@ -641,7 +688,7 @@ struct AppleSpeechAssetBootstrapper {
             break
         }
 
-        guard let resolvedFormat = await SpeechAnalyzer.bestAvailableAudioFormat(
+        guard let resolvedFormat = await analyzerFormatProvider.bestAvailableAudioFormat(
             compatibleWith: [transcriber]
         ) else {
             throw AppleSpeechBoundaryError.analyzerFormatUnavailable(localeIdentifier: locale.identifier)
