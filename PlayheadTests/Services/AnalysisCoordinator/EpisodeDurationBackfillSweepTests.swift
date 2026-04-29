@@ -21,6 +21,44 @@ import Testing
 
 @testable import Playhead
 
+/// Sendable counter used by the keyset regression test to record how many
+/// times each `episodeId` is visited during a sweep. NSLock keeps it
+/// concurrency-safe across the actor hops the closure makes.
+private final class LockedDict: @unchecked Sendable {
+    private let lock = NSLock()
+    private var counts: [String: Int] = [:]
+
+    func increment(key: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        counts[key, default: 0] += 1
+    }
+
+    func snapshot() -> [String: Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return counts
+    }
+}
+
+/// Sendable one-shot latch — used to fire the mid-sweep mutation exactly
+/// once even though the trigger row can in principle be retried.
+private final class LockedBool: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Bool
+
+    init(_ initial: Bool) { self.value = initial }
+
+    /// Returns the previous value AND atomically sets to `true`.
+    func swap(_ newValue: Bool) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let old = value
+        value = newValue
+        return old
+    }
+}
+
 @Suite("AnalysisCoordinator – runEpisodeDurationBackfillIfNeeded (gyvb.2)", .serialized)
 struct EpisodeDurationBackfillSweepTests {
 
@@ -314,6 +352,137 @@ struct EpisodeDurationBackfillSweepTests {
             #expect(after?.episodeDurationSec != 100,
                     "asset \(assetId) was not rewritten — pagination missed its row")
         }
+    }
+
+    @Test("keyset cursor stays correct under concurrent INSERT/DELETE mid-sweep (playhead-bgvx)")
+    func keysetCursorSurvivesConcurrentMutation() async throws {
+        // Regression for playhead-bgvx: the duration-backfill sweep used to
+        // paginate via OFFSET, which silently skipped or duplicated rows
+        // whenever a concurrent INSERT/DELETE shifted the underlying ordering.
+        // The fix switches to keyset pagination on `rowid`. This test pins
+        // that fix:
+        //   1. Seed 250 rows (>pageSize=200) that all need backfill.
+        //   2. During processing of an early row, INSERT a new candidate
+        //      row AND DELETE a row that has not yet been visited (a row
+        //      that would have appeared in page 2).
+        //   3. Assert the closure is called exactly once per surviving
+        //      episodeId — no skips, no duplicates.
+        //   4. Assert every surviving row plus the new row got rewritten.
+        //   5. Assert the deleted row is gone (and was never rewritten).
+        let store = try await makeStore()
+        let coordinator = makeCoordinator(store: store)
+
+        let url = try writeSynthAudio(seconds: 5.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        // Seed pageSize + 50 = 250 rows. All declare 100s with a watermark
+        // of 9000s, so every row is a candidate for the rewrite path.
+        let pageSize = 200
+        let totalRows = pageSize + 50
+        var seededIds: [String] = []
+        seededIds.reserveCapacity(totalRows)
+        for i in 0..<totalRows {
+            let assetId = String(format: "asset-keyset-%04d", i)
+            let episodeId = String(format: "ep-keyset-%04d", i)
+            seededIds.append(assetId)
+            try await store.insertAsset(makeAsset(
+                id: assetId,
+                episodeId: episodeId,
+                episodeDurationSec: 100,
+                featureCoverageEndTime: 9000
+            ))
+        }
+
+        // Pick a row near the END of page 1 (so the mutation is staged
+        // before page 2 is fetched). The existing `fetchAssets`/
+        // `fetchAssetsKeysetByRowId` orderings differ — keyset uses
+        // `rowid ASC`, so page 1 contains the FIRST 200 rows by insertion
+        // order. We trigger on row index 150 of insertion order.
+        let triggerOrdinal = 150
+        let triggerEpisodeId = String(format: "ep-keyset-%04d", triggerOrdinal)
+
+        // Pick an unvisited row to delete: anything in page 2 (insertion
+        // order >= 200). Use the LAST row.
+        let victimAssetId = String(format: "asset-keyset-%04d", totalRows - 1)
+        let victimEpisodeId = String(format: "ep-keyset-%04d", totalRows - 1)
+
+        // The newly inserted row gets a fresh rowid > every existing row.
+        // It is also a backfill candidate (declared 100s, watermark 9000s).
+        let newAssetId = "asset-keyset-INSERTED"
+        let newEpisodeId = "ep-keyset-INSERTED"
+
+        let mutationFired = LockedBool(false)
+        let invocationCounts = LockedDict()
+
+        let summary = await coordinator.runEpisodeDurationBackfillIfNeeded { [store] episodeId in
+            invocationCounts.increment(key: episodeId)
+            // First time we see the trigger row, mutate the table.
+            if episodeId == triggerEpisodeId, !mutationFired.swap(true) {
+                do {
+                    try await store.deleteAsset(id: victimAssetId)
+                    try await store.insertAsset(AnalysisAsset(
+                        id: newAssetId,
+                        episodeId: newEpisodeId,
+                        assetFingerprint: "fp-\(newAssetId)",
+                        weakFingerprint: nil,
+                        sourceURL: "file:///test/\(newAssetId).m4a",
+                        featureCoverageEndTime: 9000,
+                        fastTranscriptCoverageEndTime: nil,
+                        confirmedAdCoverageEndTime: nil,
+                        analysisState: "queued",
+                        analysisVersion: 1,
+                        capabilitySnapshot: nil,
+                        episodeDurationSec: 100
+                    ))
+                } catch {
+                    Issue.record("mid-sweep mutation failed: \(error)")
+                }
+            }
+            return url
+        }
+
+        #expect(summary.alreadyDone == false)
+
+        // Surviving rows = (seeded - deleted-victim) + newly-inserted = 250.
+        let expectedRewritten = totalRows - 1 + 1
+        #expect(summary.rewritten == expectedRewritten,
+                "expected exactly one rewrite per surviving row (got \(summary.rewritten), expected \(expectedRewritten))")
+        #expect(summary.inspected == expectedRewritten,
+                "inspected count must match rewrites — every candidate row should be visited exactly once")
+        #expect(summary.probeFailed == 0)
+
+        // No row may be visited more than once. The OFFSET cursor would
+        // duplicate a row when an earlier row was deleted concurrently.
+        let counts = invocationCounts.snapshot()
+        for (episodeId, count) in counts {
+            #expect(count == 1,
+                    "episode \(episodeId) was visited \(count) times — keyset cursor must not duplicate")
+        }
+
+        // Victim must NOT have been visited (deleted before its turn).
+        #expect(counts[victimEpisodeId] == nil,
+                "deleted row \(victimEpisodeId) must not have been visited")
+
+        // Newly inserted row MUST have been visited (its rowid > cursor at
+        // the time of its insertion, so it appears in a later page).
+        #expect(counts[newEpisodeId] == 1,
+                "new row \(newEpisodeId) inserted mid-sweep must be visited exactly once")
+
+        // Every surviving seeded row was visited exactly once.
+        for i in 0..<totalRows where i != totalRows - 1 {
+            let episodeId = String(format: "ep-keyset-%04d", i)
+            #expect(counts[episodeId] == 1,
+                    "surviving row \(episodeId) must be visited exactly once (got \(counts[episodeId] ?? 0))")
+        }
+
+        // The deleted row is gone from the store.
+        let victimAfter = try await store.fetchAsset(id: victimAssetId)
+        #expect(victimAfter == nil)
+
+        // The new row got the rewrite treatment.
+        let newAfter = try await store.fetchAsset(id: newAssetId)
+        try #require(newAfter?.episodeDurationSec != nil)
+        #expect(newAfter!.episodeDurationSec! != 100, "new row must be rewritten away from declared 100s")
     }
 
     @Test("idempotent — second invocation reports alreadyDone and does not re-probe")

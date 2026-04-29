@@ -2540,41 +2540,33 @@ actor AnalysisCoordinator {
         }
 
         // Paginate so we never hold the whole table in memory at once.
-        // ORDER BY in `fetchAssets` matches `fetchAllAssets`, so paging
-        // is stable across calls within this sweep.
         //
-        // Brittle assumption (review-followup csp / M2): the
-        // OFFSET/LIMIT cursor RELIES on cold-launch ordering — there
-        // is no runtime enforcement that no concurrent INSERT or
-        // DELETE runs against `analysis_assets` while we page. The
-        // production caller (`PlayheadRuntime.startSchedulerLoop`)
-        // happens to invoke this sweep at launch BEFORE it boots the
-        // analysis-jobs scheduler or the download-completion enqueue
-        // path, so today the sweep window is quiet by construction.
-        // If a future change moves this sweep off the cold-launch
-        // path (e.g. into a periodic maintenance task or a settings
-        // hatch), the OFFSET cursor will skip or duplicate rows
-        // whenever a concurrent INSERT/DELETE shifts the underlying
-        // ORDER BY ordering, and the bug will be silent — pages
-        // will simply have wrong rows. The fix in that future is to
-        // convert this to a deterministic-key paging cursor (e.g.
-        // `WHERE id > ? ORDER BY id`). This sweep is also gated by
-        // a one-shot `_meta` marker, so the brittleness window
-        // exists at most once per install — second launches
-        // short-circuit before the loop runs.
+        // Keyset pagination on `rowid` (playhead-bgvx, was rfu-csp M2/M3):
+        // each page returns rows with `rowid > lastSeenRowId` ordered ASC,
+        // and we advance `lastSeenRowId` to the last `rowid` in the page.
+        // This is stable under concurrent INSERT/DELETE: SQLite assigns new
+        // rowids monotonically relative to the live table, so a future INSERT
+        // lands at a `rowid` we have not yet processed and cannot retroactively
+        // shift earlier rows past the cursor; a DELETE simply removes a row
+        // from the remaining traversal. The previous OFFSET cursor would skip
+        // or duplicate rows whenever a concurrent mutation shifted the
+        // underlying ordering — a bug that would have been silent.
         let pageSize = 200
-        var offset = 0
+        var lastSeenRowId: Int64 = 0
         pageLoop: while true {
-            let page: [AnalysisAsset]
+            let page: [(rowId: Int64, asset: AnalysisAsset)]
             do {
-                page = try await store.fetchAssets(limit: pageSize, offset: offset)
+                page = try await store.fetchAssetsKeysetByRowId(
+                    afterRowId: lastSeenRowId,
+                    limit: pageSize
+                )
             } catch {
-                logger.warning("Duration backfill: fetchAssets(limit:\(pageSize),offset:\(offset)) failed (\(String(describing: error), privacy: .public)); aborting sweep")
+                logger.warning("Duration backfill: fetchAssetsKeysetByRowId(afterRowId:\(lastSeenRowId),limit:\(pageSize)) failed (\(String(describing: error), privacy: .public)); aborting sweep")
                 return summary
             }
             if page.isEmpty { break pageLoop }
 
-            for asset in page {
+            for (rowId, asset) in page {
                 // Decide whether this row is a candidate. Candidates:
                 // - persisted duration is nil OR <= 0
                 // - persisted duration is positive but a coverage watermark
@@ -2584,6 +2576,11 @@ actor AnalysisCoordinator {
                 let transcriptEnd = asset.fastTranscriptCoverageEndTime ?? 0
                 let watermarkExceedsDur = (featureEnd > dur) || (transcriptEnd > dur)
                 let needsProbe = (dur <= 0) || watermarkExceedsDur
+
+                // Advance the cursor BEFORE any per-row early-continue so that
+                // skipped rows do not get re-fetched on the next page.
+                lastSeenRowId = max(lastSeenRowId, rowId)
+
                 guard needsProbe else { continue }
 
                 guard let fileURL = await cachedFileURL(asset.episodeId) else {
@@ -2617,7 +2614,6 @@ actor AnalysisCoordinator {
 
             // Short page → drained the table.
             if page.count < pageSize { break pageLoop }
-            offset += pageSize
         }
 
         // Idempotence marker — set even if zero rows were rewritten so
