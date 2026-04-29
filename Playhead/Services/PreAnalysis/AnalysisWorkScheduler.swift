@@ -46,9 +46,9 @@ protocol ShadowLaneTickHandler: Sendable {
     func shadowLaneBTick() async
 }
 
-// `TransportStatusProviding` + `WifiTransportStatusProvider` live in
-// TransportStatusProviding.swift in this directory. A live
-// `NWPathMonitor`-backed provider will land in playhead-ml96.
+// `TransportStatusProviding`, `WifiTransportStatusProvider`, and the
+// production `LiveTransportStatusProvider` (NWPathMonitor-backed) live
+// in TransportStatusProviding.swift in this directory.
 
 actor AnalysisWorkScheduler {
     // MARK: - PlaybackContext + ScenePhase signals (playhead-gtt9.14)
@@ -117,10 +117,11 @@ actor AnalysisWorkScheduler {
     private let capabilitiesService: any CapabilitiesProviding
     private let downloadManager: any DownloadProviding
     private let batteryProvider: any BatteryStateProviding
-    /// playhead-bnrs: transport-status provider consumed by the
-    /// admission gate. Defaults to `WifiTransportStatusProvider` so
-    /// production behavior is unchanged until a real
-    /// `NWPathMonitor`-backed provider lands in playhead-ml96.
+    /// playhead-bnrs / playhead-ml96: transport-status provider
+    /// consumed by the admission gate. Defaults to
+    /// `LiveTransportStatusProvider` (NWPathMonitor + user pref) so the
+    /// admission gate actually sees cellular / unreachable in
+    /// production. Tests inject `StubTransportStatusProvider`.
     private let transportStatusProvider: any TransportStatusProviding
     /// playhead-1iq1: storage-budget snapshot provider consumed by the
     /// admission gate. Production wiring passes the live `StorageBudget`
@@ -616,7 +617,7 @@ actor AnalysisWorkScheduler {
         capabilitiesService: any CapabilitiesProviding,
         downloadManager: any DownloadProviding,
         batteryProvider: any BatteryStateProviding = UIDeviceBatteryProvider(),
-        transportStatusProvider: any TransportStatusProviding = WifiTransportStatusProvider(),
+        transportStatusProvider: any TransportStatusProviding = LiveTransportStatusProvider(),
         storageBudgetSnapshotter: any StorageBudgetSnapshotting = PlentifulStorageBudgetSnapshotter(),
         candidateWindowCascade: CandidateWindowCascade? = nil,
         config: PreAnalysisConfig = .load(),
@@ -2291,9 +2292,10 @@ actor AnalysisWorkScheduler {
     ///   loader is not plumbed here — slice-sizing uses the fallback row
     ///   until a loader is injected).
     /// - `transport`: synthesized from `transportStatusProvider`
-    ///   (defaults to `WifiTransportStatusProvider`) and the job's lane.
-    ///   Background-lane jobs map to `.maintenance` (Wi-Fi only); every
-    ///   other lane maps to `.interactive`.
+    ///   (defaults to `LiveTransportStatusProvider`, which wraps
+    ///   `NWPathMonitor` + the user's `allowsCellular` pref) and the
+    ///   job's lane. Background-lane jobs map to `.maintenance` (Wi-Fi
+    ///   only); every other lane maps to `.interactive`.
     /// - `storage`: live snapshot synthesized from the injected
     ///   `StorageBudgetSnapshotting` (typically the live `StorageBudget`
     ///   actor). The pre-admission gate now genuinely rejects
