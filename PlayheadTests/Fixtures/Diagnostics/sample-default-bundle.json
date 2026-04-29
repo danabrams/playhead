@@ -1,0 +1,47 @@
+{
+  "default" : {
+    "app_version" : "1.0.0",
+    "build_type" : "release",
+    "device_class" : "iPhone17Pro",
+    "eligibility_snapshot" : {
+      "appleIntelligenceEnabled" : true,
+      "capturedAt" : "2023-11-14T22:13:20Z",
+      "hardwareSupported" : true,
+      "languageSupported" : true,
+      "modelAvailableNow" : true,
+      "regionSupported" : true
+    },
+    "os_version" : "iOS 26.0",
+    "scheduler_events" : [
+      {
+        "episode_id_hash" : "d40dd3e75454df1bcc83f23160d7f95a327432f9b07047c8982f2668848b9eb9",
+        "event_type" : "acquired",
+        "timestamp" : 1700000001
+      },
+      {
+        "episode_id_hash" : "b144870be8198c1b66c95148abfae7449654b8cf13352ae5097b770ae1df0abe",
+        "event_type" : "acquired",
+        "timestamp" : 1700000000
+      }
+    ],
+    "work_journal_tail" : [
+      {
+        "episode_id_hash" : "b144870be8198c1b66c95148abfae7449654b8cf13352ae5097b770ae1df0abe",
+        "event_type" : "acquired",
+        "generation_id" : "00000000-0000-4000-8000-000000000000",
+        "id" : "row-0",
+        "scheduler_epoch" : 1,
+        "timestamp" : 1700000000
+      },
+      {
+        "episode_id_hash" : "d40dd3e75454df1bcc83f23160d7f95a327432f9b07047c8982f2668848b9eb9",
+        "event_type" : "acquired",
+        "generation_id" : "00000000-0000-4000-8000-000000000001",
+        "id" : "row-1",
+        "scheduler_epoch" : 1,
+        "timestamp" : 1700000001
+      }
+    ]
+  },
+  "generated_at" : "2023-11-14T22:13:20Z"
+}
