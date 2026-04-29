@@ -1164,6 +1164,41 @@ struct AppleSpeechAnalyzerRunnerTests {
             }
         }
     }
+
+    // playhead-rfu-aac (cycle-3 M3) regression guard: if a collector Task
+    // throws while pulling from `transcriber.results` / `detector.results`,
+    // we still need cancelAndFinishNow() on the analyzer (the result stream
+    // is what the collector is awaiting; if results never resolve the
+    // analyzer would otherwise hang). The fix sets `needsCleanup = false`
+    // ONLY after `try await collector!.value` resolves successfully — a
+    // pre-await false-set lets the catch fall through with cleanup
+    // skipped. We can't easily inject a thrown error into the real
+    // SpeechAnalyzer result stream from a unit test (the collector is
+    // constructed inline against concrete framework types), so this is a
+    // structural source-grep guard mirroring the apply/prepare test above.
+    @Test("collector-throw path always reaches cancelAndFinishNow cleanup")
+    func runnerCleansUpAnalyzerOnCollectorThrow() throws {
+        let source = try appleSpeechAnalyzerRunnerSource()
+
+        for funcName in ["func transcribe(", "func detectVoiceActivity("] {
+            let funcStart = try #require(source.range(of: funcName))
+            let funcBody = String(source[funcStart.lowerBound...])
+
+            let collectorAwait = try #require(
+                funcBody.range(of: "try await collector!.value"),
+                "\(funcName) no longer awaits the collector Task — review the cleanup-order guard"
+            )
+            let needsCleanupFalse = try #require(
+                funcBody.range(of: "needsCleanup = false"),
+                "\(funcName) no longer flips needsCleanup=false — review the cleanup-order guard"
+            )
+
+            #expect(
+                needsCleanupFalse.lowerBound > collectorAwait.lowerBound,
+                "\(funcName) sets needsCleanup=false BEFORE awaiting collector.value; a throwing collector would skip cancelAndFinishNow and the analyzer would hang on its result stream"
+            )
+        }
+    }
 }
 
 @Suite("SpeechTranscriber extraction")
@@ -2119,13 +2154,13 @@ struct StreamingAudioDecoderTests {
         var count = 0
         for await _ in stream { count += 1 }
         #expect(count == 0, "Garbage bytes must not produce any shards")
-        // The garbage path should hit the AVAudioConverter setup failure
-        // (or AVAudioFile rejection) and either finish naturally or
-        // record a failure. Either is correct — what we MUST NOT see is
-        // a stalled `for await`. The count == 0 above is the load-bearing
-        // assertion; we additionally probe the failure-reason accessor
-        // for diagnostic completeness when a failure was recorded.
+        // playhead-rfu-aac (cycle-3 M2): the prior assertion gated the
+        // stage check inside `if let r = reason`, so a regression that
+        // dropped the failure-reason recording entirely (reason == nil)
+        // would silently pass. Require the reason to be set, then pin the
+        // stage to one of the two declared cases.
         let reason = await decoder.failureReason()
+        #expect(reason != nil, "Garbage bytes must record a sticky failure reason")
         if let r = reason {
             #expect(r.stage == .converterSetup || r.stage == .converterError)
         }
@@ -2176,13 +2211,17 @@ struct StreamingAudioDecoderTests {
         let peak = await decoder.peakAccumulatedSampleCountForTesting()
         // samplesPerShard = 1.0s × 16_000 = 16_000.
         // readFramesPerCycle = 8_192. Source/target ratio = 1.0.
-        // Allow a small +1 cycle epsilon for partial-frame boundary slop.
+        // playhead-rfu-aac (cycle-3 L7): a full extra read cycle (8192) of
+        // epsilon is too generous — that's the size of an entire converter
+        // pass, and a regression that loosened the bound by exactly one
+        // cycle would still pass. Use a fraction of one cycle (1024 ≈
+        // ⅛ cycle) to actually pin the docstring's stated formula.
         let docstringBound = 16_000 + 8_192
-        let epsilon = 8_192   // one extra cycle of slop is the absolute ceiling
+        let epsilon = 1_024   // partial-frame boundary slop only
         let allowedMax = docstringBound + epsilon
         #expect(
             peak <= allowedMax,
-            "Peak \(peak) violated docstring-pinned bound \(allowedMax) (samplesPerShard+readFramesPerCycle+1cycle)"
+            "Peak \(peak) violated docstring-pinned bound \(allowedMax) (samplesPerShard+readFramesPerCycle+\(epsilon))"
         )
 
         await decoder.cleanup()
