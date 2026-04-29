@@ -118,10 +118,11 @@ enum AcousticFeatureFusion {
         var out: [WindowFusion] = []
         out.reserveCapacity(maxCount)
 
-        // Iterate features in stable enum order (rawValue) so the
-        // per-window combined sum is reproducible across runs. Float
-        // addition is mostly associative but `Dictionary` iteration is
-        // explicitly unstable, so we never trust it for determinism.
+        // Iterate features alphabetically by rawValue (deterministic; for
+        // a String-raw enum that's lexicographic, NOT declaration order)
+        // so the per-window combined sum is reproducible across runs.
+        // Float addition is mostly associative but `Dictionary` iteration
+        // is explicitly unstable, so we never trust it for determinism.
         let stableKinds = featureScores.keys.sorted { $0.rawValue < $1.rawValue }
 
         for idx in 0..<maxCount {
