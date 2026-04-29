@@ -729,6 +729,79 @@ struct SkipOrchestratorAdDecisionContractTests {
         let manualConfirmed = await manualOrchestrator.confirmedWindows()
         #expect(!manualConfirmed.isEmpty, "Manual mode must expose eligible AdDecisionResult spans as confirmed windows")
     }
+
+    @Test("Fusion result with same id as an open suggest entry clears the suggest entry (playhead-rfu-sad)")
+    func fusionResultClearsSharedIdSuggestEntry() async throws {
+        // M2 race scenario: an AdWindow first arrives stamped
+        // `markOnly` and lands in the suggest tier. Later the fusion
+        // pipeline emits an `AdDecisionResult` with the SAME id and
+        // `eligibilityGate = .eligible`. Without a symmetric clear in
+        // `receiveAdDecisionResults`, `suggestWindows[id]` would stay
+        // populated alongside the new managed window, and a still-
+        // visible suggest banner could re-fire `acceptSuggestedSkip`
+        // and synthesize a duplicate managed window via
+        // `UUID().uuidString`.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "manual",
+            trustScore: 0.6,
+            observations: 5
+        )
+        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        // 1. Same-id markOnly arrives via the AdWindow path → suggest tier.
+        let markOnly = AdWindow(
+            id: "ad-shared-id",
+            analysisAssetId: "asset-1",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.45,
+            boundaryState: "lexical",
+            decisionState: "candidate",
+            detectorVersion: "detection-v1",
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: "brought to you by",
+            evidenceStartTime: 60,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: nil,
+            eligibilityGate: "markOnly"
+        )
+        await orchestrator.receiveAdWindows([markOnly])
+
+        // 2. Fusion produces an eligible decision under the same id.
+        let fusionDecision = makePendingAdDecisionResult(
+            id: "ad-shared-id",
+            startTime: 60,
+            endTime: 120,
+            skipConfidence: 0.85,
+            eligibilityGate: .eligible
+        )
+        await orchestrator.receiveAdDecisionResults([fusionDecision])
+
+        // 3. A late accept on the original (now-stale) suggest banner
+        //    must be a no-op — the suggest entry was cleared by the
+        //    fusion path. If the symmetric clear was missing, this
+        //    call would synthesize a parallel UUID-keyed managed
+        //    window.
+        await orchestrator.acceptSuggestedSkip(windowId: "ad-shared-id")
+
+        let confirmed = await orchestrator.confirmedWindows()
+        let onSpan = confirmed.filter { $0.startTime == 60 && $0.endTime == 120 }
+        #expect(onSpan.count == 1,
+            "Exactly one managed window should cover the span (the fusion-managed one); got \(onSpan.count)")
+        #expect(onSpan.first?.id == "ad-shared-id",
+            "The surviving window must be the fusion-managed entry, not a UUID-keyed late promotion")
+    }
 }
 
 // MARK: - Banner Item Stream Tests
@@ -1217,5 +1290,132 @@ struct SkipOrchestratorSuggestTierTests {
         }
         #expect(matching.count == 1,
             "Stale acceptSuggestedSkip after gate flip must be a no-op; got \(matching.count) windows on the same span")
+    }
+
+    @Test("Tap before flip — accepted suggest id ignores a late non-markOnly ingest (playhead-rfu-sad)")
+    func tapThenFlipSuggestIdIgnoresLateIngest() async throws {
+        // Race scenario (the inverse of `gateFlipClearsSuggestEntry`):
+        // the user taps the suggest banner BEFORE the gate flip lands.
+        // `acceptSuggestedSkip` promotes the window under a fresh
+        // UUID. A late-arriving non-markOnly AdWindow with the
+        // ORIGINAL id must NOT register a second managed window —
+        // that would emit a duplicate auto-skip banner and a duplicate
+        // `auto_skip_fired` audit event for one user-initiated skip.
+        let dir = try makeTempDir(prefix: "rfu-sad-tap-flip")
+        let invariantLogger = SurfaceStatusInvariantLogger(directory: dir)
+        let hasher: @Sendable (String) -> String = { [invariantLogger] in
+            invariantLogger.hashEpisodeId($0)
+        }
+
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            invariantLogger: invariantLogger,
+            episodeIdHasher: hasher
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        // Collect every banner emission so we can assert exactly one
+        // span surface materialises end-to-end.
+        let bannerStream = await orchestrator.bannerItemStream()
+        nonisolated(unsafe) var receivedBanners: [AdSkipBannerItem] = []
+        let collectTask = Task {
+            for await item in bannerStream {
+                receivedBanners.append(item)
+                if receivedBanners.count >= 4 { break }
+            }
+        }
+
+        // 1. markOnly arrives → suggest banner emitted, suggestWindows populated.
+        let markOnly = makeMarkOnlyAdWindow(id: "ad-tap-flip", startTime: 30, endTime: 60)
+        await orchestrator.receiveAdWindows([markOnly])
+
+        // 2. User taps the suggest banner — promotes under a fresh UUID.
+        await orchestrator.acceptSuggestedSkip(windowId: markOnly.id)
+
+        // 3. LATE: gate flip arrives for the original id with the
+        //    eligibilityGate cleared. Without the tap-then-flip
+        //    guard, this would create a SECOND managed window
+        //    keyed by the original id and re-fire everything.
+        let lateFlipped = AdWindow(
+            id: "ad-tap-flip",
+            analysisAssetId: "asset-1",
+            startTime: markOnly.startTime,
+            endTime: markOnly.endTime,
+            confidence: 0.85,
+            boundaryState: "lexical",
+            decisionState: "confirmed",
+            detectorVersion: "detection-v1",
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: "brought to you by",
+            evidenceStartTime: markOnly.startTime,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: nil,
+            eligibilityGate: nil
+        )
+        await orchestrator.receiveAdWindows([lateFlipped])
+
+        try await Task.sleep(for: .milliseconds(150))
+        collectTask.cancel()
+
+        // Exactly one applied/confirmed managed window should exist
+        // for the original span — the UUID-keyed promotion. The late
+        // flipped ingest must NOT have registered a parallel entry
+        // under "ad-tap-flip".
+        let activeIDs = await orchestrator.activeWindowIDs()
+        #expect(!activeIDs.contains("ad-tap-flip"),
+            "Late non-markOnly ingest with the same id must NOT register a second managed window after acceptSuggestedSkip")
+
+        let log = await orchestrator.getDecisionLog()
+        let appliedOnSpan = log.filter {
+            $0.decision == .applied
+                && $0.snappedStart == markOnly.startTime
+                && $0.snappedEnd == markOnly.endTime
+        }
+        #expect(appliedOnSpan.count == 1,
+            "Exactly one applied decision should land on the span (one user skip → one decision); got \(appliedOnSpan.count)")
+
+        // Banner stream: at most one `.autoSkipped` banner for the
+        // promoted window. (A `.suggest` banner from the initial
+        // markOnly delivery is allowed and expected.)
+        let autoSkippedBanners = receivedBanners.filter { $0.tier == .autoSkipped }
+        #expect(autoSkippedBanners.count == 1,
+            "Exactly one auto-skip banner should fire for the promoted window; got \(autoSkippedBanners.count)")
+
+        // Audit log: exactly one `auto_skip_fired` event. Drain the
+        // logger's serial queue before reading.
+        invariantLogger.flushForTesting()
+        let sessionURL = try #require(invariantLogger.currentSessionFileURL)
+        var autoSkipEntries: [SurfaceStateTransitionEntry] = []
+        for _ in 0..<10 {
+            let data = try Data(contentsOf: sessionURL)
+            let lines = String(decoding: data, as: UTF8.self)
+                .split(separator: "\n", omittingEmptySubsequences: true)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let entries = try lines.map {
+                try decoder.decode(SurfaceStateTransitionEntry.self, from: Data($0.utf8))
+            }
+            autoSkipEntries = entries.filter { $0.eventType == .autoSkipFired }
+            if !autoSkipEntries.isEmpty { break }
+            invariantLogger.flushForTesting()
+        }
+        #expect(autoSkipEntries.count == 1,
+            "Exactly one auto_skip_fired audit event should fire for the user-tapped skip; got \(autoSkipEntries.count)")
     }
 }
