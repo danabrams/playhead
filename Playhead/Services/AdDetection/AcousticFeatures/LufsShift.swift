@@ -34,11 +34,18 @@ enum LufsShift {
         )
     }
 
-    /// Compute per-window LUFS-shift scores against the episode's mean dBFS.
+    /// Compute per-window LUFS-shift scores against the episode's median dBFS.
     ///
-    /// The baseline is the arithmetic mean of `20 * log10(max(rms, eps))` across
-    /// all windows. The per-window score linearly maps the absolute deviation
-    /// above `signalFloorDb` onto `[0, 1]` and saturates at `saturationDb`.
+    /// The baseline is the **median** of `20 * log10(max(rms, eps))` across
+    /// all windows — robust against the loud insertion biasing the baseline
+    /// toward itself. The per-window score linearly maps the absolute
+    /// deviation above `signalFloorDb` onto `[0, 1]` and saturates at
+    /// `saturationDb`.
+    ///
+    /// Why median over arithmetic mean: a long sustained-loud insertion
+    /// pulls the arithmetic mean toward its own dB, shrinking the delta
+    /// the detector sees. The median is unaffected by an insertion that
+    /// occupies less than half of the episode (the mainline case).
     ///
     /// - Parameters:
     ///   - windows: All feature windows for the episode. Must be sorted; any
@@ -54,7 +61,7 @@ enum LufsShift {
         guard !windows.isEmpty else { return [] }
 
         let dbValues = windows.map { dbfs(rms: $0.rms) }
-        let baseline = dbValues.reduce(0, +) / Double(dbValues.count)
+        let baseline = medianBaseline(dbValues)
 
         var out: [AcousticFeatureScore] = []
         out.reserveCapacity(windows.count)
@@ -86,6 +93,18 @@ enum LufsShift {
     static func dbfs(rms: Double) -> Double {
         let floored = max(rms, 1e-6)
         return 20 * log10(floored)
+    }
+
+    /// Median of an unsorted array. Empty input is undefined behaviour;
+    /// callers guard with `!windows.isEmpty`. Even-length arrays return
+    /// the upper of the two midpoints (i.e. `sorted[n/2]`, which is the
+    /// (n/2 + 1)-th element in 1-indexed terms — no averaging) — adequate
+    /// for a detection baseline and avoids floating-point ambiguity.
+    static func medianBaseline(_ values: [Double]) -> Double {
+        let sorted = values.sorted()
+        let n = sorted.count
+        precondition(n > 0, "medianBaseline requires non-empty input")
+        return sorted[n / 2]
     }
 
     static func mapDeltaToScore(_ delta: Double, config: Config) -> Double {

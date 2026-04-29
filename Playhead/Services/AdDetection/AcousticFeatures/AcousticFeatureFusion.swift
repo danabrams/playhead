@@ -29,17 +29,27 @@ enum AcousticFeatureFusion {
         let tempoOnset: Double
 
         // TODO(gtt9.12 → gtt9.3): tune these against the real 2026-04-23
-        // corpus. These are reasonable priors (sum ≈ 1.0); gtt9.3's grid
-        // search replaces them once the calibration pipeline is ready.
+        // corpus. These are reasonable priors that sum to exactly 1.0
+        // across the 7 live features; gtt9.3's grid search replaces them
+        // once the calibration pipeline is ready.
+        //
+        // playhead-rfu-aac (review M5): `repetitionFingerprint` is a
+        // stub today (always emits 0). Allocating it 0.15 effectively
+        // capped the achievable combined score at ≈0.85 since that mass
+        // never materialized. Redistribute the freed 0.15 across the 7
+        // live features (proportionally) so the priors sum to exactly
+        // 1.0 over signals that actually fire. The weight stays in the
+        // struct (assigned 0) so future activation is a single-line
+        // change rather than a struct-shape migration.
         static let defaultPriors = Weights(
-            musicBed: 0.15,
-            lufsShift: 0.15,
-            dynamicRange: 0.10,
-            speakerShift: 0.15,
-            spectralShift: 0.10,
+            musicBed: 0.18,           // 0.15 → 0.18 (+0.03)
+            lufsShift: 0.18,          // 0.15 → 0.18 (+0.03)
+            dynamicRange: 0.12,       // 0.10 → 0.12 (+0.02)
+            speakerShift: 0.18,       // 0.15 → 0.18 (+0.03)
+            spectralShift: 0.12,      // 0.10 → 0.12 (+0.02)
             silenceBoundary: 0.10,
-            repetitionFingerprint: 0.15,
-            tempoOnset: 0.10
+            repetitionFingerprint: 0, // stub, no signal — see comment.
+            tempoOnset: 0.12          // 0.10 → 0.12 (+0.02)
         )
 
         func weight(for feature: AcousticFeatureKind) -> Double {
@@ -85,15 +95,41 @@ enum AcousticFeatureFusion {
 
         // Use the longest score array (any feature's output; they're all
         // aligned by construction) to source the (start, end) pairs.
-        let reference = featureScores.values.max(by: { $0.count < $1.count }) ?? []
+        // Dictionary iteration order is unstable across runs, so use an
+        // explicit feature priority (largest scoring buckets first) to
+        // pick the reference deterministically. Two `combine` calls over
+        // identical input must produce identical (start, end) pairs.
+        let referencePriority: [AcousticFeatureKind] = [
+            .musicBed,
+            .lufsShift,
+            .spectralShift,
+            .speakerShift,
+            .silenceBoundary,
+            .dynamicRange,
+            .tempoOnset,
+            .repetitionFingerprint
+        ]
+        let reference: [AcousticFeatureScore] = referencePriority
+            .lazy
+            .compactMap { featureScores[$0] }
+            .first(where: { !$0.isEmpty })
+            ?? []
 
         var out: [WindowFusion] = []
         out.reserveCapacity(maxCount)
 
+        // Iterate features alphabetically by rawValue (deterministic; for
+        // a String-raw enum that's lexicographic, NOT declaration order)
+        // so the per-window combined sum is reproducible across runs.
+        // Float addition is mostly associative but `Dictionary` iteration
+        // is explicitly unstable, so we never trust it for determinism.
+        let stableKinds = featureScores.keys.sorted { $0.rawValue < $1.rawValue }
+
         for idx in 0..<maxCount {
             var combined = 0.0
             var contributing: [AcousticFeatureKind] = []
-            for (kind, arr) in featureScores where idx < arr.count {
+            for kind in stableKinds {
+                guard let arr = featureScores[kind], idx < arr.count else { continue }
                 let s = arr[idx].score
                 guard s >= gateFloor else { continue }
                 combined += weights.weight(for: kind) * s

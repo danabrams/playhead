@@ -244,6 +244,15 @@ struct NoOpTranscriptShadowGateLogger: TranscriptShadowGateLogging {
 /// tooling can correlate captures with the exact binary that produced
 /// them. Callers pass `buildCommitSHA: nil`; the actor overwrites in
 /// `appendEntry` before encoding.
+///
+/// Durability: best-effort, **not crash-durable**. We don't fsync after
+/// every record (the eval pipeline tolerates loss of the final
+/// in-flight rows on a crash, and a per-shard fsync would dominate
+/// shadow-mode CPU on cold caches). The handle is closed on
+/// `flushAndClose()` and on rotation, both of which trigger an
+/// implicit flush of any user-space buffering. Callers needing
+/// stronger guarantees should call `flushAndClose()` and reopen
+/// (review playhead-rfu-aac M3).
 actor TranscriptShadowGateLogger: TranscriptShadowGateLogging {
 
     static let defaultRotationThresholdBytes: Int = 10 * 1024 * 1024
@@ -261,6 +270,13 @@ actor TranscriptShadowGateLogger: TranscriptShadowGateLogging {
 
     private var nextRotationIndex: Int?
     private var fileHandle: FileHandle?
+    /// Bytes appended to the current active log since it was opened or last
+    /// rotated. Maintained in-memory so `rotateIfNeeded` can decide without
+    /// stat'ing the file on every record (which previously required an
+    /// fsync to flush user-space buffering before the size read was
+    /// trustworthy). Reset to 0 in `rotateNow`. Re-seeded from disk on
+    /// re-open via `seekToEnd` in `write`.
+    private var totalBytesWritten: UInt64 = 0
 
     // MARK: - Init
 
@@ -276,9 +292,14 @@ actor TranscriptShadowGateLogger: TranscriptShadowGateLogging {
         // we overwrite in `appendEntry`. Reading at init avoids hot-path
         // repeats and keeps the eval pipeline correlation deterministic.
         self.buildCommitSHA = BuildInfo.commitSHA
+        // playhead-rfu-aac L2: no field on TranscriptShadowGateEntry is a
+        // Date — `timestamp` is a `Double`. The previous `.iso8601`
+        // dateEncodingStrategy was load-bearing only by accident (it set a
+        // policy that no encoder path ever invoked). Drop it to remove the
+        // dead config and avoid confusing future maintainers who might
+        // expect schema fields to round-trip as ISO-8601 strings.
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
         self.encoder = encoder
         self.resolvedDirectory = nil
         self.nextRotationIndex = nil
@@ -293,9 +314,14 @@ actor TranscriptShadowGateLogger: TranscriptShadowGateLogging {
         self.directoryOverride = directory
         self.rotationThresholdBytes = rotationThresholdBytes
         self.buildCommitSHA = BuildInfo.commitSHA
+        // playhead-rfu-aac L2: no field on TranscriptShadowGateEntry is a
+        // Date — `timestamp` is a `Double`. The previous `.iso8601`
+        // dateEncodingStrategy was load-bearing only by accident (it set a
+        // policy that no encoder path ever invoked). Drop it to remove the
+        // dead config and avoid confusing future maintainers who might
+        // expect schema fields to round-trip as ISO-8601 strings.
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
         self.encoder = encoder
         self.resolvedDirectory = nil
         self.nextRotationIndex = nil
@@ -415,16 +441,24 @@ actor TranscriptShadowGateLogger: TranscriptShadowGateLogging {
                 FileManager.default.createFile(atPath: url.path, contents: nil)
             }
             fileHandle = try FileHandle(forWritingTo: url)
-            try fileHandle?.seekToEnd()
+            // Re-seed the in-memory size counter from the on-disk size when
+            // (re)opening the active log. Covers process restarts and any
+            // post-`flushAndClose` reopen path.
+            let endOffset = try fileHandle?.seekToEnd() ?? 0
+            totalBytesWritten = endOffset
         }
         try fileHandle?.write(contentsOf: data)
+        totalBytesWritten &+= UInt64(data.count)
     }
 
     private func rotateIfNeeded() throws {
+        // playhead-rfu-aac H1 (cycle-3): track bytes in-memory so we don't
+        // stat the file (and don't need to fsync-before-stat) on every
+        // record. The counter is incremented on each successful write and
+        // reset on rotation; durability semantics are unchanged (best-effort,
+        // not crash-durable, see actor-level docstring).
+        guard totalBytesWritten >= UInt64(rotationThresholdBytes) else { return }
         let url = activeLogURL
-        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
-        let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
-        guard size >= rotationThresholdBytes else { return }
         // Livelock guard: a single record larger than the threshold would
         // produce a fresh active file that is itself still oversized,
         // looping the rotation forever. Skip rotation when the active
@@ -474,6 +508,9 @@ actor TranscriptShadowGateLogger: TranscriptShadowGateLogging {
             try fm.moveItem(at: src, to: dst)
         }
         nextRotationIndex = idx + 1
+        // Reset the in-memory size counter; the next write reopens the
+        // handle on a fresh empty active log file.
+        totalBytesWritten = 0
         logger.info("TranscriptShadowGateLogger: rotated active log to \(dstName, privacy: .public)")
     }
 

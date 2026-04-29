@@ -11,6 +11,24 @@
 import Foundation
 import OSLog
 
+// MARK: - StreamingDecodeFailure
+
+/// Sticky failure marker for an irrecoverable mid-stream decode error.
+/// Carried on the actor and exposed via `failureReason()` so consumers
+/// who saw the `AsyncStream` end without knowing why can disambiguate.
+struct StreamingDecodeFailure: Error, Sendable, CustomStringConvertible {
+    /// Coarse failure category — useful for diagnostics + tests.
+    enum Stage: String, Sendable {
+        case converterSetup
+        case converterError
+    }
+
+    let stage: Stage
+    let message: String
+
+    var description: String { "StreamingDecodeFailure(\(stage.rawValue): \(message))" }
+}
+
 // MARK: - StreamingAudioDecoder
 
 /// Incrementally decodes compressed audio bytes into 16 kHz mono Float32
@@ -24,6 +42,14 @@ import OSLog
 /// Float32; the buffer never scales with total episode duration. (The
 /// downstream `AsyncStream`'s queue is the consumer's concern — bound
 /// that on the consumer side by draining promptly.)
+///
+/// **Failure semantics.** Recoverable read hiccups (a partial last frame
+/// while a chunk is mid-flight) are logged and the loop retries on the
+/// next `feedData(_:)` call. Irrecoverable failures (converter setup,
+/// repeated converter errors after a header was successfully detected)
+/// finish the shard stream early; the consumer can read
+/// `failureReason()` after the stream terminates to disambiguate
+/// "natural end" from "decoder gave up".
 ///
 /// Compressed bytes are appended to a temp file on disk; only the
 /// in-progress shard's PCM lives in memory.
@@ -84,6 +110,20 @@ actor StreamingAudioDecoder {
     private var shardContinuation: AsyncStream<AnalysisShard>.Continuation?
     private var streamCreated = false
 
+    // MARK: - Failure state
+
+    /// Sticky decode-failure marker. Set when an irrecoverable error
+    /// finishes the stream early; remains queryable after consumers see
+    /// `nil` from the `AsyncStream` so they can distinguish "EOF" from
+    /// "decoder bailed mid-stream". Surfaced via `failureReason()`.
+    private var decodeFailure: StreamingDecodeFailure?
+
+    // MARK: - Cleanup state
+
+    /// Idempotency latch for `cleanup()`. Guards double-close on the file
+    /// handle and avoids a redundant `removeItem` race with `deinit`.
+    private var didCleanup = false
+
     // MARK: - Output format (16 kHz mono Float32)
 
     private let outputFormat: AVAudioFormat
@@ -122,6 +162,19 @@ actor StreamingAudioDecoder {
         self.outputFormat = format
     }
 
+    /// Belt-and-suspenders temp-file removal in case `cleanup()` was never
+    /// called. Only `tempFileURL` is touched here — it's a `let`, so it's
+    /// safe to read from a non-isolated `deinit`. The actor-isolated
+    /// `tempFileHandle` is *not* closed from deinit (we can't reach
+    /// actor-isolated mutable state without a hop), so callers MUST call
+    /// `cleanup()` to release the file descriptor. The only production
+    /// call site (`AnalysisCoordinator.runStreamingDecode`) does so on
+    /// both the completion and cancellation paths; ARC-only release is
+    /// the test-suite fallback, where worktree teardown reaps any stragglers.
+    deinit {
+        try? FileManager.default.removeItem(at: tempFileURL)
+    }
+
     // MARK: - Public API
 
     /// Returns the shard stream. Call `feedData(_:)` to push compressed bytes,
@@ -139,10 +192,16 @@ actor StreamingAudioDecoder {
 
     /// Feed compressed audio bytes from the download.
     ///
-    /// Errors are logged but do not throw -- partial decode failures should
-    /// not stop the stream. The decoder will retry on the next call.
+    /// Recoverable read hiccups are logged and the next call retries.
+    /// Irrecoverable failures (converter setup, repeated converter errors)
+    /// finish the stream — the consumer's `for await` returns and they
+    /// can inspect `failureReason()` to disambiguate from natural EOF.
     func feedData(_ data: Data) {
         guard !data.isEmpty else { return }
+        // After an irrecoverable failure the stream has been finished;
+        // skip further work so we don't allocate/decode against a dead
+        // pipeline.
+        if decodeFailure != nil { return }
 
         // 1. Write bytes to temp file.
         do {
@@ -163,8 +222,20 @@ actor StreamingAudioDecoder {
 
     /// Signal that no more data will arrive. Flushes any remaining
     /// accumulated samples as a final (possibly shorter) shard, then
-    /// finishes the output stream.
+    /// finishes the output stream. No-op if the stream already failed.
+    ///
+    /// Sticky-failure synthesis: if we received enough bytes for format
+    /// detection (`>= minimumBytesForDetection`) but never produced a
+    /// valid `AVAudioFormat`, the bytes weren't recognizable audio.
+    /// Synthesize a `converterSetup` failure so consumers who inspect
+    /// `failureReason()` after seeing an empty `AsyncStream` can
+    /// distinguish "never enough bytes" from "garbage bytes".
     func finish() {
+        if decodeFailure != nil {
+            // Stream was already finished by `failStream`; nothing to do.
+            return
+        }
+
         // One last decode pass to pick up any trailing frames.
         if totalBytesWritten > 0 {
             decodeAvailableFrames()
@@ -176,16 +247,48 @@ actor StreamingAudioDecoder {
             accumulatedSamples.removeAll()
         }
 
+        // playhead-rfu-aac (cycle-3 M2): if enough bytes flowed in for
+        // detection to attempt, but no format was ever detected, the
+        // bytes weren't valid audio. Record a sticky failure so callers
+        // can disambiguate "garbage" from "natural EOF".
+        if !formatDetected && totalBytesWritten >= Int64(Self.minimumBytesForDetection) {
+            failStream(
+                stage: .converterSetup,
+                message: "Format never detected after \(totalBytesWritten) bytes; bytes are not valid audio"
+            )
+            return
+        }
+
         shardContinuation?.finish()
         shardContinuation = nil
     }
 
     /// Remove the temp file. Call after the stream has been fully consumed
-    /// or when the decode is no longer needed.
+    /// or when the decode is no longer needed. Idempotent.
     func cleanup() {
+        if didCleanup { return }
+        didCleanup = true
         try? tempFileHandle?.close()
         tempFileHandle = nil
         try? FileManager.default.removeItem(at: tempFileURL)
+    }
+
+    /// Returns the irrecoverable decode failure, if one occurred. Nil
+    /// means the stream ended naturally or has not ended yet.
+    func failureReason() -> StreamingDecodeFailure? {
+        decodeFailure
+    }
+
+    /// Internal: set the sticky failure marker (idempotent — keeps the
+    /// first failure) and finish the stream so the consumer's `for await`
+    /// returns rather than stalling forever.
+    private func failStream(stage: StreamingDecodeFailure.Stage, message: String) {
+        if decodeFailure == nil {
+            decodeFailure = StreamingDecodeFailure(stage: stage, message: message)
+            logger.error("StreamingAudioDecoder failing stream: \(stage.rawValue, privacy: .public): \(message, privacy: .public)")
+        }
+        shardContinuation?.finish()
+        shardContinuation = nil
     }
 
     // MARK: - Temp file management
@@ -225,7 +328,10 @@ actor StreamingAudioDecoder {
         if !formatDetected {
             let srcFormat = audioFile.processingFormat
             guard let conv = AVAudioConverter(from: srcFormat, to: outputFormat) else {
-                logger.error("Failed to create AVAudioConverter from \(srcFormat) to \(self.outputFormat)")
+                failStream(
+                    stage: .converterSetup,
+                    message: "Failed to create AVAudioConverter from \(srcFormat) to \(outputFormat)"
+                )
                 return
             }
             self.sourceFormat = srcFormat

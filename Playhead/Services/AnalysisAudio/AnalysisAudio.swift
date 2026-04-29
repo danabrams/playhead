@@ -402,6 +402,26 @@ actor AnalysisAudioService {
         }
         reader.add(trackOutput)
 
+        // playhead-rfu-aac H4 / cycle-3 L4: ensure the reader is torn down
+        // on every exit path — cancellation, conversion error, inputBlock
+        // failure, normal completion, AND a `startReading()` failure
+        // immediately below. A successfully-completed reader is a no-op
+        // here (`cancelReading` on `.completed` is documented as harmless),
+        // but a thrown error mid-decode previously left the reader (and
+        // its CMSampleBufferPool / decoder workqueue threads) live until
+        // ARC reclaimed it asynchronously. Deterministic cleanup matters
+        // for test stability and for keeping per-decode resources bounded
+        // during back-to-back retries.
+        //
+        // The defer is registered BEFORE `startReading()` so the
+        // `addOutput → startReading-failure → throw` path is also covered;
+        // registering after the start would skip cleanup on that path.
+        defer {
+            if reader.status == .reading {
+                reader.cancelReading()
+            }
+        }
+
         guard reader.startReading() else {
             let msg = reader.error?.localizedDescription ?? "unknown error"
             throw AnalysisAudioError.readerSetupFailed(msg)
