@@ -50,10 +50,16 @@ actor EpisodeSurfaceStatusObserver {
     /// `AnalysisAsset` row to build the reducer's `AnalysisState` input.
     private let store: AnalysisStore
 
-    /// Live capability snapshot provider. Closure so tests can inject a
-    /// deterministic snapshot without spinning up the real
-    /// `CapabilitiesService`.
-    private let capabilitySnapshotProvider: @Sendable () async -> CapabilitySnapshot?
+    /// Live eligibility provider. Closure so tests can inject a
+    /// deterministic verdict without standing up the real
+    /// `AnalysisEligibilityEvaluator` + provider stack.
+    ///
+    /// playhead-4nt1: replaced the previous `capabilitySnapshotProvider`
+    /// + static `eligibility(from:)` mapping. The observer now consumes
+    /// the evaluator's structured `AnalysisEligibility` verdict directly
+    /// — `hardwareSupported` and `regionSupported` are no longer
+    /// hardcoded `true` inside the observer.
+    private let eligibilityProvider: @Sendable () async -> AnalysisEligibility
 
     /// Pluggable hasher so tests can assert on a known hash value
     /// without depending on the production installId. Production passes
@@ -81,7 +87,7 @@ actor EpisodeSurfaceStatusObserver {
     /// closure that calls `invariantLogger.recordReadyEntered(...)`.
     ///
     /// Tests that only want to exercise the mapping+emission flow can
-    /// pass just `store` + `capabilitySnapshotProvider` and accept the
+    /// pass just `store` + `eligibilityProvider` and accept the
     /// default logger (a fresh isolated instance) and derived hasher.
     ///
     /// playhead-jzdc: the `emitter:` defaulted parameter was removed so
@@ -89,14 +95,19 @@ actor EpisodeSurfaceStatusObserver {
     /// observer, never reachable from outside). Tests that need to
     /// observe what the emitter would emit use the sink-closure init
     /// below.
+    ///
+    /// playhead-4nt1: replaced `capabilitySnapshotProvider` with
+    /// `eligibilityProvider` — production threads in the live
+    /// `AnalysisEligibilityEvaluator`'s verdict so the observer no
+    /// longer hardcodes `hardwareSupported` / `regionSupported`.
     init(
         store: AnalysisStore,
-        capabilitySnapshotProvider: @escaping @Sendable () async -> CapabilitySnapshot?,
+        eligibilityProvider: @escaping @Sendable () async -> AnalysisEligibility,
         invariantLogger: SurfaceStatusInvariantLogger = SurfaceStatusInvariantLogger(),
         episodeIdHasher: (@Sendable (String) -> String)? = nil
     ) {
         self.store = store
-        self.capabilitySnapshotProvider = capabilitySnapshotProvider
+        self.eligibilityProvider = eligibilityProvider
         self.episodeIdHasher = episodeIdHasher ?? { [invariantLogger] episodeId in
             invariantLogger.hashEpisodeId(episodeId)
         }
@@ -134,7 +145,7 @@ actor EpisodeSurfaceStatusObserver {
     #if DEBUG
     init(
         store: AnalysisStore,
-        capabilitySnapshotProvider: @escaping @Sendable () async -> CapabilitySnapshot?,
+        eligibilityProvider: @escaping @Sendable () async -> AnalysisEligibility,
         episodeIdHasher: @escaping @Sendable (String) -> String,
         emitterSink: @escaping @Sendable (
             _ episodeIdHash: String?,
@@ -142,7 +153,7 @@ actor EpisodeSurfaceStatusObserver {
         ) -> Void
     ) {
         self.store = store
-        self.capabilitySnapshotProvider = capabilitySnapshotProvider
+        self.eligibilityProvider = eligibilityProvider
         self.episodeIdHasher = episodeIdHasher
         self.emitter = SurfaceStatusReadyTransitionEmitter(
             reducer: { state, cause, eligibility, coverage, anchor in
@@ -214,8 +225,7 @@ actor EpisodeSurfaceStatusObserver {
         // Not a ready transition; nothing to emit.
         guard let asset else { return }
 
-        let capabilitySnapshot = await capabilitySnapshotProvider()
-        let eligibility = Self.eligibility(from: capabilitySnapshot)
+        let eligibility = await eligibilityProvider()
         let state = Self.analysisState(from: asset)
         let episodeIdHash = episodeIdHasher(episodeId)
 
@@ -301,14 +311,21 @@ actor EpisodeSurfaceStatusObserver {
     /// the snapshot (`appleIntelligenceEnabled`, `languageSupported` via
     /// `foundationModelsLocaleSupported`, `modelAvailableNow` via
     /// `canUseFoundationModels`). `hardwareSupported` and
-    /// `regionSupported` default to `true` here — the dedicated
-    /// `AnalysisEligibilityEvaluator` with per-field providers is not
-    /// yet wired into production (Phase 2 scope). Defaulting to `true`
-    /// is the conservative choice: it does NOT gate the reducer on
-    /// Rule 1 (eligibility-blocks), so ready transitions are measurable
-    /// on all hardware. When a truly-ineligible device shows up in the
-    /// audit, the paired `auto_skip_fired` denominator will still be
-    /// zero and the false_ready_rate surfaces the miss.
+    /// `regionSupported` default to `true` here.
+    ///
+    /// playhead-4nt1: this static helper is **no longer called from the
+    /// observer's runtime path** — the production observer consumes the
+    /// live `AnalysisEligibilityEvaluator`'s verdict via
+    /// `eligibilityProvider`, which surfaces real hardware/region
+    /// values from the per-field providers (see
+    /// `CapabilityBackedEligibilityProviders`). The helper is retained
+    /// only for the two non-observer callers
+    /// (`LiveActivitySnapshotProvider.loadInputs` and any test that
+    /// imports the snapshot→eligibility approximation directly) that
+    /// still want a one-shot mapping without spinning up the full
+    /// evaluator. Migrating those callers to the evaluator is out of
+    /// scope for 4nt1 — the observer was the load-bearing call site
+    /// that the bead targeted.
     ///
     /// `nil` snapshot (capability service not yet primed) maps to a
     /// fully-eligible snapshot for the same reason.
