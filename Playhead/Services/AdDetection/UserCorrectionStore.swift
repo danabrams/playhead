@@ -252,6 +252,24 @@ protocol UserCorrectionStore: Sendable {
     /// Counterpart to `correctionPassthroughFactor` — where passthrough suppresses,
     /// boost amplifies.
     func correctionBoostFactor(for analysisAssetId: String) async -> Double
+
+    /// playhead-rfu-sad: span-local variant. Returns the boost factor only
+    /// when at least one false-negative correction overlaps the
+    /// `[startTime, endTime]` range. Used by the precision gate's
+    /// `userConfirmedLocalPattern` safety signal so the boost fires on
+    /// the corrected span, not on every other window in the asset.
+    ///
+    /// Span-scoped corrections (`.exactSpan`, `.exactTimeSpan`) are
+    /// matched by overlap with the supplied range. Show-wide scopes
+    /// (`.sponsorOnShow`, `.phraseOnShow`, etc.) are NOT considered
+    /// here — those legitimately apply asset-wide and should be
+    /// checked via the asset-wide `correctionBoostFactor` overload
+    /// when needed.
+    func correctionBoostFactor(
+        for analysisAssetId: String,
+        overlapping startTime: Double,
+        endTime: Double
+    ) async -> Double
 }
 
 // MARK: - NoOpUserCorrectionStore
@@ -284,6 +302,15 @@ struct NoOpUserCorrectionStore: UserCorrectionStore {
 
     func correctionBoostFactor(for analysisAssetId: String) async -> Double {
         // No active false negative corrections — no boost.
+        return 1.0
+    }
+
+    func correctionBoostFactor(
+        for analysisAssetId: String,
+        overlapping startTime: Double,
+        endTime: Double
+    ) async -> Double {
+        // No active corrections at all — no boost.
         return 1.0
     }
 }
@@ -506,6 +533,83 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
         return min(2.0, 1.0 + maxCorrectionWeight)
     }
 
+    /// playhead-rfu-sad: span-local boost. Filters false-negative
+    /// corrections to those whose scope time range overlaps
+    /// `[startTime, endTime]`. Returns 1.0 (no boost) when nothing
+    /// overlaps, even if asset-wide corrections exist on this asset —
+    /// that's the whole point: the boost should fire only on the span
+    /// the user actually corrected, not on unrelated segments.
+    func correctionBoostFactor(
+        for analysisAssetId: String,
+        overlapping startTime: Double,
+        endTime: Double
+    ) async -> Double {
+        guard startTime.isFinite, endTime.isFinite, endTime > startTime else {
+            return 1.0
+        }
+        let weighted: [(CorrectionEvent, Double)]
+        do {
+            weighted = try await weightedCorrections(for: analysisAssetId)
+        } catch {
+            logger.warning(
+                "correctionBoostFactor(overlapping:): failed to load corrections for \(analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return 1.0
+        }
+
+        // Pre-load the synthetic-span ordinal-to-time map once so
+        // `.exactSpan` corrections (synthetic ordinals → reported time
+        // window) can be resolved without N round-trips to SQLite.
+        var synthSpansByOrdinal: [Int: (startTime: Double, endTime: Double)]? = nil
+        func resolveSyntheticTimes(forOrdinal ordinal: Int) async -> (startTime: Double, endTime: Double)? {
+            if synthSpansByOrdinal == nil {
+                do {
+                    let spans = try await store.fetchDecodedSpans(assetId: analysisAssetId)
+                    var map: [Int: (startTime: Double, endTime: Double)] = [:]
+                    for span in spans where span.firstAtomOrdinal < 0 {
+                        let times = (startTime: span.startTime, endTime: span.endTime)
+                        map[span.firstAtomOrdinal] = times
+                        map[span.lastAtomOrdinal] = times
+                    }
+                    synthSpansByOrdinal = map
+                } catch {
+                    synthSpansByOrdinal = [:]
+                }
+            }
+            return synthSpansByOrdinal?[ordinal]
+        }
+
+        var maxOverlapWeight: Double = 0
+        for (event, weight) in weighted where event.source?.kind == .falseNegative {
+            guard let scope = CorrectionScope.deserialize(event.scope) else { continue }
+            switch scope {
+            case .exactTimeSpan(_, let s, let e):
+                if rangesOverlap(s, e, startTime, endTime) {
+                    maxOverlapWeight = max(maxOverlapWeight, weight)
+                }
+            case .exactSpan(_, let ordinalRange):
+                // For real (non-synthetic) ordinal ranges we lack a
+                // direct time mapping here, but synthetic spans (the
+                // common false-negative path) carry negative ordinals
+                // and have a corresponding DecodedSpan with start/end
+                // times. Look those up.
+                if ordinalRange.lowerBound < 0,
+                   let times = await resolveSyntheticTimes(forOrdinal: ordinalRange.lowerBound),
+                   rangesOverlap(times.startTime, times.endTime, startTime, endTime) {
+                    maxOverlapWeight = max(maxOverlapWeight, weight)
+                }
+            case .sponsorOnShow, .phraseOnShow, .campaignOnShow,
+                 .domainOwnershipOnShow, .jingleOnShow:
+                // Show-wide scopes are intentionally NOT counted by
+                // the span-local helper. Callers that want show-wide
+                // boosting should use the asset-wide overload.
+                continue
+            }
+        }
+        guard maxOverlapWeight > 0 else { return 1.0 }
+        return min(2.0, 1.0 + maxOverlapWeight)
+    }
+
     // MARK: - False-Negative Synthetic Anchor (playhead-ef2.3.2)
 
     /// Record a false-negative correction ("missed ad here") and immediately create
@@ -533,8 +637,36 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
         let hashInt = hashBytes.prefix(8).enumerated().reduce(0) { acc, pair in
             acc | (Int(pair.element) << (pair.offset * 8))
         }
-        let syntheticFirst = -(abs(hashInt % 1_000_000) + 2)
-        let syntheticLast = syntheticFirst + 1
+        // playhead-rfu-sad: probe forward on collision. Two
+        // correction IDs whose SHA256 prefixes collide modulo 1M
+        // would otherwise overwrite each other's synthetic span via
+        // `INSERT OR REPLACE` — silently dropping the older
+        // false-negative report. Birthday-paradox math says ~1180
+        // false-negative reports per asset before a 50% collision
+        // chance, well below the practical ceiling but not so far
+        // that we can ignore it across the install base. Probe by
+        // adding 2 (synthetic ranges are pairs `[N, N+1]`) until we
+        // find an unused pair. Bounded by `maxProbeAttempts` —
+        // exhausting the budget throws so the caller (UI gesture
+        // handler) sees a real error rather than a silent overwrite.
+        let baseOffset = abs(hashInt % 1_000_000) + 2
+        let existingOrdinals = try await loadSyntheticOrdinals(assetId: assetId)
+        let maxProbeAttempts = 64
+        var probe = 0
+        var syntheticFirst = -baseOffset
+        var syntheticLast = syntheticFirst + 1
+        while existingOrdinals.contains(syntheticFirst)
+            || existingOrdinals.contains(syntheticLast) {
+            probe += 1
+            if probe > maxProbeAttempts {
+                logger.error(
+                    "recordFalseNegative: synthetic ordinal probe exhausted (\(maxProbeAttempts)) for asset \(assetId, privacy: .public); aborting to avoid silent collision"
+                )
+                throw UserCorrectionStoreError.syntheticOrdinalProbeExhausted
+            }
+            syntheticFirst -= 2
+            syntheticLast = syntheticFirst + 1
+        }
 
         // 2. Record the correction event with the actual synthetic ordinals.
         let scope = CorrectionScope.exactSpan(
@@ -612,4 +744,40 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
     func hasActiveCorrection(scope: CorrectionScope, at now: Date = Date()) async throws -> Bool {
         try await store.hasAnyCorrectionEvent(withScope: scope.serialized)
     }
+
+    // MARK: - Range overlap helper (playhead-rfu-sad)
+
+    /// Half-open overlap test: `[aStart, aEnd]` and `[bStart, bEnd]`
+    /// overlap when `aStart < bEnd && bStart < aEnd`. Touching
+    /// endpoints (`aEnd == bStart`) do NOT overlap; matches the
+    /// existing `RegionProposalBuilder.rangesOverlap` convention.
+    private func rangesOverlap(_ aStart: Double, _ aEnd: Double, _ bStart: Double, _ bEnd: Double) -> Bool {
+        return aStart < bEnd && bStart < aEnd
+    }
+
+    // MARK: - Synthetic ordinal collision avoidance (playhead-rfu-sad)
+
+    /// Load the set of negative atom ordinals already present on
+    /// synthetic (false-negative) spans for this asset. Used by
+    /// `recordFalseNegative` to probe forward on hash collision.
+    private func loadSyntheticOrdinals(assetId: String) async throws -> Set<Int> {
+        let spans = try await store.fetchDecodedSpans(assetId: assetId)
+        var ordinals: Set<Int> = []
+        for span in spans where span.firstAtomOrdinal < 0 {
+            ordinals.insert(span.firstAtomOrdinal)
+            ordinals.insert(span.lastAtomOrdinal)
+        }
+        return ordinals
+    }
+}
+
+// MARK: - UserCorrectionStoreError
+
+/// Errors thrown by `PersistentUserCorrectionStore`.
+enum UserCorrectionStoreError: Error {
+    /// `recordFalseNegative` exhausted its synthetic-ordinal probe
+    /// budget without finding a free pair. Indicates pathological
+    /// SHA256 collision density on this asset (or a bug). Caller
+    /// should surface, not silently overwrite.
+    case syntheticOrdinalProbeExhausted
 }

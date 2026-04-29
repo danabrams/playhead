@@ -334,3 +334,176 @@ struct CombinedCorrectionFactorTests {
 }
 
 // makeTestAsset(id:) is defined in TestHelpers.swift
+
+// MARK: - Span-local boost (playhead-rfu-sad)
+
+@Suite("correctionBoostFactor(overlapping:) — span-local scope")
+struct SpanLocalCorrectionBoostFactorTests {
+
+    @Test("exactTimeSpan correction only boosts the overlapping range")
+    func exactTimeSpanBoostsOnlyOverlap() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-span-tsoverlap"))
+
+        // User reported a missed ad at [60s, 90s].
+        let event = CorrectionEvent(
+            analysisAssetId: "asset-span-tsoverlap",
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: "asset-span-tsoverlap",
+                startTime: 60.0,
+                endTime: 90.0
+            ).serialized,
+            createdAt: Date().timeIntervalSince1970,
+            source: .falseNegative
+        )
+        try await correctionStore.record(event)
+
+        // Overlapping window — boost must apply.
+        let overlapping = await correctionStore.correctionBoostFactor(
+            for: "asset-span-tsoverlap",
+            overlapping: 70.0,
+            endTime: 100.0
+        )
+        #expect(overlapping > 1.9,
+                "Span overlapping the corrected range must receive boost; got \(overlapping)")
+
+        // Non-overlapping window in the same asset — boost MUST NOT apply.
+        let nonOverlapping = await correctionStore.correctionBoostFactor(
+            for: "asset-span-tsoverlap",
+            overlapping: 200.0,
+            endTime: 230.0
+        )
+        #expect(nonOverlapping == 1.0,
+                "Span outside the corrected range must NOT receive boost; got \(nonOverlapping)")
+    }
+
+    @Test("Touching endpoints do NOT count as overlap")
+    func touchingEndpointsDoNotOverlap() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-touching"))
+
+        let event = CorrectionEvent(
+            analysisAssetId: "asset-touching",
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: "asset-touching",
+                startTime: 60.0,
+                endTime: 90.0
+            ).serialized,
+            createdAt: Date().timeIntervalSince1970,
+            source: .falseNegative
+        )
+        try await correctionStore.record(event)
+
+        // Adjacent window starts exactly where correction ends — half-open
+        // overlap rule: NOT overlapping.
+        let adjacent = await correctionStore.correctionBoostFactor(
+            for: "asset-touching",
+            overlapping: 90.0,
+            endTime: 120.0
+        )
+        #expect(adjacent == 1.0,
+                "Adjacent (touching) window must NOT count as overlap; got \(adjacent)")
+    }
+
+    @Test("Synthetic span correction (recordFalseNegative) only boosts the overlapping range")
+    func syntheticSpanBoostsOnlyOverlap() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-span-synthetic"))
+
+        // Record a false-negative via the synthetic-span path (the
+        // common case from the "missed ad here" gesture). This creates
+        // both a CorrectionEvent (with .exactSpan scope and synthetic
+        // ordinals) and a DecodedSpan with the actual time range.
+        try await correctionStore.recordFalseNegative(
+            assetId: "asset-span-synthetic",
+            reportedTime: 120.0
+        )
+        // Synthetic span covers [105.0, 135.0] (±15s).
+
+        // Overlapping window — boost must apply via ordinal→time lookup.
+        let overlapping = await correctionStore.correctionBoostFactor(
+            for: "asset-span-synthetic",
+            overlapping: 110.0,
+            endTime: 140.0
+        )
+        #expect(overlapping > 1.9,
+                "Span overlapping the synthetic correction range must receive boost; got \(overlapping)")
+
+        // Non-overlapping window — boost MUST NOT apply.
+        let nonOverlapping = await correctionStore.correctionBoostFactor(
+            for: "asset-span-synthetic",
+            overlapping: 300.0,
+            endTime: 330.0
+        )
+        #expect(nonOverlapping == 1.0,
+                "Span outside the synthetic correction range must NOT receive boost; got \(nonOverlapping)")
+    }
+
+    @Test("Show-wide correction scopes do NOT boost any span via the span-local helper")
+    func showWideScopesAreIgnored() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-show-wide"))
+
+        // sponsorOnShow is a false-negative-style correction at the show
+        // level. The asset-wide overload would boost; the span-local
+        // overload should not, because we don't know which spans the
+        // sponsor lives in.
+        let event = CorrectionEvent(
+            analysisAssetId: "asset-show-wide",
+            scope: CorrectionScope.sponsorOnShow(podcastId: "podcast-x", sponsor: "BrandX").serialized,
+            createdAt: Date().timeIntervalSince1970,
+            source: .falseNegative,
+            podcastId: "podcast-x"
+        )
+        try await correctionStore.record(event)
+
+        let factor = await correctionStore.correctionBoostFactor(
+            for: "asset-show-wide",
+            overlapping: 60.0,
+            endTime: 90.0
+        )
+        #expect(factor == 1.0,
+                "Show-wide correction scope must not boost via span-local helper; got \(factor)")
+    }
+
+    @Test("NoOpUserCorrectionStore returns 1.0 for span-local boost")
+    func noOpReturnsNoBoost() async {
+        let store = NoOpUserCorrectionStore()
+        let factor = await store.correctionBoostFactor(
+            for: "any-asset",
+            overlapping: 0.0,
+            endTime: 30.0
+        )
+        #expect(factor == 1.0)
+    }
+
+    @Test("Invalid range (endTime <= startTime) returns 1.0")
+    func invalidRangeReturnsNoBoost() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-invalid-range"))
+
+        let event = CorrectionEvent(
+            analysisAssetId: "asset-invalid-range",
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: "asset-invalid-range",
+                startTime: 60.0,
+                endTime: 90.0
+            ).serialized,
+            createdAt: Date().timeIntervalSince1970,
+            source: .falseNegative
+        )
+        try await correctionStore.record(event)
+
+        let factor = await correctionStore.correctionBoostFactor(
+            for: "asset-invalid-range",
+            overlapping: 90.0,
+            endTime: 60.0
+        )
+        #expect(factor == 1.0)
+    }
+}

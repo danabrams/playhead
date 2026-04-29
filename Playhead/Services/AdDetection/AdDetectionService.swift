@@ -4226,9 +4226,21 @@ actor AdDetectionService {
         // disables the userConfirmedLocalPattern safety signal for this
         // window. This is honest: without a correction store we genuinely
         // have no user-confirmation evidence.
+        //
+        // playhead-rfu-sad: scope the boost to the span being evaluated.
+        // Asset-wide `correctionBoostFactor` would fire
+        // `userConfirmedLocalPattern` on every window in the asset once
+        // any single span had been corrected, including unrelated
+        // segments — defeating the precision-gate purpose. The
+        // span-local overload returns > 1.0 only when a false-negative
+        // correction overlaps `[startTime, endTime]`.
         let boost: Double
         if let correctionStore {
-            boost = await correctionStore.correctionBoostFactor(for: analysisAssetId)
+            boost = await correctionStore.correctionBoostFactor(
+                for: analysisAssetId,
+                overlapping: startTime,
+                endTime: endTime
+            )
         } else {
             boost = 1.0
         }
