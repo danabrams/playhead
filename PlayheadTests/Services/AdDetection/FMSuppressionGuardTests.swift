@@ -543,4 +543,45 @@ struct CappedByFMSuppressionGateTests {
         #expect(result.suppressedLedger[1].classificationTrust == 0.6,
                 "classificationTrust must be forwarded, not reset to default")
     }
+
+    @Test("subSource is preserved across suppression downweighting (playhead-rfu-sad)")
+    func subSourcePreservedThroughSuppression() {
+        // Catalog entries can carry a `subSource` disambiguator
+        // (`.transcriptCatalog` vs `.fingerprintStore`). Before
+        // playhead-rfu-sad the applicator rebuilt entries via the
+        // 4-arg init and silently dropped the field, collapsing the
+        // two distinct provenance buckets after suppression. NARL
+        // replay attributes by `subSource`, so dropping it would
+        // make cross-episode fingerprint matches and per-episode
+        // transcript matches indistinguishable downstream.
+        let ledger = [
+            EvidenceLedgerEntry(
+                source: .catalog,
+                weight: 0.20,
+                detail: .catalog(entryCount: 3),
+                classificationTrust: 1.0,
+                subSource: .transcriptCatalog
+            ),
+            EvidenceLedgerEntry(
+                source: .catalog,
+                weight: 0.18,
+                detail: .catalog(entryCount: 2),
+                classificationTrust: 1.0,
+                subSource: .fingerprintStore
+            ),
+        ]
+        let applicator = FMSuppressionApplicator(suppressionFactor: 0.3)
+        let result = applicator.apply(guardResult: .triggered, ledger: ledger)
+
+        #expect(result.applied)
+        #expect(result.suppressedLedger.count == 2)
+        // Both entries are weak (.catalog) → both should be downweighted,
+        // and both should keep their distinct subSource labels.
+        #expect(result.suppressedLedger[0].subSource == .transcriptCatalog,
+                "transcriptCatalog subSource must round-trip through suppression")
+        #expect(result.suppressedLedger[1].subSource == .fingerprintStore,
+                "fingerprintStore subSource must round-trip through suppression")
+        #expect(abs(result.suppressedLedger[0].weight - 0.20 * 0.3) < 0.001)
+        #expect(abs(result.suppressedLedger[1].weight - 0.18 * 0.3) < 0.001)
+    }
 }

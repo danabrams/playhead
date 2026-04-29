@@ -219,6 +219,16 @@ actor SkipOrchestrator {
     /// candidate. Cleared at episode end.
     private var suggestWindows: [String: AdWindow] = [:]
 
+    /// playhead-rfu-sad: tap-then-flip race guard. AdWindow ids that have
+    /// already been promoted via `acceptSuggestedSkip` (the user tapped
+    /// the suggest banner). A late-arriving ingest with the same id and
+    /// gate cleared must NOT register a second managed window — the
+    /// promoted UUID-keyed entry is already authoritative for that span.
+    /// Bounded LRU so a long episode doesn't grow the set unboundedly;
+    /// 256 ids covers any realistic single-episode tap volume.
+    private var recentlyAcceptedSuggestIds: [String] = []
+    private let recentlyAcceptedSuggestCapacity = 256
+
     /// The podcast ID for the current episode. Needed to populate banner items.
     private var activePodcastId: String?
 
@@ -341,7 +351,23 @@ actor SkipOrchestrator {
     /// guards against late deliveries that race a podcast/episode change.
     func setEvidenceCatalog(_ catalog: EvidenceCatalog) {
         guard let activeAssetId, catalog.analysisAssetId == activeAssetId else {
-            logger.debug("Dropping evidence catalog for non-active asset \(catalog.analysisAssetId, privacy: .public)")
+            // playhead-rfu-sad: bumped from .debug to .info. The
+            // common case here is benign: an asset-switch race where a
+            // catalog finished building for the previous episode just
+            // as the user moved to the next one. The catalog is
+            // correctly dropped and `evidenceCatalogEntries` falls back
+            // to empty for the new asset, which the UI handles.
+            // The non-benign case is a real wiring regression (catalog
+            // dispatcher routed to the wrong orchestrator instance,
+            // duplicate active orchestrators, etc.). Both cases want
+            // visibility: at .debug it is invisible in release; at
+            // .info it surfaces in os_log without polluting
+            // .notice/.error budgets so the wiring regression is
+            // diagnosable from a user log without drowning the signal.
+            let activeDescription = self.activeAssetId ?? "nil"
+            logger.info(
+                "Dropping evidence catalog for non-active asset \(catalog.analysisAssetId, privacy: .public) (active=\(activeDescription, privacy: .public))"
+            )
             return
         }
         activeEvidenceCatalog = catalog
@@ -507,6 +533,7 @@ actor SkipOrchestrator {
         banneredWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
         suggestWindows.removeAll()
+        recentlyAcceptedSuggestIds.removeAll()
         pushSkipCues()
     }
 
@@ -553,6 +580,38 @@ actor SkipOrchestrator {
                     emitSuggestBanner(for: adWindow)
                 }
                 continue
+            }
+
+            // playhead-rfu-sad: tap-then-flip race guard. The user
+            // already accepted this id via the suggest banner — a
+            // promoted UUID-keyed managed window is authoritative for
+            // the span. A late-arriving non-markOnly ingest with the
+            // SAME original id must NOT register a second `windows[id]`
+            // entry: that would emit a duplicate auto-skip banner and a
+            // duplicate `auto_skip_fired` audit event for one user
+            // skip. The promoted entry has already fired (or will fire)
+            // through evaluateAndPush.
+            if recentlyAcceptedSuggestIds.contains(adWindow.id) {
+                logger.debug(
+                    "AdWindow \(adWindow.id, privacy: .public) ignored — already promoted via acceptSuggestedSkip"
+                )
+                continue
+            }
+
+            // playhead-rfu-sad: gate-flip race guard. A window first seen
+            // as `markOnly` can later re-arrive with the gate cleared
+            // (e.g. fusion now admits it as auto-skip eligible). Without
+            // this clear, `suggestWindows[id]` would stay populated
+            // while `windows[id]` also gets a parallel managed entry —
+            // a still-visible suggest banner could re-fire
+            // `acceptSuggestedSkip` and synthesize a duplicate managed
+            // window via a fresh `UUID().uuidString` (see
+            // `acceptSuggestedSkip`'s `promotedId`).
+            if suggestWindows[adWindow.id] != nil {
+                suggestWindows.removeValue(forKey: adWindow.id)
+                logger.debug(
+                    "AdWindow \(adWindow.id, privacy: .public) gate flipped from markOnly — cleared suggest entry"
+                )
             }
 
             let incomingState = SkipDecisionState(rawValue: adWindow.decisionState) ?? .candidate
@@ -614,6 +673,31 @@ actor SkipOrchestrator {
                     "AdDecisionResult \(result.id, privacy: .public) gate=blocked — not adding to active windows"
                 )
                 continue
+            }
+
+            // playhead-rfu-sad: tap-then-flip race guard, fusion path.
+            // Mirrors the guard in `receiveAdWindows` so a fusion-shared
+            // id that promotes from blocked/markOnly to eligible AFTER
+            // the user has already accepted the suggest banner doesn't
+            // register a second managed window.
+            if recentlyAcceptedSuggestIds.contains(result.id) {
+                logger.debug(
+                    "AdDecisionResult \(result.id, privacy: .public) ignored — already promoted via acceptSuggestedSkip"
+                )
+                continue
+            }
+
+            // playhead-rfu-sad: symmetric gate-flip clear. If a fusion
+            // result for this id arrives eligible after the same id was
+            // first surfaced as a markOnly suggest entry, drop the
+            // suggest bookkeeping so a still-visible banner can't
+            // re-fire `acceptSuggestedSkip` against a now-managed
+            // window. Mirrors the clear in `receiveAdWindows`.
+            if suggestWindows[result.id] != nil {
+                suggestWindows.removeValue(forKey: result.id)
+                logger.debug(
+                    "AdDecisionResult \(result.id, privacy: .public) gate flipped from markOnly — cleared suggest entry"
+                )
             }
 
             let key = idempotencyKey(assetId: assetId, windowId: result.id)
@@ -853,6 +937,23 @@ actor SkipOrchestrator {
     /// injected correction store. Centralises the three manual-veto call
     /// sites (`recordListenRevert`, `revertByTimeRange`, `revertWindow`) so
     /// actor-isolated capture ritual and nil-store guard live in one place.
+    /// playhead-rfu-sad: LRU bookkeeping for the tap-then-flip race
+    /// guard. Insert if not already present, evict the oldest id when
+    /// the bounded set is full. The set is small enough that a linear
+    /// scan is cheaper than maintaining a parallel hash for membership.
+    private func rememberAcceptedSuggestId(_ id: String) {
+        if let existing = recentlyAcceptedSuggestIds.firstIndex(of: id) {
+            // Move-to-front: refresh recency.
+            recentlyAcceptedSuggestIds.remove(at: existing)
+        }
+        recentlyAcceptedSuggestIds.append(id)
+        if recentlyAcceptedSuggestIds.count > recentlyAcceptedSuggestCapacity {
+            recentlyAcceptedSuggestIds.removeFirst(
+                recentlyAcceptedSuggestIds.count - recentlyAcceptedSuggestCapacity
+            )
+        }
+    }
+
     private func persistManualCorrectionVeto(
         startTime: Double,
         endTime: Double,
@@ -886,6 +987,13 @@ actor SkipOrchestrator {
     /// auto-skipped, dismissed, or never registered as markOnly).
     func acceptSuggestedSkip(windowId: String) async {
         guard let suggested = suggestWindows.removeValue(forKey: windowId) else { return }
+
+        // playhead-rfu-sad: remember this id was promoted via tap so a
+        // late-arriving ingest with the same id and a cleared gate
+        // (tap-then-flip race) doesn't register a SECOND managed window
+        // alongside the UUID-keyed entry produced below. See the LRU
+        // check in `receiveAdWindows`.
+        rememberAcceptedSuggestId(windowId)
 
         // Build a fresh confirmed AdWindow with the suggest window's span and
         // confidence pinned to 1.0. We deliberately do not reuse the original
@@ -976,6 +1084,24 @@ actor SkipOrchestrator {
             decision: .applied,
             reason: "Manual skip by user"
         )
+
+        // playhead-rfu-sad: emit `auto_skip_fired` for the manual-skip path
+        // too. The ol05 audit log treats every applied window as a real
+        // skip — manual taps and auto-mode promotions are equivalent
+        // skips from the user's perspective and from the
+        // `false_ready_rate` denominator's perspective. Hashing routes
+        // through the same `episodeIdHasher` as the auto path so events
+        // pair byte-identically with `ready_entered`.
+        //
+        // Shadow mode is a "log-only, never actually skip" mode — the
+        // auto path explicitly does NOT emit (see evaluateWindow's
+        // .shadow case). Mirror that gate here so a manual-skip tap
+        // delivered in shadow mode (e.g. test harness, dogfood
+        // toggle) doesn't pollute the audit log with a real skip
+        // event that never produced a real user-facing skip.
+        if activeSkipMode != .shadow {
+            emitAutoSkipFiredAuditEvent(for: managed)
+        }
 
         // Persist.
         let id = managed.adWindow.id
@@ -1169,23 +1295,8 @@ actor SkipOrchestrator {
         // playhead-o45p: emit an auto_skip_fired event to the ol05 state-
         // transition log. Paired with readyEntered events on the same
         // episode_id_hash, this is the numerator/denominator source for
-        // the Wave 4 false_ready_rate dogfood metric. Hashing happens
-        // through the shared logger salt on the CANONICAL EPISODE KEY
-        // (not the analysis asset ID) so the two event sites produce
-        // byte-identical episode hashes —
-        // `EpisodeSurfaceStatusObserver.runReducerFor` hashes the same
-        // episode key onto `ready_entered`, and `false_ready_rate.swift`
-        // pairs events by that hash.
-        if let episodeId = activeEpisodeId {
-            let hashed = episodeIdHasher(episodeId)
-            let startMs = Int((managed.snappedStart * 1000.0).rounded())
-            let endMs = Int((managed.snappedEnd * 1000.0).rounded())
-            invariantLogger.recordAutoSkipFired(
-                episodeIdHash: hashed,
-                windowStartMs: startMs,
-                windowEndMs: endMs
-            )
-        }
+        // the Wave 4 false_ready_rate dogfood metric.
+        emitAutoSkipFiredAuditEvent(for: managed)
 
         // Persist to SQLite (fire-and-forget from the actor).
         let windowId = managed.adWindow.id
@@ -1202,6 +1313,33 @@ actor SkipOrchestrator {
         }
 
         return decision
+    }
+
+    // MARK: - Audit Event Emission
+
+    /// playhead-o45p / playhead-rfu-sad: emit an `auto_skip_fired` audit
+    /// event for a window that has just transitioned to `.applied`.
+    ///
+    /// Hashing routes through `episodeIdHasher` so all skip-event
+    /// producers (auto-mode evaluation, manual taps) stamp byte-identical
+    /// episode hashes — `false_ready_rate` correlation breaks the moment
+    /// hashes diverge across producers. Called from EVERY site that
+    /// finalises a real skip:
+    ///   - `evaluateWindow` auto-mode promotion
+    ///   - `applyManualSkip` (manual user tap on a confirmed window)
+    /// The suggested-skip path (`acceptSuggestedSkip`) builds a confirmed
+    /// `ManagedWindow` and re-evaluates; whichever of the two sites above
+    /// fires next picks up the emission.
+    private func emitAutoSkipFiredAuditEvent(for managed: ManagedWindow) {
+        guard let episodeId = activeEpisodeId else { return }
+        let hashed = episodeIdHasher(episodeId)
+        let startMs = Int((managed.snappedStart * 1000.0).rounded())
+        let endMs = Int((managed.snappedEnd * 1000.0).rounded())
+        invariantLogger.recordAutoSkipFired(
+            episodeIdHash: hashed,
+            windowStartMs: startMs,
+            windowEndMs: endMs
+        )
     }
 
     // MARK: - Window Merging
@@ -1279,19 +1417,21 @@ actor SkipOrchestrator {
     /// cue and whose snappedEnd is closest to the cue end. Returns -1.0
     /// when no overlap is found (logged as a sentinel rather than NaN to
     /// keep the field log line shape stable).
+    ///
+    /// playhead-rfu-sad: candidates are sorted by `(gap, adWindow.id)` so
+    /// ties (gap == 0, two windows ending at exactly the same time) pick
+    /// a deterministic winner instead of whichever order
+    /// `windows.values` happens to yield. Diagnostic-only output, but
+    /// nondeterministic logging makes flaky test diagnostics harder.
     private func nearestAdWindowEnd(forCueStart cueStart: Double, cueEnd: Double) -> Double {
-        var bestEnd: Double = -1.0
-        var bestGap: Double = .infinity
-        for managed in windows.values {
-            let overlaps = managed.snappedStart < cueEnd && managed.snappedEnd > cueStart
-            guard overlaps else { continue }
-            let gap = abs(managed.snappedEnd - cueEnd)
-            if gap < bestGap {
-                bestGap = gap
-                bestEnd = managed.adWindow.endTime
+        let candidates = windows.values
+            .filter { $0.snappedStart < cueEnd && $0.snappedEnd > cueStart }
+            .map { (gap: abs($0.snappedEnd - cueEnd), id: $0.adWindow.id, end: $0.adWindow.endTime) }
+            .sorted { lhs, rhs in
+                if lhs.gap != rhs.gap { return lhs.gap < rhs.gap }
+                return lhs.id < rhs.id
             }
-        }
-        return bestEnd
+        return candidates.first?.end ?? -1.0
     }
 
     /// Push skip cues to PlaybackService via the handler. Defaults to empty.

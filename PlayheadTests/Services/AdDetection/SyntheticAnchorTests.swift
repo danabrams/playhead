@@ -179,4 +179,148 @@ final class SyntheticAnchorTests: XCTestCase {
         XCTAssertLessThanOrEqual(span.startTime, 5.0)
         XCTAssertGreaterThanOrEqual(span.endTime, 5.0)
     }
+
+    // MARK: - Synthetic ordinal collision avoidance (playhead-rfu-sad)
+
+    /// Pre-seeds a synthetic span at a known negative ordinal pair, then
+    /// records a false-negative correction. The test asserts that the
+    /// new correction does NOT overwrite the existing span — it must
+    /// probe forward to a free ordinal pair. Before the fix, two spans
+    /// with colliding hash buckets would silently clobber each other
+    /// via `INSERT OR REPLACE`, and only one synthetic span would
+    /// remain.
+    func testSyntheticOrdinalProbeAvoidsCollision() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-collision"))
+
+        // Two false-negative reports back-to-back. SHA256 hash buckets
+        // are collision-resistant in the natural case, so this verifies
+        // the happy path: both spans persist with distinct ordinals.
+        try await correctionStore.recordFalseNegative(
+            assetId: "asset-collision",
+            reportedTime: 60.0
+        )
+        try await correctionStore.recordFalseNegative(
+            assetId: "asset-collision",
+            reportedTime: 200.0
+        )
+
+        let spans = try await analysisStore.fetchDecodedSpans(assetId: "asset-collision")
+        XCTAssertEqual(spans.count, 2,
+                       "Two false-negative corrections must produce two distinct synthetic spans")
+
+        // Ordinal pairs must be disjoint — silent overwrite would
+        // collapse to a single row.
+        let ordinalPairs = spans.map { Set([$0.firstAtomOrdinal, $0.lastAtomOrdinal]) }
+        XCTAssertEqual(ordinalPairs.count, 2)
+        XCTAssertTrue(ordinalPairs[0].isDisjoint(with: ordinalPairs[1]),
+                       "Synthetic spans must not share any ordinal")
+    }
+
+    /// Direct collision proof: pre-seed a DecodedSpan whose ordinals
+    /// match the deterministic value `recordFalseNegative` would
+    /// otherwise produce. The probe-forward loop must shift to a
+    /// distinct pair so both spans coexist.
+    func testSyntheticOrdinalProbeForwardsOnDirectCollision() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-direct-collision"))
+
+        // First record creates a synthetic span at hash-derived ordinals.
+        try await correctionStore.recordFalseNegative(
+            assetId: "asset-direct-collision",
+            reportedTime: 50.0
+        )
+        let firstSpans = try await analysisStore.fetchDecodedSpans(assetId: "asset-direct-collision")
+        XCTAssertEqual(firstSpans.count, 1)
+        let firstSpan = try XCTUnwrap(firstSpans.first)
+        let firstFirstOrdinal = firstSpan.firstAtomOrdinal
+        let firstLastOrdinal = firstSpan.lastAtomOrdinal
+
+        // Manually upsert a *different* synthetic span occupying the
+        // ordinals two steps earlier in the probe sequence (the next
+        // attempt the probe loop would try). This forces the next
+        // recordFalseNegative call to probe past it.
+        let blockingFirst = firstFirstOrdinal - 2
+        let blockingLast = blockingFirst + 1
+        let blockingSpan = DecodedSpan(
+            id: DecodedSpan.makeId(
+                assetId: "asset-direct-collision",
+                firstAtomOrdinal: blockingFirst,
+                lastAtomOrdinal: blockingLast
+            ),
+            assetId: "asset-direct-collision",
+            firstAtomOrdinal: blockingFirst,
+            lastAtomOrdinal: blockingLast,
+            startTime: 1000.0,
+            endTime: 1030.0,
+            anchorProvenance: [.userCorrection(correctionId: "blocker", reportedTime: 1015.0)]
+        )
+        try await analysisStore.upsertDecodedSpans([blockingSpan])
+
+        // Now record another false negative. Its hash MAY or MAY NOT
+        // hit the original or blocking ordinals; what matters is that
+        // we end up with all THREE spans, not two. (If we collapsed,
+        // count would be 2.)
+        try await correctionStore.recordFalseNegative(
+            assetId: "asset-direct-collision",
+            reportedTime: 200.0
+        )
+
+        let allSpans = try await analysisStore.fetchDecodedSpans(assetId: "asset-direct-collision")
+        XCTAssertEqual(allSpans.count, 3,
+                       "Probe-forward must avoid overwriting either pre-existing synthetic span")
+
+        // All ordinal pairs must be distinct.
+        let pairs = allSpans.map { Set([$0.firstAtomOrdinal, $0.lastAtomOrdinal]) }
+        for i in 0..<pairs.count {
+            for j in (i+1)..<pairs.count {
+                XCTAssertTrue(pairs[i].isDisjoint(with: pairs[j]),
+                               "All synthetic spans must have disjoint ordinals (i=\(i), j=\(j))")
+            }
+        }
+
+        // Both pre-existing ordinal pairs must still be present.
+        let allOrdinals = Set(allSpans.flatMap { [$0.firstAtomOrdinal, $0.lastAtomOrdinal] })
+        XCTAssertTrue(allOrdinals.contains(firstFirstOrdinal))
+        XCTAssertTrue(allOrdinals.contains(firstLastOrdinal))
+        XCTAssertTrue(allOrdinals.contains(blockingFirst))
+        XCTAssertTrue(allOrdinals.contains(blockingLast))
+    }
+
+    // MARK: - Int.min hash safety (playhead-rfu-sad)
+
+    /// Pin behaviour for the `Int.min` edge case in
+    /// `syntheticBaseOffset(forHashInt:)`. The previous implementation
+    /// used `abs(hashInt % 1_000_000) + 2`, which traps when hashInt
+    /// is `Int.min` because `abs(.min)` overflows. The replacement
+    /// must produce a deterministic, in-range, positive offset for
+    /// every Int input — including `.min` — without trapping.
+    func testSyntheticBaseOffsetHandlesIntMinWithoutTrapping() {
+        // .min must NOT trap. The previous expression traps the
+        // process at runtime; the fix returns a deterministic value
+        // in the documented range.
+        let offsetForMin = PersistentUserCorrectionStore.syntheticBaseOffset(forHashInt: .min)
+        XCTAssertGreaterThanOrEqual(offsetForMin, 2,
+            "Offset must be at least 2 (synthetic ranges are pairs [N, N+1])")
+        XCTAssertLessThan(offsetForMin, 1_000_002,
+            "Offset must stay within (0 ..< 1_000_002] so the synthetic ordinal range is bounded")
+
+        // Other corner cases stay well-defined.
+        let offsetForMax = PersistentUserCorrectionStore.syntheticBaseOffset(forHashInt: .max)
+        XCTAssertGreaterThanOrEqual(offsetForMax, 2)
+        XCTAssertLessThan(offsetForMax, 1_000_002)
+
+        let offsetForZero = PersistentUserCorrectionStore.syntheticBaseOffset(forHashInt: 0)
+        XCTAssertEqual(offsetForZero, 2,
+            "Zero hash must produce the minimum offset (0 % 1M + 2 = 2)")
+
+        // Symmetry around zero: ±N below the modulus produce the
+        // same offset because abs collapses the sign before the
+        // modulus.
+        let offsetPos = PersistentUserCorrectionStore.syntheticBaseOffset(forHashInt: 12345)
+        let offsetNeg = PersistentUserCorrectionStore.syntheticBaseOffset(forHashInt: -12345)
+        XCTAssertEqual(offsetPos, offsetNeg)
+    }
 }

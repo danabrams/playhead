@@ -212,12 +212,22 @@ struct FMSuppressionApplicator: Sendable {
                 }
             } else {
                 // Weak evidence: downweight by suppressionFactor.
+                //
+                // playhead-rfu-sad: preserve `subSource` through
+                // suppression. The 4-arg init silently dropped it, so
+                // catalog entries lost their `transcriptCatalog` vs
+                // `fingerprintStore` provenance after passing through.
+                // NARL replay attributes by `subSource`, so dropping
+                // it would let cross-episode fingerprint matches and
+                // in-pipeline transcript matches collapse to one
+                // indistinguishable bucket downstream.
                 let suppressedWeight = entry.weight * suppressionFactor
                 let suppressed = EvidenceLedgerEntry(
                     source: entry.source,
                     weight: suppressedWeight,
                     detail: entry.detail,
-                    classificationTrust: entry.classificationTrust
+                    classificationTrust: entry.classificationTrust,
+                    subSource: entry.subSource
                 )
                 suppressedLedger.append(suppressed)
                 downweightedCount += 1
