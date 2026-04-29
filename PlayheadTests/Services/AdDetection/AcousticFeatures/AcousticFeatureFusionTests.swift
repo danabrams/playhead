@@ -44,6 +44,46 @@ struct AcousticFeatureFusionTests {
         #expect(a.map(\.windowStart) == b.map(\.windowStart))
     }
 
+    @Test("combine tiebreak is alphabetical-by-rawValue, not hash-seed dependent (cycle-3 M1)")
+    func combineDeterministicTiebreak() {
+        // Construct a fusion input where every contributing feature gates
+        // through with the same score. Within a single window, the
+        // `contributingFeatures` list MUST come out sorted by enum rawValue
+        // (== alphabetical for a String-raw enum) — that's the deterministic
+        // tiebreak the production combiner promises.
+        //
+        // Same-process equality (a == b == c above) holds even with a
+        // hash-seed-dependent ordering because Swift fixes the per-process
+        // hash seed. To pin true determinism, hard-code the expected first-
+        // element ordering against the rawValue ASC contract.
+        let inputs: [AcousticFeatureKind: [AcousticFeatureScore]] = [
+            .musicBed: sampleScores(kind: .musicBed, score: 0.5, count: 1),
+            .lufsShift: sampleScores(kind: .lufsShift, score: 0.5, count: 1),
+            .silenceBoundary: sampleScores(kind: .silenceBoundary, score: 0.5, count: 1),
+            .speakerShift: sampleScores(kind: .speakerShift, score: 0.5, count: 1),
+            .dynamicRange: sampleScores(kind: .dynamicRange, score: 0.5, count: 1)
+        ]
+        let result = AcousticFeatureFusion.combine(featureScores: inputs)
+        #expect(result.count == 1)
+        let contributing = result.first?.contributingFeatures ?? []
+        // Hand-computed expected ordering: rawValue (== case name for a
+        // String enum) ASC. dynamicRange < lufsShift < musicBed <
+        // silenceBoundary < speakerShift.
+        let expected: [AcousticFeatureKind] = [
+            .dynamicRange,
+            .lufsShift,
+            .musicBed,
+            .silenceBoundary,
+            .speakerShift
+        ]
+        #expect(contributing == expected)
+
+        // Window bounds come from `referencePriority` (musicBed first), so
+        // the first windowStart is sourced from the musicBed score whose
+        // sampleScores() puts windowStart at idx*2 == 0 for idx 0.
+        #expect(result.first?.windowStart == 0.0)
+    }
+
     @Test("default weights sum to ≈1.0 within epsilon (M5)")
     func defaultWeightsSumToOne() {
         let w = AcousticFeatureFusion.Weights.defaultPriors
