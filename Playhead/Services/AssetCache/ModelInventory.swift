@@ -69,6 +69,19 @@ actor ModelInventory {
             if !fm.fileExists(atPath: dir.path) {
                 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
             }
+            // playhead-h3h: stamp the model subdirectories with the
+            // same protection class as the AnalysisStore. The bead's
+            // privacy gate asks for `.complete`; the same BG-launch
+            // constraint that forced AnalysisStore down to
+            // `.completeUntilFirstUserAuthentication` applies here —
+            // model files are mmap'd by ASR / classifier services
+            // during pre-first-unlock BGProcessingTask windows. Applied
+            // unconditionally so pre-h3h installs migrate on next
+            // launch.
+            try? fm.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: dir.path
+            )
         }
         // Mark the root directory as excluded from iCloud backup and
         // not visible in Files.app.
