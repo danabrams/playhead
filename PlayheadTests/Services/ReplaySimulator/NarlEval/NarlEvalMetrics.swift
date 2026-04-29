@@ -159,9 +159,24 @@ enum NarlSecondLevel {
         let tp = predSet.intersection(gtSet).count
         let fp = predSet.subtracting(gtSet).count
         let fn = gtSet.subtracting(predSet).count
-        let precision = predSet.isEmpty ? 0 : Double(tp) / Double(predSet.count)
-        let recall = gtSet.isEmpty ? 0 : Double(tp) / Double(gtSet.count)
+        // Empty-prediction + empty-GT is a *perfect* classification by
+        // standard convention — there were no ad-seconds, the detector
+        // predicted none, ergo precision = recall = F1 = 1. Matches the
+        // window-level `NarlWindowMetrics.compute` convention so ad-free
+        // episodes don't surface Window-F1=1 alongside Sec-F1=0 in the
+        // same rollup row (which would be strictly more confusing than
+        // a uniform 1).
+        let precision: Double
+        let recall: Double
+        if predSet.isEmpty && gtSet.isEmpty {
+            precision = 1
+            recall = 1
+        } else {
+            precision = predSet.isEmpty ? 0 : Double(tp) / Double(predSet.count)
+            recall = gtSet.isEmpty ? 0 : Double(tp) / Double(gtSet.count)
+        }
         let f1: Double = {
+            if predSet.isEmpty && gtSet.isEmpty { return 1 }
             let denom = precision + recall
             return denom > 0 ? 2 * precision * recall / denom : 0
         }()

@@ -150,4 +150,19 @@ struct NarlSecondLevelTests {
         let covered = NarlSecondLevel.secondsCovered(by: [NarlTimeRange(start: 0.25, end: 1.75)])
         #expect(covered == Set([0, 1]))
     }
+
+    @Test("Empty predictions + empty GT → perfect classification (precision=recall=F1=1)")
+    func emptyEverything() {
+        // Symmetry with `NarlWindowMetrics.compute`: ad-free episode +
+        // detector predicted no ads = trivial perfect result. Returning
+        // 0 here would surface Window-F1=1 alongside Sec-F1=0 for the
+        // same ad-free episode — strictly more confusing than uniform 1.
+        let m = NarlSecondLevel.compute(predicted: [], groundTruth: [])
+        #expect(m.truePositiveSeconds == 0)
+        #expect(m.falsePositiveSeconds == 0)
+        #expect(m.falseNegativeSeconds == 0)
+        #expect(m.precision == 1)
+        #expect(m.recall == 1)
+        #expect(m.f1 == 1)
+    }
 }
