@@ -601,55 +601,55 @@
   },
   "eligible\/analysisCap\/failed\/coverageNil\/anchor42_5" : {
     "disposition" : "failed",
-    "hint" : "free_up_storage",
+    "hint" : "retry",
     "playbackReadiness" : "none",
     "readinessAnchor" : 42.5,
-    "reason" : "storage_full"
+    "reason" : "couldnt_analyze"
   },
   "eligible\/analysisCap\/failed\/coverageNil\/anchorNil" : {
     "disposition" : "failed",
-    "hint" : "free_up_storage",
+    "hint" : "retry",
     "playbackReadiness" : "none",
-    "reason" : "storage_full"
+    "reason" : "couldnt_analyze"
   },
   "eligible\/analysisCap\/failed\/coveragePresent\/anchor42_5" : {
     "disposition" : "failed",
-    "hint" : "free_up_storage",
+    "hint" : "retry",
     "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
-    "reason" : "storage_full"
+    "reason" : "couldnt_analyze"
   },
   "eligible\/analysisCap\/failed\/coveragePresent\/anchorNil" : {
     "disposition" : "failed",
-    "hint" : "free_up_storage",
+    "hint" : "retry",
     "playbackReadiness" : "deferredOnly",
-    "reason" : "storage_full"
+    "reason" : "couldnt_analyze"
   },
   "eligible\/analysisCap\/queued\/coverageNil\/anchor42_5" : {
     "disposition" : "failed",
-    "hint" : "free_up_storage",
+    "hint" : "retry",
     "playbackReadiness" : "none",
     "readinessAnchor" : 42.5,
-    "reason" : "storage_full"
+    "reason" : "couldnt_analyze"
   },
   "eligible\/analysisCap\/queued\/coverageNil\/anchorNil" : {
     "disposition" : "failed",
-    "hint" : "free_up_storage",
+    "hint" : "retry",
     "playbackReadiness" : "none",
-    "reason" : "storage_full"
+    "reason" : "couldnt_analyze"
   },
   "eligible\/analysisCap\/queued\/coveragePresent\/anchor42_5" : {
     "disposition" : "failed",
-    "hint" : "free_up_storage",
+    "hint" : "retry",
     "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
-    "reason" : "storage_full"
+    "reason" : "couldnt_analyze"
   },
   "eligible\/analysisCap\/queued\/coveragePresent\/anchorNil" : {
     "disposition" : "failed",
-    "hint" : "free_up_storage",
+    "hint" : "retry",
     "playbackReadiness" : "deferredOnly",
-    "reason" : "storage_full"
+    "reason" : "couldnt_analyze"
   },
   "eligible\/appForceQuit\/failed\/coverageNil\/anchor42_5" : {
     "disposition" : "paused",
@@ -964,106 +964,106 @@
     "reason" : "phone_is_hot"
   },
   "eligible\/userCancelled\/failed\/coverageNil\/anchor42_5" : {
-    "disposition" : "cancelled",
-    "hint" : "retry",
+    "disposition" : "paused",
+    "hint" : "none",
     "playbackReadiness" : "none",
     "readinessAnchor" : 42.5,
     "reason" : "cancelled"
   },
   "eligible\/userCancelled\/failed\/coverageNil\/anchorNil" : {
-    "disposition" : "cancelled",
-    "hint" : "retry",
+    "disposition" : "paused",
+    "hint" : "none",
     "playbackReadiness" : "none",
     "reason" : "cancelled"
   },
   "eligible\/userCancelled\/failed\/coveragePresent\/anchor42_5" : {
-    "disposition" : "cancelled",
-    "hint" : "retry",
+    "disposition" : "paused",
+    "hint" : "none",
     "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "cancelled"
   },
   "eligible\/userCancelled\/failed\/coveragePresent\/anchorNil" : {
-    "disposition" : "cancelled",
-    "hint" : "retry",
+    "disposition" : "paused",
+    "hint" : "none",
     "playbackReadiness" : "deferredOnly",
     "reason" : "cancelled"
   },
   "eligible\/userCancelled\/queued\/coverageNil\/anchor42_5" : {
-    "disposition" : "cancelled",
-    "hint" : "retry",
+    "disposition" : "paused",
+    "hint" : "none",
     "playbackReadiness" : "none",
     "readinessAnchor" : 42.5,
     "reason" : "cancelled"
   },
   "eligible\/userCancelled\/queued\/coverageNil\/anchorNil" : {
-    "disposition" : "cancelled",
-    "hint" : "retry",
+    "disposition" : "paused",
+    "hint" : "none",
     "playbackReadiness" : "none",
     "reason" : "cancelled"
   },
   "eligible\/userCancelled\/queued\/coveragePresent\/anchor42_5" : {
-    "disposition" : "cancelled",
-    "hint" : "retry",
+    "disposition" : "paused",
+    "hint" : "none",
     "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "cancelled"
   },
   "eligible\/userCancelled\/queued\/coveragePresent\/anchorNil" : {
-    "disposition" : "cancelled",
-    "hint" : "retry",
+    "disposition" : "paused",
+    "hint" : "none",
     "playbackReadiness" : "deferredOnly",
     "reason" : "cancelled"
   },
   "eligible\/userPreempted\/failed\/coverageNil\/anchor42_5" : {
-    "disposition" : "cancelled",
-    "hint" : "retry",
+    "disposition" : "paused",
+    "hint" : "none",
     "playbackReadiness" : "none",
     "readinessAnchor" : 42.5,
     "reason" : "cancelled"
   },
   "eligible\/userPreempted\/failed\/coverageNil\/anchorNil" : {
-    "disposition" : "cancelled",
-    "hint" : "retry",
+    "disposition" : "paused",
+    "hint" : "none",
     "playbackReadiness" : "none",
     "reason" : "cancelled"
   },
   "eligible\/userPreempted\/failed\/coveragePresent\/anchor42_5" : {
-    "disposition" : "cancelled",
-    "hint" : "retry",
+    "disposition" : "paused",
+    "hint" : "none",
     "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "cancelled"
   },
   "eligible\/userPreempted\/failed\/coveragePresent\/anchorNil" : {
-    "disposition" : "cancelled",
-    "hint" : "retry",
+    "disposition" : "paused",
+    "hint" : "none",
     "playbackReadiness" : "deferredOnly",
     "reason" : "cancelled"
   },
   "eligible\/userPreempted\/queued\/coverageNil\/anchor42_5" : {
-    "disposition" : "cancelled",
-    "hint" : "retry",
+    "disposition" : "paused",
+    "hint" : "none",
     "playbackReadiness" : "none",
     "readinessAnchor" : 42.5,
     "reason" : "cancelled"
   },
   "eligible\/userPreempted\/queued\/coverageNil\/anchorNil" : {
-    "disposition" : "cancelled",
-    "hint" : "retry",
+    "disposition" : "paused",
+    "hint" : "none",
     "playbackReadiness" : "none",
     "reason" : "cancelled"
   },
   "eligible\/userPreempted\/queued\/coveragePresent\/anchor42_5" : {
-    "disposition" : "cancelled",
-    "hint" : "retry",
+    "disposition" : "paused",
+    "hint" : "none",
     "playbackReadiness" : "proximal",
     "readinessAnchor" : 42.5,
     "reason" : "cancelled"
   },
   "eligible\/userPreempted\/queued\/coveragePresent\/anchorNil" : {
-    "disposition" : "cancelled",
-    "hint" : "retry",
+    "disposition" : "paused",
+    "hint" : "none",
     "playbackReadiness" : "deferredOnly",
     "reason" : "cancelled"
   },
