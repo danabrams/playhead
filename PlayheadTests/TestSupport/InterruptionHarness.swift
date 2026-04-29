@@ -743,7 +743,7 @@ final class InterruptionHarness: @unchecked Sendable {
         // branch and emits `.appForceQuitRequiresRelaunch` via the
         // recorder.
         let blob = Data([0xDE, 0xAD, 0xBE, 0xEF])
-        try await downloadManager.persistResumeDataForTesting(
+        try await downloadManager.persistResumeData(
             episodeId: episodeId,
             data: blob
         )
