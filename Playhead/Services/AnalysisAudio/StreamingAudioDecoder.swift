@@ -163,11 +163,14 @@ actor StreamingAudioDecoder {
     }
 
     /// Belt-and-suspenders temp-file removal in case `cleanup()` was never
-    /// called. The file handle is `nonisolated(unsafe)` here only to allow
-    /// removal from `deinit`; the temp URL is immutable after init.
-    /// Mirrors the contract that the caller SHOULD always call
-    /// `cleanup()`, but does not punish them with a permanent leak when
-    /// they forget.
+    /// called. Only `tempFileURL` is touched here — it's a `let`, so it's
+    /// safe to read from a non-isolated `deinit`. The actor-isolated
+    /// `tempFileHandle` is *not* closed from deinit (we can't reach
+    /// actor-isolated mutable state without a hop), so callers MUST call
+    /// `cleanup()` to release the file descriptor. The only production
+    /// call site (`AnalysisCoordinator.runStreamingDecode`) does so on
+    /// both the completion and cancellation paths; ARC-only release is
+    /// the test-suite fallback, where worktree teardown reaps any stragglers.
     deinit {
         try? FileManager.default.removeItem(at: tempFileURL)
     }
