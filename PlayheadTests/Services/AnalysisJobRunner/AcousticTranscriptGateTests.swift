@@ -471,6 +471,262 @@ struct AcousticTranscriptGateTests {
         }
     }
 
+    // MARK: - Production-skip teeth (playhead-wu88)
+    //
+    // The 8 tests above all run with `skipEnabled=false` (shadow mode). The
+    // production-skip teeth — `transcribed = !acousticGateConfig.isProductionSkipActive`
+    // and `if transcribed { keptShards.append(shard) }` in
+    // `AnalysisJobRunner.evaluateAcousticTranscriptGate` — are unexercised
+    // by those tests. The next pair pins the two corner cases the future
+    // `skipEnabled=true` flip must satisfy:
+    //   * sample=0 → every below-threshold shard is dropped from the engine
+    //     (transcribed=false, keptShards omits them).
+    //   * sample=1 → every below-threshold shard is kept via the safety-sample
+    //     override (transcribed=true on every row).
+    // The shadow log's `transcribed` field is the runner's source of truth
+    // for `keptShards.append(shard)` — they're set in the same conditional —
+    // so asserting the log row's `transcribed` flag is equivalent to
+    // asserting which shards reach the transcript engine.
+    //
+    // Implementation note: every production-skip test seeds shard 3 (90–120s)
+    // with ad-onset features so at least one shard always reaches the
+    // transcript engine. This is required because `runTranscriptionLoop`
+    // returns early without emitting `.completed` when handed an empty shard
+    // list (see TranscriptEngineService.swift line ~488), which would
+    // otherwise stall each test for the runner's 5-minute completion
+    // timeout. Including the above-threshold shard makes the test stronger
+    // by exercising the gate's *selective* behaviour: would-skip shards are
+    // dropped while above-threshold shards are kept in the same run.
+
+    /// Seed three clean-speech feature windows in [0, 90) and one
+    /// ad-onset window in [90, 120) so the gate categorises shards 0–2 as
+    /// `wouldSkip` candidates and shard 3 as `aboveThreshold`. The
+    /// above-threshold shard guarantees `keptShards` is non-empty so the
+    /// transcript engine completes promptly even when the production-skip
+    /// teeth drop the others.
+    private func seedMixedSpeechAndAdOnsetWindows(
+        store: AnalysisStore,
+        assetId: String
+    ) async throws {
+        try await seedFeatureWindows(
+            store: store,
+            assetId: assetId,
+            start: 0,
+            end: 90
+        ) { s, e in cleanSpeechWindow(assetId: assetId, startTime: s, endTime: e) }
+        try await seedFeatureWindows(
+            store: store,
+            assetId: assetId,
+            start: 90,
+            end: 120
+        ) { s, e in adOnsetWindow(assetId: assetId, startTime: s, endTime: e) }
+    }
+
+    // playhead-wu88: production skip ON, no safety sample. Below-threshold
+    // shards must be tagged `wouldSkip` AND `transcribed=false` — the
+    // production teeth then drop them from `keptShards` so the transcript
+    // engine never sees them. The above-threshold shard at 90–120s is the
+    // only shard that should reach the engine.
+    @Test("skipEnabled=true with sample=0 drops every below-threshold shard from the engine")
+    func testProductionSkipDropsWouldSkipShards() async throws {
+        let store = try await makeTestStore()
+        try await seedAssetWithFeatureCoverage(
+            store: store,
+            featureCoverageEndTime: 120
+        )
+        try await seedMixedSpeechAndAdOnsetWindows(
+            store: store,
+            assetId: "test-asset"
+        )
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards4()
+        let logger = RecordingTranscriptShadowGateLogger()
+        let productionSkip = AcousticTranscriptGateConfig(
+            enabled: true,
+            skipEnabled: true,
+            likelihoodThreshold: 0.30,
+            safetySampleFraction: 0.0
+        )
+        // Coin 0.0 with strict `<` against fraction 0.0 still falls through
+        // to `wouldSkip` — the safety sample never fires. With production
+        // skip active, the runner sets `transcribed=false` and the shard is
+        // dropped from `keptShards`.
+        let runner = try await makeRunner(
+            store: store,
+            audioStub: audioStub,
+            gateConfig: productionSkip,
+            shadowLogger: logger,
+            safetySampleCoin: 0.0
+        )
+
+        _ = await runner.run(makeGateRequest(desiredCoverageSec: 120))
+
+        let entries = await logger.snapshot()
+        #expect(entries.count == 4)
+        // Sort by shard start so we can address rows positionally.
+        let sorted = entries.sorted { $0.shardStart < $1.shardStart }
+
+        // Shards 0–2: clean speech → wouldSkip → dropped from engine.
+        for entry in sorted.prefix(3) {
+            #expect(entry.decision == .wouldSkip)
+            #expect(entry.wouldGate == true)
+            // Production teeth: `transcribed=false` is what causes the
+            // shard to be omitted from `keptShards` and therefore never
+            // reach the transcript engine.
+            #expect(entry.transcribed == false)
+            if let s = entry.likelihood {
+                #expect(s < 0.30)
+            }
+        }
+        // Shard 3: ad-onset features → aboveThreshold → kept regardless of
+        // skipEnabled. Confirms the gate is *selective*, not a blanket drop.
+        let last = sorted.last!
+        #expect(last.decision == .aboveThreshold)
+        #expect(last.wouldGate == false)
+        #expect(last.transcribed == true)
+        if let s = last.likelihood {
+            #expect(s >= 0.30)
+        }
+    }
+
+    // playhead-wu88: production skip ON, safety sample = 1.0. Every below-
+    // threshold shard hits the keep arm and reaches the engine — verifying
+    // the safety-sample override is wired correctly under production skip.
+    @Test("skipEnabled=true with sample=1.0 keeps every below-threshold shard via safety sample")
+    func testProductionSkipSafetySampleAllKept() async throws {
+        let store = try await makeTestStore()
+        try await seedAssetWithFeatureCoverage(
+            store: store,
+            featureCoverageEndTime: 120
+        )
+        try await seedFeatureWindows(
+            store: store,
+            assetId: "test-asset",
+            start: 0,
+            end: 120
+        ) { s, e in cleanSpeechWindow(assetId: "test-asset", startTime: s, endTime: e) }
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards4()
+        let logger = RecordingTranscriptShadowGateLogger()
+        let productionSkipAlwaysSample = AcousticTranscriptGateConfig(
+            enabled: true,
+            skipEnabled: true,
+            likelihoodThreshold: 0.30,
+            safetySampleFraction: 1.0
+        )
+        // Coin 0.5 < 1.0 → safety-sample keep arm fires every time. Even
+        // though `skipEnabled=true`, the keep arm runs *before* the
+        // production-skip gate, so every shard is transcribed. (No empty-
+        // engine stall risk here — every shard is kept.)
+        let runner = try await makeRunner(
+            store: store,
+            audioStub: audioStub,
+            gateConfig: productionSkipAlwaysSample,
+            shadowLogger: logger,
+            safetySampleCoin: 0.5
+        )
+
+        _ = await runner.run(makeGateRequest(desiredCoverageSec: 120))
+
+        let entries = await logger.snapshot()
+        #expect(entries.count == 4)
+        for entry in entries {
+            #expect(entry.decision == .safetySampleKeep)
+            #expect(entry.wouldGate == true)
+            // Safety sample keeps the shard regardless of `skipEnabled`.
+            #expect(entry.transcribed == true)
+        }
+    }
+
+    // playhead-wu88: parameterised property-style sweep over the two
+    // production-skip corners plus a 0.5 mid-point with the coin pinned on
+    // either side of the fraction. Uses Swift Testing arguments to stamp
+    // each invocation distinctly in the test report.
+    //
+    // Each case seeds shards 0–2 (0–90s) with clean speech and shard 3
+    // (90–120s) with ad-onset features. Shard 3 is always kept
+    // (`aboveThreshold`) so the transcript engine has at least one shard
+    // and emits `.completed` promptly. The sweep asserts only the
+    // *would-skip eligibility* outcome on shards 0–2:
+    //
+    //   - fraction=0.0, coin=0.0  → wouldSkip arm  → 0 of 3 kept
+    //   - fraction=1.0, coin=0.5  → safetySample   → 3 of 3 kept
+    //   - fraction=0.5, coin=0.25 → safetySample   → 3 of 3 kept (coin < fraction)
+    //   - fraction=0.5, coin=0.75 → wouldSkip arm  → 0 of 3 kept (coin >= fraction)
+    @Test(
+        "skipEnabled=true safety-sample sweep matches expected kept count",
+        arguments: [
+            (fraction: 0.0, coin: 0.0,  expectedKept: 0, expectedDecision: TranscriptShadowGateEntry.Decision.wouldSkip),
+            (fraction: 1.0, coin: 0.5,  expectedKept: 3, expectedDecision: TranscriptShadowGateEntry.Decision.safetySampleKeep),
+            (fraction: 0.5, coin: 0.25, expectedKept: 3, expectedDecision: TranscriptShadowGateEntry.Decision.safetySampleKeep),
+            (fraction: 0.5, coin: 0.75, expectedKept: 0, expectedDecision: TranscriptShadowGateEntry.Decision.wouldSkip),
+        ]
+    )
+    func testProductionSkipSafetySampleSweep(
+        fraction: Double,
+        coin: Double,
+        expectedKept: Int,
+        expectedDecision: TranscriptShadowGateEntry.Decision
+    ) async throws {
+        let assetId = "test-asset-\(Int(fraction * 1000))-\(Int(coin * 1000))"
+        let store = try await makeTestStore()
+        try await seedAssetWithFeatureCoverage(
+            store: store,
+            assetId: assetId,
+            featureCoverageEndTime: 120
+        )
+        try await seedMixedSpeechAndAdOnsetWindows(
+            store: store,
+            assetId: assetId
+        )
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = (0..<4).map { i in
+            makeShard(
+                id: i,
+                episodeID: "test-ep",
+                startTime: Double(i) * 30,
+                duration: 30
+            )
+        }
+        let logger = RecordingTranscriptShadowGateLogger()
+        let config = AcousticTranscriptGateConfig(
+            enabled: true,
+            skipEnabled: true,
+            likelihoodThreshold: 0.30,
+            safetySampleFraction: fraction
+        )
+        let runner = try await makeRunner(
+            store: store,
+            audioStub: audioStub,
+            gateConfig: config,
+            shadowLogger: logger,
+            safetySampleCoin: coin
+        )
+
+        _ = await runner.run(makeGateRequest(desiredCoverageSec: 120, assetId: assetId))
+
+        let entries = await logger.snapshot()
+        #expect(entries.count == 4)
+        let sorted = entries.sorted { $0.shardStart < $1.shardStart }
+
+        // Shards 0–2 are below-threshold and exercise the gate.
+        let belowThreshold = Array(sorted.prefix(3))
+        let kept = belowThreshold.filter { $0.transcribed }.count
+        #expect(kept == expectedKept)
+        for entry in belowThreshold {
+            #expect(entry.decision == expectedDecision)
+            #expect(entry.wouldGate == true)
+        }
+        // Shard 3 is ad-onset; it always reaches the engine regardless of
+        // the safety-sample sweep parameters. It exists primarily to keep
+        // the engine from stalling on an empty shard list.
+        #expect(sorted.last?.decision == .aboveThreshold)
+        #expect(sorted.last?.transcribed == true)
+    }
+
     @Test("Quality precondition bypasses gating for already-transcribed shards")
     func testQualityPreconditionBypassesGating() async throws {
         let store = try await makeTestStore()
