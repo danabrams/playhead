@@ -1105,18 +1105,6 @@ struct SchedulingTests {
         }
     }
 
-    @Test("scheduleContinuedProcessing submits request")
-    func scheduleContinuedProcessingSubmitsRequest() async throws {
-        let (bps, _, scheduler, _) = makeBPS()
-
-        await bps.scheduleContinuedProcessing(reason: "test")
-
-        let continuedRequests = scheduler.submittedRequests.filter {
-            $0.identifier == BackgroundTaskID.continuedProcessing
-        }
-        #expect(continuedRequests.count == 1)
-    }
-
     @Test("schedulePreAnalysisRecovery submits request with external power")
     func schedulePreAnalysisRecoverySubmitsRequest() async throws {
         let (bps, _, scheduler, _) = makeBPS()
@@ -1142,7 +1130,6 @@ struct SchedulingTests {
 
         // This should not throw or crash.
         await bps.scheduleBackfillIfNeeded()
-        await bps.scheduleContinuedProcessing(reason: "test")
         await bps.schedulePreAnalysisRecovery()
 
         // If we got here, no crash occurred.

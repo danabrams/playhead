@@ -694,21 +694,11 @@ actor BackgroundProcessingService {
         submitWithTelemetry(request, reason: nil)
     }
 
-    /// Schedule a BGContinuedProcessingTask for user-initiated long-running
-    /// work (e.g., initial model download).
-    func scheduleContinuedProcessing(reason: String) {
-        let request = BGProcessingTaskRequest(identifier: BackgroundTaskID.continuedProcessing)
-        request.requiresNetworkConnectivity = true
-        request.requiresExternalPower = false
-
-        submitWithTelemetry(request, reason: reason)
-    }
-
     /// playhead-shpy: shared `BGTaskScheduler.submit` wrapper that emits
     /// a `submit` telemetry row regardless of throw/non-throw. Logging
     /// is fire-and-forget so a logger failure cannot cascade into the
     /// scheduler call path. The `detail` field captures the
-    /// `reason` annotation passed by `scheduleContinuedProcessing` so
+    /// `reason` annotation passed by the scheduling caller so
     /// dogfood logs distinguish intent without grepping by identifier.
     private func submitWithTelemetry(_ request: BGTaskRequest, reason: String?) {
         let earliestDelay = request.earliestBeginDate?.timeIntervalSinceNow
