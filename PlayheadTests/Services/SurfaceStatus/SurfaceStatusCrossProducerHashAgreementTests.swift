@@ -101,10 +101,21 @@ struct SurfaceStatusCrossProducerHashAgreementTests {
         )
         try await store.insertAsset(asset)
 
-        let snapshot = Self.makeCapabilitySnapshot()
+        // playhead-4nt1: the observer no longer takes a capability
+        // snapshot — it consumes a structured `AnalysisEligibility`
+        // verdict directly. Inject a fully-eligible verdict so the
+        // ready transition still fires for this hash-agreement test.
+        let eligibility = AnalysisEligibility(
+            hardwareSupported: true,
+            appleIntelligenceEnabled: true,
+            regionSupported: true,
+            languageSupported: true,
+            modelAvailableNow: true,
+            capturedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
         let observer = EpisodeSurfaceStatusObserver(
             store: store,
-            capabilitySnapshotProvider: { snapshot },
+            eligibilityProvider: { eligibility },
             invariantLogger: logger,
             episodeIdHasher: hasher
         )

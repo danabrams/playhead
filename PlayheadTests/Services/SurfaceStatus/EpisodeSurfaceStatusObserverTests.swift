@@ -56,33 +56,41 @@ struct EpisodeSurfaceStatusObserverTests {
         )
     }
 
-    private static func makeSnapshot(canUseFM: Bool = true) -> CapabilitySnapshot {
-        CapabilitySnapshot(
-            foundationModelsAvailable: canUseFM,
-            foundationModelsUsable: canUseFM,
-            appleIntelligenceEnabled: canUseFM,
-            foundationModelsLocaleSupported: canUseFM,
-            thermalState: .nominal,
-            isLowPowerMode: false,
-            isCharging: true,
-            backgroundProcessingSupported: true,
-            availableDiskSpaceBytes: 10_000_000_000,
+    /// Build a fully-eligible `AnalysisEligibility` verdict for tests
+    /// that exercise the happy path. playhead-4nt1: the observer no
+    /// longer takes a capability snapshot — it consumes a structured
+    /// `AnalysisEligibility` directly.
+    private static func makeEligibility(
+        hardwareSupported: Bool = true,
+        appleIntelligenceEnabled: Bool = true,
+        regionSupported: Bool = true,
+        languageSupported: Bool = true,
+        modelAvailableNow: Bool = true
+    ) -> AnalysisEligibility {
+        AnalysisEligibility(
+            hardwareSupported: hardwareSupported,
+            appleIntelligenceEnabled: appleIntelligenceEnabled,
+            regionSupported: regionSupported,
+            languageSupported: languageSupported,
+            modelAvailableNow: modelAvailableNow,
             capturedAt: Date(timeIntervalSince1970: 1_700_000_000)
         )
     }
 
     private static func makeObserver(
         store: AnalysisStore,
-        snapshot: CapabilitySnapshot? = makeSnapshot(),
+        eligibility: AnalysisEligibility = makeEligibility(),
         sink: @escaping @Sendable (String?, SurfaceStateTransitionEntryTrigger?) -> Void
     ) -> EpisodeSurfaceStatusObserver {
         // playhead-jzdc: tests use the sink-closure seam instead of
         // injecting an emitter object. The emitter is owned internally
         // by the observer; the sink lets tests observe what the emitter
         // would emit without ever holding a reference to it.
+        // playhead-4nt1: the snapshot provider became an eligibility
+        // provider — tests inject the structured verdict directly.
         return EpisodeSurfaceStatusObserver(
             store: store,
-            capabilitySnapshotProvider: { snapshot },
+            eligibilityProvider: { eligibility },
             episodeIdHasher: { "hash-\($0)" },
             emitterSink: sink
         )
@@ -153,25 +161,89 @@ struct EpisodeSurfaceStatusObserverTests {
         #expect(recorder.invocations.count == 1)
     }
 
-    @Test("An ineligible device does NOT fire ready_entered")
-    func ineligibleDeviceDoesNotFireReadyEntered() async throws {
+    @Test("An ineligible device (modelAvailableNow=false) does NOT fire ready_entered")
+    func ineligibleModelDoesNotFireReadyEntered() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(
             Self.makeTestAsset(episodeId: "ep-inel", state: SessionState.complete.rawValue)
         )
         let recorder = SinkRecorder()
-        // A snapshot with FM unusable maps to `modelAvailableNow=false`
-        // which flips eligibility to ineligible → Rule 1 short-circuits
-        // to `.unavailable` (not ready).
+        // `modelAvailableNow=false` flips eligibility to ineligible →
+        // Rule 1 short-circuits to `.unavailable` (not ready).
         let observer = Self.makeObserver(
             store: store,
-            snapshot: Self.makeSnapshot(canUseFM: false),
+            eligibility: Self.makeEligibility(modelAvailableNow: false),
             sink: recorder.sink
         )
 
         await observer.observeEpisodePlayStarted(episodeId: "ep-inel")
 
         #expect(recorder.invocations.isEmpty)
+    }
+
+    // MARK: - playhead-4nt1: per-axis ineligibility suppression
+
+    @Test("hardwareSupported=false suppresses ready_entered (playhead-4nt1)")
+    func hardwareUnsupportedSuppressesReadyEntered() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            Self.makeTestAsset(episodeId: "ep-no-hw", state: SessionState.complete.rawValue)
+        )
+        let recorder = SinkRecorder()
+        // The previous observer hardcoded `hardwareSupported = true`,
+        // which would have let this fire incorrectly on ineligible
+        // SoCs. Now the verdict comes from the evaluator and Rule 1
+        // suppresses.
+        let observer = Self.makeObserver(
+            store: store,
+            eligibility: Self.makeEligibility(hardwareSupported: false),
+            sink: recorder.sink
+        )
+
+        await observer.observeEpisodePlayStarted(episodeId: "ep-no-hw")
+
+        #expect(recorder.invocations.isEmpty)
+    }
+
+    @Test("regionSupported=false suppresses ready_entered (playhead-4nt1)")
+    func regionUnsupportedSuppressesReadyEntered() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            Self.makeTestAsset(episodeId: "ep-no-region", state: SessionState.complete.rawValue)
+        )
+        let recorder = SinkRecorder()
+        // Same as above for region — pre-4nt1 the observer hardcoded
+        // `regionSupported = true`, mis-attributing ready transitions
+        // for non-US dogfooders.
+        let observer = Self.makeObserver(
+            store: store,
+            eligibility: Self.makeEligibility(regionSupported: false),
+            sink: recorder.sink
+        )
+
+        await observer.observeEpisodePlayStarted(episodeId: "ep-no-region")
+
+        #expect(recorder.invocations.isEmpty)
+    }
+
+    @Test("hardware+region both true: ready_entered fires (playhead-4nt1 sanity check)")
+    func eligibleHardwareAndRegionFiresReadyEntered() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            Self.makeTestAsset(episodeId: "ep-eligible", state: SessionState.complete.rawValue)
+        )
+        let recorder = SinkRecorder()
+        // Sanity check: the eligibility-evaluator wiring still permits
+        // emission when every axis is true.
+        let observer = Self.makeObserver(
+            store: store,
+            eligibility: Self.makeEligibility(),
+            sink: recorder.sink
+        )
+
+        await observer.observeEpisodePlayStarted(episodeId: "ep-eligible")
+
+        #expect(recorder.invocations.count == 1)
     }
 
     @Test("Observer for an episode with no persisted asset does NOT fire")
@@ -218,11 +290,37 @@ struct EpisodeSurfaceStatusObserverTests {
 
     @Test("eligibility(from:) copies FM-related fields from the snapshot")
     func eligibilityCopiesFMFieldsFromSnapshot() {
-        let usable = Self.makeSnapshot(canUseFM: true)
+        // playhead-4nt1: this static helper is no longer on the
+        // observer's runtime path — its tests still pin its behavior
+        // for the remaining non-observer callers
+        // (`LiveActivitySnapshotProvider`).
+        let usable = CapabilitySnapshot(
+            foundationModelsAvailable: true,
+            foundationModelsUsable: true,
+            appleIntelligenceEnabled: true,
+            foundationModelsLocaleSupported: true,
+            thermalState: .nominal,
+            isLowPowerMode: false,
+            isCharging: true,
+            backgroundProcessingSupported: true,
+            availableDiskSpaceBytes: 10_000_000_000,
+            capturedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
         let eligible = EpisodeSurfaceStatusObserver.eligibility(from: usable)
         #expect(eligible.isFullyEligible == true)
 
-        let notUsable = Self.makeSnapshot(canUseFM: false)
+        let notUsable = CapabilitySnapshot(
+            foundationModelsAvailable: false,
+            foundationModelsUsable: false,
+            appleIntelligenceEnabled: false,
+            foundationModelsLocaleSupported: false,
+            thermalState: .nominal,
+            isLowPowerMode: false,
+            isCharging: true,
+            backgroundProcessingSupported: true,
+            availableDiskSpaceBytes: 10_000_000_000,
+            capturedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
         let ineligible = EpisodeSurfaceStatusObserver.eligibility(from: notUsable)
         #expect(ineligible.isFullyEligible == false)
         #expect(ineligible.modelAvailableNow == false)

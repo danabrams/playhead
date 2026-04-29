@@ -71,6 +71,18 @@ final class PlayheadRuntime {
     /// `episode_id_hash` values across the pair.
     let surfaceStatusLogger: SurfaceStatusInvariantLogger
 
+    /// playhead-4nt1: Live evaluator threaded into
+    /// `EpisodeSurfaceStatusObserver` so its eligibility verdict
+    /// surfaces the real `hardwareSupported` / `regionSupported`
+    /// values from the per-field providers instead of the previous
+    /// hardcoded `true` defaults.
+    let analysisEligibilityEvaluator: AnalysisEligibilityEvaluator
+
+    /// playhead-4nt1: Cache feeding the eligibility evaluator's
+    /// per-field providers. Refreshed by a Task subscribed to
+    /// `capabilitiesService.capabilityUpdates()`.
+    let surfaceStatusEligibilityCache: CapabilitySnapshotCache
+
     /// Phase 7.2: Shared user correction store. Wired to `PersistentUserCorrectionStore`
     /// in production; views (TranscriptPeekView, AdBannerView callback) consume this
     /// to persist vetoes and listen-reverts without knowing the concrete type.
@@ -747,15 +759,44 @@ final class PlayheadRuntime {
 
         // playhead-o45p: construct the surface-status observer before
         // the coordinator so it can be injected via the coordinator's
-        // optional DI slot. The observer reads capability snapshots
-        // through a closure that dispatches onto `capabilitiesService`
-        // at call time, so the snapshot is always current with runtime
-        // state (thermal/power/AI-toggle changes).
+        // optional DI slot.
+        //
+        // playhead-4nt1: build the live `AnalysisEligibilityEvaluator`
+        // and thread its verdict in via `eligibilityProvider` so the
+        // observer no longer hardcodes `hardwareSupported` /
+        // `regionSupported`. The evaluator reads from per-field
+        // providers backed by `CapabilitySnapshotCache`; the cache is
+        // refreshed by a Task subscribed to
+        // `capabilitiesService.capabilityUpdates()` (deferred Task at
+        // the bottom of init), and seeded from `currentSnapshot` on
+        // first read so cold-start eligibility is correct on eligible
+        // devices and accurate on ineligible ones.
         let capabilitiesServiceForObserver = capabilitiesService
+        let eligibilityCache = CapabilitySnapshotCache()
+        self.surfaceStatusEligibilityCache = eligibilityCache
+        let eligibilityProviders = CapabilityBackedEligibilityProviders(
+            cache: eligibilityCache
+        )
+        let eligibilityEvaluator = AnalysisEligibilityEvaluator(
+            hardwareProvider: eligibilityProviders,
+            appleIntelligenceProvider: eligibilityProviders,
+            regionProvider: eligibilityProviders,
+            languageProvider: eligibilityProviders,
+            modelAvailabilityProvider: eligibilityProviders
+        )
+        self.analysisEligibilityEvaluator = eligibilityEvaluator
         self.surfaceStatusObserver = EpisodeSurfaceStatusObserver(
             store: analysisStore,
-            capabilitySnapshotProvider: { [capabilitiesServiceForObserver] in
-                await capabilitiesServiceForObserver.currentSnapshot
+            eligibilityProvider: { [eligibilityEvaluator, capabilitiesServiceForObserver, eligibilityCache] in
+                // Seed the cache from the live actor on first read to
+                // close the cold-start window where the cache is still
+                // `nil` (subscription Task may not have run yet).
+                if eligibilityCache.snapshot == nil {
+                    let snapshot = await capabilitiesServiceForObserver.currentSnapshot
+                    eligibilityCache.set(snapshot)
+                    eligibilityEvaluator.invalidate()
+                }
+                return eligibilityEvaluator.evaluate()
             },
             invariantLogger: surfaceStatusLogger,
             episodeIdHasher: surfaceStatusHasher
@@ -961,6 +1002,25 @@ final class PlayheadRuntime {
         // default, since it means "no corrections loaded yet, don't suppress anything."
         Task { [adDetectionService, correctionStore] in
             await adDetectionService.setUserCorrectionStore(correctionStore)
+        }
+
+        // playhead-4nt1: keep the eligibility cache fresh by following
+        // capability updates. The first iteration seeds the cache from
+        // `currentSnapshot`; subsequent iterations follow
+        // `capabilityUpdates()`. Each set invalidates the evaluator so
+        // the next `evaluate()` call recomputes from the new snapshot
+        // before the 4-hour TTL would otherwise bite. The first
+        // production read also seeds the cache lazily inside the
+        // observer's `eligibilityProvider` closure (see init), so this
+        // Task is purely about staying current.
+        Task { [eligibilityCache = surfaceStatusEligibilityCache, evaluator = analysisEligibilityEvaluator, capabilitiesService] in
+            let initial = await capabilitiesService.currentSnapshot
+            eligibilityCache.set(initial)
+            evaluator.invalidate()
+            for await snapshot in await capabilitiesService.capabilityUpdates() {
+                eligibilityCache.set(snapshot)
+                evaluator.invalidate()
+            }
         }
 
         // playhead-8em9 (narL): DecisionLogger installation moved upstream
@@ -1898,7 +1958,11 @@ final class PlayheadRuntime {
         modelContainer: ModelContainer
     ) -> @Sendable ([String]) async -> [BatchChildSurfaceSummary] {
         let analysisStore = self.analysisStore
-        let capabilitiesService = self.capabilitiesService
+        // playhead-4nt1: thread the live evaluator into the batch
+        // builder so its eligibility verdict surfaces real
+        // hardware/region values instead of the previous static-helper
+        // hardcodes.
+        let eligibilityEvaluator = self.analysisEligibilityEvaluator
         let builder = BatchSummaryBuilder(
             episodeLookup: { @Sendable key in
                 await MainActor.run {
@@ -1920,8 +1984,7 @@ final class PlayheadRuntime {
                 try? await analysisStore.fetchLastWorkJournalCause(episodeId: key)
             },
             eligibilityProvider: { @Sendable in
-                let snapshot = await capabilitiesService.currentSnapshot
-                return EpisodeSurfaceStatusObserver.eligibility(from: snapshot)
+                eligibilityEvaluator.evaluate()
             }
         )
         return { episodeKeys in
