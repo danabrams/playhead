@@ -146,7 +146,7 @@ enum ReleaseDiagnosticsHatch {
         AnalysisEligibility(
             hardwareSupported: snapshot.foundationModelsAvailable,
             appleIntelligenceEnabled: snapshot.appleIntelligenceEnabled,
-            regionSupported: true,
+            regionSupported: LocaleRegionSupportProvider().isRegionSupported(),
             languageSupported: snapshot.foundationModelsLocaleSupported,
             modelAvailableNow: snapshot.foundationModelsUsable,
             capturedAt: now

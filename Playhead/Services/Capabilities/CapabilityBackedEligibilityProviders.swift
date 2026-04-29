@@ -1,7 +1,10 @@
 // CapabilityBackedEligibilityProviders.swift
-// Concrete production implementations of the five
+// Concrete production implementations of four of the five
 // `AnalysisEligibility*Providing` protocols, backed by the live
-// `CapabilitiesService` snapshot.
+// `CapabilitiesService` snapshot. Region support is provided
+// separately by `LocaleRegionSupportProvider` (see that file) — it
+// reads `Locale.current.region` directly and has no dependency on the
+// `CapabilitySnapshot`.
 //
 // Scope: playhead-4nt1 — wires the previously-library-only
 // `AnalysisEligibilityEvaluator` into production so
@@ -12,6 +15,13 @@
 // existing `CapabilitySnapshot` into per-axis `Bool`s the evaluator
 // can call synchronously.
 //
+// playhead-kgn5: `isRegionSupported` is no longer in the field-by-field
+// mapping below — region support is now a separate provider
+// (`LocaleRegionSupportProvider`) so the runtime composes two providers
+// for the evaluator's five slots: this one for the four
+// snapshot-derived axes, and a `LocaleRegionSupportProvider()` for the
+// region slot.
+//
 // Field-by-field mapping (the same approximation `DebugDiagnosticsHatch`
 // already uses for its bundle export — see that file for a longer
 // explanation):
@@ -20,8 +30,6 @@
 //     surfaces today; flips false on devices without FM hardware).
 //   - `isAppleIntelligenceEnabled` ← `snapshot.appleIntelligenceEnabled`
 //     (direct match).
-//   - `isRegionSupported`          ← `true` (no live region API today;
-//     dogfood is US-only and a real region provider is a future bead).
 //   - `isLanguageSupported`        ← `snapshot.foundationModelsLocaleSupported`
 //     (direct match — locale support IS the language gate).
 //   - `isModelAvailableNow`        ← `snapshot.foundationModelsUsable`
@@ -73,19 +81,19 @@ final class CapabilitySnapshotCache: @unchecked Sendable {
 
 // MARK: - Combined Provider
 
-/// Single class that conforms to all five
-/// `AnalysisEligibility*Providing` protocols, reading from a shared
+/// Single class that conforms to four of the five
+/// `AnalysisEligibility*Providing` protocols (region is provided
+/// separately by `LocaleRegionSupportProvider`), reading from a shared
 /// `CapabilitySnapshotCache`. One instance is constructed per
 /// `PlayheadRuntime` and passed into `AnalysisEligibilityEvaluator` for
-/// every per-field provider — this is intentional: the evaluator
-/// invokes each provider once per cache miss, all five reads are
-/// serviced from the same snapshot, so the resulting
+/// the four snapshot-derived per-field providers — this is intentional:
+/// the evaluator invokes each provider once per cache miss, all four
+/// reads are serviced from the same snapshot, so the resulting
 /// `AnalysisEligibility` is internally consistent (no risk of a
 /// snapshot update tearing the verdict mid-evaluation).
 final class CapabilityBackedEligibilityProviders:
     HardwareSupportProviding,
     AppleIntelligenceStateProviding,
-    RegionSupportProviding,
     LanguageSupportProviding,
     ModelAvailabilityProviding,
     @unchecked Sendable
@@ -103,13 +111,6 @@ final class CapabilityBackedEligibilityProviders:
 
     func isAppleIntelligenceEnabled() -> Bool {
         cache.snapshot?.appleIntelligenceEnabled ?? true
-    }
-
-    func isRegionSupported() -> Bool {
-        // No live region provider today — return `true`. The seam is
-        // here so a future bead can plug in a real region check
-        // without touching the observer or the evaluator.
-        true
     }
 
     func isLanguageSupported() -> Bool {

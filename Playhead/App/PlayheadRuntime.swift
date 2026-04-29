@@ -765,10 +765,15 @@ final class PlayheadRuntime {
         let eligibilityProviders = CapabilityBackedEligibilityProviders(
             cache: eligibilityCache
         )
+        // playhead-kgn5: real Locale-backed region gate replaces the
+        // earlier `regionSupported -> true` placeholder. The supported
+        // region set is the single named constant
+        // `LocaleRegionSupportProvider.supportedRegions` (today: ["US"]).
+        let regionProvider = LocaleRegionSupportProvider()
         let eligibilityEvaluator = AnalysisEligibilityEvaluator(
             hardwareProvider: eligibilityProviders,
             appleIntelligenceProvider: eligibilityProviders,
-            regionProvider: eligibilityProviders,
+            regionProvider: regionProvider,
             languageProvider: eligibilityProviders,
             modelAvailabilityProvider: eligibilityProviders
         )

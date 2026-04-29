@@ -310,16 +310,20 @@ actor EpisodeSurfaceStatusObserver {
     /// Three of the five eligibility fields are directly observable from
     /// the snapshot (`appleIntelligenceEnabled`, `languageSupported` via
     /// `foundationModelsLocaleSupported`, `modelAvailableNow` via
-    /// `canUseFoundationModels`). `hardwareSupported` and
-    /// `regionSupported` default to `true` here.
+    /// `canUseFoundationModels`). `hardwareSupported` defaults to `true`
+    /// here. `regionSupported` consults a live
+    /// `LocaleRegionSupportProvider` — playhead-kgn5 replaced the
+    /// previous `regionSupported -> true` placeholder; the read is
+    /// non-blocking (one `Locale.current` call against a `Set<String>`).
     ///
     /// playhead-4nt1: this static helper is **no longer called from the
     /// observer's runtime path** — the production observer consumes the
     /// live `AnalysisEligibilityEvaluator`'s verdict via
     /// `eligibilityProvider`, which surfaces real hardware/region
     /// values from the per-field providers (see
-    /// `CapabilityBackedEligibilityProviders`). The helper is retained
-    /// only for the two non-observer callers
+    /// `CapabilityBackedEligibilityProviders` and
+    /// `LocaleRegionSupportProvider`). The helper is retained only for
+    /// the two non-observer callers
     /// (`LiveActivitySnapshotProvider.loadInputs` and any test that
     /// imports the snapshot→eligibility approximation directly) that
     /// still want a one-shot mapping without spinning up the full
@@ -328,13 +332,20 @@ actor EpisodeSurfaceStatusObserver {
     /// that the bead targeted.
     ///
     /// `nil` snapshot (capability service not yet primed) maps to a
-    /// fully-eligible snapshot for the same reason.
-    static func eligibility(from snapshot: CapabilitySnapshot?) -> AnalysisEligibility {
+    /// fully-eligible snapshot for the same reason — apart from
+    /// `regionSupported`, which still consults the live provider since
+    /// the device's region is observable independent of the capability
+    /// service warmup.
+    static func eligibility(
+        from snapshot: CapabilitySnapshot?,
+        regionProvider: RegionSupportProviding = LocaleRegionSupportProvider()
+    ) -> AnalysisEligibility {
+        let regionSupported = regionProvider.isRegionSupported()
         guard let snapshot else {
             return AnalysisEligibility(
                 hardwareSupported: true,
                 appleIntelligenceEnabled: true,
-                regionSupported: true,
+                regionSupported: regionSupported,
                 languageSupported: true,
                 modelAvailableNow: true,
                 capturedAt: Date()
@@ -343,7 +354,7 @@ actor EpisodeSurfaceStatusObserver {
         return AnalysisEligibility(
             hardwareSupported: true,
             appleIntelligenceEnabled: snapshot.appleIntelligenceEnabled,
-            regionSupported: true,
+            regionSupported: regionSupported,
             languageSupported: snapshot.foundationModelsLocaleSupported,
             modelAvailableNow: snapshot.canUseFoundationModels,
             capturedAt: snapshot.capturedAt
