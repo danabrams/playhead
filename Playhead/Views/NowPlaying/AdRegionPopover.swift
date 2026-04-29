@@ -169,9 +169,11 @@ struct AdRegionPopover: View {
             return "FM + acoustic break (\(pct)% break strength)"
         case .userCorrection:
             return "User-reported ad"
-        case .classifierSeed(_, let score):
-            let pct = Int((score * 100).rounded())
-            return "Sequence classifier (\(pct)% ad probability)"
+        case .classifierSeed:
+            // playhead-rfu-sad: keep this user-facing surface qualitative
+            // (no quantified probability). The "Peace of Mind, Not
+            // Metrics" rule applies to anything the user can tap to read.
+            return "Sequence classifier flagged this segment"
         }
     }
 }
