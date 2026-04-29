@@ -31,6 +31,25 @@ private func waitForCompletion(of task: StubBackgroundTask, timeout: Duration = 
     }
 }
 
+/// playhead-hv73: poll the actor for at least `count` parked
+/// injection-wait waiters. Used by tests that drive the deterministic
+/// timeout seam — once a handler has reached the suspend point inside
+/// `awaitPreAnalysisServicesInjected`, the test can fire
+/// `triggerInjectionWaitTimeoutForTesting()` and observe failure
+/// without any wall-clock dependency on the (15 s) default timeout.
+private func waitForParkedInjectionWaiters(
+    in bps: BackgroundProcessingService,
+    atLeast count: Int = 1,
+    timeout: Duration = .seconds(2)
+) async throws {
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
+        let parked = await bps.pendingInjectionWaiterCountForTesting()
+        if parked >= count { return }
+        try await Task.sleep(for: .milliseconds(1))
+    }
+}
+
 // MARK: - Backfill Task Handler
 
 @Suite("Backfill Task Handler")
@@ -152,9 +171,11 @@ struct BackfillTaskHandlerTests {
         let coordinator = StubAnalysisCoordinator()
         coordinator.runPendingBackfillDuration = .milliseconds(300)
         let (bps, _, _, _) = makeBPS(coordinator: coordinator)
-        // playhead-8u3i: shrink the injection-wait timeout so the no-
-        // reconciler path falls through quickly instead of blocking 20s.
-        await bps.setInjectionWaitTimeoutSecondsForTesting(0.1)
+        // playhead-hv73: deterministic seam replaces the wall-clock
+        // injection-wait timeout. The recovery handler will park on
+        // `awaitPreAnalysisServicesInjected`; we trigger the timeout
+        // synchronously so the no-reconciler fail path runs without
+        // any wall-clock delay.
 
         let backfillTask = StubBackgroundTask()
         let recoveryTask = StubBackgroundTask()
@@ -168,10 +189,14 @@ struct BackfillTaskHandlerTests {
 
         // Kick off recovery while backfill is still suspended. Recovery
         // has no reconciler (none injected); the playhead-8u3i buffer
-        // times out fast (set above) and falls through to the original
-        // fail path. We just need to verify the recovery completion
-        // doesn't clobber the in-flight backfill.
-        await bps.handlePreAnalysisRecovery(recoveryTask)
+        // would normally time out, but the playhead-hv73 seam fires
+        // the timeout synchronously so the handler returns immediately.
+        // We just need to verify the recovery completion doesn't
+        // clobber the in-flight backfill.
+        let recoveryWork = Task { await bps.handlePreAnalysisRecovery(recoveryTask) }
+        try await waitForParkedInjectionWaiters(in: bps)
+        await bps.triggerInjectionWaitTimeoutForTesting()
+        await recoveryWork.value
 
         #expect(recoveryTask.completedSuccess != nil,
                 "Recovery task must complete independently of in-flight backfill")
@@ -400,31 +425,37 @@ struct PreAnalysisRecoveryHandlerTests {
 
     @Test("Recovery without reconciler completes with failure")
     func recoveryWithoutReconciler() async throws {
+        // playhead-hv73: deterministic seam replaces the wall-clock
+        // injection-wait timeout. Park the handler on a Task, wait for
+        // the waiter to register inside the actor, then fire the
+        // timeout synchronously via `triggerInjectionWaitTimeoutForTesting`.
         let (bps, _, _, _) = makeBPS()
-        // playhead-8u3i: shrink the injection-wait timeout so this test
-        // exercises the timeout->fail path quickly. Production keeps the
-        // 20s default; the timeout-fired race-coverage test below pins
-        // that the path exists at all.
-        await bps.setInjectionWaitTimeoutSecondsForTesting(0.1)
         let task = StubBackgroundTask()
 
-        // No pre-analysis services injected, so reconciler is nil.
-        await bps.handlePreAnalysisRecovery(task)
+        let handler = Task { await bps.handlePreAnalysisRecovery(task) }
+        try await waitForParkedInjectionWaiters(in: bps)
+        let resumed = await bps.triggerInjectionWaitTimeoutForTesting()
+        #expect(resumed >= 1, "Expected the parked waiter to be resumed")
+        await handler.value
 
         #expect(task.completedSuccess == false)
     }
 
     @Test("Recovery schedules next occurrence")
     func recoverySchedulesNextOccurrence() async throws {
+        // playhead-hv73: same deterministic-seam pattern as
+        // `recoveryWithoutReconciler` — `schedulePreAnalysisRecovery()`
+        // runs before the injection wait, so the request lands in the
+        // scheduler the moment the handler suspends. Triggering the
+        // timeout synchronously lets the handler return without any
+        // wall-clock sleep on the 15 s default.
         let (bps, _, scheduler, _) = makeBPS()
-        // playhead-8u3i: schedulePreAnalysisRecovery() runs before the
-        // injection wait, so the request lands in the scheduler before
-        // the buffer hits its timeout. Shrink the timeout anyway so the
-        // test method itself returns quickly.
-        await bps.setInjectionWaitTimeoutSecondsForTesting(0.1)
         let task = StubBackgroundTask()
 
-        await bps.handlePreAnalysisRecovery(task)
+        let handler = Task { await bps.handlePreAnalysisRecovery(task) }
+        try await waitForParkedInjectionWaiters(in: bps)
+        await bps.triggerInjectionWaitTimeoutForTesting()
+        await handler.value
 
         let recoveryRequests = scheduler.submittedRequests.filter {
             $0.identifier == BackgroundTaskID.preAnalysisRecovery
@@ -497,11 +528,14 @@ struct PreAnalysisRecoveryRaceTests {
         // `setPreAnalysisServices` has not yet been called when iOS wakes
         // the app and fires the BG task. The handler must suspend and
         // pick up the reconciler once injection lands.
+        //
+        // playhead-hv73: deterministic seam — the production 15 s
+        // timeout is irrelevant here because injection lands before
+        // the test fires the timeout. We poll for the parked waiter
+        // via `pendingInjectionWaiterCountForTesting` instead of
+        // sleeping 50 ms to give the handler time to suspend, so the
+        // test no longer carries any wall-clock race.
         let (bps, _, _, _) = makeBPS()
-        // Long enough for the late injection to race ahead of the
-        // timeout but short enough that an accidental no-resume hangs
-        // the test on its own deadline rather than the actor.
-        await bps.setInjectionWaitTimeoutSecondsForTesting(2.0)
         let task = StubBackgroundTask()
         let (reconciler, store) = try await makeReconciler()
         let workScheduler = makeWorkScheduler(store: store)
@@ -509,8 +543,9 @@ struct PreAnalysisRecoveryRaceTests {
         // Fire the handler before injection.
         let handlerTask = Task { await bps.handlePreAnalysisRecovery(task) }
 
-        // Hand the handler a moment to park its continuation.
-        try await Task.sleep(for: .milliseconds(50))
+        // Wait deterministically for the handler to park its
+        // continuation inside `awaitPreAnalysisServicesInjected`.
+        try await waitForParkedInjectionWaiters(in: bps)
 
         // Inject; this must drain the parked continuation and let the
         // handler run reconcile() on the (empty) store.
@@ -529,8 +564,10 @@ struct PreAnalysisRecoveryRaceTests {
         // Confirms the list-of-continuations design: three handlers
         // suspended before injection must all be resumed when injection
         // lands, not just the first one.
+        //
+        // playhead-hv73: deterministic seam — replace the 50 ms
+        // "let them all park" sleep with a poll on the waiter count.
         let (bps, _, _, _) = makeBPS()
-        await bps.setInjectionWaitTimeoutSecondsForTesting(2.0)
         let tasks = (0..<3).map { _ in StubBackgroundTask() }
         let (reconciler, store) = try await makeReconciler()
         let workScheduler = makeWorkScheduler(store: store)
@@ -539,8 +576,8 @@ struct PreAnalysisRecoveryRaceTests {
             Task { await bps.handlePreAnalysisRecovery(task) }
         }
 
-        // Let all three park their continuations.
-        try await Task.sleep(for: .milliseconds(50))
+        // Wait deterministically for all three to park.
+        try await waitForParkedInjectionWaiters(in: bps, atLeast: tasks.count)
 
         await bps.setPreAnalysisServices(scheduler: workScheduler, reconciler: reconciler)
 
@@ -562,14 +599,19 @@ struct PreAnalysisRecoveryRaceTests {
     func handlerFiredWithoutInjectionTimesOut() async throws {
         // Pins the original fail path: when injection never lands, the
         // handler must still complete success=false instead of hanging
-        // iOS's BGProcessingTask. We use a short test-only timeout
-        // (200ms) so the test itself completes well under the file's
-        // 1-minute time limit.
+        // iOS's BGProcessingTask.
+        //
+        // playhead-hv73: deterministic seam — fire the timeout
+        // synchronously via `triggerInjectionWaitTimeoutForTesting`
+        // instead of waiting out a (small) wall-clock timer. Closes
+        // the residual flake risk of the prior 200 ms wait.
         let (bps, _, _, _) = makeBPS()
-        await bps.setInjectionWaitTimeoutSecondsForTesting(0.2)
         let task = StubBackgroundTask()
 
-        await bps.handlePreAnalysisRecovery(task)
+        let handler = Task { await bps.handlePreAnalysisRecovery(task) }
+        try await waitForParkedInjectionWaiters(in: bps)
+        await bps.triggerInjectionWaitTimeoutForTesting()
+        await handler.value
 
         #expect(task.completedSuccess == false,
                 "Timed-out injection wait must fall through to the original fail path")
@@ -584,16 +626,23 @@ struct PreAnalysisRecoveryRaceTests {
         // then `setPreAnalysisServices` is called. The drain loop must
         // observe the slot's continuation as `nil` and skip it; resuming
         // a consumed continuation would crash the test runner.
+        //
+        // playhead-hv73: deterministic seam — `triggerInjectionWaitTimeoutForTesting`
+        // simulates the timeout firing without any wall-clock delay,
+        // and the slot-removal logic it shares with the production
+        // timer path is what this test exercises.
         let (bps, _, _, _) = makeBPS()
-        await bps.setInjectionWaitTimeoutSecondsForTesting(0.1)
         let task = StubBackgroundTask()
         let (reconciler, store) = try await makeReconciler()
         let workScheduler = makeWorkScheduler(store: store)
 
-        // Run the handler to completion. With injection never landing
-        // before the 100ms timeout, the handler exits the fail path
-        // with success=false.
-        await bps.handlePreAnalysisRecovery(task)
+        // Park the handler, fire the timeout synchronously, await
+        // completion. The handler exits the fail path with
+        // success=false.
+        let handler = Task { await bps.handlePreAnalysisRecovery(task) }
+        try await waitForParkedInjectionWaiters(in: bps)
+        await bps.triggerInjectionWaitTimeoutForTesting()
+        await handler.value
         #expect(task.completedSuccess == false,
                 "Pre-injection timeout must complete the task with success=false")
 
@@ -611,6 +660,59 @@ struct PreAnalysisRecoveryRaceTests {
         try await waitForCompletion(of: warmTask)
         #expect(warmTask.completedSuccess == true,
                 "After injection, a follow-up handler must complete success=true via the warm path")
+    }
+
+    // playhead-hv73: direct coverage for the deterministic
+    // injection-wait seam itself, independent of the recovery
+    // handler. Pins (a) the parked-waiter count is observable, (b)
+    // `triggerInjectionWaitTimeoutForTesting` resumes every parked
+    // waiter exactly once and reports the count, and (c) calling it
+    // when no one is parked is a safe no-op that returns 0.
+
+    @Test("Triggered timeout resumes all parked waiters and reports the count",
+          .timeLimit(.minutes(1)))
+    func triggeredTimeoutResumesEveryWaiter() async throws {
+        let (bps, _, _, _) = makeBPS()
+
+        // Park three handlers without injection.
+        let tasks = (0..<3).map { _ in StubBackgroundTask() }
+        let handlers = tasks.map { task in
+            Task { await bps.handlePreAnalysisRecovery(task) }
+        }
+
+        try await waitForParkedInjectionWaiters(in: bps, atLeast: tasks.count)
+        let beforeTrigger = await bps.pendingInjectionWaiterCountForTesting()
+        #expect(beforeTrigger == tasks.count,
+                "All handlers should be parked before the trigger fires")
+
+        let resumed = await bps.triggerInjectionWaitTimeoutForTesting()
+        #expect(resumed == tasks.count,
+                "Trigger should resume every parked waiter")
+
+        for handler in handlers {
+            await handler.value
+        }
+        for (index, task) in tasks.enumerated() {
+            #expect(task.completedSuccess == false,
+                    "Waiter #\(index) should fall through the timeout fail path")
+        }
+
+        let afterTrigger = await bps.pendingInjectionWaiterCountForTesting()
+        #expect(afterTrigger == 0,
+                "Drained waiter list should be empty after the trigger")
+    }
+
+    @Test("Triggered timeout with no parked waiters is a no-op",
+          .timeLimit(.minutes(1)))
+    func triggeredTimeoutNoOp() async throws {
+        let (bps, _, _, _) = makeBPS()
+
+        let resumed = await bps.triggerInjectionWaitTimeoutForTesting()
+        #expect(resumed == 0,
+                "Trigger with no parked waiters should resume nothing")
+
+        let count = await bps.pendingInjectionWaiterCountForTesting()
+        #expect(count == 0)
     }
 }
 
