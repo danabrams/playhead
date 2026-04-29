@@ -1,7 +1,7 @@
 // SettingsViewModel.swift
 // ViewModel for the Settings screen. Bridges UserPreferences (SwiftData),
-// ModelInventory (model management), EntitlementManager (restore purchases),
-// and file-system queries (storage sizes).
+// EntitlementManager (restore purchases), and file-system queries
+// (storage sizes).
 
 import Foundation
 import SwiftData
@@ -16,13 +16,8 @@ final class SettingsViewModel {
 
     // MARK: - Storage sizes
 
-    var modelFilesSize: Int64 = 0
     var transcriptCacheSize: Int64 = 0
     var cachedAudioSize: Int64 = 0
-
-    // MARK: - Model statuses (snapshot for UI)
-
-    var modelStatuses: [(ModelEntry, ModelStatus)] = []
 
     // MARK: - Restore state
 
@@ -30,52 +25,11 @@ final class SettingsViewModel {
     var restoreError: String?
     var restoreSucceeded = false
 
-    // MARK: - Delete model state
-
-    var isDeletingModel: String?
-
     // MARK: - Compute storage
 
     func computeStorageSizes() async {
-        modelFilesSize = directorySize(at: ModelInventory.defaultModelsRoot())
         transcriptCacheSize = directorySize(at: analysisShardsDirectory())
         cachedAudioSize = directorySize(at: audioCacheDirectory())
-    }
-
-    /// Refreshes model statuses from the inventory.
-    func refreshModelStatuses(inventory: ModelInventory) async {
-        let allEntries = await inventory.manifest.models
-        var result: [(ModelEntry, ModelStatus)] = []
-        for entry in allEntries {
-            let status = await inventory.status(for: entry.id)
-            result.append((entry, status))
-        }
-        modelStatuses = result
-    }
-
-    /// Deletes a model from disk (active + staged + rollback + downloads).
-    func deleteModel(entry: ModelEntry, inventory: ModelInventory) async {
-        isDeletingModel = entry.id
-        let fm = FileManager.default
-        let dirs = [
-            inventory.activeDirectory,
-            inventory.stagingDirectory,
-            inventory.rollbackDirectory,
-            inventory.downloadsDirectory,
-        ]
-        for dir in dirs {
-            let modelURL = dir.appendingPathComponent(entry.id)
-            let sidecarURL = dir.appendingPathComponent("\(entry.id).version")
-            let partialURL = dir.appendingPathComponent("\(entry.id).partial")
-            try? fm.removeItem(at: modelURL)
-            try? fm.removeItem(at: sidecarURL)
-            try? fm.removeItem(at: partialURL)
-        }
-        await inventory.markMissing(modelId: entry.id)
-        await refreshModelStatuses(inventory: inventory)
-        await computeStorageSizes()
-        isDeletingModel = nil
-        logger.info("Deleted model \(entry.id)")
     }
 
     /// Triggers EntitlementManager restore flow.

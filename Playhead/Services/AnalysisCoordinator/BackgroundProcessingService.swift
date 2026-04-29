@@ -6,8 +6,7 @@
 //     MVP reliability path -- background work only improves completeness.
 //   - BGProcessingTask: registered for deferred backfill of episodes when the
 //     system grants background time.
-//   - BGContinuedProcessingTask: ONLY for user-initiated long-running work
-//     (e.g., initial model download via AssetProvider).
+//   - BGContinuedProcessingTask: ONLY for user-initiated long-running work.
 //
 // Thermal + battery + power management (routed through QualityProfile, C1):
 //   profile=.nominal/.fair -> full analysis (Background lane may pause at

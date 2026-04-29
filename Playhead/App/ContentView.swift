@@ -89,8 +89,6 @@ struct ContentView: View {
 
             tabRoot {
                 SettingsView(
-                    inventory: runtime.modelInventory,
-                    assetProvider: runtime.assetProvider,
                     entitlementManager: runtime.entitlementManager,
                     router: settingsRouter
                 )

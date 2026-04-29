@@ -85,7 +85,7 @@ private final class StallingRecognizer: SpeechRecognizer, @unchecked Sendable {
     let core = StallingRecognizerCore()
     private let _loaded = OSAllocatedUnfairLock(initialState: false)
 
-    func loadModel(from directory: URL) async throws {
+    func loadModel() async throws {
         _loaded.withLock { $0 = true }
     }
 
@@ -239,7 +239,7 @@ struct TranscriptEngineStopTranscriptionTests {
 
         let recognizer = StallingRecognizer()
         let speech = SpeechService(recognizer: recognizer)
-        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
         let events = await engine.events()
@@ -306,7 +306,7 @@ struct TranscriptEngineStopTranscriptionTests {
 
         let recognizer = StallingRecognizer()
         let speech = SpeechService(recognizer: recognizer)
-        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
         let events = await engine.events()
@@ -339,7 +339,7 @@ struct TranscriptEngineStopTranscriptionTests {
 
         let recognizer = StallingRecognizer()
         let speech = SpeechService(recognizer: recognizer)
-        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
 
@@ -389,7 +389,7 @@ struct TranscriptEngineStopTranscriptionTests {
 
         let recognizer = StallingRecognizer()
         let speech = SpeechService(recognizer: recognizer)
-        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
 
@@ -438,7 +438,7 @@ struct TranscriptEngineStopTranscriptionTests {
 
         let recognizer = StallingRecognizer()
         let speech = SpeechService(recognizer: recognizer)
-        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
 
@@ -489,7 +489,7 @@ struct TranscriptEngineStopTranscriptionTests {
 
         let recognizer = StallingRecognizer()
         let speech = SpeechService(recognizer: recognizer)
-        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
 

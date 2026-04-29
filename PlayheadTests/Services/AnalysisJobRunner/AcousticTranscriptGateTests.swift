@@ -178,7 +178,7 @@ private func makeRunner(
 ) async throws -> AnalysisJobRunner {
     let featureService = FeatureExtractionService(store: store)
     let speechService = SpeechService(recognizer: StubSpeechRecognizer())
-    try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+    try await speechService.loadFastModel()
     let transcriptEngine = TranscriptEngineService(
         speechService: speechService,
         store: store

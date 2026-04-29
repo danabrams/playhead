@@ -1,11 +1,10 @@
 // OnboardingView.swift
-// First-launch experience: welcome, value prop, model download, first podcast.
+// First-launch experience: welcome, value prop, first podcast.
 //
 // Flow:
 // 1. Welcome screen with playhead line motif
 // 2. Value proposition (single screen)
-// 3. Model download with progress (fast-path first)
-// 4. Search and subscribe to first podcast
+// 3. Search and subscribe to first podcast
 //
 // The aha moment — the first ad skip — happens during the first listen,
 // powered by the 12-min preview budget that reliably lands an ad skip.
@@ -31,9 +30,7 @@ struct OnboardingView: View {
             case .welcome:
                 WelcomeStepView(onContinue: { advanceTo(.valueProp) })
             case .valueProp:
-                ValuePropStepView(onContinue: { advanceTo(.modelDownload) })
-            case .modelDownload:
-                ModelDownloadStepView(onContinue: { advanceTo(.firstPodcast) })
+                ValuePropStepView(onContinue: { advanceTo(.firstPodcast) })
             case .firstPodcast:
                 FirstPodcastStepView(onComplete: { completeOnboarding() })
             }
@@ -55,7 +52,6 @@ struct OnboardingView: View {
 enum OnboardingStep: Int, CaseIterable {
     case welcome
     case valueProp
-    case modelDownload
     case firstPodcast
 }
 
@@ -209,81 +205,6 @@ private struct ValuePropStepView: View {
             }
         }
         .accessibilityElement(children: .combine)
-    }
-}
-
-// MARK: - Model Download
-
-private struct ModelDownloadStepView: View {
-
-    let onContinue: () -> Void
-
-    @State private var viewModel = ModelDownloadViewModel()
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Spacer()
-
-            VStack(spacing: Spacing.lg) {
-                // Animated indicator
-                ZStack {
-                    Circle()
-                        .stroke(AppColors.textSecondary.opacity(0.2), lineWidth: 3)
-                        .frame(width: 72, height: 72)
-
-                    if viewModel.fastPathReady {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 28, weight: .medium))
-                            .foregroundStyle(AppColors.accent)
-                            .transition(.scale.combined(with: .opacity))
-                    } else {
-                        Circle()
-                            .trim(from: 0, to: viewModel.displayProgress)
-                            .stroke(AppColors.accent, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                            .frame(width: 72, height: 72)
-                            .rotationEffect(.degrees(-90))
-                            .animation(Motion.quick, value: viewModel.displayProgress)
-                    }
-                }
-                .accessibilityLabel(viewModel.fastPathReady ? "Download complete" : "Downloading: \(Int(viewModel.displayProgress * 100)) percent")
-
-                VStack(spacing: Spacing.xs) {
-                    Text(viewModel.fastPathReady ? "Ready to go" : "Preparing ad detection")
-                        .font(AppTypography.sans(size: 20, weight: .semibold))
-                        .foregroundStyle(AppColors.textPrimary)
-
-                    Text(viewModel.statusMessage)
-                        .font(AppTypography.caption)
-                        .foregroundStyle(AppColors.textSecondary)
-                        .multilineTextAlignment(.center)
-                }
-            }
-
-            Spacer()
-
-            VStack(spacing: Spacing.sm) {
-                OnboardingButton(label: "Continue") {
-                    onContinue()
-                }
-                .disabled(!viewModel.canProceed)
-                .opacity(viewModel.canProceed ? 1 : 0.4)
-
-                if !viewModel.fastPathReady && viewModel.allModelsReady {
-                    // Edge case: fast path not flagged but all are ready
-                }
-
-                if viewModel.backgroundModelsRemaining > 0 && viewModel.fastPathReady {
-                    Text("Remaining models download in the background.")
-                        .font(AppTypography.caption)
-                        .foregroundStyle(AppColors.textTertiary)
-                }
-            }
-            .padding(.horizontal, Spacing.xl)
-            .padding(.bottom, Spacing.xxl)
-        }
-        .task {
-            await viewModel.startDownloads()
-        }
     }
 }
 

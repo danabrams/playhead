@@ -137,7 +137,7 @@ protocol DownloadProviding: Sendable {
 // MARK: - DownloadManager
 
 /// Manages background downloads and progressive caching for podcast
-/// episode audio. Model asset downloads are handled by ``AssetProvider``.
+/// episode audio.
 ///
 /// Responsibilities:
 /// - Progressive download: cache audio as it streams for playback

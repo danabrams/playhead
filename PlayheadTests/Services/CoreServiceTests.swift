@@ -1,7 +1,7 @@
 // CoreServiceTests.swift
 // Unit tests for core services: AnalysisStore, LexicalScanner,
 // SkipOrchestrator, TrustScoringService, PreviewBudgetStore,
-// CapabilitiesService, and AssetProvider.
+// and CapabilitiesService.
 
 import Foundation
 import SwiftData
@@ -1397,245 +1397,6 @@ struct CapabilitiesServiceTests {
     }
 }
 
-// MARK: - AssetProvider: Lifecycle
-
-@Suite("AssetProvider - Verify, Stage, Promote, Rollback")
-struct AssetProviderLifecycleTests {
-
-    private func makeTestInventory() throws -> ModelInventory {
-        let tempRoot = try makeTempDir(prefix: "PlayheadModelTests")
-        let manifest = ModelManifest(
-            version: 1,
-            generatedAt: .now,
-            models: [
-                ModelEntry(
-                    id: "test-model",
-                    role: .asrFast,
-                    displayName: "Test Model",
-                    modelVersion: "1.0.0",
-                    downloadURL: URL(string: "https://example.com/model.bin")!,
-                    sha256: "abc123",
-                    compressedSizeBytes: 1000,
-                    uncompressedSizeBytes: 2000,
-                    priority: 100,
-                    minimumOS: "26.0",
-                    requiredCapabilities: []
-                )
-            ]
-        )
-        let inventory = ModelInventory(manifest: manifest, rootOverride: tempRoot)
-        return inventory
-    }
-
-    @Test("Stage moves verified file to staging directory")
-    func stageModel() async throws {
-        let inventory = try makeTestInventory()
-        try await inventory.ensureDirectories()
-        let provider = AssetProvider(inventory: inventory)
-
-        // Create a fake verified file.
-        let tempFile = FileManager.default.temporaryDirectory
-            .appendingPathComponent("verified-\(UUID().uuidString)")
-        try "model data".write(to: tempFile, atomically: true, encoding: .utf8)
-
-        let entry = await inventory.manifest.models[0]
-        try await provider.stage(entry: entry, verifiedFile: tempFile)
-
-        let status = await inventory.status(for: "test-model")
-        #expect(status == .staged, "Model should be in staged state after staging")
-
-        // Verify the file was moved.
-        let stagedPath = inventory.stagingDirectory.appendingPathComponent("test-model")
-        #expect(FileManager.default.fileExists(atPath: stagedPath.path))
-    }
-
-    @Test("Promote moves staged model to active directory")
-    func promoteModel() async throws {
-        let inventory = try makeTestInventory()
-        try await inventory.ensureDirectories()
-        let provider = AssetProvider(inventory: inventory)
-
-        // Stage a file first.
-        let tempFile = FileManager.default.temporaryDirectory
-            .appendingPathComponent("verified-\(UUID().uuidString)")
-        try "model data".write(to: tempFile, atomically: true, encoding: .utf8)
-
-        let entry = await inventory.manifest.models[0]
-        try await provider.stage(entry: entry, verifiedFile: tempFile)
-
-        // Promote.
-        try await provider.promote(modelId: "test-model")
-
-        let activePath = inventory.activeDirectory.appendingPathComponent("test-model")
-        #expect(FileManager.default.fileExists(atPath: activePath.path),
-                "Model should exist in active directory after promotion")
-
-        let status = await inventory.status(for: "test-model")
-        if case .ready = status {
-            // Expected.
-        } else {
-            #expect(Bool(false), "Status should be .ready after promotion, got \(status)")
-        }
-    }
-
-    @Test("Promote with existing active version creates rollback")
-    func promoteCreatesRollback() async throws {
-        let inventory = try makeTestInventory()
-        try await inventory.ensureDirectories()
-        let provider = AssetProvider(inventory: inventory)
-        let entry = await inventory.manifest.models[0]
-
-        // Stage and promote v1.
-        let v1 = FileManager.default.temporaryDirectory
-            .appendingPathComponent("v1-\(UUID().uuidString)")
-        try "v1 data".write(to: v1, atomically: true, encoding: .utf8)
-        try await provider.stage(entry: entry, verifiedFile: v1)
-        try await provider.promote(modelId: "test-model")
-
-        // Stage and promote v2.
-        let v2 = FileManager.default.temporaryDirectory
-            .appendingPathComponent("v2-\(UUID().uuidString)")
-        try "v2 data".write(to: v2, atomically: true, encoding: .utf8)
-        try await provider.stage(entry: entry, verifiedFile: v2)
-        try await provider.promote(modelId: "test-model")
-
-        // Verify rollback exists.
-        let rollbackPath = inventory.rollbackDirectory.appendingPathComponent("test-model")
-        #expect(FileManager.default.fileExists(atPath: rollbackPath.path),
-                "Previous version should be moved to rollback directory")
-
-        // Verify active has v2 content.
-        let activePath = inventory.activeDirectory.appendingPathComponent("test-model")
-        let activeContent = try String(contentsOf: activePath, encoding: .utf8)
-        #expect(activeContent == "v2 data")
-    }
-
-    @Test("Rollback restores previous version")
-    func rollbackRestores() async throws {
-        let inventory = try makeTestInventory()
-        try await inventory.ensureDirectories()
-        let provider = AssetProvider(inventory: inventory)
-        let entry = await inventory.manifest.models[0]
-
-        // Stage and promote v1, then v2.
-        let v1 = FileManager.default.temporaryDirectory
-            .appendingPathComponent("v1-\(UUID().uuidString)")
-        try "v1 data".write(to: v1, atomically: true, encoding: .utf8)
-        try await provider.stage(entry: entry, verifiedFile: v1)
-        try await provider.promote(modelId: "test-model")
-
-        let v2 = FileManager.default.temporaryDirectory
-            .appendingPathComponent("v2-\(UUID().uuidString)")
-        try "v2 data".write(to: v2, atomically: true, encoding: .utf8)
-        try await provider.stage(entry: entry, verifiedFile: v2)
-        try await provider.promote(modelId: "test-model")
-
-        // Rollback.
-        try await provider.rollback(modelId: "test-model")
-
-        // Active should have v1 content.
-        let activePath = inventory.activeDirectory.appendingPathComponent("test-model")
-        let content = try String(contentsOf: activePath, encoding: .utf8)
-        #expect(content == "v1 data", "Rollback should restore v1 data")
-    }
-
-    @Test("Rollback with no previous version throws")
-    func rollbackWithNoPrevious() async throws {
-        let inventory = try makeTestInventory()
-        try await inventory.ensureDirectories()
-        let provider = AssetProvider(inventory: inventory)
-
-        await #expect(throws: AssetProviderError.self) {
-            try await provider.rollback(modelId: "test-model")
-        }
-    }
-
-    @Test("Promote with nothing staged throws")
-    func promoteNothingStaged() async throws {
-        let inventory = try makeTestInventory()
-        try await inventory.ensureDirectories()
-        let provider = AssetProvider(inventory: inventory)
-
-        await #expect(throws: AssetProviderError.self) {
-            try await provider.promote(modelId: "test-model")
-        }
-    }
-
-    @Test("Checksum verification detects mismatched content")
-    func checksumMismatch() async throws {
-        let inventory = try makeTestInventory()
-        let provider = AssetProvider(inventory: inventory)
-
-        let tempFile = FileManager.default.temporaryDirectory
-            .appendingPathComponent("checksum-test-\(UUID().uuidString)")
-        try "some content".write(to: tempFile, atomically: true, encoding: .utf8)
-        defer { try? FileManager.default.removeItem(at: tempFile) }
-
-        let matches = try await provider.verifyChecksum(
-            fileURL: tempFile, expected: "0000000000000000000000000000000000000000000000000000000000000000"
-        )
-        #expect(matches == false, "Checksum should not match arbitrary expected hash")
-    }
-}
-
-// MARK: - ModelInventory
-
-@Suite("ModelInventory - Scanning and Status")
-struct ModelInventoryTests {
-
-    @Test("Scan detects missing models")
-    func scanDetectsMissing() async throws {
-        let tempRoot = try makeTempDir(prefix: "InvTests")
-        let manifest = ModelManifest(
-            version: 1,
-            generatedAt: .now,
-            models: [
-                ModelEntry(
-                    id: "model-a",
-                    role: .asrFast,
-                    displayName: "Model A",
-                    modelVersion: "1.0.0",
-                    downloadURL: URL(string: "https://example.com/a.bin")!,
-                    sha256: "aaa",
-                    compressedSizeBytes: 100,
-                    uncompressedSizeBytes: 200,
-                    priority: 100,
-                    minimumOS: "26.0",
-                    requiredCapabilities: []
-                )
-            ]
-        )
-        let inventory = ModelInventory(manifest: manifest, rootOverride: tempRoot)
-        try await inventory.scan()
-        let status = await inventory.status(for: "model-a")
-        #expect(status == .missing)
-    }
-
-    @Test("missingModels returns models sorted by priority")
-    func missingModelsPriority() async throws {
-        let tempRoot = try makeTempDir(prefix: "InvTests")
-        let manifest = ModelManifest(
-            version: 1,
-            generatedAt: .now,
-            models: [
-                ModelEntry(id: "low", role: .classifier, displayName: "Low",
-                           modelVersion: "1.0", downloadURL: URL(string: "https://example.com/l")!,
-                           sha256: "l", compressedSizeBytes: 100, uncompressedSizeBytes: 200,
-                           priority: 10, minimumOS: "26.0", requiredCapabilities: []),
-                ModelEntry(id: "high", role: .asrFast, displayName: "High",
-                           modelVersion: "1.0", downloadURL: URL(string: "https://example.com/h")!,
-                           sha256: "h", compressedSizeBytes: 100, uncompressedSizeBytes: 200,
-                           priority: 100, minimumOS: "26.0", requiredCapabilities: [])
-            ]
-        )
-        let inventory = ModelInventory(manifest: manifest, rootOverride: tempRoot)
-        try await inventory.scan()
-        let missing = await inventory.missingModels()
-        #expect(missing.count == 2)
-        #expect(missing[0].id == "high", "Higher priority model should come first")
-    }
-}
-
 // MARK: - SkipMode Enum
 
 @Suite("SkipMode - Enum Behavior")
@@ -1676,33 +1437,17 @@ struct RuntimeContractTests {
         #expect(runtimeSource.contains("backgroundProcessingService.registerBackgroundTasks()"))
         #expect(runtimeSource.contains("let analysisStore: AnalysisStore"))
         #expect(runtimeSource.contains("let skipOrchestrator: SkipOrchestrator"))
-        #expect(runtimeSource.contains("let modelInventory: ModelInventory"))
         #expect(runtimeSource.contains("let entitlementManager: EntitlementManager"))
 
         #expect(episodeListSource.contains("NowPlayingView(runtime: runtime"))
         #expect(!episodeListSource.contains("NowPlayingView()"))
 
         #expect(contentViewSource.contains("SettingsView("))
-        #expect(contentViewSource.contains("inventory: runtime.modelInventory"))
-        #expect(contentViewSource.contains("assetProvider: runtime.assetProvider"))
 
         #expect(nowPlayingVMSource.contains("let service = runtime.playbackService"))
         #expect(!nowPlayingVMSource.contains("PlaybackService()"))
 
         #expect(!nowPlayingViewSource.contains("NowPlayingViewModel()"))
-    }
-
-    @Test("Bundled model manifest is present and registered in the app target")
-    func modelManifestIsBundled() throws {
-        let manifestURL = repoRootURL().appendingPathComponent("Playhead/Resources/ModelManifest.json")
-        #expect(FileManager.default.fileExists(atPath: manifestURL.path))
-
-        let projectFile = try readRepoSource("Playhead.xcodeproj/project.pbxproj")
-        #expect(projectFile.contains("ModelManifest.json in Resources"))
-
-        let manifest = try ModelInventory.loadBundledManifest()
-        #expect(!manifest.models.isEmpty)
-        #expect(manifest.models.allSatisfy { !$0.id.isEmpty })
     }
 }
 
@@ -1957,34 +1702,28 @@ struct SettingsStorageContractTests {
     @MainActor
     @Test("Storage sizes track the actual on-disk directories")
     func computeStorageSizesUsesCurrentServicePaths() async throws {
-        let modelRoot = ModelInventory.defaultModelsRoot()
         let analysisShardsRoot = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("AnalysisShards", isDirectory: true)
         let audioCacheRoot = DownloadManager.defaultCacheDirectory()
 
-        try FileManager.default.createDirectory(at: modelRoot, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: analysisShardsRoot, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: audioCacheRoot, withIntermediateDirectories: true)
 
-        let modelMarker = modelRoot.appendingPathComponent("model-marker.bin")
         let analysisMarker = analysisShardsRoot.appendingPathComponent("analysis-marker.bin")
         let audioMarker = audioCacheRoot.appendingPathComponent("audio-marker.bin")
 
         defer {
-            try? FileManager.default.removeItem(at: modelMarker)
             try? FileManager.default.removeItem(at: analysisMarker)
             try? FileManager.default.removeItem(at: audioMarker)
         }
 
-        try Data(repeating: 0x61, count: 11).write(to: modelMarker)
         try Data(repeating: 0x62, count: 13).write(to: analysisMarker)
         try Data(repeating: 0x63, count: 17).write(to: audioMarker)
 
         let viewModel = SettingsViewModel()
         await viewModel.computeStorageSizes()
 
-        #expect(viewModel.modelFilesSize >= 11)
         #expect(viewModel.transcriptCacheSize >= 13)
         #expect(viewModel.cachedAudioSize >= 17)
     }
@@ -2047,103 +1786,6 @@ struct PodcastDiscoveryPersistenceTests {
     }
 }
 
-// MARK: - AssetCache: Bootstrap and Composition
-
-@Suite("AssetCache - Bootstrap and Composition")
-struct AssetCacheTests {
-
-    private func makeManifest() -> ModelManifest {
-        ModelManifest(
-            version: 1,
-            generatedAt: .now,
-            models: [
-                ModelEntry(
-                    id: "test-model-a",
-                    role: .asrFast,
-                    displayName: "Test A",
-                    modelVersion: "1.0.0",
-                    downloadURL: URL(string: "https://example.com/a.bin")!,
-                    sha256: String(repeating: "a", count: 64),
-                    compressedSizeBytes: 1000,
-                    uncompressedSizeBytes: 2000,
-                    priority: 100,
-                    minimumOS: "26.0",
-                    requiredCapabilities: []
-                ),
-                ModelEntry(
-                    id: "test-model-b",
-                    role: .classifier,
-                    displayName: "Test B",
-                    modelVersion: "2.0.0",
-                    downloadURL: URL(string: "https://example.com/b.bin")!,
-                    sha256: String(repeating: "b", count: 64),
-                    compressedSizeBytes: 500,
-                    uncompressedSizeBytes: 1000,
-                    priority: 50,
-                    minimumOS: "26.0",
-                    requiredCapabilities: []
-                ),
-            ]
-        )
-    }
-
-    @Test("AssetCache exposes modelInventory and assetProvider")
-    func compositionOwnership() async throws {
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AssetCacheTests-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: tempRoot) }
-
-        let manifest = makeManifest()
-        let cache = AssetCache(manifest: manifest, modelsRootOverride: tempRoot)
-
-        // Verify composition: the cache owns the inventory and provider.
-        // Access nonisolated properties through the actor-isolated inventory.
-        let inventory = await cache.modelInventory
-        #expect(inventory.modelsRoot == tempRoot)
-    }
-
-    @Test("Bootstrap creates directories and scans for missing models")
-    func bootstrapCreatesDirectories() async throws {
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AssetCacheBootstrap-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: tempRoot) }
-
-        let cache = AssetCache(manifest: makeManifest(), modelsRootOverride: tempRoot)
-        try await cache.bootstrap()
-
-        let fm = FileManager.default
-        let inventory = await cache.modelInventory
-        #expect(fm.fileExists(atPath: inventory.activeDirectory.path),
-                "Bootstrap should create Active directory")
-        #expect(fm.fileExists(atPath: inventory.stagingDirectory.path),
-                "Bootstrap should create Staging directory")
-        #expect(fm.fileExists(atPath: inventory.downloadsDirectory.path),
-                "Bootstrap should create Downloads directory")
-        #expect(fm.fileExists(atPath: inventory.rollbackDirectory.path),
-                "Bootstrap should create Rollback directory")
-
-        // All models should be missing after initial scan.
-        let missing = await inventory.missingModels()
-        #expect(missing.count == 2,
-                "All models should be missing after initial bootstrap")
-    }
-
-    @Test("Bootstrap is idempotent")
-    func bootstrapIdempotent() async throws {
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AssetCacheIdempotent-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: tempRoot) }
-
-        let cache = AssetCache(manifest: makeManifest(), modelsRootOverride: tempRoot)
-
-        // Bootstrap twice should not throw.
-        try await cache.bootstrap()
-        try await cache.bootstrap()
-
-        let missing = await cache.modelInventory.missingModels()
-        #expect(missing.count == 2)
-    }
-}
 
 // MARK: - FileHasher
 
