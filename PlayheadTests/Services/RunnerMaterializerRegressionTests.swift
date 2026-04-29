@@ -379,15 +379,27 @@ struct DownloadManagerRegressionTests {
         let manager = DownloadManager(cacheDirectory: dir)
         try await manager.bootstrap()
 
-        // Create a dummy file to simulate a completed download.
-        let dummyFile = dir.appendingPathComponent("dummy.mp3")
-        try Data("fake audio".utf8).write(to: dummyFile)
+        // Create a dummy staged file to simulate a completed download.
+        // playhead-24cm.1: the actor now takes ownership of a staged
+        // file URL and moves it into the cache, so the smoke test
+        // synthesizes one in a temp staging location.
+        let stagingDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PlayheadBGStagingSmoke", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: stagingDir, withIntermediateDirectories: true
+        )
+        let stagedFile = stagingDir.appendingPathComponent(
+            "\(DownloadManager.safeFilename(for: "smoke-test-ep")).mp3"
+        )
+        try Data("fake audio".utf8).write(to: stagedFile)
 
         // This should not crash. The method is actor-isolated, so
         // calling it exercises the actor hop path.
         await manager.handleBackgroundDownloadComplete(
             episodeId: "smoke-test-ep",
-            fileURL: dummyFile
+            stagedURL: stagedFile,
+            originalURL: URL(string: "https://example.com/smoke.mp3"),
+            metadata: nil
         )
     }
 }
