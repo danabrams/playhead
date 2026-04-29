@@ -120,6 +120,7 @@ struct SettingsView: View {
                         backgroundSection(prefs)
                         storageSection
                         purchasesSection
+                        aboutSection
                         // playhead-btoa.4: always-visible debug-toggles
                         // section. Currently holds only the Activity
                         // pipeline-strip flag; new always-on debug
@@ -167,6 +168,18 @@ struct SettingsView: View {
                 .task {
                     await viewModel.computeStorageSizes()
                     await refreshSchedulerEvents()
+                    // playhead-j2u: hydrate the Models section's
+                    // status-only readout from the live evaluator. The
+                    // call is non-blocking by contract.
+                    viewModel.refreshEligibility(
+                        using: runtime.analysisEligibilityEvaluator
+                    )
+                    // playhead-j2u: subscribe to premium-status updates
+                    // so the Purchases section reflects transactions
+                    // arriving from other devices / restores.
+                    if let entitlementManager {
+                        await viewModel.observePremiumStatus(entitlementManager)
+                    }
                 }
                 .onChange(of: router?.pending) { _, newRoute in
                     guard let newRoute else { return }
@@ -211,22 +224,33 @@ struct SettingsView: View {
 
 }
 
-// MARK: - Model Selection Section
+// MARK: - Model Status Section (playhead-j2u)
+//
+// Status-only readout. NO download/delete buttons, NO model-selection
+// picker, NO size displays — playhead-c6r removed external model
+// manifests and on-device speech assets are managed by iOS itself. The
+// row simply surfaces the verdict from `AnalysisEligibilityEvaluator
+// .evaluate()` so the user knows whether on-device analysis is
+// currently available on their device.
 
 private extension SettingsView {
 
     var modelSection: some View {
         Section {
-            VStack(alignment: .leading, spacing: Spacing.xxs) {
-                Text("Apple Speech")
+            HStack(alignment: .firstTextBaseline) {
+                Text("On-device transcription")
                     .font(AppTypography.body)
                     .foregroundStyle(AppColors.textPrimary)
-                Text("Speech assets are managed by iOS and stay on device.")
+                Spacer()
+                Text(modelStatusText)
                     .font(AppTypography.caption)
-                    .foregroundStyle(AppColors.textSecondary)
+                    .foregroundStyle(modelStatusColor)
+                    .accessibilityIdentifier("Settings.models.statusValue")
             }
-            .padding(.vertical, Spacing.xxs)
             .listRowBackground(AppColors.surface)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("On-device transcription status")
+            .accessibilityValue(modelStatusText)
         } header: {
             sectionHeader("Models")
         } footer: {
@@ -236,6 +260,24 @@ private extension SettingsView {
         }
     }
 
+    /// playhead-j2u: derive the status string from the cached
+    /// `AnalysisEligibility` snapshot. Returns "Checking…" until the
+    /// first evaluation lands so we never lie about the verdict.
+    var modelStatusText: String {
+        guard let eligibility = viewModel.eligibility else {
+            return "Checking…"
+        }
+        return eligibility.isFullyEligible ? "Available" : "Unavailable"
+    }
+
+    var modelStatusColor: Color {
+        guard let eligibility = viewModel.eligibility else {
+            return AppColors.textTertiary
+        }
+        return eligibility.isFullyEligible
+            ? AppColors.textSecondary
+            : AppColors.accent
+    }
 }
 
 // MARK: - Ad Skip Section
@@ -396,37 +438,78 @@ private extension SettingsView {
     var storageSection: some View {
         Section {
             storageRow(
-                label: "Transcript Cache",
+                label: "Cached Audio",
+                icon: "waveform",
+                size: viewModel.storage.cachedAudioBytes,
+                isClearing: viewModel.isClearingAudioCache,
+                clearAction: {
+                    Task { await viewModel.clearAudioCache() }
+                }
+            )
+
+            storageRow(
+                label: "Transcript DB",
                 icon: "doc.text",
-                size: viewModel.transcriptCacheSize,
+                size: viewModel.storage.transcriptDatabaseBytes,
+                isClearing: viewModel.isClearingTranscriptCache,
                 clearAction: {
                     Task { await viewModel.clearTranscriptCache() }
                 }
             )
 
-            storageRow(
-                label: "Cached Audio",
-                icon: "waveform",
-                size: viewModel.cachedAudioSize,
-                clearAction: {
-                    Task { await viewModel.clearAudioCache() }
-                }
-            )
+            // playhead-j2u: total + remaining device storage rows.
+            // Both are read-only — they live alongside the per-category
+            // breakdown so the user can see the absolute footprint and
+            // how much room remains on the device.
+            HStack {
+                Text("Total used by Playhead")
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textPrimary)
+                Spacer()
+                Text(SettingsViewModel.formattedSize(viewModel.storage.totalBytes))
+                    .font(AppTypography.timestamp)
+                    .foregroundStyle(AppColors.textTertiary)
+            }
+            .listRowBackground(AppColors.surface)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("Settings.storage.total")
+
+            HStack {
+                Text("Available on device")
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textPrimary)
+                Spacer()
+                Text(deviceAvailableText)
+                    .font(AppTypography.timestamp)
+                    .foregroundStyle(AppColors.textTertiary)
+            }
+            .listRowBackground(AppColors.surface)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("Settings.storage.deviceAvailable")
         } header: {
             sectionHeader("Storage")
         }
+    }
+
+    /// playhead-j2u: format the device-available figure, falling back
+    /// to a quiet "—" when the volume metadata is unavailable (older OS
+    /// or simulator with stripped capacity keys).
+    var deviceAvailableText: String {
+        guard let bytes = viewModel.storage.deviceAvailableBytes else { return "—" }
+        return SettingsViewModel.formattedSize(bytes)
     }
 
     func storageRow(
         label: String,
         icon: String,
         size: Int64,
+        isClearing: Bool = false,
         clearAction: (() -> Void)? = nil
     ) -> some View {
         HStack {
             Label(label, systemImage: icon)
                 .font(AppTypography.body)
-                .foregroundStyle(AppColors.textPrimary)
+                .foregroundStyle(isClearing ? AppColors.textTertiary : AppColors.textPrimary)
 
             Spacer()
 
@@ -434,7 +517,13 @@ private extension SettingsView {
                 .font(AppTypography.timestamp)
                 .foregroundStyle(AppColors.textTertiary)
 
-            if let clearAction, size > 0 {
+            if isClearing {
+                // playhead-j2u: Quiet Instrument — slim trailing progress
+                // indicator (no percentage, no bar) while the clear runs.
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Clearing \(label)")
+            } else if let clearAction, size > 0 {
                 Button("Clear", action: clearAction)
                     .font(AppTypography.caption)
                     .foregroundStyle(.red.opacity(0.8))
@@ -453,44 +542,135 @@ private extension SettingsView {
 
     var purchasesSection: some View {
         Section {
-            Button {
-                Task {
-                    guard let entitlementManager else { return }
-                    await viewModel.restorePurchases(entitlementManager: entitlementManager)
-                }
-            } label: {
-                HStack {
-                    Label("Restore Purchases", systemImage: "arrow.clockwise")
-                        .font(AppTypography.body)
-                        .foregroundStyle(AppColors.accent)
+            // playhead-j2u: premium status line. The Restore button only
+            // appears when the user is NOT premium per the bead spec —
+            // showing it on a premium account would invite confusion.
+            HStack {
+                Text("Status")
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textPrimary)
+                Spacer()
+                Text(premiumStatusText)
+                    .font(AppTypography.caption)
+                    .foregroundStyle(viewModel.isPremium ? AppColors.accent : AppColors.textSecondary)
+                    .accessibilityIdentifier("Settings.purchase.statusValue")
+            }
+            .listRowBackground(AppColors.surface)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Premium status")
+            .accessibilityValue(premiumStatusText)
 
-                    Spacer()
+            if !viewModel.isPremium {
+                Button {
+                    Task {
+                        guard let entitlementManager else { return }
+                        await viewModel.restorePurchases(entitlementManager: entitlementManager)
+                    }
+                } label: {
+                    HStack {
+                        Label("Restore Purchases", systemImage: "arrow.clockwise")
+                            .font(AppTypography.body)
+                            .foregroundStyle(AppColors.accent)
 
-                    if viewModel.isRestoring {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else if viewModel.restoreSucceeded {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                            .accessibilityLabel("Restore successful")
+                        Spacer()
+
+                        if viewModel.isRestoring {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else if viewModel.restoreSucceeded {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                                .accessibilityLabel("Restore successful")
+                        }
                     }
                 }
-            }
-            .buttonStyle(.plain)
-            .disabled(viewModel.isRestoring)
-            .listRowBackground(AppColors.surface)
-            .accessibilityLabel("Restore purchases")
+                .buttonStyle(.plain)
+                .disabled(viewModel.isRestoring)
+                .listRowBackground(AppColors.surface)
+                .accessibilityLabel("Restore purchases")
 
-            if let error = viewModel.restoreError {
-                Text(error)
-                    .font(AppTypography.caption)
-                    .foregroundStyle(.red)
-                    .listRowBackground(AppColors.surface)
+                if let error = viewModel.restoreError {
+                    Text(error)
+                        .font(AppTypography.caption)
+                        .foregroundStyle(.red)
+                        .listRowBackground(AppColors.surface)
+                }
             }
         } header: {
-            sectionHeader("Purchases")
+            sectionHeader("Purchase")
         }
     }
+
+    /// playhead-j2u: short status string per the bead spec. "Premium —
+    /// purchased" / "Free preview" — no pricing flow on the Settings
+    /// surface.
+    var premiumStatusText: String {
+        viewModel.isPremium ? "Premium — purchased" : "Free preview"
+    }
+}
+
+// MARK: - About Section (playhead-j2u)
+//
+// Three rows: app version, build number, and the verbatim privacy
+// statement. No diagnostic links, no acknowledgements — the Diagnostics
+// section already covers support flows.
+
+private extension SettingsView {
+
+    var aboutSection: some View {
+        Section {
+            HStack {
+                Text("Version")
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textPrimary)
+                Spacer()
+                Text(aboutVersionText)
+                    .font(AppTypography.timestamp)
+                    .foregroundStyle(AppColors.textTertiary)
+                    .accessibilityIdentifier("Settings.about.version")
+            }
+            .listRowBackground(AppColors.surface)
+            .accessibilityElement(children: .combine)
+
+            HStack {
+                Text("Build")
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textPrimary)
+                Spacer()
+                Text(aboutBuildText)
+                    .font(AppTypography.timestamp)
+                    .foregroundStyle(AppColors.textTertiary)
+                    .accessibilityIdentifier("Settings.about.build")
+            }
+            .listRowBackground(AppColors.surface)
+            .accessibilityElement(children: .combine)
+
+            Text(SettingsAboutCopy.privacyStatement)
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.textSecondary)
+                .listRowBackground(AppColors.surface)
+                .accessibilityIdentifier("Settings.about.privacy")
+        } header: {
+            sectionHeader("About")
+        }
+    }
+
+    var aboutVersionText: String {
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "—"
+    }
+
+    var aboutBuildText: String {
+        (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "—"
+    }
+}
+
+// MARK: - About copy (playhead-j2u)
+
+/// Verbatim user-facing copy for the About section. Pinned in tests so
+/// any future edit requires touching the spec + the assertion together.
+enum SettingsAboutCopy {
+    /// Privacy statement — verbatim per playhead-j2u.
+    static let privacyStatement: String = "Your podcasts never leave your device."
 }
 
 // MARK: - Debug Toggles Section (always visible)
