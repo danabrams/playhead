@@ -239,13 +239,47 @@ actor BackgroundProcessingService {
     /// bounded.
     private var injectionWaitTimeoutSeconds: TimeInterval = 15
 
-    /// Test seam: override the injection-wait timeout used by
-    /// `awaitPreAnalysisServicesInjected`. Production code never calls
-    /// this; tests use it to keep race-coverage wall time bounded. Lives
-    /// on the actor so concurrent reads observe the new value through
-    /// actor isolation.
-    func setInjectionWaitTimeoutSecondsForTesting(_ seconds: TimeInterval) {
-        self.injectionWaitTimeoutSeconds = seconds
+    /// playhead-hv73 test seam: fire the injection-wait timeout NOW for
+    /// every currently parked waiter, returning the count resumed.
+    ///
+    /// Eliminates the wall-clock dependency in tests that pin the
+    /// timeout-path behavior of `awaitPreAnalysisServicesInjected`:
+    /// instead of setting a small `injectionWaitTimeoutSeconds` and
+    /// sleeping the test thread until the timer fires, callers park
+    /// the handler on a Task, observe via
+    /// `pendingInjectionWaiterCountForTesting()` that the continuation
+    /// is parked, then call this method to resume it synchronously
+    /// with the timeout outcome (`false`).
+    ///
+    /// Production code never calls this — the only resume sources in
+    /// production are `setPreAnalysisServices` (success) and the
+    /// per-waiter timer Task spawned inside
+    /// `awaitPreAnalysisServicesInjected` (timeout). Behavior under
+    /// the live BPS is unchanged: the wall-clock timeout still fires
+    /// after `injectionWaitTimeoutSeconds` in production, since
+    /// nothing else calls this method.
+    @discardableResult
+    func triggerInjectionWaitTimeoutForTesting() -> Int {
+        let waiters = pendingInjectionWaiters
+        pendingInjectionWaiters.removeAll()
+        var resumed = 0
+        for entry in waiters {
+            guard let continuation = entry.slot.continuation else { continue }
+            entry.slot.continuation = nil
+            continuation.resume(returning: false)
+            resumed += 1
+        }
+        return resumed
+    }
+
+    /// playhead-hv73 test seam: count of waiters currently parked in
+    /// `awaitPreAnalysisServicesInjected`. Lets tests deterministically
+    /// observe that a handler has reached the suspend point before
+    /// firing `triggerInjectionWaitTimeoutForTesting()` or
+    /// `setPreAnalysisServices(...)`, eliminating the small `Task.sleep`
+    /// previously needed to give the handler time to park.
+    func pendingInjectionWaiterCountForTesting() -> Int {
+        pendingInjectionWaiters.count
     }
 
     // MARK: - State
