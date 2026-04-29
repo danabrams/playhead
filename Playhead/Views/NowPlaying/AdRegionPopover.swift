@@ -147,10 +147,15 @@ struct AdRegionPopover: View {
     }
 
     private func provenanceDescription(_ ref: AnchorRef) -> String {
+        // playhead-rfu-sad: every branch here renders into the popover the
+        // user taps. Per "Peace of Mind, Not Metrics," none of these
+        // strings carry quantified probabilities. The `_strength`
+        // values are preserved on the AnchorRef payload (other call
+        // sites still use them for ranking / fusion) but never reach
+        // the user-facing copy here.
         switch ref {
-        case .fmConsensus(_, let strength):
-            let pct = Int((strength * 100).rounded())
-            return "Foundation model consensus (\(pct)% strength)"
+        case .fmConsensus:
+            return "Foundation model consensus"
         case .evidenceCatalog(let entry):
             switch entry.category {
             case .url:
@@ -164,15 +169,11 @@ struct AdRegionPopover: View {
             case .brandSpan:
                 return "Brand mention: \"\(entry.matchedText)\""
             }
-        case .fmAcousticCorroborated(_, let strength):
-            let pct = Int((strength * 100).rounded())
-            return "FM + acoustic break (\(pct)% break strength)"
+        case .fmAcousticCorroborated:
+            return "Confirmed by acoustic break cues"
         case .userCorrection:
             return "User-reported ad"
         case .classifierSeed:
-            // playhead-rfu-sad: keep this user-facing surface qualitative
-            // (no quantified probability). The "Peace of Mind, Not
-            // Metrics" rule applies to anything the user can tap to read.
             return "Sequence classifier flagged this segment"
         }
     }
