@@ -97,8 +97,9 @@ enum LufsShift {
 
     /// Median of an unsorted array. Empty input is undefined behaviour;
     /// callers guard with `!windows.isEmpty`. Even-length arrays return
-    /// the lower of the two midpoints (no averaging) — adequate for a
-    /// detection baseline and avoids floating-point ambiguity.
+    /// the upper of the two midpoints (i.e. `sorted[n/2]`, which is the
+    /// (n/2 + 1)-th element in 1-indexed terms — no averaging) — adequate
+    /// for a detection baseline and avoids floating-point ambiguity.
     static func medianBaseline(_ values: [Double]) -> Double {
         let sorted = values.sorted()
         let n = sorted.count
