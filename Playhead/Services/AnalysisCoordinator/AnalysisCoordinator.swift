@@ -1532,30 +1532,54 @@ actor AnalysisCoordinator {
 
             // Check for an existing session.
             let existingSession = try await store.fetchLatestSessionForAsset(assetId: assetId)
-            if let session = existingSession,
-               let state = SessionState(rawValue: session.state),
-               state != .failed
-            {
-                // For late-stage states (backfill, complete), verify that
-                // transcript data actually exists. A prior crash can leave
-                // the state machine advanced but the data empty.
-                if state == .backfill || state == .complete {
-                    let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
-                    if chunks.isEmpty {
-                        logger.info("Session \(session.id) in \(state.rawValue) but 0 chunks — resetting to queued")
-                        try await store.updateSessionState(
-                            id: session.id,
-                            state: SessionState.queued.rawValue,
-                            failureReason: nil
-                        )
-                        try await store.updateAssetState(id: assetId, state: SessionState.queued.rawValue)
-                        // Reset coverage watermarks so no shards are skipped.
-                        try await store.updateFastTranscriptCoverage(id: assetId, endTime: 0)
-                        return (session.id, assetId, .queued)
+            if let session = existingSession {
+                if let state = SessionState(rawValue: session.state) {
+                    if state != .failed {
+                        // For late-stage states (backfill, complete), verify that
+                        // transcript data actually exists. A prior crash can leave
+                        // the state machine advanced but the data empty.
+                        if state == .backfill || state == .complete {
+                            let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
+                            if chunks.isEmpty {
+                                logger.info("Session \(session.id) in \(state.rawValue) but 0 chunks — resetting to queued")
+                                try await store.updateSessionState(
+                                    id: session.id,
+                                    state: SessionState.queued.rawValue,
+                                    failureReason: nil
+                                )
+                                try await store.updateAssetState(id: assetId, state: SessionState.queued.rawValue)
+                                // Reset coverage watermarks so no shards are skipped.
+                                try await store.updateFastTranscriptCoverage(id: assetId, endTime: 0)
+                                return (session.id, assetId, .queued)
+                            }
+                        }
+                        // Resume from persisted state.
+                        return (session.id, assetId, state)
                     }
+                } else {
+                    // playhead-qaw: corrupt session state. Mark the row
+                    // `.failed` with a logged reason so the harness can
+                    // distinguish "row never advanced" from "row was
+                    // unparseable on resume", then fall through to
+                    // create a fresh session for this asset. Without
+                    // this branch a corrupt row was silently shadowed
+                    // by a new session — the user lost the audit trail
+                    // and the corrupt row stayed in its broken state.
+                    let reason = "corrupt session state on resume: \(session.state)"
+                    logger.error(
+                        "Detected corrupt session state '\(session.state, privacy: .public)' for session \(session.id, privacy: .public); marking failed and creating fresh session"
+                    )
+                    try await store.updateSessionState(
+                        id: session.id,
+                        state: SessionState.failed.rawValue,
+                        failureReason: reason
+                    )
+                    // Asset state may also be corrupt; force it back to
+                    // .queued so the next pipeline run drives it from
+                    // the start. (`updateAssetState` does not validate
+                    // the prior value.)
+                    try await store.updateAssetState(id: assetId, state: SessionState.queued.rawValue)
                 }
-                // Resume from persisted state.
-                return (session.id, assetId, state)
             }
 
             // No usable session -- create a new one.
