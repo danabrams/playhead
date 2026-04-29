@@ -384,6 +384,58 @@ struct AnalysisWorkSchedulerAcousticPromotionTests {
         #expect(acoustic != nil,
                 "Ad-onset window past current coverage must yield an acoustic-promotion opportunity even when catchup is also eligible — the run-loop ordering picks catchup first, but both predicates report independently")
     }
+
+    // MARK: - Admission-vs-persistence ordering (review-followup csp / H1)
+
+    @Test("dispatchAcousticPromotion: admission denial does NOT persist a deeper coverage target")
+    func testAcousticAdmissionDenialDoesNotPersistEscalation() async throws {
+        // Review-followup (csp / H1): mirrors the M4 catchup fix — the
+        // prior order persisted `desiredCoverageSec` BEFORE checking
+        // admission. A denied admission then left the row at an
+        // inflated tier with no dispatch — every subsequent dispatch
+        // saw a coverage demand the runner couldn't satisfy in one
+        // pass. Pin the new order: admission first, persistence only
+        // after it succeeds.
+        //
+        // Drive a denial deterministically by saturating the Soon-lane
+        // counter via a sibling didStart. The promotion job (priority
+        // 5) is in Soon (1..<20); Soon cap is 1; one outstanding
+        // sibling is enough to make `canAdmit` reject.
+        let fx = try await makeFixture(desiredCoverageSec: 900)
+
+        // Saturate the Soon lane with a sibling job. The job we pass
+        // to `didStart` must have a Soon-lane priority too.
+        let sibling = makeAnalysisJob(
+            jobId: "sibling-soon",
+            jobType: "preAnalysis",
+            episodeId: "ep-other",
+            sourceFingerprint: "fp-other",
+            priority: 5, // Soon
+            desiredCoverageSec: 900,
+            state: "running"
+        )
+        await fx.scheduler.didStart(job: sibling)
+
+        // Construct an opportunity targeting our promotion job. Values
+        // mirror the positive-trigger test: prior 900 → escalated 1805.
+        let opportunity = AnalysisWorkScheduler.AcousticPromotionOpportunity(
+            jobId: fx.job.jobId,
+            episodeId: fx.asset.episodeId,
+            priorDesiredCoverageSec: 900,
+            escalatedDesiredCoverageSec: 1805,
+            triggerWindowStartSec: 1800,
+            triggerWindowEndSec: 1805,
+            triggerWindowScore: 0.95
+        )
+
+        await fx.scheduler.dispatchAcousticPromotionForTesting(opportunity: opportunity)
+
+        // The persisted desiredCoverageSec must remain at the prior
+        // value — admission denial bailed before any write landed.
+        let after = try #require(await fx.store.fetchLatestJobForEpisode(fx.asset.episodeId))
+        #expect(after.desiredCoverageSec == 900,
+                "Denied admission must not persist the escalated coverage target; got \(after.desiredCoverageSec)")
+    }
 }
 
 #endif

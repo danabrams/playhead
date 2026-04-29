@@ -1416,6 +1416,15 @@ actor AnalysisWorkScheduler {
         await dispatchForegroundCatchup(opportunity: opportunity)
     }
 
+    /// Test-only entrypoint into `dispatchAcousticPromotion` for tests
+    /// that need to verify the order-of-operations between admission
+    /// gating and the persisted `desiredCoverageSec` write
+    /// (review-followup csp / H1). Production code routes through the
+    /// run loop, which calls the private function directly.
+    func dispatchAcousticPromotionForTesting(opportunity: AcousticPromotionOpportunity) async {
+        await dispatchAcousticPromotion(opportunity: opportunity)
+    }
+
     /// Test-only accessor for the live playhead position field.
     func playheadPositionSecForTesting() -> TimeInterval? {
         playheadPositionSec
@@ -2099,10 +2108,54 @@ actor AnalysisWorkScheduler {
     /// without it does not bypass any execution semantic — slice
     /// execution is playhead-1iq1).
     private func dispatchAcousticPromotion(opportunity: AcousticPromotionOpportunity) async {
-        // Persist the escalation so the runner reads the deeper
-        // target on its next `fetchJob(byId:)` (and a crash mid-
-        // promotion resumes against the deeper target rather than the
-        // stale tier value).
+        // Fetch the current row so admission decisions read live state
+        // (lane, priority, fingerprint) without depending on the
+        // escalation having landed first. A `nil` here is unusual (the
+        // row existed at `currentAcousticPromotionOpportunity` evaluation
+        // moments ago) but bail safely if the row was concurrently
+        // superseded.
+        let preEscalationJob: AnalysisJob
+        do {
+            guard let refreshed = try await store.fetchJob(byId: opportunity.jobId) else {
+                logger.warning("Acoustic promotion: job \(opportunity.jobId) disappeared before escalation")
+                return
+            }
+            preEscalationJob = refreshed
+        } catch {
+            logger.warning("Acoustic promotion: pre-admission fetchJob threw for \(opportunity.jobId): \(error)")
+            return
+        }
+
+        // Lane-cap and admission-gate checks mirror `runLoop()` and
+        // `dispatchForegroundCatchup`. We consult both because
+        // promotion should never bust the Now-cap or skip the bnrs
+        // gate.
+        //
+        // Order matters (review-followup csp / H1, mirroring M4):
+        // admission MUST happen BEFORE the persisted
+        // `desiredCoverageSec` escalation. A rejection that has already
+        // written the deeper target permanently raises the row's
+        // coverage demand without ever performing the work, so the next
+        // dispatch sees an inflated tier the runner can't satisfy in
+        // one pass. Persisting only after admission succeeds keeps
+        // denied admissions side-effect free.
+        guard canAdmit(job: preEscalationJob) else {
+            logger.info("Acoustic promotion: lane \(String(describing: preEscalationJob.schedulerLane), privacy: .public) at capacity; deferring")
+            await sleepOrWake(seconds: Self.idlePollSeconds)
+            return
+        }
+
+        let gateDecision = await evaluateAdmissionGate(for: preEscalationJob)
+        if case .reject(let cause) = gateDecision {
+            logger.info("Acoustic promotion: AdmissionGate rejected job \(preEscalationJob.jobId) cause=\(cause.rawValue, privacy: .public)")
+            await sleepOrWake(seconds: Self.rejectionBackoffSeconds)
+            return
+        }
+
+        // Admission cleared. Persist the escalation so the runner
+        // reads the deeper target on its next `fetchJob(byId:)` (and a
+        // crash mid-promotion resumes against the deeper target rather
+        // than the stale tier value).
         do {
             try await store.updateJobDesiredCoverage(
                 jobId: opportunity.jobId,
@@ -2115,9 +2168,8 @@ actor AnalysisWorkScheduler {
         }
 
         // Re-fetch the row so the dispatch reflects the persisted
-        // escalation. A `nil` here is unusual (the row existed at
-        // `currentAcousticPromotionOpportunity` evaluation moments ago)
-        // but bail safely if the row was concurrently superseded.
+        // escalation. Same null-safety reasoning as the pre-admission
+        // fetch above.
         let job: AnalysisJob
         do {
             guard let refreshed = try await store.fetchJob(byId: opportunity.jobId) else {
@@ -2126,24 +2178,7 @@ actor AnalysisWorkScheduler {
             }
             job = refreshed
         } catch {
-            logger.warning("Acoustic promotion: fetchJob threw for \(opportunity.jobId): \(error)")
-            return
-        }
-
-        // Lane-cap and admission-gate checks mirror `runLoop()` and
-        // `dispatchForegroundCatchup`. We consult both because
-        // promotion should never bust the Now-cap or skip the bnrs
-        // gate.
-        guard canAdmit(job: job) else {
-            logger.info("Acoustic promotion: lane \(String(describing: job.schedulerLane), privacy: .public) at capacity; deferring")
-            await sleepOrWake(seconds: Self.idlePollSeconds)
-            return
-        }
-
-        let gateDecision = await evaluateAdmissionGate(for: job)
-        if case .reject(let cause) = gateDecision {
-            logger.info("Acoustic promotion: AdmissionGate rejected job \(job.jobId) cause=\(cause.rawValue, privacy: .public)")
-            await sleepOrWake(seconds: Self.rejectionBackoffSeconds)
+            logger.warning("Acoustic promotion: post-escalation fetchJob threw for \(opportunity.jobId): \(error)")
             return
         }
 
