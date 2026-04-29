@@ -77,24 +77,22 @@ final class SurfaceStatusUILintTests: XCTestCase {
     /// references internal types in doc comments. These two files are
     /// not SwiftUI Views and never render user copy.
     ///
-    /// `DebugEpisodeExporter.swift` and `TranscriptPeekViewModel.swift`
-    /// are legacy UI-layer files (under `Playhead/Views/`) that pre-date
-    /// the `EpisodeSurfaceStatus` boundary discipline. Their refactor is
-    /// tracked as a separate followup — see bead filed after ol05 merge.
-    /// They are allow-listed here so that the extended UI lint can land
-    /// without blocking on a scope-creep refactor.
-    ///
     /// `CorpusExporter.swift` (playhead-dgzw, narE) is a DEBUG-only
     /// developer tool that intentionally reads `AnalysisStore` rows to
-    /// write a JSONL corpus for offline analysis. Like
-    /// `DebugEpisodeExporter`, it is not a SwiftUI View and never renders
-    /// user-facing copy — it lives under `Playhead/Views/Settings/` purely
-    /// for file-system locality with the Settings-debug-section call site.
+    /// write a JSONL corpus for offline analysis. It is not a SwiftUI
+    /// View and never renders user-facing copy — it lives under
+    /// `Playhead/Views/Settings/` purely for file-system locality with
+    /// the Settings-debug-section call site.
+    ///
+    /// playhead-fwvz: `DebugEpisodeExporter.swift` and
+    /// `TranscriptPeekViewModel.swift` were previously allow-listed
+    /// here while their refactor was deferred. Both now consume
+    /// boundary types only (`DebugEpisodeExportService` /
+    /// `TranscriptPeekDataSource`) and have been removed from this
+    /// list — the lint covers them like any other UI-layer file.
     private static let uiPathExemptFilenames: Set<String> = [
         "PlayheadRuntime.swift",
         "PlayheadAppDelegate.swift",
-        "DebugEpisodeExporter.swift",
-        "TranscriptPeekViewModel.swift",
         "CorpusExporter.swift",
     ]
 
