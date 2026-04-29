@@ -2518,6 +2518,26 @@ actor AnalysisCoordinator {
         // Paginate so we never hold the whole table in memory at once.
         // ORDER BY in `fetchAssets` matches `fetchAllAssets`, so paging
         // is stable across calls within this sweep.
+        //
+        // Brittle assumption (review-followup csp / M2): the
+        // OFFSET/LIMIT cursor RELIES on cold-launch ordering — there
+        // is no runtime enforcement that no concurrent INSERT or
+        // DELETE runs against `analysis_assets` while we page. The
+        // production caller (`PlayheadRuntime.startSchedulerLoop`)
+        // happens to invoke this sweep at launch BEFORE it boots the
+        // analysis-jobs scheduler or the download-completion enqueue
+        // path, so today the sweep window is quiet by construction.
+        // If a future change moves this sweep off the cold-launch
+        // path (e.g. into a periodic maintenance task or a settings
+        // hatch), the OFFSET cursor will skip or duplicate rows
+        // whenever a concurrent INSERT/DELETE shifts the underlying
+        // ORDER BY ordering, and the bug will be silent — pages
+        // will simply have wrong rows. The fix in that future is to
+        // convert this to a deterministic-key paging cursor (e.g.
+        // `WHERE id > ? ORDER BY id`). This sweep is also gated by
+        // a one-shot `_meta` marker, so the brittleness window
+        // exists at most once per install — second launches
+        // short-circuit before the loop runs.
         let pageSize = 200
         var offset = 0
         pageLoop: while true {

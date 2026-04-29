@@ -188,6 +188,29 @@ actor AnalysisWorkScheduler {
     /// Admission decision the scheduler derives from the current QualityProfile
     /// and applies to every loop iteration. Consolidates thermal/battery/
     /// low-power gating into a single surface — see `QualityProfile.derive`.
+    ///
+    /// **Foreground-aggressive relaxation surface** (review-followup
+    /// csp / L4). When the scheduler is in foreground-aggressive mode
+    /// (see `isForegroundAggressiveMode()`), `relaxedPolicy(for:profile:foregroundAggressive:)`
+    /// rewrites the baseline `SchedulerPolicy` derived from the
+    /// QualityProfile to widen Soon-lane admission. The relaxation is
+    /// deliberately narrow:
+    ///
+    /// - Triggers ONLY when `profile == .serious`. `.nominal`,
+    ///   `.fair`, and `.critical` pass through untouched. In
+    ///   particular `.critical` is never relaxed because
+    ///   `pauseAllWork` is dominant in every state and the device is
+    ///   too hot to pile on more work safely.
+    /// - Reopens ONLY `allowSoonLane`. `allowBackgroundLane` and
+    ///   `pauseAllWork` keep the baseline policy's values, so deep
+    ///   T2 backfill stays gated and global pause is honored.
+    /// - `sliceFraction` is forwarded unchanged — slice sizing is
+    ///   the QualityProfile's responsibility and not part of the
+    ///   relaxation surface.
+    ///
+    /// Anyone widening this relaxation MUST keep the
+    /// foreground-aggressive precondition and the
+    /// `pauseAllWork`-dominant safety property intact.
     struct LaneAdmission: Sendable, Equatable {
         let qualityProfile: QualityProfile
         let policy: QualityProfile.SchedulerPolicy
@@ -1384,6 +1407,24 @@ actor AnalysisWorkScheduler {
         catchupPolicy
     }
 
+    /// Test-only entrypoint into `dispatchForegroundCatchup` for tests
+    /// that need to verify the order-of-operations between admission
+    /// gating and the persisted `desiredCoverageSec` write
+    /// (review-followup csp / M4). Production code routes through the
+    /// run loop, which calls the private function directly.
+    func dispatchForegroundCatchupForTesting(opportunity: CatchupOpportunity) async {
+        await dispatchForegroundCatchup(opportunity: opportunity)
+    }
+
+    /// Test-only entrypoint into `dispatchAcousticPromotion` for tests
+    /// that need to verify the order-of-operations between admission
+    /// gating and the persisted `desiredCoverageSec` write
+    /// (review-followup csp / H1). Production code routes through the
+    /// run loop, which calls the private function directly.
+    func dispatchAcousticPromotionForTesting(opportunity: AcousticPromotionOpportunity) async {
+        await dispatchAcousticPromotion(opportunity: opportunity)
+    }
+
     /// Test-only accessor for the live playhead position field.
     func playheadPositionSecForTesting() -> TimeInterval? {
         playheadPositionSec
@@ -1945,10 +1986,56 @@ actor AnalysisWorkScheduler {
     ///      re-evaluate the trigger predicate against the next observed
     ///      playhead).
     private func dispatchForegroundCatchup(opportunity: CatchupOpportunity) async {
-        // Persist the escalation so the runner reads the deeper
-        // target on its next `fetchJob(byId:)` (and a crash mid-
-        // catch-up resumes against the deeper target rather than the
-        // stale tier value).
+        // Fetch the current row so admission decisions read live state
+        // (lane, priority, fingerprint) without depending on the
+        // escalation having landed first. A `nil` here is unusual (the
+        // row existed at `currentCatchupOpportunity` evaluation time
+        // moments ago) but bail safely if the row was concurrently
+        // superseded.
+        let preEscalationJob: AnalysisJob
+        do {
+            guard let refreshed = try await store.fetchJob(byId: opportunity.jobId) else {
+                logger.warning("Foreground catch-up: job \(opportunity.jobId) disappeared before escalation")
+                return
+            }
+            preEscalationJob = refreshed
+        } catch {
+            logger.warning("Foreground catch-up: pre-admission fetchJob threw for \(opportunity.jobId): \(error)")
+            return
+        }
+
+        // Lane-cap and admission-gate checks mirror `runLoop()`. We
+        // consult both because catch-up should never bust the Now-cap
+        // or skip the bnrs gate — both invariants are preserved when
+        // catch-up escalates the same row that would have been
+        // dispatched normally; the only thing that changed is the
+        // coverage target.
+        //
+        // Order matters (review-followup csp / M4): admission MUST
+        // happen BEFORE the persisted `desiredCoverageSec` escalation.
+        // A rejection that has already written the deeper target
+        // permanently raises the row's coverage demand without ever
+        // performing the work, so the next dispatch sees an inflated
+        // tier the runner can't satisfy in one pass. Persisting only
+        // after admission succeeds keeps denied admissions side-effect
+        // free.
+        guard canAdmit(job: preEscalationJob) else {
+            logger.info("Foreground catch-up: lane \(String(describing: preEscalationJob.schedulerLane), privacy: .public) at capacity; deferring")
+            await sleepOrWake(seconds: Self.idlePollSeconds)
+            return
+        }
+
+        let gateDecision = await evaluateAdmissionGate(for: preEscalationJob)
+        if case .reject(let cause) = gateDecision {
+            logger.info("Foreground catch-up: AdmissionGate rejected job \(preEscalationJob.jobId) cause=\(cause.rawValue, privacy: .public)")
+            await sleepOrWake(seconds: Self.rejectionBackoffSeconds)
+            return
+        }
+
+        // Admission cleared. Persist the escalation so the runner
+        // reads the deeper target on its next `fetchJob(byId:)` (and a
+        // crash mid-catch-up resumes against the deeper target rather
+        // than the stale tier value).
         do {
             try await store.updateJobDesiredCoverage(
                 jobId: opportunity.jobId,
@@ -1961,9 +2048,8 @@ actor AnalysisWorkScheduler {
         }
 
         // Re-fetch the row so the dispatch reflects the persisted
-        // escalation. A `nil` here is unusual (the row existed at
-        // `currentCatchupOpportunity` evaluation time moments ago)
-        // but bail safely if the row was concurrently superseded.
+        // escalation. Same null-safety reasoning as the pre-admission
+        // fetch above.
         let job: AnalysisJob
         do {
             guard let refreshed = try await store.fetchJob(byId: opportunity.jobId) else {
@@ -1972,26 +2058,7 @@ actor AnalysisWorkScheduler {
             }
             job = refreshed
         } catch {
-            logger.warning("Foreground catch-up: fetchJob threw for \(opportunity.jobId): \(error)")
-            return
-        }
-
-        // Lane-cap and admission-gate checks mirror `runLoop()`. We
-        // consult both because catch-up should never bust the Now-cap
-        // or skip the bnrs gate — both invariants are preserved when
-        // catch-up escalates the same row that would have been
-        // dispatched normally; the only thing that changed is the
-        // coverage target.
-        guard canAdmit(job: job) else {
-            logger.info("Foreground catch-up: lane \(String(describing: job.schedulerLane), privacy: .public) at capacity; deferring")
-            await sleepOrWake(seconds: Self.idlePollSeconds)
-            return
-        }
-
-        let gateDecision = await evaluateAdmissionGate(for: job)
-        if case .reject(let cause) = gateDecision {
-            logger.info("Foreground catch-up: AdmissionGate rejected job \(job.jobId) cause=\(cause.rawValue, privacy: .public)")
-            await sleepOrWake(seconds: Self.rejectionBackoffSeconds)
+            logger.warning("Foreground catch-up: post-escalation fetchJob threw for \(opportunity.jobId): \(error)")
             return
         }
 
@@ -2041,10 +2108,54 @@ actor AnalysisWorkScheduler {
     /// without it does not bypass any execution semantic — slice
     /// execution is playhead-1iq1).
     private func dispatchAcousticPromotion(opportunity: AcousticPromotionOpportunity) async {
-        // Persist the escalation so the runner reads the deeper
-        // target on its next `fetchJob(byId:)` (and a crash mid-
-        // promotion resumes against the deeper target rather than the
-        // stale tier value).
+        // Fetch the current row so admission decisions read live state
+        // (lane, priority, fingerprint) without depending on the
+        // escalation having landed first. A `nil` here is unusual (the
+        // row existed at `currentAcousticPromotionOpportunity` evaluation
+        // moments ago) but bail safely if the row was concurrently
+        // superseded.
+        let preEscalationJob: AnalysisJob
+        do {
+            guard let refreshed = try await store.fetchJob(byId: opportunity.jobId) else {
+                logger.warning("Acoustic promotion: job \(opportunity.jobId) disappeared before escalation")
+                return
+            }
+            preEscalationJob = refreshed
+        } catch {
+            logger.warning("Acoustic promotion: pre-admission fetchJob threw for \(opportunity.jobId): \(error)")
+            return
+        }
+
+        // Lane-cap and admission-gate checks mirror `runLoop()` and
+        // `dispatchForegroundCatchup`. We consult both because
+        // promotion should never bust the Now-cap or skip the bnrs
+        // gate.
+        //
+        // Order matters (review-followup csp / H1, mirroring M4):
+        // admission MUST happen BEFORE the persisted
+        // `desiredCoverageSec` escalation. A rejection that has already
+        // written the deeper target permanently raises the row's
+        // coverage demand without ever performing the work, so the next
+        // dispatch sees an inflated tier the runner can't satisfy in
+        // one pass. Persisting only after admission succeeds keeps
+        // denied admissions side-effect free.
+        guard canAdmit(job: preEscalationJob) else {
+            logger.info("Acoustic promotion: lane \(String(describing: preEscalationJob.schedulerLane), privacy: .public) at capacity; deferring")
+            await sleepOrWake(seconds: Self.idlePollSeconds)
+            return
+        }
+
+        let gateDecision = await evaluateAdmissionGate(for: preEscalationJob)
+        if case .reject(let cause) = gateDecision {
+            logger.info("Acoustic promotion: AdmissionGate rejected job \(preEscalationJob.jobId) cause=\(cause.rawValue, privacy: .public)")
+            await sleepOrWake(seconds: Self.rejectionBackoffSeconds)
+            return
+        }
+
+        // Admission cleared. Persist the escalation so the runner
+        // reads the deeper target on its next `fetchJob(byId:)` (and a
+        // crash mid-promotion resumes against the deeper target rather
+        // than the stale tier value).
         do {
             try await store.updateJobDesiredCoverage(
                 jobId: opportunity.jobId,
@@ -2057,9 +2168,8 @@ actor AnalysisWorkScheduler {
         }
 
         // Re-fetch the row so the dispatch reflects the persisted
-        // escalation. A `nil` here is unusual (the row existed at
-        // `currentAcousticPromotionOpportunity` evaluation moments ago)
-        // but bail safely if the row was concurrently superseded.
+        // escalation. Same null-safety reasoning as the pre-admission
+        // fetch above.
         let job: AnalysisJob
         do {
             guard let refreshed = try await store.fetchJob(byId: opportunity.jobId) else {
@@ -2068,24 +2178,7 @@ actor AnalysisWorkScheduler {
             }
             job = refreshed
         } catch {
-            logger.warning("Acoustic promotion: fetchJob threw for \(opportunity.jobId): \(error)")
-            return
-        }
-
-        // Lane-cap and admission-gate checks mirror `runLoop()` and
-        // `dispatchForegroundCatchup`. We consult both because
-        // promotion should never bust the Now-cap or skip the bnrs
-        // gate.
-        guard canAdmit(job: job) else {
-            logger.info("Acoustic promotion: lane \(String(describing: job.schedulerLane), privacy: .public) at capacity; deferring")
-            await sleepOrWake(seconds: Self.idlePollSeconds)
-            return
-        }
-
-        let gateDecision = await evaluateAdmissionGate(for: job)
-        if case .reject(let cause) = gateDecision {
-            logger.info("Acoustic promotion: AdmissionGate rejected job \(job.jobId) cause=\(cause.rawValue, privacy: .public)")
-            await sleepOrWake(seconds: Self.rejectionBackoffSeconds)
+            logger.warning("Acoustic promotion: post-escalation fetchJob threw for \(opportunity.jobId): \(error)")
             return
         }
 
@@ -2580,6 +2673,17 @@ actor AnalysisWorkScheduler {
                     )
                     logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: cancelMidRun")
                 } else {
+                    // Mirror the `.failed.requeue` arm and apply
+                    // exponential backoff: a user pause/play loop on a
+                    // poison-content episode used to hammer through
+                    // `maxAttemptCount` instantly because the requeue
+                    // dropped `nextEligibleAt`. With backoff, the Nth
+                    // cancel pushes `nextEligibleAt` to
+                    // `now + min(2^N * 60, 3600)s`, matching how the
+                    // `.failed` arm paces unhealthy jobs and giving
+                    // queued work behind it a chance to dispatch.
+                    let backoff = Self.exponentialBackoffSeconds(attempt: attempts)
+                    let nextEligible = clock().timeIntervalSince1970 + backoff
                     await commitOutcomeArm(
                         "cancelCatch.revertQueued",
                         AnalysisStore.ProcessJobOutcomeArmCommit(
@@ -2587,7 +2691,7 @@ actor AnalysisWorkScheduler {
                             incrementAttempt: true,
                             stateUpdate: .init(
                                 state: "queued",
-                                nextEligibleAt: nil,
+                                nextEligibleAt: nextEligible,
                                 lastErrorCode: nil
                             )
                         )
@@ -2960,6 +3064,36 @@ actor AnalysisWorkScheduler {
     /// where a process kill between separate transactions could leave
     /// the `analysis_jobs` row at `state='running'` with progress
     /// recorded but no terminal mark.
+    ///
+    /// Arms that route through this helper (review-followup csp / M3):
+    ///   1. `assetResolution.{supersede,requeue}` — pre-runner asset
+    ///      lookup failed; row is requeued or terminated.
+    ///   2. `cancelCatch.{supersede,revertQueued}` — `CancellationError`
+    ///      caught with `lostOwnership == false` (mid-decode cancel).
+    ///   3. `tierAdvance` / `allTiersDone` — `.reachedTarget` outcome
+    ///      with coverage met.
+    ///   4. `coverageInsufficient.{noProgress,maxAttempts,requeue}` —
+    ///      `.reachedTarget` outcome that did not actually clear the
+    ///      desired tier.
+    ///   5. `blockedByModel` — `.blockedByModel` outcome.
+    ///   6. `pausedThermalOrMemory` — `.pausedForThermal` /
+    ///      `.memoryPressure` outcome.
+    ///   7. `failed.{supersede,requeue}` /
+    ///      `backgroundExpired.requeue` / `cancelledByPlayback.requeue`
+    ///      / `preempted.requeue` — explicit non-fatal outcomes.
+    ///   8. `outerCatch.{supersede,requeue}` — outer-try catch arm
+    ///      that catches anything the runner rethrew.
+    ///
+    /// **Lease leakage invariant.**
+    /// `ProcessJobOutcomeArmCommit.releaseLease` defaults to `true`,
+    /// so every arm's transaction terminates with `releaseLease(jobId:)`
+    /// unless the call site explicitly sets it to `false`. Each arm
+    /// MUST honor that default unless it has a specific, documented
+    /// reason to keep the lease (today, no arm above sets
+    /// `releaseLease: false`). A leaked lease is silently corrosive:
+    /// the row stays invisible to the dispatcher until the lease
+    /// expires (300s), and the lane counter never decrements, so a
+    /// repeating leak burns out lane capacity over the session.
     private func commitOutcomeArm(
         _ what: String,
         _ commit: AnalysisStore.ProcessJobOutcomeArmCommit

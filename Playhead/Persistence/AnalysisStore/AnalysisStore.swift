@@ -2570,13 +2570,33 @@ actor AnalysisStore {
     /// early-returns once `schemaVersion >= 16`.
     ///
     /// The v17 migrator drops and recreates the table with the corrected
-    /// shape. This is safe because, by the bead's contract, the cohort-scoped
-    /// upstream ledgers are wiped on cohort flips and `training_examples` is
-    /// only populated by the materializer post-rebuild — there is no real
-    /// production data on a v16 row that survives a cohort transition. Any
-    /// rows that do exist locally on a developer DB will be re-materialized
-    /// on the next backfill from the still-warm cohort, so the drop is
-    /// recoverable.
+    /// shape.
+    ///
+    /// **Data loss is intentional and total** (review-followup csp /
+    /// persistence M2). The `DROP TABLE` deletes every row that
+    /// existed at v16. There is no copy-and-restore step, no
+    /// archival, and no per-row recovery path — ANY rows that
+    /// happened to be present at v16 are unrecoverable after this
+    /// migration runs. We accept that trade-off because:
+    ///
+    ///   1. By the bead's cohort contract, the upstream evidence
+    ///      ledgers (`scans`, `evidence`, …) are wiped on cohort
+    ///      flips, so a row written under one cohort cannot be
+    ///      meaningfully reused under the next one regardless.
+    ///   2. The materializer that populates `training_examples`
+    ///      always re-runs on the next backfill, so the rows
+    ///      destroyed here are reconstructible from primary
+    ///      sources still on disk.
+    ///   3. Authoring a copy-and-rewrite path against the broken
+    ///      v16 schema (NOT NULL `decisionCohortJSON`, CASCADE FK)
+    ///      would have to fabricate cohort JSON for rows that
+    ///      pre-date the cohort field, expanding the surface for
+    ///      bad data to leak forward.
+    ///
+    /// Anyone tempted to make this migrator "safer" by preserving
+    /// rows MUST first reconcile points 1–3 above with the new
+    /// preservation strategy. The naive `INSERT INTO new SELECT *
+    /// FROM old` will not work — the column constraints differ.
     ///
     /// Rollback: same as any DDL drop — there is no automatic downgrade. A
     /// user pinned to an earlier app build would see a v16 DB with the new
@@ -3393,6 +3413,19 @@ actor AnalysisStore {
     /// "Latest" follows the same precedence as
     /// `fetchAssetByEpisodeId`: `ORDER BY createdAt DESC, rowid DESC`,
     /// keep the first row encountered per episodeId.
+    ///
+    /// TODO (review-followup csp / persistence L1): unbounded scan
+    /// against `analysis_assets`, ordered by `createdAt DESC`. Today
+    /// the table size stays small (one row per episode under normal
+    /// flow), but the query plan is `SCAN analysis_assets USE
+    /// TEMP B-TREE FOR ORDER BY` — large libraries pay an O(N log N)
+    /// sort on every Activity-screen snapshot refresh. A composite
+    /// index on `(episodeId, createdAt DESC, rowid DESC)` would let
+    /// SQLite stream results in order without the temp B-tree, at
+    /// the cost of a one-time migration. Not done in this branch
+    /// because it requires a schema-version bump and the tradeoff
+    /// hasn't been measured against the current observed library
+    /// sizes.
     func fetchLatestAssetByEpisodeIdMap() throws -> [String: AnalysisAsset] {
         let sql = """
             SELECT \(assetSelectColumns)
@@ -3450,8 +3483,15 @@ actor AnalysisStore {
                 WHERE episodeId IN (\(placeholders))
                 ORDER BY createdAt DESC, rowid DESC
                 """
+            // Review-followup (csp / persistence M1): finalize the
+            // prepared statement explicitly at the end of each
+            // iteration rather than via `defer` inside the loop. A
+            // `defer` inside a `while` body does fire at the end of
+            // each iteration in Swift, but the explicit form removes
+            // the doubt for future readers and makes the per-iteration
+            // lifecycle obvious — every prepared statement is paired
+            // with a finalize on the same line of the loop body.
             let stmt = try prepare(sql)
-            defer { sqlite3_finalize(stmt) }
             for (i, id) in slice.enumerated() {
                 bind(stmt, Int32(i + 1), id)
             }
@@ -3463,6 +3503,7 @@ actor AnalysisStore {
                     results[asset.episodeId] = asset
                 }
             }
+            sqlite3_finalize(stmt)
             index = end
         }
 
@@ -5396,15 +5437,24 @@ actor AnalysisStore {
     /// `cueCoverageSec`) and `attemptCount` are intentionally untouched —
     /// the sweep is meant to *resume* progress from the prior session, not
     /// restart from zero or penalize the row for an outage that wasn't its
-    /// fault. `lastErrorCode` is cleared because any error code attached to
-    /// the prior session is no longer informative for the new run.
-    /// `nextEligibleAt` is cleared so the row is immediately dispatchable —
-    /// any backoff window that may have been set by the prior session is
-    /// stale by the time the row is being recovered (the prior process is
-    /// gone), and leaving a future `nextEligibleAt` in place would defeat
-    /// the entire point of this recovery (the row would stay invisible to
-    /// the dispatcher until the timer expired, exactly the symptom this
-    /// sweep exists to fix).
+    /// fault.
+    ///
+    /// `nextEligibleAt` and `lastErrorCode` are also intentionally
+    /// preserved (review-followup csp / H2). The earlier behavior cleared
+    /// both on the theory that "the prior process is gone, so its
+    /// bookkeeping is stale." That reasoning collapses one important
+    /// detail: a future `nextEligibleAt` represents an exponential-backoff
+    /// window earned by repeated failures or repeated mid-decode cancels.
+    /// Clearing it on cold launch makes the stranded row immediately
+    /// dispatchable, which combines with the cancel-mid-decode requeue
+    /// path (also in this followup) to defeat backoff entirely — a job
+    /// that crashed the prior process is the LAST one that should skip
+    /// its cooldown. Leaving the column in place lets the dispatcher
+    /// honor the backoff that was earned legitimately; the row remains
+    /// queryable via `fetchNextEligibleJob` once the window elapses.
+    /// `lastErrorCode` is preserved alongside it as diagnostic context —
+    /// the prior session's terminal error is the most informative
+    /// signal we have about why the row is stranded.
     func recoverStrandedActiveJob(
         jobId: String,
         newSchedulerEpoch: Int,
@@ -5415,8 +5465,6 @@ actor AnalysisStore {
             SET state = 'queued',
                 leaseOwner = NULL,
                 leaseExpiresAt = NULL,
-                lastErrorCode = NULL,
-                nextEligibleAt = NULL,
                 schedulerEpoch = ?,
                 updatedAt = ?
             WHERE jobId = ?
@@ -6776,6 +6824,22 @@ actor AnalysisStore {
     /// transaction so a crash mid-prune cannot leave the two tables in
     /// divergent cohort states. Returns the total number of rows deleted
     /// across both tables, as reported by `sqlite3_changes`.
+    ///
+    /// **Tables NOT pruned by this sweep** (review-followup csp /
+    /// persistence M3):
+    ///   - `training_examples` — durability contract. The materializer
+    ///     populates this table specifically as a long-lived training
+    ///     ledger that must survive cohort flips (an example written
+    ///     under cohort A is still a useful training datum after the
+    ///     cohort moves to B; the asset-level `analysisAssetId` and
+    ///     `scanCohortJSON` columns let downstream readers filter by
+    ///     cohort if they need to).
+    ///   - `analysis_assets`, `analysis_jobs`, `download_blobs`, etc. —
+    ///     not cohort-scoped.
+    ///
+    /// Anyone adding a new cohort-scoped table MUST decide explicitly
+    /// whether it joins this sweep (transient evidence) or stays out
+    /// (durable training data) and document the reason here.
     ///
     /// NOTE: this method is exposed but NOT called by `migrate()`
     /// automatically. Wiring the production call in `PlayheadRuntime.init`

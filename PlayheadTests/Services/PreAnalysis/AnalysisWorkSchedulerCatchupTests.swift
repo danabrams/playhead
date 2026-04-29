@@ -382,6 +382,95 @@ struct AnalysisWorkSchedulerCatchupTests {
         #expect(refetched.desiredCoverageSec == 1500,
                 "Escalated coverage must round-trip through SQLite")
     }
+
+    // MARK: - Admission-vs-persistence ordering (review-followup csp / M4)
+
+    @Test("dispatchForegroundCatchup: admission denial does NOT persist a deeper coverage target")
+    func testAdmissionDenialDoesNotPersistEscalation() async throws {
+        // Review-followup (csp / M4): the prior order persisted
+        // `desiredCoverageSec` BEFORE checking admission. A denied
+        // admission then left the row at an inflated tier with no
+        // dispatch — every subsequent dispatch saw a coverage demand
+        // the runner couldn't satisfy in one pass. Pin the new order:
+        // admission first, persistence only after it succeeds.
+        //
+        // Drive a denial deterministically by saturating the Soon-lane
+        // counter via a sibling didStart. The catchup job (priority 5)
+        // is in Soon (1..<20); Soon cap is 1; one outstanding sibling
+        // is enough to make `canAdmit` reject.
+        let fx = try await makeFixture(desiredCoverageSec: 600)
+
+        // Saturate the Soon lane with a sibling job. The job we pass
+        // to `didStart` must have a Soon-lane priority too.
+        let sibling = makeAnalysisJob(
+            jobId: "sibling-soon",
+            jobType: "preAnalysis",
+            episodeId: "ep-other",
+            sourceFingerprint: "fp-other",
+            priority: 5, // Soon
+            desiredCoverageSec: 600,
+            state: "running"
+        )
+        await fx.scheduler.didStart(job: sibling)
+
+        // Construct an opportunity targeting our catchup job. Values
+        // mirror the positive-trigger test: prior 600 → escalated 890.
+        let opportunity = AnalysisWorkScheduler.CatchupOpportunity(
+            jobId: fx.job.jobId,
+            episodeId: fx.asset.episodeId,
+            priorDesiredCoverageSec: 600,
+            escalatedDesiredCoverageSec: 890,
+            transcribedAheadSec: 10,
+            playheadPositionSec: 590
+        )
+
+        await fx.scheduler.dispatchForegroundCatchupForTesting(opportunity: opportunity)
+
+        // The persisted desiredCoverageSec must remain at the prior
+        // value — admission denial bailed before any write landed.
+        let after = try #require(await fx.store.fetchLatestJobForEpisode(fx.asset.episodeId))
+        #expect(after.desiredCoverageSec == 600,
+                "Denied admission must not persist the escalated coverage target; got \(after.desiredCoverageSec)")
+    }
+
+    @Test("dispatchForegroundCatchup: ADMITTED job DOES persist the escalated coverage target")
+    func testAdmissionSuccessPersistsEscalation() async throws {
+        // Review-followup (csp / L1): positive-path counterpart to
+        // testAdmissionDenialDoesNotPersistEscalation. Verifies that
+        // when admission clears, the post-admission persistence DOES
+        // land and the post-admission re-fetch picks up the new value
+        // before `processJob` runs. Together the two tests pin both
+        // sides of the M4 ordering invariant.
+        //
+        // The lane is empty (no sibling didStart), so canAdmit + the
+        // admission gate both pass. processJob then short-circuits via
+        // `blocked:missingFile` because the StubDownloadProvider has no
+        // cached URL for this episode — that's fine: by the time
+        // processJob runs, the desiredCoverageSec write has already
+        // happened, so the assertion below is independent of what
+        // processJob does after.
+        let fx = try await makeFixture(desiredCoverageSec: 600)
+
+        let opportunity = AnalysisWorkScheduler.CatchupOpportunity(
+            jobId: fx.job.jobId,
+            episodeId: fx.asset.episodeId,
+            priorDesiredCoverageSec: 600,
+            escalatedDesiredCoverageSec: 890,
+            transcribedAheadSec: 10,
+            playheadPositionSec: 590
+        )
+
+        await fx.scheduler.dispatchForegroundCatchupForTesting(opportunity: opportunity)
+
+        // Admission cleared, so the escalated coverage target MUST
+        // round-trip through SQLite. The post-admission re-fetch
+        // inside the dispatch path is what threads the new value into
+        // processJob; pinning the persisted value here covers the
+        // observable side of that re-fetch.
+        let after = try #require(await fx.store.fetchLatestJobForEpisode(fx.asset.episodeId))
+        #expect(after.desiredCoverageSec == 890,
+                "Admitted dispatch must persist the escalated coverage target; got \(after.desiredCoverageSec)")
+    }
 }
 
 #endif

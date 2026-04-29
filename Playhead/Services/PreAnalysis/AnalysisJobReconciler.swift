@@ -200,8 +200,20 @@ actor AnalysisJobReconciler {
     /// `cueCoverageSec`) and `attemptCount` are intentionally preserved — we
     /// resume from where the prior session left off rather than re-running
     /// already-completed work or penalizing the row for an outage.
-    /// `lastErrorCode` is cleared because any error code from the prior
-    /// session is no longer informative.
+    ///
+    /// `lastErrorCode` and `nextEligibleAt` are also preserved
+    /// (review-followup csp / H2). An earlier revision cleared
+    /// `lastErrorCode` on the reasoning that "any error code from the
+    /// prior session is no longer informative" — that reasoning was
+    /// reversed: the prior session's terminal error is the single most
+    /// informative diagnostic we have about why the row stranded, and
+    /// pairing it with `nextEligibleAt` keeps the legitimately-earned
+    /// exponential-backoff window intact across cold launch. Clearing
+    /// either field on recovery would let a row that crashed the
+    /// process — exactly the row that should respect cooldown most —
+    /// dispatch immediately. See the AnalysisStore-side docstring on
+    /// ``AnalysisStore.recoverStrandedActiveJob`` for the persistence
+    /// contract these two columns enforce together.
     ///
     /// Telemetry: one `logger.info` per recovered row plus a summary line.
     /// The reconciler uses OSLog throughout (matches `recoverExpiredLeases`,
@@ -209,6 +221,20 @@ actor AnalysisJobReconciler {
     /// can grep `JobReconciler` in Console for `stranded_session_recovered`
     /// markers.
     private func recoverStrandedSessionJobs() async throws -> Int {
+        // Sequential-ordering invariant (review-followup csp / L3):
+        // this step reads `_meta.scheduler_epoch` once at entry. Any
+        // upstream call that mutates the epoch (today: only the
+        // `incrementSchedulerEpoch` that happens before
+        // `PlayheadRuntime.startSchedulerLoop` boots the reconciler)
+        // MUST have completed before we are invoked. The reconciler
+        // sequencing in `reconcile()` above honors this — step 1
+        // (`recoverExpiredLeases`) does not touch the epoch, and the
+        // bead-btwk wiring guarantees we run after the runtime's
+        // launch-time epoch bump. If a future caller drives this
+        // function from a path that lets the epoch race the read,
+        // the stranded-detection predicate
+        // (`schedulerEpoch < currentEpoch`) will momentarily
+        // misclassify rows minted in the new epoch as stranded.
         let now = Date().timeIntervalSince1970
         let currentEpoch = (try await store.fetchSchedulerEpoch()) ?? 0
         let stranded = try await store.fetchStrandedActiveJobs(
