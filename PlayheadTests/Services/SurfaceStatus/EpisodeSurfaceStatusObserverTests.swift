@@ -29,7 +29,7 @@ struct EpisodeSurfaceStatusObserverTests {
             lock.lock(); defer { lock.unlock() }
             return _invocations
         }
-        lazy var sink: SurfaceStatusReadyTransitionEmitter.LoggerSink = { [weak self] hash, trigger in
+        lazy var sink: @Sendable (String?, SurfaceStateTransitionEntryTrigger?) -> Void = { [weak self] hash, trigger in
             guard let self else { return }
             self.lock.lock(); defer { self.lock.unlock() }
             self._invocations.append(Invocation(episodeIdHash: hash, trigger: trigger))
@@ -74,27 +74,17 @@ struct EpisodeSurfaceStatusObserverTests {
     private static func makeObserver(
         store: AnalysisStore,
         snapshot: CapabilitySnapshot? = makeSnapshot(),
-        sink: @escaping SurfaceStatusReadyTransitionEmitter.LoggerSink
+        sink: @escaping @Sendable (String?, SurfaceStateTransitionEntryTrigger?) -> Void
     ) -> EpisodeSurfaceStatusObserver {
-        let reducer: SurfaceStatusReadyTransitionEmitter.Reducer = {
-            state, cause, eligibility, coverage, anchor in
-            episodeSurfaceStatus(
-                state: state,
-                cause: cause,
-                eligibility: eligibility,
-                coverage: coverage,
-                readinessAnchor: anchor
-            )
-        }
-        let emitter = SurfaceStatusReadyTransitionEmitter(
-            reducer: reducer,
-            loggerSink: sink
-        )
+        // playhead-jzdc: tests use the sink-closure seam instead of
+        // injecting an emitter object. The emitter is owned internally
+        // by the observer; the sink lets tests observe what the emitter
+        // would emit without ever holding a reference to it.
         return EpisodeSurfaceStatusObserver(
             store: store,
             capabilitySnapshotProvider: { snapshot },
             episodeIdHasher: { "hash-\($0)" },
-            emitter: emitter
+            emitterSink: sink
         )
     }
 

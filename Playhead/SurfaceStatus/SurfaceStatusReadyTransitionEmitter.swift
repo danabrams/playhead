@@ -27,12 +27,12 @@ import Foundation
 /// (queued + no blocking cause). Pure stateful machinery — does NOT own
 /// the logger writes it delegates to.
 ///
-/// Marked `@unchecked Sendable` so it can be handed to an owning actor
-/// (e.g. `EpisodeSurfaceStatusObserver`) at init time. The internal
-/// `lastReadyByEpisode` dictionary is NOT thread-safe on its own — per
-/// the class contract, the owning actor must serialize all calls to
-/// `reduceAndEmit(...)`. This conformance is a compile-time assertion
-/// that single-actor ownership is the only supported usage pattern.
+/// Single-owner per observer, constructed inside
+/// `EpisodeSurfaceStatusObserver`. The `@unchecked Sendable` is sound
+/// because the emitter is no longer reachable from outside its owning
+/// observer: `EpisodeSurfaceStatusObserver` has no public initializer
+/// that accepts an emitter, so the dictionary-mutating `reduceAndEmit`
+/// call site is always serialized by the owning actor (playhead-jzdc).
 final class SurfaceStatusReadyTransitionEmitter: @unchecked Sendable {
 
     /// The reducer this emitter wraps. Pluggable so tests can inject a

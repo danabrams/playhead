@@ -83,21 +83,24 @@ actor EpisodeSurfaceStatusObserver {
     /// Tests that only want to exercise the mapping+emission flow can
     /// pass just `store` + `capabilitySnapshotProvider` and accept the
     /// default logger (a fresh isolated instance) and derived hasher.
-    /// Tests that want to assert on the emitted trigger/hash can inject
-    /// a custom `emitter` directly, bypassing the logger entirely.
+    ///
+    /// playhead-jzdc: the `emitter:` defaulted parameter was removed so
+    /// the emitter is provably single-owner (constructed inside the
+    /// observer, never reachable from outside). Tests that need to
+    /// observe what the emitter would emit use the sink-closure init
+    /// below.
     init(
         store: AnalysisStore,
         capabilitySnapshotProvider: @escaping @Sendable () async -> CapabilitySnapshot?,
         invariantLogger: SurfaceStatusInvariantLogger = SurfaceStatusInvariantLogger(),
-        episodeIdHasher: (@Sendable (String) -> String)? = nil,
-        emitter: SurfaceStatusReadyTransitionEmitter? = nil
+        episodeIdHasher: (@Sendable (String) -> String)? = nil
     ) {
         self.store = store
         self.capabilitySnapshotProvider = capabilitySnapshotProvider
         self.episodeIdHasher = episodeIdHasher ?? { [invariantLogger] episodeId in
             invariantLogger.hashEpisodeId(episodeId)
         }
-        self.emitter = emitter ?? SurfaceStatusReadyTransitionEmitter(
+        self.emitter = SurfaceStatusReadyTransitionEmitter(
             reducer: { state, cause, eligibility, coverage, anchor in
                 episodeSurfaceStatus(
                     state: state,
@@ -116,6 +119,45 @@ actor EpisodeSurfaceStatusObserver {
             }
         )
     }
+
+    /// Test-only seam (playhead-jzdc): construct an observer whose
+    /// internally-owned emitter routes its `ready_entered` notifications
+    /// through `emitterSink` instead of the production
+    /// `SurfaceStatusInvariantLogger`. Lets tests observe what the
+    /// emitter would emit without ever taking a reference to the
+    /// emitter object — preserves the single-owner invariant on
+    /// `SurfaceStatusReadyTransitionEmitter`.
+    ///
+    /// This init also bypasses the reducer's `invariantLogger`
+    /// passthrough: tests using the sink seam are exercising the
+    /// mapping+emission flow, not the impossible-state logger.
+    #if DEBUG
+    init(
+        store: AnalysisStore,
+        capabilitySnapshotProvider: @escaping @Sendable () async -> CapabilitySnapshot?,
+        episodeIdHasher: @escaping @Sendable (String) -> String,
+        emitterSink: @escaping @Sendable (
+            _ episodeIdHash: String?,
+            _ trigger: SurfaceStateTransitionEntryTrigger?
+        ) -> Void
+    ) {
+        self.store = store
+        self.capabilitySnapshotProvider = capabilitySnapshotProvider
+        self.episodeIdHasher = episodeIdHasher
+        self.emitter = SurfaceStatusReadyTransitionEmitter(
+            reducer: { state, cause, eligibility, coverage, anchor in
+                episodeSurfaceStatus(
+                    state: state,
+                    cause: cause,
+                    eligibility: eligibility,
+                    coverage: coverage,
+                    readinessAnchor: anchor
+                )
+            },
+            loggerSink: emitterSink
+        )
+    }
+    #endif
 
     // MARK: - Production entry points
 
