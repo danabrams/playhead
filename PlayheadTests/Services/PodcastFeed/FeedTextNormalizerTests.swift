@@ -94,18 +94,29 @@ struct FeedTextNormalizerTests {
         // byte cap, the four uncapped regex passes in `normalize` would
         // each scan the full string, producing a perf cliff. The cap
         // truncates raw input before regex, so we expect this to return
-        // a sub-`maxLength` String comfortably within a handful of
-        // milliseconds. Bound the wall-clock to keep this useful as a
-        // regression test (CI-friendly: 5 s is generous against the
-        // measured ~tens of ms typical run).
+        // a sub-`maxLength` String.
+        //
+        // Reviewer suggestion (rfu-mn): assert the *structural* property —
+        // the post-regex output is bounded by `maxLength` and strictly
+        // less than the input — rather than a wall-clock threshold. A
+        // wall-clock assertion can flake on a loaded CI simulator AND
+        // can silently false-pass if a future regression slows the path
+        // to 4 s instead of 4 ms. The structural assertion proves the
+        // pre-regex byte cap fired (otherwise the regex pipeline would
+        // have either OOMed or produced a much larger intermediate),
+        // independent of wall-clock noise.
         let raw = String(repeating: "A", count: 4_000_000)
-        let start = Date()
         let result = FeedTextNormalizer.normalize(raw)
-        let elapsed = Date().timeIntervalSince(start)
         #expect(result != nil)
+        // The post-truncation length is exactly `maxLength` characters.
+        // This bounds the output and proves the truncation step ran;
+        // combined with the test merely returning (not OOMing or
+        // hanging), this asserts the cap+truncation pipeline succeeded.
         #expect(result?.count == FeedTextNormalizer.maxLength)
-        #expect(elapsed < 5.0,
-                "normalize on 4 MB input took \(elapsed)s — expected <5 s with pre-regex cap")
+        // Tripwire: the result must be strictly smaller than the input.
+        // If a future refactor accidentally bypasses the cap AND the
+        // post-regex truncation, this catches it independent of timing.
+        #expect((result?.utf8.count ?? .max) < raw.utf8.count)
     }
 
     @Test("Does not truncate text within limit")

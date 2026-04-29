@@ -115,16 +115,7 @@ final class FeedParser: NSObject, XMLParserDelegate {
         feedBaseURL = baseURL
         let parser = XMLParser(data: data)
         parser.delegate = self
-        parser.shouldProcessNamespaces = true
-        parser.shouldReportNamespacePrefixes = false
-        // Defense in depth against XXE / billion-laughs entity expansion.
-        // Foundation's XMLParser defaults are safe today (external entities
-        // are not resolved over the network), but a future refactor —
-        // including adopting a different parser that reuses these flags —
-        // could quietly regress. Pin both knobs explicitly so anyone
-        // auditing this constructor sees the hardening.
-        parser.shouldResolveExternalEntities = false
-        parser.externalEntityResolvingPolicy = .never
+        Self.applySecurityHardening(to: parser)
 
         guard parser.parse() else {
             if let error = parseError {
@@ -139,6 +130,25 @@ final class FeedParser: NSObject, XMLParserDelegate {
         }
 
         return feed
+    }
+
+    /// Apply the namespace + entity-resolution flags every feed parse
+    /// operation depends on. Extracted as a static seam so tests can
+    /// directly assert the configured properties on a parser instance
+    /// without driving a full parse — defense in depth against a future
+    /// refactor silently dropping the XXE / billion-laughs hardening.
+    /// (Reviewer suggestion / rfu-mn.)
+    static func applySecurityHardening(to parser: XMLParser) {
+        parser.shouldProcessNamespaces = true
+        parser.shouldReportNamespacePrefixes = false
+        // Defense in depth against XXE / billion-laughs entity expansion.
+        // Foundation's XMLParser defaults are safe today (external entities
+        // are not resolved over the network), but a future refactor —
+        // including adopting a different parser that reuses these flags —
+        // could quietly regress. Pin both knobs explicitly so anyone
+        // auditing this constructor sees the hardening.
+        parser.shouldResolveExternalEntities = false
+        parser.externalEntityResolvingPolicy = .never
     }
 
     // MARK: - XMLParserDelegate
