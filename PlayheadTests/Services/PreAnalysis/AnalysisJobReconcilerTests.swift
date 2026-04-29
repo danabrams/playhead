@@ -544,12 +544,29 @@ struct AnalysisJobReconcilerTests {
 
     @Test("recoverStrandedSessionJobs_preservesNextEligibleAtAndLastErrorCode")
     func testRecoverStrandedJobPreservesBackoffAndError() async throws {
-        // Review-followup (csp / H2): the recovery sweep used to clear
-        // `nextEligibleAt` and `lastErrorCode`. That defeated
-        // exponential backoff on cold launch — a row that crashed the
-        // prior process became immediately dispatchable, contradicting
-        // the H1 cancel-mid-decode pacing fix. Pin the new contract:
-        // both columns survive the recovery untouched.
+        // Review-followup (csp / H2): pin the contract that the
+        // stranded-recovery sweep preserves both `nextEligibleAt` and
+        // `lastErrorCode` on the recovered row. The earlier
+        // implementation cleared both; the H2 fix flips that.
+        //
+        // What this test pins: single-row column preservation. Insert
+        // a stranded `running` row that carries a future
+        // `nextEligibleAt` and a non-nil `lastErrorCode`, run the
+        // reconcile sweep, and assert the recovered row still carries
+        // both values verbatim alongside the expected state flip.
+        //
+        // On cross-coupling with the H1 cancel-mid-decode pacing fix:
+        // the typical `running` row in production has
+        // `nextEligibleAt = NULL` (a row that successfully acquired a
+        // lease was already past its eligibility window), so the
+        // H1/H2 interaction is defensive — the cancel-mid-decode
+        // requeue path could in principle stamp a future
+        // `nextEligibleAt` onto a row that then strands, and we don't
+        // want that backoff window erased. The cross-coupling shapes
+        // the "why preserve" rationale but is NOT the load-bearing
+        // reason for this test; the contract this test enforces is
+        // the simpler one — preservation of the two columns on
+        // recovery, full stop.
         let store = try await makeTestStore()
         let currentEpoch = try await store.fetchSchedulerEpoch() ?? 0
         let priorEpoch = max(0, currentEpoch - 1)
