@@ -161,7 +161,9 @@ struct NowPlayingView: View {
                 TranscriptPeekView(
                     peekViewModel: TranscriptPeekViewModel(
                         analysisAssetId: assetId,
-                        store: runtime.analysisStore
+                        dataSource: LiveTranscriptPeekDataSource(
+                            store: runtime.analysisStore
+                        )
                     ),
                     currentTime: viewModel.currentTime,
                     // Phase 7.2: inject the persistent correction store so the

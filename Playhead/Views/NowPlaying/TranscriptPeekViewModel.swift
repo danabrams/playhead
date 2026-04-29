@@ -1,7 +1,14 @@
 // TranscriptPeekViewModel.swift
-// Drives the transcript peek sheet: loads chunks from AnalysisStore,
-// polls for new fast-pass arrivals, resolves the active segment index
-// from the current playback time, and identifies ad regions.
+// Drives the transcript peek sheet: pulls snapshots from a
+// `TranscriptPeekDataSource`, polls for new fast-pass arrivals,
+// resolves the active segment index from the current playback time,
+// and identifies ad regions.
+//
+// playhead-fwvz: this file is on the UI-layer contract — it consumes
+// the `TranscriptPeekSnapshot` boundary type only and does not
+// reference `AnalysisStore` (or any other forbidden module-boundary
+// token enforced by `SurfaceStatusUILintTests`). The fetch logic that
+// previously lived here moved to `LiveTranscriptPeekDataSource`.
 
 import Foundation
 import OSLog
@@ -38,23 +45,24 @@ final class TranscriptPeekViewModel {
     // MARK: - Configuration
 
     let analysisAssetId: String
-    private let store: AnalysisStore
+    private let dataSource: TranscriptPeekDataSource
     private let logger = Logger(subsystem: "com.playhead", category: "TranscriptPeek")
 
     /// How often to poll for new chunks (seconds).
-    /// Polling is intentional here: AnalysisStore does not emit granular
-    /// notifications for individual chunk inserts. The 2-second interval
-    /// balances responsiveness with efficiency. When AnalysisStore gains
-    /// change notifications, this should be replaced with event-driven updates.
+    /// Polling is intentional here: the data source does not emit
+    /// granular notifications for individual chunk inserts. The
+    /// 2-second interval balances responsiveness with efficiency.
+    /// When the data source gains change notifications, this should
+    /// be replaced with event-driven updates.
     private static let pollInterval: TimeInterval = 2.0
 
     private var pollTask: Task<Void, Never>?
 
     // MARK: - Init
 
-    init(analysisAssetId: String, store: AnalysisStore) {
+    init(analysisAssetId: String, dataSource: TranscriptPeekDataSource) {
         self.analysisAssetId = analysisAssetId
-        self.store = store
+        self.dataSource = dataSource
     }
 
     // MARK: - Lifecycle
@@ -156,7 +164,7 @@ final class TranscriptPeekViewModel {
     /// Debug stats summary for TestFlight diagnostics.
     private(set) var debugStats: String = "loading…"
 
-    private func updateDebugStats() async {
+    private func updateDebugStats(snapshot: TranscriptPeekSnapshot) {
         let count = chunks.count
         let fmt = { (t: Double) -> String in
             let m = Int(t) / 60
@@ -179,37 +187,30 @@ final class TranscriptPeekViewModel {
         parts.append("\(adWindows.count) ads")
 
         // Raw chunk count (before dedup) to detect if writes are missing
-        do {
-            let rawChunks = try await store.fetchTranscriptChunks(assetId: analysisAssetId)
-            if rawChunks.count != count {
-                parts.append("raw \(rawChunks.count)")
-            }
-        } catch {}
+        if snapshot.rawChunkCount != count {
+            parts.append("raw \(snapshot.rawChunkCount)")
+        }
 
-        // Asset coverage watermarks + session state from store
-        do {
-            let asset = try await store.fetchAsset(id: analysisAssetId)
-            if let featCov = asset?.featureCoverageEndTime {
-                parts.append("feat \(fmt(featCov))")
-            }
-            if let txCov = asset?.fastTranscriptCoverageEndTime {
-                parts.append("tx \(fmt(txCov))")
-            }
-
-            let session = try await store.fetchLatestSessionForAsset(assetId: analysisAssetId)
-            if let session {
-                parts.append(session.state)
-            }
-        } catch {
+        // Asset coverage watermarks + session state
+        if let featCov = snapshot.featureCoverageEnd {
+            parts.append("feat \(fmt(featCov))")
+        }
+        if let txCov = snapshot.fastTranscriptCoverageEnd {
+            parts.append("tx \(fmt(txCov))")
+        }
+        if let session = snapshot.latestSessionState {
+            parts.append(session)
+        }
+        if snapshot.fetchFailed {
             parts.append("err")
         }
 
         // Streaming decode diagnostics.
 #if DEBUG
         let seed = UserDefaults.standard.integer(forKey: "debug_streamingSeeded")
-        let chunks = UserDefaults.standard.integer(forKey: "debug_streamingChunks")
+        let streamingChunks = UserDefaults.standard.integer(forKey: "debug_streamingChunks")
         let strShards = UserDefaults.standard.integer(forKey: "debug_streamingShards")
-        parts.append("s:\(seed/1024)k c:\(chunks) sh:\(strShards)")
+        parts.append("s:\(seed/1024)k c:\(streamingChunks) sh:\(strShards)")
 #endif
 
         debugStats = parts.joined(separator: " · ")
@@ -245,26 +246,14 @@ final class TranscriptPeekViewModel {
     }
 
     private func refresh() async {
-        do {
-            let freshChunks = try await store.fetchTranscriptChunks(assetId: analysisAssetId)
-            let freshAds = try await store.fetchAdWindows(assetId: analysisAssetId)
-            let freshSpans = try await store.fetchDecodedSpans(assetId: analysisAssetId)
-
-            // Deduplicate: if both fast and final exist for the same segment,
-            // prefer final. Group by chunkIndex, keep final if available.
-            let grouped = Dictionary(grouping: freshChunks, by: { $0.chunkIndex })
-            let deduped = grouped.values.map { group -> TranscriptChunk in
-                group.first(where: { $0.pass == "final" }) ?? group[0]
-            }
-            .sorted { $0.startTime < $1.startTime }
-
-            chunks = deduped
-            adWindows = freshAds
-            decodedSpans = freshSpans
-            rebuildSpansByChunkIndex()
-            await updateDebugStats()
-        } catch {
-            logger.error("Failed to refresh transcript chunks: \(error)")
+        let snapshot = await dataSource.fetchSnapshot(assetId: analysisAssetId)
+        if snapshot.fetchFailed {
+            logger.error("Transcript peek: snapshot fetch reported failure for asset \(self.analysisAssetId)")
         }
+        chunks = snapshot.chunks
+        adWindows = snapshot.adWindows
+        decodedSpans = snapshot.decodedSpans
+        rebuildSpansByChunkIndex()
+        updateDebugStats(snapshot: snapshot)
     }
 }

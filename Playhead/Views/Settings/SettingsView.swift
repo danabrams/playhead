@@ -891,7 +891,7 @@ private extension SettingsView {
         let title = runtime.currentEpisodeTitle ?? "Unknown Episode"
         let podcast = runtime.currentPodcastTitle ?? "Unknown Podcast"
 
-        debugExport = await DebugEpisodeExporter.build(
+        debugExport = await DebugEpisodeExportService.build(
             episodeTitle: title,
             podcastTitle: podcast,
             analysisAssetId: assetId,
@@ -905,7 +905,7 @@ private extension SettingsView {
         debugExportInProgress = true
         defer { debugExportInProgress = false }
 
-        debugExport = await DebugEpisodeExporter.buildLibraryExport(
+        debugExport = await DebugEpisodeExportService.buildLibraryExport(
             store: runtime.analysisStore
         )
     }
