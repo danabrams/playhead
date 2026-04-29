@@ -148,12 +148,39 @@ final class SurfaceStatusInvariantLogger: @unchecked Sendable {
         }
     }
 
-    /// Legacy string-only entry-point retained so the reducer's existing
-    /// call-sites do not need to change. Wraps the message in a
-    /// synthetic `reducerInternalBug`-coded violation so the JSON shape
-    /// stays consistent.
-    func invariantViolated(_ message: String) {
-        state.enqueueSyntheticViolation(message: message)
+    /// Code-typed entry-point. The reducer's invariant call-sites pass a
+    /// specific `InvariantViolation.Code` plus a human-readable
+    /// `description`; the logger wraps both into a synthetic JSON Lines
+    /// entry whose `invariantViolation` payload carries the supplied code
+    /// verbatim. `playhead-e2a3`'s dogfood audit groups by code, so each
+    /// caller MUST pass the code that actually describes its condition.
+    ///
+    /// playhead-glch: this replaced the pre-glch string-only entry-point
+    /// that hard-coded `.reducerInternalBug` regardless of the message —
+    /// silently miscategorizing every reducer-precedence impossibility
+    /// into a single bucket. After glch, every reducer call-site passes a
+    /// real code (`.userPausedUnknownCause`,
+    /// `.resourceBlockUnknownCause`, `.transientWaitUnknownCause`,
+    /// `.unmappedForwardCompatCause`).
+    func invariantViolated(
+        code: InvariantViolation.Code,
+        description: String
+    ) {
+        state.enqueueSyntheticViolation(code: code, message: description)
+    }
+
+    /// Explicit "I don't have a code for this condition" fallback. Emits
+    /// a synthetic violation tagged with `.unknown` so `playhead-e2a3`'s
+    /// audit can surface the bucket as a follow-up signal — anyone whose
+    /// site reaches `recordUnknown` should be filing a bead to introduce
+    /// a real code.
+    ///
+    /// As of `playhead-glch` this has zero callers in production code.
+    /// It exists ONLY so a future code path that genuinely lacks a code
+    /// can opt in deliberately rather than silently re-introducing
+    /// hard-coded miscategorization.
+    func recordUnknown(_ description: String) {
+        state.enqueueSyntheticViolation(code: .unknown, message: description)
     }
 
     // MARK: - playhead-o45p event emitters
@@ -435,10 +462,18 @@ private final class LoggerState: @unchecked Sendable {
         }
     }
 
-    /// Legacy synthetic-violation entry point. Used by
-    /// `SurfaceStatusInvariantLogger.invariantViolated(_:)` to wrap a
-    /// free-form message in a real JSON-shaped entry.
-    func enqueueSyntheticViolation(message: String) {
+    /// Synthetic-violation entry point. Used by
+    /// `SurfaceStatusInvariantLogger.invariantViolated(code:description:)`
+    /// (and `recordUnknown(_:)`) to wrap a code + free-form message in a
+    /// real JSON-shaped entry.
+    ///
+    /// playhead-glch: prior to this bead the code argument was hard-coded
+    /// to `.reducerInternalBug`. Now every caller must supply the real
+    /// code so e2a3's audit can group by condition.
+    func enqueueSyntheticViolation(
+        code: InvariantViolation.Code,
+        message: String
+    ) {
         let timestamp = Date()
         writeQueue.async { [weak self] in
             guard let self else { return }
@@ -453,7 +488,7 @@ private final class LoggerState: @unchecked Sendable {
                 cause: nil,
                 eligibilitySnapshot: nil,
                 invariantViolation: InvariantViolation(
-                    code: .reducerInternalBug,
+                    code: code,
                     description: message
                 )
             )

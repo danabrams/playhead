@@ -64,8 +64,13 @@ struct EpisodeSurfaceStatusUnmappedCauseTests {
         #expect(surfaced.hint == .retry)
 
         // Drain the logger and verify the session file contains a
-        // reducer_internal_bug invariant entry mentioning the raw cause
-        // string.
+        // unmapped_forward_compat_cause invariant entry mentioning the raw
+        // cause string.
+        //
+        // playhead-glch: prior to this bead the code on this row was
+        // hard-coded to `.reducerInternalBug`; the migration replaced
+        // every reducer call-site with a specific code so e2a3's audit
+        // can group meaningfully.
         logger.flushForTesting()
 
         let sessionURL = try #require(logger.currentSessionFileURL)
@@ -83,9 +88,120 @@ struct EpisodeSurfaceStatusUnmappedCauseTests {
 
         let violations = entries.filter {
             $0.eventType == .invariantViolation
-                && $0.invariantViolation?.code == .reducerInternalBug
+                && $0.invariantViolation?.code == .unmappedForwardCompatCause
                 && ($0.invariantViolation?.description.contains("future_cause_xyz") ?? false)
         }
         #expect(violations.count == 1)
+    }
+}
+
+// MARK: - playhead-glch regression: per-call-site code mapping
+//
+// These tests pin the contract for the four reducer-impossibility codes
+// introduced in `playhead-glch`. The three precedence-ladder defaults
+// (`.userPausedUnknownCause`, `.resourceBlockUnknownCause`,
+// `.transientWaitUnknownCause`) are dead code by current construction —
+// the inner `switch` exhausts every cause the corresponding classifier
+// returns true for, and the `default` arm only fires if a future change
+// causes the classifier and the inner `switch` to fall out of sync. These
+// tests exercise the logger's code-typed entry-point with each new code
+// and verify the JSON Lines emission carries the right `code` value, so a
+// future regression that hard-codes `.unknown` (or `.reducerInternalBug`,
+// pre-glch) at the synthetic path would flip these to red. The unmapped
+// forward-compat cause IS reachable via the public reducer surface and is
+// covered by the suite above.
+@Suite("playhead-glch — reducer-impossibility codes route through the logger correctly")
+struct ReducerImpossibilityCodeMappingTests {
+
+    private static func makeTempDirectory() -> URL {
+        try! makeTempDir(prefix: "glch-code-mapping")
+    }
+
+    /// Round-trip a single synthetic violation through the logger and
+    /// return the decoded `InvariantViolation` payload (or nil when the
+    /// session file is empty / the entry has no violation).
+    private static func emitAndDecode(
+        code: InvariantViolation.Code,
+        description: String
+    ) throws -> InvariantViolation? {
+        let dir = makeTempDirectory()
+        let logger = SurfaceStatusInvariantLogger(directory: dir)
+        logger.invariantViolated(code: code, description: description)
+        logger.flushForTesting()
+
+        let sessionURL = try #require(logger.currentSessionFileURL)
+        // Drain with retry, identical to the unmapped-cause suite above.
+        var entries: [SurfaceStateTransitionEntry] = []
+        for _ in 0..<10 {
+            let data = try Data(contentsOf: sessionURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            entries = try String(decoding: data, as: UTF8.self)
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map { try decoder.decode(SurfaceStateTransitionEntry.self, from: Data($0.utf8)) }
+            if !entries.isEmpty { break }
+            logger.flushForTesting()
+        }
+        return entries.first?.invariantViolation
+    }
+
+    @Test("Rule 2 (user-paused) impossibility emits .userPausedUnknownCause")
+    func userPausedUnknownCauseRoundTrips() throws {
+        let violation = try Self.emitAndDecode(
+            code: .userPausedUnknownCause,
+            description: "user-paused rule matched an unknown cause: <synthetic>"
+        )
+        let unwrapped = try #require(violation)
+        #expect(unwrapped.code == .userPausedUnknownCause)
+        #expect(unwrapped.code.rawValue == "user_paused_unknown_cause")
+        #expect(unwrapped.description.contains("user-paused"))
+    }
+
+    @Test("Rule 3 (resource-block) impossibility emits .resourceBlockUnknownCause")
+    func resourceBlockUnknownCauseRoundTrips() throws {
+        let violation = try Self.emitAndDecode(
+            code: .resourceBlockUnknownCause,
+            description: "resource-block rule matched an unknown cause: <synthetic>"
+        )
+        let unwrapped = try #require(violation)
+        #expect(unwrapped.code == .resourceBlockUnknownCause)
+        #expect(unwrapped.code.rawValue == "resource_block_unknown_cause")
+        #expect(unwrapped.description.contains("resource-block"))
+    }
+
+    @Test("Rule 4 (transient-wait) impossibility emits .transientWaitUnknownCause")
+    func transientWaitUnknownCauseRoundTrips() throws {
+        let violation = try Self.emitAndDecode(
+            code: .transientWaitUnknownCause,
+            description: "transient-wait rule matched an unknown cause: <synthetic>"
+        )
+        let unwrapped = try #require(violation)
+        #expect(unwrapped.code == .transientWaitUnknownCause)
+        #expect(unwrapped.code.rawValue == "transient_wait_unknown_cause")
+        #expect(unwrapped.description.contains("transient-wait"))
+    }
+
+    @Test("recordUnknown(_:) tags the synthetic violation with .unknown")
+    func recordUnknownTagsAsUnknown() throws {
+        let dir = Self.makeTempDirectory()
+        let logger = SurfaceStatusInvariantLogger(directory: dir)
+        logger.recordUnknown("a future site without a real code")
+        logger.flushForTesting()
+
+        let sessionURL = try #require(logger.currentSessionFileURL)
+        var entries: [SurfaceStateTransitionEntry] = []
+        for _ in 0..<10 {
+            let data = try Data(contentsOf: sessionURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            entries = try String(decoding: data, as: UTF8.self)
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map { try decoder.decode(SurfaceStateTransitionEntry.self, from: Data($0.utf8)) }
+            if !entries.isEmpty { break }
+            logger.flushForTesting()
+        }
+        let violation = try #require(entries.first?.invariantViolation)
+        #expect(violation.code == .unknown)
+        #expect(violation.code.rawValue == "unknown")
     }
 }

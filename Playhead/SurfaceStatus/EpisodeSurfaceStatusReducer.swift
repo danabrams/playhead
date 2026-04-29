@@ -228,7 +228,8 @@ private func _episodeSurfaceStatusCore(
             // the invariant logger so ol05 can observe this path if the
             // ladder ever falls out of sync.
             invariantLogger?.invariantViolated(
-                "user-paused rule matched an unknown cause: \(cause)"
+                code: .userPausedUnknownCause,
+                description: "user-paused rule matched an unknown cause: \(cause)"
             )
             return fallback(
                 readiness: readiness,
@@ -279,7 +280,8 @@ private func _episodeSurfaceStatusCore(
             )
         default:
             invariantLogger?.invariantViolated(
-                "resource-block rule matched an unknown cause: \(cause)"
+                code: .resourceBlockUnknownCause,
+                description: "resource-block rule matched an unknown cause: \(cause)"
             )
             return fallback(
                 readiness: readiness,
@@ -354,7 +356,8 @@ private func _episodeSurfaceStatusCore(
             )
         default:
             invariantLogger?.invariantViolated(
-                "transient-wait rule matched an unknown cause: \(cause)"
+                code: .transientWaitUnknownCause,
+                description: "transient-wait rule matched an unknown cause: \(cause)"
             )
             return fallback(
                 readiness: readiness,
@@ -381,7 +384,8 @@ private func _episodeSurfaceStatusCore(
     // surface behavior.
     if case .unknown(let raw) = cause {
         invariantLogger?.invariantViolated(
-            "reducer received unmapped InternalMissCause.unknown(\(raw)); surfaced conservative .failed/.couldntAnalyze/.retry triple"
+            code: .unmappedForwardCompatCause,
+            description: "reducer received unmapped InternalMissCause.unknown(\(raw)); surfaced conservative .failed/.couldntAnalyze/.retry triple"
         )
     }
     return EpisodeSurfaceStatus(
