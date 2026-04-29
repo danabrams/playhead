@@ -316,8 +316,8 @@ actor DownloadManager {
         }
         // playhead-g2wq: route harvested resume-data blobs from the
         // delegate back into the actor's `resumeDataDirectory`. Wired at
-        // init (not per-session like onDownloadComplete) because the
-        // harvest is independent of which background session fired.
+        // init (not per-session like onBackgroundDownloadStaged) because
+        // the harvest is independent of which background session fired.
         //
         // Retain-cycle note: `[weak manager = self]` avoids the cycle
         // `delegate → closure → manager → sessionDelegate → closure`.
@@ -350,25 +350,35 @@ actor DownloadManager {
                 }
             }
         }
-        // Wire onDownloadComplete once at init (not per-session). Body
-        // is identical across sessions — only the actor hop varies, and
-        // that's keyed off `episodeId`/`fileURL` not the session. The
-        // prior per-session reassignment in `backgroundSession(for:)`
-        // produced needless closure churn under repeated session
-        // instantiation (e.g. cold-launch rehydration of multiple
-        // identifiers).
+        // Wire onBackgroundDownloadStaged once at init (not per-session).
+        // Body is identical across sessions — only the actor hop varies,
+        // and that's keyed off the staged file/metadata, not the
+        // session. The prior per-session reassignment in
+        // `backgroundSession(for:)` produced needless closure churn
+        // under repeated session instantiation (e.g. cold-launch
+        // rehydration of multiple identifiers).
+        //
+        // playhead-24cm.1: the delegate's job is now to stage the
+        // OS-provided file into a process-global temp dir; the actor
+        // owns the final placement (which honors `cacheDirectory`,
+        // including custom test directories) and the synthesis of a
+        // real weak fingerprint from URL + HTTP response metadata
+        // harvested on the delegate queue.
         //
         // Retain-cycle note: `[weak manager = self]` mirrors
         // `onResumeDataHarvested` above. The cycle would otherwise be
         // `delegate → closure → manager → sessionDelegate → closure`,
         // leaking every `DownloadManager` forever and defeating
         // `deinit` cleanup of the willResignActive observer.
-        self.sessionDelegate.onDownloadComplete = { [weak manager = self] episodeId, fileURL in
+        self.sessionDelegate.onBackgroundDownloadStaged = {
+            [weak manager = self] episodeId, stagedURL, originalURL, metadata in
             Task {
                 guard let manager else { return }
                 await manager.handleBackgroundDownloadComplete(
                     episodeId: episodeId,
-                    fileURL: fileURL
+                    stagedURL: stagedURL,
+                    originalURL: originalURL,
+                    metadata: metadata
                 )
             }
         }
@@ -799,8 +809,9 @@ actor DownloadManager {
             delegateQueue: nil
         )
 
-        // onDownloadComplete is wired once at init — see DownloadManager
-        // initializer. No per-session reassignment needed.
+        // onBackgroundDownloadStaged is wired once at init — see
+        // DownloadManager initializer. No per-session reassignment
+        // needed.
 
         _sessionsByRole[resolvedRole] = session
         return session
@@ -1529,22 +1540,112 @@ actor DownloadManager {
         accessLog[episodeId] = Date()
     }
 
-    /// Called by the background download delegate when a transfer completes.
-    /// Computes a strong fingerprint and enqueues analysis.
-    func handleBackgroundDownloadComplete(episodeId: String, fileURL: URL) async {
-        if let strongHash = try? FileHasher.sha256(fileURL: fileURL) {
-            // Preserve any weak fingerprint a prior progressive/streaming
-            // download (or metadata cache) populated for this episode —
-            // overwriting with `weak: ""` would erase data analysis
-            // consumers later expect to find via `fingerprint(for:)`.
-            let existingWeak = fingerprintCache[episodeId]?.weak ?? ""
-            fingerprintCache[episodeId] = AudioFingerprint(weak: existingWeak, strong: strongHash)
+    /// Called by the background download delegate when a transfer
+    /// completes. Owns the final-placement file move (so it honors
+    /// `cacheDirectory`, including custom directories injected by tests
+    /// or future multi-profile hosts), synthesizes a real weak
+    /// fingerprint from URL + HTTP response metadata, computes the
+    /// strong fingerprint, and enqueues analysis. (playhead-24cm.1
+    /// I3 + I4.)
+    ///
+    /// `stagedURL` points at a process-global temp file the delegate
+    /// moved out of the OS-owned location during the synchronous
+    /// callback. We are responsible for moving it into
+    /// `completeFileURL(for:)` and cleaning up if the move fails.
+    /// `originalURL` and `metadata` may be nil if the delegate could
+    /// not harvest them (e.g. the task carried no HTTP response); in
+    /// that case we preserve whatever weak fingerprint a prior
+    /// progressive/streaming pass already cached, rather than
+    /// regressing it to the empty sentinel.
+    func handleBackgroundDownloadComplete(
+        episodeId: String,
+        stagedURL: URL,
+        originalURL: URL?,
+        metadata: HTTPAssetMetadata?
+    ) async {
+        let fm = FileManager.default
+
+        // Cache the file extension so `completeFileURL(for:)` returns
+        // the right path. Mirrors the progressive path which sets
+        // `extensionCache` from `url.pathExtension` before computing
+        // `completeFileURL`.
+        let stagedExt = stagedURL.pathExtension
+        if !stagedExt.isEmpty {
+            extensionCache[episodeId] = stagedExt
+        } else if let originalExt = originalURL?.pathExtension, !originalExt.isEmpty {
+            extensionCache[episodeId] = originalExt
+        }
+
+        let destURL = completeFileURL(for: episodeId)
+        let destDir = destURL.deletingLastPathComponent()
+
+        do {
+            if !fm.fileExists(atPath: destDir.path) {
+                try fm.createDirectory(at: destDir, withIntermediateDirectories: true)
+            }
+            if fm.fileExists(atPath: destURL.path) {
+                try fm.removeItem(at: destURL)
+            }
+            try fm.moveItem(at: stagedURL, to: destURL)
+            // playhead-h3h: stamp the freshly-deposited cached audio so
+            // the protection class matches the parent directory. Files
+            // moved in from the URLSession session container inherit
+            // the system-default class, which is `.complete` on
+            // background-session containers — that would block reads
+            // during pre-first-unlock BG processing windows.
+            try? fm.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: destURL.path
+            )
+            logger.info("Background download complete for \(episodeId)")
+        } catch {
+            logger.error(
+                "Failed to place background download for \(episodeId, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+            // Best-effort cleanup of the staged file; otherwise it
+            // accumulates in the temp directory.
+            try? fm.removeItem(at: stagedURL)
+            bgInFlightEpisodes.remove(episodeId)
+            return
+        }
+
+        // Synthesize the weak fingerprint from URL + HTTP metadata
+        // harvested by the delegate. Mirrors what the progressive path
+        // does at `performStreamingDownload`. If the delegate could
+        // not harvest a URL or response, fall back to whatever a prior
+        // foreground pass already populated — never overwrite a real
+        // weak with the empty sentinel (playhead-24cm.1 I4).
+        if let originalURL {
+            let synthesizedMetadata = metadata ?? HTTPAssetMetadata(
+                etag: nil, contentLength: nil, lastModified: nil
+            )
+            metadataCache[episodeId] = synthesizedMetadata
+            let weakFP = AudioFingerprint.makeWeak(
+                url: originalURL, metadata: synthesizedMetadata
+            )
+            fingerprintCache[episodeId] = AudioFingerprint(weak: weakFP, strong: nil)
+        }
+
+        // Compute the strong fingerprint (full SHA-256). Logging the
+        // hash failure rather than swallowing it via `try?` so support
+        // triage can spot a corrupt deposit; the cache entry without
+        // the strong field still carries the weak fingerprint and is
+        // useful to dedup re-downloads (playhead-24cm.1 I4).
+        do {
+            let strongHash = try FileHasher.sha256(fileURL: destURL)
+            let weakFP = fingerprintCache[episodeId]?.weak ?? ""
+            fingerprintCache[episodeId] = AudioFingerprint(weak: weakFP, strong: strongHash)
             await enqueueAnalysisIfNeeded(
                 episodeId: episodeId,
                 sourceFingerprint: strongHash,
                 context: nil
             )
+        } catch {
+            logger.error(
+                "Strong fingerprint hash failed for \(episodeId, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
         }
+
         touchAccess(episodeId: episodeId)
         bgInFlightEpisodes.remove(episodeId)
         // A successful completion can resurrect a stale resume-data blob
@@ -1685,8 +1786,17 @@ struct UserPreferencesSnapshot: Sendable {
 final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Sendable {
     private let logger = Logger(subsystem: "com.playhead", category: "EpisodeDownload")
 
-    /// Callback for completed downloads: (episodeId, fileURL) -> Void.
-    nonisolated(unsafe) var onDownloadComplete: ((String, URL) -> Void)?
+    /// Callback fired on the delegate queue once a completed background
+    /// transfer has been staged into a process-global temp directory.
+    /// Carries the episode ID, the staged file URL (caller takes
+    /// ownership and is expected to move it into the cache), the
+    /// original request URL, and HTTP response metadata harvested for
+    /// weak-fingerprint synthesis (playhead-24cm.1 I3 + I4).
+    ///
+    /// Same init-once / read-many invariant as `onResumeDataHarvested`.
+    nonisolated(unsafe) var onBackgroundDownloadStaged: (
+        (String, URL, URL?, HTTPAssetMetadata?) -> Void
+    )?
 
     /// Invoked when the URLSession has drained all pending events after
     /// a background wake. Forwards the session's identifier so the app
@@ -1707,8 +1817,9 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
     /// and is only READ thereafter from URLSession's delegate queue.
     /// Mutation after init is forbidden — the `nonisolated(unsafe)`
     /// qualifier opts out of Swift concurrency checking and relies on
-    /// this invariant for safety. Same contract as `onDownloadComplete`
-    /// and `onUrlSessionDidFinishEvents` above.
+    /// this invariant for safety. Same contract as
+    /// `onBackgroundDownloadStaged` and `onUrlSessionDidFinishEvents`
+    /// above.
     nonisolated(unsafe) var onResumeDataHarvested: ((String, Data) -> Void)?
 
     /// WorkJournal recorder for finalized / failed events. Defaults to
@@ -1716,7 +1827,7 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
     /// init via `DownloadManager(workJournalRecorder:)` and assigned
     /// here in one shot by `DownloadManager.init(...)` before the
     /// delegate is handed to any URLSession (same init-once contract as
-    /// `onDownloadComplete`). Mutation after init is forbidden.
+    /// `onBackgroundDownloadStaged`). Mutation after init is forbidden.
     nonisolated(unsafe) var workJournal: WorkJournalRecording = NoopWorkJournalRecorder()
 
     func urlSession(
@@ -1730,43 +1841,55 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
         }
 
         // Derive extension from the original request URL, falling back to mp3.
+        let originalURL = downloadTask.originalRequest?.url
         let ext: String = {
-            let raw = downloadTask.originalRequest?.url?.pathExtension ?? ""
+            let raw = originalURL?.pathExtension ?? ""
             return raw.isEmpty ? "mp3" : raw
         }()
         let filename = DownloadManager.safeFilename(for: episodeId)
 
-        // Move the file to the complete directory. Note: StorageBudget
-        // (playhead-h7r) placement lands as the media artifact class —
-        // for now we call into the existing complete/ directory which
-        // is the media class on disk.
-        let cacheDir = DownloadManager.defaultCacheDirectory()
-            .appendingPathComponent("complete", isDirectory: true)
-        let destURL = cacheDir.appendingPathComponent("\(filename).\(ext)")
+        // Harvest HTTP metadata for the weak fingerprint here, while the
+        // delegate-queue stack still has access to the task. The actor
+        // hop below cannot read `downloadTask.response` because
+        // URLSessionDownloadTask is non-Sendable.
+        let httpMetadata: HTTPAssetMetadata? = {
+            guard let response = downloadTask.response as? HTTPURLResponse else {
+                return nil
+            }
+            let reportedLength = response.expectedContentLength
+            return HTTPAssetMetadata(
+                etag: response.value(forHTTPHeaderField: "ETag"),
+                contentLength: reportedLength > 0 ? reportedLength : nil,
+                lastModified: response.value(forHTTPHeaderField: "Last-Modified")
+            )
+        }()
+
+        // playhead-24cm.1 (I3): stage the file into a process-global temp
+        // directory synchronously on the delegate queue. The OS-provided
+        // `location` URL is only valid during this callback; once we
+        // return, the file may be deleted. Staging into a stable temp
+        // path lets the actor — which knows the real `cacheDirectory`,
+        // even when it's not the default — perform the final placement.
+        let stagingDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PlayheadBGStaging", isDirectory: true)
+        let stagedURL = stagingDir.appendingPathComponent("\(filename).\(ext)")
 
         let fm = FileManager.default
         do {
-            // Ensure the complete directory exists — the delegate may fire
-            // after a cold launch before bootstrap() has been called.
-            if !fm.fileExists(atPath: cacheDir.path) {
-                try fm.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+            if !fm.fileExists(atPath: stagingDir.path) {
+                try fm.createDirectory(at: stagingDir, withIntermediateDirectories: true)
             }
-            if fm.fileExists(atPath: destURL.path) {
-                try fm.removeItem(at: destURL)
+            if fm.fileExists(atPath: stagedURL.path) {
+                try fm.removeItem(at: stagedURL)
             }
-            try fm.moveItem(at: location, to: destURL)
-            // playhead-h3h: stamp the freshly-deposited cached audio so
-            // the protection class matches the parent directory. Files
-            // moved in from the URLSession session container inherit
-            // the system-default class, which is `.complete` on
-            // background-session containers — that would block reads
-            // during pre-first-unlock BG processing windows.
-            try? fm.setAttributes(
-                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-                ofItemAtPath: destURL.path
-            )
-            logger.info("Background download complete for \(episodeId)")
-            onDownloadComplete?(episodeId, destURL)
+            try fm.moveItem(at: location, to: stagedURL)
+            logger.info("Background download staged for \(episodeId)")
+
+            // Hand the staged file to the actor, which will move it into
+            // the correct `cacheDirectory`-relative `complete/` directory
+            // and populate fingerprint state with a real weak fingerprint
+            // (playhead-24cm.1 I3 + I4).
+            onBackgroundDownloadStaged?(episodeId, stagedURL, originalURL, httpMetadata)
 
             // Emit finalized event for WorkJournal (playhead-uzdq).
             let recorder = workJournal
@@ -1774,7 +1897,7 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
                 await recorder.recordFinalized(episodeId: episodeId)
             }
         } catch {
-            logger.error("Failed to move background download for \(episodeId): \(error.localizedDescription)")
+            logger.error("Failed to stage background download for \(episodeId): \(error.localizedDescription)")
             let recorder = workJournal
             let errorDescription = error.localizedDescription
             Task {
