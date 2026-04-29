@@ -3278,6 +3278,50 @@ actor AnalysisStore {
         return results
     }
 
+    /// Production-safe keyset-paginated read of `analysis_assets` for full-table
+    /// sweeps. Returns rows whose `rowid > afterRowId`, ordered by `rowid ASC`,
+    /// capped at `limit`. Each tuple includes the SQLite `rowid` so the caller
+    /// can advance its cursor.
+    ///
+    /// Why keyset over OFFSET (playhead-bgvx): an OFFSET cursor is brittle under
+    /// concurrent INSERT/DELETE — a row inserted or deleted "behind" the cursor
+    /// silently shifts every later row by one position, which causes the next
+    /// page to skip a row or repeat one. Tracking the last-seen `rowid` instead
+    /// is stable: SQLite assigns each new `rowid` as `max(rowid)+1` (no AUTO-
+    /// INCREMENT here, but the rowid is still monotonic relative to the live
+    /// table), so any future INSERT lands at a `rowid` we have not yet
+    /// processed, and any DELETE simply removes a row from the remaining
+    /// traversal.
+    ///
+    /// `limit` is clamped to `>= 0`; a `limit` of `0` returns an empty array.
+    /// Pass `afterRowId: 0` to start from the beginning (SQLite rowids start at
+    /// 1).
+    func fetchAssetsKeysetByRowId(afterRowId: Int64, limit: Int) throws -> [(rowId: Int64, asset: AnalysisAsset)] {
+        let safeLimit = max(0, limit)
+        guard safeLimit > 0 else { return [] }
+        let sql = """
+            SELECT rowid, \(assetSelectColumns)
+            FROM analysis_assets
+            WHERE rowid > ?
+            ORDER BY rowid ASC
+            LIMIT ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, afterRowId)
+        sqlite3_bind_int64(stmt, 2, Int64(safeLimit))
+        var results: [(rowId: Int64, asset: AnalysisAsset)] = []
+        results.reserveCapacity(safeLimit)
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let rowId = sqlite3_column_int64(stmt, 0)
+            // Shift readAsset's column reads by 1 — rowid is at index 0,
+            // assetSelectColumns starts at index 1.
+            let asset = readAssetShifted(stmt, columnOffset: 1)
+            results.append((rowId: rowId, asset: asset))
+        }
+        return results
+    }
+
 #if DEBUG
     /// Fetch every analysis asset in the store, ordered by creation time (newest first).
     ///
@@ -3538,40 +3582,49 @@ actor AnalysisStore {
     private var assetSelectColumns: String { Self.assetSelectColumns }
 
     private func readAsset(_ stmt: OpaquePointer?) -> AnalysisAsset {
-        // playhead-gtt9.1.1: decoded against the explicit
-        // ``assetSelectColumns`` ordering, not `SELECT *`. Indices
-        // correspond 1:1 with the columns listed there.
-        //   0: id
-        //   1: episodeId
-        //   2: assetFingerprint
-        //   3: weakFingerprint
-        //   4: sourceURL
-        //   5: featureCoverageEndTime
-        //   6: fastTranscriptCoverageEndTime
-        //   7: confirmedAdCoverageEndTime
-        //   8: analysisState
-        //   9: analysisVersion
-        //  10: capabilitySnapshot
-        //  11: artifact_class  (playhead-h7r)
-        //  12: episodeDurationSec  (playhead-gtt9.1.1)
-        //  13: terminalReason  (playhead-gtt9.8)
-        //  14: episodeTitle  (playhead-i9dj)
+        readAssetShifted(stmt, columnOffset: 0)
+    }
+
+    /// Decodes an `analysis_assets` row from a prepared statement whose first
+    /// `columnOffset` columns are something other than the asset columns
+    /// (e.g. `rowid` for keyset pagination). When `columnOffset == 0` this is
+    /// equivalent to the original `readAsset`.
+    ///
+    /// playhead-gtt9.1.1: decoded against the explicit ``assetSelectColumns``
+    /// ordering, not `SELECT *`. Indices correspond 1:1 with the columns
+    /// listed there, plus the caller-supplied prefix offset.
+    ///   0: id
+    ///   1: episodeId
+    ///   2: assetFingerprint
+    ///   3: weakFingerprint
+    ///   4: sourceURL
+    ///   5: featureCoverageEndTime
+    ///   6: fastTranscriptCoverageEndTime
+    ///   7: confirmedAdCoverageEndTime
+    ///   8: analysisState
+    ///   9: analysisVersion
+    ///  10: capabilitySnapshot
+    ///  11: artifact_class  (playhead-h7r)
+    ///  12: episodeDurationSec  (playhead-gtt9.1.1)
+    ///  13: terminalReason  (playhead-gtt9.8)
+    ///  14: episodeTitle  (playhead-i9dj)
+    private func readAssetShifted(_ stmt: OpaquePointer?, columnOffset: Int32) -> AnalysisAsset {
         AnalysisAsset(
-            id: text(stmt, 0),
-            episodeId: text(stmt, 1),
-            assetFingerprint: text(stmt, 2),
-            weakFingerprint: optionalText(stmt, 3),
-            sourceURL: text(stmt, 4),
-            featureCoverageEndTime: optionalDouble(stmt, 5),
-            fastTranscriptCoverageEndTime: optionalDouble(stmt, 6),
-            confirmedAdCoverageEndTime: optionalDouble(stmt, 7),
-            analysisState: text(stmt, 8),
-            analysisVersion: Int(sqlite3_column_int(stmt, 9)),
-            capabilitySnapshot: optionalText(stmt, 10),
-            artifactClass: ArtifactClass.fromPersistedRaw(optionalText(stmt, 11)),
-            episodeDurationSec: optionalDouble(stmt, 12),
-            terminalReason: optionalText(stmt, 13),
-            episodeTitle: optionalText(stmt, 14)
+            id: text(stmt, columnOffset + 0),
+            episodeId: text(stmt, columnOffset + 1),
+            assetFingerprint: text(stmt, columnOffset + 2),
+            weakFingerprint: optionalText(stmt, columnOffset + 3),
+            sourceURL: text(stmt, columnOffset + 4),
+            featureCoverageEndTime: optionalDouble(stmt, columnOffset + 5),
+            fastTranscriptCoverageEndTime: optionalDouble(stmt, columnOffset + 6),
+            confirmedAdCoverageEndTime: optionalDouble(stmt, columnOffset + 7),
+            analysisState: text(stmt, columnOffset + 8),
+            analysisVersion: Int(sqlite3_column_int(stmt, columnOffset + 9)),
+            capabilitySnapshot: optionalText(stmt, columnOffset + 10),
+            artifactClass: ArtifactClass.fromPersistedRaw(optionalText(stmt, columnOffset + 11)),
+            episodeDurationSec: optionalDouble(stmt, columnOffset + 12),
+            terminalReason: optionalText(stmt, columnOffset + 13),
+            episodeTitle: optionalText(stmt, columnOffset + 14)
         )
     }
 
