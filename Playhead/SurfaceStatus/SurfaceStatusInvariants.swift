@@ -363,17 +363,46 @@ struct InvariantViolation: Sendable, Hashable, Codable {
             "empty_batch_with_non_queued_disposition"
 
         /// Synthetic catch-all used by
-        /// `SurfaceStatusInvariantLogger.invariantViolated(_:)` when the
-        /// reducer hits a precedence-ladder default branch that should be
-        /// unreachable (see `EpisodeSurfaceStatusReducer`'s three internal
-        /// `invariantViolated(_:)` call-sites). Not one of the five
-        /// numbered Phase-1.5 invariants — this code exists so the JSON
-        /// Lines log can distinguish "taxonomy-rule violation" from
-        /// "reducer-internal impossibility" when e2a3 aggregates by code.
-        /// Addresses reviewer's `playhead-glch` concern in place of
-        /// filing a follow-up bead: a dedicated code is a ~1-line change
-        /// that makes the audit stream unambiguous today.
-        case reducerInternalBug = "reducer_internal_bug"
+        /// `SurfaceStatusInvariantLogger.recordUnknown(_:)` when a future
+        /// caller has no specific `Code` for its condition. Not one of the
+        /// five numbered Phase-1.5 invariants. Reaching this code from
+        /// production means a new code-less site was added — a follow-up
+        /// should give it a real `Code` (e2a3 aggregates by code, so an
+        /// `.unknown` bucket is intentionally vague).
+        ///
+        /// As of `playhead-glch`, every reducer call-site has been
+        /// migrated to a specific code; `recordUnknown(_:)` exists only
+        /// as a deliberately-explicit "I don't have a code for this"
+        /// fallback with zero current callers in production code.
+        case unknown = "unknown"
+
+        /// `EpisodeSurfaceStatusReducer` Rule 2 (user-paused) matched a
+        /// cause that is not one of `.userPreempted` / `.userCancelled` /
+        /// `.appForceQuitRequiresRelaunch`. The `isUserPaused` classifier
+        /// fell out of sync with the inner `switch` — this is a
+        /// reducer-precedence impossibility, not a taxonomy violation.
+        case userPausedUnknownCause = "user_paused_unknown_cause"
+
+        /// `EpisodeSurfaceStatusReducer` Rule 3 (resource-block) matched a
+        /// cause that is not handled by the inner `switch` (`.mediaCap` /
+        /// `.analysisCap` / `.taskExpired`). `isResourceBlock` and the
+        /// inner switch fell out of sync.
+        case resourceBlockUnknownCause = "resource_block_unknown_cause"
+
+        /// `EpisodeSurfaceStatusReducer` Rule 4 (transient-wait) matched a
+        /// cause that is not handled by the inner `switch`. `isTransientWait`
+        /// and the inner switch fell out of sync.
+        case transientWaitUnknownCause = "transient_wait_unknown_cause"
+
+        /// `EpisodeSurfaceStatusReducer` default branch received an
+        /// `InternalMissCause.unknown(raw)` forward-compat sentinel — a
+        /// schema-evolved cause string escaped upstream validation. The
+        /// surface output is still a safe conservative triple; this code
+        /// lets e2a3 count unmapped-cause occurrences independently of
+        /// the surface behavior. Distinct from the three precedence-ladder
+        /// codes above because this fires on a known-shape sentinel
+        /// rather than a precedence inconsistency.
+        case unmappedForwardCompatCause = "unmapped_forward_compat_cause"
 
         /// playhead-cthe Invariant A (part 1): `PlaybackReadiness
         /// == .complete` but the coverage record is nil OR its
