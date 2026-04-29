@@ -168,9 +168,14 @@ struct AcousticFingerprintTests {
         // Pre-fix the per-frame DFT was O(windowSize²) ≈ 246M trig calls
         // for 30s @ 16kHz, taking many seconds on a simulator. The
         // vDSP_DFT_zop swap drops this to well under a second on simulator
-        // and ~100ms on real device. The 5s budget is loose enough to be
-        // CI-stable across simulator hosts but tight enough to catch a
-        // regression back to the naive DFT.
+        // and ~100ms on real device.
+        //
+        // playhead-rfu-aac (cycle-3 M4): 5s was too loose — a subtler
+        // regression (DFT setup recreated per frame instead of reused once)
+        // would still complete inside 5s. Tighten to 2s so a recreate-
+        // per-frame regression fails the test on simulator while remaining
+        // CI-stable. Real device finishes in ~100ms, so the 2s ceiling has
+        // ample headroom there.
         let sampleRate: Double = 16_000
         let durationSeconds: Double = 30
         let frameCount = Int(sampleRate * durationSeconds)
@@ -185,7 +190,7 @@ struct AcousticFingerprintTests {
         let fp = AcousticFingerprint.fromPCM(pcm, sampleRate: sampleRate)
         let elapsed = ContinuousClock.now - start
         #expect(!fp.isZero)
-        #expect(elapsed < .seconds(5), "fromPCM took \(elapsed) — DFT regression suspected")
+        #expect(elapsed < .seconds(2), "fromPCM took \(elapsed) — DFT regression suspected (likely setup-recreated-per-frame)")
     }
 
     @Test("fromPCM distinguishes tones of different frequencies")
