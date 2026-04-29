@@ -223,6 +223,13 @@ actor StreamingAudioDecoder {
     /// Signal that no more data will arrive. Flushes any remaining
     /// accumulated samples as a final (possibly shorter) shard, then
     /// finishes the output stream. No-op if the stream already failed.
+    ///
+    /// Sticky-failure synthesis: if we received enough bytes for format
+    /// detection (`>= minimumBytesForDetection`) but never produced a
+    /// valid `AVAudioFormat`, the bytes weren't recognizable audio.
+    /// Synthesize a `converterSetup` failure so consumers who inspect
+    /// `failureReason()` after seeing an empty `AsyncStream` can
+    /// distinguish "never enough bytes" from "garbage bytes".
     func finish() {
         if decodeFailure != nil {
             // Stream was already finished by `failStream`; nothing to do.
@@ -238,6 +245,18 @@ actor StreamingAudioDecoder {
         if !accumulatedSamples.isEmpty {
             emitShard(samples: accumulatedSamples, isFinal: true)
             accumulatedSamples.removeAll()
+        }
+
+        // playhead-rfu-aac (cycle-3 M2): if enough bytes flowed in for
+        // detection to attempt, but no format was ever detected, the
+        // bytes weren't valid audio. Record a sticky failure so callers
+        // can disambiguate "garbage" from "natural EOF".
+        if !formatDetected && totalBytesWritten >= Int64(Self.minimumBytesForDetection) {
+            failStream(
+                stage: .converterSetup,
+                message: "Format never detected after \(totalBytesWritten) bytes; bytes are not valid audio"
+            )
+            return
         }
 
         shardContinuation?.finish()
