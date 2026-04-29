@@ -94,6 +94,7 @@ enum SpeakerShift {
     /// continuous 0..1 probability when the two were combined via `max`.
     /// Documenting the heuristic explicitly so calibration (gtt9.3) can
     /// promote it to a learned scalar later.
+    // 0.7 = "strong but not certain" calibration; not yet corpus-validated, gtt9.3 will promote to learned scalar.
     static let clusterShiftCertainty: Double = 0.7
 
     static func clusterShiftComponent(index: Int, windows: [FeatureWindow], config: Config) -> Double {
