@@ -664,6 +664,116 @@ struct BackgroundFeedRefreshIdentifierTests {
     }
 }
 
+// MARK: - Shared telemetry holder (early-fire fallback wiring)
+
+/// playhead-shpy / M2 (rfu-mn): pin the
+/// `attachSharedTelemetry`/`detachSharedTelemetry` lock-holder contract
+/// the early-fire fallback path relies on. The fallback closure inside
+/// `registerTaskHandler` reads `sharedTelemetry.withLock { $0 }` to find
+/// a logger; if that read returns nil the submit-or-fail outcome is
+/// silently dropped. Driving the static directly (rather than synthesizing
+/// a BGAppRefreshTask) keeps the test deterministic — exercising the
+/// actual handler closure would require a real BGTaskScheduler dispatch.
+@Suite("BackgroundFeedRefreshService — shared telemetry holder")
+struct BackgroundFeedRefreshServiceSharedTelemetryTests {
+
+    @Test("attachSharedTelemetry stores the logger in the lock-held holder")
+    func attachStoresLoggerInHolder() async {
+        // Defensive: clean state so a leak from another suite can't
+        // mask an attach failure.
+        BackgroundFeedRefreshService.detachSharedTelemetry()
+        #expect(BackgroundFeedRefreshService.sharedTelemetryForTesting == nil)
+
+        let recorder = SharedTelemetryRecordingLogger()
+        BackgroundFeedRefreshService.attachSharedTelemetry(recorder)
+
+        let held = BackgroundFeedRefreshService.sharedTelemetryForTesting
+        #expect(held != nil)
+        // Identity check: the held logger must be the exact instance
+        // attached, not a copy. We pin this through a recorder
+        // round-trip — recording an event into the held reference and
+        // observing it on the original recorder proves they are the
+        // same backing storage.
+        let probe = BGTaskTelemetryEvent(
+            ts: Date(),
+            event: "submit",
+            identifier: "probe",
+            submitSucceeded: true
+        )
+        await held?.record(probe)
+        let observed = await recorder.snapshot()
+        #expect(observed.contains { $0.identifier == "probe" })
+
+        BackgroundFeedRefreshService.detachSharedTelemetry()
+    }
+
+    @Test("detachSharedTelemetry nils out the holder")
+    func detachClearsHolder() {
+        let recorder = SharedTelemetryRecordingLogger()
+        BackgroundFeedRefreshService.attachSharedTelemetry(recorder)
+        #expect(BackgroundFeedRefreshService.sharedTelemetryForTesting != nil)
+
+        BackgroundFeedRefreshService.detachSharedTelemetry()
+        #expect(BackgroundFeedRefreshService.sharedTelemetryForTesting == nil)
+    }
+
+    @Test("attachSharedTelemetry is idempotent — later calls overwrite")
+    func attachIsIdempotent() async {
+        BackgroundFeedRefreshService.detachSharedTelemetry()
+
+        let first = SharedTelemetryRecordingLogger()
+        let second = SharedTelemetryRecordingLogger()
+        BackgroundFeedRefreshService.attachSharedTelemetry(first)
+        BackgroundFeedRefreshService.attachSharedTelemetry(second)
+
+        // Probe lands in `second`, not `first`.
+        let probe = BGTaskTelemetryEvent(
+            ts: Date(),
+            event: "submit",
+            identifier: "probe-overwrite",
+            submitSucceeded: true
+        )
+        let held = BackgroundFeedRefreshService.sharedTelemetryForTesting
+        await held?.record(probe)
+
+        let firstEvents = await first.snapshot()
+        let secondEvents = await second.snapshot()
+        #expect(firstEvents.isEmpty)
+        #expect(secondEvents.contains { $0.identifier == "probe-overwrite" })
+
+        BackgroundFeedRefreshService.detachSharedTelemetry()
+    }
+}
+
+/// Local recorder for the shared-telemetry contract tests. Mirrors the
+/// shape of `RecordingBGTaskTelemetryLogger` in
+/// `BackgroundProcessingServiceTelemetryTests` but is declared in-file so
+/// these tests don't pick up a cross-suite dependency. Backed by an
+/// actor for thread-safe append/snapshot under structured concurrency.
+private actor SharedTelemetryRecordingActor {
+    private(set) var events: [BGTaskTelemetryEvent] = []
+
+    func append(_ event: BGTaskTelemetryEvent) {
+        events.append(event)
+    }
+
+    func snapshot() -> [BGTaskTelemetryEvent] {
+        events
+    }
+}
+
+private struct SharedTelemetryRecordingLogger: BGTaskTelemetryLogging {
+    let inner = SharedTelemetryRecordingActor()
+
+    func record(_ event: BGTaskTelemetryEvent) async {
+        await inner.append(event)
+    }
+
+    func snapshot() async -> [BGTaskTelemetryEvent] {
+        await inner.snapshot()
+    }
+}
+
 // MARK: - Helpers
 
 private func newRecord(

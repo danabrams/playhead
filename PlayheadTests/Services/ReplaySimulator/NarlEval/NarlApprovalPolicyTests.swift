@@ -385,7 +385,7 @@ struct NarlApprovalMultiThresholdTests {
         #expect(rec.precisionCheckPassed == false)
     }
 
-    @Test("Single-τ convenience initializer round-trips through iouThreshold accessor")
+    @Test("Single-τ convenience initializer round-trips through primaryIouThreshold accessor")
     func singleTauInitRoundTrip() {
         let policy = NarlApprovalPolicy(
             precisionEpsilon: 0.02,
@@ -393,7 +393,7 @@ struct NarlApprovalMultiThresholdTests {
             iouThreshold: 0.6
         )
         #expect(policy.iouThresholds == [0.6])
-        #expect(policy.iouThreshold == 0.6)
+        #expect(policy.primaryIouThreshold == 0.6)
     }
 
     @Test("Legacy single-τ Codable payload decodes into iouThresholds")
@@ -408,7 +408,7 @@ struct NarlApprovalMultiThresholdTests {
         let data = try #require(legacyJSON.data(using: .utf8))
         let decoded = try JSONDecoder().decode(NarlApprovalPolicy.self, from: data)
         #expect(decoded.iouThresholds == [0.5])
-        #expect(decoded.iouThreshold == 0.5)
+        #expect(decoded.primaryIouThreshold == 0.5)
     }
 }
 

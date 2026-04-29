@@ -45,12 +45,27 @@ struct NarlApprovalPolicy: Sendable, Codable, Equatable {
     /// only at τ=0.7 can't slip through a single-τ recommendation.
     let iouThresholds: [Double]
 
-    /// Convenience accessor for a single-τ caller / legacy reader. Returns
-    /// the first threshold — useful for dashboards that pin one value. The
-    /// policy evaluator itself always walks the full `iouThresholds` array.
-    var iouThreshold: Double {
+    /// Convenience accessor returning the *first* (primary) τ from
+    /// `iouThresholds` — used by dashboards and audit columns that need to
+    /// pin one number. **The evaluator does NOT trust this value when
+    /// deciding flip / hold-off**: it walks the full `iouThresholds`
+    /// array (AND across all τ). The reasoning string emitted on every
+    /// recommendation names every τ that drove the decision, while the
+    /// numeric `defaultRecall`/`allEnabledRecall`/`thresholdTau` audit
+    /// columns reflect *only* this primary τ. Renamed from the bare
+    /// `iouThreshold` to make the multi-τ caveat impossible to miss; the
+    /// `iouThreshold` legacy Codable key still decodes for backwards
+    /// compatibility (see `init(from:)`).
+    var primaryIouThreshold: Double {
         iouThresholds.first ?? 0.5
     }
+
+    /// Deprecated single-τ alias retained for backwards source
+    /// compatibility with anyone reading `policy.iouThreshold` outside
+    /// the eval module. Forwards to `primaryIouThreshold`.
+    @available(*, deprecated, renamed: "primaryIouThreshold",
+               message: "Renamed to make the multi-τ caveat explicit. The evaluator walks the full `iouThresholds` array; this accessor returns only the first τ for audit-column display.")
+    var iouThreshold: Double { primaryIouThreshold }
 
     static let `default` = NarlApprovalPolicy(
         precisionEpsilon: 0.02,
@@ -179,8 +194,9 @@ enum NarlApprovalPolicyEvaluator {
     ///     graceful fallback for missing `fmSchedulingEnabled` data required
     ///     by the bead spec.
     ///   - Otherwise apply the policy rule against the (precision, recall)
-    ///     pair at `policy.iouThreshold`. If metrics for that threshold are
-    ///     absent → `insufficientData`.
+    ///     pairs at every `policy.iouThresholds` τ (AND across all). If
+    ///     metrics for any τ are absent → `insufficientData`. Audit
+    ///     columns on the recommendation reflect `primaryIouThreshold`.
     static func evaluate(
         report: NarlEvalReport,
         policy: NarlApprovalPolicy = .default
@@ -222,7 +238,7 @@ enum NarlApprovalPolicyEvaluator {
                 defaultRecall: nil, allEnabledRecall: nil,
                 defaultPrecision: nil, allEnabledPrecision: nil,
                 hasShadowCoverage: firstExcluded.hasShadowCoverage,
-                thresholdTau: policy.iouThreshold,
+                thresholdTau: policy.primaryIouThreshold,
                 recallCheckPassed: nil,
                 precisionCheckPassed: nil
             )
@@ -249,7 +265,7 @@ enum NarlApprovalPolicyEvaluator {
                 defaultRecall: nil, allEnabledRecall: nil,
                 defaultPrecision: nil, allEnabledPrecision: nil,
                 hasShadowCoverage: sample?.hasShadowCoverage ?? false,
-                thresholdTau: policy.iouThreshold,
+                thresholdTau: policy.primaryIouThreshold,
                 recallCheckPassed: nil,
                 precisionCheckPassed: nil
             )
@@ -269,7 +285,7 @@ enum NarlApprovalPolicyEvaluator {
                 defaultRecall: nil, allEnabledRecall: nil,
                 defaultPrecision: nil, allEnabledPrecision: nil,
                 hasShadowCoverage: false,
-                thresholdTau: policy.iouThreshold,
+                thresholdTau: policy.primaryIouThreshold,
                 recallCheckPassed: nil,
                 precisionCheckPassed: nil
             )

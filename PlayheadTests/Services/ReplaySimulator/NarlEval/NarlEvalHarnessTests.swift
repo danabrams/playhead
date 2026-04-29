@@ -1244,14 +1244,34 @@ struct NarlEvalHarnessTests {
         return raw
     }
 
-    /// Parse the trailing float from an `exactTimeSpan:<assetId>:<start>:<end>`
+    /// Parse the trailing time from an `exactTimeSpan:<assetId>:<start>:<end>`
     /// scope. Returns nil for scopes that don't carry a time span (whole-
     /// asset vetoes, ordinal scopes). Used by `adjustPipelineFailureFlag`.
+    ///
+    /// Delegates to the canonical `NarlCorrectionScope.parse` to avoid
+    /// divergent split/glue logic. Asset IDs are SHA-derived today so the
+    /// previous `split(separator:)` heuristic happened to agree on real
+    /// data, but a colon ever appearing in an assetId would split this
+    /// helper's output differently from the canonical parser; routing
+    /// through one parser eliminates the footgun.
+    ///
+    /// Contract change vs. the previous local heuristic (L3 / rfu-mn):
+    /// the canonical parser is stricter — it requires both the start and
+    /// the end of the scope to parse as Doubles AND `end >= start`,
+    /// returning `.unhandled` on either failure. The old local heuristic
+    /// returned `Double(parts[parts.count - 1])` even when the start
+    /// time was unparseable. Production data has no malformed scopes
+    /// (every emit uses `String(format: "%.3f", ...)`), so the strict
+    /// rejection is a no-op on real data; documenting the change here so
+    /// a future review that compares git blame against behavior doesn't
+    /// have to re-derive the contract.
     private static func correctionMaxTime(scope: String) -> Double? {
-        guard scope.hasPrefix("exactTimeSpan:") else { return nil }
-        let parts = scope.split(separator: ":")
-        guard parts.count >= 4 else { return nil }
-        return Double(parts[parts.count - 1])
+        switch NarlCorrectionScope.parse(scope) {
+        case .exactTimeSpan(_, _, let endTime):
+            return endTime
+        case .exactSpan, .wholeAssetVeto, .unhandled:
+            return nil
+        }
     }
 
     /// gtt9.7: log per-asset correction counts before and after the

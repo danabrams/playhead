@@ -16,14 +16,18 @@ Options:
   --keep-worktree     Preserve the temporary worktree on failure/success.
   --help              Show this help text.
 
-Environment overrides:
+Required environment variables (no defaults — script aborts if unset):
+  PLAYHEAD_TESTFLIGHT_TEAM_ID                  Apple Developer team ID
+  PLAYHEAD_TESTFLIGHT_BUNDLE_ID                App bundle identifier
+  PLAYHEAD_TESTFLIGHT_PROFILE_NAME             Provisioning profile name
+  PLAYHEAD_TESTFLIGHT_CODE_SIGN_IDENTITY       Signing identity (full
+                                               "Apple Distribution: …" string,
+                                               including the team ID suffix)
+
+Optional environment overrides:
   PLAYHEAD_TESTFLIGHT_REF
   PLAYHEAD_TESTFLIGHT_KEEP_WORKTREE=1
   PLAYHEAD_TESTFLIGHT_SCHEME=Playhead
-  PLAYHEAD_TESTFLIGHT_TEAM_ID=36Z6VYTT9X
-  PLAYHEAD_TESTFLIGHT_BUNDLE_ID=com.playhead.app
-  PLAYHEAD_TESTFLIGHT_PROFILE_NAME="Playhead App Store"
-  PLAYHEAD_TESTFLIGHT_CODE_SIGN_IDENTITY="Apple Distribution: Daniel Abrams (36Z6VYTT9X)"
   PLAYHEAD_TESTFLIGHT_PROFILE_DIR="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
   PLAYHEAD_TESTFLIGHT_ARTIFACTS_DIR=/custom/output/dir
 
@@ -91,10 +95,25 @@ find_profile_uuid() {
 REF="${PLAYHEAD_TESTFLIGHT_REF:-main}"
 KEEP_WORKTREE="${PLAYHEAD_TESTFLIGHT_KEEP_WORKTREE:-0}"
 SCHEME="${PLAYHEAD_TESTFLIGHT_SCHEME:-Playhead}"
-TEAM_ID="${PLAYHEAD_TESTFLIGHT_TEAM_ID:-36Z6VYTT9X}"
-BUNDLE_ID="${PLAYHEAD_TESTFLIGHT_BUNDLE_ID:-com.playhead.app}"
-PROFILE_NAME="${PLAYHEAD_TESTFLIGHT_PROFILE_NAME:-Playhead App Store}"
-CODE_SIGN_IDENTITY="${PLAYHEAD_TESTFLIGHT_CODE_SIGN_IDENTITY:-Apple Distribution: Daniel Abrams (36Z6VYTT9X)}"
+# These four are required — fail fast (with a clear message) rather than
+# silently shipping with a stale developer-specific default. See script
+# header for the full list and what each value should be.
+require_env() {
+  local name="$1"
+  if [[ -z "${!name:-}" ]]; then
+    echo "error: required environment variable not set: $name" >&2
+    echo "       see ./scripts/upload-testflight.sh --help for required env vars" >&2
+    exit 1
+  fi
+}
+require_env PLAYHEAD_TESTFLIGHT_TEAM_ID
+require_env PLAYHEAD_TESTFLIGHT_BUNDLE_ID
+require_env PLAYHEAD_TESTFLIGHT_PROFILE_NAME
+require_env PLAYHEAD_TESTFLIGHT_CODE_SIGN_IDENTITY
+TEAM_ID="$PLAYHEAD_TESTFLIGHT_TEAM_ID"
+BUNDLE_ID="$PLAYHEAD_TESTFLIGHT_BUNDLE_ID"
+PROFILE_NAME="$PLAYHEAD_TESTFLIGHT_PROFILE_NAME"
+CODE_SIGN_IDENTITY="$PLAYHEAD_TESTFLIGHT_CODE_SIGN_IDENTITY"
 PROFILE_DIR="${PLAYHEAD_TESTFLIGHT_PROFILE_DIR:-$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles}"
 
 while [[ $# -gt 0 ]]; do
@@ -136,7 +155,17 @@ WORKTREE_DIR=""
 cleanup() {
   local status=$?
   if [[ -n "$WORKTREE_DIR" && -d "$WORKTREE_DIR" && "$KEEP_WORKTREE" != "1" ]]; then
-    git -C "$REPO_ROOT" worktree remove -f "$WORKTREE_DIR" >/dev/null 2>&1 || true
+    # CLAUDE.md forbids `git worktree remove --force` without explicit
+    # user approval. If the unforced remove fails because the worktree
+    # is dirty (uncommitted changes, locked, etc.), surface that so the
+    # operator can inspect and decide rather than silently discarding
+    # state. We deliberately do NOT auto-retry with -f.
+    if ! git -C "$REPO_ROOT" worktree remove "$WORKTREE_DIR" >/dev/null 2>&1; then
+      echo "warning: could not remove temporary worktree $WORKTREE_DIR" >&2
+      echo "         it may be dirty or locked. Inspect it manually:" >&2
+      echo "         git -C \"$REPO_ROOT\" status (within $WORKTREE_DIR)" >&2
+      echo "         and remove it with \`git worktree remove\` once clean." >&2
+    fi
   fi
   exit "$status"
 }
@@ -157,7 +186,10 @@ if [[ -z "$PROFILE_UUID" ]]; then
   exit 1
 fi
 
-WORKTREE_DIR="$(mktemp -d "$WORKTREE_PARENT/testflight.$TIMESTAMP.XXXXXX")"
+# `git worktree add` requires the destination to not exist (or be empty
+# on git ≥2.36). Use `mktemp -u` so we get a unique path template without
+# actually creating the directory; `git worktree add` then creates it.
+WORKTREE_DIR="$(mktemp -u "$WORKTREE_PARENT/testflight.$TIMESTAMP.XXXXXX")"
 git -C "$REPO_ROOT" worktree add --detach "$WORKTREE_DIR" "$REF" >/dev/null
 
 ARCHIVE_PATH="$ARTIFACTS_DIR/Playhead.xcarchive"

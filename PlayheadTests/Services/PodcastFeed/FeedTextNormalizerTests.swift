@@ -88,6 +88,37 @@ struct FeedTextNormalizerTests {
         #expect(result?.count == FeedTextNormalizer.maxLength)
     }
 
+    @Test("Multi-MB input does not blow up regex pipeline")
+    func multiMBInputCappedBeforeRegex() {
+        // Adversarial input: ~4 MB of plain text. Without the pre-regex
+        // byte cap, the four uncapped regex passes in `normalize` would
+        // each scan the full string, producing a perf cliff. The cap
+        // truncates raw input before regex, so we expect this to return
+        // a sub-`maxLength` String.
+        //
+        // Reviewer suggestion (rfu-mn): assert the *structural* property —
+        // the post-regex output is bounded by `maxLength` and strictly
+        // less than the input — rather than a wall-clock threshold. A
+        // wall-clock assertion can flake on a loaded CI simulator AND
+        // can silently false-pass if a future regression slows the path
+        // to 4 s instead of 4 ms. The structural assertion proves the
+        // pre-regex byte cap fired (otherwise the regex pipeline would
+        // have either OOMed or produced a much larger intermediate),
+        // independent of wall-clock noise.
+        let raw = String(repeating: "A", count: 4_000_000)
+        let result = FeedTextNormalizer.normalize(raw)
+        #expect(result != nil)
+        // The post-truncation length is exactly `maxLength` characters.
+        // This bounds the output and proves the truncation step ran;
+        // combined with the test merely returning (not OOMing or
+        // hanging), this asserts the cap+truncation pipeline succeeded.
+        #expect(result?.count == FeedTextNormalizer.maxLength)
+        // Tripwire: the result must be strictly smaller than the input.
+        // If a future refactor accidentally bypasses the cap AND the
+        // post-regex truncation, this catches it independent of timing.
+        #expect((result?.utf8.count ?? .max) < raw.utf8.count)
+    }
+
     @Test("Does not truncate text within limit")
     func noTruncationIfShort() {
         let raw = "Short text"
@@ -167,6 +198,27 @@ struct FeedTextNormalizerTests {
             rawSummary: nil
         )
         #expect(meta == nil)
+    }
+
+    @Test("makeMetadata returns nil when all four signal sources are empty/nil")
+    func makeMetadataAllSignalsEmpty() {
+        // Pin the suppression invariant: nil/empty desc + nil/empty summary
+        // + empty chapter evidence + nil chaptersFeedURL must collapse to
+        // nil. Consumers treat a non-nil metadata blob as "we have *some*
+        // useful signal for this episode"; this guards that contract.
+        #expect(FeedTextNormalizer.makeMetadata(
+            rawDescription: nil,
+            rawSummary: nil,
+            chapterEvidence: nil,
+            chaptersFeedURL: nil
+        ) == nil)
+
+        #expect(FeedTextNormalizer.makeMetadata(
+            rawDescription: "",
+            rawSummary: "",
+            chapterEvidence: [],
+            chaptersFeedURL: nil
+        ) == nil)
     }
 
     @Test("makeMetadata handles description-only")

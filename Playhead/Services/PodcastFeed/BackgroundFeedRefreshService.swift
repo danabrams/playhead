@@ -183,6 +183,38 @@ actor BackgroundFeedRefreshService {
     /// crash on).
     private static let sharedService = OSAllocatedUnfairLock<BackgroundFeedRefreshService?>(initialState: nil)
 
+    /// Process-wide telemetry holder for the early-fire fallback path.
+    /// `registerTaskHandler()` runs without `self`, so when the OS fires a
+    /// refresh between runtime init and `attachSharedService(_:)`, the
+    /// fallback path has no `bgTelemetry` member to call. Wiring this
+    /// holder during runtime init (BEFORE `registerTaskHandler()`) lets
+    /// the fallback's submit-or-fail outcome land in `bg-task-log.jsonl`
+    /// instead of being silently discarded — closing the observability
+    /// gap `BGTaskTelemetryLogger` exists for (playhead-shpy).
+    ///
+    /// Lifetime: process-global. The holder retains the supplied logger
+    /// until either (a) another `attachSharedTelemetry(_:)` call replaces
+    /// it (production has at most one runtime, so this is rare) or (b)
+    /// `detachSharedTelemetry()` nils it out. Tests that construct a
+    /// transient logger via `withTestRuntime { ... }` MUST detach in
+    /// teardown; otherwise the static holds a dead recorder reference
+    /// past the end of the test (bounded leak — one logger per test, no
+    /// growth — but still visible in `xctest` heap snapshots).
+    ///
+    /// The existential is pinned to `any BGTaskTelemetryLogging & Sendable`
+    /// so future protocol drift cannot weaken the Sendable invariant the
+    /// fallback closure relies on (the closure escapes into a `Task { ... }`
+    /// from a `nonisolated static` context — without `Sendable`, that
+    /// capture would be a data race).
+    private static let sharedTelemetry = OSAllocatedUnfairLock<(any BGTaskTelemetryLogging & Sendable)?>(initialState: nil)
+
+    /// Static logger for the no-`self` fallback path. The instance-level
+    /// `logger` is not reachable from `registerTaskHandler` (which runs
+    /// before any `BackgroundFeedRefreshService` exists), so the early-
+    /// fire fallback uses this one to surface submit failures into
+    /// `os_log` even if the telemetry holder is unset.
+    private static let staticLogger = Logger(subsystem: "com.playhead", category: "FeedRefresh")
+
     /// Install a live service instance as the target of the early-registered
     /// BGTask handler. Call from `PlayheadApp.task` once the ModelContainer
     /// has been threaded through into production collaborators. Idempotent;
@@ -191,6 +223,37 @@ actor BackgroundFeedRefreshService {
     nonisolated static func attachSharedService(_ service: BackgroundFeedRefreshService) {
         sharedService.withLock { $0 = service }
     }
+
+    /// Install a process-wide telemetry logger for the early-fire fallback
+    /// to call before `attachSharedService(_:)` has run. Wire from
+    /// `PlayheadRuntime` BEFORE `registerTaskHandler()` so the fallback
+    /// always sees a live recorder if iOS dispatches a refresh in the
+    /// micro-window between registration and service attach. Idempotent —
+    /// later calls overwrite the held logger.
+    nonisolated static func attachSharedTelemetry(_ telemetry: any BGTaskTelemetryLogging & Sendable) {
+        sharedTelemetry.withLock { $0 = telemetry }
+    }
+
+    /// Nil out the process-wide telemetry holder. Tests that construct a
+    /// transient logger via `withTestRuntime { ... }` should call this in
+    /// teardown so the static doesn't hold a dead recorder past the end
+    /// of the test. Production should never call this — the live logger
+    /// has process lifetime.
+    nonisolated static func detachSharedTelemetry() {
+        sharedTelemetry.withLock { $0 = nil }
+    }
+
+    #if DEBUG
+    /// Test-only accessor returning the currently-held shared telemetry
+    /// logger. Used by `BackgroundFeedRefreshServiceTests` to pin the
+    /// `attachSharedTelemetry` → `sharedTelemetry` lock contract without
+    /// needing to trigger an actual BGTaskScheduler dispatch. Returns
+    /// nil before any `attachSharedTelemetry(_:)` call (or after a
+    /// `detachSharedTelemetry()`).
+    nonisolated static var sharedTelemetryForTesting: (any BGTaskTelemetryLogging & Sendable)? {
+        sharedTelemetry.withLock { $0 }
+    }
+    #endif
 
     /// Early BGTask registration. Call from `PlayheadRuntime.init` (NOT
     /// from App `.task`, which runs after launch completes). The
@@ -220,17 +283,46 @@ actor BackgroundFeedRefreshService {
                 // must handle it without crashing. Submit is best-effort
                 // since BGTaskScheduler may itself reject in that window.
                 //
-                // playhead-shpy: this fallback path runs with no service
-                // attached and therefore no `BGTaskTelemetryLogging`
-                // instance to call. We accept the gap rather than
-                // building a parallel logger here — the window is
-                // empirically small (one App-scope `.task` await) and
-                // the next regular fire will land on the wired path.
+                // playhead-shpy: this fallback path runs with no
+                // service attached, but we still emit a `submit`
+                // telemetry row through `sharedTelemetry` (when wired)
+                // and surface failures via the static OSLog so the
+                // window is no longer a silent observability hole.
                 let nextRequest = BGAppRefreshTaskRequest(identifier: taskIdentifier)
                 nextRequest.earliestBeginDate = Date(
                     timeIntervalSinceNow: minimumRefreshInterval
                 )
-                try? BGTaskScheduler.shared.submit(nextRequest)
+                let earliestDelay = nextRequest.earliestBeginDate?.timeIntervalSinceNow
+                let telemetry = sharedTelemetry.withLock { $0 }
+                let submitSucceeded: Bool
+                let submitError: Error?
+                do {
+                    try BGTaskScheduler.shared.submit(nextRequest)
+                    submitSucceeded = true
+                    submitError = nil
+                } catch {
+                    submitSucceeded = false
+                    submitError = error
+                    staticLogger.error(
+                        "Early-fire fallback: BGTaskScheduler.submit failed: \(String(describing: error), privacy: .public)"
+                    )
+                }
+                if let telemetry {
+                    let errString = submitError.map { String(describing: $0) }
+                    Task {
+                        let phase = await BGTaskTelemetryScenePhase.current()
+                        await telemetry.record(
+                            .submit(
+                                identifier: taskIdentifier,
+                                succeeded: submitSucceeded,
+                                error: errString,
+                                earliestBeginDelaySec: earliestDelay,
+                                scenePhase: phase,
+                                detail: "feed-refresh-early-fire-fallback"
+                            )
+                        )
+                    }
+                }
                 task.setTaskCompleted(success: false)
                 return
             }
