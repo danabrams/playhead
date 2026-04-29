@@ -137,8 +137,13 @@ private func _validatedEpisodeSurfaceStatus(
     return status
 }
 
-/// Pure core: the original reducer body, untouched except for the
-/// rename. Every return below is gated through `_validatedEpisodeSurfaceStatus`.
+/// Pure core: the reducer's input-precedence ladder. Decides WHICH input
+/// channel drives the surface (eligibility / user / resource / transient
+/// / queued); for any cause-driven branch (Rules 2–4 + the default) it
+/// delegates the cause→(disposition, reason, hint) triple to
+/// `CauseAttributionPolicy.attribute(_:context:)`, which is the canonical
+/// post-dfem source of truth. Every return below is gated through
+/// `_validatedEpisodeSurfaceStatus`.
 private func _episodeSurfaceStatusCore(
     state: AnalysisState,
     cause: InternalMissCause?,
@@ -160,6 +165,19 @@ private func _episodeSurfaceStatusCore(
     )
     let unavailableReason = AnalysisUnavailableReason.derive(from: eligibility)
 
+    // Build the `CauseAttributionContext` once. The reducer does not have
+    // a real retry-budget integer in scope — `state.persistedStatus` is
+    // the only signal that distinguishes "the system will retry on its
+    // own" from "retries are exhausted". Map `.failed` → 0 (no retries
+    // remaining) and any other persisted status → 1 (some budget
+    // remaining); this matches the policy's branching for `.taskExpired`
+    // (`> 0` → environmental-transient queued wait, `== 0` →
+    // resource-exhausted failure).
+    let attributionContext = CauseAttributionContext(
+        modelAvailableNow: eligibility.modelAvailableNow,
+        retryBudgetRemaining: state.persistedStatus == .failed ? 0 : 1
+    )
+
     // MARK: Rule 1 — eligibility-blocks
     //
     // When the device cannot run analysis at all, we short-circuit to
@@ -168,6 +186,10 @@ private func _episodeSurfaceStatusCore(
     // (or at least user-action-gated) condition that invalidates every
     // other cause: a `.thermal` wait is pointless on a device that
     // cannot run analysis in the first place.
+    //
+    // Rule 1 stays inside the reducer (NOT delegated to the policy)
+    // because eligibility is a non-cause channel — the policy operates
+    // on a single `InternalMissCause` and has no eligibility input.
     if !eligibility.isFullyEligible {
         return EpisodeSurfaceStatus(
             disposition: .unavailable,
@@ -196,202 +218,94 @@ private func _episodeSurfaceStatusCore(
         )
     }
 
-    // MARK: Rule 2 — user-paused
-    //
-    // User-initiated causes surface the user-facing pause reason
-    // regardless of any resource / transient state. Emphasis is on the
-    // USER source: the user took an action, so we must acknowledge
-    // that action in the UI rather than dress it up as a resource wait.
-    if isUserPaused(cause) {
-        switch cause {
-        case .userPreempted, .userCancelled:
-            return EpisodeSurfaceStatus(
-                disposition: .cancelled,
-                reason: .cancelled,
-                hint: .retry,
-                analysisUnavailableReason: nil,
-                playbackReadiness: readiness,
-                readinessAnchor: readinessAnchor
-            )
-        case .appForceQuitRequiresRelaunch:
-            return EpisodeSurfaceStatus(
-                disposition: .paused,
-                reason: .resumeInApp,
-                hint: .openAppToResume,
-                analysisUnavailableReason: nil,
-                playbackReadiness: readiness,
-                readinessAnchor: readinessAnchor
-            )
-        default:
-            // Impossible by the guard above — `isUserPaused` only
-            // returns true for the three cases handled above. We call
-            // the invariant logger so ol05 can observe this path if the
-            // ladder ever falls out of sync.
-            invariantLogger?.invariantViolated(
-                code: .userPausedUnknownCause,
-                description: "user-paused rule matched an unknown cause: \(cause)"
-            )
-            return fallback(
-                readiness: readiness,
-                readinessAnchor: readinessAnchor
-            )
-        }
-    }
-
-    // MARK: Rule 3 — resource-blocks
-    //
-    // Resource-exhausted causes (mediaCap / analysisCap) surface the
-    // storage reason. `taskExpired` is context-dependent — with retries
-    // remaining it belongs to the transient tier (Rule 4); with the
-    // budget exhausted it belongs here. The reducer does not have
-    // retry-budget context in its signature, so we conservatively treat
-    // `taskExpired` as a transient wait unless the persisted status
-    // says the job has already moved to `.failed`.
-    if isResourceBlock(cause: cause, state: state) {
-        switch cause {
-        case .mediaCap:
-            return EpisodeSurfaceStatus(
-                disposition: .failed,
-                reason: .storageFull,
-                hint: .freeUpStorage,
-                analysisUnavailableReason: nil,
-                playbackReadiness: readiness,
-                readinessAnchor: readinessAnchor
-            )
-        case .analysisCap:
-            return EpisodeSurfaceStatus(
-                disposition: .failed,
-                reason: .storageFull,
-                hint: .freeUpStorage,
-                analysisUnavailableReason: nil,
-                playbackReadiness: readiness,
-                readinessAnchor: readinessAnchor
-            )
-        case .taskExpired:
-            // Only reached when the persisted status is `.failed`,
-            // meaning retries are exhausted — see `isResourceBlock`.
-            return EpisodeSurfaceStatus(
-                disposition: .failed,
-                reason: .couldntAnalyze,
-                hint: .retry,
-                analysisUnavailableReason: nil,
-                playbackReadiness: readiness,
-                readinessAnchor: readinessAnchor
-            )
-        default:
-            invariantLogger?.invariantViolated(
-                code: .resourceBlockUnknownCause,
-                description: "resource-block rule matched an unknown cause: \(cause)"
-            )
-            return fallback(
-                readiness: readiness,
-                readinessAnchor: readinessAnchor
-            )
-        }
-    }
-
-    // MARK: Rule 4 — transient-waits
-    //
-    // Environmental-transient causes (thermal, noNetwork, etc.) surface
-    // the paused/waiting reason. These are conditions that will resolve
-    // themselves over time or with a small user action (plug in,
-    // connect to Wi-Fi) without requiring a retry.
-    if isTransientWait(cause: cause) {
-        switch cause {
-        case .thermal:
-            return EpisodeSurfaceStatus(
-                disposition: .paused,
-                reason: .phoneIsHot,
-                hint: .wait,
-                analysisUnavailableReason: nil,
-                playbackReadiness: readiness,
-                readinessAnchor: readinessAnchor
-            )
-        case .lowPowerMode, .batteryLowUnplugged:
-            return EpisodeSurfaceStatus(
-                disposition: .paused,
-                reason: .powerLimited,
-                hint: .chargeDevice,
-                analysisUnavailableReason: nil,
-                playbackReadiness: readiness,
-                readinessAnchor: readinessAnchor
-            )
-        case .noNetwork:
-            return EpisodeSurfaceStatus(
-                disposition: .paused,
-                reason: .waitingForNetwork,
-                hint: .wait,
-                analysisUnavailableReason: nil,
-                playbackReadiness: readiness,
-                readinessAnchor: readinessAnchor
-            )
-        case .wifiRequired:
-            return EpisodeSurfaceStatus(
-                disposition: .paused,
-                reason: .waitingForNetwork,
-                hint: .connectToWiFi,
-                analysisUnavailableReason: nil,
-                playbackReadiness: readiness,
-                readinessAnchor: readinessAnchor
-            )
-        case .taskExpired:
-            // Retries remaining → surface as a normal wait.
-            return EpisodeSurfaceStatus(
-                disposition: .queued,
-                reason: .waitingForTime,
-                hint: .wait,
-                analysisUnavailableReason: nil,
-                playbackReadiness: readiness,
-                readinessAnchor: readinessAnchor
-            )
-        case .modelTemporarilyUnavailable:
-            // Runtime expected back without user action.
-            return EpisodeSurfaceStatus(
-                disposition: .queued,
-                reason: .waitingForTime,
-                hint: .wait,
-                analysisUnavailableReason: nil,
-                playbackReadiness: readiness,
-                readinessAnchor: readinessAnchor
-            )
-        default:
-            invariantLogger?.invariantViolated(
-                code: .transientWaitUnknownCause,
-                description: "transient-wait rule matched an unknown cause: \(cause)"
-            )
-            return fallback(
-                readiness: readiness,
-                readinessAnchor: readinessAnchor
-            )
-        }
-    }
-
-    // MARK: Default — engine-error / unmapped / forward-compat unknown
-    //
-    // Remaining causes (engine errors, unsupported language, no runtime
-    // grant, forward-compat unknown) surface a conservative "couldn't
-    // analyze" failure. These are the rows CauseAttributionPolicy
-    // marks as `engineError` or `eligibilityPermanent`, for which a
-    // retry CTA is the correct Phase 1.5 affordance.
-    //
-    // playhead-o45p Gap D: when a `.unknown(_)` forward-compat sentinel
-    // reaches this branch, emit an impossible-state log entry via the
-    // ol05 invariant logger. The reducer's contract is total over the 16
-    // canonical cases — reaching this default with `.unknown(raw)` means
-    // a schema-evolved cause string escaped upstream validation. The
-    // surface output is still a safe conservative triple; the log line
-    // lets e2a3 aggregate unmapped-cause rates independently of the
-    // surface behavior.
+    // Forward-compat sentinel: `.unknown(_)` is NOT a member of
+    // `CauseAttributionPolicy.mappedCauses`, so calling
+    // `attribute(.unknown(raw), context:)` would trip the H1 DEBUG
+    // safety-net `assertionFailure`. We handle the sentinel inline,
+    // emit the same conservative `(failed, couldntAnalyze, retry)`
+    // triple the policy's `attributeCore` returns for `.unknown(_)`,
+    // and log the impossible-state row through the ol05 invariant
+    // channel so e2a3 can aggregate unmapped-cause rates independently
+    // of the surface behavior.
     if case .unknown(let raw) = cause {
         invariantLogger?.invariantViolated(
             code: .unmappedForwardCompatCause,
             description: "reducer received unmapped InternalMissCause.unknown(\(raw)); surfaced conservative .failed/.couldntAnalyze/.retry triple"
         )
+        return EpisodeSurfaceStatus(
+            disposition: .failed,
+            reason: .couldntAnalyze,
+            hint: .retry,
+            analysisUnavailableReason: nil,
+            playbackReadiness: readiness,
+            readinessAnchor: readinessAnchor
+        )
     }
+
+    // MARK: Rules 2–4 + default — delegate to CauseAttributionPolicy
+    //
+    // For every cause OTHER than the forward-compat sentinel handled
+    // above, the cause→(disposition, reason, hint) triple is the
+    // canonical mapping defined in `CauseAttributionPolicy.attribute`.
+    // The reducer's input-precedence helpers (`isUserPaused`,
+    // `isResourceBlock`, `isTransientWait`) still classify the cause
+    // for ladder ordering and for ol05 invariant logging when a future
+    // change makes a classifier fall out of sync with the policy — but
+    // they no longer carry their own triple-emitting switch.
+    //
+    // Every classifier path (user-paused / resource-block / transient-
+    // wait / default) routes through the same `attribute` call below,
+    // so the four classifier branches differ only in the invariant
+    // code they log when the classifier matches an unexpected cause.
+    if isUserPaused(cause) {
+        switch cause {
+        case .userPreempted, .userCancelled, .appForceQuitRequiresRelaunch:
+            break
+        default:
+            invariantLogger?.invariantViolated(
+                code: .userPausedUnknownCause,
+                description: "user-paused rule matched an unknown cause: \(cause)"
+            )
+        }
+    } else if isResourceBlock(cause: cause, state: state) {
+        switch cause {
+        case .mediaCap, .analysisCap, .taskExpired:
+            break
+        default:
+            invariantLogger?.invariantViolated(
+                code: .resourceBlockUnknownCause,
+                description: "resource-block rule matched an unknown cause: \(cause)"
+            )
+        }
+    } else if isTransientWait(cause: cause) {
+        switch cause {
+        case .thermal,
+             .lowPowerMode,
+             .batteryLowUnplugged,
+             .noNetwork,
+             .wifiRequired,
+             .taskExpired,
+             .modelTemporarilyUnavailable:
+            break
+        default:
+            invariantLogger?.invariantViolated(
+                code: .transientWaitUnknownCause,
+                description: "transient-wait rule matched an unknown cause: \(cause)"
+            )
+        }
+    }
+    // Default branch (engine errors / no-runtime-grant / unsupported-
+    // episode-language) needs no classifier sentinel — `attribute`
+    // covers every canonical case.
+
+    let attribution = CauseAttributionPolicy.attribute(
+        cause,
+        context: attributionContext
+    )
     return EpisodeSurfaceStatus(
-        disposition: .failed,
-        reason: .couldntAnalyze,
-        hint: .retry,
+        disposition: attribution.disposition,
+        reason: attribution.reason,
+        hint: attribution.hint,
         analysisUnavailableReason: nil,
         playbackReadiness: readiness,
         readinessAnchor: readinessAnchor
@@ -463,20 +377,3 @@ private func isTransientWait(cause: InternalMissCause) -> Bool {
     }
 }
 
-/// Conservative fallback used only from the invariant-violation paths.
-/// The reducer's contract is total — every case of every enum is
-/// handled — so this should never execute in production. It exists so
-/// the compiler can see that every branch returns a value.
-private func fallback(
-    readiness: PlaybackReadiness,
-    readinessAnchor: TimeInterval?
-) -> EpisodeSurfaceStatus {
-    EpisodeSurfaceStatus(
-        disposition: .failed,
-        reason: .couldntAnalyze,
-        hint: .retry,
-        analysisUnavailableReason: nil,
-        playbackReadiness: readiness,
-        readinessAnchor: readinessAnchor
-    )
-}

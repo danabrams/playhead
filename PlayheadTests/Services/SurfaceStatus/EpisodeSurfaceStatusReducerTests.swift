@@ -87,7 +87,7 @@ struct EpisodeSurfaceStatusReducerTests {
 
     // MARK: - Rule 2: user-paused beats resource / transient / queued
 
-    @Test("Rule 2 — userPreempted surfaces the cancelled disposition")
+    @Test("Rule 2 — userPreempted surfaces paused + cancelled (delegated to CauseAttributionPolicy)")
     func userPausedUserPreempted() {
         let out = episodeSurfaceStatus(
             state: Self.queuedState,
@@ -96,9 +96,11 @@ struct EpisodeSurfaceStatusReducerTests {
             coverage: nil,
             readinessAnchor: nil
         )
-        #expect(out.disposition == .cancelled)
+        // Delegated to CauseAttributionPolicy.attribute — `.userPreempted`
+        // and `.userCancelled` both map to (paused, cancelled, none).
+        #expect(out.disposition == .paused)
         #expect(out.reason == .cancelled)
-        #expect(out.hint == .retry)
+        #expect(out.hint == ResolutionHint.none)
     }
 
     @Test("Rule 2 — appForceQuitRequiresRelaunch surfaces paused + resumeInApp")
@@ -131,7 +133,7 @@ struct EpisodeSurfaceStatusReducerTests {
         #expect(out.hint == .freeUpStorage)
     }
 
-    @Test("Rule 3 — analysisCap surfaces failed + storageFull")
+    @Test("Rule 3 — analysisCap surfaces failed + couldntAnalyze (delegated to CauseAttributionPolicy)")
     func resourceBlockAnalysisCap() {
         let out = episodeSurfaceStatus(
             state: Self.queuedState,
@@ -140,9 +142,12 @@ struct EpisodeSurfaceStatusReducerTests {
             coverage: nil,
             readinessAnchor: nil
         )
+        // Delegated to CauseAttributionPolicy.attribute — `.analysisCap`
+        // is internal-budget exhaustion, distinct from `.mediaCap` storage
+        // exhaustion. Surfaces (failed, couldntAnalyze, retry).
         #expect(out.disposition == .failed)
-        #expect(out.reason == .storageFull)
-        #expect(out.hint == .freeUpStorage)
+        #expect(out.reason == .couldntAnalyze)
+        #expect(out.hint == .retry)
     }
 
     @Test("Rule 3 — taskExpired with persisted .failed state surfaces failed + couldntAnalyze")
@@ -290,35 +295,17 @@ struct EpisodeSurfaceStatusReducerTests {
     // past the matrix. They also pin the reducer's default-branch and
     // forward-compat `.unknown` handling.
     //
-    // NOTE: the expected triples below reflect the EpisodeSurfaceStatus
-    // reducer's CURRENT output. They do NOT necessarily match the
-    // `CauseAttributionPolicy` table in playhead-dfem — that table
-    // classifies causes at the attribution layer, while the reducer
-    // applies its own ladder on top. Any divergence is deliberately
-    // pinned here so a future refactor must audit the mapping.
-    //
-    // Divergences from dfem's CauseAttributionPolicy worth flagging:
-    //   * `.noRuntimeGrant`           dfem → (queued, waitingForTime)
-    //                                 reducer → (failed, couldntAnalyze)
-    //   * `.unsupportedEpisodeLanguage` dfem → (unavailable, analysisUnavailable)
-    //                                 reducer → (failed, couldntAnalyze)
-    //   * `.noNetwork`                 dfem → (paused, waitingForNetwork, none)
-    //                                 reducer → (paused, waitingForNetwork, wait)
-    //   * `.userCancelled`             dfem → (paused, cancelled)
-    //                                 reducer → (cancelled, cancelled)
-    //   * `.modelTemporarilyUnavailable` when modelAvailableNow=false:
-    //                                 reducer Rule 1 fires first because
-    //                                 `isFullyEligible` returns false, so
-    //                                 the result is (unavailable,
-    //                                 analysisUnavailable, enableAppleIntelligence)
-    //                                 — this happens to match dfem's
-    //                                 CauseAttributionPolicy intent for
-    //                                 this combination.
-    //
-    // These divergences are NOT changed in this polish pass; they are
-    // tracked here so a future bead can decide whether to reconcile.
+    // playhead-own9: cause→(disposition, reason, hint) routing now
+    // delegates to `CauseAttributionPolicy.attribute(_:context:)`. The
+    // reducer's input-precedence ladder still decides WHICH channel
+    // (eligibility / user / resource / transient / queued) drives the
+    // surface, but for any cause-driven branch the triple comes from the
+    // canonical post-dfem v11 table. The expected triples below match
+    // the policy's outputs — the prior pinned divergences for
+    // `.noRuntimeGrant`, `.unsupportedEpisodeLanguage`, `.noNetwork`,
+    // `.userCancelled`, `.userPreempted`, and `.analysisCap` are gone.
 
-    @Test("default-branch — noRuntimeGrant routes to failed + couldntAnalyze + retry")
+    @Test("default-branch — noRuntimeGrant delegates to CauseAttributionPolicy → queued + waitingForTime + wait")
     func defaultBranchNoRuntimeGrant() {
         let out = episodeSurfaceStatus(
             state: Self.queuedState,
@@ -327,9 +314,11 @@ struct EpisodeSurfaceStatusReducerTests {
             coverage: nil,
             readinessAnchor: nil
         )
-        #expect(out.disposition == .failed)
-        #expect(out.reason == .couldntAnalyze)
-        #expect(out.hint == .retry)
+        // Policy: `.noRuntimeGrant` is environmental — system will
+        // recover on its own; surface as a queued wait.
+        #expect(out.disposition == .queued)
+        #expect(out.reason == .waitingForTime)
+        #expect(out.hint == .wait)
     }
 
     @Test("default-branch — asrFailed routes to failed + couldntAnalyze + retry")
@@ -360,7 +349,7 @@ struct EpisodeSurfaceStatusReducerTests {
         #expect(out.hint == .retry)
     }
 
-    @Test("default-branch — unsupportedEpisodeLanguage routes to failed + couldntAnalyze + retry")
+    @Test("default-branch — unsupportedEpisodeLanguage delegates to CauseAttributionPolicy → unavailable + analysisUnavailable + none")
     func defaultBranchUnsupportedEpisodeLanguage() {
         let out = episodeSurfaceStatus(
             state: Self.queuedState,
@@ -369,12 +358,15 @@ struct EpisodeSurfaceStatusReducerTests {
             coverage: nil,
             readinessAnchor: nil
         )
-        #expect(out.disposition == .failed)
-        #expect(out.reason == .couldntAnalyze)
-        #expect(out.hint == .retry)
+        // Policy: episode language is outside the FM-supported set, so
+        // analysis cannot happen for this episode. No CTA — the user
+        // cannot change an episode's language.
+        #expect(out.disposition == .unavailable)
+        #expect(out.reason == .analysisUnavailable)
+        #expect(out.hint == ResolutionHint.none)
     }
 
-    @Test("Rule 4 — noNetwork routes to paused + waitingForNetwork + wait")
+    @Test("Rule 4 — noNetwork delegates to CauseAttributionPolicy → paused + waitingForNetwork + none")
     func transientNoNetwork() {
         let out = episodeSurfaceStatus(
             state: Self.queuedState,
@@ -383,9 +375,11 @@ struct EpisodeSurfaceStatusReducerTests {
             coverage: nil,
             readinessAnchor: nil
         )
+        // Policy: `.noNetwork` has no CTA (wait for connectivity to
+        // return); `.wifiRequired` is the variant with `.connectToWiFi`.
         #expect(out.disposition == .paused)
         #expect(out.reason == .waitingForNetwork)
-        #expect(out.hint == .wait)
+        #expect(out.hint == ResolutionHint.none)
     }
 
     @Test("Rule 4 — batteryLowUnplugged routes to paused + powerLimited + chargeDevice")
@@ -445,7 +439,7 @@ struct EpisodeSurfaceStatusReducerTests {
         #expect(out.hint == .enableAppleIntelligence)
     }
 
-    @Test("Rule 2 — userCancelled routes to cancelled + cancelled + retry")
+    @Test("Rule 2 — userCancelled delegates to CauseAttributionPolicy → paused + cancelled + none")
     func userPausedUserCancelled() {
         let out = episodeSurfaceStatus(
             state: Self.queuedState,
@@ -454,9 +448,12 @@ struct EpisodeSurfaceStatusReducerTests {
             coverage: nil,
             readinessAnchor: nil
         )
-        #expect(out.disposition == .cancelled)
+        // Policy: both `.userCancelled` and `.userPreempted` map to
+        // (paused, cancelled, none). The telemetry distinction between
+        // the two lives upstream; the UI does not differentiate.
+        #expect(out.disposition == .paused)
         #expect(out.reason == .cancelled)
-        #expect(out.hint == .retry)
+        #expect(out.hint == ResolutionHint.none)
     }
 
     @Test("forward-compat — .unknown(\"futureCause\") routes through the fallback default-branch")

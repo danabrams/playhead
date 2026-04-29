@@ -31,12 +31,19 @@ struct EpisodeSurfaceStatusContractTests {
     }
 
     static let expectedPairs: Set<Pair> = [
-        // Rule 1 — eligibility-blocks
+        // Rule 1 — eligibility-blocks (also `.unsupportedEpisodeLanguage`
+        // via the policy delegation, which routes to `.unavailable`).
         .init(disposition: .unavailable, reason: .analysisUnavailable),
-        // Rule 2 — user-paused
-        .init(disposition: .cancelled, reason: .cancelled),
+        // Rule 2 — user-paused. After playhead-own9 the cause→triple
+        // mapping for `.userCancelled` / `.userPreempted` delegates to
+        // `CauseAttributionPolicy`, which emits (paused, cancelled).
+        // `.appForceQuitRequiresRelaunch` keeps its (paused, resumeInApp)
+        // triple.
+        .init(disposition: .paused, reason: .cancelled),
         .init(disposition: .paused, reason: .resumeInApp),
-        // Rule 3 — resource-blocks
+        // Rule 3 — resource-blocks. `.mediaCap` keeps storageFull;
+        // `.analysisCap` and `.taskExpired` (retries exhausted) both
+        // surface (failed, couldntAnalyze) via the policy.
         .init(disposition: .failed, reason: .storageFull),
         .init(disposition: .failed, reason: .couldntAnalyze),
         // Rule 4 — transient-waits
