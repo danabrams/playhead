@@ -432,6 +432,45 @@ struct AnalysisWorkSchedulerCatchupTests {
         #expect(after.desiredCoverageSec == 600,
                 "Denied admission must not persist the escalated coverage target; got \(after.desiredCoverageSec)")
     }
+
+    @Test("dispatchForegroundCatchup: ADMITTED job DOES persist the escalated coverage target")
+    func testAdmissionSuccessPersistsEscalation() async throws {
+        // Review-followup (csp / L1): positive-path counterpart to
+        // testAdmissionDenialDoesNotPersistEscalation. Verifies that
+        // when admission clears, the post-admission persistence DOES
+        // land and the post-admission re-fetch picks up the new value
+        // before `processJob` runs. Together the two tests pin both
+        // sides of the M4 ordering invariant.
+        //
+        // The lane is empty (no sibling didStart), so canAdmit + the
+        // admission gate both pass. processJob then short-circuits via
+        // `blocked:missingFile` because the StubDownloadProvider has no
+        // cached URL for this episode — that's fine: by the time
+        // processJob runs, the desiredCoverageSec write has already
+        // happened, so the assertion below is independent of what
+        // processJob does after.
+        let fx = try await makeFixture(desiredCoverageSec: 600)
+
+        let opportunity = AnalysisWorkScheduler.CatchupOpportunity(
+            jobId: fx.job.jobId,
+            episodeId: fx.asset.episodeId,
+            priorDesiredCoverageSec: 600,
+            escalatedDesiredCoverageSec: 890,
+            transcribedAheadSec: 10,
+            playheadPositionSec: 590
+        )
+
+        await fx.scheduler.dispatchForegroundCatchupForTesting(opportunity: opportunity)
+
+        // Admission cleared, so the escalated coverage target MUST
+        // round-trip through SQLite. The post-admission re-fetch
+        // inside the dispatch path is what threads the new value into
+        // processJob; pinning the persisted value here covers the
+        // observable side of that re-fetch.
+        let after = try #require(await fx.store.fetchLatestJobForEpisode(fx.asset.episodeId))
+        #expect(after.desiredCoverageSec == 890,
+                "Admitted dispatch must persist the escalated coverage target; got \(after.desiredCoverageSec)")
+    }
 }
 
 #endif
