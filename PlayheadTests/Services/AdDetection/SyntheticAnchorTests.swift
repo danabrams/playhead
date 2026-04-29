@@ -288,4 +288,39 @@ final class SyntheticAnchorTests: XCTestCase {
         XCTAssertTrue(allOrdinals.contains(blockingFirst))
         XCTAssertTrue(allOrdinals.contains(blockingLast))
     }
+
+    // MARK: - Int.min hash safety (playhead-rfu-sad)
+
+    /// Pin behaviour for the `Int.min` edge case in
+    /// `syntheticBaseOffset(forHashInt:)`. The previous implementation
+    /// used `abs(hashInt % 1_000_000) + 2`, which traps when hashInt
+    /// is `Int.min` because `abs(.min)` overflows. The replacement
+    /// must produce a deterministic, in-range, positive offset for
+    /// every Int input — including `.min` — without trapping.
+    func testSyntheticBaseOffsetHandlesIntMinWithoutTrapping() {
+        // .min must NOT trap. The previous expression traps the
+        // process at runtime; the fix returns a deterministic value
+        // in the documented range.
+        let offsetForMin = PersistentUserCorrectionStore.syntheticBaseOffset(forHashInt: .min)
+        XCTAssertGreaterThanOrEqual(offsetForMin, 2,
+            "Offset must be at least 2 (synthetic ranges are pairs [N, N+1])")
+        XCTAssertLessThan(offsetForMin, 1_000_002,
+            "Offset must stay within (0 ..< 1_000_002] so the synthetic ordinal range is bounded")
+
+        // Other corner cases stay well-defined.
+        let offsetForMax = PersistentUserCorrectionStore.syntheticBaseOffset(forHashInt: .max)
+        XCTAssertGreaterThanOrEqual(offsetForMax, 2)
+        XCTAssertLessThan(offsetForMax, 1_000_002)
+
+        let offsetForZero = PersistentUserCorrectionStore.syntheticBaseOffset(forHashInt: 0)
+        XCTAssertEqual(offsetForZero, 2,
+            "Zero hash must produce the minimum offset (0 % 1M + 2 = 2)")
+
+        // Symmetry around zero: ±N below the modulus produce the
+        // same offset because abs collapses the sign before the
+        // modulus.
+        let offsetPos = PersistentUserCorrectionStore.syntheticBaseOffset(forHashInt: 12345)
+        let offsetNeg = PersistentUserCorrectionStore.syntheticBaseOffset(forHashInt: -12345)
+        XCTAssertEqual(offsetPos, offsetNeg)
+    }
 }

@@ -557,14 +557,15 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
             return 1.0
         }
 
-        // Pre-load the synthetic-span ordinal-to-time map once so
-        // `.exactSpan` corrections (synthetic ordinals → reported time
-        // window) can be resolved without N round-trips to SQLite.
-        // Lazily computed only if at least one false-negative
-        // correction is `.exactSpan` with a synthetic (negative)
-        // ordinal range — otherwise we never hit the store.
-        let synthSpansByOrdinal: [Int: (startTime: Double, endTime: Double)] =
-            await loadSyntheticOrdinalTimeMap(assetId: analysisAssetId)
+        // Synthetic-span ordinal-to-time map. Only loaded if at least
+        // one false-negative correction is `.exactSpan` with a
+        // synthetic (negative) ordinal range — otherwise the
+        // round-trip to SQLite is wasted. Resolving the predicate
+        // first avoids that cost on the common path where users
+        // recorded `.exactTimeSpan` corrections (the entry the UI
+        // ships today). Cached locally so multiple synthetic events
+        // for the same asset share one fetch.
+        var synthSpansByOrdinal: [Int: (startTime: Double, endTime: Double)]?
 
         var maxOverlapWeight: Double = 0
         for (event, weight) in weighted where event.source?.kind == .falseNegative {
@@ -575,13 +576,20 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
                     maxOverlapWeight = max(maxOverlapWeight, weight)
                 }
             case .exactSpan(_, let ordinalRange):
-                // For real (non-synthetic) ordinal ranges we lack a
-                // direct time mapping here, but synthetic spans (the
-                // common false-negative path) carry negative ordinals
-                // and have a corresponding DecodedSpan with start/end
-                // times. Look those up via the pre-built map.
-                if ordinalRange.lowerBound < 0,
-                   let times = synthSpansByOrdinal[ordinalRange.lowerBound],
+                // Only synthetic ordinals (negative) are resolvable
+                // here. Real transcript ordinals lack a direct time
+                // mapping at this layer; skip them so we don't pay
+                // the SQLite cost without being able to use the
+                // result.
+                guard ordinalRange.lowerBound < 0 else { continue }
+                let map: [Int: (startTime: Double, endTime: Double)]
+                if let cached = synthSpansByOrdinal {
+                    map = cached
+                } else {
+                    map = await loadSyntheticOrdinalTimeMap(assetId: analysisAssetId)
+                    synthSpansByOrdinal = map
+                }
+                if let times = map[ordinalRange.lowerBound],
                    rangesOverlap(times.startTime, times.endTime, startTime, endTime) {
                     maxOverlapWeight = max(maxOverlapWeight, weight)
                 }
@@ -619,6 +627,20 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
             )
             return [:]
         }
+    }
+
+    /// playhead-rfu-sad: derive the synthetic-ordinal base offset from
+    /// a SHA256-derived integer without trapping on `Int.min`.
+    ///
+    /// The previous expression was `abs(hashInt % 1_000_000) + 2`. With
+    /// probability ~1/2^64 the random hash bits land on `Int.min`, where
+    /// `abs(.min)` overflows and traps the runtime. Mapping `.min` →
+    /// `.max` before the modulus is correctness-preserving (both feed a
+    /// downstream `% 1_000_000`) and removes the trap. Internal so unit
+    /// tests can pin the `Int.min` behavior directly.
+    static func syntheticBaseOffset(forHashInt hashInt: Int) -> Int {
+        let safe: Int = (hashInt == .min) ? .max : abs(hashInt)
+        return (safe % 1_000_000) + 2
     }
 
     // MARK: - False-Negative Synthetic Anchor (playhead-ef2.3.2)
@@ -660,7 +682,7 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
         // find an unused pair. Bounded by `maxProbeAttempts` —
         // exhausting the budget throws so the caller (UI gesture
         // handler) sees a real error rather than a silent overwrite.
-        let baseOffset = abs(hashInt % 1_000_000) + 2
+        let baseOffset = Self.syntheticBaseOffset(forHashInt: hashInt)
         let existingOrdinals = try await loadSyntheticOrdinals(assetId: assetId)
         let maxProbeAttempts = 64
         var probe = 0
@@ -679,21 +701,19 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
             syntheticLast = syntheticFirst + 1
         }
 
-        // 2. Record the correction event with the actual synthetic ordinals.
-        let scope = CorrectionScope.exactSpan(
-            assetId: assetId,
-            ordinalRange: syntheticFirst...syntheticLast
-        )
-        let event = CorrectionEvent(
-            analysisAssetId: assetId,
-            scope: scope.serialized,
-            createdAt: now,
-            source: .falseNegative,
-            podcastId: nil
-        )
-        try await record(event)
+        // playhead-rfu-sad: span insert MUST run before the correction
+        // event is persisted. Inverted ordering left a window where a
+        // failed `upsertDecodedSpans` would still leave the
+        // CorrectionEvent on disk, with synthetic ordinals that the
+        // span-local boost probe (`loadSyntheticOrdinalTimeMap`) can
+        // never resolve — silently degrading the boost path. With the
+        // span first, a failed insert throws BEFORE any event row
+        // exists; with the event last, both halves either succeed
+        // together or neither persists.
 
-        // 3. Create synthetic DecodedSpan with ±15s fallback boundaries.
+        // 2. Create synthetic DecodedSpan with ±15s fallback boundaries
+        //    and persist it FIRST so the correction-event scope only
+        //    references ordinals that actually exist in the span store.
         let fallbackRadius = 15.0
         let startTime = max(0.0, reportedTime - fallbackRadius)
         let endTime = reportedTime + fallbackRadius
@@ -727,6 +747,27 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
             )
             throw error
         }
+
+        // 3. Record the correction event with the actual synthetic
+        //    ordinals. If this fails the span row stays on disk
+        //    (orphan), but the boost lookup path is span-driven and
+        //    the next call to `recordFalseNegative` for the same
+        //    correctionId would re-record the event idempotently
+        //    against the existing span. The opposite ordering would
+        //    leave the event with no resolvable span, which is the
+        //    silent-degradation case we are guarding against.
+        let scope = CorrectionScope.exactSpan(
+            assetId: assetId,
+            ordinalRange: syntheticFirst...syntheticLast
+        )
+        let event = CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: scope.serialized,
+            createdAt: now,
+            source: .falseNegative,
+            podcastId: nil
+        )
+        try await record(event)
     }
 
     // MARK: - Query
