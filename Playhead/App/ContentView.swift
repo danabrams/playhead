@@ -2,6 +2,17 @@ import OSLog
 import SwiftData
 import SwiftUI
 
+/// Top-level tab routes. The raw values are persisted across launches
+/// only as a one-shot hint from onboarding (see
+/// `OnboardingFlags.requestedInitialTabKey`); they are not the canonical
+/// tab identifier in any other flow.
+enum AppTab: Int, Hashable {
+    case library = 0
+    case browse = 1
+    case activity = 2
+    case settings = 3
+}
+
 struct ContentView: View {
     private static let logger = Logger(subsystem: "com.playhead", category: "Activity")
 
@@ -9,17 +20,42 @@ struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @State private var showNowPlaying = false
     @State private var nowPlayingViewModel: NowPlayingViewModel?
+    @State private var selectedTab: AppTab
 
     /// playhead-l274: shared deep-link router. Lives at the tab root so
     /// Library (hkg8 "Free up space" CTA) and Settings (consumer) share
     /// a single instance. Installed into the SwiftUI environment below.
     @State private var settingsRouter = SettingsRouter()
 
+    /// playhead-1v8: ContentView reads a one-shot tab hint set by the
+    /// onboarding search-prompt CTA. The hint is consumed exactly once
+    /// (cleared during init); a future launch falls back to the
+    /// default (Library).
+    init(defaults: UserDefaults = .standard) {
+        let initial = ContentView.consumeInitialTabHint(defaults: defaults)
+        _selectedTab = State(initialValue: initial)
+    }
+
+    /// Reads-and-clears the tab hint set by `OnboardingFlowViewModel`.
+    /// Static so the State initializer can call it without `self`.
+    static func consumeInitialTabHint(defaults: UserDefaults) -> AppTab {
+        guard let raw = defaults.string(forKey: OnboardingFlags.requestedInitialTabKey),
+              let hint = OnboardingInitialTab(rawValue: raw) else {
+            return .library
+        }
+        defaults.removeObject(forKey: OnboardingFlags.requestedInitialTabKey)
+        switch hint {
+        case .library: return .library
+        case .browse: return .browse
+        }
+    }
+
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             tabRoot {
                 LibraryView()
             }
+                .tag(AppTab.library)
                 .tabItem {
                     Label("Library", systemImage: "square.stack")
                 }
@@ -27,6 +63,7 @@ struct ContentView: View {
             tabRoot {
                 BrowseView()
             }
+                .tag(AppTab.browse)
                 .tabItem {
                     Label("Browse", systemImage: "magnifyingglass")
                 }
@@ -83,6 +120,7 @@ struct ContentView: View {
                     }
                 )
             }
+                .tag(AppTab.activity)
                 .tabItem {
                     Label("Activity", systemImage: "chart.bar.doc.horizontal")
                 }
@@ -93,6 +131,7 @@ struct ContentView: View {
                     router: settingsRouter
                 )
             }
+                .tag(AppTab.settings)
                 .tabItem {
                     Label("Settings", systemImage: "gearshape")
                 }
