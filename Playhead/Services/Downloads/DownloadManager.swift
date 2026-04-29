@@ -873,6 +873,29 @@ actor DownloadManager {
     func sessionDelegateForTesting() -> EpisodeDownloadDelegate {
         sessionDelegate
     }
+
+    /// playhead-6e8m test seam: cancels every in-flight task on every
+    /// instantiated background URLSession and invalidates the sessions
+    /// themselves. Required by tests that exercise the resume path
+    /// (e.g. `ResumeSuspendedTransferTests.resumeConsumesBlob`) which
+    /// hand garbage `Data` blobs to a real background URLSession on the
+    /// process-global `com.playhead.transfer.interactive` identifier —
+    /// without invalidation the orphaned task stays alive for the rest
+    /// of the process and leaks into sibling tests that construct a
+    /// fresh `DownloadManager`.
+    ///
+    /// Idempotent: a session that has already been invalidated is
+    /// dropped from the role map, so a second call is a no-op. Drops
+    /// the role map after invalidation so subsequent calls to
+    /// `backgroundSession(for:)` would lazily create a fresh session
+    /// (callers should treat this as an end-of-life signal for the
+    /// manager-under-test).
+    func invalidateBackgroundSessionsForTesting() {
+        for session in _sessionsByRole.values {
+            session.invalidateAndCancel()
+        }
+        _sessionsByRole.removeAll()
+    }
     #endif
 
     // MARK: - Progressive Download (Streaming Cache)
