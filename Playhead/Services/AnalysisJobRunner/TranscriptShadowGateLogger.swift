@@ -270,6 +270,13 @@ actor TranscriptShadowGateLogger: TranscriptShadowGateLogging {
 
     private var nextRotationIndex: Int?
     private var fileHandle: FileHandle?
+    /// Bytes appended to the current active log since it was opened or last
+    /// rotated. Maintained in-memory so `rotateIfNeeded` can decide without
+    /// stat'ing the file on every record (which previously required an
+    /// fsync to flush user-space buffering before the size read was
+    /// trustworthy). Reset to 0 in `rotateNow`. Re-seeded from disk on
+    /// re-open via `seekToEnd` in `write`.
+    private var totalBytesWritten: UInt64 = 0
 
     // MARK: - Init
 
@@ -434,23 +441,24 @@ actor TranscriptShadowGateLogger: TranscriptShadowGateLogging {
                 FileManager.default.createFile(atPath: url.path, contents: nil)
             }
             fileHandle = try FileHandle(forWritingTo: url)
-            try fileHandle?.seekToEnd()
+            // Re-seed the in-memory size counter from the on-disk size when
+            // (re)opening the active log. Covers process restarts and any
+            // post-`flushAndClose` reopen path.
+            let endOffset = try fileHandle?.seekToEnd() ?? 0
+            totalBytesWritten = endOffset
         }
         try fileHandle?.write(contentsOf: data)
+        totalBytesWritten &+= UInt64(data.count)
     }
 
     private func rotateIfNeeded() throws {
-        // playhead-rfu-aac M2: `attributesOfItem(atPath:)` reads kernel
-        // attributes which can lag the FileHandle's user-space write
-        // buffer. Without a flush, a record large enough to push the
-        // file past `rotationThresholdBytes` could fall under the
-        // pre-flush size attribute and we'd skip rotation for the next
-        // record (or worse, several). Synchronize before measuring.
-        try? fileHandle?.synchronize()
+        // playhead-rfu-aac H1 (cycle-3): track bytes in-memory so we don't
+        // stat the file (and don't need to fsync-before-stat) on every
+        // record. The counter is incremented on each successful write and
+        // reset on rotation; durability semantics are unchanged (best-effort,
+        // not crash-durable, see actor-level docstring).
+        guard totalBytesWritten >= UInt64(rotationThresholdBytes) else { return }
         let url = activeLogURL
-        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
-        let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
-        guard size >= rotationThresholdBytes else { return }
         // Livelock guard: a single record larger than the threshold would
         // produce a fresh active file that is itself still oversized,
         // looping the rotation forever. Skip rotation when the active
@@ -500,6 +508,9 @@ actor TranscriptShadowGateLogger: TranscriptShadowGateLogging {
             try fm.moveItem(at: src, to: dst)
         }
         nextRotationIndex = idx + 1
+        // Reset the in-memory size counter; the next write reopens the
+        // handle on a fresh empty active log file.
+        totalBytesWritten = 0
         logger.info("TranscriptShadowGateLogger: rotated active log to \(dstName, privacy: .public)")
     }
 
