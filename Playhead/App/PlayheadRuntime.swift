@@ -845,12 +845,28 @@ final class PlayheadRuntime {
         // next foreground. Reuses the `BackfillScheduling` adapter
         // shipped for Gap-5 (`BackgroundFeedRefreshService.swift`) —
         // same protocol, same production wrapper.
+        // playhead-1iq1: construct a live `StorageBudget` actor and pass
+        // it into the scheduler so the admission gate's storage axis is
+        // a real pre-admission gate (not the prior `plentiful` no-op).
+        // Stub closures: production size accounting + an LRU evictor
+        // are out of scope for this bead — they land in the future
+        // backfill of playhead-h7r consumers. Until then, the size
+        // provider returns 0 (no admission rejection in production)
+        // and the evictor reports the requested target as freed (never
+        // called in admit-only paths). The seam is what matters; any
+        // future bead can drop in real disk-walk + LRU-eviction
+        // closures without changing the scheduler's call-site.
+        let storageBudget = StorageBudget(
+            sizeProvider: { _ in 0 },
+            evictor: { _, target in target }
+        )
         self.analysisWorkScheduler = AnalysisWorkScheduler(
             store: analysisStore,
             jobRunner: analysisJobRunner,
             capabilitiesService: capabilitiesService,
             downloadManager: downloadManager,
             batteryProvider: batteryProvider,
+            storageBudgetSnapshotter: storageBudget,
             candidateWindowCascade: CandidateWindowCascade(),
             backfillScheduler: ProductionBackfillScheduler(
                 backgroundProcessingService: backgroundProcessingService

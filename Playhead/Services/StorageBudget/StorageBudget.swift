@@ -402,3 +402,82 @@ actor StorageBudget {
     }
     #endif
 }
+
+// MARK: - StorageBudgetSnapshotting
+
+/// playhead-1iq1: a narrow async surface that lets the
+/// `AnalysisWorkScheduler` synthesize a `StorageSnapshot` per admission
+/// pass without taking a direct reference to the `StorageBudget` actor.
+///
+/// The protocol exists so test harnesses can inject a stub that drives
+/// the storage axis through the full truth table (deny media-class
+/// admission, deny analysis-class admission, plentiful headroom, etc.)
+/// without standing up a real `StorageBudget` and its size/evictor
+/// closures.
+///
+/// Production conformance is provided by `StorageBudget` itself via the
+/// extension below; the existing public actor API is unchanged.
+protocol StorageBudgetSnapshotting: Sendable {
+    /// Boolean view of `StorageBudget.admit(class:sizeBytes:)`: returns
+    /// `true` when the proposed write would be admitted at the actor's
+    /// write-time check.
+    func canAdmit(_ cls: ArtifactClass, bytes: Int64) async -> Bool
+
+    /// Bytes still available under the cap that governs `cls`. For
+    /// `media` this is `mediaCap - currentMediaBytes`; for the two
+    /// analysis classes (`warmResumeBundle`, `scratch`) it is the
+    /// combined-pool remainder, mirroring `StorageBudget`'s
+    /// per-cap accounting. Clamped to zero when over-cap.
+    func remainingBytes(_ cls: ArtifactClass) async -> Int64
+}
+
+/// playhead-1iq1: default `StorageBudgetSnapshotting` used by call-sites
+/// that have no `StorageBudget` to inject (early-bring-up tests, preview
+/// runtimes). Always admits with `Int64.max` headroom — equivalent to
+/// the historical `StorageSnapshot.plentiful` literal the scheduler
+/// used before the live snapshotter was wired in.
+struct PlentifulStorageBudgetSnapshotter: StorageBudgetSnapshotting {
+    func canAdmit(_ cls: ArtifactClass, bytes: Int64) async -> Bool { true }
+    func remainingBytes(_ cls: ArtifactClass) async -> Int64 { .max }
+}
+
+extension StorageBudget: StorageBudgetSnapshotting {
+    /// Admits iff the canonical `admit(class:sizeBytes:)` path returns
+    /// `.accept`. Negative `bytes` is an upstream caller bug; we clamp
+    /// to zero rather than crashing the snapshot path because admission
+    /// gating must remain side-effect free.
+    func canAdmit(_ cls: ArtifactClass, bytes: Int64) -> Bool {
+        let clamped = max(0, bytes)
+        switch admit(class: cls, sizeBytes: clamped) {
+        case .accept:
+            return true
+        case .rejectCapExceeded, .rejectWarmResumeRatioExceeded:
+            return false
+        }
+    }
+
+    /// Cap-governed remainder for `cls`. The analysis classes share a
+    /// single cap, so the remainder is `analysisCap - (warm + scratch)`
+    /// for both. Saturating subtraction: if the on-disk total has
+    /// somehow exceeded the cap, the remainder is `0` rather than a
+    /// negative value (the gate's slice math divides by 2 and clamps
+    /// non-negative; returning a negative here would be redundant).
+    func remainingBytes(_ cls: ArtifactClass) -> Int64 {
+        let cap = cap(for: cls)
+        let used: Int64
+        switch cls {
+        case .media:
+            used = currentBytes(for: .media)
+        case .warmResumeBundle, .scratch:
+            let warm = currentBytes(for: .warmResumeBundle)
+            let scratch = currentBytes(for: .scratch)
+            let (sum, overflow) = warm.addingReportingOverflow(scratch)
+            used = overflow ? Int64.max : sum
+        }
+        let (remaining, underflow) = cap.subtractingReportingOverflow(used)
+        if underflow || remaining < 0 {
+            return 0
+        }
+        return remaining
+    }
+}

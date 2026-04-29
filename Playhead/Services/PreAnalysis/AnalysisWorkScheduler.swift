@@ -122,6 +122,13 @@ actor AnalysisWorkScheduler {
     /// production behavior is unchanged until a real
     /// `NWPathMonitor`-backed provider lands in playhead-ml96.
     private let transportStatusProvider: any TransportStatusProviding
+    /// playhead-1iq1: storage-budget snapshot provider consumed by the
+    /// admission gate. Production wiring passes the live `StorageBudget`
+    /// actor (which conforms to `StorageBudgetSnapshotting` via an
+    /// extension), making the storage axis a real pre-admission gate;
+    /// the previous `StorageSnapshot.plentiful` literal is gone. Tests
+    /// inject a stub that drives the axis through the full truth table.
+    private let storageBudgetSnapshotter: any StorageBudgetSnapshotting
     /// playhead-c3pi: advisory cascade that tracks the readiness anchor
     /// and candidate-window ordering per episode. When nil, the
     /// scheduler operates exactly as it did before c3pi — the
@@ -610,6 +617,7 @@ actor AnalysisWorkScheduler {
         downloadManager: any DownloadProviding,
         batteryProvider: any BatteryStateProviding = UIDeviceBatteryProvider(),
         transportStatusProvider: any TransportStatusProviding = WifiTransportStatusProvider(),
+        storageBudgetSnapshotter: any StorageBudgetSnapshotting = PlentifulStorageBudgetSnapshotter(),
         candidateWindowCascade: CandidateWindowCascade? = nil,
         config: PreAnalysisConfig = .load(),
         clock: @escaping @Sendable () -> Date = { Date() },
@@ -623,6 +631,7 @@ actor AnalysisWorkScheduler {
         self.downloadManager = downloadManager
         self.batteryProvider = batteryProvider
         self.transportStatusProvider = transportStatusProvider
+        self.storageBudgetSnapshotter = storageBudgetSnapshotter
         self.candidateWindowCascade = candidateWindowCascade
         self.config = config
         self.clock = clock
@@ -2285,11 +2294,13 @@ actor AnalysisWorkScheduler {
     ///   (defaults to `WifiTransportStatusProvider`) and the job's lane.
     ///   Background-lane jobs map to `.maintenance` (Wi-Fi only); every
     ///   other lane maps to `.interactive`.
-    /// - `storage`: plentiful-default snapshot — the per-class cap check
-    ///   is still performed by `StorageBudget.admit` at write time; this
-    ///   gate's role in the bnrs wire is to ensure the transport / CPU /
-    ///   thermal axes are consulted at admission. Plumbing a live
-    ///   `StorageBudget` snapshot into the scheduler is playhead-1iq1.
+    /// - `storage`: live snapshot synthesized from the injected
+    ///   `StorageBudgetSnapshotting` (typically the live `StorageBudget`
+    ///   actor). The pre-admission gate now genuinely rejects
+    ///   media-writing jobs when the media cap is reached — the
+    ///   previous `StorageSnapshot.plentiful` no-op is gone. Write-time
+    ///   `StorageBudget.admit(class:sizeBytes:)` continues to enforce
+    ///   independently as a defense-in-depth backstop. (playhead-1iq1.)
     func evaluateAdmissionGate(for job: AnalysisJob) async -> GateAdmissionDecision {
         let snapshot = await capabilitiesService.currentSnapshot
         let batteryState = await batteryProvider.currentBatteryState()
@@ -2316,18 +2327,15 @@ actor AnalysisWorkScheduler {
             userAllowsCellular: allowsCellular
         )
 
-        // Storage snapshot: plentiful by construction for this bead.
-        // The per-class admission check is performed by
-        // `StorageBudget.admit(class:sizeBytes:)` at the actual write
-        // site; this gate's contribution is to keep transport/CPU/
-        // thermal consulted at scheduling time. playhead-1iq1 will
-        // inject a live StorageBudget reference and replace this with a
-        // real snapshot.
-        let storage = StorageSnapshot.plentiful
+        let estimatedBytes = max(0, job.estimatedWriteBytes)
+        let storage = await synthesizeStorageSnapshot(
+            for: job.artifactClass,
+            estimatedBytes: estimatedBytes
+        )
 
         let admissionJob = AdmissionJob(
             artifactClasses: [job.artifactClass],
-            estimatedWriteBytes: max(0, job.estimatedWriteBytes)
+            estimatedWriteBytes: estimatedBytes
         )
 
         return AdmissionGate.admit(
@@ -2338,6 +2346,35 @@ actor AnalysisWorkScheduler {
             storage: storage,
             transport: transport
         )
+    }
+
+    /// playhead-1iq1: build a per-admission `StorageSnapshot` from the
+    /// injected snapshotter. The job's `artifactClass` drives the
+    /// per-class `canAdmit` query for the projected write; the other
+    /// classes are admitted by default (the gate consults only the
+    /// classes the job actually writes to). `remainingBytes` is queried
+    /// for every class so the slice-sizing path has the headroom view
+    /// it expects.
+    private func synthesizeStorageSnapshot(
+        for cls: ArtifactClass,
+        estimatedBytes: Int64
+    ) async -> StorageSnapshot {
+        var canAdmit: [ArtifactClass: Bool] = [
+            .media: true,
+            .warmResumeBundle: true,
+            .scratch: true,
+        ]
+        canAdmit[cls] = await storageBudgetSnapshotter.canAdmit(
+            cls,
+            bytes: estimatedBytes
+        )
+
+        var remaining: [ArtifactClass: Int64] = [:]
+        for c in ArtifactClass.allCases {
+            remaining[c] = await storageBudgetSnapshotter.remainingBytes(c)
+        }
+
+        return StorageSnapshot(canAdmit: canAdmit, remainingBytes: remaining)
     }
 
     /// Evaluate the current `LaneAdmission` from the capabilities snapshot and
