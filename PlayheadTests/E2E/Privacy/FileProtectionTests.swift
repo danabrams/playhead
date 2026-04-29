@@ -171,29 +171,4 @@ struct FileProtectionTests {
                          label: "DownloadManager resumeDataDirectory")
     }
 
-    // MARK: - ModelInventory (on-disk model files)
-
-    @Test("ModelInventory subdirectories are protected at .completeUntilFirstUserAuthentication")
-    func modelInventoryDirectoriesAreProtected() async throws {
-        let dir = try makeTempDir(prefix: "h3h-models")
-        // Build with a trivial bundled-default manifest; we don't
-        // actually need entries — we're asserting the directory stamp,
-        // which `ensureDirectories()` applies unconditionally.
-        let manifest = ModelManifest(
-            version: 1,
-            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
-            models: []
-        )
-        let inventory = ModelInventory(manifest: manifest, rootOverride: dir)
-        try await inventory.ensureDirectories()
-
-        assertProtection(atPath: inventory.activeDirectory.path,
-                         label: "ModelInventory activeDirectory")
-        assertProtection(atPath: inventory.stagingDirectory.path,
-                         label: "ModelInventory stagingDirectory")
-        assertProtection(atPath: inventory.downloadsDirectory.path,
-                         label: "ModelInventory downloadsDirectory")
-        assertProtection(atPath: inventory.rollbackDirectory.path,
-                         label: "ModelInventory rollbackDirectory")
-    }
 }

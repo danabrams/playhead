@@ -266,9 +266,10 @@ struct VADResult: Sendable {
 /// uses Apple's Speech framework on iOS 26+, while tests can inject the stub.
 protocol SpeechRecognizer: Sendable {
 
-    /// Load the model from a local directory path.
-    /// Called after AssetProvider promotes a model to the active directory.
-    func loadModel(from directory: URL) async throws
+    /// Prepare the recognizer for inference. The Apple Speech backend
+    /// asks the OS to provision speech assets for the current locale; the
+    /// stub flips an internal `loaded` flag.
+    func loadModel() async throws
 
     /// Unload the current model, freeing memory and ANE resources.
     func unloadModel() async
@@ -337,6 +338,19 @@ private actor SpeechRecognitionRequestGate {
     }
 }
 
+// MARK: - ModelRole
+
+/// The functional role a recognizer model serves in the analysis pipeline.
+/// Tracked by `SpeechService.activeModelRole` so downstream code can
+/// distinguish fast-path lookahead transcription from final-path backfill.
+enum ModelRole: String, Sendable, CaseIterable {
+    /// Fast-path ASR — small, low-latency, used for real-time ad lookahead.
+    case asrFast = "asr_fast"
+
+    /// Final-path ASR — higher accuracy, used for backfill transcription.
+    case asrFinal = "asr_final"
+}
+
 // MARK: - SpeechService
 
 /// Actor wrapping the runtime ASR backend for thread-safe transcription.
@@ -380,29 +394,27 @@ actor SpeechService {
 
     // MARK: - Model Management
 
-    /// Load the fast-path model for real-time ad lookahead.
-    /// Apple Speech prepares locale assets; the directory is ignored but
-    /// keeps the runtime shape compatible with the model-based interface.
-    func loadFastModel(from directory: URL) async throws {
+    /// Load the fast-path recognizer for real-time ad lookahead.
+    /// Apple Speech prepares locale assets on demand.
+    func loadFastModel() async throws {
         logger.info("Preparing fast-path Speech model…")
         let start = ContinuousClock.now
-        try await recognizer.loadModel(from: directory)
+        try await recognizer.loadModel()
         activeModelRole = .asrFast
         let elapsed = ContinuousClock.now - start
         logger.info("Fast-path Speech model ready (\(elapsed))")
     }
 
-    /// Load the final-path model for backfill transcription.
-    /// Apple Speech prepares locale assets; the directory is ignored but
-    /// keeps the runtime shape compatible with the model-based interface.
-    func loadFinalModel(from directory: URL) async throws {
+    /// Load the final-path recognizer for backfill transcription.
+    /// Apple Speech prepares locale assets on demand.
+    func loadFinalModel() async throws {
         if await recognizer.isModelLoaded() {
             logger.info("Unloading current model before loading final-path model")
             await recognizer.unloadModel()
         }
         logger.info("Preparing final-path Speech model…")
         let start = ContinuousClock.now
-        try await recognizer.loadModel(from: directory)
+        try await recognizer.loadModel()
         activeModelRole = .asrFinal
         let elapsed = ContinuousClock.now - start
         logger.info("Final-path Speech model ready (\(elapsed))")
@@ -535,7 +547,7 @@ enum TranscriptEngineError: Error, CustomStringConvertible {
 final class StubSpeechRecognizer: SpeechRecognizer, Sendable {
     private let _loaded = OSAllocatedUnfairLock(initialState: false)
 
-    func loadModel(from directory: URL) async throws {
+    func loadModel() async throws {
         _loaded.withLock { $0 = true }
     }
 
@@ -1289,7 +1301,7 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
 
     // MARK: - Model Lifecycle
 
-    func loadModel(from directory: URL) async throws {
+    func loadModel() async throws {
         logger.info("Preparing SpeechAnalyzer backend")
         do {
             let preparedModel = try await assetBootstrapper.prepare()

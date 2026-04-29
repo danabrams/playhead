@@ -23,8 +23,6 @@ final class PlayheadRuntime {
     let playbackService: PlaybackService
     let capabilitiesService: CapabilitiesService
     let analysisStore: AnalysisStore
-    let modelInventory: ModelInventory
-    let assetProvider: AssetProvider
     let entitlementManager: EntitlementManager
     let audioService: AnalysisAudioService
     let featureService: FeatureExtractionService
@@ -277,21 +275,19 @@ final class PlayheadRuntime {
     //      `.completeUntilFirstUserAuthentication`); even with that
     //      fix the open + WAL replay was the largest sync I/O remaining
     //      in init.
-    //   2. ModelInventory.loadBundledManifest() — Bundle resource read
-    //      + JSON decode. Single-digit ms.
-    //   3. PromptRedactor.loadDefault() — Bundle resource read + regex
+    //   2. PromptRedactor.loadDefault() — Bundle resource read + regex
     //      compile. Single-digit ms.
-    //   4. FoundationModelsFeedbackStore() (DEBUG only) — since
+    //   3. FoundationModelsFeedbackStore() (DEBUG only) — since
     //      playhead-jncn the init body stores overrides only; the
     //      `Application Support/FoundationModelsFeedback/` lookup +
     //      directory create are deferred to `migrate()` (run off-main
     //      from the deferred Task below) or to first-use through
     //      `ensureDirectoryExists()`.
-    //   5. RegionShadowObserver() (DEBUG) — pure object construction.
-    //   6. Phase5ProjectorObserver() (DEBUG) — pure object construction.
-    //   7. PersistentUserCorrectionStore(store:) — wraps the already-
+    //   4. RegionShadowObserver() (DEBUG) — pure object construction.
+    //   5. Phase5ProjectorObserver() (DEBUG) — pure object construction.
+    //   6. PersistentUserCorrectionStore(store:) — wraps the already-
     //      open AnalysisStore handle; no I/O.
-    //   8. SurfaceStatusInvariantLogger() — since playhead-jncn the
+    //   7. SurfaceStatusInvariantLogger() — since playhead-jncn the
     //      init body stores overrides only. The `Caches/Diagnostics/`
     //      lookup, the install-ID salt load, the eviction sweep, and
     //      the per-session JSONL file open are all deferred to
@@ -300,14 +296,14 @@ final class PlayheadRuntime {
     //      synchronous `hashEpisodeId(_:)` API loads the salt lazily
     //      under the writeQueue lock so the call-site shape stays
     //      compatible.
-    //   9. SkipOrchestrator(...) — pure object construction.
-    //   10. DecisionLogger() (DEBUG) — since playhead-jncn the init
-    //       body stores overrides only. The Documents lookup, the
-    //       directory create, and the rotation-index scan
-    //       (`scanNextRotationIndex(in:)`) are all deferred to
-    //       `migrate()` (run off-main from the deferred Task) or to
-    //       first-write through `ensureBootstrapped()`.
-    //   11. AdCatalogStore(directoryURL:) — FileManager.createDirectory
+    //   8. SkipOrchestrator(...) — pure object construction.
+    //   9. DecisionLogger() (DEBUG) — since playhead-jncn the init
+    //      body stores overrides only. The Documents lookup, the
+    //      directory create, and the rotation-index scan
+    //      (`scanNextRotationIndex(in:)`) are all deferred to
+    //      `migrate()` (run off-main from the deferred Task) or to
+    //      first-write through `ensureBootstrapped()`.
+    //   10. AdCatalogStore(directoryURL:) — FileManager.createDirectory
     //       only. Since playhead-jndk this no longer opens SQLite or
     //       runs PRAGMAs/migration in init; the database connection,
     //       WAL/foreign-keys/secure-delete pragmas, and schema migration
@@ -317,30 +313,30 @@ final class PlayheadRuntime {
     //       open path was responsible for replaying a stale 424 KB WAL
     //       on the 2026-04-25 22:42 snapshot — minutes of main-thread
     //       blocking on a cold disk.
-    //   12. AdDetectionService(...) — actor; init only stores refs.
-    //   13. DownloadManager() — URLSession config + actor wiring; no
+    //   11. AdDetectionService(...) — actor; init only stores refs.
+    //   12. DownloadManager() — URLSession config + actor wiring; no
     //       blocking I/O.
-    //   14. EpisodeSurfaceStatusObserver(...) — pure object construction.
-    //   15. AssetLifecycleLogger() — since playhead-jncn the init
+    //   13. EpisodeSurfaceStatusObserver(...) — pure object construction.
+    //   14. AssetLifecycleLogger() — since playhead-jncn the init
     //       body stores overrides only. The Documents lookup, the
     //       directory create, and the rotation-index scan are all
     //       deferred to `migrate()` (run off-main from the deferred
     //       Task) or to first-write through `ensureBootstrapped()`.
-    //   16. AnalysisCoordinator(...) — pure object construction.
-    //   17. BGTaskTelemetryLogger() — since playhead-jncn the init
+    //   15. AnalysisCoordinator(...) — pure object construction.
+    //   16. BGTaskTelemetryLogger() — since playhead-jncn the init
     //       body stores overrides only. The Documents lookup, the
     //       directory create, and the rotation-index scan are all
     //       deferred to `migrate()` (run off-main from the deferred
     //       Task) or to first-write through `ensureBootstrapped()`.
-    //   18. BackgroundProcessingService(...) — pure object construction;
+    //   17. BackgroundProcessingService(...) — pure object construction;
     //       BGTaskScheduler.register is a no-op until the OS calls back.
-    //   19. SkipCueMaterializer(store:) — pure object construction.
-    //   20. LanePreemptionCoordinator() — pure object construction.
-    //   21. AnalysisJobRunner(...) — pure object construction.
-    //   22. CandidateWindowCascade() — reads PreAnalysisConfig (Bundle).
-    //   23. AnalysisWorkScheduler(...) — pure object construction.
-    //   24. AnalysisJobReconciler(...) — pure object construction.
-    //   25. ShadowRetryObserver / shadow pipeline — pure object construction
+    //   18. SkipCueMaterializer(store:) — pure object construction.
+    //   19. LanePreemptionCoordinator() — pure object construction.
+    //   20. AnalysisJobRunner(...) — pure object construction.
+    //   21. CandidateWindowCascade() — reads PreAnalysisConfig (Bundle).
+    //   22. AnalysisWorkScheduler(...) — pure object construction.
+    //   23. AnalysisJobReconciler(...) — pure object construction.
+    //   24. ShadowRetryObserver / shadow pipeline — pure object construction
     //       in non-preview runtimes.
     //
     // Bead-jndk addition: the `bd1enPermissiveBox` factory closure that
@@ -451,14 +447,6 @@ final class PlayheadRuntime {
         let storeError: String? = nil
         self.analysisStore = resolvedStore
 
-        let manifest: ModelManifest
-        do {
-            manifest = try ModelInventory.loadBundledManifest()
-        } catch {
-            manifest = ModelManifest(version: 1, generatedAt: .now, models: [])
-        }
-        self.modelInventory = ModelInventory(manifest: manifest)
-        self.assetProvider = AssetProvider(inventory: modelInventory)
         self.entitlementManager = EntitlementManager()
 
         self.audioService = AnalysisAudioService()
@@ -1456,13 +1444,7 @@ final class PlayheadRuntime {
             await downloadManager.registerForegroundAssistLifecycleObserver()
 
             do {
-                try await modelInventory.scan()
-            } catch {
-                // Settings can still render, but model lifecycle reporting will be empty.
-            }
-
-            do {
-                try await speechService.loadFastModel(from: modelInventory.activeDirectory)
+                try await speechService.loadFastModel()
             } catch {
                 // Speech asset preparation is best-effort at launch; the
                 // transcript engine will surface failures when first used.

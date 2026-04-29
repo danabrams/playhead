@@ -133,7 +133,7 @@ struct AnalysisJobRunnerTests {
 
         let featureService = FeatureExtractionService(store: store)
         let speechService = SpeechService(recognizer: StubSpeechRecognizer())
-        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speechService.loadFastModel()
         let transcriptEngine = TranscriptEngineService(
             speechService: speechService,
             store: store
@@ -173,7 +173,7 @@ struct AnalysisJobRunnerTests {
 
         let featureService = FeatureExtractionService(store: store)
         let speechService = SpeechService(recognizer: StubSpeechRecognizer())
-        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speechService.loadFastModel()
         let transcriptEngine = TranscriptEngineService(
             speechService: speechService,
             store: store
@@ -213,7 +213,7 @@ struct AnalysisJobRunnerTests {
 
         let featureService = FeatureExtractionService(store: store)
         let speechService = SpeechService(recognizer: StubSpeechRecognizer())
-        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speechService.loadFastModel()
         let transcriptEngine = TranscriptEngineService(
             speechService: speechService,
             store: store
@@ -316,7 +316,7 @@ struct AnalysisJobRunnerTests {
 
         let featureService = FeatureExtractionService(store: store)
         let speechService = SpeechService(recognizer: StubSpeechRecognizer())
-        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speechService.loadFastModel()
         let transcriptEngine = TranscriptEngineService(
             speechService: speechService,
             store: store
@@ -414,7 +414,7 @@ struct AnalysisJobRunnerTests {
         let recognizer = MockSpeechRecognizer()
         recognizer.transcribeResult = [segment]
         let speechService = SpeechService(recognizer: recognizer)
-        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speechService.loadFastModel()
         let transcriptEngine = TranscriptEngineService(
             speechService: speechService,
             store: store
@@ -479,7 +479,7 @@ struct AnalysisJobRunnerTests {
         let recognizer = MockSpeechRecognizer()
         recognizer.transcribeResult = [segment]
         let speechService = SpeechService(recognizer: recognizer)
-        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speechService.loadFastModel()
         let transcriptEngine = TranscriptEngineService(
             speechService: speechService,
             store: store
@@ -522,7 +522,7 @@ struct AnalysisJobRunnerTests {
         let recognizer = MockSpeechRecognizer()
         recognizer.transcribeResult = [segment]
         let speechService = SpeechService(recognizer: recognizer)
-        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speechService.loadFastModel()
         let transcriptEngine = TranscriptEngineService(
             speechService: speechService,
             store: store
@@ -574,7 +574,7 @@ struct AnalysisJobRunnerTests {
 
         let featureService = FeatureExtractionService(store: store)
         let speechService = SpeechService(recognizer: StubSpeechRecognizer())
-        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speechService.loadFastModel()
         let transcriptEngine = TranscriptEngineService(
             speechService: speechService,
             store: store
@@ -613,7 +613,7 @@ struct AnalysisJobRunnerTests {
 
         let featureService = FeatureExtractionService(store: store)
         let speechService = SpeechService(recognizer: StubSpeechRecognizer())
-        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speechService.loadFastModel()
         let transcriptEngine = TranscriptEngineService(
             speechService: speechService,
             store: store
@@ -654,7 +654,7 @@ struct AnalysisJobRunnerTests {
 
         let featureService = FeatureExtractionService(store: store)
         let speechService = SpeechService(recognizer: StubSpeechRecognizer())
-        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speechService.loadFastModel()
         let transcriptEngine = TranscriptEngineService(
             speechService: speechService,
             store: store
@@ -741,7 +741,7 @@ struct AnalysisJobRunnerTests {
         // branch (the same branch the 5-minute timeout would land on).
         let recognizer = MockSpeechRecognizer()
         let speechService = SpeechService(recognizer: recognizer)
-        try await speechService.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speechService.loadFastModel()
         // Flip after load so loadModel doesn't throw — only transcribe
         // calls fail.
         recognizer.shouldThrow = true

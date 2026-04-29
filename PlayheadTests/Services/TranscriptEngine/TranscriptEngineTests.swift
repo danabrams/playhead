@@ -22,7 +22,7 @@ final class MockSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
     var vadCallCount = 0
     var shouldThrow = false
 
-    func loadModel(from directory: URL) async throws {
+    func loadModel() async throws {
         if shouldThrow { throw TranscriptEngineError.transcriptionFailed("mock load error") }
         loaded = true
     }
@@ -73,7 +73,7 @@ private final class ConcurrentProbeSpeechRecognizer: SpeechRecognizer, @unchecke
         state.withLock { $0.transcribeCallCount }
     }
 
-    func loadModel(from directory: URL) async throws {
+    func loadModel() async throws {
         state.withLock { $0.loaded = true }
     }
 
@@ -261,7 +261,7 @@ struct SpeechServiceModelTests {
     func loadFast() async throws {
         let mock = MockSpeechRecognizer()
         let service = SpeechService(recognizer: mock)
-        try await service.loadFastModel(from: URL(fileURLWithPath: "/tmp/model"))
+        try await service.loadFastModel()
         let role = await service.activeModelRole
         #expect(role == .asrFast)
         let ready = await service.isReady()
@@ -272,7 +272,7 @@ struct SpeechServiceModelTests {
     func loadFinal() async throws {
         let mock = MockSpeechRecognizer()
         let service = SpeechService(recognizer: mock)
-        try await service.loadFinalModel(from: URL(fileURLWithPath: "/tmp/model"))
+        try await service.loadFinalModel()
         let role = await service.activeModelRole
         #expect(role == .asrFinal)
     }
@@ -281,8 +281,8 @@ struct SpeechServiceModelTests {
     func finalUnloadsCurrent() async throws {
         let mock = MockSpeechRecognizer()
         let service = SpeechService(recognizer: mock)
-        try await service.loadFastModel(from: URL(fileURLWithPath: "/tmp/fast"))
-        try await service.loadFinalModel(from: URL(fileURLWithPath: "/tmp/final"))
+        try await service.loadFastModel()
+        try await service.loadFinalModel()
         let role = await service.activeModelRole
         #expect(role == .asrFinal)
     }
@@ -291,7 +291,7 @@ struct SpeechServiceModelTests {
     func unload() async throws {
         let mock = MockSpeechRecognizer()
         let service = SpeechService(recognizer: mock)
-        try await service.loadFastModel(from: URL(fileURLWithPath: "/tmp/model"))
+        try await service.loadFastModel()
         await service.unloadCurrentModel()
         let ready = await service.isReady()
         #expect(!ready)
@@ -318,7 +318,7 @@ struct SpeechServiceTranscriptionTests {
         let mock = MockSpeechRecognizer()
         mock.transcribeResult = [makeSegment()]
         let service = SpeechService(recognizer: mock)
-        try await service.loadFastModel(from: URL(fileURLWithPath: "/tmp/model"))
+        try await service.loadFastModel()
 
         let shard = makeShard()
         let segments = try await service.transcribe(shard: shard)
@@ -331,7 +331,7 @@ struct SpeechServiceTranscriptionTests {
         let mock = MockSpeechRecognizer()
         mock.transcribeResult = [makeSegment()]
         let service = SpeechService(recognizer: mock)
-        try await service.loadFinalModel(from: URL(fileURLWithPath: "/tmp/model"))
+        try await service.loadFinalModel()
 
         let shard = makeShard()
         let segments = try await service.transcribe(shard: shard)
@@ -343,7 +343,7 @@ struct SpeechServiceTranscriptionTests {
     func concurrentTranscribesStaySerialized() async throws {
         let recognizer = ConcurrentProbeSpeechRecognizer()
         let service = SpeechService(recognizer: recognizer)
-        try await service.loadFastModel(from: URL(fileURLWithPath: "/tmp/model"))
+        try await service.loadFastModel()
 
         async let first = service.transcribe(
             shard: makeShard(id: 0, startTime: 0, duration: 30)
@@ -373,7 +373,7 @@ struct SpeechServiceVADTests {
                                     startTime: 0, endTime: 30)]
         mock.transcribeResult = [makeSegment()]
         let service = SpeechService(recognizer: mock)
-        try await service.loadFastModel(from: URL(fileURLWithPath: "/tmp/model"))
+        try await service.loadFastModel()
 
         let shards = [makeShard(id: 0), makeShard(id: 1)]
         let segments = try await service.transcribeWithVAD(shards: shards)
@@ -388,7 +388,7 @@ struct SpeechServiceVADTests {
                                     startTime: 0, endTime: 30)]
         mock.transcribeResult = [makeSegment()]
         let service = SpeechService(recognizer: mock)
-        try await service.loadFastModel(from: URL(fileURLWithPath: "/tmp/model"))
+        try await service.loadFastModel()
 
         let shards = [makeShard()]
         let segments = try await service.transcribeWithVAD(shards: shards)
@@ -406,7 +406,7 @@ struct StubSpeechRecognizerTests {
     func stubLifecycle() async throws {
         let stub = StubSpeechRecognizer()
         #expect(await !stub.isModelLoaded())
-        try await stub.loadModel(from: URL(fileURLWithPath: "/tmp/model"))
+        try await stub.loadModel()
         #expect(await stub.isModelLoaded())
         await stub.unloadModel()
         #expect(await !stub.isModelLoaded())
@@ -415,7 +415,7 @@ struct StubSpeechRecognizerTests {
     @Test("Stub transcribe returns empty when loaded")
     func stubTranscribe() async throws {
         let stub = StubSpeechRecognizer()
-        try await stub.loadModel(from: URL(fileURLWithPath: "/tmp/model"))
+        try await stub.loadModel()
         let result = try await stub.transcribe(shard: makeShard(), podcastId: nil)
         #expect(result.isEmpty)
     }
@@ -431,7 +431,7 @@ struct StubSpeechRecognizerTests {
     @Test("Stub VAD returns speech detected")
     func stubVAD() async throws {
         let stub = StubSpeechRecognizer()
-        try await stub.loadModel(from: URL(fileURLWithPath: "/tmp/model"))
+        try await stub.loadModel()
         let results = try await stub.detectVoiceActivity(shard: makeShard())
         #expect(results.count == 1)
         #expect(results[0].isSpeech)
@@ -588,7 +588,7 @@ private final class TrackingRecognizer: SpeechRecognizer, @unchecked Sendable {
     private let _shardIds = OSAllocatedUnfairLock(initialState: [Int]())
     var transcribedShardIds: [Int] { _shardIds.withLock { $0 } }
 
-    func loadModel(from directory: URL) async throws { loaded = true }
+    func loadModel() async throws { loaded = true }
     func unloadModel() async { loaded = false }
     func isModelLoaded() async -> Bool { loaded }
 
@@ -630,7 +630,7 @@ struct IncrementalShardAppendTests {
         let store = try await makeTestStore()
         let recognizer = TrackingRecognizer()
         let speech = SpeechService(recognizer: recognizer)
-        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
 
@@ -704,7 +704,7 @@ struct IncrementalShardAppendTests {
         try await store.insertAsset(makeTranscriptAsset(id: "asset-race", episodeId: "ep-race"))
         let recognizer = TrackingRecognizer()
         let speech = SpeechService(recognizer: recognizer)
-        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
         // Use independent event subscriptions for the two windows. Each
@@ -775,7 +775,7 @@ struct TranscriptEngineAssetSwitchingTests {
         try await store.insertAsset(makeTranscriptAsset(id: "asset-2", episodeId: "ep-2"))
         let recognizer = TrackingRecognizer()
         let speech = SpeechService(recognizer: recognizer)
-        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
         let firstEvents = await engine.events()
@@ -819,7 +819,7 @@ struct TranscriptEngineAssetSwitchingTests {
         try await store.insertAsset(makeTranscriptAsset(id: "asset-2", episodeId: "ep-2"))
         let recognizer = TrackingRecognizer()
         let speech = SpeechService(recognizer: recognizer)
-        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
         let events = await engine.events()
@@ -873,7 +873,7 @@ struct TranscriptEngineAssetSwitchingTests {
             ),
         ]
         let speech = SpeechService(recognizer: recognizer)
-        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
         let events = await engine.events()
@@ -1726,7 +1726,7 @@ struct TranscriptEngineWeakAnchorMetadataTests {
         ]
 
         let speech = SpeechService(recognizer: mock)
-        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
         let events = await engine.events()
@@ -1778,7 +1778,7 @@ struct TranscriptEngineWeakAnchorMetadataTests {
         ]
 
         let speech = SpeechService(recognizer: mock)
-        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speech.loadFastModel()
         let engine = TranscriptEngineService(speechService: speech, store: store)
 
         let firstEvents = await engine.events()
@@ -1886,7 +1886,7 @@ struct TranscriptEngineWeakAnchorMetadataTests {
         ]
 
         let speech = SpeechService(recognizer: mock)
-        try await speech.loadFastModel(from: URL(fileURLWithPath: "/tmp"))
+        try await speech.loadFastModel()
         let engine = TranscriptEngineService(speechService: speech, store: store)
 
         let firstEvents = await engine.events()

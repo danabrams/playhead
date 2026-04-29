@@ -2,18 +2,15 @@
 // Settings screen with all user-configurable options.
 //
 // Sections:
-// - Speech model selection with download management and size indicators
+// - Speech model status (Apple Speech, system-managed)
 // - Ad skip behavior (auto/manual/off)
 // - Playback defaults (speed, skip intervals)
-// - Storage management (transcript cache, model files, cached audio)
+// - Storage management (transcript cache, cached audio)
 // - Background processing preferences
 // - Restore Purchases
 
 import SwiftUI
 import SwiftData
-#if canImport(Speech)
-import Speech
-#endif
 #if canImport(UIKit) && os(iOS)
 import UIKit
 #endif
@@ -54,8 +51,6 @@ struct SettingsView: View {
     #endif
 
     /// Injected dependencies — set via environment or passed directly.
-    var inventory: ModelInventory?
-    var assetProvider: AssetProvider?
     var entitlementManager: EntitlementManager?
 
     /// playhead-l274: optional deep-link router. When non-nil, the view
@@ -171,9 +166,6 @@ struct SettingsView: View {
                 }
                 .task {
                     await viewModel.computeStorageSizes()
-                    if let inventory {
-                        await viewModel.refreshModelStatuses(inventory: inventory)
-                    }
                     await refreshSchedulerEvents()
                 }
                 .onChange(of: router?.pending) { _, newRoute in
@@ -225,26 +217,16 @@ private extension SettingsView {
 
     var modelSection: some View {
         Section {
-            if usesSystemSpeechAssets {
-                VStack(alignment: .leading, spacing: Spacing.xxs) {
-                    Text("Apple Speech")
-                        .font(AppTypography.body)
-                        .foregroundStyle(AppColors.textPrimary)
-                    Text("Speech assets are managed by iOS and stay on device.")
-                        .font(AppTypography.caption)
-                        .foregroundStyle(AppColors.textSecondary)
-                }
-                .padding(.vertical, Spacing.xxs)
-                .listRowBackground(AppColors.surface)
-            } else if viewModel.modelStatuses.isEmpty {
-                Text("No models in manifest")
+            VStack(alignment: .leading, spacing: Spacing.xxs) {
+                Text("Apple Speech")
                     .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textPrimary)
+                Text("Speech assets are managed by iOS and stay on device.")
+                    .font(AppTypography.caption)
                     .foregroundStyle(AppColors.textSecondary)
-            } else {
-                ForEach(viewModel.modelStatuses, id: \.0.id) { entry, status in
-                    modelRow(entry: entry, status: status)
-                }
             }
+            .padding(.vertical, Spacing.xxs)
+            .listRowBackground(AppColors.surface)
         } header: {
             sectionHeader("Models")
         } footer: {
@@ -254,160 +236,6 @@ private extension SettingsView {
         }
     }
 
-    @ViewBuilder
-    func modelRow(entry: ModelEntry, status: ModelStatus) -> some View {
-        HStack {
-            VStack(alignment: .leading, spacing: Spacing.xxs) {
-                Text(entry.displayName)
-                    .font(AppTypography.body)
-                    .foregroundStyle(AppColors.textPrimary)
-
-                HStack(spacing: Spacing.xs) {
-                    Text(entry.role.rawValue)
-                        .font(AppTypography.caption)
-                        .foregroundStyle(AppColors.textTertiary)
-
-                    Text(SettingsViewModel.formattedSize(entry.uncompressedSizeBytes))
-                        .font(AppTypography.timestamp)
-                        .foregroundStyle(AppColors.textTertiary)
-                }
-            }
-
-            Spacer()
-
-            modelStatusBadge(entry: entry, status: status)
-        }
-        .padding(.vertical, Spacing.xxs)
-        .listRowBackground(AppColors.surface)
-        .accessibilityElement(children: .combine)
-    }
-
-    @ViewBuilder
-    func modelStatusBadge(entry: ModelEntry, status: ModelStatus) -> some View {
-        switch status {
-        case .missing:
-            Button {
-                Task {
-                    await downloadAndActivate(entry: entry)
-                }
-            } label: {
-                Label("Download", systemImage: "arrow.down.circle")
-                    .font(AppTypography.caption)
-                    .foregroundStyle(AppColors.accent)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Download \(entry.displayName)")
-
-        case .downloading(let progress):
-            HStack(spacing: Spacing.xs) {
-                ProgressView(value: progress)
-                    .tint(AppColors.accent)
-                    .frame(width: 60)
-                Text("\(Int(progress * 100))%")
-                    .font(AppTypography.timestamp)
-                    .foregroundStyle(AppColors.textTertiary)
-            }
-            .accessibilityValue("Downloading: \(Int(progress * 100)) percent")
-
-        case .staged:
-            Button {
-                Task {
-                    await promoteStaged(entry: entry)
-                }
-            } label: {
-                Label("Activate", systemImage: "checkmark.circle")
-                    .font(AppTypography.caption)
-                    .foregroundStyle(AppColors.accent)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Activate \(entry.displayName)")
-
-        case .ready(let version):
-            HStack(spacing: Spacing.xs) {
-                Text("v\(version)")
-                    .font(AppTypography.timestamp)
-                    .foregroundStyle(AppColors.textSecondary)
-
-                if viewModel.isDeletingModel == entry.id {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Button {
-                        Task {
-                            guard let inventory else { return }
-                            await viewModel.deleteModel(entry: entry, inventory: inventory)
-                        }
-                    } label: {
-                        Image(systemName: "trash")
-                            .font(AppTypography.caption)
-                            .foregroundStyle(.red.opacity(0.8))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Delete \(entry.displayName)")
-                }
-            }
-
-        case .updateAvailable(let current, let new):
-            VStack(alignment: .trailing, spacing: 4) {
-                Text("v\(current)")
-                    .font(AppTypography.timestamp)
-                    .foregroundStyle(AppColors.textTertiary)
-                Text("v\(new) available")
-                    .font(AppTypography.caption)
-                    .foregroundStyle(AppColors.accent)
-                Button {
-                    Task {
-                        await promoteStaged(entry: entry)
-                    }
-                } label: {
-                    Label("Update", systemImage: "arrow.up.circle")
-                        .font(AppTypography.caption)
-                        .foregroundStyle(AppColors.accent)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Update \(entry.displayName) to version \(new)")
-            }
-        }
-    }
-
-    func downloadAndActivate(entry: ModelEntry) async {
-        guard let assetProvider, let inventory else { return }
-        do {
-            try await assetProvider.download(entry: entry)
-            try await assetProvider.promote(modelId: entry.id)
-        } catch {
-            // The inventory refresh below will surface the latest state.
-        }
-
-        await viewModel.refreshModelStatuses(inventory: inventory)
-        await viewModel.computeStorageSizes()
-    }
-
-    func promoteStaged(entry: ModelEntry) async {
-        guard let assetProvider, let inventory else { return }
-        do {
-            try await assetProvider.promote(modelId: entry.id)
-        } catch {
-            // A missing staged file or similar lifecycle issue will be
-            // reflected by the refreshed inventory state below.
-        }
-
-        await viewModel.refreshModelStatuses(inventory: inventory)
-        await viewModel.computeStorageSizes()
-    }
-
-    var usesSystemSpeechAssets: Bool {
-#if canImport(Speech)
-        let env = ProcessInfo.processInfo.environment
-        let usesStubSpeech =
-            env["XCTestConfigurationFilePath"] != nil ||
-            env["XCODE_RUNNING_FOR_PREVIEWS"] == "1" ||
-            env["PLAYHEAD_USE_STUB_SPEECH"] == "1"
-        return !usesStubSpeech
-#else
-        return false
-#endif
-    }
 }
 
 // MARK: - Ad Skip Section
@@ -554,7 +382,7 @@ private extension SettingsView {
         } header: {
             sectionHeader("Processing")
         } footer: {
-            Text("When enabled, episodes are transcribed and analyzed in the background. Requires sufficient battery and may use network for model downloads.")
+            Text("When enabled, episodes are transcribed and analyzed in the background. Requires sufficient battery.")
                 .font(AppTypography.caption)
                 .foregroundStyle(AppColors.textTertiary)
         }
@@ -567,12 +395,6 @@ private extension SettingsView {
 
     var storageSection: some View {
         Section {
-            storageRow(
-                label: "Model Files",
-                icon: "cpu",
-                size: viewModel.modelFilesSize
-            )
-
             storageRow(
                 label: "Transcript Cache",
                 icon: "doc.text",
