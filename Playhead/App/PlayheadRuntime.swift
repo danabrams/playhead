@@ -1352,6 +1352,12 @@ final class PlayheadRuntime {
         // attached later by `PlayheadApp.task` once the `ModelContainer`
         // is available; see `BackgroundFeedRefreshService.attachSharedService`.
         BackgroundFeedRefreshService.registerTaskHandler()
+        // playhead-shpy: wire the process-wide telemetry holder so the
+        // early-fire fallback path (no live service yet) still emits a
+        // `submit` row when iOS dispatches a refresh between
+        // `registerTaskHandler` and `attachSharedService`. Without this,
+        // submit failures in that window are silently dropped.
+        BackgroundFeedRefreshService.attachSharedTelemetry(bgTaskTelemetryLogger)
 
         Task { [downloadManager] in
             do {
