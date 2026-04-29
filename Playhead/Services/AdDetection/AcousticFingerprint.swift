@@ -114,15 +114,24 @@ struct AcousticFingerprint: Sendable, Hashable, Codable {
     init?(data: Data) {
         let stride = MemoryLayout<Float>.size
         guard data.count == Self.vectorLength * stride else { return nil }
-        // Block bind the data into a Float buffer rather than walking
-        // index-by-index. Layout matches `var data` (little-endian
-        // bit-patterns of the L2-normalized vector).
+        // playhead-rfu-aac (cycle-3 L1): the encoder emits explicit
+        // `bits.littleEndian` UInt32 bit-patterns — round-trip symmetrically
+        // by reading UInt32 LE and reconstructing each Float via
+        // `Float(bitPattern:)`. A naive `bindMemory(to: Float.self)` would
+        // be host-endianness-dependent and silently break if this code
+        // were ever ported off little-endian Apple silicon.
         let vs: [Float] = data.withUnsafeBytes { rawBuf -> [Float] in
-            let floats = rawBuf.bindMemory(to: Float.self)
+            let words = rawBuf.bindMemory(to: UInt32.self)
             // bindMemory yields a typed buffer that may be empty if the
             // raw count doesn't divide evenly — the count check above
             // guarantees we get exactly vectorLength entries.
-            return Array(floats.prefix(Self.vectorLength))
+            var out: [Float] = []
+            out.reserveCapacity(Self.vectorLength)
+            for i in 0..<Self.vectorLength {
+                let bits = UInt32(littleEndian: words[i])
+                out.append(Float(bitPattern: bits))
+            }
+            return out
         }
         guard vs.count == Self.vectorLength else { return nil }
         // Already normalized when we wrote; reconstruct without renormalizing
