@@ -341,7 +341,17 @@ actor SkipOrchestrator {
     /// guards against late deliveries that race a podcast/episode change.
     func setEvidenceCatalog(_ catalog: EvidenceCatalog) {
         guard let activeAssetId, catalog.analysisAssetId == activeAssetId else {
-            logger.debug("Dropping evidence catalog for non-active asset \(catalog.analysisAssetId, privacy: .public)")
+            // playhead-rfu-sad: bumped from .debug to .info. A
+            // mismatched-asset catalog is a real wiring regression
+            // (catalog dispatcher routed to the wrong orchestrator
+            // instance, asset switch raced ahead of the catalog
+            // builder, etc.). At .debug it is invisible in release;
+            // at .info it surfaces in os_log without polluting
+            // .notice/.error budgets.
+            let activeDescription = self.activeAssetId ?? "nil"
+            logger.info(
+                "Dropping evidence catalog for non-active asset \(catalog.analysisAssetId, privacy: .public) (active=\(activeDescription, privacy: .public))"
+            )
             return
         }
         activeEvidenceCatalog = catalog
@@ -553,6 +563,22 @@ actor SkipOrchestrator {
                     emitSuggestBanner(for: adWindow)
                 }
                 continue
+            }
+
+            // playhead-rfu-sad: gate-flip race guard. A window first seen
+            // as `markOnly` can later re-arrive with the gate cleared
+            // (e.g. fusion now admits it as auto-skip eligible). Without
+            // this clear, `suggestWindows[id]` would stay populated
+            // while `windows[id]` also gets a parallel managed entry —
+            // a still-visible suggest banner could re-fire
+            // `acceptSuggestedSkip` and synthesize a duplicate managed
+            // window via a fresh `UUID().uuidString` (see
+            // `acceptSuggestedSkip`'s `promotedId`).
+            if suggestWindows[adWindow.id] != nil {
+                suggestWindows.removeValue(forKey: adWindow.id)
+                logger.debug(
+                    "AdWindow \(adWindow.id, privacy: .public) gate flipped from markOnly — cleared suggest entry"
+                )
             }
 
             let incomingState = SkipDecisionState(rawValue: adWindow.decisionState) ?? .candidate
@@ -977,6 +1003,15 @@ actor SkipOrchestrator {
             reason: "Manual skip by user"
         )
 
+        // playhead-rfu-sad: emit `auto_skip_fired` for the manual-skip path
+        // too. The ol05 audit log treats every applied window as a real
+        // skip — manual taps and auto-mode promotions are equivalent
+        // skips from the user's perspective and from the
+        // `false_ready_rate` denominator's perspective. Hashing routes
+        // through the same `episodeIdHasher` as the auto path so events
+        // pair byte-identically with `ready_entered`.
+        emitAutoSkipFiredAuditEvent(for: managed)
+
         // Persist.
         let id = managed.adWindow.id
         Task { [store, logger] in
@@ -1169,23 +1204,8 @@ actor SkipOrchestrator {
         // playhead-o45p: emit an auto_skip_fired event to the ol05 state-
         // transition log. Paired with readyEntered events on the same
         // episode_id_hash, this is the numerator/denominator source for
-        // the Wave 4 false_ready_rate dogfood metric. Hashing happens
-        // through the shared logger salt on the CANONICAL EPISODE KEY
-        // (not the analysis asset ID) so the two event sites produce
-        // byte-identical episode hashes —
-        // `EpisodeSurfaceStatusObserver.runReducerFor` hashes the same
-        // episode key onto `ready_entered`, and `false_ready_rate.swift`
-        // pairs events by that hash.
-        if let episodeId = activeEpisodeId {
-            let hashed = episodeIdHasher(episodeId)
-            let startMs = Int((managed.snappedStart * 1000.0).rounded())
-            let endMs = Int((managed.snappedEnd * 1000.0).rounded())
-            invariantLogger.recordAutoSkipFired(
-                episodeIdHash: hashed,
-                windowStartMs: startMs,
-                windowEndMs: endMs
-            )
-        }
+        // the Wave 4 false_ready_rate dogfood metric.
+        emitAutoSkipFiredAuditEvent(for: managed)
 
         // Persist to SQLite (fire-and-forget from the actor).
         let windowId = managed.adWindow.id
@@ -1202,6 +1222,33 @@ actor SkipOrchestrator {
         }
 
         return decision
+    }
+
+    // MARK: - Audit Event Emission
+
+    /// playhead-o45p / playhead-rfu-sad: emit an `auto_skip_fired` audit
+    /// event for a window that has just transitioned to `.applied`.
+    ///
+    /// Hashing routes through `episodeIdHasher` so all skip-event
+    /// producers (auto-mode evaluation, manual taps) stamp byte-identical
+    /// episode hashes — `false_ready_rate` correlation breaks the moment
+    /// hashes diverge across producers. Called from EVERY site that
+    /// finalises a real skip:
+    ///   - `evaluateWindow` auto-mode promotion
+    ///   - `applyManualSkip` (manual user tap on a confirmed window)
+    /// The suggested-skip path (`acceptSuggestedSkip`) builds a confirmed
+    /// `ManagedWindow` and re-evaluates; whichever of the two sites above
+    /// fires next picks up the emission.
+    private func emitAutoSkipFiredAuditEvent(for managed: ManagedWindow) {
+        guard let episodeId = activeEpisodeId else { return }
+        let hashed = episodeIdHasher(episodeId)
+        let startMs = Int((managed.snappedStart * 1000.0).rounded())
+        let endMs = Int((managed.snappedEnd * 1000.0).rounded())
+        invariantLogger.recordAutoSkipFired(
+            episodeIdHash: hashed,
+            windowStartMs: startMs,
+            windowEndMs: endMs
+        )
     }
 
     // MARK: - Window Merging
@@ -1279,19 +1326,21 @@ actor SkipOrchestrator {
     /// cue and whose snappedEnd is closest to the cue end. Returns -1.0
     /// when no overlap is found (logged as a sentinel rather than NaN to
     /// keep the field log line shape stable).
+    ///
+    /// playhead-rfu-sad: candidates are sorted by `(gap, adWindow.id)` so
+    /// ties (gap == 0, two windows ending at exactly the same time) pick
+    /// a deterministic winner instead of whichever order
+    /// `windows.values` happens to yield. Diagnostic-only output, but
+    /// nondeterministic logging makes flaky test diagnostics harder.
     private func nearestAdWindowEnd(forCueStart cueStart: Double, cueEnd: Double) -> Double {
-        var bestEnd: Double = -1.0
-        var bestGap: Double = .infinity
-        for managed in windows.values {
-            let overlaps = managed.snappedStart < cueEnd && managed.snappedEnd > cueStart
-            guard overlaps else { continue }
-            let gap = abs(managed.snappedEnd - cueEnd)
-            if gap < bestGap {
-                bestGap = gap
-                bestEnd = managed.adWindow.endTime
+        let candidates = windows.values
+            .filter { $0.snappedStart < cueEnd && $0.snappedEnd > cueStart }
+            .map { (gap: abs($0.snappedEnd - cueEnd), id: $0.adWindow.id, end: $0.adWindow.endTime) }
+            .sorted { lhs, rhs in
+                if lhs.gap != rhs.gap { return lhs.gap < rhs.gap }
+                return lhs.id < rhs.id
             }
-        }
-        return bestEnd
+        return candidates.first?.end ?? -1.0
     }
 
     /// Push skip cues to PlaybackService via the handler. Defaults to empty.

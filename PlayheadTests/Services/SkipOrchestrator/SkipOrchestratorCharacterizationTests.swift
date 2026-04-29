@@ -1142,4 +1142,80 @@ struct SkipOrchestratorSuggestTierTests {
         #expect(count == 1,
             "Suggest banner must dedupe across repeated markOnly deliveries; got \(count)")
     }
+
+    @Test("Gate flip from markOnly clears suggest entry — accept after flip is a no-op (playhead-rfu-sad)")
+    func gateFlipClearsSuggestEntry() async throws {
+        // Race scenario: a window arrives first stamped `markOnly`
+        // (suggest tier), then a later detection pass re-emits the same
+        // window id with the gate cleared (eligible for auto-skip). If
+        // the suggest entry isn't cleared, a still-visible suggest
+        // banner could re-fire `acceptSuggestedSkip`, which would
+        // synthesize a duplicate managed window via a fresh
+        // `UUID().uuidString` and silently corrupt state.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "manual",
+            trustScore: 0.6,
+            observations: 5
+        )
+        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        // 1. Window arrives as markOnly → enters suggestWindows.
+        let markOnly = makeMarkOnlyAdWindow(id: "ad-gate-flip")
+        await orchestrator.receiveAdWindows([markOnly])
+
+        // 2. Same id re-arrives, this time WITHOUT a markOnly stamp
+        //    (eligibilityGate=nil simulates a gate clear). The
+        //    orchestrator must drop the suggest entry before
+        //    materializing the managed window.
+        let promotedSameId = AdWindow(
+            id: "ad-gate-flip",
+            analysisAssetId: "asset-1",
+            startTime: markOnly.startTime,
+            endTime: markOnly.endTime,
+            confidence: 0.85,
+            boundaryState: "lexical",
+            decisionState: "confirmed",
+            detectorVersion: "detection-v1",
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: "brought to you by",
+            evidenceStartTime: markOnly.startTime,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: nil,
+            eligibilityGate: nil
+        )
+        await orchestrator.receiveAdWindows([promotedSameId])
+
+        // 3. Confirmed window for this id should now exist (manual mode
+        //    keeps it at .confirmed).
+        let confirmedAfterFlip = await orchestrator.confirmedWindows()
+        #expect(confirmedAfterFlip.contains { $0.id == "ad-gate-flip" },
+            "After gate flip, the same id must enter the managed-window set")
+
+        // 4. A late `acceptSuggestedSkip` call (e.g. a stale banner tap
+        //    arriving after the gate flip) must NOT synthesize a
+        //    duplicate managed window — the suggest entry was cleared
+        //    when the gate flipped, so this is a no-op.
+        await orchestrator.acceptSuggestedSkip(windowId: "ad-gate-flip")
+
+        let confirmedAfterAccept = await orchestrator.confirmedWindows()
+        // Exactly one window covering the original span should exist —
+        // the one created by the gate flip. No duplicate from
+        // acceptSuggestedSkip's `promotedId = UUID().uuidString` path.
+        let matching = confirmedAfterAccept.filter {
+            $0.startTime == markOnly.startTime && $0.endTime == markOnly.endTime
+        }
+        #expect(matching.count == 1,
+            "Stale acceptSuggestedSkip after gate flip must be a no-op; got \(matching.count) windows on the same span")
+    }
 }

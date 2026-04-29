@@ -106,6 +106,81 @@ struct SkipOrchestratorAutoSkipFiredEmissionTests {
         #expect(autoSkipEntries.first?.episodeIdHash != hasher(assetId))
     }
 
+    @Test("auto_skip_fired is emitted on manual-skip (applyManualSkip) — playhead-rfu-sad")
+    func autoSkipFiredEmittedOnManualSkip() async throws {
+        // The audit log must capture every real skip the user actually
+        // executes — manual-mode taps included. Before playhead-rfu-sad
+        // only the auto-mode path emitted `auto_skip_fired`, so manual
+        // taps were invisible to `false_ready_rate` even though the
+        // user's experience was "an ad was skipped". This test pins
+        // the manual-skip emission so the audit log stays honest.
+        let dir = Self.makeTempDirectory()
+        let logger = SurfaceStatusInvariantLogger(directory: dir)
+        let hasher: @Sendable (String) -> String = { [logger] in
+            logger.hashEpisodeId($0)
+        }
+
+        let runTag = UUID().uuidString
+        let assetId = "asset-rfu-sad-manual-\(runTag)"
+        let episodeId = "episode-rfu-sad-manual-\(runTag)"
+
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: assetId, episodeId: episodeId))
+        let trustService = try await makeSkipTestTrustService(
+            mode: "manual",
+            trustScore: 0.6,
+            observations: 5
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            invariantLogger: logger,
+            episodeIdHasher: hasher
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: assetId,
+            episodeId: episodeId,
+            podcastId: "podcast-1"
+        )
+
+        // Persist the window first (manual-skip path persists decision
+        // updates by id, expecting an existing row).
+        let window = makeSkipTestAdWindow(
+            id: "ad-rfu-sad-manual-\(runTag)",
+            assetId: assetId,
+            startTime: 30.0,
+            endTime: 60.0,
+            confidence: 0.85,
+            decisionState: "confirmed"
+        )
+        try await store.insertAdWindow(window)
+        await orchestrator.receiveAdWindows([window])
+
+        // In manual mode, evaluateWindow keeps the window at .confirmed
+        // — no auto path emission yet. Tapping "Skip Ad" promotes it to
+        // .applied.
+        await orchestrator.applyManualSkip(windowId: window.id)
+
+        logger.flushForTesting()
+
+        let sessionURL = try #require(logger.currentSessionFileURL)
+        var autoSkipEntries: [SurfaceStateTransitionEntry] = []
+        for _ in 0..<10 {
+            let all = try Self.readAllEntries(sessionURL)
+            autoSkipEntries = all.filter { $0.eventType == .autoSkipFired }
+            if !autoSkipEntries.isEmpty { break }
+            logger.flushForTesting()
+        }
+
+        #expect(autoSkipEntries.count == 1)
+        #expect(autoSkipEntries.first?.windowStartMs == 30_000)
+        #expect(autoSkipEntries.first?.windowEndMs == 60_000)
+        #expect(autoSkipEntries.first?.episodeIdHash == hasher(episodeId))
+        // Hash must be the EPISODE id, not the asset id — same
+        // contract the auto path honors.
+        #expect(autoSkipEntries.first?.episodeIdHash != hasher(assetId))
+    }
+
     @Test("auto_skip_fired is NOT emitted when mode is shadow (no auto-skip)")
     func autoSkipFiredNotEmittedInShadowMode() async throws {
         let dir = Self.makeTempDirectory()
