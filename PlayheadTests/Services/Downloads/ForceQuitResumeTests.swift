@@ -75,9 +75,9 @@ struct ForceQuitResumeDataStorageTests {
         try await manager.bootstrap()
 
         let blob = Data([0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04])
-        try await manager.persistResumeDataForTesting(episodeId: "ep-hyht-1", data: blob)
+        try await manager.persistResumeData(episodeId: "ep-hyht-1", data: blob)
 
-        let loaded = try await manager.loadResumeDataForTesting(episodeId: "ep-hyht-1")
+        let loaded = try await manager.loadResumeData(episodeId: "ep-hyht-1")
         #expect(loaded == blob)
     }
 
@@ -89,10 +89,10 @@ struct ForceQuitResumeDataStorageTests {
         let manager = DownloadManager(cacheDirectory: dir)
         try await manager.bootstrap()
 
-        try await manager.persistResumeDataForTesting(episodeId: "ep-hyht-2", data: Data([0x01]))
-        try await manager.persistResumeDataForTesting(episodeId: "ep-hyht-2", data: Data([0x02, 0x03]))
+        try await manager.persistResumeData(episodeId: "ep-hyht-2", data: Data([0x01]))
+        try await manager.persistResumeData(episodeId: "ep-hyht-2", data: Data([0x02, 0x03]))
 
-        let loaded = try await manager.loadResumeDataForTesting(episodeId: "ep-hyht-2")
+        let loaded = try await manager.loadResumeData(episodeId: "ep-hyht-2")
         #expect(loaded == Data([0x02, 0x03]))
     }
 
@@ -104,7 +104,7 @@ struct ForceQuitResumeDataStorageTests {
         let manager = DownloadManager(cacheDirectory: dir)
         try await manager.bootstrap()
 
-        let loaded = try await manager.loadResumeDataForTesting(episodeId: "ep-missing")
+        let loaded = try await manager.loadResumeData(episodeId: "ep-missing")
         #expect(loaded == nil)
     }
 
@@ -116,10 +116,10 @@ struct ForceQuitResumeDataStorageTests {
         let manager = DownloadManager(cacheDirectory: dir)
         try await manager.bootstrap()
 
-        try await manager.persistResumeDataForTesting(episodeId: "ep-a", data: Data([0xAA]))
-        try await manager.persistResumeDataForTesting(episodeId: "ep-b", data: Data([0xBB]))
+        try await manager.persistResumeData(episodeId: "ep-a", data: Data([0xAA]))
+        try await manager.persistResumeData(episodeId: "ep-b", data: Data([0xBB]))
 
-        let ids = await manager.persistedResumeDataEpisodeIdsForTesting()
+        let ids = await manager.persistedResumeDataEpisodeIds()
         #expect(ids == Set(["ep-a", "ep-b"]))
     }
 
@@ -131,10 +131,10 @@ struct ForceQuitResumeDataStorageTests {
         let manager = DownloadManager(cacheDirectory: dir)
         try await manager.bootstrap()
 
-        try await manager.persistResumeDataForTesting(episodeId: "ep-del", data: Data([0x01]))
-        try await manager.deleteResumeDataForTesting(episodeId: "ep-del")
+        try await manager.persistResumeData(episodeId: "ep-del", data: Data([0x01]))
+        try await manager.deleteResumeData(episodeId: "ep-del")
 
-        let loaded = try await manager.loadResumeDataForTesting(episodeId: "ep-del")
+        let loaded = try await manager.loadResumeData(episodeId: "ep-del")
         #expect(loaded == nil)
     }
 }
@@ -155,8 +155,8 @@ struct ScanForSuspendedTransfersTests {
 
         // Seed two persisted blobs as if they were left behind by a
         // force-quit prior to this cold launch.
-        try await manager.persistResumeDataForTesting(episodeId: "ep-1", data: Data([0x01, 0x02]))
-        try await manager.persistResumeDataForTesting(episodeId: "ep-2", data: Data([0x03, 0x04, 0x05]))
+        try await manager.persistResumeData(episodeId: "ep-1", data: Data([0x01, 0x02]))
+        try await manager.persistResumeData(episodeId: "ep-2", data: Data([0x03, 0x04, 0x05]))
 
         let outcome = try await manager.scanForSuspendedTransfers()
 
@@ -183,7 +183,7 @@ struct ScanForSuspendedTransfersTests {
         let manager = DownloadManager(cacheDirectory: dir, workJournalRecorder: recorder)
         try await manager.bootstrap()
 
-        try await manager.persistResumeDataForTesting(episodeId: "ep-idem", data: Data([0x01]))
+        try await manager.persistResumeData(episodeId: "ep-idem", data: Data([0x01]))
 
         _ = try await manager.scanForSuspendedTransfers()
         _ = try await manager.scanForSuspendedTransfers()
@@ -220,7 +220,7 @@ struct ScanForSuspendedTransfersTests {
 
         // Seed a handful of blobs so the scan has real work to do.
         for i in 0..<10 {
-            try await manager.persistResumeDataForTesting(
+            try await manager.persistResumeData(
                 episodeId: "ep-sla-\(i)",
                 data: Data(repeating: UInt8(i), count: 1024)
             )
@@ -257,7 +257,7 @@ struct ScanForSuspendedTransfersTests {
 
         // A zero-length blob is the canonical "corrupted" signal — URLSession
         // cannot reconstruct a task from it.
-        try await manager.persistResumeDataForTesting(episodeId: "ep-corrupt", data: Data())
+        try await manager.persistResumeData(episodeId: "ep-corrupt", data: Data())
 
         let outcome = try await manager.scanForSuspendedTransfers()
 
@@ -273,7 +273,7 @@ struct ScanForSuspendedTransfersTests {
         #expect(failures.first?.cause == .pipelineError)
 
         // Corrupted blob is removed so the next scan doesn't re-report it.
-        let loaded = try await manager.loadResumeDataForTesting(episodeId: "ep-corrupt")
+        let loaded = try await manager.loadResumeData(episodeId: "ep-corrupt")
         #expect(loaded == nil)
     }
 
@@ -286,8 +286,8 @@ struct ScanForSuspendedTransfersTests {
         let manager = DownloadManager(cacheDirectory: dir, workJournalRecorder: recorder)
         try await manager.bootstrap()
 
-        try await manager.persistResumeDataForTesting(episodeId: "ep-good", data: Data([0x01, 0x02, 0x03]))
-        try await manager.persistResumeDataForTesting(episodeId: "ep-bad", data: Data())
+        try await manager.persistResumeData(episodeId: "ep-good", data: Data([0x01, 0x02, 0x03]))
+        try await manager.persistResumeData(episodeId: "ep-bad", data: Data())
 
         let outcome = try await manager.scanForSuspendedTransfers()
 
@@ -320,13 +320,13 @@ struct ResumeSuspendedTransferTests {
         // NOTE: we cannot inject a real suspended URLSessionDownloadTask in a
         // unit test, so this exercises the test seam. A non-empty blob takes
         // the "attempt resume" branch and the seam reports success.
-        try await manager.persistResumeDataForTesting(episodeId: "ep-res", data: Data([0xAB, 0xCD]))
+        try await manager.persistResumeData(episodeId: "ep-res", data: Data([0xAB, 0xCD]))
 
-        let outcome = try await manager.resumeSuspendedTransferForTesting(episodeId: "ep-res")
+        let outcome = try await manager.resumeSuspendedTransfer(episodeId: "ep-res")
         #expect(outcome == .resumed)
 
         // On success the blob is removed — the OS now owns continuation.
-        let loaded = try await manager.loadResumeDataForTesting(episodeId: "ep-res")
+        let loaded = try await manager.loadResumeData(episodeId: "ep-res")
         #expect(loaded == nil)
     }
 
@@ -338,7 +338,7 @@ struct ResumeSuspendedTransferTests {
         let manager = DownloadManager(cacheDirectory: dir)
         try await manager.bootstrap()
 
-        let outcome = try await manager.resumeSuspendedTransferForTesting(episodeId: "ep-none")
+        let outcome = try await manager.resumeSuspendedTransfer(episodeId: "ep-none")
         #expect(outcome == .missing)
     }
 
@@ -351,14 +351,14 @@ struct ResumeSuspendedTransferTests {
         let manager = DownloadManager(cacheDirectory: dir, workJournalRecorder: recorder)
         try await manager.bootstrap()
 
-        try await manager.persistResumeDataForTesting(episodeId: "ep-corrupt2", data: Data())
+        try await manager.persistResumeData(episodeId: "ep-corrupt2", data: Data())
 
-        let outcome = try await manager.resumeSuspendedTransferForTesting(episodeId: "ep-corrupt2")
+        let outcome = try await manager.resumeSuspendedTransfer(episodeId: "ep-corrupt2")
         #expect(outcome == .corrupted)
 
         // Blob is purged so the user sees a clean-restart error once, not
         // forever.
-        let loaded = try await manager.loadResumeDataForTesting(episodeId: "ep-corrupt2")
+        let loaded = try await manager.loadResumeData(episodeId: "ep-corrupt2")
         #expect(loaded == nil)
 
         // Emits failed/pipelineError for the support-triage Diagnostics path.
@@ -437,14 +437,14 @@ struct EpisodeDownloadDelegateResumeHarvestTests {
         // The harvest routes through an actor hop; poll until the blob
         // lands on disk or we give up.
         let sawBlob = await pollUntil(timeout: .seconds(2)) {
-            let loaded = try? await manager.loadResumeDataForTesting(episodeId: "ep-g2wq-harvest")
+            let loaded = try? await manager.loadResumeData(episodeId: "ep-g2wq-harvest")
             return loaded == resumeBlob
         }
         #expect(sawBlob)
 
         // Belt-and-suspenders: the scan enumerator should now list the
         // harvested episode, proving the index file was written too.
-        let ids = await manager.persistedResumeDataEpisodeIdsForTesting()
+        let ids = await manager.persistedResumeDataEpisodeIds()
         #expect(ids.contains("ep-g2wq-harvest"))
     }
 
@@ -477,10 +477,10 @@ struct EpisodeDownloadDelegateResumeHarvestTests {
         // shouldn't exist), then assert nothing was persisted.
         try await Task.sleep(for: .milliseconds(200))
 
-        let ids = await manager.persistedResumeDataEpisodeIdsForTesting()
+        let ids = await manager.persistedResumeDataEpisodeIds()
         #expect(ids.isEmpty, "Resume-data directory must remain empty when error carries no NSURLSessionDownloadTaskResumeData blob")
 
-        let loaded = try await manager.loadResumeDataForTesting(episodeId: "ep-g2wq-no-blob")
+        let loaded = try await manager.loadResumeData(episodeId: "ep-g2wq-no-blob")
         #expect(loaded == nil)
     }
 }
@@ -500,7 +500,7 @@ struct PlayheadAppDelegateScanWiringTests {
         let manager = DownloadManager(cacheDirectory: dir, workJournalRecorder: recorder)
         try await manager.bootstrap()
 
-        try await manager.persistResumeDataForTesting(episodeId: "ep-launch", data: Data([0x01, 0x02, 0x03]))
+        try await manager.persistResumeData(episodeId: "ep-launch", data: Data([0x01, 0x02, 0x03]))
 
         DownloadManager.registerShared(manager)
         defer { DownloadManager.registerShared(nil) }

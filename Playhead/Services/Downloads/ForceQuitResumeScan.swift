@@ -82,10 +82,9 @@ extension DownloadManager {
     /// Writes `data` as the resume-data blob for `episodeId`. Overwrites
     /// any prior blob for that episode.
     ///
-    /// Exposed internally (`fileprivate` granularity widened for unit
-    /// tests via the `*ForTesting` surface below). Production writes
-    /// happen inside `scanForSuspendedTransfers()` — callers do NOT
-    /// need to call this directly.
+    /// Internal so tests can reach it via `@testable import`. Production
+    /// writes happen inside `scanForSuspendedTransfers()` — callers do
+    /// NOT need to call this directly.
     func persistResumeData(episodeId: String, data: Data) throws {
         let fm = FileManager.default
         if !fm.fileExists(atPath: resumeDataDirectory.path) {
@@ -151,29 +150,6 @@ extension DownloadManager {
         return ids
     }
 
-    // MARK: - Test seams
-
-    func persistResumeDataForTesting(episodeId: String, data: Data) throws {
-        try persistResumeData(episodeId: episodeId, data: data)
-    }
-
-    func loadResumeDataForTesting(episodeId: String) throws -> Data? {
-        try loadResumeData(episodeId: episodeId)
-    }
-
-    func deleteResumeDataForTesting(episodeId: String) throws {
-        try deleteResumeData(episodeId: episodeId)
-    }
-
-    func persistedResumeDataEpisodeIdsForTesting() -> Set<String> {
-        persistedResumeDataEpisodeIds()
-    }
-
-    func resumeSuspendedTransferForTesting(
-        episodeId: String
-    ) async throws -> SuspendedTransferResumeOutcome {
-        try await resumeSuspendedTransfer(episodeId: episodeId)
-    }
 }
 
 // MARK: - Scan
