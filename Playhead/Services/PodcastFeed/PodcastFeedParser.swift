@@ -117,6 +117,14 @@ final class FeedParser: NSObject, XMLParserDelegate {
         parser.delegate = self
         parser.shouldProcessNamespaces = true
         parser.shouldReportNamespacePrefixes = false
+        // Defense in depth against XXE / billion-laughs entity expansion.
+        // Foundation's XMLParser defaults are safe today (external entities
+        // are not resolved over the network), but a future refactor —
+        // including adopting a different parser that reuses these flags —
+        // could quietly regress. Pin both knobs explicitly so anyone
+        // auditing this constructor sees the hardening.
+        parser.shouldResolveExternalEntities = false
+        parser.externalEntityResolvingPolicy = .never
 
         guard parser.parse() else {
             if let error = parseError {

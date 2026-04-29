@@ -88,6 +88,26 @@ struct FeedTextNormalizerTests {
         #expect(result?.count == FeedTextNormalizer.maxLength)
     }
 
+    @Test("Multi-MB input does not blow up regex pipeline")
+    func multiMBInputCappedBeforeRegex() {
+        // Adversarial input: ~4 MB of plain text. Without the pre-regex
+        // byte cap, the four uncapped regex passes in `normalize` would
+        // each scan the full string, producing a perf cliff. The cap
+        // truncates raw input before regex, so we expect this to return
+        // a sub-`maxLength` String comfortably within a handful of
+        // milliseconds. Bound the wall-clock to keep this useful as a
+        // regression test (CI-friendly: 5 s is generous against the
+        // measured ~tens of ms typical run).
+        let raw = String(repeating: "A", count: 4_000_000)
+        let start = Date()
+        let result = FeedTextNormalizer.normalize(raw)
+        let elapsed = Date().timeIntervalSince(start)
+        #expect(result != nil)
+        #expect(result?.count == FeedTextNormalizer.maxLength)
+        #expect(elapsed < 5.0,
+                "normalize on 4 MB input took \(elapsed)s — expected <5 s with pre-regex cap")
+    }
+
     @Test("Does not truncate text within limit")
     func noTruncationIfShort() {
         let raw = "Short text"
@@ -167,6 +187,27 @@ struct FeedTextNormalizerTests {
             rawSummary: nil
         )
         #expect(meta == nil)
+    }
+
+    @Test("makeMetadata returns nil when all four signal sources are empty/nil")
+    func makeMetadataAllSignalsEmpty() {
+        // Pin the suppression invariant: nil/empty desc + nil/empty summary
+        // + empty chapter evidence + nil chaptersFeedURL must collapse to
+        // nil. Consumers treat a non-nil metadata blob as "we have *some*
+        // useful signal for this episode"; this guards that contract.
+        #expect(FeedTextNormalizer.makeMetadata(
+            rawDescription: nil,
+            rawSummary: nil,
+            chapterEvidence: nil,
+            chaptersFeedURL: nil
+        ) == nil)
+
+        #expect(FeedTextNormalizer.makeMetadata(
+            rawDescription: "",
+            rawSummary: "",
+            chapterEvidence: [],
+            chaptersFeedURL: nil
+        ) == nil)
     }
 
     @Test("makeMetadata handles description-only")

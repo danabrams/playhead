@@ -9,12 +9,44 @@ enum FeedTextNormalizer {
     /// Maximum stored character count for normalized text fields.
     static let maxLength = 4000
 
+    /// Pre-regex byte cap. Truncates the raw input before the regex pipeline
+    /// runs so a multi-megabyte feed description (RSS in the wild has been
+    /// observed at >1 MB on misconfigured shows) cannot trigger a perf
+    /// cliff in the four uncapped regex passes below. The cap is
+    /// deliberately generous — typical descriptions are <10 KB — so this
+    /// only fires on adversarial / pathological input.
+    ///
+    /// Final post-regex truncation to `maxLength` (4 000 chars) still
+    /// applies; this just bounds the regex working set.
+    static let preRegexByteCap = 256 * 1024  // 256 KB
+
     /// Normalize raw RSS text: strip HTML tags, decode entities, collapse whitespace,
     /// and truncate to `maxLength`.
     static func normalize(_ raw: String?) -> String? {
         guard let raw, !raw.isEmpty else { return nil }
 
         var text = raw
+
+        // 0. Cheap byte-cap up front. The regex pipeline below has four
+        //    uncapped passes whose worst-case behavior on adversarial
+        //    multi-MB input dominates this function's cost; truncate
+        //    first so the pathological path is bounded.
+        if text.utf8.count > Self.preRegexByteCap {
+            // Find a UTF-8-safe truncation point: cap by UTF-8 byte count
+            // but advance to a Character boundary so we don't split a
+            // multi-byte scalar mid-stream.
+            let utf8 = text.utf8
+            var endByteIndex = utf8.index(utf8.startIndex, offsetBy: Self.preRegexByteCap)
+            // Walk backward to a valid Character boundary if the cap
+            // landed inside a scalar.
+            while endByteIndex > utf8.startIndex,
+                  String.Index(endByteIndex, within: text) == nil {
+                endByteIndex = utf8.index(before: endByteIndex)
+            }
+            if let stringIndex = String.Index(endByteIndex, within: text) {
+                text = String(text[..<stringIndex])
+            }
+        }
 
         // 1a. Strip <script>...</script> and <style>...</style> blocks entirely
         //     (including content) before general tag stripping, to prevent CSS/JS
