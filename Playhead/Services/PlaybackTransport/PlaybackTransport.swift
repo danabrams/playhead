@@ -598,6 +598,34 @@ final class PlaybackService: NSObject, Sendable {
     func _testingApplyObservedRate(_ rate: Float) {
         applyObservedRate(rate)
     }
+
+    /// Test-only hook that drives the skip-cue duck/seek/release path
+    /// without needing the periodic time observer to hit the cue
+    /// naturally. Used by `SkipCueSmoothingTests` (playhead-456) to
+    /// measure transition wall-clock latency.
+    func _testingPerformSkipTransition(to seconds: TimeInterval) async {
+        await performSkipTransition(to: seconds)
+    }
+
+    /// Test-only accessor for the currently-armed skip cue ranges.
+    /// Used by `SkipCueSmoothingTests` to assert `setSkipCues` actually
+    /// stored the ranges.
+    var _testingSkipCues: [CMTimeRange] { skipCues }
+
+    /// Test-only hook that installs a sentinel `AVPlayerItem` so calls
+    /// to `play()` pass the `playerItem != nil` guard. Used by
+    /// `playhead-456` E2E tests that need to exercise post-route-change
+    /// resume semantics without racing against AVPlayer's asynchronous
+    /// asset-load KVO (which can flip the status to `.failed` after a
+    /// `_testingInjectState(.playing)` call). The item is a no-op:
+    /// no resource loader delegate, no observers attached, and the
+    /// itemStatusObservation is not wired up — so no KVO fires and
+    /// `_state.status` is not overwritten.
+    func _testingInstallStubPlayerItem() {
+        playerItem = AVPlayerItem(asset: AVURLAsset(
+            url: URL(string: "playhead-progressive://stub/sentinel.mp3")!
+        ))
+    }
 #endif
 }
 
