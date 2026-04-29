@@ -176,4 +176,170 @@ struct SurfaceStatusReadyTransitionEmitterTests {
         #expect(sink.invocations.count == 1)
         #expect(sink.invocations.first?.trigger == .analysisCompleted)
     }
+
+    // MARK: - playhead-2v1r — bounded LRU regressions
+
+    /// Capacity literal mirrored from the production type. If the
+    /// constant in `SurfaceStatusReadyTransitionEmitter` changes, this
+    /// test will fail loudly at the eviction boundary.
+    private static let lastReadyCapacityForTests = 128
+
+    @Test("LRU evicts the oldest entries once capacity+N distinct hashes have been seen")
+    func lruEvictsOldestPastCapacity() {
+        let sink = Sink()
+        let emitter = SurfaceStatusReadyTransitionEmitter(loggerSink: sink.record)
+        let capacity = Self.lastReadyCapacityForTests
+
+        // Seed `capacity + 5` distinct hashes with a ready reduction
+        // each. Every reduction is a cold-start ⇒ each one emits.
+        for index in 0..<(capacity + 5) {
+            _ = emitter.reduceAndEmit(
+                episodeIdHash: "ep-\(index)",
+                state: Self.queuedState,
+                cause: nil,
+                eligibility: Self.eligible,
+                coverage: nil,
+                readinessAnchor: nil
+            )
+        }
+
+        // Sanity: each unique hash on a ready reduction emitted once.
+        #expect(sink.invocations.count == capacity + 5)
+        let baselineCount = sink.invocations.count
+
+        // Re-querying the 5 oldest hashes (ep-0 ... ep-4) on another
+        // ready reduction must emit again — they were evicted, so the
+        // emitter treats them as never-seen ⇒ coldStart trigger.
+        for index in 0..<5 {
+            _ = emitter.reduceAndEmit(
+                episodeIdHash: "ep-\(index)",
+                state: Self.queuedState,
+                cause: nil,
+                eligibility: Self.eligible,
+                coverage: nil,
+                readinessAnchor: nil
+            )
+        }
+        let newInvocations = Array(sink.invocations.dropFirst(baselineCount))
+        #expect(newInvocations.count == 5)
+        for invocation in newInvocations {
+            #expect(invocation.trigger == .coldStart)
+        }
+    }
+
+    @Test("LRU continues to suppress emits for hashes still within the recency window")
+    func lruSuppressesEmitForRecentHash() {
+        let sink = Sink()
+        let emitter = SurfaceStatusReadyTransitionEmitter(loggerSink: sink.record)
+        let capacity = Self.lastReadyCapacityForTests
+
+        // Insert ep-target on a ready reduction, then push exactly
+        // `capacity - 1` more distinct hashes — ep-target is still the
+        // oldest BUT remains within capacity.
+        _ = emitter.reduceAndEmit(
+            episodeIdHash: "ep-target",
+            state: Self.queuedState,
+            cause: nil,
+            eligibility: Self.eligible,
+            coverage: nil,
+            readinessAnchor: nil
+        )
+        for index in 0..<(capacity - 1) {
+            _ = emitter.reduceAndEmit(
+                episodeIdHash: "ep-other-\(index)",
+                state: Self.queuedState,
+                cause: nil,
+                eligibility: Self.eligible,
+                coverage: nil,
+                readinessAnchor: nil
+            )
+        }
+        let baselineCount = sink.invocations.count
+
+        // ep-target must still be remembered as ready ⇒ another ready
+        // reduction must NOT emit (idempotence preserved).
+        _ = emitter.reduceAndEmit(
+            episodeIdHash: "ep-target",
+            state: Self.queuedState,
+            cause: nil,
+            eligibility: Self.eligible,
+            coverage: nil,
+            readinessAnchor: nil
+        )
+        #expect(sink.invocations.count == baselineCount)
+    }
+
+    @Test("LRU promotes recency on touch — accessed hashes survive eviction")
+    func lruMoveToFrontProtectsTouchedHash() {
+        let sink = Sink()
+        let emitter = SurfaceStatusReadyTransitionEmitter(loggerSink: sink.record)
+        let capacity = Self.lastReadyCapacityForTests
+
+        // Seed ep-touched as the oldest entry.
+        _ = emitter.reduceAndEmit(
+            episodeIdHash: "ep-touched",
+            state: Self.queuedState,
+            cause: nil,
+            eligibility: Self.eligible,
+            coverage: nil,
+            readinessAnchor: nil
+        )
+        // Fill up to capacity-1 more entries.
+        for index in 0..<(capacity - 1) {
+            _ = emitter.reduceAndEmit(
+                episodeIdHash: "ep-filler-\(index)",
+                state: Self.queuedState,
+                cause: nil,
+                eligibility: Self.eligible,
+                coverage: nil,
+                readinessAnchor: nil
+            )
+        }
+        // Touch ep-touched again (idempotent ready ⇒ move-to-back, no emit).
+        _ = emitter.reduceAndEmit(
+            episodeIdHash: "ep-touched",
+            state: Self.queuedState,
+            cause: nil,
+            eligibility: Self.eligible,
+            coverage: nil,
+            readinessAnchor: nil
+        )
+        // Now insert 5 more hashes — these push out the OLDEST entries,
+        // which are now ep-filler-0 ... ep-filler-4 (NOT ep-touched).
+        for index in 0..<5 {
+            _ = emitter.reduceAndEmit(
+                episodeIdHash: "ep-late-\(index)",
+                state: Self.queuedState,
+                cause: nil,
+                eligibility: Self.eligible,
+                coverage: nil,
+                readinessAnchor: nil
+            )
+        }
+        let preProbeCount = sink.invocations.count
+
+        // ep-touched survived: re-emit on ready must NOT fire.
+        _ = emitter.reduceAndEmit(
+            episodeIdHash: "ep-touched",
+            state: Self.queuedState,
+            cause: nil,
+            eligibility: Self.eligible,
+            coverage: nil,
+            readinessAnchor: nil
+        )
+        #expect(sink.invocations.count == preProbeCount)
+
+        // ep-filler-0 was evicted: re-emit must fire as coldStart.
+        let beforeEvicted = sink.invocations.count
+        _ = emitter.reduceAndEmit(
+            episodeIdHash: "ep-filler-0",
+            state: Self.queuedState,
+            cause: nil,
+            eligibility: Self.eligible,
+            coverage: nil,
+            readinessAnchor: nil
+        )
+        #expect(sink.invocations.count == beforeEvicted + 1)
+        #expect(sink.invocations.last?.trigger == .coldStart)
+    }
 }

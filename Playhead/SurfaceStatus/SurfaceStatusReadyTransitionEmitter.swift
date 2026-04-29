@@ -69,7 +69,30 @@ final class SurfaceStatusReadyTransitionEmitter: @unchecked Sendable {
     /// last reduction produced a ready-for-playback disposition. Missing
     /// keys mean the emitter has never seen the episode — the first
     /// ready reduction is classified as `coldStart`.
+    ///
+    /// playhead-2v1r: Bounded LRU so a long-running process doesn't grow
+    /// this dictionary unboundedly across hundreds of unique episode
+    /// hashes seen during dogfood. The eviction is observable: a hash
+    /// evicted from the LRU and then re-seen on a ready reduction will
+    /// be classified as `coldStart` again. This is acceptable because
+    /// idempotence only matters for near-term repeats — once we've not
+    /// touched an episode in `lastReadyCapacity` distinct-hash steps,
+    /// re-emitting `ready_entered` for it is semantically fine. The
+    /// shape mirrors `SkipOrchestrator.recentlyAcceptedSuggestIds`
+    /// (parallel ordered array + dict for keyed lookup) since this
+    /// helper additionally needs the per-key `Bool` value.
     private var lastReadyByEpisode: [String: Bool] = [:]
+    /// Recency order for `lastReadyByEpisode`. Front = oldest, back =
+    /// newest. Linear `firstIndex(of:)` scans are cheaper than a
+    /// parallel hash-set at this capacity.
+    private var lastReadyOrder: [String] = []
+    /// Cap on the number of distinct episode hashes the LRU retains.
+    /// 128 comfortably absorbs a multi-day dogfood session (typically
+    /// tens of distinct episodes touched) while keeping the bound
+    /// small. SkipOrchestrator's analogous cap is 256, sized for tap
+    /// volume per episode rather than episode-hash count, so the
+    /// constants are intentionally different.
+    private let lastReadyCapacity = 128
 
     /// Default reducer that forwards to `episodeSurfaceStatus(...)`
     /// without the optional invariant logger. Callers that want the
@@ -132,7 +155,7 @@ final class SurfaceStatusReadyTransitionEmitter: @unchecked Sendable {
 
         let hasSeenBefore = (lastReadyByEpisode[episodeIdHash] != nil)
         let wasReady = lastReadyByEpisode[episodeIdHash] ?? false
-        lastReadyByEpisode[episodeIdHash] = isReadyNow
+        rememberLastReady(episodeIdHash: episodeIdHash, isReady: isReadyNow)
 
         if isReadyNow && !wasReady {
             // Transition INTO ready — emit exactly one event.
@@ -153,9 +176,31 @@ final class SurfaceStatusReadyTransitionEmitter: @unchecked Sendable {
     /// share the same emitter instance.
     func resetForTesting() {
         lastReadyByEpisode.removeAll()
+        lastReadyOrder.removeAll()
     }
 
     // MARK: - Internal helpers
+
+    /// playhead-2v1r: LRU bookkeeping. Insert or refresh the recency of
+    /// `episodeIdHash` and update its `isReady` value. Evicts the oldest
+    /// hash when the bounded set is full. Mirrors the inline pattern in
+    /// `SkipOrchestrator.rememberAcceptedSuggestId`.
+    private func rememberLastReady(episodeIdHash: String, isReady: Bool) {
+        if let existing = lastReadyOrder.firstIndex(of: episodeIdHash) {
+            // Move-to-back: refresh recency.
+            lastReadyOrder.remove(at: existing)
+        }
+        lastReadyOrder.append(episodeIdHash)
+        lastReadyByEpisode[episodeIdHash] = isReady
+        if lastReadyOrder.count > lastReadyCapacity {
+            let overflow = lastReadyOrder.count - lastReadyCapacity
+            let evicted = lastReadyOrder.prefix(overflow)
+            for key in evicted {
+                lastReadyByEpisode.removeValue(forKey: key)
+            }
+            lastReadyOrder.removeFirst(overflow)
+        }
+    }
 
     /// Classify a reduced status + cause as ready-for-playback.
     ///
