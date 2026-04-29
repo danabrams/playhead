@@ -91,4 +91,37 @@ struct AcousticFeatureFusionTests {
             w.spectralShift + w.silenceBoundary + w.repetitionFingerprint + w.tempoOnset
         #expect(abs(sum - 1.0) < 1e-9)
     }
+
+    @Test("AcousticFeatureScore NaN input clamps to zero (cycle-3 L6)")
+    func nanScoreClampsToZero() {
+        // A NaN upstream metric (e.g. divide-by-zero in a feature
+        // implementation) MUST NOT poison fusion arithmetic. The init
+        // delegates to `clampUnit`, which converts NaN → 0.
+        let nanScore = AcousticFeatureScore(
+            feature: .musicBed,
+            windowStart: 0,
+            windowEnd: 2,
+            score: .nan,
+            rawMetric: 0
+        )
+        #expect(nanScore.score == 0)
+
+        // Sanity: the same path also clamps out-of-range finite inputs.
+        let overflow = AcousticFeatureScore(
+            feature: .musicBed,
+            windowStart: 0,
+            windowEnd: 2,
+            score: 1.5,
+            rawMetric: 0
+        )
+        #expect(overflow.score == 1.0)
+        let underflow = AcousticFeatureScore(
+            feature: .musicBed,
+            windowStart: 0,
+            windowEnd: 2,
+            score: -0.5,
+            rawMetric: 0
+        )
+        #expect(underflow.score == 0.0)
+    }
 }
