@@ -1254,6 +1254,17 @@ struct NarlEvalHarnessTests {
     /// data, but a colon ever appearing in an assetId would split this
     /// helper's output differently from the canonical parser; routing
     /// through one parser eliminates the footgun.
+    ///
+    /// Contract change vs. the previous local heuristic (L3 / rfu-mn):
+    /// the canonical parser is stricter — it requires both the start and
+    /// the end of the scope to parse as Doubles AND `end >= start`,
+    /// returning `.unhandled` on either failure. The old local heuristic
+    /// returned `Double(parts[parts.count - 1])` even when the start
+    /// time was unparseable. Production data has no malformed scopes
+    /// (every emit uses `String(format: "%.3f", ...)`), so the strict
+    /// rejection is a no-op on real data; documenting the change here so
+    /// a future review that compares git blame against behavior doesn't
+    /// have to re-derive the contract.
     private static func correctionMaxTime(scope: String) -> Double? {
         switch NarlCorrectionScope.parse(scope) {
         case .exactTimeSpan(_, _, let endTime):
