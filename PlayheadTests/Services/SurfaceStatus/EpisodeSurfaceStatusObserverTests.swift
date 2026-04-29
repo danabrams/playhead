@@ -306,7 +306,13 @@ struct EpisodeSurfaceStatusObserverTests {
             availableDiskSpaceBytes: 10_000_000_000,
             capturedAt: Date(timeIntervalSince1970: 1_700_000_000)
         )
-        let eligible = EpisodeSurfaceStatusObserver.eligibility(from: usable)
+        let eligible = EpisodeSurfaceStatusObserver.eligibility(
+            from: usable,
+            regionProvider: LocaleRegionSupportProvider(
+                supportedRegions: ["US"],
+                regionProvider: { "US" }
+            )
+        )
         #expect(eligible.isFullyEligible == true)
 
         let notUsable = CapabilitySnapshot(
@@ -321,14 +327,26 @@ struct EpisodeSurfaceStatusObserverTests {
             availableDiskSpaceBytes: 10_000_000_000,
             capturedAt: Date(timeIntervalSince1970: 1_700_000_000)
         )
-        let ineligible = EpisodeSurfaceStatusObserver.eligibility(from: notUsable)
+        let ineligible = EpisodeSurfaceStatusObserver.eligibility(
+            from: notUsable,
+            regionProvider: LocaleRegionSupportProvider(
+                supportedRegions: ["US"],
+                regionProvider: { "US" }
+            )
+        )
         #expect(ineligible.isFullyEligible == false)
         #expect(ineligible.modelAvailableNow == false)
     }
 
     @Test("eligibility(from: nil) is fully eligible so missing snapshot does not suppress emission")
     func eligibilityWithNilSnapshotIsFullyEligible() {
-        let eligibility = EpisodeSurfaceStatusObserver.eligibility(from: nil)
+        let eligibility = EpisodeSurfaceStatusObserver.eligibility(
+            from: nil,
+            regionProvider: LocaleRegionSupportProvider(
+                supportedRegions: ["US"],
+                regionProvider: { "US" }
+            )
+        )
         #expect(eligibility.isFullyEligible == true)
     }
 }

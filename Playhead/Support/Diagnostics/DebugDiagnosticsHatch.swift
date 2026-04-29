@@ -172,8 +172,10 @@ enum DebugDiagnosticsHatch {
     ///   SoC meets the minimum bar" that the runtime surfaces today).
     /// - `appleIntelligenceEnabled` ← `snapshot.appleIntelligenceEnabled`
     ///   (direct match).
-    /// - `regionSupported` ← `true` (dogfood is US-only; l274 will
-    ///   replace this with a real region provider).
+    /// - `regionSupported` ← live `LocaleRegionSupportProvider` reading
+    ///   `Locale.current.region` against `supportedRegions` (today:
+    ///   ["US"]). Updated by playhead-kgn5 — the diagnostics bundle now
+    ///   reports the real region gate that the evaluator sees.
     /// - `languageSupported` ← `snapshot.foundationModelsLocaleSupported`
     ///   (direct match — locale support is the language gate).
     /// - `modelAvailableNow` ← `snapshot.foundationModelsUsable` (the
@@ -186,7 +188,7 @@ enum DebugDiagnosticsHatch {
         AnalysisEligibility(
             hardwareSupported: snapshot.foundationModelsAvailable,
             appleIntelligenceEnabled: snapshot.appleIntelligenceEnabled,
-            regionSupported: true,
+            regionSupported: LocaleRegionSupportProvider().isRegionSupported(),
             languageSupported: snapshot.foundationModelsLocaleSupported,
             modelAvailableNow: snapshot.foundationModelsUsable,
             capturedAt: now

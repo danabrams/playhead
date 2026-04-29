@@ -32,11 +32,13 @@ struct CapabilityBackedEligibilityProvidersTests {
 
     @Test("Empty cache (nil snapshot) returns permissive defaults on every axis")
     func emptyCacheIsPermissive() {
+        // playhead-kgn5: region was moved to a separate provider
+        // (`LocaleRegionSupportProvider`) — this struct now carries four
+        // of the five eligibility axes.
         let cache = CapabilitySnapshotCache()
         let providers = CapabilityBackedEligibilityProviders(cache: cache)
         #expect(providers.isHardwareSupported() == true)
         #expect(providers.isAppleIntelligenceEnabled() == true)
-        #expect(providers.isRegionSupported() == true)
         #expect(providers.isLanguageSupported() == true)
         #expect(providers.isModelAvailableNow() == true)
     }
@@ -65,16 +67,17 @@ struct CapabilityBackedEligibilityProvidersTests {
         #expect(providers.isAppleIntelligenceEnabled() == false)
     }
 
-    @Test("Region axis is always true today (no live region provider)")
-    func regionIsAlwaysTrue() {
-        // Documented gap: no live region API. The seam exists so a
-        // future bead can swap in a real provider without touching the
-        // observer or the evaluator. Pin the current behavior so the
-        // swap is intentional.
-        let cache = CapabilitySnapshotCache()
-        let providers = CapabilityBackedEligibilityProviders(cache: cache)
-        cache.set(Self.makeSnapshot())
-        #expect(providers.isRegionSupported() == true)
+    @Test("Region axis is no longer carried by this provider (playhead-kgn5)")
+    func regionAxisIsNotOnThisProvider() {
+        // playhead-kgn5: the previous `isRegionSupported() -> true`
+        // placeholder was lifted out of `CapabilityBackedEligibilityProviders`
+        // and replaced by `LocaleRegionSupportProvider`, which reads
+        // `Locale.current.region` against a US-only constant. Production
+        // wiring composes this provider for the four snapshot-derived
+        // axes and `LocaleRegionSupportProvider()` for the region slot.
+        // See `LocaleRegionSupportProviderTests` for the region behavior;
+        // this test pins the structural separation.
+        #expect(LocaleRegionSupportProvider.supportedRegions == ["US"])
     }
 
     @Test("Language axis tracks foundationModelsLocaleSupported")
