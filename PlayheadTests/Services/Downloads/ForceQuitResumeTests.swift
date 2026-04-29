@@ -328,6 +328,15 @@ struct ResumeSuspendedTransferTests {
         // On success the blob is removed — the OS now owns continuation.
         let loaded = try await manager.loadResumeData(episodeId: "ep-res")
         #expect(loaded == nil)
+
+        // playhead-6e8m: `resumeSuspendedTransfer` constructed a real
+        // background URLSession on the process-global
+        // `com.playhead.transfer.interactive` identifier and handed it
+        // a garbage 2-byte resume-data blob. Without invalidation the
+        // session + orphan task stays alive and leaks into any sibling
+        // test that subsequently constructs a `DownloadManager` (the
+        // identifier collides). Tear down explicitly here.
+        await manager.invalidateBackgroundSessionsForTesting()
     }
 
     @Test("resumeSuspendedTransfer returns .missing when no blob is persisted")
