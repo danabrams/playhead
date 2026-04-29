@@ -560,24 +560,11 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
         // Pre-load the synthetic-span ordinal-to-time map once so
         // `.exactSpan` corrections (synthetic ordinals → reported time
         // window) can be resolved without N round-trips to SQLite.
-        var synthSpansByOrdinal: [Int: (startTime: Double, endTime: Double)]? = nil
-        func resolveSyntheticTimes(forOrdinal ordinal: Int) async -> (startTime: Double, endTime: Double)? {
-            if synthSpansByOrdinal == nil {
-                do {
-                    let spans = try await store.fetchDecodedSpans(assetId: analysisAssetId)
-                    var map: [Int: (startTime: Double, endTime: Double)] = [:]
-                    for span in spans where span.firstAtomOrdinal < 0 {
-                        let times = (startTime: span.startTime, endTime: span.endTime)
-                        map[span.firstAtomOrdinal] = times
-                        map[span.lastAtomOrdinal] = times
-                    }
-                    synthSpansByOrdinal = map
-                } catch {
-                    synthSpansByOrdinal = [:]
-                }
-            }
-            return synthSpansByOrdinal?[ordinal]
-        }
+        // Lazily computed only if at least one false-negative
+        // correction is `.exactSpan` with a synthetic (negative)
+        // ordinal range — otherwise we never hit the store.
+        let synthSpansByOrdinal: [Int: (startTime: Double, endTime: Double)] =
+            await loadSyntheticOrdinalTimeMap(assetId: analysisAssetId)
 
         var maxOverlapWeight: Double = 0
         for (event, weight) in weighted where event.source?.kind == .falseNegative {
@@ -592,9 +579,9 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
                 // direct time mapping here, but synthetic spans (the
                 // common false-negative path) carry negative ordinals
                 // and have a corresponding DecodedSpan with start/end
-                // times. Look those up.
+                // times. Look those up via the pre-built map.
                 if ordinalRange.lowerBound < 0,
-                   let times = await resolveSyntheticTimes(forOrdinal: ordinalRange.lowerBound),
+                   let times = synthSpansByOrdinal[ordinalRange.lowerBound],
                    rangesOverlap(times.startTime, times.endTime, startTime, endTime) {
                     maxOverlapWeight = max(maxOverlapWeight, weight)
                 }
@@ -608,6 +595,30 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
         }
         guard maxOverlapWeight > 0 else { return 1.0 }
         return min(2.0, 1.0 + maxOverlapWeight)
+    }
+
+    /// Build a map from synthetic atom ordinal (always negative) to the
+    /// DecodedSpan time range that owns it. Used by the span-local
+    /// `correctionBoostFactor(overlapping:)` to resolve `.exactSpan`
+    /// corrections (which carry ordinals, not times) into time ranges
+    /// for overlap testing. Returns an empty map if the lookup fails —
+    /// the caller treats absent entries as non-overlapping.
+    private func loadSyntheticOrdinalTimeMap(assetId: String) async -> [Int: (startTime: Double, endTime: Double)] {
+        do {
+            let spans = try await store.fetchDecodedSpans(assetId: assetId)
+            var map: [Int: (startTime: Double, endTime: Double)] = [:]
+            for span in spans where span.firstAtomOrdinal < 0 {
+                let times = (startTime: span.startTime, endTime: span.endTime)
+                map[span.firstAtomOrdinal] = times
+                map[span.lastAtomOrdinal] = times
+            }
+            return map
+        } catch {
+            logger.warning(
+                "loadSyntheticOrdinalTimeMap: failed to load decoded spans for \(assetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return [:]
+        }
     }
 
     // MARK: - False-Negative Synthetic Anchor (playhead-ef2.3.2)
