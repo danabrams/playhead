@@ -28,7 +28,7 @@ struct BackgroundProcessingServiceTelemetryTests {
         )
 
         await bps.scheduleBackfillIfNeeded()
-        let events = try await recorder.eventsMatching(event: "submit", timeout: .seconds(2))
+        let events = try await recorder.eventsMatching(event: "submit", timeout: .seconds(10))
 
         #expect(events.count >= 1)
         let submit = events.first { $0.identifier == BackgroundTaskID.backfillProcessing }
@@ -50,7 +50,7 @@ struct BackgroundProcessingServiceTelemetryTests {
         )
 
         await bps.scheduleBackfillIfNeeded()
-        let events = try await recorder.eventsMatching(event: "submit", timeout: .seconds(2))
+        let events = try await recorder.eventsMatching(event: "submit", timeout: .seconds(10))
 
         let submit = events.first { $0.identifier == BackgroundTaskID.backfillProcessing }
         #expect(submit?.submitSucceeded == false)
@@ -82,8 +82,8 @@ struct BackgroundProcessingServiceTelemetryTests {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        let starts = try await recorder.eventsMatching(event: "start", timeout: .seconds(2))
-        let completes = try await recorder.eventsMatching(event: "complete", timeout: .seconds(2))
+        let starts = try await recorder.eventsMatching(event: "start", timeout: .seconds(10))
+        let completes = try await recorder.eventsMatching(event: "complete", timeout: .seconds(10))
 
         let start = starts.first { $0.identifier == BackgroundTaskID.backfillProcessing }
         let complete = completes.first { $0.identifier == BackgroundTaskID.backfillProcessing }
@@ -136,15 +136,43 @@ struct BackgroundProcessingServiceTelemetryTests {
 /// Backed by an actor so the recorder is Sendable and thread-safe
 /// without resorting to NSLock (which Swift Concurrency forbids in
 /// async contexts).
+///
+/// Subscribers receive a live `AsyncStream` that yields every recorded
+/// event the moment `append` returns. Tests use this to wait
+/// event-driven (no polling) for the production fire-and-forget
+/// telemetry `Task { await bgTelemetry.record(...) }` to land. Polling
+/// was previously fragile under cross-suite parallel test load: the
+/// poll task and production task competed for cooperative runtime slots,
+/// so a 2 s deadline could elapse without the production task ever
+/// scheduling — observed as flakes in submit/start/complete tests.
 actor RecordingBGTaskTelemetryActor {
     private(set) var events: [BGTaskTelemetryEvent] = []
+    private var continuations: [UUID: AsyncStream<BGTaskTelemetryEvent>.Continuation] = [:]
 
     func append(_ event: BGTaskTelemetryEvent) {
         events.append(event)
+        for c in continuations.values { c.yield(event) }
     }
 
     func snapshot() -> [BGTaskTelemetryEvent] {
         events
+    }
+
+    /// Returns a stream that replays all events recorded so far, then
+    /// yields each subsequent event as it arrives. Caller MUST invoke
+    /// `unsubscribe(id:)` (or finish the iterator) so the continuation
+    /// doesn't leak.
+    func subscribe() -> (UUID, AsyncStream<BGTaskTelemetryEvent>) {
+        let id = UUID()
+        var continuation: AsyncStream<BGTaskTelemetryEvent>.Continuation!
+        let stream = AsyncStream<BGTaskTelemetryEvent> { c in continuation = c }
+        for e in events { continuation.yield(e) }
+        continuations[id] = continuation
+        return (id, stream)
+    }
+
+    func unsubscribe(id: UUID) {
+        continuations.removeValue(forKey: id)?.finish()
     }
 }
 
@@ -159,22 +187,38 @@ struct RecordingBGTaskTelemetryLogger: BGTaskTelemetryLogging {
         await inner.snapshot()
     }
 
-    /// Spin until at least one event with the given discriminator is
-    /// observed, or the deadline expires. Production code emits via
-    /// fire-and-forget `Task { await logger.record(...) }`, so a test
-    /// that observes too early will see an empty buffer.
+    /// Wait until at least one event with the given discriminator is
+    /// observed, or the deadline expires; then return ALL matching
+    /// events in the snapshot. Event-driven via `AsyncStream` rather
+    /// than polling, so a single runtime slot for the production task
+    /// is enough — there is no cadence dependency. The timeout is the
+    /// upper bound on how long the test will wait for the production
+    /// fire-and-forget `Task { ... await bgTelemetry.record(...) }`
+    /// to schedule and run.
     func eventsMatching(
         event: String,
         timeout: Duration
     ) async throws -> [BGTaskTelemetryEvent] {
-        let deadline = ContinuousClock.now + timeout
-        while ContinuousClock.now < deadline {
-            let matches = await snapshot().filter { $0.event == event }
-            if !matches.isEmpty {
-                return matches
-            }
-            try await Task.sleep(for: .milliseconds(10))
+        let initial = await snapshot().filter { $0.event == event }
+        if !initial.isEmpty { return initial }
+
+        let (id, stream) = await inner.subscribe()
+        defer {
+            let inner = self.inner
+            Task { await inner.unsubscribe(id: id) }
         }
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                for await e in stream where e.event == event { return }
+            }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+            }
+            await group.next()
+            group.cancelAll()
+        }
+
         return await snapshot().filter { $0.event == event }
     }
 }
