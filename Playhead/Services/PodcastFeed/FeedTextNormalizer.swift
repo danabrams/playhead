@@ -31,6 +31,25 @@ enum FeedTextNormalizer {
         //    uncapped passes whose worst-case behavior on adversarial
         //    multi-MB input dominates this function's cost; truncate
         //    first so the pathological path is bounded.
+        //
+        //    Trade-off (L2 / rfu-mn): the byte-cap walk-back lands on
+        //    a Character boundary but does NOT inspect HTML structure.
+        //    If an open `<script>...` or `<style>...` block straddles
+        //    the 256 KB boundary, the closing tag is dropped along
+        //    with everything past the cap. The follow-on `<script>`
+        //    and `<style>` content strippers (steps 1a) require
+        //    matching open/close pairs and therefore leave the
+        //    pre-cap remnant in place. Any leaked content is bounded
+        //    by the post-regex `maxLength` truncation (4 000 chars)
+        //    AND by the generic `<[^>]+>` tag stripper (step 1b),
+        //    which removes the open `<script ...>` tag itself even if
+        //    the close was lost. Net effect: at most 4 000 chars of
+        //    de-tagged JS/CSS body text from the pre-cap window can
+        //    survive into the normalized output — the same upper
+        //    bound that already governs every other stripped-tag
+        //    fragment. Adding a structure-aware walk-back to fix
+        //    this is not worth the complexity for content past the
+        //    cap, which is already adversarial.
         if text.utf8.count > Self.preRegexByteCap {
             // Find a UTF-8-safe truncation point: cap by UTF-8 byte count
             // but advance to a Character boundary so we don't split a
