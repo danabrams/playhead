@@ -186,6 +186,17 @@ actor AssetProvider {
 
         try fm.moveItem(at: verifiedFile, to: stagedURL)
 
+        // playhead-h3h: re-stamp the staged model's protection class so
+        // files moved in from the URLSession session container inherit
+        // the same `.completeUntilFirstUserAuthentication` envelope as
+        // the AnalysisStore. The cross-volume rename keeps a file's
+        // original class, so the stamp is mandatory — directory-level
+        // protection alone does not propagate.
+        try? fm.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: stagedURL.path
+        )
+
         // Write version sidecar.
         try await inventory.writeVersionSidecar(modelId: entry.id, version: entry.modelVersion, in: stagingDir)
         await inventory.markStaged(modelId: entry.id)

@@ -684,6 +684,19 @@ actor DownloadManager {
             if !fm.fileExists(atPath: dir.path) {
                 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
             }
+            // playhead-h3h: stamp the audio-cache directories with the
+            // same protection class as the AnalysisStore. The bead's
+            // wishlist asks for `.complete`, but the same BG-launch
+            // constraint that forced AnalysisStore down to
+            // `.completeUntilFirstUserAuthentication` applies here:
+            // AnalysisCoordinator opens cached audio during
+            // BGProcessingTask windows that may begin pre-first-unlock.
+            // `.complete` would block those reads. Re-stamping
+            // unconditionally migrates pre-h3h installs.
+            try? fm.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: dir.path
+            )
         }
         // Remove stale files with unrecognized extensions (e.g. ".audio"
         // from earlier builds) that AVURLAsset can't open.
@@ -1024,7 +1037,16 @@ actor DownloadManager {
         if fm.fileExists(atPath: completeURL.path) {
             try fm.removeItem(at: completeURL)
         }
-        fm.createFile(atPath: completeURL.path, contents: nil)
+        // playhead-h3h: create with explicit
+        // `.completeUntilFirstUserAuthentication` rather than letting the
+        // file inherit the system default. Aligns with the AnalysisStore
+        // protection class so a BGProcessingTask reading cached audio
+        // pre-first-unlock cannot fail with EPERM mid-pipeline.
+        fm.createFile(
+            atPath: completeURL.path,
+            contents: nil,
+            attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
+        )
         let fileHandle = try FileHandle(forWritingTo: completeURL)
 
         let request = URLRequest(url: url)
@@ -1733,6 +1755,16 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
                 try fm.removeItem(at: destURL)
             }
             try fm.moveItem(at: location, to: destURL)
+            // playhead-h3h: stamp the freshly-deposited cached audio so
+            // the protection class matches the parent directory. Files
+            // moved in from the URLSession session container inherit
+            // the system-default class, which is `.complete` on
+            // background-session containers — that would block reads
+            // during pre-first-unlock BG processing windows.
+            try? fm.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: destURL.path
+            )
             logger.info("Background download complete for \(episodeId)")
             onDownloadComplete?(episodeId, destURL)
 
