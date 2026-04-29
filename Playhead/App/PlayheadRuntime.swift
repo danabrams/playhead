@@ -1347,17 +1347,21 @@ final class PlayheadRuntime {
         guard !isPreviewRuntime else { return }
 
         backgroundProcessingService.registerBackgroundTasks()
+        // playhead-shpy: wire the process-wide telemetry holder BEFORE
+        // registering the early-fire BGTask handler so the fallback's
+        // `sharedTelemetry.withLock { $0 }` always sees a live recorder.
+        // The handler is the side effect — iOS could dispatch a refresh
+        // immediately after `register(...)` returns, so any code that
+        // wants to observe the fallback path must publish itself first.
+        // `attachSharedTelemetry` only mutates the lock-held holder
+        // (idempotent — later calls overwrite), so calling it before any
+        // handler is registered is safe.
+        BackgroundFeedRefreshService.attachSharedTelemetry(bgTaskTelemetryLogger)
         // playhead-fv2q: register the periodic BGAppRefreshTask identifier
         // before launch completes. The real service instance is built and
         // attached later by `PlayheadApp.task` once the `ModelContainer`
         // is available; see `BackgroundFeedRefreshService.attachSharedService`.
         BackgroundFeedRefreshService.registerTaskHandler()
-        // playhead-shpy: wire the process-wide telemetry holder so the
-        // early-fire fallback path (no live service yet) still emits a
-        // `submit` row when iOS dispatches a refresh between
-        // `registerTaskHandler` and `attachSharedService`. Without this,
-        // submit failures in that window are silently dropped.
-        BackgroundFeedRefreshService.attachSharedTelemetry(bgTaskTelemetryLogger)
 
         Task { [downloadManager] in
             do {

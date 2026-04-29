@@ -43,9 +43,19 @@ func withTestRuntime<T>(
     do {
         let result = try await body(runtime)
         await runtime.shutdown()
+        // playhead-shpy / M4 (rfu-mn): the runtime publishes its
+        // BG-task telemetry logger into a process-global static via
+        // `BackgroundFeedRefreshService.attachSharedTelemetry`. Without
+        // this detach, every `withTestRuntime` call leaves a dead
+        // recorder reference behind in the static after teardown
+        // (bounded — one per test, no growth — but visible in heap
+        // snapshots). Production never calls detach; the live logger
+        // has process lifetime there.
+        BackgroundFeedRefreshService.detachSharedTelemetry()
         return result
     } catch {
         await runtime.shutdown()
+        BackgroundFeedRefreshService.detachSharedTelemetry()
         throw error
     }
 }
