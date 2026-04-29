@@ -83,9 +83,24 @@ enum NarlWindowMetrics {
         let tp = tpPairs.count
         let fp = preds.count - tp
         let fn = gts.count - claimedGT.count
-        let precision = preds.isEmpty ? 0 : Double(tp) / Double(preds.count)
-        let recall = gts.isEmpty ? 0 : Double(tp) / Double(gts.count)
+        // Empty-prediction + empty-GT is a *perfect* classification by
+        // standard convention — there were no ads, the detector predicted
+        // none, ergo precision = recall = F1 = 1. Returning 0 here would
+        // systematically pull rollups down for every ad-free episode (a
+        // population we expect to grow as eval coverage broadens). The
+        // standard PASCAL VOC convention treats "nothing to find, nothing
+        // found" as the trivial perfect case.
+        let precision: Double
+        let recall: Double
+        if preds.isEmpty && gts.isEmpty {
+            precision = 1
+            recall = 1
+        } else {
+            precision = preds.isEmpty ? 0 : Double(tp) / Double(preds.count)
+            recall = gts.isEmpty ? 0 : Double(tp) / Double(gts.count)
+        }
         let f1: Double = {
+            if preds.isEmpty && gts.isEmpty { return 1 }
             let denom = precision + recall
             return denom > 0 ? 2 * precision * recall / denom : 0
         }()

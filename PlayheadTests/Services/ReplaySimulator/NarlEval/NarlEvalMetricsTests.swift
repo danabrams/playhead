@@ -101,13 +101,20 @@ struct NarlWindowMatchingTests {
         #expect(m.truePositives == 2)
     }
 
-    @Test("Empty predictions + empty GT → zero-safe values")
+    @Test("Empty predictions + empty GT → perfect classification (precision=recall=F1=1)")
     func emptyEverything() {
+        // PASCAL-VOC convention: when there are no ads to detect and the
+        // detector predicts none, that's a trivial perfect result.
+        // Returning 0 here would systematically pull rollups down for
+        // every ad-free episode — exactly the population we want to
+        // expand coverage on.
         let m = NarlWindowMetrics.compute(predicted: [], groundTruth: [], threshold: 0.5)
         #expect(m.truePositives == 0)
-        #expect(m.precision == 0)
-        #expect(m.recall == 0)
-        #expect(m.f1 == 0)
+        #expect(m.falsePositives == 0)
+        #expect(m.falseNegatives == 0)
+        #expect(m.precision == 1)
+        #expect(m.recall == 1)
+        #expect(m.f1 == 1)
     }
 }
 
