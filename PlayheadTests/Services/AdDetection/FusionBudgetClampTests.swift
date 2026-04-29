@@ -12,7 +12,7 @@ import OSLog
 import Testing
 @testable import Playhead
 
-@Suite("FusionBudgetClamp — unit")
+@Suite("FusionBudgetClamp — unit", .serialized)
 struct FusionBudgetClampTests {
 
     private static let testLogger = Logger(
