@@ -124,13 +124,26 @@ struct NowPlayingView: View {
             viewModel.observeBanners(from: runtime.skipOrchestrator, into: bannerQueue)
             // playhead-gtt9.23: when a suggest-tier banner exits without
             // a Skip tap (auto-fade or dismiss button), tell the
-            // orchestrator to drop the suggest window. Set once on
-            // appear; the queue retains the closure for its lifetime.
-            bannerQueue.onSuggestExitWithoutSkip = { item in
-                let orchestrator = runtime.skipOrchestrator
-                let windowId = item.windowId
-                Task {
-                    await orchestrator.declineSuggestedSkip(windowId: windowId)
+            // orchestrator to drop the suggest window.
+            //
+            // playhead-rfu-sad: bind only once. `onAppear` fires every
+            // time the view returns to screen (sheet dismissal, push
+            // pop, app foreground), and rebinding on each call would
+            // create churn for no benefit — the queue retains the
+            // closure for its lifetime, and the runtime reference is
+            // stable across view-lifecycle events. Guard with a
+            // `nil` check so subsequent re-appearances are no-ops.
+            // The `runtime` capture is also weakened so a stale
+            // closure cannot fire on a deallocated runtime if the
+            // queue ever outlives this view.
+            if bannerQueue.onSuggestExitWithoutSkip == nil {
+                bannerQueue.onSuggestExitWithoutSkip = { [weak runtime] item in
+                    guard let runtime else { return }
+                    let orchestrator = runtime.skipOrchestrator
+                    let windowId = item.windowId
+                    Task {
+                        await orchestrator.declineSuggestedSkip(windowId: windowId)
+                    }
                 }
             }
             Task { await viewModel.loadSkipMode(from: runtime.skipOrchestrator) }
