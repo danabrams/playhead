@@ -279,4 +279,113 @@ struct FullTranscriptViewModelTests {
         await vm.load()
         #expect(vm.tappedParagraph(at: 5) == nil)
     }
+
+    // MARK: Search
+
+    @Test("Search finds case-insensitive substring matches")
+    func searchCaseInsensitive() async {
+        // Each chunk pair is ~3s apart so the long-pause rule splits them
+        // into separate paragraphs (testing that search walks paragraphs).
+        let chunks = [
+            chunk(index: 0, start: 0, end: 2, text: "Welcome to the show today"),
+            chunk(index: 1, start: 6, end: 8, text: "Our sponsor is BetterHelp"),
+            chunk(index: 2, start: 14, end: 16, text: "Back to the interview"),
+        ]
+        let vm = FullTranscriptViewModel(
+            analysisAssetId: "asset-1",
+            dataSource: StubTranscriptPeekDataSource(snapshot: snapshot(chunks: chunks))
+        )
+        await vm.load()
+        #expect(vm.paragraphs.count == 3)
+
+        vm.searchQuery = "the"
+        // "the show today" and "the interview" both match.
+        #expect(vm.matchingParagraphIndices == [0, 2])
+        #expect(vm.currentMatchPosition == 0)
+        #expect(vm.matchCountLabel == "1 of 2")
+    }
+
+    @Test("Empty search clears match state")
+    func emptyQueryClearsMatches() async {
+        let chunks = [
+            chunk(index: 0, start: 0, end: 2, text: "alpha"),
+            chunk(index: 1, start: 4, end: 6, text: "beta"),
+        ]
+        let vm = FullTranscriptViewModel(
+            analysisAssetId: "asset-1",
+            dataSource: StubTranscriptPeekDataSource(snapshot: snapshot(chunks: chunks))
+        )
+        await vm.load()
+
+        vm.searchQuery = "alpha"
+        #expect(!vm.matchingParagraphIndices.isEmpty)
+
+        vm.searchQuery = ""
+        #expect(vm.matchingParagraphIndices.isEmpty)
+        #expect(vm.currentMatchPosition == nil)
+        #expect(vm.matchCountLabel == "")
+    }
+
+    @Test("nextMatch advances and wraps")
+    func nextMatchWraps() async {
+        // 3 separate paragraphs, all containing the word "the".
+        let chunks = [
+            chunk(index: 0, start: 0, end: 2, text: "the alpha"),
+            chunk(index: 1, start: 6, end: 8, text: "the beta"),
+            chunk(index: 2, start: 14, end: 16, text: "the gamma"),
+        ]
+        let vm = FullTranscriptViewModel(
+            analysisAssetId: "asset-1",
+            dataSource: StubTranscriptPeekDataSource(snapshot: snapshot(chunks: chunks))
+        )
+        await vm.load()
+        vm.searchQuery = "the"
+        #expect(vm.matchingParagraphIndices == [0, 1, 2])
+        #expect(vm.currentMatchPosition == 0)
+
+        let target1 = vm.nextMatch()
+        #expect(vm.currentMatchPosition == 1)
+        #expect(target1 == vm.paragraphs[1].id)
+
+        _ = vm.nextMatch()
+        #expect(vm.currentMatchPosition == 2)
+
+        let target3 = vm.nextMatch()
+        #expect(vm.currentMatchPosition == 0)
+        #expect(target3 == vm.paragraphs[0].id)
+    }
+
+    @Test("previousMatch wraps from first to last")
+    func previousMatchWraps() async {
+        let chunks = [
+            chunk(index: 0, start: 0, end: 2, text: "the alpha"),
+            chunk(index: 1, start: 6, end: 8, text: "the beta"),
+        ]
+        let vm = FullTranscriptViewModel(
+            analysisAssetId: "asset-1",
+            dataSource: StubTranscriptPeekDataSource(snapshot: snapshot(chunks: chunks))
+        )
+        await vm.load()
+        vm.searchQuery = "the"
+
+        // Position 0 -> previous wraps to last (position 1).
+        let target = vm.previousMatch()
+        #expect(vm.currentMatchPosition == 1)
+        #expect(target == vm.paragraphs[1].id)
+    }
+
+    @Test("nextMatch with no matches is a no-op and returns nil")
+    func nextMatchNoMatches() async {
+        let vm = FullTranscriptViewModel(
+            analysisAssetId: "asset-1",
+            dataSource: StubTranscriptPeekDataSource(
+                snapshot: snapshot(chunks: [chunk(index: 0, start: 0, end: 2, text: "alpha")])
+            )
+        )
+        await vm.load()
+        vm.searchQuery = "missing"
+        #expect(vm.matchingParagraphIndices.isEmpty)
+        #expect(vm.nextMatch() == nil)
+        #expect(vm.previousMatch() == nil)
+    }
 }
