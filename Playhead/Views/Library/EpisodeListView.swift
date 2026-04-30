@@ -379,6 +379,12 @@ private struct EpisodeRow: View {
     /// has been written yet (the backfill coordinator hasn't gotten to
     /// this asset, or coverage is still <80%).
     @State private var fetchedSummary: EpisodeSummary?
+    /// playhead-9u0: analysis asset id for this episode, resolved alongside
+    /// the summary lookup. Drives the "Read transcript" navigation link in
+    /// the expanded body — the link becomes available once the row's analysis
+    /// asset has been located. Stays nil for episodes whose analysis hasn't
+    /// produced an asset row yet.
+    @State private var resolvedAnalysisAssetId: String?
     @Environment(PlayheadRuntime.self) private var runtime
 
     var body: some View {
@@ -529,13 +535,36 @@ private struct EpisodeRow: View {
                     .foregroundStyle(AppColors.textSecondary)
             }
 
-            Button(action: onPlay) {
-                Label("Play", systemImage: "play.fill")
-                    .font(AppTypography.sans(size: 14, weight: .semibold))
-                    .foregroundStyle(AppColors.accent)
+            HStack(spacing: Spacing.lg) {
+                Button(action: onPlay) {
+                    Label("Play", systemImage: "play.fill")
+                        .font(AppTypography.sans(size: 14, weight: .semibold))
+                        .foregroundStyle(AppColors.accent)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("EpisodeRow.expanded.playButton")
+
+                // playhead-9u0: full-screen transcript reader. Available
+                // once the row has resolved an analysis asset id (so the
+                // FullTranscriptViewModel has something to fetch). When
+                // resolution is still pending the link is omitted rather
+                // than rendered disabled — the row collapses cleanly to
+                // just "Play" until analysis catches up.
+                if let assetId = resolvedAnalysisAssetId {
+                    NavigationLink {
+                        LibraryFullTranscriptHost(
+                            episode: episode,
+                            analysisAssetId: assetId
+                        )
+                    } label: {
+                        Label("Transcript", systemImage: "text.justify.left")
+                            .font(AppTypography.sans(size: 14, weight: .semibold))
+                            .foregroundStyle(AppColors.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("EpisodeRow.expanded.transcriptLink")
+                }
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("EpisodeRow.expanded.playButton")
         }
         .padding(.top, Spacing.xs)
         .transition(.opacity.combined(with: .move(edge: .top)))
@@ -566,14 +595,19 @@ private struct EpisodeRow: View {
         let store = runtime.analysisStore
         let key = episode.canonicalEpisodeKey
         let summary: EpisodeSummary?
+        let assetId: String
         do {
             guard let asset = try await store.fetchAssetByEpisodeId(key) else {
                 return
             }
+            assetId = asset.id
             summary = try await store.fetchEpisodeSummary(assetId: asset.id)
         } catch {
             return
         }
+        // Resolve the asset id even when no summary has been written yet
+        // (the transcript may exist before the summary backfill catches up).
+        await MainActor.run { self.resolvedAnalysisAssetId = assetId }
         if let summary {
             await MainActor.run { self.fetchedSummary = summary }
         }
@@ -692,6 +726,75 @@ func libraryRowStatusLineInputs(episode: Episode) -> LibraryRowStatusLineInputs?
         coverage: episode.coverageSummary,
         anchor: episode.playbackAnchor
     )
+}
+
+// MARK: - Full Transcript Host (playhead-9u0)
+
+/// Hosts the `FullTranscriptView` from a Library row's NavigationLink
+/// destination. The wrapper exists to bridge a *frozen* call-site value
+/// (the row was created at one point in the @Query render) and the
+/// *live* playback time — when the row's episode happens to be the one
+/// currently playing, we observe `PlaybackService.observeStates()` so
+/// the transcript can auto-follow. When the row's episode is NOT the
+/// currently-playing one (the common Library "browse" case) we leave
+/// `currentTime` at 0 and the view simply renders without a highlight,
+/// matching the bead's spec for browse-mode entry.
+private struct LibraryFullTranscriptHost: View {
+
+    let episode: Episode
+    let analysisAssetId: String
+    @Environment(PlayheadRuntime.self) private var runtime
+
+    /// Live playback time in seconds. Only updates while the row's
+    /// episode matches `runtime.currentEpisodeId`; otherwise stays at 0.
+    @State private var currentTime: TimeInterval = 0
+    @State private var observationTask: Task<Void, Never>?
+
+    var body: some View {
+        FullTranscriptView(
+            viewModel: FullTranscriptViewModel(
+                analysisAssetId: analysisAssetId,
+                dataSource: LiveTranscriptPeekDataSource(
+                    store: runtime.analysisStore
+                )
+            ),
+            currentTime: currentTime,
+            duration: episode.duration ?? 0,
+            onSeek: { seekTime in
+                Task {
+                    await runtime.playEpisode(episode)
+                    await runtime.seek(to: seekTime)
+                }
+            }
+        )
+        .task {
+            await beginObservingIfCurrent()
+        }
+        .onDisappear {
+            observationTask?.cancel()
+            observationTask = nil
+        }
+    }
+
+    /// Start a playback-state observation task, but only when this row's
+    /// episode is the runtime's current episode. We compare against
+    /// `Episode.canonicalEpisodeKey` because that's the same key the
+    /// runtime uses (`setCurrentEpisodeId`).
+    private func beginObservingIfCurrent() async {
+        let isCurrent = runtime.currentEpisodeId == episode.canonicalEpisodeKey
+        guard isCurrent else { return }
+        // Seed with the current snapshot so the first paint is correct.
+        let snapshot = await runtime.playbackService.snapshot()
+        currentTime = snapshot.currentTime
+        observationTask?.cancel()
+        observationTask = Task { @MainActor in
+            let stream = await runtime.playbackService.observeStates()
+            for await state in stream {
+                guard !Task.isCancelled else { return }
+                currentTime = state.currentTime
+            }
+        }
+    }
 }
 
 // MARK: - Pull-to-Refresh Helper (playhead-riu8)

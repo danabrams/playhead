@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+    <head>
+        <title>Unicode Subscriptions</title>
+    </head>
+    <body>
+        <outline type="rss" text="Café del Mar — Música" xmlUrl="https://example.com/cafe.rss"/>
+        <outline type="rss" text="日本語ポッドキャスト" xmlUrl="https://example.com/jp.rss"/>
+        <outline type="rss" text="Naïve &amp; Sentimental" xmlUrl="https://example.com/naive.rss"/>
+    </body>
+</opml>
