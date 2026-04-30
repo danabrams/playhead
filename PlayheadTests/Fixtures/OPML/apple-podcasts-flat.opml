@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+    <head>
+        <title>iTunes Subscriptions</title>
+    </head>
+    <body>
+        <outline type="rss" text="Diary of a CEO" xmlUrl="https://feeds.flightcast.com/diary-of-a-ceo"/>
+        <outline type="rss" text="Smartless" xmlUrl="https://rss.art19.com/smartless"/>
+    </body>
+</opml>

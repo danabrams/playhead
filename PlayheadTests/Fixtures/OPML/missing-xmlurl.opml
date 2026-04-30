@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+    <head>
+        <title>Mixed feeds</title>
+    </head>
+    <body>
+        <outline type="rss" text="Has feed" xmlUrl="https://example.com/has.rss"/>
+        <outline type="rss" text="Folder no xmlUrl"/>
+        <outline type="link" text="Bookmark" url="https://example.com/page"/>
+    </body>
+</opml>

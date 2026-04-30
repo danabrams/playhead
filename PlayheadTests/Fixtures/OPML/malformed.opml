@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="1.0">
+    <head><title>Broken</title></head>
+    <body>
+        <outline type="rss" text="Unclosed" xmlUrl="https://example.com/feed.rss"
+    </body>
+</opml>
