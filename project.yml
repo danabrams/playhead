@@ -24,6 +24,24 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.playhead.app
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_EMIT_LOC_STRINGS: YES
+        # playhead-izvj.1: Mac Catalyst spike. Enable Catalyst as a
+        # secondary destination for the existing iOS target. The
+        # `maccatalyst.` prefix on the bundle id keeps the two installs
+        # separable when both are sideloaded on the same Mac.
+        SUPPORTS_MACCATALYST: YES
+        # Apple Silicon Macs only — matches the epic's strategic stance
+        # (no Intel Macs by 2026). Also disables the
+        # "Designed for iPad" install path; Catalyst is the deliberate
+        # Mac story for this app.
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+      configs:
+        # Xcode 26 deprecates DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER
+        # in favor of conditional PRODUCT_BUNDLE_IDENTIFIER. Apply the
+        # Catalyst-only override per Apple's documented pattern.
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER[sdk=macosx*]: maccatalyst.com.playhead.app
+        Release:
+          PRODUCT_BUNDLE_IDENTIFIER[sdk=macosx*]: maccatalyst.com.playhead.app
     # playhead-gtt9.21: stamp the short git SHA into a dedicated
     # `BuildProvenance.plist` in the app bundle so `BuildInfo.commitSHA`
     # (and downstream FrozenTrace provenance) reflects the binary's

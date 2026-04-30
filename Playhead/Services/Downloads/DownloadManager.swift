@@ -635,8 +635,22 @@ actor DownloadManager {
     /// identifiers, and `handleWillResignActive`'s caller loop already
     /// iterates distinct `episodeId`s, so a single cycle cannot submit
     /// twice for the same episode.
+    ///
+    /// playhead-izvj.1 (Mac Catalyst spike): `BGContinuedProcessingTaskRequest`
+    /// is iOS-only — the API is unavailable in Mac Catalyst. On Catalyst
+    /// we no-op and log; the desktop process is not subject to the same
+    /// suspend-on-background lifecycle, so the 80%/2-min decision still
+    /// flows through `ForegroundAssistHandoff.decide(...)` (so the call
+    /// site logs it) but the BG task submission is skipped. A future
+    /// Catalyst polish bead can decide whether to keep the URL session
+    /// alive explicitly or rely on the OS not killing the process.
     private func submitContinuedProcessingRequest(for episodeId: String) {
         let identifier = "\(BackgroundTaskID.continuedProcessing).\(episodeId)"
+        #if targetEnvironment(macCatalyst)
+        logger.info(
+            "Skipping BGContinuedProcessingTaskRequest on Mac Catalyst (API unavailable): \(identifier, privacy: .public)"
+        )
+        #else
         let request = BGContinuedProcessingTaskRequest(
             identifier: identifier,
             title: "Finishing download",
@@ -651,6 +665,7 @@ actor DownloadManager {
                 "Failed to submit BGContinuedProcessingTaskRequest \(identifier, privacy: .public): \(String(describing: error), privacy: .public)"
             )
         }
+        #endif
     }
 
     /// Test hook: read the current stored foreground-assist progress
