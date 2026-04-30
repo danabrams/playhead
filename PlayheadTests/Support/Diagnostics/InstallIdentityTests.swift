@@ -25,7 +25,7 @@ struct InstallIdentityTests {
 
     private func makeInMemoryContext() throws -> ModelContext {
         let schema = Schema([InstallIdentity.self])
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         let container = try ModelContainer(for: schema, configurations: [config])
         return ModelContext(container)
     }

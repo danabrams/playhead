@@ -162,6 +162,18 @@ private extension LibraryView {
     // MARK: - Actions
 
     func unsubscribe(_ podcast: Podcast) {
+        // playhead-5c1t: writer-tap. Build the tombstone record BEFORE
+        // the local delete so the in-memory `Podcast` fields are still
+        // readable; we read `feedURL`/`title`/etc through the live
+        // SwiftData object. The CloudKit push is fire-and-forget so the
+        // unsubscribe gesture stays instant — the coordinator owns
+        // retry/queueing.
+        let tombstone = SubscriptionLibrary.tombstoneRecord(for: podcast)
+        let coordinator = runtime.iCloudSyncCoordinator
+        Task.detached {
+            _ = try? await coordinator.upsertSubscriptionMerging(tombstone)
+        }
+
         modelContext.delete(podcast)
     }
 

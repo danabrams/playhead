@@ -27,7 +27,7 @@ struct UserPreferencesPersistenceTests {
     /// in-memory store, and verify the persisted value is observed.
     @Test func skipBehaviorRoundTrips() throws {
         let schema = Schema([UserPreferences.self])
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         let container = try ModelContainer(for: schema, configurations: config)
 
         // First context: write `.manual`.
@@ -51,7 +51,7 @@ struct UserPreferencesPersistenceTests {
 
     @Test func playbackSpeedRoundTrips() throws {
         let schema = Schema([UserPreferences.self])
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         let container = try ModelContainer(for: schema, configurations: config)
 
         do {
@@ -69,7 +69,7 @@ struct UserPreferencesPersistenceTests {
 
     @Test func skipIntervalsRoundTrip() throws {
         let schema = Schema([UserPreferences.self])
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         let container = try ModelContainer(for: schema, configurations: config)
 
         do {
@@ -314,5 +314,68 @@ struct SettingsPremiumStatusTests {
         viewModel.isPremium = false
         let copy = viewModel.isPremium ? "Premium — purchased" : "Free preview"
         #expect(copy == "Free preview")
+    }
+}
+
+// MARK: - iCloud sync reactivity (playhead-5c1t)
+
+@Suite("Settings iCloud sync footer reactivity (playhead-5c1t)")
+@MainActor
+struct SettingsICloudSyncReactivityTests {
+
+    /// The fresh view-model must report `nil` so the View suppresses
+    /// the footer rather than flashing a wrong value at launch.
+    @Test func defaultICloudSyncEnabledIsNil() {
+        let viewModel = SettingsViewModel()
+        #expect(viewModel.iCloudSyncEnabled == nil,
+                "Fresh view-model defaults iCloud-sync flag to nil so the footer is suppressed.")
+    }
+
+    /// Drive the fake provider to `unavailable` mid-observation and
+    /// assert the view-model published value flips. Pinned by the bead
+    /// spec — sign-out mid-session must update the footer without a
+    /// view re-appear.
+    @Test func observeICloudSyncStatusFlipsOnSignOut() async throws {
+        let provider = FakeCloudKitProvider(initialAccountStatus: .available)
+        let coordinator = ICloudSyncCoordinator(provider: provider)
+        await coordinator.handleAccountStatusChange()
+
+        let viewModel = SettingsViewModel()
+
+        // Run the observation in a child task so the suspending
+        // for-loop doesn't block the test. We then drive the
+        // status flip and poll the view-model for the new value.
+        let observationTask = Task { @MainActor in
+            await viewModel.observeICloudSyncStatus(coordinator)
+        }
+        defer { observationTask.cancel() }
+
+        // Wait for the seed value (`true`) to land on the view-model.
+        try await waitFor { viewModel.iCloudSyncEnabled == true }
+
+        // Sign out mid-session.
+        await provider.setAccountStatus(.noAccount)
+        await coordinator.handleAccountStatusChange()
+
+        // Footer must flip to `false` without a view re-appear.
+        try await waitFor { viewModel.iCloudSyncEnabled == false }
+        #expect(viewModel.iCloudSyncEnabled == false)
+    }
+
+    /// Polls a predicate on the main actor with a 1s ceiling. Sweeter
+    /// than scattering `try await Task.sleep` across each test.
+    @MainActor
+    private func waitFor(
+        _ predicate: @MainActor () -> Bool,
+        timeout: Duration = .seconds(1)
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if predicate() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        if !predicate() {
+            Issue.record("Predicate never became true within \(timeout)")
+        }
     }
 }

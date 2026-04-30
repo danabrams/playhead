@@ -13,7 +13,8 @@ private func makeInMemoryContainer() throws -> ModelContainer {
     let config = ModelConfiguration(
         "DownloadBatchEvictorTests",
         schema: schema,
-        isStoredInMemoryOnly: true
+        isStoredInMemoryOnly: true,
+        cloudKitDatabase: .none
     )
     return try ModelContainer(for: schema, configurations: [config])
 }

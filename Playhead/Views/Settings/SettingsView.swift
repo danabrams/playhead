@@ -21,7 +21,10 @@ struct SettingsView: View {
 
     @Query private var allPreferences: [UserPreferences]
     @Environment(\.modelContext) var modelContext
-    @Environment(PlayheadRuntime.self) private var runtime
+    /// playhead-5c1t: kept `internal` so `SettingsOPMLSection` (an
+    /// extension in another file) can pass the coordinator into the
+    /// OPML import bridge for the writer-tap.
+    @Environment(PlayheadRuntime.self) var runtime
 
     @State private var viewModel = SettingsViewModel()
 
@@ -185,12 +188,24 @@ struct SettingsView: View {
                     viewModel.refreshEligibility(
                         using: runtime.analysisEligibilityEvaluator
                     )
-                    // playhead-j2u: subscribe to premium-status updates
-                    // so the Purchases section reflects transactions
-                    // arriving from other devices / restores.
-                    if let entitlementManager {
-                        await viewModel.observePremiumStatus(entitlementManager)
-                    }
+                    // playhead-5c1t: both `observeICloudSyncStatus`
+                    // and `observePremiumStatus` are AsyncSequence
+                    // consumers that never return until the enclosing
+                    // task is cancelled (SwiftUI tears the `.task`
+                    // modifier down when the view leaves the
+                    // hierarchy). Run them concurrently via `async let`
+                    // so neither starves the other; cancelling either
+                    // child propagates from the parent task's
+                    // cancellation.
+                    async let icloud: Void = viewModel.observeICloudSyncStatus(
+                        runtime.iCloudSyncCoordinator
+                    )
+                    async let premium: Void = {
+                        if let entitlementManager {
+                            await viewModel.observePremiumStatus(entitlementManager)
+                        }
+                    }()
+                    _ = await (icloud, premium)
                 }
                 .onChange(of: router?.pending) { _, newRoute in
                     guard let newRoute else { return }
@@ -733,6 +748,29 @@ private extension SettingsView {
                 .accessibilityIdentifier("Settings.about.privacy")
         } header: {
             sectionHeader("About")
+        } footer: {
+            // playhead-5c1t: quiet "Synced via iCloud" / "iCloud sync
+            // paused" footer. Peace-of-mind, not metrics — no badge, no
+            // animation, no quantified counter. Single tertiary-color
+            // line, hidden entirely when the runtime hasn't loaded the
+            // status yet so we never lie about the state.
+            iCloudSyncFooter
+        }
+    }
+
+    /// playhead-5c1t: footer text for the About section. Reflects the
+    /// `ICloudSyncCoordinator.isSyncEnabled` state observed from the
+    /// view model. Empty string while the first observation lands —
+    /// avoids flashing the wrong value at launch.
+    @ViewBuilder
+    var iCloudSyncFooter: some View {
+        if let enabled = viewModel.iCloudSyncEnabled {
+            Text(enabled ? SettingsAboutCopy.iCloudSyncedFooter : SettingsAboutCopy.iCloudPausedFooter)
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.textTertiary)
+                .accessibilityIdentifier("Settings.about.iCloudFooter")
+        } else {
+            EmptyView()
         }
     }
 
@@ -752,6 +790,16 @@ private extension SettingsView {
 enum SettingsAboutCopy {
     /// Privacy statement — verbatim per playhead-j2u.
     static let privacyStatement: String = "Your podcasts never leave your device."
+
+    /// playhead-5c1t: footer text shown when iCloud sync is available.
+    /// Quiet, single-line, peace-of-mind — no badge, no animation.
+    static let iCloudSyncedFooter: String = "Synced via iCloud."
+
+    /// playhead-5c1t: footer text shown when iCloud sync is paused
+    /// (signed-out, restricted, or temporarily unavailable). Avoids the
+    /// word "error" — the user's local data is fine; only the sync is
+    /// paused.
+    static let iCloudPausedFooter: String = "iCloud sync paused."
 }
 
 // MARK: - Debug Toggles Section (always visible)

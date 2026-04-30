@@ -51,6 +51,14 @@ final class SettingsViewModel {
     /// "Free preview" until the first stream emission lands.
     var isPremium: Bool = false
 
+    // MARK: - iCloud sync status (playhead-5c1t)
+
+    /// Mirrors `ICloudSyncCoordinator.isSyncEnabled`. `nil` until the
+    /// first observation lands so the view can suppress the footer
+    /// rather than flash a wrong value at launch (peace-of-mind, not
+    /// metrics — no badge, no animation, no quantified counter).
+    var iCloudSyncEnabled: Bool?
+
     // MARK: - Eligibility (playhead-j2u, model-status readout)
 
     /// Latest snapshot from `AnalysisEligibilityEvaluator.evaluate()`.
@@ -110,6 +118,21 @@ final class SettingsViewModel {
     func observePremiumStatus(_ entitlementManager: EntitlementManager) async {
         for await value in entitlementManager.premiumUpdates {
             self.isPremium = value
+        }
+    }
+
+    /// playhead-5c1t: subscribe to the coordinator's sync-enabled
+    /// stream so the Settings footer reflects sign-out / sign-in
+    /// without a view re-appear. The stream emits the current value
+    /// on subscription and a fresh value whenever
+    /// `handleAccountStatusChange` observes a change. Call once per
+    /// view lifecycle — the loop suspends until the consuming task is
+    /// cancelled (typically by SwiftUI tearing down the `.task`
+    /// modifier when the view leaves the hierarchy).
+    func observeICloudSyncStatus(_ coordinator: ICloudSyncCoordinator) async {
+        let stream = await coordinator.syncEnabledUpdates()
+        for await enabled in stream {
+            self.iCloudSyncEnabled = enabled
         }
     }
 

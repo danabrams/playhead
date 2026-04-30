@@ -17,7 +17,8 @@ struct QueueFinishObserverTests {
         let schema = Schema([QueueEntry.self])
         let config = ModelConfiguration(
             schema: schema,
-            isStoredInMemoryOnly: true
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
         )
         return try ModelContainer(for: schema, configurations: [config])
     }

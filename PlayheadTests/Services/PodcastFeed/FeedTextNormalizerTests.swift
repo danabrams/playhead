@@ -312,7 +312,8 @@ struct FeedDescriptionMetadataPersistenceTests {
         let config = ModelConfiguration(
             "FeedMetadataTest",
             schema: SwiftDataStore.schema,
-            isStoredInMemoryOnly: true
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
         )
         let container = try ModelContainer(
             for: SwiftDataStore.schema,
@@ -355,7 +356,8 @@ struct FeedDescriptionMetadataPersistenceTests {
         let config = ModelConfiguration(
             "FeedMetadataHighBitTest",
             schema: SwiftDataStore.schema,
-            isStoredInMemoryOnly: true
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
         )
         let container = try ModelContainer(
             for: SwiftDataStore.schema,
@@ -400,7 +402,8 @@ struct FeedDescriptionMetadataPersistenceTests {
         let config = ModelConfiguration(
             "FeedMetadataDefaultTest",
             schema: SwiftDataStore.schema,
-            isStoredInMemoryOnly: true
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
         )
         let container = try ModelContainer(
             for: SwiftDataStore.schema,
@@ -428,7 +431,8 @@ struct FeedDescriptionMetadataPersistenceTests {
         let config = ModelConfiguration(
             "FeedSyncMetadataTest",
             schema: SwiftDataStore.schema,
-            isStoredInMemoryOnly: true
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
         )
         let container = try ModelContainer(
             for: SwiftDataStore.schema,

@@ -221,6 +221,12 @@ struct PodcastDetailView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
+    /// playhead-5c1t: read by the post-subscribe writer-tap so the new
+    /// `Podcast` row is mirrored to CloudKit on every device. Preview
+    /// runtimes inject `PlayheadRuntime(isPreviewRuntime: true)`, where
+    /// the coordinator uses the real CK provider but `start()` is
+    /// gated on the preview flag (see `PlayheadRuntime.swift`).
+    @Environment(PlayheadRuntime.self) private var runtime
 
     @State private var isSubscribing = false
     @State private var subscribed = false
@@ -379,9 +385,20 @@ struct PodcastDetailView: View {
 
         do {
             let feed = try await discoveryService.fetchFeed(url: feedURL)
-            let _ = await discoveryService.persist(feed, from: feedURL, in: modelContext)
+            let podcast = discoveryService.persist(feed, from: feedURL, in: modelContext)
             try modelContext.save()
             subscribed = true
+
+            // playhead-5c1t: writer-tap. Mirror the new subscription to
+            // iCloud so other devices pick it up. Fire-and-forget — the
+            // coordinator owns the queue/retry semantics; blocking the
+            // UI on a network call would defeat the "subscribe is a
+            // tap, not a wait" UX.
+            let record = SubscriptionLibrary.subscribedRecord(for: podcast)
+            let coordinator = runtime.iCloudSyncCoordinator
+            Task.detached {
+                _ = try? await coordinator.upsertSubscriptionMerging(record)
+            }
         } catch {
             errorMessage = "Could not subscribe: \(error.localizedDescription)"
         }
@@ -394,6 +411,7 @@ struct PodcastDetailView: View {
 
 #Preview("Browse — Empty") {
     BrowseView()
+        .environment(PlayheadRuntime(isPreviewRuntime: true))
         .preferredColorScheme(.dark)
         .modelContainer(for: [Podcast.self, Episode.self], inMemory: true)
 }

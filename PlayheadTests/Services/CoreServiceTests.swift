@@ -139,7 +139,8 @@ private func makeInMemoryModelContainer() throws -> ModelContainer {
     let config = ModelConfiguration(
         "PlayheadTests",
         schema: SwiftDataStore.schema,
-        isStoredInMemoryOnly: true
+        isStoredInMemoryOnly: true,
+        cloudKitDatabase: .none
     )
     return try ModelContainer(
         for: SwiftDataStore.schema,

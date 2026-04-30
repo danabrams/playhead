@@ -104,7 +104,7 @@ struct DebugDiagnosticsHatchTests {
         // (it's a diagnostics-local model), so use a dedicated schema
         // here that mirrors what the app container carries at launch.
         let installSchema = Schema([InstallIdentity.self])
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         let installCtx = ModelContext(try ModelContainer(for: installSchema, configurations: [config]))
 
         let first = try InstallIDProvider(context: installCtx).installID()
@@ -220,7 +220,7 @@ struct DebugDiagnosticsHatchTests {
         let installSchema = Schema([InstallIdentity.self])
         let installCtx = ModelContext(try ModelContainer(
             for: installSchema,
-            configurations: [ModelConfiguration(isStoredInMemoryOnly: true)]
+            configurations: [ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)]
         ))
         let installID = try InstallIDProvider(context: installCtx).installID()
 

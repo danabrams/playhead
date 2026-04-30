@@ -228,7 +228,8 @@ func makeFeedDiscoveryContainer() throws -> ModelContainer {
     let config = ModelConfiguration(
         "FeedDiscoveryE2ETests-\(UUID().uuidString)",
         schema: schema,
-        isStoredInMemoryOnly: true
+        isStoredInMemoryOnly: true,
+        cloudKitDatabase: .none
     )
     return try ModelContainer(for: schema, configurations: [config])
 }
