@@ -519,21 +519,9 @@ private struct EpisodeRow: View {
                 // just "Play" until analysis catches up.
                 if let assetId = resolvedAnalysisAssetId {
                     NavigationLink {
-                        FullTranscriptView(
-                            viewModel: FullTranscriptViewModel(
-                                analysisAssetId: assetId,
-                                dataSource: LiveTranscriptPeekDataSource(
-                                    store: runtime.analysisStore
-                                )
-                            ),
-                            currentTime: 0,
-                            duration: episode.duration ?? 0,
-                            onSeek: { seekTime in
-                                Task {
-                                    await runtime.playEpisode(episode)
-                                    await runtime.seek(to: seekTime)
-                                }
-                            }
+                        LibraryFullTranscriptHost(
+                            episode: episode,
+                            analysisAssetId: assetId
                         )
                     } label: {
                         Label("Transcript", systemImage: "text.justify.left")
@@ -705,6 +693,75 @@ func libraryRowStatusLineInputs(episode: Episode) -> LibraryRowStatusLineInputs?
         coverage: episode.coverageSummary,
         anchor: episode.playbackAnchor
     )
+}
+
+// MARK: - Full Transcript Host (playhead-9u0)
+
+/// Hosts the `FullTranscriptView` from a Library row's NavigationLink
+/// destination. The wrapper exists to bridge a *frozen* call-site value
+/// (the row was created at one point in the @Query render) and the
+/// *live* playback time — when the row's episode happens to be the one
+/// currently playing, we observe `PlaybackService.observeStates()` so
+/// the transcript can auto-follow. When the row's episode is NOT the
+/// currently-playing one (the common Library "browse" case) we leave
+/// `currentTime` at 0 and the view simply renders without a highlight,
+/// matching the bead's spec for browse-mode entry.
+private struct LibraryFullTranscriptHost: View {
+
+    let episode: Episode
+    let analysisAssetId: String
+    @Environment(PlayheadRuntime.self) private var runtime
+
+    /// Live playback time in seconds. Only updates while the row's
+    /// episode matches `runtime.currentEpisodeId`; otherwise stays at 0.
+    @State private var currentTime: TimeInterval = 0
+    @State private var observationTask: Task<Void, Never>?
+
+    var body: some View {
+        FullTranscriptView(
+            viewModel: FullTranscriptViewModel(
+                analysisAssetId: analysisAssetId,
+                dataSource: LiveTranscriptPeekDataSource(
+                    store: runtime.analysisStore
+                )
+            ),
+            currentTime: currentTime,
+            duration: episode.duration ?? 0,
+            onSeek: { seekTime in
+                Task {
+                    await runtime.playEpisode(episode)
+                    await runtime.seek(to: seekTime)
+                }
+            }
+        )
+        .task {
+            await beginObservingIfCurrent()
+        }
+        .onDisappear {
+            observationTask?.cancel()
+            observationTask = nil
+        }
+    }
+
+    /// Start a playback-state observation task, but only when this row's
+    /// episode is the runtime's current episode. We compare against
+    /// `Episode.canonicalEpisodeKey` because that's the same key the
+    /// runtime uses (`setCurrentEpisodeId`).
+    private func beginObservingIfCurrent() async {
+        let isCurrent = runtime.currentEpisodeId == episode.canonicalEpisodeKey
+        guard isCurrent else { return }
+        // Seed with the current snapshot so the first paint is correct.
+        let snapshot = await runtime.playbackService.snapshot()
+        currentTime = snapshot.currentTime
+        observationTask?.cancel()
+        observationTask = Task { @MainActor in
+            let stream = await runtime.playbackService.observeStates()
+            for await state in stream {
+                guard !Task.isCancelled else { return }
+                currentTime = state.currentTime
+            }
+        }
+    }
 }
 
 // MARK: - Pull-to-Refresh Helper (playhead-riu8)

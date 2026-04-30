@@ -376,14 +376,14 @@ private extension FullTranscriptView {
 
     func jumpToNowButton(proxy: ScrollViewProxy) -> some View {
         Button {
+            // jumpToNow() always transitions back to .autoScrolling and
+            // returns the active paragraph id when one exists. When no
+            // paragraph is active (e.g. transcript not yet loaded) we
+            // still want the state transition — just nothing to scroll.
             if let target = viewModel.jumpToNow() {
                 withAnimation(Motion.standard) {
                     proxy.scrollTo(target, anchor: .center)
                 }
-            } else {
-                // No active paragraph (e.g. before load); just exit
-                // userScrolled state.
-                _ = viewModel.jumpToNow()
             }
         } label: {
             HStack(spacing: Spacing.xs) {
