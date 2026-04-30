@@ -249,16 +249,20 @@ final class NewEpisodeNotificationScheduler {
     }
 
     // MARK: - Identifiers
+    //
+    // Identifiers are read from non-main contexts (e.g. the
+    // `SystemPendingNewEpisodeCancellation` background thread filtering
+    // pending requests by category), so they must be `nonisolated`.
 
-    static let categoryIdentifier: String = "NEW_EPISODE"
-    static let summaryCategoryIdentifier: String = "NEW_EPISODE_SUMMARY"
+    nonisolated static let categoryIdentifier: String = "NEW_EPISODE"
+    nonisolated static let summaryCategoryIdentifier: String = "NEW_EPISODE_SUMMARY"
 
     /// Request identifier for an individual new-episode notification.
     /// Stable across retries so a re-fire of the same episode key would
     /// idempotently replace any pending duplicate (the ledger should
     /// have already prevented the second call from reaching here, but
     /// the stable identifier is the second line of defense).
-    static func requestIdentifier(for episodeKey: String) -> String {
+    nonisolated static func requestIdentifier(for episodeKey: String) -> String {
         "new-episode-\(episodeKey)"
     }
 }
