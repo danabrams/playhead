@@ -21,6 +21,16 @@ import SwiftUI
 
 struct FullTranscriptView: View {
 
+    /// playhead-m8v7: metadata needed to build a transcript-share
+    /// artifact. `nil` disables the selection / share UI entirely
+    /// (call sites that don't have access to the episode metadata —
+    /// e.g. a future preview surface — pass `nil`).
+    struct ShareMetadata: Equatable {
+        let episodeId: String
+        let showTitle: String
+        let episodeTitle: String
+    }
+
     @State private var viewModel: FullTranscriptViewModel
 
     /// Current playback time in seconds. The presenter updates this on
@@ -34,6 +44,11 @@ struct FullTranscriptView: View {
     /// Invoked when the user taps a paragraph or activates the seek
     /// accessibility action. Receives the paragraph's startTime.
     let onSeek: (TimeInterval) -> Void
+
+    /// playhead-m8v7: metadata used by the share-quote feature. When
+    /// non-nil, the view enables the long-press → selection-mode UI
+    /// and renders a Share button when ≥1 paragraphs are selected.
+    let shareMetadata: ShareMetadata?
 
     /// Last whole-second of `currentTime` applied to the view-model.
     /// Coalesces sub-second `onChange` fires so the view-model's
@@ -51,12 +66,14 @@ struct FullTranscriptView: View {
         viewModel: FullTranscriptViewModel,
         currentTime: TimeInterval,
         duration: TimeInterval,
-        onSeek: @escaping (TimeInterval) -> Void
+        onSeek: @escaping (TimeInterval) -> Void,
+        shareMetadata: ShareMetadata? = nil
     ) {
         self._viewModel = State(wrappedValue: viewModel)
         self.currentTime = currentTime
         self.duration = duration
         self.onSeek = onSeek
+        self.shareMetadata = shareMetadata
     }
 
     var body: some View {
@@ -66,13 +83,31 @@ struct FullTranscriptView: View {
 
             content
         }
-        .navigationTitle("Transcript")
+        .navigationTitle(viewModel.isSelectionModeActive ? selectionTitle : "Transcript")
         .navigationBarTitleDisplayMode(.inline)
         .searchable(
             text: $searchText,
             placement: .navigationBarDrawer(displayMode: .always),
             prompt: "Search this episode"
         )
+        .toolbar {
+            // playhead-m8v7: selection-mode toolbar — Share button on
+            // the trailing side, "Done" on the leading side. Both
+            // are gated on shareMetadata being available; without it
+            // the long-press gesture never fires so this branch is
+            // unreachable but the explicit guard is cheap insurance.
+            if viewModel.isSelectionModeActive, let metadata = shareMetadata {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Done") {
+                        viewModel.clearSelection()
+                    }
+                    .accessibilityLabel("Done — exit selection mode")
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    selectionShareButton(metadata: metadata)
+                }
+            }
+        }
         .onChange(of: searchText) { _, newValue in
             viewModel.searchQuery = newValue
         }
@@ -86,6 +121,44 @@ struct FullTranscriptView: View {
             guard second != lastAppliedSecond else { return }
             lastAppliedSecond = second
             viewModel.updatePlaybackPosition(newTime)
+        }
+    }
+
+    /// Title shown while selection mode is active. Editorial-bare:
+    /// "1 selected" / "3 selected".
+    private var selectionTitle: String {
+        let count = viewModel.selectedParagraphIds.count
+        return count == 1 ? "1 selected" : "\(count) selected"
+    }
+
+    /// Toolbar button that opens the share sheet over a precomputed
+    /// share envelope. We snapshot the envelope inside the closure so
+    /// SwiftUI's `ShareLink` receives a non-optional value type.
+    @ViewBuilder
+    private func selectionShareButton(metadata: ShareMetadata) -> some View {
+        if let envelope = viewModel.shareEnvelope(
+            episodeId: metadata.episodeId,
+            showTitle: metadata.showTitle,
+            episodeTitle: metadata.episodeTitle,
+            now: Date()
+        ) {
+            // Two share-sheet items: the share text (rich block quote
+            // with the URL embedded as the last line) and the URL by
+            // itself so iOS recognises a tappable link target. Plain-
+            // text-only recipients still see the URL via the embedded
+            // line; rich recipients (Notes, Mail) get both.
+            ShareLink(
+                items: [envelope.shareText, envelope.deepLinkURL.absoluteString]
+            ) {
+                Image(systemName: "square.and.arrow.up")
+                    .accessibilityLabel("Share quote")
+            }
+        } else {
+            // Defensive: selection-mode-active should imply ≥1
+            // selected which implies a non-nil envelope. If the
+            // invariant ever drifts, we still render *something*
+            // rather than a missing toolbar item.
+            EmptyView()
         }
     }
 
@@ -219,10 +292,15 @@ private extension FullTranscriptView {
 
     func paragraphRow(paragraph: TranscriptParagraph, index: Int) -> some View {
         let isActive = viewModel.activeParagraphIndex == index
+        let isSelected = viewModel.selectedParagraphIds.contains(paragraph.id)
 
         return HStack(alignment: .top, spacing: Spacing.xs) {
             // Active-paragraph copper border (4pt, leading edge).
-            if isActive {
+            // playhead-m8v7: a SELECTED paragraph also gets the copper
+            // edge (selection takes visual precedence). The active
+            // edge would otherwise be invisible while the user is
+            // browsing in selection mode.
+            if isActive || isSelected {
                 Rectangle()
                     .fill(AppColors.accent)
                     .frame(width: 4)
@@ -261,22 +339,54 @@ private extension FullTranscriptView {
             Spacer(minLength: 0)
         }
         .padding(.vertical, Spacing.xs)
-        .background(paragraph.isAd ? AppColors.accentSubtle : Color.clear)
+        .background(rowBackground(paragraph: paragraph, isSelected: isSelected))
         .contentShape(Rectangle())
         .onTapGesture {
             if let target = viewModel.tappedParagraph(at: index) {
                 onSeek(target)
             }
+            // When `tappedParagraph` returns nil, the view-model
+            // already toggled the selection — no further action.
+        }
+        // playhead-m8v7: long-press is the entry point into selection
+        // mode. Only enabled when `shareMetadata` is non-nil (the
+        // selection feature is gated on having episode metadata to
+        // build the share envelope from).
+        .onLongPressGesture(minimumDuration: 0.4) {
+            guard shareMetadata != nil else { return }
+            viewModel.longPressedParagraph(at: index)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(rowAccessibilityLabel(paragraph: paragraph, isActive: isActive))
-        .accessibilityHint("Tap to play from this point in the episode.")
+        .accessibilityLabel(rowAccessibilityLabel(paragraph: paragraph, isActive: isActive, isSelected: isSelected))
+        .accessibilityHint(viewModel.isSelectionModeActive
+            ? "Tap to add or remove this paragraph from your selection."
+            : "Tap to play from this point in the episode."
+        )
         .accessibilityAddTraits(.isButton)
         .accessibilityAction(named: Text("Play from here")) {
             if let target = viewModel.tappedParagraph(at: index) {
                 onSeek(target)
             }
         }
+        .accessibilityAction(named: Text(isSelected ? "Remove from selection" : "Add to selection")) {
+            guard shareMetadata != nil else { return }
+            if isSelected {
+                _ = viewModel.tappedParagraph(at: index)  // toggles off
+            } else {
+                viewModel.longPressedParagraph(at: index)
+            }
+        }
+    }
+
+    /// Background color for a paragraph row. Ad paragraphs get the
+    /// accent-subtle wash (existing 9u0 behaviour); selected paragraphs
+    /// get the same wash so the selection state is visible against
+    /// the dark background. Ad-and-selected stays as-is — the wash
+    /// does not stack.
+    func rowBackground(paragraph: TranscriptParagraph, isSelected: Bool) -> Color {
+        if paragraph.isAd { return AppColors.accentSubtle }
+        if isSelected { return AppColors.accentSubtle }
+        return Color.clear
     }
 
     /// Build an `AttributedString` for the paragraph that highlights
@@ -312,15 +422,18 @@ private extension FullTranscriptView {
         return isActive ? AppColors.textPrimary : AppColors.textSecondary
     }
 
-    func rowAccessibilityLabel(paragraph: TranscriptParagraph, isActive: Bool) -> String {
+    func rowAccessibilityLabel(paragraph: TranscriptParagraph, isActive: Bool, isSelected: Bool) -> String {
         let timestamp = TimeFormatter.formatTime(paragraph.startTime)
-        let prefix: String
+        var prefix: String
         if paragraph.isAd {
             prefix = "Advertisement at \(timestamp)"
         } else if isActive {
             prefix = "Currently playing at \(timestamp)"
         } else {
             prefix = "At \(timestamp)"
+        }
+        if isSelected {
+            prefix = "Selected. " + prefix
         }
         return "\(prefix). \(paragraph.text)"
     }
