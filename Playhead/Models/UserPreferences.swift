@@ -37,6 +37,16 @@ final class UserPreferences {
     /// generation against any rows still missing or stale.
     var episodeSummariesEnabled: Bool = true
 
+    /// playhead-snp: master switch for new-episode local notifications.
+    /// Default ON (opt-out). Toggling off makes the feed-refresh hook
+    /// short-circuit before consulting authorization, and the App-scope
+    /// observer also asks the scheduler to remove any pending requests
+    /// so a queued local notification doesn't fire after the user
+    /// flips this switch. Additive optional with a Swift default —
+    /// existing rows decode with the property set to `true` so an
+    /// upgrade quietly preserves the spec'd opt-out behavior.
+    var newEpisodeNotificationsEnabled: Bool = true
+
     init(
         skipBehavior: SkipBehavior = .auto,
         playbackSpeed: Double = 1.0,
@@ -44,7 +54,8 @@ final class UserPreferences {
         backgroundProcessingEnabled: Bool = true,
         allowsCellular: Bool = true,
         notificationPermissionAsked: Bool = false,
-        episodeSummariesEnabled: Bool = true
+        episodeSummariesEnabled: Bool = true,
+        newEpisodeNotificationsEnabled: Bool = true
     ) {
         self.skipBehavior = skipBehavior
         self.playbackSpeed = playbackSpeed
@@ -53,6 +64,7 @@ final class UserPreferences {
         self.allowsCellular = allowsCellular
         self.notificationPermissionAsked = notificationPermissionAsked
         self.episodeSummariesEnabled = episodeSummariesEnabled
+        self.newEpisodeNotificationsEnabled = newEpisodeNotificationsEnabled
     }
 }
 

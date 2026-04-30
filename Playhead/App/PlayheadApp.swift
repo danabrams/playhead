@@ -193,6 +193,30 @@ struct PlayheadApp: App {
                     // fire that lands between runtime init and this
                     // attach simply reschedules and bails gracefully —
                     // see `registerTaskHandler` for that fallback.
+                    // playhead-snp: build the new-episode notification
+                    // scheduler + SwiftData announcer adapter that the
+                    // feed-refresh service will hop through after each
+                    // refresh discovers new items. Holding it on the
+                    // App scope (not in PlayheadRuntime) keeps the
+                    // ModelContainer dependency local to the App-scope
+                    // wiring step and matches the pattern used by the
+                    // playback-queue controller above.
+                    let newEpisodeScheduler = NewEpisodeNotificationScheduler(
+                        scheduler: SystemNewEpisodeNotificationScheduler(),
+                        authorizer: SystemNewEpisodeAuthorizationProvider(),
+                        ledger: UserDefaultsNewEpisodeLedger()
+                    )
+                    let appWideEnabledProvider: @Sendable @MainActor () -> Bool = {
+                        let context = modelContainer.mainContext
+                        let prefs = (try? context.fetch(FetchDescriptor<UserPreferences>()).first)
+                        return prefs?.newEpisodeNotificationsEnabled ?? true
+                    }
+                    let newEpisodeAnnouncer = SwiftDataNewEpisodeAnnouncer(
+                        modelContainer: modelContainer,
+                        scheduler: newEpisodeScheduler,
+                        appWideEnabledProvider: appWideEnabledProvider
+                    )
+
                     let feedRefreshService = BackgroundFeedRefreshService(
                         enumerator: ProductionPodcastEnumerator(
                             modelContainer: modelContainer
@@ -216,7 +240,8 @@ struct PlayheadApp: App {
                         // logger so feed-refresh and backfill events
                         // land in the same `bg-task-log.jsonl` and a
                         // jq query can correlate by ts.
-                        bgTelemetry: runtime.bgTaskTelemetryLogger
+                        bgTelemetry: runtime.bgTaskTelemetryLogger,
+                        newEpisodeAnnouncer: newEpisodeAnnouncer
                     )
                     BackgroundFeedRefreshService.attachSharedService(feedRefreshService)
                     feedRefreshService.start()

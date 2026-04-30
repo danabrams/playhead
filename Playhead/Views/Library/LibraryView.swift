@@ -126,6 +126,26 @@ private extension LibraryView {
                         } label: {
                             Label("Mark All Played", systemImage: "checkmark.circle")
                         }
+
+                        // playhead-snp: per-show new-episode notifications.
+                        // Toggle the boolean directly; SwiftData @Model
+                        // persists on the next autosave. Label flips to
+                        // mirror the new state for the next press.
+                        Button {
+                            podcast.notificationsEnabled.toggle()
+                        } label: {
+                            if podcast.notificationsEnabled {
+                                Label(
+                                    "Mute New Episode Alerts",
+                                    systemImage: "bell.slash"
+                                )
+                            } else {
+                                Label(
+                                    "Notify on New Episodes",
+                                    systemImage: "bell"
+                                )
+                            }
+                        }
                     }
                     .accessibilityLabel("\(podcast.title), \(unplayedCount) unplayed")
                 }
