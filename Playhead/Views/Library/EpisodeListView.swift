@@ -346,6 +346,12 @@ private struct EpisodeRow: View {
     /// has been written yet (the backfill coordinator hasn't gotten to
     /// this asset, or coverage is still <80%).
     @State private var fetchedSummary: EpisodeSummary?
+    /// playhead-9u0: analysis asset id for this episode, resolved alongside
+    /// the summary lookup. Drives the "Read transcript" navigation link in
+    /// the expanded body — the link becomes available once the row's analysis
+    /// asset has been located. Stays nil for episodes whose analysis hasn't
+    /// produced an asset row yet.
+    @State private var resolvedAnalysisAssetId: String?
     @Environment(PlayheadRuntime.self) private var runtime
 
     var body: some View {
@@ -496,13 +502,48 @@ private struct EpisodeRow: View {
                     .foregroundStyle(AppColors.textSecondary)
             }
 
-            Button(action: onPlay) {
-                Label("Play", systemImage: "play.fill")
-                    .font(AppTypography.sans(size: 14, weight: .semibold))
-                    .foregroundStyle(AppColors.accent)
+            HStack(spacing: Spacing.lg) {
+                Button(action: onPlay) {
+                    Label("Play", systemImage: "play.fill")
+                        .font(AppTypography.sans(size: 14, weight: .semibold))
+                        .foregroundStyle(AppColors.accent)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("EpisodeRow.expanded.playButton")
+
+                // playhead-9u0: full-screen transcript reader. Available
+                // once the row has resolved an analysis asset id (so the
+                // FullTranscriptViewModel has something to fetch). When
+                // resolution is still pending the link is omitted rather
+                // than rendered disabled — the row collapses cleanly to
+                // just "Play" until analysis catches up.
+                if let assetId = resolvedAnalysisAssetId {
+                    NavigationLink {
+                        FullTranscriptView(
+                            viewModel: FullTranscriptViewModel(
+                                analysisAssetId: assetId,
+                                dataSource: LiveTranscriptPeekDataSource(
+                                    store: runtime.analysisStore
+                                )
+                            ),
+                            currentTime: 0,
+                            duration: episode.duration ?? 0,
+                            onSeek: { seekTime in
+                                Task {
+                                    await runtime.playEpisode(episode)
+                                    await runtime.seek(to: seekTime)
+                                }
+                            }
+                        )
+                    } label: {
+                        Label("Transcript", systemImage: "text.justify.left")
+                            .font(AppTypography.sans(size: 14, weight: .semibold))
+                            .foregroundStyle(AppColors.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("EpisodeRow.expanded.transcriptLink")
+                }
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("EpisodeRow.expanded.playButton")
         }
         .padding(.top, Spacing.xs)
         .transition(.opacity.combined(with: .move(edge: .top)))
@@ -533,14 +574,19 @@ private struct EpisodeRow: View {
         let store = runtime.analysisStore
         let key = episode.canonicalEpisodeKey
         let summary: EpisodeSummary?
+        let assetId: String
         do {
             guard let asset = try await store.fetchAssetByEpisodeId(key) else {
                 return
             }
+            assetId = asset.id
             summary = try await store.fetchEpisodeSummary(assetId: asset.id)
         } catch {
             return
         }
+        // Resolve the asset id even when no summary has been written yet
+        // (the transcript may exist before the summary backfill catches up).
+        await MainActor.run { self.resolvedAnalysisAssetId = assetId }
         if let summary {
             await MainActor.run { self.fetchedSummary = summary }
         }
