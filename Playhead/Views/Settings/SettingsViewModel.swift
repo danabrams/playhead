@@ -121,15 +121,19 @@ final class SettingsViewModel {
         }
     }
 
-    /// playhead-5c1t: read the current iCloud sync status from the
-    /// coordinator. Single-shot rather than a stream — the coordinator
-    /// already pushes account-status changes through its own `start()` /
-    /// `handleAccountStatusChange()` plumbing, and the Settings footer
-    /// is a peace-of-mind artifact that doesn't need to re-render on
-    /// every account-status flicker. Call once per view lifecycle.
+    /// playhead-5c1t: subscribe to the coordinator's sync-enabled
+    /// stream so the Settings footer reflects sign-out / sign-in
+    /// without a view re-appear. The stream emits the current value
+    /// on subscription and a fresh value whenever
+    /// `handleAccountStatusChange` observes a change. Call once per
+    /// view lifecycle — the loop suspends until the consuming task is
+    /// cancelled (typically by SwiftUI tearing down the `.task`
+    /// modifier when the view leaves the hierarchy).
     func observeICloudSyncStatus(_ coordinator: ICloudSyncCoordinator) async {
-        let enabled = await coordinator.isSyncEnabled
-        self.iCloudSyncEnabled = enabled
+        let stream = await coordinator.syncEnabledUpdates()
+        for await enabled in stream {
+            self.iCloudSyncEnabled = enabled
+        }
     }
 
     /// Clears transcript cache files.

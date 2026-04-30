@@ -21,7 +21,10 @@ struct SettingsView: View {
 
     @Query private var allPreferences: [UserPreferences]
     @Environment(\.modelContext) var modelContext
-    @Environment(PlayheadRuntime.self) private var runtime
+    /// playhead-5c1t: kept `internal` so `SettingsOPMLSection` (an
+    /// extension in another file) can pass the coordinator into the
+    /// OPML import bridge for the writer-tap.
+    @Environment(PlayheadRuntime.self) var runtime
 
     @State private var viewModel = SettingsViewModel()
 
@@ -184,17 +187,24 @@ struct SettingsView: View {
                     viewModel.refreshEligibility(
                         using: runtime.analysisEligibilityEvaluator
                     )
-                    // playhead-5c1t: read the iCloud sync status from the
-                    // coordinator BEFORE the (suspending) premium-stream
-                    // observation below — that observation never returns,
-                    // so anything queued after it would never run.
-                    await viewModel.observeICloudSyncStatus(runtime.iCloudSyncCoordinator)
-                    // playhead-j2u: subscribe to premium-status updates
-                    // so the Purchases section reflects transactions
-                    // arriving from other devices / restores.
-                    if let entitlementManager {
-                        await viewModel.observePremiumStatus(entitlementManager)
-                    }
+                    // playhead-5c1t: both `observeICloudSyncStatus`
+                    // and `observePremiumStatus` are AsyncSequence
+                    // consumers that never return until the enclosing
+                    // task is cancelled (SwiftUI tears the `.task`
+                    // modifier down when the view leaves the
+                    // hierarchy). Run them concurrently via `async let`
+                    // so neither starves the other; cancelling either
+                    // child propagates from the parent task's
+                    // cancellation.
+                    async let icloud: Void = viewModel.observeICloudSyncStatus(
+                        runtime.iCloudSyncCoordinator
+                    )
+                    async let premium: Void = {
+                        if let entitlementManager {
+                            await viewModel.observePremiumStatus(entitlementManager)
+                        }
+                    }()
+                    _ = await (icloud, premium)
                 }
                 .onChange(of: router?.pending) { _, newRoute in
                     guard let newRoute else { return }
