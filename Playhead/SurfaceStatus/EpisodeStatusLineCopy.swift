@@ -274,6 +274,36 @@ enum EpisodeStatusLineCopy {
     /// (and the primary line is a playable-state copy).
     static let backfillSecondary = "analyzing remainder"
 
+    /// Subcopy for an Activity Paused row: "{reason}" when `hint`
+    /// is `.none`, "{reason} · {hintCopy}" otherwise.
+    ///
+    /// `ActivityView.PausedRowView` renders this string below the
+    /// episode title. The Activity section header already says
+    /// "Paused", so the row's title-adjacent line does NOT add a
+    /// "Paused —" prefix — callers get the verbatim
+    /// `SurfaceReasonCopyTemplates` string for the reason.
+    ///
+    /// playhead-9mya post-own9 reconcile: when `hint == .none`, the
+    /// trailing "· {hintCopy}" segment is omitted so user-cancelled
+    /// rows (which `CauseAttributionPolicy` now routes through
+    /// `(paused, cancelled, none)`) and `.noNetwork` pauses (which
+    /// now route through `(paused, waitingForNetwork, none)`) do not
+    /// emit the awkward / redundant "· waiting" tail. This matches
+    /// the same `.none`-hint rule applied in `pausedPrimary`.
+    static func pausedSubcopy(
+        reason: SurfaceReason,
+        hint: ResolutionHint
+    ) -> String {
+        let reasonCopy = SurfaceReasonCopyTemplates.template(for: reason)
+        switch hint {
+        case .none:
+            return reasonCopy
+        case .wait, .connectToWiFi, .chargeDevice, .freeUpStorage,
+             .enableAppleIntelligence, .openAppToResume, .retry:
+            return "\(reasonCopy) \(middot) \(hintCopy(hint))"
+        }
+    }
+
     /// Copy for a `ResolutionHint`. Localized strings will replace this
     /// in Phase 2; until then the strings are the canonical copy.
     static func hintCopy(_ hint: ResolutionHint) -> String {

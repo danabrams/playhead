@@ -463,6 +463,74 @@ struct EpisodeStatusLineCopyTests {
         }
     }
 
+    // MARK: - pausedSubcopy (playhead-9mya)
+    //
+    // Helper consumed by `ActivityView.PausedRowView` to render the
+    // "{reason} · {hint}" subcopy below an Activity Paused row's title.
+    // Mirrors the `pausedPrimary` rule that drops the "· {hint}" tail
+    // when `hint == .none` so post-own9 user-cancelled / noNetwork
+    // rows do not produce "Cancelled · waiting" / "Waiting for
+    // network · waiting".
+
+    @Test("pausedSubcopy drops the \"· hint\" tail when hint is .none")
+    func pausedSubcopyOmitsTailWhenHintIsNone() {
+        let copy = EpisodeStatusLineCopy.pausedSubcopy(
+            reason: .cancelled,
+            hint: .none
+        )
+        #expect(copy == "Cancelled")
+        #expect(!copy.contains("·"))
+        #expect(!copy.contains("waiting"))
+    }
+
+    @Test("pausedSubcopy drops the \"· hint\" tail for waitingForNetwork + none")
+    func pausedSubcopyOmitsTailForWaitingForNetworkNone() {
+        let copy = EpisodeStatusLineCopy.pausedSubcopy(
+            reason: .waitingForNetwork,
+            hint: .none
+        )
+        #expect(copy == "Waiting for network")
+    }
+
+    @Test("pausedSubcopy retains the \"· hint\" tail when hint is actionable")
+    func pausedSubcopyKeepsTailWhenHintIsActionable() {
+        let copy = EpisodeStatusLineCopy.pausedSubcopy(
+            reason: .waitingForNetwork,
+            hint: .connectToWiFi
+        )
+        #expect(copy == "Waiting for network \(Self.middot) connect to Wi-Fi")
+    }
+
+    @Test("pausedSubcopy retains the \"· waiting\" tail when hint is .wait")
+    func pausedSubcopyKeepsWaitTail() {
+        // Sanity: only `.none` triggers the elision. `.wait` is still
+        // a real (if anodyne) hint that the View should render.
+        let copy = EpisodeStatusLineCopy.pausedSubcopy(
+            reason: .phoneIsHot,
+            hint: .wait
+        )
+        // pausedSubcopy uses the verbatim SurfaceReasonCopyTemplates
+        // string (no "Paused —" strip) because the Activity row's
+        // section header already says "Paused".
+        #expect(copy == "Paused \(Self.emdash) phone is too hot \(Self.middot) waiting")
+    }
+
+    @Test("every (SurfaceReason, ResolutionHint) pair produces a non-empty pausedSubcopy")
+    func pausedSubcopyIsExhaustive() {
+        for reason in SurfaceReason.allCases {
+            for hint in ResolutionHint.allCases {
+                let copy = EpisodeStatusLineCopy.pausedSubcopy(
+                    reason: reason,
+                    hint: hint
+                )
+                #expect(
+                    !copy.isEmpty,
+                    "pausedSubcopy(\(reason), \(hint)) must not be empty"
+                )
+            }
+        }
+    }
+
     // MARK: - Exhaustive unavailable-reason copy
 
     @Test("every AnalysisUnavailableReason has a non-empty copy string")
