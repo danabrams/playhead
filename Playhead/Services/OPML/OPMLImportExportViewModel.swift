@@ -36,6 +36,14 @@ public final class OPMLImportExportViewModel {
 
     // MARK: - Reset
 
+    /// Surface a file-picker / file-read failure into the same error
+    /// slot `runImport` writes to, so the View only has one place to
+    /// look.
+    public func setImportError(_ reason: String) {
+        lastImportError = reason
+        lastImportSummary = nil
+    }
+
     /// Clear all transient state. Settings calls this when the user
     /// dismisses the result-summary sheet.
     public func reset() {
@@ -57,7 +65,7 @@ public final class OPMLImportExportViewModel {
     /// `ModelContext` without forcing this view-model to import either.
     public func runImport(
         data: Data,
-        exists: @escaping @Sendable (URL) -> Bool,
+        exists: @escaping @Sendable (URL) async -> Bool,
         resolve: @escaping @Sendable (URL) async -> OPMLService.ResolveOutcome,
         persist: @escaping @Sendable (OPMLFeed) async -> Void,
         service: OPMLService = OPMLService()

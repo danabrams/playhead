@@ -203,7 +203,7 @@ public struct OPMLService: Sendable {
     ///     to 5, matching the spec's "5 simultaneous requests" rule.
     public func importFeeds(
         _ feeds: [OPMLFeed],
-        exists: @escaping @Sendable (URL) -> Bool,
+        exists: @escaping @Sendable (URL) async -> Bool,
         resolve: @escaping @Sendable (URL) async -> ResolveOutcome,
         persist: @escaping @Sendable (OPMLFeed) async -> Void,
         progress: @escaping @Sendable (Int, Int) -> Void,
@@ -274,13 +274,13 @@ public struct OPMLService: Sendable {
     private static func processOne(
         feed: OPMLFeed,
         total: Int,
-        exists: @escaping @Sendable (URL) -> Bool,
+        exists: @escaping @Sendable (URL) async -> Bool,
         resolve: @escaping @Sendable (URL) async -> ResolveOutcome,
         persist: @escaping @Sendable (OPMLFeed) async -> Void,
         progress: @escaping @Sendable (Int, Int) -> Void,
         aggregator: OPMLImportAggregator
     ) async {
-        if exists(feed.xmlUrl) {
+        if await exists(feed.xmlUrl) {
             await aggregator.recordSkipped()
         } else {
             switch await resolve(feed.xmlUrl) {
