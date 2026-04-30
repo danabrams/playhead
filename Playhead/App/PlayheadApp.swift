@@ -38,10 +38,18 @@ struct PlayheadApp: App {
                 Self.logger.error("SwiftData recovery failed: \(error). Using in-memory store.")
                 // Last resort: in-memory container so the app can still launch.
                 do {
+                    // playhead-5c1t: `cloudKitDatabase: .none` mirrors the
+                    // primary `SwiftDataStore.makeContainer` path. The
+                    // app declares the iCloud capability for the
+                    // hand-written `ICloudSyncCoordinator` pipeline,
+                    // which would otherwise force SwiftData into a
+                    // CloudKit auto-mirror that none of our models are
+                    // shaped for. See SwiftDataStore.swift for context.
                     let config = ModelConfiguration(
                         "Playhead",
                         schema: SwiftDataStore.schema,
-                        isStoredInMemoryOnly: true
+                        isStoredInMemoryOnly: true,
+                        cloudKitDatabase: .none
                     )
                     modelContainer = try ModelContainer(
                         for: SwiftDataStore.schema,

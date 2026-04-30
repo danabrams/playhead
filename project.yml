@@ -24,6 +24,10 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.playhead.app
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_EMIT_LOC_STRINGS: YES
+        # playhead-5c1t: iCloud sync (CloudKit private DB).
+        # Container `iCloud.com.playhead.app` carries the
+        # `PodcastSubscription` and `Entitlement` record types.
+        CODE_SIGN_ENTITLEMENTS: Playhead/Support/Playhead.entitlements
         # playhead-izvj.1: Mac Catalyst spike. Enable Catalyst as a
         # secondary destination for the existing iOS target. The
         # `maccatalyst.` prefix on the bundle id keeps the two installs

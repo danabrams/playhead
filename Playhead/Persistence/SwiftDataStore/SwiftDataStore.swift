@@ -28,10 +28,28 @@ enum SwiftDataStore {
     @MainActor
     static func makeContainer() throws -> ModelContainer {
         let schema = Self.schema
+        // playhead-5c1t: when the app's iCloud capability is enabled
+        // (entitlements file + `com.apple.developer.icloud-services
+        // = CloudKit`), SwiftData attempts to opt the entire schema
+        // into Core Data + CloudKit auto-mirroring at container-load
+        // time. That mirror has stricter constraints than our schema
+        // satisfies (every attribute must be optional or have a
+        // default; relationships must be optional; unique constraints
+        // are forbidden) — and would bake on-device-only content
+        // (transcripts, analysis, episode positions) into a CloudKit
+        // private DB without our consent, violating the on-device
+        // mandate.
+        //
+        // Setting `cloudKitDatabase: .none` opts out and keeps SwiftData
+        // purely on-device. iCloud sync for SUBSCRIPTIONS + ENTITLEMENT
+        // lives behind a separate hand-written CloudKit pipeline
+        // (`ICloudSyncCoordinator` in Services/iCloudSync) so we control
+        // exactly what crosses the device boundary.
         let modelConfiguration = ModelConfiguration(
             "Playhead",
             schema: schema,
-            isStoredInMemoryOnly: false
+            isStoredInMemoryOnly: false,
+            cloudKitDatabase: .none
         )
         return try ModelContainer(
             for: schema,
